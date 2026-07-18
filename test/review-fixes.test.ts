@@ -582,6 +582,70 @@ describe("shell robustness", () => {
   });
 });
 
+describe("observer isolation", () => {
+  it("completes the run even when onEvent throws", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-observer");
+    const engine = new WorkflowEngine({
+      executor: new ScriptedExecutor(),
+      outputRoot,
+      onEvent: () => {
+        throw new Error("UI exploded");
+      },
+    });
+    const workflow = defineWorkflow({
+      name: "observed",
+      startAt: "noop",
+      nodes: { noop: compute({ run: () => "done" }) },
+      edges: [],
+    });
+    const { state } = await engine.run(workflow, {});
+    expect(state.status).toBe("completed");
+  });
+});
+
+describe("nudge delivery failures", () => {
+  it("fails the pending step promptly when the reminder cannot be sent", async () => {
+    let sends = 0;
+    const executor = new ConversationStepExecutor({
+      sendPrompt: () => {
+        sends += 1;
+        if (sends > 1) {
+          throw new Error("reminder delivery failed");
+        }
+      },
+    });
+    const request: AgentStepRequest = {
+      contract: { runId: "r", workflowName: "w", nodeId: "step", attemptId: "a1" },
+      prompt: "step",
+      accept: async (output) => ({ ok: true, value: output }),
+    };
+    const stepPromise = executor.runAgentStep(request, new AbortController().signal);
+    expect(executor.handleAgentSettled()).toBe(false);
+    await expect(stepPromise).rejects.toThrow(/reminder delivery failed/);
+    expect(executor.pendingStepId).toBeNull();
+  });
+});
+
+describe("spawn failure receipts", () => {
+  it("records a receipt when the executable does not exist", async () => {
+    const workflow = defineWorkflow({
+      name: "no-such-binary",
+      startAt: "ghost",
+      nodes: {
+        ghost: shell({ exec: () => ({ command: "definitely-not-a-real-binary-xyz" }) }),
+      },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("failed");
+    expect(state.steps.at(-1)?.action).toMatchObject({
+      actionType: "shell",
+      command: "definitely-not-a-real-binary-xyz",
+      exitCode: null,
+    });
+  });
+});
+
 describe("embedded JSON extraction bounds", () => {
   it("stays fast on pathological brace floods", () => {
     const started = Date.now();

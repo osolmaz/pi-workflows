@@ -184,15 +184,23 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     }
     pending.nudgesSent += 1;
     const { nodeId, attemptId } = pending.request.contract;
-    this.sendPrompt({
-      prompt: [
-        `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
-        "Complete it by calling the `workflow` tool with:",
-        `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
-        `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
-      ].join("\n"),
-      streaming: this.streaming,
-    });
+    try {
+      this.sendPrompt({
+        prompt: [
+          `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
+          "Complete it by calling the `workflow` tool with:",
+          `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
+          `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
+        ].join("\n"),
+        streaming: this.streaming,
+      });
+    } catch (error) {
+      // No reminder turn was started, so nothing would settle the step; fail
+      // it promptly instead of waiting out the node timeout.
+      this.clearPending();
+      pending.reject(error);
+      return false;
+    }
     return true;
   }
 

@@ -124,7 +124,22 @@ export async function runShellAction(
       stderr = appendCapped(stderr, chunk);
     });
 
-    child.once("error", reject);
+    child.once("error", (error) => {
+      // Spawn failures (missing executable, EACCES) still get a receipt so
+      // failed actions remain auditable.
+      const result: ShellActionResult = {
+        command: spec.command,
+        args,
+        cwd,
+        stdout,
+        stderr,
+        exitCode: null,
+        signal: null,
+        durationMs: Date.now() - startMs,
+      };
+      (error as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT] = result;
+      reject(error);
+    });
     // `close` (unlike `exit`) fires only after stdio has fully closed, so
     // captured output is never truncated.
     child.once("close", (exitCode, signalName) => {

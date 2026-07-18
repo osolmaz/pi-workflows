@@ -560,7 +560,12 @@ export class WorkflowEngine {
     event: WorkflowTraceEventDraft,
   ): Promise<void> {
     const traceEvent = await this.store.writeSnapshot(runDir, state, event);
-    this.onEvent?.(traceEvent, state);
+    try {
+      this.onEvent?.(traceEvent, state);
+    } catch {
+      // Observers (UI updates, loggers) must never determine workflow
+      // correctness; a throwing observer would otherwise fail the run.
+    }
   }
 
   private async finishRun(
