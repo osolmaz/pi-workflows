@@ -1,3 +1,4 @@
+import { sanitizeText } from "../workflows/text.js";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -41,19 +42,23 @@ export function buildWidgetLines(
   snapshot: WorkflowDefinitionSnapshot,
 ): string[] {
   const glyph = STATUS_GLYPHS[state.status];
-  const title = state.runTitle ? ` — ${state.runTitle}` : "";
-  const header = `${glyph} workflow ${state.workflowName}${title} [${state.status}]`;
+  // Titles, status details, and errors can carry model- or shell-controlled
+  // text; never let escape sequences or newlines reach the terminal.
+  const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
+  const header = `${glyph} workflow ${sanitizeText(state.workflowName)}${title} [${state.status}]`;
 
   const nodes = displayNodeIds(snapshot).map((nodeId) => {
     const marker = nodeGlyph(state, nodeId);
     const detail =
-      state.currentNode === nodeId && state.statusDetail ? ` (${state.statusDetail})` : "";
+      state.currentNode === nodeId && state.statusDetail
+        ? ` (${sanitizeText(state.statusDetail)})`
+        : "";
     return `${marker} ${nodeId}${detail}`;
   });
 
   const lines = [header, `  ${nodes.join("  ")}`];
   if (state.error) {
-    lines.push(`  error: ${truncate(state.error, 120)}`);
+    lines.push(`  error: ${truncate(sanitizeText(state.error), 120)}`);
   }
   if (state.status === "waiting" && state.waitingOn) {
     lines.push(`  waiting on checkpoint: ${state.waitingOn}`);

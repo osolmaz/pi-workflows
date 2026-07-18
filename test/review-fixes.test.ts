@@ -340,6 +340,78 @@ describe("prompt delivery failures", () => {
   });
 });
 
+describe("hung validation after the step is cleared", () => {
+  it("unblocks the submit call when the step times out mid-validation", async () => {
+    const executor = new ConversationStepExecutor({ sendPrompt: () => {} });
+    const request: AgentStepRequest = {
+      contract: { runId: "r", workflowName: "w", nodeId: "step", attemptId: "a1" },
+      prompt: "step",
+      accept: () => new Promise(() => {}), // validation never settles
+    };
+    const abort = new AbortController();
+    const stepPromise = executor.runAgentStep(request, abort.signal);
+    const submission = executor.submit("step", "a1", {});
+
+    abort.abort(new Error("timed out"));
+    await expect(stepPromise).rejects.toThrow(/timed out/);
+
+    // Without the cleared-race, this await would hang forever and block pi's
+    // tool execution.
+    const result = await submission;
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/no longer awaiting/);
+  });
+});
+
+describe("checkpoint edges", () => {
+  it("rejects outgoing edges from checkpoint nodes", async () => {
+    const { checkpoint } = await import("../src/workflows/definition.js");
+    const workflow = defineWorkflow({
+      name: "checkpoint-edge",
+      startAt: "pause",
+      nodes: { pause: checkpoint({}), after: compute({ run: () => 1 }) },
+      edges: [{ from: "pause", to: "after" }],
+    });
+    expect(() => validateWorkflowDefinition(workflow)).toThrow(
+      /checkpoint node must not declare an outgoing edge/,
+    );
+  });
+});
+
+describe("late prompt continuations", () => {
+  it("does not persist agent_prompt_sent after the node timed out", async () => {
+    let resolvePrompt: ((value: string) => void) | undefined;
+    const workflow = defineWorkflow({
+      name: "slow-prompt",
+      startAt: "ask",
+      nodes: {
+        ask: agent({
+          timeoutMs: 100,
+          prompt: () =>
+            new Promise<string>((resolve) => {
+              resolvePrompt = resolve;
+            }),
+        }),
+      },
+      edges: [],
+    });
+    const { state, runDir } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("timed_out");
+
+    // The stale continuation resolves after the run is terminal.
+    resolvePrompt?.("late prompt");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const trace = await fs.readFile(`${runDir}/trace.ndjson`, "utf8");
+    const types = trace
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).not.toContain("agent_prompt_sent");
+    expect(types.at(-1)).toBe("run_timed_out");
+  });
+});
+
 describe("stale submissions after a step is replaced", () => {
   it("does not clear a newer pending step", async () => {
     const sent: PromptDelivery[] = [];

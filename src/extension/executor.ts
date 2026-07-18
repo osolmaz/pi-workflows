@@ -27,6 +27,9 @@ type PendingStep = {
   reject: (error: unknown) => void;
   nudgesSent: number;
   cleanup: () => void;
+  /** Resolves when this step stops being the pending step. */
+  cleared: Promise<void>;
+  markCleared: () => void;
 };
 
 const DEFAULT_MAX_NUDGES = 2;
@@ -69,12 +72,18 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         reject(reason);
       };
       signal.addEventListener("abort", onAbort, { once: true });
+      let markCleared!: () => void;
+      const cleared = new Promise<void>((resolveCleared) => {
+        markCleared = resolveCleared;
+      });
       this.pending = {
         request,
         resolve,
         reject,
         nudgesSent: 0,
         cleanup: () => signal.removeEventListener("abort", onAbort),
+        cleared,
+        markCleared,
       };
       if (signal.aborted) {
         onAbort();
@@ -119,11 +128,17 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         )}; the pending attempt is ${JSON.stringify(expectedAttempt)}. Use the attempt id from the latest step contract.`,
       };
     }
-    const result = await pending.request.accept(output);
+    // Race validation against the step being cleared: a hung `validate`
+    // callback must not leave this tool call (and therefore pi) blocked after
+    // a timeout or cancel already resolved the run.
+    const result = await Promise.race([
+      pending.request.accept(output),
+      pending.cleared.then(() => null),
+    ]);
     // The step may have timed out or been cancelled (and a newer step
     // installed) while validation was awaited; a stale submission must not
     // clear or resolve the newer pending step.
-    if (this.pending !== pending) {
+    if (result === null || this.pending !== pending) {
       return {
         accepted: false,
         message: `Step ${JSON.stringify(stepId)} is no longer awaiting output.`,
@@ -183,6 +198,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
 
   private clearPending(): void {
     this.pending?.cleanup();
+    this.pending?.markCleared();
     this.pending = null;
   }
 }

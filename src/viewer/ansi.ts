@@ -1,3 +1,7 @@
+import { sanitizeText, stripAnsi } from "../workflows/text.js";
+
+export { sanitizeText, stripAnsi };
+
 /**
  * Colors are on for interactive terminals only, so piped output stays clean.
  * `NO_COLOR`/`PI_WORKFLOWS_NO_COLOR` force them off; `FORCE_COLOR` forces
@@ -31,40 +35,6 @@ export const ansi = {
 /** Visible length of a string, ignoring ANSI escape sequences. */
 export function visibleLength(text: string): number {
   return stripAnsi(text).length;
-}
-
-export function stripAnsi(text: string): string {
-  let result = "";
-  let index = 0;
-  while (index < text.length) {
-    if (text[index] === "\u001b" && text[index + 1] === "[") {
-      index += 2;
-      while (index < text.length && !/[A-Za-z]/.test(text[index] as string)) {
-        index += 1;
-      }
-      index += 1;
-      continue;
-    }
-    result += text[index];
-    index += 1;
-  }
-  return result;
-}
-
-/**
- * Remove ANSI escapes and control characters from untrusted text (model
- * outputs, errors) so rendering it cannot alter terminal state. Line breaks
- * and tabs collapse to single spaces because callers interpolate the result
- * into single terminal lines, where a stray newline would break viewport
- * math and allow fake rows.
- */
-export function sanitizeText(text: string): string {
-  return (
-    stripAnsi(text)
-      .replaceAll(/[\t\n\r]+/g, " ")
-      // eslint-disable-next-line no-control-regex
-      .replaceAll(/[\u0000-\u001f\u007f]/g, "")
-  );
 }
 
 /** Truncate to a visible width, keeping ANSI sequences intact by stripping them first when needed. */

@@ -483,6 +483,12 @@ export class WorkflowEngine {
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
     const basePrompt = await node.prompt(context);
+    if (signal.aborted) {
+      // The node timed out or the run was cancelled while the async prompt
+      // builder ran; a late continuation must not write into a bundle that
+      // may already be terminal.
+      throw abortError(signal);
+    }
     const prompt = appendStepContract(
       basePrompt,
       workflow.name,
@@ -636,11 +642,16 @@ async function runShellActionNode(
 }
 
 /** Rejects with the abort reason once the signal fires; never resolves. */
+/** The error carried by an aborted signal, normalized to an Error. */
+function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason ?? new CancelledError();
+  return reason instanceof Error ? reason : new CancelledError(String(reason));
+}
+
 function abortRejection(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_resolve, reject) => {
     const onAbort = () => {
-      const reason: unknown = signal.reason ?? new CancelledError();
-      reject(reason instanceof Error ? reason : new CancelledError(String(reason)));
+      reject(abortError(signal));
     };
     if (signal.aborted) {
       onAbort();

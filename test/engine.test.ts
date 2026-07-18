@@ -114,9 +114,8 @@ describe("WorkflowEngine", () => {
       startAt: "hold",
       nodes: {
         hold: checkpoint({ summary: "needs review" }),
-        after: compute({ run: () => "never" }),
       },
-      edges: [{ from: "hold", to: "after" }],
+      edges: [],
     });
     const { engine } = await makeEngine(new ScriptedExecutor());
 

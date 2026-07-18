@@ -44,8 +44,11 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   const spaceIndex = trimmed.search(/\s/);
   const ref = spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex);
   const rest = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex).trim();
-  if (rest.startsWith("--input-json")) {
-    const json = rest.slice("--input-json".length).trim();
+  // Match the option as a complete token so task text such as
+  // "--input-jsonschema help" is not misparsed as the JSON option.
+  const inputJsonMatch = rest.match(/^--input-json(?:\s+|$)([\s\S]*)$/);
+  if (inputJsonMatch) {
+    const json = (inputJsonMatch[1] as string).trim();
     if (!json) {
       throw new Error("--input-json requires a JSON value");
     }

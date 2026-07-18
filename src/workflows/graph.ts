@@ -58,6 +58,11 @@ function validateWorkflowEdge(
   outgoingEdges: Set<string>,
 ): void {
   assertKnownNode(workflow, edge.from, "Workflow edge references unknown from-node");
+  if (workflow.nodes[edge.from]?.nodeType === "checkpoint") {
+    // A checkpoint terminates the run as `waiting` and nothing resumes it,
+    // so an outgoing edge would make its targets silently unreachable.
+    throw new Error(`Workflow checkpoint node must not declare an outgoing edge: ${edge.from}`);
+  }
   if (outgoingEdges.has(edge.from)) {
     throw new Error(`Workflow node must not declare multiple outgoing edges: ${edge.from}`);
   }

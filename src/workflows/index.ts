@@ -27,6 +27,7 @@ export {
   type WorkflowSearchPaths,
 } from "./loader.js";
 export { renderShellCommand, runShellAction } from "./shell.js";
+export { sanitizeText, stripAnsi } from "./text.js";
 export {
   DEFINITION_SNAPSHOT_SCHEMA,
   RUN_BUNDLE_SCHEMA,

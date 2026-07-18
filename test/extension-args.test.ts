@@ -39,6 +39,14 @@ describe("parseWorkflowArgs", () => {
     expect(() => parseWorkflowArgs("branch --input-json {broken")).toThrow();
   });
 
+  it("treats task text starting with --input-json as plain text", () => {
+    expect(parseWorkflowArgs("echo --input-jsonschema help")).toEqual({
+      kind: "run",
+      ref: "echo",
+      input: { task: "--input-jsonschema help" },
+    });
+  });
+
   it("supports path refs", () => {
     expect(parseWorkflowArgs("./examples/workflows/echo.workflow.ts hello")).toEqual({
       kind: "run",

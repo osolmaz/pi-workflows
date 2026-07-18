@@ -98,4 +98,24 @@ describe("buildWidgetLines", () => {
     );
     expect(waiting.at(-1)).toContain("waiting on checkpoint: third");
   });
+
+  it("sanitizes titles, status details, and errors", () => {
+    const lines = buildWidgetLines(
+      makeState({
+        runTitle: "evil\u001b[2J\ntitle",
+        currentNode: "second",
+        statusDetail: "phase\tone\u0007",
+        error: "boom\nline2",
+        status: "failed",
+      }),
+      snapshot,
+    );
+    const joined = lines.join("|");
+    expect(joined).not.toContain("\u001b");
+    expect(joined).not.toContain("\u0007");
+    expect(joined).not.toContain("\n");
+    expect(lines[0]).toContain("evil title");
+    expect(joined).toContain("(phase one)");
+    expect(joined).toContain("error: boom line2");
+  });
 });

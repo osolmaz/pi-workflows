@@ -147,6 +147,8 @@ command fails.
 
 Ends the run in a `waiting` state for human review. Runs after a checkpoint do
 not resume automatically; the checkpoint output is the run's final output.
+Because nothing resumes past a checkpoint, graph validation rejects outgoing
+edges from checkpoint nodes.
 
 ```typescript
 checkpoint({
