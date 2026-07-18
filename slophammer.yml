@@ -1,0 +1,28 @@
+typescript:
+  coverage:
+    threshold: 85
+  complexity:
+    max: 8
+  dry:
+    max_findings: 0
+    paths:
+      - src
+    exclude:
+      - "**/*.test.ts"
+      - "dist/**"
+      - "node_modules/**"
+    copied_blocks:
+      enabled: true
+      min_tokens: 100
+  dependency_boundaries:
+    # workflows is the core engine; it must stay pi-agnostic and standalone.
+    - from: src/workflows
+      allow: []
+    # The extension embeds the engine in pi.
+    - from: src/extension
+      allow:
+        - src/workflows
+    # The viewer only reads run bundles; it must never import the extension.
+    - from: src/viewer
+      allow:
+        - src/workflows
