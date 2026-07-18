@@ -130,6 +130,12 @@ function assertValidEdgeShape(edge: WorkflowEdge, index: number): void {
   if (typeof edge.switch.on !== "string" || edge.switch.on.length === 0) {
     fail(`edge ${index} switch.on must be a JSON path string`);
   }
+  // Routing only understands these prefixes; rejecting others here prevents
+  // the source node from executing its side effects before a routing error.
+  const on = edge.switch.on;
+  if (!on.startsWith("$.") && !on.startsWith("$output.") && !on.startsWith("$result.")) {
+    fail(`edge ${index} switch.on must start with "$.", "$output.", or "$result."`);
+  }
   assertRecord(edge.switch.cases, `edge ${index} switch.cases`);
   if (Object.keys(edge.switch.cases).length === 0) {
     fail(`edge ${index} switch.cases must not be empty`);

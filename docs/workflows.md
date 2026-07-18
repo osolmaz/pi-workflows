@@ -41,14 +41,14 @@ export default defineWorkflow({
 
 Top-level fields:
 
-| Field      | Type                   | Notes                                                                      |
-| ---------- | ---------------------- | -------------------------------------------------------------------------- |
-| `name`     | `string`               | Required. Used in run ids and the step contract.                           |
-| `title`    | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. |
-| `startAt`  | `string`               | Required. Id of the first node.                                            |
-| `nodes`    | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.        |
-| `edges`    | `WorkflowEdge[]`       | Required. See routing below.                                               |
-| `maxSteps` | `number`               | Optional loop bound, default 100. The run fails when exceeded.             |
+| Field      | Type                   | Notes                                                                                                                         |
+| ---------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `name`     | `string`               | Required. Used in run ids and the step contract.                                                                              |
+| `title`    | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable. |
+| `startAt`  | `string`               | Required. Id of the first node.                                                                                               |
+| `nodes`    | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                           |
+| `edges`    | `WorkflowEdge[]`       | Required. See routing below.                                                                                                  |
+| `maxSteps` | `number`               | Optional loop bound, default 100. The run fails when exceeded.                                                                |
 
 `defineWorkflow` validates the shape eagerly (node ids, edge shapes, function
 fields) and validates the graph (unknown targets, duplicate outgoing edges,
@@ -137,8 +137,11 @@ shell({
 
 Without `parse`, the node output is the full `ShellActionResult` (`stdout`,
 `stderr`, `exitCode`, `signal`, `durationMs`). A non-zero exit fails the node
-unless `allowNonZeroExit` is set. Both action forms record a receipt (command,
-exit code, duration) in the step record for auditability.
+unless `allowNonZeroExit` is set. Captured stdout and stderr are each capped
+(default 1,000,000 characters, configurable with `maxOutputChars`) so verbose
+commands cannot exhaust memory. Both action forms record a receipt (command,
+exit code, duration) in the step record for auditability, including when the
+command fails.
 
 ### checkpoint
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fitWidth, stripAnsi, visibleLength } from "../src/viewer/ansi.js";
 import {
   formatDuration,
+  maxDetailScroll,
   renderRunDetailLines,
   renderRunListLines,
   runElapsedMs,
@@ -142,6 +143,31 @@ describe("renderRunDetailLines", () => {
   it("clips to the viewport height", () => {
     const lines = renderRunDetailLines(makeBundle(), { width: 100, height: 4 }, NOW);
     expect(lines).toHaveLength(4);
+  });
+
+  it("shows the running node's statusDetail", () => {
+    const bundle = makeBundle({
+      currentNode: "two",
+      currentNodeStartedAt: "2026-07-19T00:00:50.000Z",
+      statusDetail: "reviewing",
+    });
+    const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
+    expect(text).toContain("◐ two [compute] running 10s · reviewing");
+  });
+
+  it("scrolls the detail view over long content", () => {
+    const bundle = makeBundle();
+    const viewport = { width: 100, height: 4 };
+    const top = renderRunDetailLines(bundle, viewport, NOW, 0).map(stripAnsi);
+    const scrolled = renderRunDetailLines(bundle, viewport, NOW, 2).map(stripAnsi);
+    expect(scrolled[0]).toBe(top[2]);
+    expect(maxDetailScroll(bundle, viewport)).toBeGreaterThan(0);
+    // Scroll beyond the end clamps to the last full viewport.
+    const clamped = renderRunDetailLines(bundle, viewport, NOW, 10_000).map(stripAnsi);
+    expect(clamped).toHaveLength(4);
+    expect(renderRunDetailLines(bundle, viewport, NOW, maxDetailScroll(bundle, viewport))).toEqual(
+      renderRunDetailLines(bundle, viewport, NOW, 10_000),
+    );
   });
 });
 

@@ -1,6 +1,11 @@
 import { listRunBundles, readRunBundle } from "../workflows/store.js";
 import type { LoadedRunBundle } from "../workflows/store.js";
-import { renderRunDetailLines, renderRunListLines, type ViewportSize } from "./render.js";
+import {
+  maxDetailScroll,
+  renderRunDetailLines,
+  renderRunListLines,
+  type ViewportSize,
+} from "./render.js";
 import { watchRunsDir } from "./watch.js";
 
 const ALT_SCREEN_ON = "\u001b[?1049h\u001b[?25l";
@@ -31,6 +36,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   let mode: ViewerMode = { view: "list" };
   let bundles: LoadedRunBundle[] = [];
   let selectedIndex = 0;
+  let detailScroll = 0;
 
   if (options.runId) {
     bundles = await listRunBundles(options.runsDir);
@@ -57,7 +63,8 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     if (!bundle) {
       return ["Run bundle disappeared. Press q to go back."];
     }
-    return renderRunDetailLines(bundle, size);
+    detailScroll = Math.min(detailScroll, maxDetailScroll(bundle, size));
+    return renderRunDetailLines(bundle, size, new Date(), detailScroll);
   };
 
   process.stdout.write(ALT_SCREEN_ON);
@@ -94,6 +101,13 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
         if (mode.view !== "list") {
           if (key === "r") {
             void draw();
+          } else if (key === "\u001b[A" || key === "k") {
+            detailScroll = Math.max(0, detailScroll - 1);
+            void draw();
+          } else if (key === "\u001b[B" || key === "j") {
+            // Clamped against the content height in renderDetail.
+            detailScroll += 1;
+            void draw();
           }
           return;
         }
@@ -107,6 +121,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
           const selected = bundles[selectedIndex];
           if (selected) {
             mode = { view: "detail", runDir: selected.runDir };
+            detailScroll = 0;
             void draw();
           }
         }

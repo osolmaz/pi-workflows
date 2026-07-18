@@ -80,6 +80,8 @@ export type ShellActionExecution = {
   shell?: boolean | string;
   allowNonZeroExit?: boolean;
   timeoutMs?: number;
+  /** Cap on captured stdout/stderr each, default 1,000,000 characters. */
+  maxOutputChars?: number;
 };
 
 export type ShellActionResult = {

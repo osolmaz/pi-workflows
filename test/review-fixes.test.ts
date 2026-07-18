@@ -381,6 +381,108 @@ describe("stale submissions after a step is replaced", () => {
   });
 });
 
+describe("switch path validation", () => {
+  it("rejects unsupported switch paths at definition time", () => {
+    expect(() =>
+      defineWorkflow({
+        name: "bad-path",
+        startAt: "a",
+        nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
+        edges: [{ from: "a", switch: { on: "route", cases: { x: "b" } } }],
+      }),
+    ).toThrow(/switch\.on must start with/);
+  });
+});
+
+describe("hung title resolution", () => {
+  it("can be cancelled before any node runs", async () => {
+    const workflow = defineWorkflow({
+      name: "hung-title",
+      title: () => new Promise<string>(() => {}),
+      startAt: "noop",
+      nodes: { noop: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const engine = await makeEngine();
+    const runPromise = engine.run(workflow, {});
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    engine.cancel();
+    await expect(runPromise).rejects.toThrow(/cancelled/i);
+  });
+});
+
+describe("validator results that are not JSON", () => {
+  it("returns a retryable validation error instead of accepting", async () => {
+    const attempts: unknown[] = [];
+    const workflow = defineWorkflow({
+      name: "bad-validator",
+      startAt: "step",
+      nodes: {
+        step: agent({
+          prompt: () => "?",
+          validate: (output) =>
+            (output as { fix?: boolean }).fix ? { fixed: true } : { when: new Date() },
+        }),
+      },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("step", async (request) => {
+      const first = await request.accept({ fix: false });
+      attempts.push(first);
+      const second = await request.accept({ fix: true });
+      if (!second.ok) {
+        throw new Error("expected the corrected output to be accepted");
+      }
+      return { output: second.value };
+    });
+    const { state } = await (await makeEngine({ executor })).run(workflow, {});
+    expect(state.status).toBe("completed");
+    expect(attempts[0]).toMatchObject({ ok: false });
+    expect((attempts[0] as { error: string }).error).toMatch(/round-trip/);
+  });
+});
+
+describe("failure metadata retention", () => {
+  it("keeps the shell action receipt when the command fails", async () => {
+    const workflow = defineWorkflow({
+      name: "failing-shell",
+      startAt: "boom",
+      nodes: { boom: shell({ exec: () => ({ command: "sh", args: ["-c", "exit 7"] }) }) },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("failed");
+    const step = state.steps.at(-1);
+    expect(step?.action).toMatchObject({ actionType: "shell", exitCode: 7 });
+    expect(step).toHaveProperty("output", null);
+  });
+
+  it("keeps the agent prompt when the step fails after delivery", async () => {
+    const workflow = defineWorkflow({
+      name: "failing-agent",
+      startAt: "ask",
+      nodes: { ask: agent({ prompt: () => "Please answer" }) },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("ask", { error: "executor gave up" });
+    const { state } = await (await makeEngine({ executor })).run(workflow, {});
+    expect(state.status).toBe("failed");
+    expect(state.steps.at(-1)?.promptText).toContain("Please answer");
+  });
+});
+
+describe("bounded shell output", () => {
+  it("truncates output beyond maxOutputChars", async () => {
+    const result = await runShellAction({
+      command: "sh",
+      args: ["-c", "yes x | head -c 100000"],
+      maxOutputChars: 1_000,
+    });
+    expect(result.stdout.length).toBeLessThan(1_100);
+    expect(result.stdout).toContain("[output truncated]");
+  });
+});
+
 describe("terminal output sanitization", () => {
   it("strips ANSI and control characters from untrusted text", () => {
     expect(sanitizeText("\u001b[2Jwiped\u0007bell")).toBe("wipedbell");

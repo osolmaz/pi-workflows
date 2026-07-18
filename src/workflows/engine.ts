@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { CancelledError, errorMessage, isAbortLikeError, TimeoutError } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
-import { runShellAction } from "./shell.js";
+import { runShellAction, shellResultFromError } from "./shell.js";
 import { WorkflowRunStore, createRunId } from "./store.js";
 import type {
   AgentNodeDefinition,
@@ -11,6 +11,7 @@ import type {
   ActionNodeDefinition,
   CheckpointNodeDefinition,
   ShellActionNodeDefinition,
+  ShellActionResult,
   WorkflowActionReceipt,
   WorkflowDefinition,
   WorkflowEngineOptions,
@@ -26,9 +27,19 @@ import type {
 
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
+const TITLE_TIMEOUT_MS = 30_000;
 
 type NodeExecution = {
   output: unknown;
+  promptText: string | null;
+  action?: WorkflowActionReceipt;
+};
+
+/**
+ * Metadata collected while a node runs, so a failing node still persists the
+ * agent prompt it sent and the shell action it executed.
+ */
+type NodeExecutionMeta = {
   promptText: string | null;
   action?: WorkflowActionReceipt;
 };
@@ -107,6 +118,32 @@ export class WorkflowEngine {
     return { runDir, state };
   }
 
+  /**
+   * Resolve the run title inside a cancellation and timeout boundary. This
+   * runs before any node abort controller exists, so without it a hung async
+   * `title` callback would leave the session permanently occupied.
+   */
+  private async resolveTitleBounded(
+    workflow: WorkflowDefinition,
+    input: unknown,
+  ): Promise<{ runTitle?: string }> {
+    if (typeof workflow.title !== "function") {
+      return resolveRunTitle(workflow, input);
+    }
+    const abort = new AbortController();
+    this.activeAbort = abort;
+    const timer = setTimeout(
+      () => abort.abort(new TimeoutError(TITLE_TIMEOUT_MS)),
+      TITLE_TIMEOUT_MS,
+    );
+    try {
+      return await Promise.race([resolveRunTitle(workflow, input), abortRejection(abort.signal)]);
+    } finally {
+      clearTimeout(timer);
+      this.activeAbort = null;
+    }
+  }
+
   private async createRunState(
     workflow: WorkflowDefinition,
     input: unknown,
@@ -116,7 +153,7 @@ export class WorkflowEngine {
     return {
       runId: createRunId(workflow.name),
       workflowName: workflow.name,
-      ...(await resolveRunTitle(workflow, input)),
+      ...(await this.resolveTitleBounded(workflow, input)),
       ...(workflowPath !== undefined ? { workflowPath } : {}),
       startedAt: now,
       updatedAt: now,
@@ -226,7 +263,8 @@ export class WorkflowEngine {
       startedAt: attempt.result.startedAt,
       finishedAt: attempt.result.finishedAt,
       promptText: attempt.execution?.promptText ?? null,
-      output: attempt.result.output,
+      // `undefined` would drop the required field during JSON serialization.
+      output: attempt.result.output ?? null,
       ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
       ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
     };
@@ -262,6 +300,7 @@ export class WorkflowEngine {
       payload: { nodeType: node.nodeType },
     });
 
+    const meta: NodeExecutionMeta = { promptText: null };
     try {
       const execution = await this.runNodeWithTimeout(
         workflow,
@@ -270,6 +309,7 @@ export class WorkflowEngine {
         nodeId,
         attemptId,
         node,
+        meta,
       );
       return {
         result: this.createNodeResult(nodeId, node, attemptId, startedAt, "ok", execution.output),
@@ -282,7 +322,13 @@ export class WorkflowEngine {
           ...this.createNodeResult(nodeId, node, attemptId, startedAt, outcome, undefined),
           error: errorMessage(error),
         },
-        execution: null,
+        // Keep whatever metadata the node produced before failing so the
+        // audit history retains the agent prompt and action receipt.
+        execution: {
+          output: null,
+          promptText: meta.promptText,
+          ...(meta.action !== undefined ? { action: meta.action } : {}),
+        },
         error,
       };
     }
@@ -326,6 +372,7 @@ export class WorkflowEngine {
     nodeId: string,
     attemptId: string,
     node: WorkflowNodeDefinition,
+    meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
     const timeoutMs = node.timeoutMs ?? this.defaultNodeTimeoutMs;
     const abort = new AbortController();
@@ -341,7 +388,7 @@ export class WorkflowEngine {
       // Race the dispatch against the abort signal so timeouts and cancel
       // take effect even for node callbacks that never observe the signal.
       const execution = await Promise.race([
-        this.dispatchNode(workflow, state, runDir, nodeId, attemptId, node, abort.signal),
+        this.dispatchNode(workflow, state, runDir, nodeId, attemptId, node, abort.signal, meta),
         abortRejection(abort.signal),
       ]);
       if (execution.output === undefined) {
@@ -368,6 +415,7 @@ export class WorkflowEngine {
     attemptId: string,
     node: WorkflowNodeDefinition,
     signal: AbortSignal,
+    meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
     const context = this.createNodeContext(state, signal);
     switch (node.nodeType) {
@@ -381,11 +429,12 @@ export class WorkflowEngine {
           node,
           context,
           signal,
+          meta,
         );
       case "compute":
         return { output: await node.run(context), promptText: null };
       case "action":
-        return await this.runActionNode(node, context, signal);
+        return await this.runActionNode(node, context, signal, meta);
       case "checkpoint":
         return await runCheckpointNode(node, context);
     }
@@ -410,6 +459,7 @@ export class WorkflowEngine {
     node: AgentNodeDefinition,
     context: WorkflowNodeContext,
     signal: AbortSignal,
+    meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
     const basePrompt = await node.prompt(context);
     const prompt = appendStepContract(
@@ -419,6 +469,7 @@ export class WorkflowEngine {
       attemptId,
       node.expectedOutput,
     );
+    meta.promptText = prompt;
     await this.persist(runDir, state, {
       scope: "agent",
       type: "agent_prompt_sent",
@@ -451,7 +502,11 @@ export class WorkflowEngine {
   ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
     try {
       const normalized = normalizeAgentOutput(output);
-      const value = node.validate ? await node.validate(normalized, context) : normalized;
+      const validated = node.validate ? await node.validate(normalized, context) : normalized;
+      const value = validated === undefined ? null : validated;
+      // Check here rather than after acceptance so a non-JSON validator
+      // result comes back as a validation error the model can retry.
+      assertJsonSerializable(value, "Step output");
       return { ok: true, value };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
@@ -462,10 +517,12 @@ export class WorkflowEngine {
     node: ActionNodeDefinition,
     context: WorkflowNodeContext,
     signal: AbortSignal,
+    meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
     if ("exec" in node) {
-      return await runShellActionNode(node, context, signal);
+      return await runShellActionNode(node, context, signal, meta);
     }
+    meta.action = { actionType: "function" };
     const output = await node.run(context);
     return { output, promptText: null, action: { actionType: "function" } };
   }
@@ -523,27 +580,38 @@ async function runCheckpointNode(
   return { output, promptText: null };
 }
 
+function shellReceipt(result: ShellActionResult): WorkflowActionReceipt {
+  return {
+    actionType: "shell",
+    command: result.command,
+    args: result.args,
+    cwd: result.cwd,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    durationMs: result.durationMs,
+  };
+}
+
 async function runShellActionNode(
   node: ShellActionNodeDefinition,
   context: WorkflowNodeContext,
   signal: AbortSignal,
+  meta: NodeExecutionMeta,
 ): Promise<NodeExecution> {
   const spec = await node.exec(context);
-  const result = await runShellAction(spec, signal);
+  let result: ShellActionResult;
+  try {
+    result = await runShellAction(spec, signal);
+  } catch (error) {
+    const failed = shellResultFromError(error);
+    if (failed) {
+      meta.action = shellReceipt(failed);
+    }
+    throw error;
+  }
+  meta.action = shellReceipt(result);
   const output = node.parse ? await node.parse(result, context) : result;
-  return {
-    output,
-    promptText: null,
-    action: {
-      actionType: "shell",
-      command: result.command,
-      args: result.args,
-      cwd: result.cwd,
-      exitCode: result.exitCode,
-      signal: result.signal,
-      durationMs: result.durationMs,
-    },
-  };
+  return { output, promptText: null, action: shellReceipt(result) };
 }
 
 /** Rejects with the abort reason once the signal fires; never resolves. */

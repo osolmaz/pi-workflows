@@ -116,7 +116,8 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
     const startedAt = state.currentNodeStartedAt
       ? Date.parse(state.currentNodeStartedAt)
       : now.getTime();
-    suffix = ansi.cyan(` running ${formatDuration(now.getTime() - startedAt)}`);
+    const detail = state.statusDetail ? ` · ${sanitizeText(state.statusDetail)}` : "";
+    suffix = ansi.cyan(` running ${formatDuration(now.getTime() - startedAt)}${detail}`);
   } else if (state.waitingOn === nodeId) {
     glyph = ansi.yellow("⏸");
     suffix = ansi.yellow(" waiting");
@@ -127,11 +128,15 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
   return fitWidth(`  ${glyph} ${nodeId} ${ansi.dim(`[${nodeType}]`)}${suffix}`, width);
 }
 
-/** Full-run detail view. */
+/**
+ * Full-run detail view. `scroll` shifts the viewport down over the full body
+ * so long runs stay explorable; it is clamped to the content height.
+ */
 export function renderRunDetailLines(
   bundle: LoadedRunBundle,
   size: ViewportSize,
   now: Date = new Date(),
+  scroll = 0,
 ): string[] {
   const state = bundle.state;
   const lines: string[] = [];
@@ -143,7 +148,7 @@ export function renderRunDetailLines(
       size.width,
     ),
   );
-  lines.push(ansi.dim("q back · r refresh"));
+  lines.push(ansi.dim("q back · r refresh · ↑/↓ scroll"));
   lines.push("");
 
   lines.push(ansi.bold("nodes"));
@@ -173,5 +178,15 @@ export function renderRunDetailLines(
       ),
     );
   }
-  return lines.slice(0, size.height);
+  const start = Math.max(0, Math.min(scroll, lines.length - size.height));
+  return lines.slice(start, start + size.height);
+}
+
+/** Highest useful `scroll` value for the detail view of `bundle`. */
+export function maxDetailScroll(bundle: LoadedRunBundle, size: ViewportSize): number {
+  const total = renderRunDetailLines(bundle, {
+    width: size.width,
+    height: Number.MAX_SAFE_INTEGER,
+  }).length;
+  return Math.max(0, total - size.height);
 }

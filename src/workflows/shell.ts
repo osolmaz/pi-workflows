@@ -2,6 +2,25 @@ import { spawn } from "node:child_process";
 import { CancelledError, TimeoutError } from "./errors.js";
 import type { ShellActionExecution, ShellActionResult } from "./types.js";
 
+/** Default cap on captured stdout/stderr, each. */
+const DEFAULT_MAX_OUTPUT_CHARS = 1_000_000;
+const TRUNCATION_MARKER = "\n…[output truncated]";
+
+const SHELL_RESULT = Symbol.for("pi-workflows.shell-result");
+
+/**
+ * Retrieve the shell result attached to an error thrown by
+ * {@link runShellAction}, so callers can persist the action receipt even when
+ * the command failed.
+ */
+export function shellResultFromError(error: unknown): ShellActionResult | null {
+  if (error instanceof Error) {
+    const attached = (error as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT];
+    return attached ?? null;
+  }
+  return null;
+}
+
 export function renderShellCommand(command: string, args: string[]): string {
   const renderedArgs = args.map((arg) => JSON.stringify(arg)).join(" ");
   return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
@@ -53,6 +72,20 @@ export async function runShellAction(
   let killedBy: "timeout" | "abort" | null = null;
   let timeout: NodeJS.Timeout | undefined;
 
+  // Cap retained output so a verbose or unending command cannot exhaust
+  // memory before its timeout fires.
+  const maxOutputChars = spec.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+  const appendCapped = (current: string, chunk: string): string => {
+    if (current.endsWith(TRUNCATION_MARKER)) {
+      return current;
+    }
+    const room = maxOutputChars - current.length;
+    if (chunk.length <= room) {
+      return current + chunk;
+    }
+    return current + chunk.slice(0, Math.max(0, room)) + TRUNCATION_MARKER;
+  };
+
   const signalTree = (killSignal: NodeJS.Signals) => {
     if (useProcessGroup && child.pid !== undefined) {
       try {
@@ -78,10 +111,10 @@ export async function runShellAction(
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
+      stdout = appendCapped(stdout, chunk);
     });
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      stderr = appendCapped(stderr, chunk);
     });
 
     child.once("error", reject);
@@ -100,6 +133,8 @@ export async function runShellAction(
       };
       const error = shellFailure(spec, args, result, killedBy);
       if (error) {
+        // Attach the result so callers can persist the action receipt.
+        (error as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT] = result;
         reject(error);
         return;
       }
