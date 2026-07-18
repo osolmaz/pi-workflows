@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { TimeoutError } from "./errors.js";
+import { CancelledError, TimeoutError } from "./errors.js";
 import type { ShellActionExecution, ShellActionResult } from "./types.js";
 
 export function renderShellCommand(command: string, args: string[]): string {
@@ -11,10 +11,13 @@ function shellFailure(
   spec: ShellActionExecution,
   args: string[],
   result: ShellActionResult,
-  timedOut: boolean,
+  killedBy: "timeout" | "abort" | null,
 ): Error | undefined {
-  if (timedOut) {
+  if (killedBy === "timeout") {
     return new TimeoutError(spec.timeoutMs ?? 0);
+  }
+  if (killedBy === "abort") {
+    return new CancelledError();
   }
   if (((result.exitCode ?? 0) !== 0 || result.signal != null) && spec.allowNonZeroExit !== true) {
     const status = result.signal ? `signal ${result.signal}` : `exit ${String(result.exitCode)}`;
@@ -26,7 +29,10 @@ function shellFailure(
   return undefined;
 }
 
-export async function runShellAction(spec: ShellActionExecution): Promise<ShellActionResult> {
+export async function runShellAction(
+  spec: ShellActionExecution,
+  signal?: AbortSignal,
+): Promise<ShellActionResult> {
   const cwd = spec.cwd ?? process.cwd();
   const args = spec.args ?? [];
   const startMs = Date.now();
@@ -40,8 +46,17 @@ export async function runShellAction(spec: ShellActionExecution): Promise<ShellA
 
   let stdout = "";
   let stderr = "";
-  let timedOut = false;
+  let killedBy: "timeout" | "abort" | null = null;
   let timeout: NodeJS.Timeout | undefined;
+
+  const kill = (reason: "timeout" | "abort") => {
+    killedBy ??= reason;
+    child.kill("SIGTERM");
+    setTimeout(() => {
+      child.kill("SIGKILL");
+    }, 1_000).unref();
+  };
+  const onAbort = () => kill("abort");
 
   const finish = new Promise<ShellActionResult>((resolve, reject) => {
     child.stdout.setEncoding("utf8");
@@ -54,7 +69,9 @@ export async function runShellAction(spec: ShellActionExecution): Promise<ShellA
     });
 
     child.once("error", reject);
-    child.once("exit", (exitCode, signal) => {
+    // `close` (unlike `exit`) fires only after stdio has fully closed, so
+    // captured output is never truncated.
+    child.once("close", (exitCode, signalName) => {
       const result: ShellActionResult = {
         command: spec.command,
         args,
@@ -62,10 +79,10 @@ export async function runShellAction(spec: ShellActionExecution): Promise<ShellA
         stdout,
         stderr,
         exitCode,
-        signal,
+        signal: signalName,
         durationMs: Date.now() - startMs,
       };
-      const error = shellFailure(spec, args, result, timedOut);
+      const error = shellFailure(spec, args, result, killedBy);
       if (error) {
         reject(error);
         return;
@@ -80,13 +97,14 @@ export async function runShellAction(spec: ShellActionExecution): Promise<ShellA
   child.stdin.end();
 
   if (spec.timeoutMs != null && spec.timeoutMs > 0) {
-    timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        child.kill("SIGKILL");
-      }, 1_000).unref();
-    }, spec.timeoutMs);
+    timeout = setTimeout(() => kill("timeout"), spec.timeoutMs);
+  }
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   }
 
   try {
@@ -95,5 +113,6 @@ export async function runShellAction(spec: ShellActionExecution): Promise<ShellA
     if (timeout) {
       clearTimeout(timeout);
     }
+    signal?.removeEventListener("abort", onAbort);
   }
 }

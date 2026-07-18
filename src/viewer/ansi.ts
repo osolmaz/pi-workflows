@@ -39,6 +39,15 @@ export function stripAnsi(text: string): string {
   return result;
 }
 
+/**
+ * Remove ANSI escapes and control characters from untrusted text (model
+ * outputs, errors) so rendering it cannot alter terminal state.
+ */
+export function sanitizeText(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return stripAnsi(text).replaceAll(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+}
+
 /** Truncate to a visible width, keeping ANSI sequences intact by stripping them first when needed. */
 export function fitWidth(text: string, width: number): string {
   if (visibleLength(text) <= width) {

@@ -102,6 +102,15 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       };
     }
     const result = await pending.request.accept(output);
+    // The step may have timed out or been cancelled (and a newer step
+    // installed) while validation was awaited; a stale submission must not
+    // clear or resolve the newer pending step.
+    if (this.pending !== pending) {
+      return {
+        accepted: false,
+        message: `Step ${JSON.stringify(stepId)} is no longer awaiting output.`,
+      };
+    }
     if (!result.ok) {
       return {
         accepted: false,

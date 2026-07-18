@@ -4,7 +4,7 @@ import type {
   WorkflowRunStatus,
   WorkflowStepRecord,
 } from "../workflows/types.js";
-import { ansi, fitWidth } from "./ansi.js";
+import { ansi, fitWidth, sanitizeText } from "./ansi.js";
 
 export type ViewportSize = {
   width: number;
@@ -47,7 +47,10 @@ function previewValue(value: unknown, maxLength: number): string {
     return "";
   }
   const text = typeof value === "string" ? value : JSON.stringify(value);
-  const singleLine = (text ?? "").replaceAll(/\s+/g, " ").trim();
+  // Model-controlled values must not carry escape sequences into the terminal.
+  const singleLine = sanitizeText(text ?? "")
+    .replaceAll(/\s+/g, " ")
+    .trim();
   return singleLine.length <= maxLength ? singleLine : `${singleLine.slice(0, maxLength - 1)}…`;
 }
 
@@ -76,7 +79,7 @@ export function renderRunListLines(
     const state = bundle.state;
     const marker = index === selectedIndex ? ansi.cyan("›") : " ";
     const elapsed = formatDuration(runElapsedMs(state, now));
-    const title = state.runTitle ? ` — ${state.runTitle}` : "";
+    const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
     lines.push(
       fitWidth(
         `${marker} ${statusLabel(state.status)}  ${ansi.bold(state.workflowName)}${title}  ${ansi.dim(
@@ -132,7 +135,7 @@ export function renderRunDetailLines(
 ): string[] {
   const state = bundle.state;
   const lines: string[] = [];
-  const title = state.runTitle ? ` — ${state.runTitle}` : "";
+  const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
   lines.push(fitWidth(`${ansi.bold(`workflow ${state.workflowName}`)}${title}`, size.width));
   lines.push(
     fitWidth(
@@ -159,7 +162,7 @@ export function renderRunDetailLines(
 
   if (state.error) {
     lines.push("");
-    lines.push(fitWidth(ansi.red(`error: ${state.error}`), size.width));
+    lines.push(fitWidth(ansi.red(`error: ${sanitizeText(state.error)}`), size.width));
   }
   if (state.status === "completed" && state.finalOutput !== undefined) {
     lines.push("");

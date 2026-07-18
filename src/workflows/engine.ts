@@ -93,7 +93,8 @@ export class WorkflowEngine {
     try {
       await this.executeGraph(workflow, state, runDir);
     } catch (error) {
-      await this.finishRun(runDir, state, this.cancelled ? "cancelled" : "failed", {
+      const cancelled = this.cancelled || isAbortLikeError(error);
+      await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
         error: errorMessage(error),
       });
       return { runDir, state };
@@ -328,15 +329,14 @@ export class WorkflowEngine {
       abort.abort(new TimeoutError(timeoutMs));
     }, timeoutMs);
     try {
-      return await this.dispatchNode(
-        workflow,
-        state,
-        runDir,
-        nodeId,
-        attemptId,
-        node,
-        abort.signal,
-      );
+      // Race the dispatch against the abort signal so timeouts and cancel
+      // take effect even for node callbacks that never observe the signal.
+      const execution = await Promise.race([
+        this.dispatchNode(workflow, state, runDir, nodeId, attemptId, node, abort.signal),
+        abortRejection(abort.signal),
+      ]);
+      assertJsonSerializable(execution.output, nodeId);
+      return execution;
     } catch (error) {
       const reason: unknown = abort.signal.aborted ? abort.signal.reason : undefined;
       throw reason instanceof TimeoutError || reason instanceof CancelledError ? reason : error;
@@ -371,7 +371,7 @@ export class WorkflowEngine {
       case "compute":
         return { output: await node.run(context), promptText: null };
       case "action":
-        return await this.runActionNode(node, context);
+        return await this.runActionNode(node, context, signal);
       case "checkpoint":
         return await runCheckpointNode(node, context);
     }
@@ -440,9 +440,10 @@ export class WorkflowEngine {
   private async runActionNode(
     node: ActionNodeDefinition,
     context: WorkflowNodeContext,
+    signal: AbortSignal,
   ): Promise<NodeExecution> {
     if ("exec" in node) {
-      return await runShellActionNode(node, context);
+      return await runShellActionNode(node, context, signal);
     }
     const output = await node.run(context);
     return { output, promptText: null, action: { actionType: "function" } };
@@ -504,9 +505,10 @@ async function runCheckpointNode(
 async function runShellActionNode(
   node: ShellActionNodeDefinition,
   context: WorkflowNodeContext,
+  signal: AbortSignal,
 ): Promise<NodeExecution> {
   const spec = await node.exec(context);
-  const result = await runShellAction(spec);
+  const result = await runShellAction(spec, signal);
   const output = node.parse ? await node.parse(result, context) : result;
   return {
     output,
@@ -521,6 +523,39 @@ async function runShellActionNode(
       durationMs: result.durationMs,
     },
   };
+}
+
+/** Rejects with the abort reason once the signal fires; never resolves. */
+function abortRejection(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      const reason: unknown = signal.reason ?? new CancelledError();
+      reject(reason instanceof Error ? reason : new CancelledError(String(reason)));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Outputs are persisted to the run bundle, so they must be JSON-serializable.
+ * Failing here turns a bad callback return value into a normal node failure
+ * instead of corrupting the run state.
+ */
+function assertJsonSerializable(output: unknown, nodeId: string): void {
+  if (output === undefined) {
+    return;
+  }
+  try {
+    JSON.stringify(output);
+  } catch (error) {
+    throw new Error(
+      `Node ${nodeId} returned a non-JSON-serializable output: ${errorMessage(error)}`,
+    );
+  }
 }
 
 /**
