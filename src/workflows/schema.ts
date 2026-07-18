@@ -3,6 +3,7 @@ import type {
   ActionNodeDefinition,
   CheckpointNodeDefinition,
   ComputeNodeDefinition,
+  FunctionActionNodeDefinition,
   ShellActionNodeDefinition,
   WorkflowDefinition,
   WorkflowEdge,
@@ -61,13 +62,21 @@ export function assertValidComputeNode(node: ComputeNodeDefinition, nodeId = "co
 }
 
 export function assertValidActionNode(node: ActionNodeDefinition, nodeId = "action"): void {
-  const hasRun = "run" in node && typeof node.run === "function";
-  const hasExec = "exec" in node && typeof node.exec === "function";
-  if (hasRun === hasExec) {
+  // Dispatch discriminates with `"exec" in node`, so validation must use the
+  // same property semantics: a present-but-invalid `exec` is an error even
+  // when a `run` function exists.
+  const hasExec = "exec" in node;
+  const hasRun = "run" in node;
+  if (hasExec === hasRun) {
     fail(`node ${nodeId} requires exactly one of run or exec`);
   }
   if (hasExec) {
+    if (typeof node.exec !== "function") {
+      fail(`node ${nodeId} exec must be a function`);
+    }
     assertOptionalFunction((node as ShellActionNodeDefinition).parse, `node ${nodeId} parse`);
+  } else if (typeof (node as FunctionActionNodeDefinition).run !== "function") {
+    fail(`node ${nodeId} run must be a function`);
   }
   assertCommonNodeFields(node, nodeId);
 }

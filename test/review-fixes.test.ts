@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { ConversationStepExecutor, type PromptDelivery } from "../src/extension/executor.js";
 import { sanitizeText } from "../src/viewer/ansi.js";
@@ -5,6 +6,7 @@ import { renderRunDetailLines } from "../src/viewer/render.js";
 import { agent, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
+import { extractJsonValue } from "../src/workflows/json.js";
 import { runShellAction } from "../src/workflows/shell.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import type { AgentStepRequest } from "../src/workflows/types.js";
@@ -471,6 +473,55 @@ describe("failure metadata retention", () => {
   });
 });
 
+describe("shell robustness", () => {
+  it("survives a child that exits without consuming stdin", async () => {
+    // 1 MiB of stdin against a child that closes stdin immediately (EPIPE).
+    const result = await runShellAction({
+      command: "sh",
+      args: ["-c", "exec 0<&-; printf ok"],
+      stdin: "x".repeat(1_048_576),
+      allowNonZeroExit: true,
+    });
+    expect(result.stdout).toBe("ok");
+  });
+
+  it("refuses to spawn when the signal is already aborted", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const marker = `${Date.now()}-no-spawn`;
+    await expect(
+      runShellAction({ command: "sh", args: ["-c", `touch /tmp/${marker}`] }, abort.signal),
+    ).rejects.toThrow(/cancelled/i);
+    await expect(fs.access(`/tmp/${marker}`)).rejects.toThrow();
+  });
+
+  it("keeps the shell receipt when the node-level timeout kills the command", async () => {
+    const workflow = defineWorkflow({
+      name: "receipt-on-timeout",
+      startAt: "sleepy",
+      nodes: {
+        sleepy: shell({ timeoutMs: 150, exec: () => ({ command: "sleep", args: ["10"] }) }),
+      },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("timed_out");
+    expect(state.steps.at(-1)?.action).toMatchObject({ actionType: "shell", command: "sleep" });
+  });
+});
+
+describe("embedded JSON extraction bounds", () => {
+  it("stays fast on pathological brace floods", () => {
+    const started = Date.now();
+    expect(() => extractJsonValue("{".repeat(20_000))).toThrow(/Could not parse/);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("still finds JSON embedded in chatty text", () => {
+    expect(extractJsonValue('Sure! Here you go: {"route":"y"} — done.')).toEqual({ route: "y" });
+  });
+});
+
 describe("bounded shell output", () => {
   it("truncates output beyond maxOutputChars", async () => {
     const result = await runShellAction({
@@ -487,6 +538,10 @@ describe("terminal output sanitization", () => {
   it("strips ANSI and control characters from untrusted text", () => {
     expect(sanitizeText("\u001b[2Jwiped\u0007bell")).toBe("wipedbell");
     expect(sanitizeText("plain text")).toBe("plain text");
+  });
+
+  it("collapses line breaks and tabs so one value stays one line", () => {
+    expect(sanitizeText("line1\nline2\r\n\tline3")).toBe("line1 line2 line3");
   });
 
   it("keeps model-controlled escape sequences out of rendered runs", async () => {

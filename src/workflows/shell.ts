@@ -52,6 +52,11 @@ export async function runShellAction(
   spec: ShellActionExecution,
   signal?: AbortSignal,
 ): Promise<ShellActionResult> {
+  // The node may have been cancelled while an async `exec` callback resolved;
+  // never start side effects for an already-abandoned attempt.
+  if (signal?.aborted) {
+    throw new CancelledError();
+  }
   const cwd = spec.cwd ?? process.cwd();
   const args = spec.args ?? [];
   const startMs = Date.now();
@@ -98,12 +103,14 @@ export async function runShellAction(
     child.kill(killSignal);
   };
 
+  let killEscalation: NodeJS.Timeout | undefined;
   const kill = (reason: "timeout" | "abort") => {
     killedBy ??= reason;
     signalTree("SIGTERM");
-    setTimeout(() => {
+    killEscalation ??= setTimeout(() => {
       signalTree("SIGKILL");
-    }, 1_000).unref();
+    }, 1_000);
+    killEscalation.unref();
   };
   const onAbort = () => kill("abort");
 
@@ -142,6 +149,9 @@ export async function runShellAction(
     });
   });
 
+  // A child that exits without consuming stdin emits EPIPE; without a
+  // listener that would crash the whole process instead of just this action.
+  child.stdin.on("error", () => {});
   if (spec.stdin != null) {
     child.stdin.write(spec.stdin);
   }
@@ -163,6 +173,11 @@ export async function runShellAction(
   } finally {
     if (timeout) {
       clearTimeout(timeout);
+    }
+    if (killEscalation) {
+      // The group pid may be reused after the child exits; never let the
+      // delayed SIGKILL fire once the command has fully closed.
+      clearTimeout(killEscalation);
     }
     signal?.removeEventListener("abort", onAbort);
   }

@@ -53,11 +53,18 @@ export function stripAnsi(text: string): string {
 
 /**
  * Remove ANSI escapes and control characters from untrusted text (model
- * outputs, errors) so rendering it cannot alter terminal state.
+ * outputs, errors) so rendering it cannot alter terminal state. Line breaks
+ * and tabs collapse to single spaces because callers interpolate the result
+ * into single terminal lines, where a stray newline would break viewport
+ * math and allow fake rows.
  */
 export function sanitizeText(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return stripAnsi(text).replaceAll(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+  return (
+    stripAnsi(text)
+      .replaceAll(/[\t\n\r]+/g, " ")
+      // eslint-disable-next-line no-control-regex
+      .replaceAll(/[\u0000-\u001f\u007f]/g, "")
+  );
 }
 
 /** Truncate to a visible width, keeping ANSI sequences intact by stripping them first when needed. */

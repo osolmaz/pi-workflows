@@ -88,12 +88,19 @@ function isFenceWhitespace(char: string | undefined): boolean {
   return char === " " || char === "\n" || char === "\r" || char === "\t";
 }
 
+// Bound on balanced-scan attempts. Without it, pathological text such as
+// twenty thousand opening braces makes candidate extraction quadratic and
+// blocks the event loop, which also prevents node timeouts from firing.
+const MAX_CANDIDATE_SCANS = 64;
+
 function extractBalancedJsonCandidates(text: string): string[] {
   const candidates: string[] = [];
-  for (let index = 0; index < text.length; index += 1) {
+  let scans = 0;
+  for (let index = 0; index < text.length && scans < MAX_CANDIDATE_SCANS; index += 1) {
     if (text[index] !== "{" && text[index] !== "[") {
       continue;
     }
+    scans += 1;
     const candidate = scanBalanced(text, index);
     if (candidate !== null) {
       candidates.push(candidate);

@@ -28,6 +28,8 @@ import type {
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
 const TITLE_TIMEOUT_MS = 30_000;
+// Covers the shell SIGTERM → SIGKILL escalation (1s) plus stdio close.
+const ABORT_CLEANUP_GRACE_MS = 2_000;
 
 type NodeExecution = {
   output: unknown;
@@ -384,13 +386,24 @@ export class WorkflowEngine {
     const timer = setTimeout(() => {
       abort.abort(new TimeoutError(timeoutMs));
     }, timeoutMs);
+    const dispatched = this.dispatchNode(
+      workflow,
+      state,
+      runDir,
+      nodeId,
+      attemptId,
+      node,
+      abort.signal,
+      meta,
+    );
+    const dispatchSettled = dispatched.then(
+      () => undefined,
+      () => undefined,
+    );
     try {
       // Race the dispatch against the abort signal so timeouts and cancel
       // take effect even for node callbacks that never observe the signal.
-      const execution = await Promise.race([
-        this.dispatchNode(workflow, state, runDir, nodeId, attemptId, node, abort.signal, meta),
-        abortRejection(abort.signal),
-      ]);
+      const execution = await Promise.race([dispatched, abortRejection(abort.signal)]);
       if (execution.output === undefined) {
         // JSON cannot represent undefined; normalize so the in-memory state
         // matches what the persisted bundle round-trips to.
@@ -399,6 +412,14 @@ export class WorkflowEngine {
       assertJsonSerializable(execution.output, `Node ${nodeId} output`);
       return execution;
     } catch (error) {
+      if (node.nodeType === "action" && "exec" in node) {
+        // Give the killed shell command a short grace period to close so its
+        // action receipt lands in `meta` before the failed attempt persists.
+        await Promise.race([
+          dispatchSettled,
+          new Promise((resolve) => setTimeout(resolve, ABORT_CLEANUP_GRACE_MS)),
+        ]);
+      }
       const reason: unknown = abort.signal.aborted ? abort.signal.reason : undefined;
       throw reason instanceof TimeoutError || reason instanceof CancelledError ? reason : error;
     } finally {
