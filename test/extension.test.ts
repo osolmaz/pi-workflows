@@ -6,7 +6,10 @@ import { makeTempDir } from "./helpers.js";
 
 type RegisteredTool = {
   name: string;
-  execute: (toolCallId: string, params: { step: string; output: unknown }) => Promise<unknown>;
+  execute: (
+    toolCallId: string,
+    params: { step: string; attempt: string; output: unknown },
+  ) => Promise<unknown>;
 };
 
 type RegisteredCommand = {
@@ -106,9 +109,9 @@ export default defineWorkflow({
   );
 }
 
-function stepIdFromPrompt(prompt: string): string | null {
-  const match = prompt.match(/"step": "([^"]+)"/);
-  return match?.[1] ?? null;
+function stepFromPrompt(prompt: string): { step: string; attempt: string } | null {
+  const match = prompt.match(/"step": "([^"]+)", "attempt": "([^"]+)"/);
+  return match ? { step: match[1] as string, attempt: match[2] as string } : null;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -131,9 +134,9 @@ describe("pi-workflows extension", () => {
       const harness = makeHarness({
         cwd,
         respond: (prompt, tool) => {
-          const step = stepIdFromPrompt(prompt);
-          if (step) {
-            void tool.execute("call-1", { step, output: { reply: "hi" } });
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
           }
         },
       });
@@ -184,9 +187,9 @@ describe("pi-workflows extension", () => {
   it("rejects tool calls outside a workflow", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const harness = makeHarness({ cwd, respond: () => {} });
-    await expect(harness.tool.execute("call-1", { step: "reply", output: {} })).rejects.toThrow(
-      /No workflow is running/,
-    );
+    await expect(
+      harness.tool.execute("call-1", { step: "reply", attempt: "a1", output: {} }),
+    ).rejects.toThrow(/No workflow is running/);
   });
 
   it("cancels a running workflow", async () => {

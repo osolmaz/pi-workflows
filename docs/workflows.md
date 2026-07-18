@@ -203,23 +203,25 @@ node with no outgoing edge (or no matching failure route) ends the run:
 ## The step contract
 
 Every `agent` prompt ends with a step contract block naming the workflow, the
-step id, and the expected output shape:
+step id, the attempt id, and the expected output shape:
 
 ```
 ---
-Workflow step contract (workflow: autoimplement, step: review)
+Workflow step contract (workflow: autoimplement, step: review, attempt: 6f9d…)
 
 Complete this step by calling the `workflow` tool exactly once with:
-{"step": "review", "output": <your result>}
+{"step": "review", "attempt": "6f9d…", "output": <your result>}
 Expected output: { "route": "clean" | "issues_found", "reason": "short justification" }
 The step is complete only after the workflow tool accepts the output.
 If the tool reports a validation error, correct the output and call it again.
 ```
 
-The `workflow` tool takes `{ step, output }`. Submissions are rejected (with a
-reason the model sees) when no step is pending, the step id is wrong, or
-`validate` throws. Acceptance resolves the step and the engine advances; the
-next agent prompt arrives as a new user message in the same conversation.
+The `workflow` tool takes `{ step, attempt, output }`. Submissions are
+rejected (with a reason the model sees) when no step is pending, the step id
+is wrong, the attempt id belongs to an earlier attempt of the same node (loops
+revisit node ids, so each attempt gets a fresh id), or `validate` throws.
+Acceptance resolves the step and the engine advances; the next agent prompt
+arrives as a new user message in the same conversation.
 
 ## Runtime behavior
 

@@ -92,7 +92,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   }
 
   /** Called by the `workflow` tool when the model submits a step output. */
-  async submit(stepId: string, output: unknown): Promise<SubmissionResult> {
+  async submit(stepId: string, attemptId: string, output: unknown): Promise<SubmissionResult> {
     const pending = this.pending;
     if (!pending) {
       return {
@@ -106,6 +106,17 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       return {
         accepted: false,
         message: `Wrong step id ${JSON.stringify(stepId)}; the pending step is ${JSON.stringify(expected)}.`,
+      };
+    }
+    // Loops revisit the same node id, so a delayed duplicate submission from
+    // an earlier attempt would otherwise be accepted as this attempt's output.
+    const expectedAttempt = pending.request.contract.attemptId;
+    if (attemptId !== expectedAttempt) {
+      return {
+        accepted: false,
+        message: `Stale attempt id ${JSON.stringify(attemptId)} for step ${JSON.stringify(
+          stepId,
+        )}; the pending attempt is ${JSON.stringify(expectedAttempt)}. Use the attempt id from the latest step contract.`,
       };
     }
     const result = await pending.request.accept(output);
@@ -157,11 +168,12 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       return false;
     }
     pending.nudgesSent += 1;
+    const { nodeId, attemptId } = pending.request.contract;
     this.sendPrompt({
       prompt: [
-        `Reminder: workflow step ${JSON.stringify(pending.request.contract.nodeId)} is still awaiting your output.`,
+        `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
         "Complete it by calling the `workflow` tool with:",
-        `{"step": ${JSON.stringify(pending.request.contract.nodeId)}, "output": <your result>}`,
+        `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
         `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
       ].join("\n"),
       streaming: this.streaming,

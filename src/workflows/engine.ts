@@ -78,9 +78,13 @@ export class WorkflowEngine {
     options: { workflowPath?: string } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
+    // Fail before any bundle exists so bad input cannot leave a partial run
+    // on disk or silently change shape when state.json round-trips.
+    const normalizedInput = input === undefined ? null : input;
+    assertJsonSerializable(normalizedInput, "Workflow run input");
     this.cancelled = false;
 
-    const state = await this.createRunState(workflow, input, options.workflowPath);
+    const state = await this.createRunState(workflow, normalizedInput, options.workflowPath);
     const runDir = await this.store.initializeRunBundle(workflow, state);
     await this.persist(runDir, state, {
       scope: "run",
@@ -345,7 +349,7 @@ export class WorkflowEngine {
         // matches what the persisted bundle round-trips to.
         execution.output = null;
       }
-      assertJsonSerializable(execution.output, nodeId);
+      assertJsonSerializable(execution.output, `Node ${nodeId} output`);
       return execution;
     } catch (error) {
       const reason: unknown = abort.signal.aborted ? abort.signal.reason : undefined;
@@ -408,7 +412,13 @@ export class WorkflowEngine {
     signal: AbortSignal,
   ): Promise<NodeExecution> {
     const basePrompt = await node.prompt(context);
-    const prompt = appendStepContract(basePrompt, workflow.name, nodeId, node.expectedOutput);
+    const prompt = appendStepContract(
+      basePrompt,
+      workflow.name,
+      nodeId,
+      attemptId,
+      node.expectedOutput,
+    );
     await this.persist(runDir, state, {
       scope: "agent",
       type: "agent_prompt_sent",
@@ -556,19 +566,17 @@ function abortRejection(signal: AbortSignal): Promise<never> {
  * Failing here turns a bad callback return value into a normal node failure
  * instead of corrupting the run state.
  */
-function assertJsonSerializable(output: unknown, nodeId: string): void {
+function assertJsonSerializable(value: unknown, what: string): void {
   let encoded: string | undefined;
   try {
-    encoded = JSON.stringify(output);
+    encoded = JSON.stringify(value);
   } catch (error) {
-    throw new Error(
-      `Node ${nodeId} returned a non-JSON-serializable output: ${errorMessage(error)}`,
-    );
+    throw new Error(`${what} is non-JSON-serializable: ${errorMessage(error)}`);
   }
-  if (encoded === undefined || !isDeepStrictEqual(JSON.parse(encoded), output)) {
+  if (encoded === undefined || !isDeepStrictEqual(JSON.parse(encoded), value)) {
     throw new Error(
-      `Node ${nodeId} returned an output that does not survive a JSON round-trip. ` +
-        `Outputs must be plain JSON values (no functions, dates, NaN, or undefined properties).`,
+      `${what} does not survive a JSON round-trip. ` +
+        `Use plain JSON values (no functions, dates, NaN, or undefined properties).`,
     );
   }
 }
@@ -596,16 +604,17 @@ export function appendStepContract(
   prompt: string,
   workflowName: string,
   nodeId: string,
+  attemptId: string,
   expectedOutput: string | undefined,
 ): string {
   return [
     prompt.trimEnd(),
     "",
     "---",
-    `Workflow step contract (workflow: ${workflowName}, step: ${nodeId})`,
+    `Workflow step contract (workflow: ${workflowName}, step: ${nodeId}, attempt: ${attemptId})`,
     "",
     "Complete this step by calling the `workflow` tool exactly once with:",
-    `{"step": ${JSON.stringify(nodeId)}, "output": <your result>}`,
+    `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
     `Expected output: ${expectedOutput ?? "a JSON object with your result"}`,
     "The step is complete only after the workflow tool accepts the output.",
     "If the tool reports a validation error, correct the output and call it again.",

@@ -218,6 +218,61 @@ describe("stale outputs on repeated attempts", () => {
   });
 });
 
+describe("run input validation", () => {
+  it("rejects non-round-tripping input before any bundle is written", async () => {
+    const engine = await makeEngine();
+    const workflow = defineWorkflow({
+      name: "input-check",
+      startAt: "noop",
+      nodes: { noop: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    await expect(engine.run(workflow, { when: new Date() })).rejects.toThrow(/round-trip/);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    await expect(engine.run(workflow, cyclic)).rejects.toThrow(/non-JSON-serializable/);
+  });
+
+  it("normalizes undefined input to null", async () => {
+    const workflow = defineWorkflow({
+      name: "input-null",
+      startAt: "echo",
+      nodes: { echo: compute({ run: ({ input }) => ({ input }) }) },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, undefined);
+    expect(state.status).toBe("completed");
+    expect(state.input).toBeNull();
+  });
+});
+
+describe("unreachable nodes", () => {
+  it("rejects a workflow with a node no path can reach", async () => {
+    const workflow = defineWorkflow({
+      name: "island",
+      startAt: "a",
+      nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
+      edges: [],
+    });
+    expect(() => validateWorkflowDefinition(workflow)).toThrow(/unreachable nodes: b/);
+  });
+});
+
+describe("reserved node ids", () => {
+  it("rejects node ids that shadow Object prototype members", () => {
+    for (const nodeId of ["__proto__", "constructor", "toString"]) {
+      expect(() =>
+        defineWorkflow({
+          name: "reserved",
+          startAt: nodeId,
+          nodes: { [nodeId]: compute({ run: () => 1 }) },
+          edges: [],
+        }),
+      ).toThrow(/shadows an Object prototype member|must match/);
+    }
+  });
+});
+
 describe("prototype-polluting node ids", () => {
   it("rejects a start node that only exists on Object.prototype", () => {
     const workflow = defineWorkflow({
@@ -276,7 +331,9 @@ describe("prompt delivery failures", () => {
     );
     expect(executor.pendingStepId).toBeNull();
     const second = executor.runAgentStep(request("b"), new AbortController().signal);
-    await expect(executor.submit("b", { done: true })).resolves.toMatchObject({ accepted: true });
+    await expect(executor.submit("b", "b", { done: true })).resolves.toMatchObject({
+      accepted: true,
+    });
     await expect(second).resolves.toEqual({ output: { done: true } });
   });
 });
@@ -298,7 +355,7 @@ describe("stale submissions after a step is replaced", () => {
 
     const firstAbort = new AbortController();
     const firstStep = executor.runAgentStep(slowRequest, firstAbort.signal);
-    const staleSubmission = executor.submit("first", {});
+    const staleSubmission = executor.submit("first", "a1", {});
 
     // The step times out while validation is still pending, and the engine
     // moves on to a new step.
@@ -318,7 +375,7 @@ describe("stale submissions after a step is replaced", () => {
     expect(stale.message).toMatch(/no longer awaiting/);
 
     // The newer step is still submittable.
-    const fresh = await executor.submit("first", { ok: 1 });
+    const fresh = await executor.submit("first", "a2", { ok: 1 });
     expect(fresh.accepted).toBe(true);
     await expect(secondStep).resolves.toEqual({ output: { ok: 1 } });
   });

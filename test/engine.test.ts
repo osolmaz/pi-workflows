@@ -72,12 +72,16 @@ describe("WorkflowEngine", () => {
 
     await engine.run(workflow, {});
 
-    const prompt = executor.requests[0]?.prompt ?? "";
+    const request = executor.requests[0];
+    const prompt = request?.prompt ?? "";
+    const attemptId = request?.contract.attemptId ?? "";
     expect(prompt).toContain("Base prompt");
     expect(prompt).toContain("Workflow step contract");
-    expect(prompt).toContain(`{"step": "ask", "output": <your result>}`);
+    expect(prompt).toContain(`{"step": "ask", "attempt": "${attemptId}", "output": <your result>}`);
     expect(prompt).toContain(`Expected output: { "x": 1 }`);
-    expect(prompt).toBe(appendStepContract("Base prompt", "contract", "ask", `{ "x": 1 }`));
+    expect(prompt).toBe(
+      appendStepContract("Base prompt", "contract", "ask", attemptId, `{ "x": 1 }`),
+    );
   });
 
   it("routes decisions through switch edges", async () => {

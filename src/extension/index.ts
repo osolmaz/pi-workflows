@@ -198,6 +198,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ].join(" "),
     parameters: Type.Object({
       step: Type.String({ description: "The step id from the workflow step contract" }),
+      attempt: Type.String({ description: "The attempt id from the workflow step contract" }),
       output: Type.Unknown({ description: "The step output, matching the expected output shape" }),
     }),
     async execute(_toolCallId, params) {
@@ -206,7 +207,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           "No workflow is running. Do not call the workflow tool outside a workflow.",
         );
       }
-      const result = await activeRun.executor.submit(params.step, params.output);
+      const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
       if (!result.accepted) {
         throw new Error(result.message);
       }

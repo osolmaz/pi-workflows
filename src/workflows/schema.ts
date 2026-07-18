@@ -172,6 +172,11 @@ export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinitio
     if (!NODE_ID_PATTERN.test(nodeId)) {
       fail(`node id ${JSON.stringify(nodeId)} must match ${NODE_ID_PATTERN.source}`);
     }
+    // Ids like __proto__ or toString would collide with Object prototype
+    // members in the plain-object maps used for outputs and results.
+    if (nodeId in Object.prototype) {
+      fail(`node id ${JSON.stringify(nodeId)} shadows an Object prototype member`);
+    }
     assertRecord(node, `node ${nodeId}`);
     assertValidNode(node, nodeId);
   }

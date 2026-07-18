@@ -15,6 +15,33 @@ export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
   for (const edge of workflow.edges) {
     validateWorkflowEdge(workflow, edge, outgoingEdges);
   }
+
+  assertAllNodesReachable(workflow);
+}
+
+/** Reject nodes that no path from `startAt` can ever reach. */
+function assertAllNodesReachable(workflow: WorkflowDefinition): void {
+  const reachable = new Set<string>([workflow.startAt]);
+  const queue = [workflow.startAt];
+  while (queue.length > 0) {
+    const nodeId = queue.shift() as string;
+    for (const edge of workflow.edges) {
+      if (edge.from !== nodeId) {
+        continue;
+      }
+      const targets = "to" in edge ? [edge.to] : Object.values(edge.switch.cases);
+      for (const target of targets) {
+        if (!reachable.has(target)) {
+          reachable.add(target);
+          queue.push(target);
+        }
+      }
+    }
+  }
+  const unreachable = Object.keys(workflow.nodes).filter((nodeId) => !reachable.has(nodeId));
+  if (unreachable.length > 0) {
+    throw new Error(`Workflow has unreachable nodes: ${unreachable.join(", ")}`);
+  }
 }
 
 function assertKnownNode(workflow: WorkflowDefinition, nodeId: string, description: string): void {
