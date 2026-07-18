@@ -14,7 +14,7 @@ function makeContext(): WorkflowNodeContext {
     results: {},
     steps: [],
   } as WorkflowRunState;
-  return { input: {}, outputs: {}, results: {}, state };
+  return { input: {}, outputs: {}, results: {}, state, signal: new AbortController().signal };
 }
 
 describe("decision", () => {

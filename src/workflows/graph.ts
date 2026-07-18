@@ -7,7 +7,7 @@ import type { WorkflowDefinition, WorkflowEdge, WorkflowNodeResult } from "./typ
  */
 export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
   assertValidWorkflowDefinitionShape(workflow);
-  if (!workflow.nodes[workflow.startAt]) {
+  if (!Object.hasOwn(workflow.nodes, workflow.startAt)) {
     throw new Error(`Workflow start node is missing: ${workflow.startAt}`);
   }
 
@@ -18,7 +18,9 @@ export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
 }
 
 function assertKnownNode(workflow: WorkflowDefinition, nodeId: string, description: string): void {
-  if (!workflow.nodes[nodeId]) {
+  // Own-property check so ids like "toString" cannot resolve through the
+  // Object prototype and later dispatch an inherited function as a node.
+  if (!Object.hasOwn(workflow.nodes, nodeId)) {
     throw new Error(`${description}: ${nodeId}`);
   }
 }

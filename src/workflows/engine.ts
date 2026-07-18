@@ -340,6 +340,11 @@ export class WorkflowEngine {
         this.dispatchNode(workflow, state, runDir, nodeId, attemptId, node, abort.signal),
         abortRejection(abort.signal),
       ]);
+      if (execution.output === undefined) {
+        // JSON cannot represent undefined; normalize so the in-memory state
+        // matches what the persisted bundle round-trips to.
+        execution.output = null;
+      }
       assertJsonSerializable(execution.output, nodeId);
       return execution;
     } catch (error) {
@@ -360,7 +365,7 @@ export class WorkflowEngine {
     node: WorkflowNodeDefinition,
     signal: AbortSignal,
   ): Promise<NodeExecution> {
-    const context = this.createNodeContext(state);
+    const context = this.createNodeContext(state, signal);
     switch (node.nodeType) {
       case "agent":
         return await this.runAgentNode(
@@ -382,12 +387,13 @@ export class WorkflowEngine {
     }
   }
 
-  private createNodeContext(state: WorkflowRunState): WorkflowNodeContext {
+  private createNodeContext(state: WorkflowRunState, signal: AbortSignal): WorkflowNodeContext {
     return {
       input: state.input,
       outputs: state.outputs,
       results: state.results,
       state,
+      signal,
     };
   }
 
@@ -551,9 +557,6 @@ function abortRejection(signal: AbortSignal): Promise<never> {
  * instead of corrupting the run state.
  */
 function assertJsonSerializable(output: unknown, nodeId: string): void {
-  if (output === undefined) {
-    return;
-  }
   let encoded: string | undefined;
   try {
     encoded = JSON.stringify(output);

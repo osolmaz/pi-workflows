@@ -64,11 +64,18 @@ type WorkflowNodeContext = {
   outputs: Record<string, unknown>; // accepted output per finished node id
   results: Record<string, WorkflowNodeResult>; // full result records, including failures
   state: WorkflowRunState; // the live run state (read-only by convention)
+  signal: AbortSignal; // aborted on node timeout or run cancellation
 };
 ```
 
 `outputs` only contains nodes that finished with outcome `ok`. When a node runs
-more than once (a loop), the latest result wins.
+more than once (a loop), the latest result wins. A failed retry removes the
+node's earlier output from `outputs`.
+
+Long-running compute, action, and checkpoint callbacks should observe
+`context.signal` (pass it to `fetch`/`spawn`, or check `signal.aborted` between
+steps). When the node times out or the run is cancelled, the engine stops
+waiting immediately, but only cooperative callbacks stop doing work.
 
 ## Node types
 

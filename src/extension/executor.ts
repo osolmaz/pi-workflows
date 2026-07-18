@@ -80,7 +80,14 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         onAbort();
         return;
       }
-      this.sendPrompt({ prompt: request.prompt, streaming: this.streaming });
+      try {
+        this.sendPrompt({ prompt: request.prompt, streaming: this.streaming });
+      } catch (error) {
+        // A failed delivery must not leave the step installed, or every
+        // subsequent agent node would fail with "already awaiting output".
+        this.clearPending();
+        reject(error);
+      }
     });
   }
 

@@ -10,6 +10,13 @@ export type WorkflowNodeContext<TInput = unknown> = {
   outputs: Record<string, unknown>;
   results: Record<string, WorkflowNodeResult>;
   state: WorkflowRunState;
+  /**
+   * Aborted when the node times out or the run is cancelled. Long-running
+   * callbacks should observe it (pass it to fetch/spawn or check
+   * `signal.aborted`) so side effects stop when the engine gives up on the
+   * node.
+   */
+  signal: AbortSignal;
 };
 
 export type WorkflowNodeCommon = {

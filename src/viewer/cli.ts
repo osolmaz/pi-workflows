@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
+import { sanitizeText } from "./ansi.js";
 import {
   formatDuration,
   renderRunDetailLines,
@@ -68,9 +69,10 @@ async function printRuns(dir: string): Promise<void> {
   }
   for (const bundle of bundles) {
     const state = bundle.state;
-    const title = state.runTitle ? ` — ${state.runTitle}` : "";
+    // Titles can interpolate untrusted run input; strip control sequences.
+    const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
     process.stdout.write(
-      `${statusLabel(state.status)}  ${state.workflowName}${title}  ${state.runId}  ${formatDuration(
+      `${statusLabel(state.status)}  ${sanitizeText(state.workflowName)}${title}  ${state.runId}  ${formatDuration(
         runElapsedMs(state),
       )}\n`,
     );

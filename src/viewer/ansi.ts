@@ -1,8 +1,20 @@
-const COLOR_ENABLED =
-  process.env.NO_COLOR === undefined && process.env.PI_WORKFLOWS_NO_COLOR === undefined;
+/**
+ * Colors are on for interactive terminals only, so piped output stays clean.
+ * `NO_COLOR`/`PI_WORKFLOWS_NO_COLOR` force them off; `FORCE_COLOR` forces
+ * them on. Evaluated per call so env changes (tests) take effect.
+ */
+function colorEnabled(): boolean {
+  if (process.env.NO_COLOR !== undefined || process.env.PI_WORKFLOWS_NO_COLOR !== undefined) {
+    return false;
+  }
+  if (process.env.FORCE_COLOR !== undefined) {
+    return true;
+  }
+  return process.stdout.isTTY === true;
+}
 
 function wrap(code: string, text: string): string {
-  return COLOR_ENABLED ? `\u001b[${code}m${text}\u001b[0m` : text;
+  return colorEnabled() ? `\u001b[${code}m${text}\u001b[0m` : text;
 }
 
 export const ansi = {

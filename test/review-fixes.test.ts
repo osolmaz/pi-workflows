@@ -4,6 +4,7 @@ import { sanitizeText } from "../src/viewer/ansi.js";
 import { renderRunDetailLines } from "../src/viewer/render.js";
 import { agent, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { validateWorkflowDefinition } from "../src/workflows/graph.js";
 import { runShellAction } from "../src/workflows/shell.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import type { AgentStepRequest } from "../src/workflows/types.js";
@@ -40,6 +41,30 @@ describe("timeouts and cancellation for local nodes", () => {
     engine.cancel();
     const { state } = await runPromise;
     expect(state.status).toBe("cancelled");
+  });
+
+  it("exposes an abort signal that fires when the node times out", async () => {
+    let sawAbort = false;
+    const workflow = defineWorkflow({
+      name: "cooperative",
+      startAt: "spin",
+      nodes: {
+        spin: compute({
+          timeoutMs: 100,
+          run: ({ signal }) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => {
+                sawAbort = true;
+                reject(signal.reason);
+              });
+            }),
+        }),
+      },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("timed_out");
+    expect(sawAbort).toBe(true);
   });
 
   it("kills a shell action without its own timeout when the node times out", async () => {
@@ -120,6 +145,19 @@ describe("unserializable node outputs", () => {
     const { state } = await (await makeEngine()).run(workflow, {});
     expect(state.status).toBe("completed");
   });
+
+  it("normalizes an undefined output to null", async () => {
+    const workflow = defineWorkflow({
+      name: "void-output",
+      startAt: "quiet",
+      nodes: { quiet: compute({ run: () => undefined }) },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("completed");
+    expect(state.outputs.quiet).toBeNull();
+    expect(JSON.parse(JSON.stringify(state)).outputs).toHaveProperty("quiet");
+  });
 });
 
 describe("shell output capture", () => {
@@ -177,6 +215,69 @@ describe("stale outputs on repeated attempts", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toEqual({ sawStaleOutput: false });
     expect(state.outputs).not.toHaveProperty("work");
+  });
+});
+
+describe("prototype-polluting node ids", () => {
+  it("rejects a start node that only exists on Object.prototype", () => {
+    const workflow = defineWorkflow({
+      name: "proto-start",
+      startAt: "toString",
+      nodes: { real: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    expect(() => validateWorkflowDefinition(workflow)).toThrow(/start node is missing: toString/);
+  });
+
+  it("rejects an edge target that only exists on Object.prototype", () => {
+    const workflow = defineWorkflow({
+      name: "proto-edge",
+      startAt: "real",
+      nodes: { real: compute({ run: () => 1 }) },
+      edges: [{ from: "real", to: "hasOwnProperty" }],
+    });
+    expect(() => validateWorkflowDefinition(workflow)).toThrow(/unknown to-node: hasOwnProperty/);
+  });
+});
+
+describe("non-finite timeouts", () => {
+  it("rejects NaN and Infinity timeouts at definition time", () => {
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        defineWorkflow({
+          name: "bad-timeout",
+          startAt: "spin",
+          nodes: { spin: compute({ timeoutMs, run: () => 1 }) },
+          edges: [],
+        }),
+      ).toThrow(/finite positive number/);
+    }
+  });
+});
+
+describe("prompt delivery failures", () => {
+  it("clears the pending step so a recovery step can run", async () => {
+    let failFirst = true;
+    const executor = new ConversationStepExecutor({
+      sendPrompt: () => {
+        if (failFirst) {
+          failFirst = false;
+          throw new Error("delivery failed");
+        }
+      },
+    });
+    const request = (nodeId: string): AgentStepRequest => ({
+      contract: { runId: "r", workflowName: "w", nodeId, attemptId: nodeId },
+      prompt: nodeId,
+      accept: async (output) => ({ ok: true, value: output }),
+    });
+    await expect(executor.runAgentStep(request("a"), new AbortController().signal)).rejects.toThrow(
+      /delivery failed/,
+    );
+    expect(executor.pendingStepId).toBeNull();
+    const second = executor.runAgentStep(request("b"), new AbortController().signal);
+    await expect(executor.submit("b", { done: true })).resolves.toMatchObject({ accepted: true });
+    await expect(second).resolves.toEqual({ output: { done: true } });
   });
 });
 
