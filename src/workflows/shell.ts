@@ -36,12 +36,16 @@ export async function runShellAction(
   const cwd = spec.cwd ?? process.cwd();
   const args = spec.args ?? [];
   const startMs = Date.now();
+  // POSIX: run in its own process group so timeout/abort can kill the whole
+  // tree, including descendants that inherited the stdio pipes.
+  const useProcessGroup = process.platform !== "win32";
   const child = spawn(spec.command, args, {
     cwd,
     env: { ...process.env, ...spec.env },
     shell: spec.shell,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
+    detached: useProcessGroup,
   });
 
   let stdout = "";
@@ -49,11 +53,23 @@ export async function runShellAction(
   let killedBy: "timeout" | "abort" | null = null;
   let timeout: NodeJS.Timeout | undefined;
 
+  const signalTree = (killSignal: NodeJS.Signals) => {
+    if (useProcessGroup && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, killSignal);
+        return;
+      } catch {
+        // Group already gone; fall back to the direct child.
+      }
+    }
+    child.kill(killSignal);
+  };
+
   const kill = (reason: "timeout" | "abort") => {
     killedBy ??= reason;
-    child.kill("SIGTERM");
+    signalTree("SIGTERM");
     setTimeout(() => {
-      child.kill("SIGKILL");
+      signalTree("SIGKILL");
     }, 1_000).unref();
   };
   const onAbort = () => kill("abort");

@@ -95,6 +95,31 @@ describe("unserializable node outputs", () => {
     expect(state.error).toMatch(/non-JSON-serializable/);
     expect(() => JSON.stringify(state)).not.toThrow();
   });
+
+  it("rejects values that stringify but do not round-trip", async () => {
+    for (const value of [Number.NaN, () => 1, { when: new Date() }, { drop: undefined, keep: 1 }]) {
+      const workflow = defineWorkflow({
+        name: "lossy-output",
+        startAt: "bad",
+        nodes: { bad: compute({ run: () => value }) },
+        edges: [],
+      });
+      const { state } = await (await makeEngine()).run(workflow, {});
+      expect(state.status).toBe("failed");
+      expect(state.error).toMatch(/round-trip|non-JSON/);
+    }
+  });
+
+  it("accepts plain JSON values", async () => {
+    const workflow = defineWorkflow({
+      name: "clean-output",
+      startAt: "good",
+      nodes: { good: compute({ run: () => ({ list: [1, "two", null, { nested: true }] }) }) },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("completed");
+  });
 });
 
 describe("shell output capture", () => {
@@ -104,6 +129,54 @@ describe("shell output capture", () => {
       args: ["-c", "(sleep 0.1; printf late) & printf early"],
     });
     expect(result.stdout).toBe("earlylate");
+  });
+
+  it("kills the whole process tree on timeout", async () => {
+    const started = Date.now();
+    await expect(
+      runShellAction({
+        command: "sh",
+        args: ["-c", "(sleep 5; printf late) & sleep 5"],
+        timeoutMs: 150,
+      }),
+    ).rejects.toThrow(/Timed out/);
+    // With only the direct child killed, the backgrounded descendant would
+    // hold the stdio pipes open for the full 5 seconds.
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+});
+
+describe("stale outputs on repeated attempts", () => {
+  it("removes a previous success from outputs when the retry fails", async () => {
+    let calls = 0;
+    const workflow = defineWorkflow({
+      name: "flaky-loop",
+      startAt: "work",
+      nodes: {
+        work: compute({
+          run: () => {
+            calls += 1;
+            if (calls > 1) {
+              throw new Error("second attempt failed");
+            }
+            return { attempt: calls };
+          },
+        }),
+        again: compute({ run: () => "loop" }),
+        recover: compute({ run: ({ outputs }) => ({ sawStaleOutput: "work" in outputs }) }),
+      },
+      edges: [
+        {
+          from: "work",
+          switch: { on: "$result.outcome", cases: { ok: "again", failed: "recover" } },
+        },
+        { from: "again", to: "work" },
+      ],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toEqual({ sawStaleOutput: false });
+    expect(state.outputs).not.toHaveProperty("work");
   });
 });
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { CancelledError, TimeoutError, errorMessage, isAbortLikeError } from "./errors.js";
+import { isDeepStrictEqual } from "node:util";
+import { CancelledError, errorMessage, isAbortLikeError, TimeoutError } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction } from "./shell.js";
@@ -208,6 +209,10 @@ export class WorkflowEngine {
     state.results[attempt.result.nodeId] = attempt.result;
     if (attempt.result.outcome === "ok") {
       state.outputs[attempt.result.nodeId] = attempt.result.output;
+    } else {
+      // A failed repeat attempt supersedes an earlier success; stale output
+      // must not survive next to a non-ok latest result.
+      delete state.outputs[attempt.result.nodeId];
     }
     const step: WorkflowStepRecord = {
       attemptId: attempt.result.attemptId,
@@ -549,11 +554,18 @@ function assertJsonSerializable(output: unknown, nodeId: string): void {
   if (output === undefined) {
     return;
   }
+  let encoded: string | undefined;
   try {
-    JSON.stringify(output);
+    encoded = JSON.stringify(output);
   } catch (error) {
     throw new Error(
       `Node ${nodeId} returned a non-JSON-serializable output: ${errorMessage(error)}`,
+    );
+  }
+  if (encoded === undefined || !isDeepStrictEqual(JSON.parse(encoded), output)) {
+    throw new Error(
+      `Node ${nodeId} returned an output that does not survive a JSON round-trip. ` +
+        `Outputs must be plain JSON values (no functions, dates, NaN, or undefined properties).`,
     );
   }
 }
