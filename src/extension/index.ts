@@ -69,7 +69,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let widgetTimer: NodeJS.Timeout | null = null;
   let widgetTicker: NodeJS.Timeout | null = null;
   // Manual widget scroll: null follows the active node; a number is the
-  // first visible graph row, set by ctrl+↑/↓ and reset on step advance.
+  // first visible graph row, set by shift+↑/↓ and reset on step advance.
   let widgetSource: WidgetSource | null = null;
   let widgetScroll: number | null = null;
   let widgetShownScroll = 0;
@@ -324,12 +324,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut("ctrl+up", {
+  pi.registerShortcut("shift+up", {
     description: "Scroll the workflow widget up",
     handler: (ctx) => scrollWidget(ctx, -WIDGET_SCROLL_STEP),
   });
 
-  pi.registerShortcut("ctrl+down", {
+  pi.registerShortcut("shift+down", {
     description: "Scroll the workflow widget down",
     handler: (ctx) => scrollWidget(ctx, WIDGET_SCROLL_STEP),
   });

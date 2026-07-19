@@ -200,10 +200,10 @@ describe("pi-workflows extension", () => {
   it("registers scroll shortcuts that no-op without a widget", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const harness = makeHarness({ cwd, respond: () => {} });
-    expect([...harness.shortcuts.keys()]).toEqual(["ctrl+up", "ctrl+down"]);
+    expect([...harness.shortcuts.keys()]).toEqual(["shift+up", "shift+down"]);
     // No workflow has run yet, so there is nothing to scroll; must not throw.
-    harness.shortcuts.get("ctrl+up")?.(harness.ctx);
-    harness.shortcuts.get("ctrl+down")?.(harness.ctx);
+    harness.shortcuts.get("shift+up")?.(harness.ctx);
+    harness.shortcuts.get("shift+down")?.(harness.ctx);
     expect(harness.widgets).toHaveLength(0);
   });
 

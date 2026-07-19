@@ -186,7 +186,7 @@ describe("buildWidgetLines", () => {
     expect(top.scroll).toBe(0);
     expect(top.lines.join("\n")).toContain("n0");
     expect(top.lines.join("\n")).not.toMatch(/↑ \d+ more/);
-    expect(top.lines.join("\n")).toMatch(/↓ \d+ more · ctrl\+↑\/↓ scroll/);
+    expect(top.lines.join("\n")).toMatch(/↓ \d+ more · shift\+↑\/↓ scroll/);
 
     const bottom = buildWidgetView(state, tall, now, 9_999);
     expect(bottom.scroll).toBeLessThanOrEqual(bottom.maxScroll);

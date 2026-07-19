@@ -150,7 +150,7 @@ function windowLines(
   }
   out.push(...lines.slice(start, end));
   if (end < lines.length) {
-    out.push(ansi.dim(`↓ ${lines.length - end} more · ctrl+↑/↓ scroll`));
+    out.push(ansi.dim(`↓ ${lines.length - end} more · shift+↑/↓ scroll`));
   }
   return { lines: out, scroll: start, maxScroll: Math.max(0, lines.length - inner) };
 }

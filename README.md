@@ -108,7 +108,7 @@ scrubbing to the end snaps back to following the run live.
 
 Inside pi, a widget above the editor shows the same boxed graph while a
 workflow is running, windowed around the active node when it is taller than
-pi's widget budget. Scroll the window with `ctrl+↑` / `ctrl+↓`; it snaps back
+pi's widget budget. Scroll the window with `shift+↑` / `shift+↓`; it snaps back
 to following the active node whenever the workflow advances a step.
 
 ## Node types
