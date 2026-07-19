@@ -142,6 +142,13 @@ example set. Copy any of them into `.pi/workflows/` to use them:
 - `autoimplement` runs an implement, verify, review loop where the review
   decision routes `issues_found` back to a fix step until it comes back
   `clean`, bounded by `maxSteps`.
+- `autoresearch` runs an iterative feature-search loop in the style of
+  [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup
+  creates a frozen evaluation harness, one editable feature file, and a
+  journal; each loop iteration runs one generation of experiments and
+  journals every result; an assess decision keeps looping until a kept
+  result plateaus or a diverse generation all fails, then conclusions are
+  written before the winner is promoted out of the loop directory.
 
 ## License
 
