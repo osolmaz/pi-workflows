@@ -61,15 +61,26 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let activeRun: ActiveRun | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
 
+  // UI updates are best-effort: a captured ctx becomes stale after session
+  // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
+  // A workflow finishing right as the session goes away must not crash pi.
   const notify = (ctx: ExtensionContext, message: string, type?: "info" | "warning" | "error") => {
-    if (ctx.hasUI) {
-      ctx.ui.notify(message, type);
+    try {
+      if (ctx.hasUI) {
+        ctx.ui.notify(message, type);
+      }
+    } catch {
+      // Stale ctx; the notification has nowhere to go.
     }
   };
 
   const setWidget = (ctx: ExtensionContext, lines: string[] | undefined) => {
-    if (ctx.hasUI) {
-      ctx.ui.setWidget(WIDGET_KEY, lines);
+    try {
+      if (ctx.hasUI) {
+        ctx.ui.setWidget(WIDGET_KEY, lines);
+      }
+    } catch {
+      // Stale ctx; the widget no longer exists.
     }
   };
 
