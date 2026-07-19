@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { sanitizeText } from "../render/ansi.js";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
-import { sanitizeText } from "./ansi.js";
 import {
   formatDuration,
   renderRunDetailLines,

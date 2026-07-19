@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { ConversationStepExecutor, type PromptDelivery } from "../src/extension/executor.js";
-import { sanitizeText } from "../src/viewer/ansi.js";
+import { sanitizeText } from "../src/render/ansi.js";
 import { renderRunDetailLines } from "../src/viewer/render.js";
 import { agent, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";

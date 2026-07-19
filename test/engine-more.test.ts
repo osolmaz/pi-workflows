@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ansi } from "../src/viewer/ansi.js";
-import { stripAnsi } from "../src/viewer/ansi.js";
+import { ansi } from "../src/render/ansi.js";
+import { stripAnsi } from "../src/render/ansi.js";
 import { renderRunListLines, statusLabel } from "../src/viewer/render.js";
 import { action, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";

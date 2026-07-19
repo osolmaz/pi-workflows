@@ -71,18 +71,48 @@ describe("nodeGlyph", () => {
 });
 
 describe("buildWidgetLines", () => {
-  it("renders a header and node markers", () => {
+  it("renders a header and the workflow graph", () => {
     const state = makeState({
       currentNode: "second",
+      currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
       statusDetail: "verifying",
       results: { first: makeResult("first", "ok") },
+      steps: [
+        {
+          attemptId: "a",
+          nodeId: "first",
+          nodeType: "compute",
+          outcome: "ok",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          finishedAt: "2026-01-01T00:00:01.000Z",
+          promptText: null,
+          output: 1,
+        },
+      ],
       runTitle: "demo run",
     });
     const lines = buildWidgetLines(state, snapshot);
+    const joined = lines.join("\n");
     expect(lines[0]).toContain("workflow demo — demo run [running]");
-    expect(lines[1]).toContain("✓ first");
-    expect(lines[1]).toContain("◐ second (verifying)");
-    expect(lines[1]).toContain("· third");
+    expect(joined).toContain("✓ first [compute]");
+    expect(joined).toMatch(/◐ second \[compute\] running .* · verifying/);
+    expect(joined).toContain("· third [compute]");
+    // The graph body draws edges, not just a node strip.
+    expect(joined).toContain("▼");
+  });
+
+  it("falls back to the compact strip for very tall graphs", () => {
+    const nodes = Object.fromEntries(
+      Array.from({ length: 20 }, (_v, i) => [`n${i}`, compute({ run: () => i })]),
+    );
+    const edges = Array.from({ length: 19 }, (_v, i) => ({ from: `n${i}`, to: `n${i + 1}` }));
+    const tall = createDefinitionSnapshot(
+      defineWorkflow({ name: "tall", startAt: "n0", nodes, edges }),
+    );
+    const lines = buildWidgetLines(makeState({ workflowName: "tall" }), tall);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("· n0");
+    expect(lines[1]).toContain("· n19");
   });
 
   it("shows errors and waiting checkpoints", () => {
@@ -104,6 +134,7 @@ describe("buildWidgetLines", () => {
       makeState({
         runTitle: "evil\u001b[2J\ntitle",
         currentNode: "second",
+        currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
         statusDetail: "phase\tone\u0007",
         error: "boom\nline2",
         status: "failed",
@@ -115,7 +146,7 @@ describe("buildWidgetLines", () => {
     expect(joined).not.toContain("\u0007");
     expect(joined).not.toContain("\n");
     expect(lines[0]).toContain("evil title");
-    expect(joined).toContain("(phase one)");
+    expect(joined).toContain("phase one");
     expect(joined).toContain("error: boom line2");
   });
 });

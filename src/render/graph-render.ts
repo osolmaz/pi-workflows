@@ -1,6 +1,9 @@
-import type { LoadedRunBundle } from "../workflows/store.js";
-import type { WorkflowStepRecord } from "../workflows/types.js";
-import { ansi } from "./ansi.js";
+import type {
+  WorkflowDefinitionSnapshot,
+  WorkflowRunState,
+  WorkflowStepRecord,
+} from "../workflows/types.js";
+import { ansi, sanitizeText } from "./ansi.js";
 import { CharCanvas, type CanvasStyle } from "./canvas.js";
 import { formatDuration } from "./format.js";
 import { layoutGraph, type GraphCell, type GraphLayout, type GraphSegment } from "./graph.js";
@@ -11,6 +14,12 @@ import { layoutGraph, type GraphCell, type GraphLayout, type GraphSegment } from
  * transitions highlight, switch branches carry case labels, and loop edges
  * route through a right-hand gutter.
  */
+
+/** Everything the graph needs; a LoadedRunBundle satisfies this shape. */
+export type GraphView = {
+  state: WorkflowRunState;
+  snapshot: WorkflowDefinitionSnapshot | null;
+};
 
 type NodeStatus = "completed" | "failed" | "active" | "waiting" | "queued" | "cancelled";
 
@@ -67,12 +76,12 @@ function latestVisibleAttempt(
 }
 
 function deriveNodeStatus(
-  bundle: LoadedRunBundle,
+  view: GraphView,
   nodeId: string,
   visibleSteps: WorkflowStepRecord[],
   atLatestStep: boolean,
 ): NodeStatus {
-  const state = bundle.state;
+  const state = view.state;
   if (atLatestStep && state.currentNode === nodeId) {
     return "active";
   }
@@ -105,7 +114,7 @@ type RenderedCell = {
 };
 
 function renderCellText(
-  bundle: LoadedRunBundle,
+  view: GraphView,
   cell: GraphCell,
   visibleSteps: WorkflowStepRecord[],
   atLatestStep: boolean,
@@ -114,10 +123,10 @@ function renderCellText(
   if (cell.kind === "virtual") {
     return { cell, text: "", status: null, width: 1 };
   }
-  const state = bundle.state;
+  const state = view.state;
   const nodeId = cell.nodeId;
-  const status = deriveNodeStatus(bundle, nodeId, visibleSteps, atLatestStep);
-  const nodeType = bundle.snapshot?.nodes[nodeId]?.nodeType ?? "?";
+  const status = deriveNodeStatus(view, nodeId, visibleSteps, atLatestStep);
+  const nodeType = view.snapshot?.nodes[nodeId]?.nodeType ?? "?";
   const attempt = latestVisibleAttempt(visibleSteps, nodeId);
   const attempts = visibleSteps.filter((step) => step.nodeId === nodeId).length;
   const parts = [`${nodeId} [${nodeType}]`];
@@ -127,7 +136,8 @@ function renderCellText(
       : now.getTime();
     parts.push(`running ${formatDuration(now.getTime() - startedAt)}`);
     if (state.statusDetail) {
-      parts.push(`· ${state.statusDetail}`);
+      // statusDetail can be set by workflow authors; keep terminal-safe.
+      parts.push(`· ${sanitizeText(state.statusDetail)}`);
     }
   } else if (attempt) {
     const durationMs = Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
@@ -161,24 +171,24 @@ function takenTransitions(visibleSteps: WorkflowStepRecord[]): Set<string> {
  * pass `steps.length - 1` (or larger) for the live view.
  */
 export function renderGraphLines(
-  bundle: LoadedRunBundle,
+  view: GraphView,
   selectedStepIndex: number,
   now: Date = new Date(),
 ): string[] {
-  const snapshot = bundle.snapshot;
+  const snapshot = view.snapshot;
   if (!snapshot) {
     return [];
   }
   const layout = layoutGraph(snapshot);
-  const steps = bundle.state.steps;
+  const steps = view.state.steps;
   const boundedIndex = Math.min(Math.max(selectedStepIndex, -1), steps.length - 1);
   const atLatestStep = boundedIndex >= steps.length - 1;
   const visibleSteps = steps.slice(0, boundedIndex + 1);
   const transitions = takenTransitions(visibleSteps);
-  const activePair = derivePairInFlight(bundle, visibleSteps, atLatestStep);
+  const activePair = derivePairInFlight(view, visibleSteps, atLatestStep);
 
   const rendered = layout.ranks.map((rank) =>
-    rank.map((cell) => renderCellText(bundle, cell, visibleSteps, atLatestStep, now)),
+    rank.map((cell) => renderCellText(view, cell, visibleSteps, atLatestStep, now)),
   );
 
   // Column positions: pack cells left to right per rank, then center every
@@ -214,11 +224,11 @@ export function renderGraphLines(
 
 /** The transition currently in flight, drawn in the active style. */
 function derivePairInFlight(
-  bundle: LoadedRunBundle,
+  view: GraphView,
   visibleSteps: WorkflowStepRecord[],
   atLatestStep: boolean,
 ): string | null {
-  const state = bundle.state;
+  const state = view.state;
   if (atLatestStep) {
     if (state.status === "running" && state.currentNode && visibleSteps.length > 0) {
       return `${visibleSteps.at(-1)?.nodeId}->${state.currentNode}`;

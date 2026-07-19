@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { stripAnsi } from "../src/viewer/ansi.js";
-import { renderGraphLines } from "../src/viewer/graph-render.js";
-import { expandEdges, layoutGraph } from "../src/viewer/graph.js";
+import { stripAnsi } from "../src/render/ansi.js";
+import { renderGraphLines } from "../src/render/graph-render.js";
+import { expandEdges, layoutGraph } from "../src/render/graph.js";
 import type { LoadedRunBundle } from "../src/workflows/store.js";
 import type {
   WorkflowDefinitionSnapshot,

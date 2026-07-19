@@ -18,11 +18,17 @@ typescript:
     # workflows is the core engine; it must stay pi-agnostic and standalone.
     - from: src/workflows
       allow: []
-    # The extension embeds the engine in pi.
+    # Shared presentation: graph layout and terminal rendering, pi-agnostic.
+    - from: src/render
+      allow:
+        - src/workflows
+    # The extension embeds the engine in pi and draws the widget graph.
     - from: src/extension
       allow:
         - src/workflows
+        - src/render
     # The viewer only reads run bundles; it must never import the extension.
     - from: src/viewer
       allow:
         - src/workflows
+        - src/render

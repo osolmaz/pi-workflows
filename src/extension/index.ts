@@ -25,6 +25,7 @@ type ActiveRun = {
   engine: WorkflowEngine;
   executor: ConversationStepExecutor;
   snapshot: WorkflowDefinitionSnapshot;
+  lastState: WorkflowRunState | null;
 };
 
 export type ParsedWorkflowArgs =
@@ -60,6 +61,7 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
 export default function piWorkflows(pi: ExtensionAPI) {
   let activeRun: ActiveRun | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
+  let widgetTicker: NodeJS.Timeout | null = null;
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -91,10 +93,31 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  const stopWidgetTicker = () => {
+    if (widgetTicker) {
+      clearInterval(widgetTicker);
+      widgetTicker = null;
+    }
+  };
+
+  /** Keep the elapsed timers in the widget graph counting between events. */
+  const startWidgetTicker = (ctx: ExtensionContext, run: ActiveRun) => {
+    stopWidgetTicker();
+    widgetTicker = setInterval(() => {
+      if (activeRun !== run || !run.lastState) {
+        stopWidgetTicker();
+        return;
+      }
+      setWidget(ctx, buildWidgetLines(run.lastState, run.snapshot));
+    }, 1_000);
+    widgetTicker.unref?.();
+  };
+
   const finishRun = (ctx: ExtensionContext, run: ActiveRun, result: WorkflowRunResult) => {
     if (activeRun === run) {
       activeRun = null;
     }
+    stopWidgetTicker();
     const { state } = result;
     setWidget(ctx, buildWidgetLines(state, run.snapshot));
     clearWidgetTimer();
@@ -128,12 +151,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (run.runId === null) {
           run.runId = state.runId;
         }
+        run.lastState = state;
         setWidget(ctx, buildWidgetLines(state, snapshot));
       },
     });
-    const run: ActiveRun = { runId: null, workflowName: workflow.name, engine, executor, snapshot };
+    const run: ActiveRun = {
+      runId: null,
+      workflowName: workflow.name,
+      engine,
+      executor,
+      snapshot,
+      lastState: null,
+    };
     activeRun = run;
     clearWidgetTimer();
+    startWidgetTicker(ctx, run);
     notify(ctx, `Workflow ${workflow.name} started. Follow it live with: pi-workflows view`);
 
     engine
@@ -143,6 +175,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (activeRun === run) {
           activeRun = null;
         }
+        stopWidgetTicker();
         setWidget(ctx, undefined);
         notify(ctx, `Workflow ${workflow.name} crashed: ${errorMessage(error)}`, "error");
       });
@@ -248,5 +281,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     activeRun?.engine.cancel();
     activeRun = null;
     clearWidgetTimer();
+    stopWidgetTicker();
   });
 }

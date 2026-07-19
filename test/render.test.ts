@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitWidth, stripAnsi, visibleLength } from "../src/viewer/ansi.js";
+import { fitWidth, stripAnsi, visibleLength } from "../src/render/ansi.js";
 import {
   formatDuration,
   maxDetailScroll,
