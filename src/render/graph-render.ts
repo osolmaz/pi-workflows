@@ -247,6 +247,12 @@ function gapRows(layout: GraphLayout, rank: number): number {
   if (strip.length === 0) {
     return rank < layout.ranks.length - 1 ? 1 : 0;
   }
+  // Straight unlabeled strips need no track rows: one line row, one arrow row.
+  if (
+    strip.every((segment) => segment.fromCell === segment.toCell && segment.label === undefined)
+  ) {
+    return 2;
+  }
   return 2 + trackAssignments(strip).trackCount;
 }
 

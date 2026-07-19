@@ -101,7 +101,7 @@ describe("buildWidgetLines", () => {
     expect(joined).toContain("▼");
   });
 
-  it("falls back to the compact strip for very tall graphs", () => {
+  it("windows tall graphs around the active node within pi's line budget", () => {
     const nodes = Object.fromEntries(
       Array.from({ length: 20 }, (_v, i) => [`n${i}`, compute({ run: () => i })]),
     );
@@ -109,10 +109,29 @@ describe("buildWidgetLines", () => {
     const tall = createDefinitionSnapshot(
       defineWorkflow({ name: "tall", startAt: "n0", nodes, edges }),
     );
-    const lines = buildWidgetLines(makeState({ workflowName: "tall" }), tall);
-    expect(lines).toHaveLength(2);
-    expect(lines[1]).toContain("· n0");
-    expect(lines[1]).toContain("· n19");
+    const lines = buildWidgetLines(
+      makeState({
+        workflowName: "tall",
+        currentNode: "n10",
+        currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
+      }),
+      tall,
+    );
+    // pi truncates widgets beyond 10 lines; we must stay within that.
+    expect(lines.length).toBeLessThanOrEqual(10);
+    const joined = lines.join("\n");
+    // The window centers on the active node and marks hidden rows.
+    expect(joined).toContain("◐ n10");
+    expect(joined).toMatch(/↑ \d+ more/);
+    expect(joined).toMatch(/↓ \d+ more/);
+    expect(joined).not.toContain("n0 ");
+    expect(joined).not.toContain("n19");
+  });
+
+  it("shows the whole graph when it fits the budget", () => {
+    const lines = buildWidgetLines(makeState(), snapshot);
+    expect(lines.join("\n")).not.toMatch(/more/);
+    expect(lines.length).toBeLessThanOrEqual(10);
   });
 
   it("shows errors and waiting checkpoints", () => {
