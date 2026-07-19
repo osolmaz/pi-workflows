@@ -22,8 +22,9 @@ longest-path layering, barycenter ordering, virtual pass-through cells for
 long edges), `canvas.ts` is a character grid that merges box-drawing
 characters by connectivity, and `graph-render.ts` turns a run bundle plus a
 replay position into the drawn graph in one of two node styles: `box`
-(bordered nodes, used by the viewer) or `line` (single-line nodes, used by
-the in-pi widget where vertical space is scarce). `render.ts` in `src/viewer`
+(bordered nodes, used by the viewer and the in-pi widget) or `line`
+(single-line nodes). The widget windows the boxed graph around the active
+node to stay inside pi's 10-line widget cap. `render.ts` in `src/viewer`
 composes the full detail view (header, graph, step timeline, step inspector)
 and stays pure so tests can assert on rendered lines.
 
