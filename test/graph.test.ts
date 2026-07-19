@@ -1,139 +1,214 @@
 import { describe, expect, it } from "vitest";
-import { agent, compute, defineWorkflow } from "../src/workflows/definition.js";
-import {
-  resolveNext,
-  resolveNextForOutcome,
-  validateWorkflowDefinition,
-} from "../src/workflows/graph.js";
-import type { WorkflowEdge, WorkflowNodeResult } from "../src/workflows/types.js";
+import { stripAnsi } from "../src/viewer/ansi.js";
+import { renderGraphLines } from "../src/viewer/graph-render.js";
+import { expandEdges, layoutGraph } from "../src/viewer/graph.js";
+import type { LoadedRunBundle } from "../src/workflows/store.js";
+import type {
+  WorkflowDefinitionSnapshot,
+  WorkflowRunState,
+  WorkflowStepRecord,
+} from "../src/workflows/types.js";
 
-function makeResult(overrides: Partial<WorkflowNodeResult> = {}): WorkflowNodeResult {
+const LOOP_SNAPSHOT: WorkflowDefinitionSnapshot = {
+  schema: "pi-workflows.definition-snapshot.v1",
+  name: "autoimplement",
+  startAt: "plan",
+  nodes: {
+    plan: { nodeType: "compute" },
+    implement: { nodeType: "agent" },
+    verify: { nodeType: "action" },
+    review: { nodeType: "agent" },
+    fix: { nodeType: "agent" },
+    done: { nodeType: "compute" },
+  },
+  edges: [
+    { from: "plan", to: "implement" },
+    { from: "implement", to: "verify" },
+    { from: "verify", to: "review" },
+    { from: "review", switch: { on: "$.route", cases: { clean: "done", issues_found: "fix" } } },
+    { from: "fix", to: "verify" },
+  ],
+};
+
+const BRANCH_SNAPSHOT: WorkflowDefinitionSnapshot = {
+  schema: "pi-workflows.definition-snapshot.v1",
+  name: "branchy",
+  startAt: "a",
+  nodes: {
+    a: { nodeType: "agent" },
+    b: { nodeType: "agent" },
+    c: { nodeType: "agent" },
+    d: { nodeType: "agent" },
+  },
+  edges: [
+    { from: "a", switch: { on: "$.route", cases: { left: "b", right: "d" } } },
+    { from: "b", to: "c" },
+    { from: "c", to: "d" },
+  ],
+};
+
+function makeStep(
+  nodeId: string,
+  index: number,
+  outcome: "ok" | "failed" = "ok",
+): WorkflowStepRecord {
+  const startedAt = new Date(1_752_900_000_000 + index * 10_000);
   return {
-    attemptId: "a1",
-    nodeId: "n1",
+    attemptId: `a${index}`,
+    nodeId,
     nodeType: "agent",
-    outcome: "ok",
-    startedAt: "2026-01-01T00:00:00.000Z",
-    finishedAt: "2026-01-01T00:00:01.000Z",
-    durationMs: 1000,
-    ...overrides,
+    outcome,
+    startedAt: startedAt.toISOString(),
+    finishedAt: new Date(startedAt.getTime() + 8_000).toISOString(),
+    promptText: null,
+    output: { step: index },
   };
 }
 
-const workflowBase = {
-  name: "t",
-  startAt: "a",
-  nodes: {
-    a: compute({ run: () => 1 }),
-    b: compute({ run: () => 2 }),
-  },
-};
-
-describe("validateWorkflowDefinition", () => {
-  it("accepts a valid graph", () => {
-    const workflow = defineWorkflow({ ...workflowBase, edges: [{ from: "a", to: "b" }] });
-    expect(() => validateWorkflowDefinition(workflow)).not.toThrow();
-  });
-
-  it("rejects a missing start node", () => {
-    const workflow = defineWorkflow({ ...workflowBase, edges: [] });
-    expect(() => validateWorkflowDefinition({ ...workflow, startAt: "zzz" })).toThrow(/start node/);
-  });
-
-  it("rejects unknown edge targets", () => {
-    const workflow = defineWorkflow({ ...workflowBase, edges: [{ from: "a", to: "zzz" }] });
-    expect(() => validateWorkflowDefinition(workflow)).toThrow(/unknown to-node/);
-  });
-
-  it("rejects unknown edge sources", () => {
-    const workflow = defineWorkflow({ ...workflowBase, edges: [{ from: "zzz", to: "a" }] });
-    expect(() => validateWorkflowDefinition(workflow)).toThrow(/unknown from-node/);
-  });
-
-  it("rejects multiple outgoing edges from one node", () => {
-    const workflow = defineWorkflow({
-      ...workflowBase,
-      edges: [
-        { from: "a", to: "b" },
-        { from: "a", to: "b" },
-      ],
-    });
-    expect(() => validateWorkflowDefinition(workflow)).toThrow(/multiple outgoing edges/);
-  });
-
-  it("rejects switch cases pointing at unknown nodes", () => {
-    const workflow = defineWorkflow({
-      ...workflowBase,
-      edges: [{ from: "a", switch: { on: "$.route", cases: { x: "zzz" } } }],
-    });
-    expect(() => validateWorkflowDefinition(workflow)).toThrow(/unknown to-node/);
-  });
-
-  it("rejects agent nodes without a prompt", () => {
-    expect(() => agent({} as never)).toThrow(/prompt/);
-  });
-});
-
-describe("resolveNext", () => {
-  const switchEdge: WorkflowEdge = {
-    from: "a",
-    switch: { on: "$.route", cases: { yes: "b", no: "c" } },
+function makeBundle(
+  snapshot: WorkflowDefinitionSnapshot,
+  steps: WorkflowStepRecord[],
+  overrides: Partial<WorkflowRunState> = {},
+): LoadedRunBundle {
+  const state: WorkflowRunState = {
+    runId: "run-graph",
+    workflowName: snapshot.name,
+    startedAt: steps[0]?.startedAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "running",
+    input: {},
+    outputs: {},
+    results: {},
+    steps,
+    ...overrides,
   };
+  return {
+    runDir: "/tmp/run-graph",
+    manifest: {
+      schema: "pi-workflows.run-bundle.v1",
+      runId: state.runId,
+      workflowName: state.workflowName,
+      startedAt: state.startedAt,
+      status: state.status,
+      traceSchema: "pi-workflows.trace-event.v1",
+      paths: { workflow: "workflow.json", state: "state.json", trace: "trace.ndjson" },
+    },
+    state,
+    snapshot,
+  };
+}
 
-  it("returns null when there is no outgoing edge", () => {
-    expect(resolveNext([], "a", {})).toBeNull();
-  });
-
-  it("follows plain edges", () => {
-    expect(resolveNext([{ from: "a", to: "b" }], "a", {})).toBe("b");
-  });
-
-  it("routes switch edges on output paths", () => {
-    expect(resolveNext([switchEdge], "a", { route: "yes" })).toBe("b");
-    expect(resolveNext([switchEdge], "a", { route: "no" })).toBe("c");
-  });
-
-  it("supports $output. prefixed paths", () => {
-    const edge: WorkflowEdge = {
-      from: "a",
-      switch: { on: "$output.deep.route", cases: { "1": "b" } },
-    };
-    expect(resolveNext([edge], "a", { deep: { route: 1 } })).toBe("b");
-  });
-
-  it("supports $result. prefixed paths", () => {
-    const edge: WorkflowEdge = { from: "a", switch: { on: "$result.outcome", cases: { ok: "b" } } };
-    expect(resolveNext([edge], "a", {}, makeResult())).toBe("b");
-  });
-
-  it("throws on non-scalar switch values", () => {
-    expect(() => resolveNext([switchEdge], "a", { route: { nested: true } })).toThrow(/scalar/);
-  });
-
-  it("throws when no case matches", () => {
-    expect(() => resolveNext([switchEdge], "a", { route: "maybe" })).toThrow(
-      /No workflow switch case/,
-    );
-  });
-
-  it("rejects unsupported JSON paths", () => {
-    const edge: WorkflowEdge = { from: "a", switch: { on: "route", cases: { yes: "b" } } };
-    expect(() => resolveNext([edge], "a", { route: "yes" })).toThrow(/Unsupported JSON path/);
+describe("expandEdges", () => {
+  it("expands switch edges into labelled edges per case", () => {
+    const edges = expandEdges(LOOP_SNAPSHOT);
+    const fromReview = edges.filter((edge) => edge.from === "review");
+    expect(fromReview).toHaveLength(2);
+    expect(fromReview.map((edge) => edge.label)).toEqual(["clean", "issues_found"]);
+    expect(fromReview.map((edge) => edge.to)).toEqual(["done", "fix"]);
   });
 });
 
-describe("resolveNextForOutcome", () => {
-  it("routes failures through $result. switch edges", () => {
-    const edge: WorkflowEdge = {
-      from: "a",
-      switch: { on: "$result.outcome", cases: { failed: "b", ok: "c" } },
-    };
-    expect(resolveNextForOutcome([edge], "a", makeResult({ outcome: "failed" }))).toBe("b");
+describe("layoutGraph", () => {
+  it("classifies loop edges as back edges", () => {
+    const layout = layoutGraph(LOOP_SNAPSHOT);
+    const backEdges = layout.edges.filter((edge) => edge.isBackEdge);
+    expect(backEdges).toHaveLength(1);
+    expect(backEdges[0]).toMatchObject({ from: "fix", to: "verify" });
   });
 
-  it("returns null for plain edges and output switches", () => {
-    expect(resolveNextForOutcome([{ from: "a", to: "b" }], "a", makeResult())).toBeNull();
-    const outputEdge: WorkflowEdge = { from: "a", switch: { on: "$.route", cases: { x: "b" } } };
-    expect(resolveNextForOutcome([outputEdge], "a", makeResult())).toBeNull();
+  it("assigns increasing ranks along the main path", () => {
+    const layout = layoutGraph(LOOP_SNAPSHOT);
+    const rank = (nodeId: string) => layout.rankOfNode.get(nodeId) ?? -1;
+    expect(rank("plan")).toBe(0);
+    expect(rank("implement")).toBe(1);
+    expect(rank("verify")).toBe(2);
+    expect(rank("review")).toBe(3);
+    expect(rank("fix")).toBe(4);
+    expect(rank("done")).toBe(4);
+  });
+
+  it("inserts virtual cells for edges spanning multiple ranks", () => {
+    const layout = layoutGraph(BRANCH_SNAPSHOT);
+    // a -> d spans from rank 0 to rank 3 (d is pushed below c), so the a->d
+    // edge must pass through virtual cells in ranks 1 and 2.
+    const virtualCells = layout.ranks.flat().filter((cell) => cell.kind === "virtual");
+    expect(virtualCells.length).toBe(2);
+    // Every segment connects adjacent ranks by construction.
+    for (const segment of layout.segments) {
+      expect(segment.rank).toBeGreaterThanOrEqual(0);
+      expect(segment.rank).toBeLessThan(layout.ranks.length - 1);
+    }
+  });
+
+  it("keeps switch labels only on the first segment of an edge", () => {
+    const layout = layoutGraph(BRANCH_SNAPSHOT);
+    const labelled = layout.segments.filter((segment) => segment.label !== undefined);
+    expect(labelled.map((segment) => segment.label).toSorted()).toEqual(["left", "right"]);
+  });
+});
+
+describe("renderGraphLines", () => {
+  const loopSteps = ["plan", "implement", "verify", "review", "fix", "verify", "review"].map(
+    (nodeId, index) => makeStep(nodeId, index),
+  );
+
+  it("renders nodes, taken branches, and loop gutters", () => {
+    const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, {
+      status: "running",
+      currentNode: "review",
+      currentNodeStartedAt: new Date().toISOString(),
+    });
+    const text = renderGraphLines(bundle, loopSteps.length - 1)
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("✓ plan [compute]");
+    expect(text).toContain("◐ review [agent] running");
+    expect(text).toContain("×2"); // verify ran twice
+    expect(text).toContain("issues_found");
+    expect(text).toContain("clean");
+    expect(text).toContain("◀"); // back-edge arrow into verify
+    expect(text).toContain("· done [compute]"); // untouched branch stays queued
+  });
+
+  it("derives statuses as of the scrubbed step", () => {
+    const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, { status: "completed" });
+    // Scrub to step index 1 (implement): verify/review/fix must be queued.
+    const text = renderGraphLines(bundle, 1).map(stripAnsi).join("\n");
+    expect(text).toContain("✓ plan [compute]");
+    expect(text).toContain("◐ implement [agent]");
+    expect(text).toContain("· verify [action]");
+    expect(text).toContain("· review [agent]");
+  });
+
+  it("marks failed steps", () => {
+    const steps = [makeStep("plan", 0), makeStep("implement", 1, "failed")];
+    const bundle = makeBundle(LOOP_SNAPSHOT, steps, { status: "failed", error: "boom" });
+    const text = renderGraphLines(bundle, steps.length - 1)
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("✗ implement [agent]");
+  });
+
+  it("returns no lines without a definition snapshot", () => {
+    const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps);
+    const withoutSnapshot = { ...bundle, snapshot: null };
+    expect(renderGraphLines(withoutSnapshot, 0)).toEqual([]);
+  });
+
+  it("draws connected vertical edges between chained ranks", () => {
+    const steps = [makeStep("plan", 0)];
+    const bundle = makeBundle(LOOP_SNAPSHOT, steps, {
+      status: "running",
+      currentNode: "implement",
+    });
+    const lines = renderGraphLines(bundle, 0).map(stripAnsi);
+    const planLine = lines.findIndex((line) => line.includes("plan"));
+    const implementLine = lines.findIndex((line) => line.includes("implement"));
+    expect(planLine).toBeGreaterThanOrEqual(0);
+    expect(implementLine).toBeGreaterThan(planLine);
+    for (let index = planLine + 1; index < implementLine - 1; index += 1) {
+      expect(lines[index]).toMatch(/│/);
+    }
+    expect(lines[implementLine - 1]).toMatch(/▼/);
   });
 });

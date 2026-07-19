@@ -16,6 +16,15 @@ imports nothing outside itself and never imports pi. `src/extension` and
 `src/viewer` may import `src/workflows` and never each other. The viewer
 observes runs purely through the bundle files, so it works from any process.
 
+Within the viewer, `graph.ts` computes a pure layered layout (ported from the
+acpx replay viewer: labelled switch expansion, DFS back-edge detection,
+longest-path layering, barycenter ordering, virtual pass-through cells for
+long edges), `canvas.ts` is a character grid that merges box-drawing
+characters by connectivity, and `graph-render.ts` turns a run bundle plus a
+replay position into the drawn graph. `render.ts` composes the full detail
+view (header, graph, step timeline, step inspector) and stays pure so tests
+can assert on rendered lines.
+
 Inside the engine, the pi-facing seam is the `AgentStepExecutor` interface.
 The extension implements it on top of the live conversation
 (`src/extension/executor.ts`), and tests implement it with a scripted fake

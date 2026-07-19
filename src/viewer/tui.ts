@@ -37,6 +37,9 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   let bundles: LoadedRunBundle[] = [];
   let selectedIndex = 0;
   let detailScroll = 0;
+  /** Replay position; null follows the latest step live. */
+  let selectedStep: number | null = null;
+  let detailStepCount = 0;
 
   if (options.runId) {
     bundles = await listRunBundles(options.runsDir);
@@ -63,8 +66,13 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     if (!bundle) {
       return ["Run bundle disappeared. Press q to go back."];
     }
-    detailScroll = Math.min(detailScroll, maxDetailScroll(bundle, size));
-    return renderRunDetailLines(bundle, size, new Date(), detailScroll);
+    detailStepCount = bundle.state.steps.length;
+    if (selectedStep !== null && selectedStep >= detailStepCount - 1) {
+      // Scrubbed to (or past) the end: snap back to following live updates.
+      selectedStep = null;
+    }
+    detailScroll = Math.min(detailScroll, maxDetailScroll(bundle, size, selectedStep));
+    return renderRunDetailLines(bundle, size, new Date(), detailScroll, selectedStep);
   };
 
   process.stdout.write(ALT_SCREEN_ON);
@@ -108,6 +116,14 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
             // Clamped against the content height in renderDetail.
             detailScroll += 1;
             void draw();
+          } else if (key === "\u001b[D" || key === "h") {
+            const current = selectedStep ?? detailStepCount - 1;
+            selectedStep = Math.max(0, current - 1);
+            void draw();
+          } else if (key === "\u001b[C" || key === "l") {
+            // renderDetail snaps back to live once this reaches the end.
+            selectedStep = selectedStep === null ? null : selectedStep + 1;
+            void draw();
           }
           return;
         }
@@ -122,6 +138,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
           if (selected) {
             mode = { view: "detail", runDir: selected.runDir };
             detailScroll = 0;
+            selectedStep = null;
             void draw();
           }
         }

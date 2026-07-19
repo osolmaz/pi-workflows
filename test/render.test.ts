@@ -155,6 +155,75 @@ describe("renderRunDetailLines", () => {
     expect(text).toContain("◐ two [compute] running 10s · reviewing");
   });
 
+  it("scrubs to a selected step with position and inspector", () => {
+    const steps = [
+      {
+        attemptId: "a1",
+        nodeId: "one",
+        nodeType: "compute" as const,
+        outcome: "ok" as const,
+        startedAt: "2026-07-19T00:00:00.000Z",
+        finishedAt: "2026-07-19T00:00:01.000Z",
+        promptText: null,
+        output: { value: 1 },
+      },
+      {
+        attemptId: "a2",
+        nodeId: "two",
+        nodeType: "compute" as const,
+        outcome: "failed" as const,
+        startedAt: "2026-07-19T00:00:01.000Z",
+        finishedAt: "2026-07-19T00:00:02.000Z",
+        promptText: null,
+        output: null,
+        error: "two exploded",
+        action: {
+          actionType: "shell" as const,
+          command: "false",
+          args: ["--now"],
+          exitCode: 1,
+        },
+      },
+    ];
+    const bundle = makeBundle({ status: "failed", steps, error: "two exploded" });
+
+    const first = renderRunDetailLines(bundle, size, NOW, 0, 0).map(stripAnsi).join("\n");
+    expect(first).toContain("step 1/2");
+    expect(first).toContain("step output — one (ok)");
+    expect(first).toContain(`"value": 1`);
+    // Scrubbed to step 1: node two has no visible attempt yet.
+    expect(first).toContain("· two [compute]");
+
+    const second = renderRunDetailLines(bundle, size, NOW, 0, 1).map(stripAnsi).join("\n");
+    expect(second).toContain("step 2/2");
+    expect(second).toContain("step output — two (failed)");
+    expect(second).toContain("two exploded");
+    expect(second).toContain("shell false --now → exit 1");
+    expect(second).toContain("✗ two [compute]");
+  });
+
+  it("falls back to a flat node list without a snapshot", () => {
+    const bundle = makeBundle({
+      status: "waiting",
+      waitingOn: "one",
+      results: {
+        one: {
+          attemptId: "a",
+          nodeId: "one",
+          nodeType: "compute",
+          outcome: "ok",
+          startedAt: "2026-07-19T00:00:00.000Z",
+          finishedAt: "2026-07-19T00:00:01.000Z",
+          durationMs: 1000,
+        },
+      },
+    });
+    const withoutSnapshot = { ...bundle, snapshot: null };
+    const text = renderRunDetailLines(withoutSnapshot, size, NOW).map(stripAnsi).join("\n");
+    expect(text).toContain("⏸ one");
+    expect(text).toContain("waiting");
+  });
+
   it("scrolls the detail view over long content", () => {
     const bundle = makeBundle();
     const viewport = { width: 100, height: 4 };
