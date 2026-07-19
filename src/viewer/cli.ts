@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
 import { sanitizeText } from "./ansi.js";
@@ -132,8 +133,18 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 }
 
 const entryPath = process.argv[1];
-if (entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href) {
+// realpath so invocation through a bin symlink (npm link) still matches.
+const resolvedEntry = entryPath !== undefined ? realpathSyncSafe(entryPath) : undefined;
+if (resolvedEntry !== undefined && import.meta.url === pathToFileURL(resolvedEntry).href) {
   main().then((code) => {
     process.exitCode = code;
   });
+}
+
+function realpathSyncSafe(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    return target;
+  }
 }
