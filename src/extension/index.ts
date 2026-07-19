@@ -14,10 +14,11 @@ import type {
   WorkflowRunState,
 } from "../workflows/types.js";
 import { ConversationStepExecutor } from "./executor.js";
-import { buildWidgetLines } from "./widget.js";
+import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
 const FINAL_WIDGET_TTL_MS = 60_000;
+const WIDGET_SCROLL_STEP = 3;
 
 type ActiveRun = {
   runId: string | null;
@@ -58,10 +59,22 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   return { kind: "run", ref, input: rest.length > 0 ? { task: rest } : {} };
 }
 
+type WidgetSource = {
+  state: WorkflowRunState;
+  snapshot: WorkflowDefinitionSnapshot;
+};
+
 export default function piWorkflows(pi: ExtensionAPI) {
   let activeRun: ActiveRun | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
   let widgetTicker: NodeJS.Timeout | null = null;
+  // Manual widget scroll: null follows the active node; a number is the
+  // first visible graph row, set by ctrl+↑/↓ and reset on step advance.
+  let widgetSource: WidgetSource | null = null;
+  let widgetScroll: number | null = null;
+  let widgetShownScroll = 0;
+  let widgetMaxScroll = 0;
+  let widgetStepCount = 0;
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -86,6 +99,52 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  const renderWidget = (ctx: ExtensionContext) => {
+    if (!widgetSource) {
+      return;
+    }
+    const view = buildWidgetView(
+      widgetSource.state,
+      widgetSource.snapshot,
+      new Date(),
+      widgetScroll,
+    );
+    widgetShownScroll = view.scroll;
+    widgetMaxScroll = view.maxScroll;
+    if (widgetScroll !== null) {
+      widgetScroll = view.scroll;
+    }
+    setWidget(ctx, view.lines);
+  };
+
+  const updateWidget = (
+    ctx: ExtensionContext,
+    state: WorkflowRunState,
+    snapshot: WorkflowDefinitionSnapshot,
+  ) => {
+    if (state.steps.length !== widgetStepCount) {
+      widgetStepCount = state.steps.length;
+      // The workflow moved on; resume following the active node.
+      widgetScroll = null;
+    }
+    widgetSource = { state, snapshot };
+    renderWidget(ctx);
+  };
+
+  const clearWidget = (ctx: ExtensionContext) => {
+    widgetSource = null;
+    widgetScroll = null;
+    setWidget(ctx, undefined);
+  };
+
+  const scrollWidget = (ctx: ExtensionContext, delta: number) => {
+    if (!widgetSource || widgetMaxScroll === 0) {
+      return;
+    }
+    widgetScroll = Math.max(0, Math.min(widgetShownScroll + delta, widgetMaxScroll));
+    renderWidget(ctx);
+  };
+
   const clearWidgetTimer = () => {
     if (widgetTimer) {
       clearTimeout(widgetTimer);
@@ -108,7 +167,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         stopWidgetTicker();
         return;
       }
-      setWidget(ctx, buildWidgetLines(run.lastState, run.snapshot));
+      renderWidget(ctx);
     }, 1_000);
     widgetTicker.unref?.();
   };
@@ -119,9 +178,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     stopWidgetTicker();
     const { state } = result;
-    setWidget(ctx, buildWidgetLines(state, run.snapshot));
+    updateWidget(ctx, state, run.snapshot);
     clearWidgetTimer();
-    widgetTimer = setTimeout(() => setWidget(ctx, undefined), FINAL_WIDGET_TTL_MS);
+    widgetTimer = setTimeout(() => clearWidget(ctx), FINAL_WIDGET_TTL_MS);
     widgetTimer.unref?.();
     const summary = `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
@@ -152,7 +211,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           run.runId = state.runId;
         }
         run.lastState = state;
-        setWidget(ctx, buildWidgetLines(state, snapshot));
+        updateWidget(ctx, state, snapshot);
       },
     });
     const run: ActiveRun = {
@@ -176,7 +235,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           activeRun = null;
         }
         stopWidgetTicker();
-        setWidget(ctx, undefined);
+        clearWidget(ctx);
         notify(ctx, `Workflow ${workflow.name} crashed: ${errorMessage(error)}`, "error");
       });
   };
@@ -265,6 +324,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerShortcut("ctrl+up", {
+    description: "Scroll the workflow widget up",
+    handler: (ctx) => scrollWidget(ctx, -WIDGET_SCROLL_STEP),
+  });
+
+  pi.registerShortcut("ctrl+down", {
+    description: "Scroll the workflow widget down",
+    handler: (ctx) => scrollWidget(ctx, WIDGET_SCROLL_STEP),
+  });
+
   pi.on("agent_start", () => {
     activeRun?.executor.setStreaming(true);
   });
@@ -282,5 +351,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     activeRun = null;
     clearWidgetTimer();
     stopWidgetTicker();
+    widgetSource = null;
+    widgetScroll = null;
   });
 }

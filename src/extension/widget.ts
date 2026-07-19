@@ -42,17 +42,27 @@ export function displayNodeIds(snapshot: WorkflowDefinitionSnapshot): string[] {
   return Object.keys(snapshot.nodes);
 }
 
+export type WidgetView = {
+  lines: string[];
+  /** The clamped first visible graph row; feed back in to scroll relatively. */
+  scroll: number;
+  /** Largest useful scroll value; 0 when the whole graph fits. */
+  maxScroll: number;
+};
+
 /**
- * Live-progress lines for the in-pi widget: a header plus the same graph the
- * standalone viewer draws. When the graph is taller than pi's widget budget,
- * a window centered on the active node is shown with ↑/↓ overflow markers.
- * Pure so it can be tested without a TUI.
+ * Live-progress view for the in-pi widget: a header plus the same boxed
+ * graph the standalone viewer draws. When the graph is taller than pi's
+ * widget budget, a window is shown with ↑/↓ overflow markers — centered on
+ * the active node by default, or at `scroll` when the user scrolled
+ * manually. Pure so it can be tested without a TUI.
  */
-export function buildWidgetLines(
+export function buildWidgetView(
   state: WorkflowRunState,
   snapshot: WorkflowDefinitionSnapshot,
   now: Date = new Date(),
-): string[] {
+  scroll: number | null = null,
+): WidgetView {
   const glyph = STATUS_GLYPHS[state.status];
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
@@ -71,12 +81,28 @@ export function buildWidgetLines(
   const graph = renderGraphLines({ state, snapshot }, state.steps.length - 1, now, {
     nodeStyle: "box",
   });
-  const body =
-    graph.length > 0
-      ? windowAroundFocus(graph, focusLine(graph, state), budget).map((line) => `  ${line}`)
-      : [`  ${compactNodeStrip(state, snapshot)}`];
+  if (graph.length === 0) {
+    return {
+      lines: [header, `  ${compactNodeStrip(state, snapshot)}`, ...footer],
+      scroll: 0,
+      maxScroll: 0,
+    };
+  }
+  const windowed = windowLines(graph, budget, scroll ?? focusLine(graph, state), scroll !== null);
+  return {
+    lines: [header, ...windowed.lines.map((line) => `  ${line}`), ...footer],
+    scroll: windowed.scroll,
+    maxScroll: windowed.maxScroll,
+  };
+}
 
-  return [header, ...body, ...footer];
+/** Back-compatible line view following the active node. */
+export function buildWidgetLines(
+  state: WorkflowRunState,
+  snapshot: WorkflowDefinitionSnapshot,
+  now: Date = new Date(),
+): string[] {
+  return buildWidgetView(state, snapshot, now).lines;
 }
 
 /** The graph row the window should center on: the active or waiting node. */
@@ -95,22 +121,28 @@ function focusLine(graph: string[], state: WorkflowRunState): number {
 }
 
 /**
- * Slice `lines` to at most `budget` rows centered on `focus`, marking hidden
- * rows at either end. Markers count against the budget.
+ * Slice `lines` to at most `budget` rows, marking hidden rows at either end.
+ * Markers count against the budget. `anchor` is a row to center on (follow
+ * mode) or the requested first visible row (manual scroll).
  */
-function windowAroundFocus(lines: string[], focus: number, budget: number): string[] {
+function windowLines(
+  lines: string[],
+  budget: number,
+  anchor: number,
+  anchorIsStart: boolean,
+): { lines: string[]; scroll: number; maxScroll: number } {
   if (lines.length <= budget) {
-    return lines;
+    return { lines, scroll: 0, maxScroll: 0 };
   }
-  // First centering pass decides which markers exist; the second recenters
-  // within the remaining space. A marker flag can only turn on (never off)
-  // in the second pass, so the result stays within budget.
+  // First pass decides which markers exist; the second re-fits within the
+  // remaining space. A marker flag can only turn on (never off) in the
+  // second pass, so the result stays within budget.
   let inner = budget;
   for (let pass = 0; pass < 2; pass += 1) {
-    const start = clampStart(focus, inner, lines.length);
+    const start = clampStart(anchor, inner, lines.length, anchorIsStart);
     inner = budget - (start > 0 ? 1 : 0) - (start + inner < lines.length ? 1 : 0);
   }
-  const start = clampStart(focus, inner, lines.length);
+  const start = clampStart(anchor, inner, lines.length, anchorIsStart);
   const end = start + inner;
   const out: string[] = [];
   if (start > 0) {
@@ -118,13 +150,14 @@ function windowAroundFocus(lines: string[], focus: number, budget: number): stri
   }
   out.push(...lines.slice(start, end));
   if (end < lines.length) {
-    out.push(ansi.dim(`↓ ${lines.length - end} more`));
+    out.push(ansi.dim(`↓ ${lines.length - end} more · ctrl+↑/↓ scroll`));
   }
-  return out;
+  return { lines: out, scroll: start, maxScroll: Math.max(0, lines.length - inner) };
 }
 
-function clampStart(focus: number, inner: number, total: number): number {
-  return Math.max(0, Math.min(focus - Math.floor(inner / 2), total - inner));
+function clampStart(anchor: number, inner: number, total: number, anchorIsStart: boolean): number {
+  const start = anchorIsStart ? anchor : anchor - Math.floor(inner / 2);
+  return Math.max(0, Math.min(start, total - inner));
 }
 
 function compactNodeStrip(state: WorkflowRunState, snapshot: WorkflowDefinitionSnapshot): string {

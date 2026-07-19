@@ -39,6 +39,7 @@ function makeHarness(options: {
   const notifications: string[] = [];
   const widgets: (string[] | undefined)[] = [];
   const listeners = new Map<string, (() => void)[]>();
+  const shortcuts = new Map<string, (ctx: FakeContext) => void>();
   let command: RegisteredCommand | null = null;
   let tool: RegisteredTool | null = null;
 
@@ -57,6 +58,9 @@ function makeHarness(options: {
     },
     registerTool: (spec: RegisteredTool) => {
       tool = spec;
+    },
+    registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
+      shortcuts.set(key, spec.handler);
     },
     on: (event: string, listener: () => void) => {
       const queue = listeners.get(event) ?? [];
@@ -79,6 +83,7 @@ function makeHarness(options: {
     widgets,
     command: command as RegisteredCommand,
     tool: tool as RegisteredTool,
+    shortcuts,
     emit: (event: string) => {
       for (const listener of listeners.get(event) ?? []) {
         listener();
@@ -190,6 +195,16 @@ describe("pi-workflows extension", () => {
     } finally {
       homedirSpy.mockRestore();
     }
+  });
+
+  it("registers scroll shortcuts that no-op without a widget", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const harness = makeHarness({ cwd, respond: () => {} });
+    expect([...harness.shortcuts.keys()]).toEqual(["ctrl+up", "ctrl+down"]);
+    // No workflow has run yet, so there is nothing to scroll; must not throw.
+    harness.shortcuts.get("ctrl+up")?.(harness.ctx);
+    harness.shortcuts.get("ctrl+down")?.(harness.ctx);
+    expect(harness.widgets).toHaveLength(0);
   });
 
   it("rejects tool calls outside a workflow", async () => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildWidgetLines, displayNodeIds, nodeGlyph } from "../src/extension/widget.js";
+import {
+  buildWidgetLines,
+  buildWidgetView,
+  displayNodeIds,
+  nodeGlyph,
+} from "../src/extension/widget.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import type { WorkflowNodeResult, WorkflowRunState } from "../src/workflows/types.js";
@@ -155,6 +160,53 @@ describe("buildWidgetLines", () => {
       snapshot,
     );
     expect(waiting.at(-1)).toContain("waiting on checkpoint: third");
+  });
+
+  it("supports manual scrolling with clamped bounds", () => {
+    const nodes = Object.fromEntries(
+      Array.from({ length: 20 }, (_v, i) => [`n${i}`, compute({ run: () => i })]),
+    );
+    const edges = Array.from({ length: 19 }, (_v, i) => ({ from: `n${i}`, to: `n${i + 1}` }));
+    const tall = createDefinitionSnapshot(
+      defineWorkflow({ name: "tall", startAt: "n0", nodes, edges }),
+    );
+    const state = makeState({
+      workflowName: "tall",
+      currentNode: "n10",
+      currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const now = new Date("2026-01-01T00:00:02.000Z");
+
+    const followed = buildWidgetView(state, tall, now);
+    expect(followed.maxScroll).toBeGreaterThan(0);
+    expect(followed.scroll).toBeGreaterThan(0);
+    expect(followed.lines.join("\n")).toContain("◐ n10");
+
+    const top = buildWidgetView(state, tall, now, 0);
+    expect(top.scroll).toBe(0);
+    expect(top.lines.join("\n")).toContain("n0");
+    expect(top.lines.join("\n")).not.toMatch(/↑ \d+ more/);
+    expect(top.lines.join("\n")).toMatch(/↓ \d+ more · ctrl\+↑\/↓ scroll/);
+
+    const bottom = buildWidgetView(state, tall, now, 9_999);
+    expect(bottom.scroll).toBeLessThanOrEqual(bottom.maxScroll);
+    expect(bottom.lines.join("\n")).toContain("n19");
+    expect(bottom.lines.join("\n")).not.toMatch(/↓ \d+ more/);
+    expect(bottom.lines.length).toBeLessThanOrEqual(10);
+  });
+
+  it("reports no scroll range when the graph fits", () => {
+    const pair = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "pair",
+        startAt: "a",
+        nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
+        edges: [{ from: "a", to: "b" }],
+      }),
+    );
+    const view = buildWidgetView(makeState({ workflowName: "pair" }), pair);
+    expect(view.maxScroll).toBe(0);
+    expect(view.scroll).toBe(0);
   });
 
   it("sanitizes titles, status details, and errors", () => {
