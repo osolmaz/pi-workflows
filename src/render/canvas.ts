@@ -8,12 +8,13 @@ export type CanvasStyle = "plain" | "dim" | "taken" | "active" | "back" | "ok" |
 
 type CanvasChar = { char: string; style: CanvasStyle };
 
-const UP = 1;
-const DOWN = 2;
-const LEFT = 4;
-const RIGHT = 8;
+export const UP = 1;
+export const DOWN = 2;
+export const LEFT = 4;
+export const RIGHT = 8;
 
-const CHAR_TO_MASK: Record<string, number> = {
+/** Which sides each box-drawing character connects to (exported for tests). */
+export const CHAR_TO_MASK: Record<string, number> = {
   "─": LEFT | RIGHT,
   "│": UP | DOWN,
   "┌": DOWN | RIGHT,
@@ -70,12 +71,8 @@ export class CharCanvas {
     const row = this.row(y);
     this.maxX = Math.max(this.maxX, x);
     const existing = row.get(x);
-    // Label padding may soften a horizontal run but must never erase
-    // corners, verticals, or other content.
+    // Spaces never occupy cells; textOverRun handles deliberate padding.
     if (char === " ") {
-      if (existing && existing.char === "─") {
-        row.set(x, { char, style });
-      }
       return;
     }
     if (existing) {
@@ -102,6 +99,51 @@ export class CharCanvas {
     for (const [index, char] of [...value].entries()) {
       this.put(x + index, y, char, style);
     }
+  }
+
+  /**
+   * Write text only when every target cell is empty. Returns whether the
+   * text was written. Used for optional decorations (edge labels) that must
+   * never corrupt lines or nodes already on the canvas.
+   */
+  textIfEmpty(x: number, y: number, value: string, style: CanvasStyle = "plain"): boolean {
+    if (x < 0 || y < 0) {
+      return false;
+    }
+    const row = this.cells.get(y);
+    const width = [...value].length;
+    for (let index = 0; index < width; index += 1) {
+      if (row?.has(x + index)) {
+        return false;
+      }
+    }
+    this.text(x, y, value, style);
+    return true;
+  }
+
+  /**
+   * Write text over a plain horizontal run, replacing `─` cells only.
+   * Refuses (returns false) unless every target cell and both flanking
+   * cells are exactly `─`, so a label can never overwrite or sit against
+   * corners, crossings, or other labels. Spaces in `value` become real
+   * blanks, visually breaking the run around the label on purpose.
+   */
+  textOverRun(x: number, y: number, value: string, style: CanvasStyle = "plain"): boolean {
+    if (x < 1 || y < 0) {
+      return false;
+    }
+    const chars = [...value];
+    const row = this.cells.get(y);
+    for (let index = -1; index <= chars.length; index += 1) {
+      if (row?.get(x + index)?.char !== "─") {
+        return false;
+      }
+    }
+    for (const [index, char] of chars.entries()) {
+      this.row(y).set(x + index, { char, style });
+    }
+    this.maxX = Math.max(this.maxX, x + chars.length - 1);
+    return true;
   }
 
   hline(y: number, x1: number, x2: number, style: CanvasStyle = "plain"): void {

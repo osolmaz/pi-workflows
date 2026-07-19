@@ -79,23 +79,31 @@ pi-workflows runs          # plain list of recent runs
 pi-workflows view --once   # print a snapshot and exit (good for scripts)
 ```
 
-The run detail view draws the workflow as a graph, like the acpx replay
-viewer: branches carry their case labels, the taken path is highlighted, and
-loops route through a gutter on the right. `←/→` scrubs backwards and
-forwards through the recorded steps and re-derives every node's status as of
-that step, with the selected step's full output shown below; scrubbing to the
-end snaps back to following the run live.
+The run detail view draws the workflow as a boxed graph, like the acpx replay
+viewer: every node sits in a box (heavy border for the active node), branches
+carry their case labels, the taken path is highlighted, and loops route
+through a gutter on the right back into their target from above. `←/→` scrubs
+backwards and forwards through the recorded steps and re-derives every node's
+status as of that step, with the selected step's full output shown below;
+scrubbing to the end snaps back to following the run live.
 
 ```
-         ✓ verify [action] 8.0s ×2 ◀─────────┐
-                     │                       │
-                     ▼                       │
-◐ review [agent] running 12s · reviewing ×2  │
-          ┌─ clean ──┤                       │
-          │          └─────────┐             │
-          │       issues_found │             │
-          ▼                    ▼             │
-  · done [compute]    ✓ fix [agent] 8.0s ────┘
+              │ ┌──────────────────┐
+              ▼ ▼                  │
+  ┌──────────────────────────┐     │
+  │ ✓ verify [action] 8.0s ×2 │    │
+  └──────────────────────────┘     │
+              │                    │
+              ▼                    │
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓     │
+  ┃ ◐ review [agent] 12s ×2  ┃     │
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛     │
+     ┌─ clean ─┘ └─ issues ─┐      │
+     ▼                      ▼      │
+┌───────────┐    ┌───────────────┐ │
+│ · done    │    │ ✓ fix [agent] │ │
+└───────────┘    └───────────────┘ │
+                        └──────────┘
 ```
 
 Inside pi, a compact widget above the editor shows the same progress while a

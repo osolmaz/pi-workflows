@@ -6,7 +6,13 @@ import type {
 import { ansi, sanitizeText } from "./ansi.js";
 import { CharCanvas, type CanvasStyle } from "./canvas.js";
 import { formatDuration } from "./format.js";
-import { layoutGraph, type GraphCell, type GraphLayout, type GraphSegment } from "./graph.js";
+import {
+  layoutGraph,
+  type GraphCell,
+  type GraphEdge,
+  type GraphLayout,
+  type GraphSegment,
+} from "./graph.js";
 
 /**
  * Renders the workflow DAG as text, mirroring the acpx replay viewer's graph
@@ -43,6 +49,18 @@ const STATUS_STYLES: Record<NodeStatus, CanvasStyle> = {
 
 const CELL_GAP = 4;
 const GUTTER_GAP = 2;
+
+/** How node cells are drawn: single text lines or bordered boxes. */
+export type GraphNodeStyle = "line" | "box";
+
+export type GraphRenderOptions = {
+  nodeStyle?: GraphNodeStyle;
+};
+
+/** Rows a node cell occupies: boxes add a border row above and below. */
+function cellHeight(nodeStyle: GraphNodeStyle): number {
+  return nodeStyle === "box" ? 3 : 1;
+}
 
 function paint(text: string, style: CanvasStyle): string {
   switch (style) {
@@ -119,6 +137,7 @@ function renderCellText(
   visibleSteps: WorkflowStepRecord[],
   atLatestStep: boolean,
   now: Date,
+  nodeStyle: GraphNodeStyle,
 ): RenderedCell {
   if (cell.kind === "virtual") {
     return { cell, text: "", status: null, width: 1 };
@@ -147,14 +166,35 @@ function renderCellText(
     parts.push(`×${attempts}`);
   }
   const text = parts.join(" ");
-  // Width includes the status glyph and the space after it.
-  return { cell, text, status, width: text.length + 2 };
+  // Width includes the status glyph and the space after it; boxes add a
+  // border and one padding column on each side.
+  const contentWidth = text.length + 2;
+  return { cell, text, status, width: nodeStyle === "box" ? contentWidth + 4 : contentWidth };
 }
 
-type PlacedRank = {
+type RankGeometry = {
   cells: RenderedCell[];
   centers: number[];
-  y: number;
+};
+
+type PlacedRank = RankGeometry & { y: number };
+
+/** A strip segment with final pixel geometry and its assigned track row. */
+type GeomSegment = {
+  edgeId: string;
+  label?: string | undefined;
+  fromX: number;
+  toX: number;
+  track: number;
+  targetIsNode: boolean;
+};
+
+type StripGeometry = {
+  segments: GeomSegment[];
+  trackCount: number;
+  hasLabels: boolean;
+  /** True when every segment is an unlabeled vertical line. */
+  straight: boolean;
 };
 
 /** Transitions actually taken between the visible steps, as "from->to". */
@@ -174,11 +214,13 @@ export function renderGraphLines(
   view: GraphView,
   selectedStepIndex: number,
   now: Date = new Date(),
+  options: GraphRenderOptions = {},
 ): string[] {
   const snapshot = view.snapshot;
   if (!snapshot) {
     return [];
   }
+  const nodeStyle = options.nodeStyle ?? "line";
   const layout = layoutGraph(snapshot);
   const steps = view.state.steps;
   const boundedIndex = Math.min(Math.max(selectedStepIndex, -1), steps.length - 1);
@@ -188,7 +230,7 @@ export function renderGraphLines(
   const activePair = derivePairInFlight(view, visibleSteps, atLatestStep);
 
   const rendered = layout.ranks.map((rank) =>
-    rank.map((cell) => renderCellText(view, cell, visibleSteps, atLatestStep, now)),
+    rank.map((cell) => renderCellText(view, cell, visibleSteps, atLatestStep, now, nodeStyle)),
   );
 
   // Column positions: pack cells left to right per rank, then center every
@@ -198,9 +240,7 @@ export function renderGraphLines(
       cells.reduce((sum, cell) => sum + cell.width, 0) + Math.max(0, cells.length - 1) * CELL_GAP,
   );
   const graphWidth = Math.max(0, ...rankWidths);
-  const placed: PlacedRank[] = [];
-  let y = 0;
-  for (const [rankIndex, cells] of rendered.entries()) {
+  const geometry: RankGeometry[] = rendered.map((cells, rankIndex) => {
     const centers: number[] = [];
     let x = Math.floor((graphWidth - (rankWidths[rankIndex] ?? 0)) / 2);
     for (const cell of cells) {
@@ -211,15 +251,71 @@ export function renderGraphLines(
       );
       x += cell.width + CELL_GAP;
     }
-    placed.push({ cells, centers, y });
-    y += 1 + gapRows(layout, rankIndex);
+    return { cells, centers };
+  });
+
+  // Horizontal edge geometry (exit/entry columns, pixel-space track rows) is
+  // fully decided before vertical placement, so row budgeting is exact.
+  const strips = geometry.map((_rank, rankIndex) =>
+    computeStripGeometry(layout, rankIndex, geometry),
+  );
+
+  const lanes = backEdgeLanes(layout);
+  const placed: PlacedRank[] = [];
+  // Entry lanes above the first rank need an arrow row of their own.
+  const topLanes = lanes.above(0).length;
+  let y = topLanes > 0 ? topLanes + 1 : 0;
+  for (const [rankIndex, rank] of geometry.entries()) {
+    placed.push({ ...rank, y });
+    y +=
+      cellHeight(nodeStyle) +
+      lanes.below(rankIndex).length +
+      gapRows(strips[rankIndex] as StripGeometry, rankIndex, layout.ranks.length) +
+      lanes.above(rankIndex + 1).length;
   }
 
   const canvas = new CharCanvas();
-  drawNodes(canvas, placed, layout, transitions);
-  drawSegments(canvas, placed, layout, transitions, activePair, graphWidth);
-  drawBackEdges(canvas, placed, layout, transitions, graphWidth);
+  drawNodes(canvas, placed, layout, transitions, nodeStyle);
+  const labels = drawSegments(
+    canvas,
+    placed,
+    strips,
+    layout,
+    transitions,
+    activePair,
+    graphWidth,
+    nodeStyle,
+    lanes,
+  );
+  drawBackEdges(canvas, placed, layout, transitions, graphWidth, nodeStyle, lanes);
+  // Labels go on last, once every line is on the canvas: placement can then
+  // guarantee no later stroke crosses through a label.
+  for (const label of labels) {
+    drawSegmentLabel(canvas, label);
+  }
   return canvas.render(paint);
+}
+
+/**
+ * Back edges route through dedicated lane rows: one below their source rank
+ * (box bottom to the right gutter) and one above their target rank (gutter
+ * to the target's top). Dedicated rows mean a loop line can never collide
+ * with node cells or other horizontal runs, no matter where the loop's
+ * endpoints sit in their ranks; forward edges merely cross them vertically.
+ */
+type BackEdgeLanes = {
+  edges: GraphEdge[];
+  below: (rank: number) => GraphEdge[];
+  above: (rank: number) => GraphEdge[];
+};
+
+function backEdgeLanes(layout: GraphLayout): BackEdgeLanes {
+  const edges = layout.edges.filter((edge) => edge.isBackEdge);
+  return {
+    edges,
+    below: (rank) => edges.filter((edge) => layout.rankOfNode.get(edge.from) === rank),
+    above: (rank) => edges.filter((edge) => layout.rankOfNode.get(edge.to) === rank),
+  };
 }
 
 /** The transition currently in flight, drawn in the active style. */
@@ -241,40 +337,69 @@ function derivePairInFlight(
   return null;
 }
 
-/** Rows between rank r's node line and rank r+1's node line. */
-function gapRows(layout: GraphLayout, rank: number): number {
-  const strip = layout.segments.filter((segment) => segment.rank === rank);
-  if (strip.length === 0) {
-    return rank < layout.ranks.length - 1 ? 1 : 0;
+/** Rows between rank r's cell rows and rank r+1's cell rows. */
+function gapRows(strip: StripGeometry, rank: number, rankCount: number): number {
+  if (strip.segments.length === 0) {
+    return rank < rankCount - 1 ? 1 : 0;
   }
   // Straight unlabeled strips need no track rows: one line row, one arrow row.
-  if (
-    strip.every((segment) => segment.fromCell === segment.toCell && segment.label === undefined)
-  ) {
+  if (strip.straight) {
     return 2;
   }
-  return 2 + trackAssignments(strip).trackCount;
+  // Labelled strips reserve one extra row below the tracks so labels that do
+  // not fit on their horizontal run always have a collision-free home.
+  return 2 + strip.trackCount + (strip.hasLabels ? 1 : 0);
 }
 
-type TrackedSegment = GraphSegment & { track: number };
-
 /**
- * Assign horizontal tracks so overlapping horizontal runs in the same strip
- * get separate rows. Straight unlabeled segments do not occupy a track.
+ * Resolve a strip (all segments between rank r and rank r+1) to final pixel
+ * geometry: exit and entry columns, and a horizontal track row per segment.
+ *
+ * Two rules make the drawing collision-free by construction. First, when
+ * several edges leave or enter one cell, they fan out over separate columns
+ * (ordered by the far end so lines inside a fan never cross), so corner
+ * characters cannot merge into fake junctions. Second, tracks are assigned
+ * from the final pixel spans, so two horizontal runs share a row only when
+ * they cannot touch, corners included.
  */
-function trackAssignments(strip: GraphSegment[]): {
-  tracked: TrackedSegment[];
-  trackCount: number;
-} {
-  const tracked: TrackedSegment[] = [];
+function computeStripGeometry(
+  layout: GraphLayout,
+  rank: number,
+  geometry: RankGeometry[],
+): StripGeometry {
+  const strip = layout.segments.filter((segment) => segment.rank === rank);
+  const top = geometry[rank];
+  const bottom = geometry[rank + 1];
+  if (strip.length === 0 || !top || !bottom) {
+    return { segments: [], trackCount: 1, hasLabels: false, straight: true };
+  }
+  const exitOffsets = fanOffsets(strip, "from", top, bottom);
+  const entryOffsets = fanOffsets(strip, "to", top, bottom);
+  const resolved = strip.map((segment) => {
+    const fromX =
+      (top.centers[segment.fromCell] as number) + (exitOffsets.get(segment.edgeId) ?? 0);
+    let toX = (bottom.centers[segment.toCell] as number) + (entryOffsets.get(segment.edgeId) ?? 0);
+    const targetIsNode = (bottom.cells[segment.toCell] as RenderedCell).cell.kind === "node";
+    // A one-column jog reads as noise; draw it straight into the target,
+    // whose rendered cell is wide enough to absorb the offset. Virtual
+    // cells are exactly one column wide, so they must never be snapped.
+    if (targetIsNode && Math.abs(toX - fromX) <= 1) {
+      toX = fromX;
+    }
+    return { edgeId: segment.edgeId, label: segment.label, fromX, toX, targetIsNode };
+  });
+
+  // First-fit track assignment over pixel spans; straight unlabeled
+  // segments draw a plain vertical line and need no track row.
+  const segments: GeomSegment[] = [];
   const trackRanges: [number, number][][] = [];
-  for (const segment of strip.toSorted((a, b) => a.fromCell - b.fromCell)) {
-    const span: [number, number] = [
-      Math.min(segment.fromCell, segment.toCell),
-      Math.max(segment.fromCell, segment.toCell),
-    ];
+  for (const segment of resolved.toSorted((a, b) => a.fromX - b.fromX)) {
     let track = 0;
-    if (segment.fromCell !== segment.toCell || segment.label !== undefined) {
+    if (segment.fromX !== segment.toX || segment.label !== undefined) {
+      const span: [number, number] = [
+        Math.min(segment.fromX, segment.toX),
+        Math.max(segment.fromX, segment.toX),
+      ];
       track = trackRanges.findIndex((ranges) =>
         ranges.every(([start, end]) => span[1] < start || span[0] > end),
       );
@@ -284,16 +409,70 @@ function trackAssignments(strip: GraphSegment[]): {
       }
       (trackRanges[track] as [number, number][]).push(span);
     }
-    tracked.push({ ...segment, track });
+    segments.push({ ...segment, track });
   }
-  return { tracked, trackCount: Math.max(1, trackRanges.length) };
+  return {
+    segments,
+    trackCount: Math.max(1, trackRanges.length),
+    hasLabels: segments.some((segment) => segment.label !== undefined),
+    straight: segments.every(
+      (segment) => segment.fromX === segment.toX && segment.label === undefined,
+    ),
+  };
 }
+
+/**
+ * Fan columns for edges sharing a cell: segment i (ordered by the far
+ * end's x) gets column center - 2*(n-1-i), clamped to the cell, never
+ * right of center. Forward fans stay at or left of center while back-edge
+ * anchors sit right of center, so the two can never collide.
+ */
+function fanOffsets(
+  strip: GraphSegment[],
+  side: "from" | "to",
+  top: RankGeometry,
+  bottom: RankGeometry,
+): Map<string, number> {
+  const [ownRank, ownCell, farRank, farCell] =
+    side === "from"
+      ? ([top, (s: GraphSegment) => s.fromCell, bottom, (s: GraphSegment) => s.toCell] as const)
+      : ([bottom, (s: GraphSegment) => s.toCell, top, (s: GraphSegment) => s.fromCell] as const);
+  const offsets = new Map<string, number>();
+  const groups = new Map<number, GraphSegment[]>();
+  for (const segment of strip) {
+    // Virtual cells are one column wide and always have one edge per side.
+    if ((ownRank.cells[ownCell(segment)] as RenderedCell).cell.kind === "node") {
+      groups.set(ownCell(segment), [...(groups.get(ownCell(segment)) ?? []), segment]);
+    }
+  }
+  for (const [cellIndex, group] of groups) {
+    if (group.length < 2) {
+      continue;
+    }
+    const cell = ownRank.cells[cellIndex] as RenderedCell;
+    const maxOffset = Math.max(1, Math.floor(cell.width / 2) - 1);
+    const ordered = group.toSorted(
+      (a, b) => (farRank.centers[farCell(a)] as number) - (farRank.centers[farCell(b)] as number),
+    );
+    for (const [index, segment] of ordered.entries()) {
+      const offset = -2 * (ordered.length - 1 - index);
+      offsets.set(segment.edgeId, Math.max(-maxOffset, offset));
+    }
+  }
+  return offsets;
+}
+
+const BOX_CHARS = {
+  light: { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" },
+  heavy: { tl: "┏", tr: "┓", bl: "┗", br: "┛", h: "━", v: "┃" },
+} as const;
 
 function drawNodes(
   canvas: CharCanvas,
   placed: PlacedRank[],
   layout: GraphLayout,
   transitions: Set<string>,
+  nodeStyle: GraphNodeStyle,
 ): void {
   for (const rank of placed) {
     for (const [index, rendered] of rank.cells.entries()) {
@@ -302,15 +481,44 @@ function drawNodes(
       if (cell.kind === "virtual") {
         const edge = layout.edges.find((candidate) => candidate.edgeId === cell.edgeId);
         const taken = edge ? transitions.has(`${edge.from}->${edge.to}`) : false;
-        canvas.put(center, rank.y, "│", taken ? "taken" : "dim");
+        // Pass-through cells span the full cell height so the edge stays
+        // visually continuous across the rank row(s).
+        canvas.vline(center, rank.y, rank.y + cellHeight(nodeStyle) - 1, taken ? "taken" : "dim");
         continue;
       }
       const status = rendered.status ?? "queued";
       const startX = center - Math.floor(rendered.width / 2);
-      canvas.put(startX, rank.y, STATUS_GLYPHS[status], STATUS_STYLES[status]);
-      canvas.text(startX + 2, rank.y, rendered.text, status === "queued" ? "dim" : "plain");
+      if (nodeStyle === "box") {
+        drawNodeBox(canvas, startX, rank.y, rendered, status);
+      } else {
+        canvas.put(startX, rank.y, STATUS_GLYPHS[status], STATUS_STYLES[status]);
+        canvas.text(startX + 2, rank.y, rendered.text, status === "queued" ? "dim" : "plain");
+      }
     }
   }
+}
+
+/**
+ * A bordered node cell. Edge geometry keeps lines outside the border rows,
+ * so borders stay unbroken; the active node gets a heavy border so the
+ * current position stands out.
+ */
+function drawNodeBox(
+  canvas: CharCanvas,
+  startX: number,
+  y: number,
+  rendered: RenderedCell,
+  status: NodeStatus,
+): void {
+  const chars = status === "active" ? BOX_CHARS.heavy : BOX_CHARS.light;
+  const style = STATUS_STYLES[status];
+  const innerWidth = rendered.width - 2;
+  canvas.text(startX, y, `${chars.tl}${chars.h.repeat(innerWidth)}${chars.tr}`, style);
+  canvas.text(startX, y + 1, chars.v, style);
+  canvas.put(startX + 2, y + 1, STATUS_GLYPHS[status], style);
+  canvas.text(startX + 4, y + 1, rendered.text, status === "queued" ? "dim" : "plain");
+  canvas.text(startX + rendered.width - 1, y + 1, chars.v, style);
+  canvas.text(startX, y + 2, `${chars.bl}${chars.h.repeat(innerWidth)}${chars.br}`, style);
 }
 
 function edgeStyle(
@@ -330,41 +538,42 @@ function edgeStyle(
 function drawSegments(
   canvas: CharCanvas,
   placed: PlacedRank[],
+  strips: StripGeometry[],
   layout: GraphLayout,
   transitions: Set<string>,
   activePair: string | null,
   graphWidth: number,
-): void {
+  nodeStyle: GraphNodeStyle,
+  lanes: BackEdgeLanes,
+): PendingLabel[] {
+  const labels: PendingLabel[] = [];
   for (let rank = 0; rank < placed.length - 1; rank += 1) {
-    const strip = layout.segments.filter((segment) => segment.rank === rank);
-    if (strip.length === 0) {
+    const strip = strips[rank] as StripGeometry;
+    if (strip.segments.length === 0) {
       continue;
     }
-    const { tracked } = trackAssignments(strip);
     const top = placed[rank] as PlacedRank;
     const bottom = placed[rank + 1] as PlacedRank;
-    const stripTop = top.y + 1;
+    // Forward lines start right below the source cell, cross any back-edge
+    // lane rows (as ┼ crossings), run their strip tracks, then cross the
+    // entry lanes to the arrow row directly above the target cell.
+    const stubTop = top.y + cellHeight(nodeStyle);
+    const stripTop = stubTop + lanes.below(rank).length;
     const arrowY = bottom.y - 1;
-    for (const segment of tracked) {
+    const stripBottom = arrowY - 1 - lanes.above(rank + 1).length;
+    for (const segment of strip.segments) {
       const edge = layout.edges.find((candidate) => candidate.edgeId === segment.edgeId);
       if (!edge) {
         continue;
       }
       const style = edgeStyle(`${edge.from}->${edge.to}`, transitions, activePair);
-      const fromX = top.centers[segment.fromCell] as number;
-      let toX = bottom.centers[segment.toCell] as number;
+      const { fromX, toX } = segment;
       const trackY = stripTop + segment.track;
-      const targetCell = (bottom.cells[segment.toCell] as RenderedCell).cell;
-      // A one-column jog reads as noise; draw it straight into the target,
-      // whose rendered cell is wide enough to absorb the offset.
-      if (Math.abs(toX - fromX) <= 1) {
-        toX = fromX;
-      }
       if (fromX === toX) {
-        canvas.vline(fromX, stripTop, arrowY, style);
+        canvas.vline(fromX, stubTop, arrowY, style);
       } else {
-        if (trackY > stripTop) {
-          canvas.vline(fromX, stripTop, trackY - 1, style);
+        if (trackY > stubTop) {
+          canvas.vline(fromX, stubTop, trackY - 1, style);
         }
         canvas.put(fromX, trackY, toX > fromX ? "└" : "┘", style);
         canvas.hline(trackY, Math.min(fromX, toX) + 1, Math.max(fromX, toX) - 1, style);
@@ -373,46 +582,93 @@ function drawSegments(
           canvas.vline(toX, trackY + 1, arrowY, style);
         }
       }
-      if (targetCell.kind === "node") {
+      if (segment.targetIsNode) {
         canvas.put(toX, arrowY, "▼", style);
       }
       if (segment.label !== undefined) {
-        const label = ` ${segment.label} `;
-        if (fromX === toX) {
-          canvas.text(fromX + 2, trackY, label, style);
-        } else if (Math.abs(toX - fromX) >= label.length + 4) {
-          // Long horizontal run: center the label on the line.
-          canvas.text(
-            Math.floor((fromX + toX) / 2) - Math.floor(label.length / 2),
-            trackY,
-            label,
-            style,
-          );
-        } else {
-          // Short run: hang the label beside the descending line, on the
-          // side facing the graph center so it stays clear of the back-edge
-          // gutter at the right margin.
-          const labelY = Math.min(trackY + 1, arrowY - 1);
-          if (toX >= Math.floor(graphWidth / 2)) {
-            canvas.text(toX - label.length, labelY, label, style);
-          } else {
-            canvas.text(toX + 2, labelY, label, style);
-          }
-        }
+        labels.push({
+          text: segment.label,
+          style,
+          fromX,
+          toX,
+          trackY,
+          labelRow: Math.min(stripTop + strip.trackCount, stripBottom),
+          graphWidth,
+        });
       }
     }
   }
+  return labels;
 }
 
+type PendingLabel = {
+  text: string;
+  style: CanvasStyle;
+  fromX: number;
+  toX: number;
+  trackY: number;
+  labelRow: number;
+  graphWidth: number;
+};
+
+/**
+ * Place a branch label. Labels are drawn after every line is on the canvas,
+ * so a spot that is free now stays free: first try writing over the
+ * segment's own horizontal run (only plain `─` cells may be replaced), then
+ * the strip's reserved label row beside the descending line, trying the
+ * side facing the graph center first.
+ */
+function drawSegmentLabel(canvas: CharCanvas, label: PendingLabel): void {
+  const { text, style, fromX, toX, trackY, labelRow, graphWidth } = label;
+  const padded = ` ${text} `;
+  if (fromX !== toX) {
+    const runStart = Math.min(fromX, toX) + 1;
+    const runEnd = Math.max(fromX, toX) - 1;
+    const center = Math.floor((runStart + runEnd) / 2) - Math.floor(padded.length / 2);
+    if (
+      runEnd - runStart + 1 >= padded.length + 2 &&
+      canvas.textOverRun(center, trackY, padded, style)
+    ) {
+      return;
+    }
+  }
+  const candidates: [number, number][] =
+    toX >= Math.floor(graphWidth / 2)
+      ? [
+          [toX - text.length - 1, labelRow],
+          [toX + 2, labelRow],
+        ]
+      : [
+          [toX + 2, labelRow],
+          [toX - text.length - 1, labelRow],
+        ];
+  for (const [x, y] of candidates) {
+    if (canvas.textIfEmpty(x, y, text, style)) {
+      return;
+    }
+  }
+  // Last resort: beside the source corner on the track row.
+  canvas.textIfEmpty(fromX + 2, trackY, text, style);
+}
+
+/**
+ * Each back edge leaves its source cell downward into its own lane row,
+ * runs right to a private gutter column, climbs the gutter, and re-enters
+ * through its target's entry lane and arrow row from above. Every lane row
+ * and gutter column is exclusive to one edge, so loop lines can only ever
+ * cross other lines (merging into ┼), never run along them.
+ */
 function drawBackEdges(
   canvas: CharCanvas,
   placed: PlacedRank[],
   layout: GraphLayout,
   transitions: Set<string>,
   graphWidth: number,
+  nodeStyle: GraphNodeStyle,
+  lanes: BackEdgeLanes,
 ): void {
-  const backEdges = layout.edges.filter((edge) => edge.isBackEdge);
-  for (const [track, edge] of backEdges.entries()) {
+  let gutterX = graphWidth + GUTTER_GAP;
+  for (const edge of lanes.edges) {
     const fromRank = layout.rankOfNode.get(edge.from);
     const toRank = layout.rankOfNode.get(edge.to);
     if (fromRank === undefined || toRank === undefined) {
@@ -420,33 +676,63 @@ function drawBackEdges(
     }
     const from = placed[fromRank] as PlacedRank;
     const to = placed[toRank] as PlacedRank;
-    const fromIndex = from.cells.findIndex(
-      (cell) => cell.cell.kind === "node" && cell.cell.nodeId === edge.from,
-    );
-    const toIndex = to.cells.findIndex(
-      (cell) => cell.cell.kind === "node" && cell.cell.nodeId === edge.to,
-    );
-    if (fromIndex === -1 || toIndex === -1) {
+    const exit = cellAnchor(from, edge.from, lanes.below(fromRank), edge);
+    const entry = cellAnchor(to, edge.to, lanes.above(toRank), edge);
+    if (!exit || !entry) {
       continue;
     }
     const style: CanvasStyle = transitions.has(`${edge.from}->${edge.to}`) ? "taken" : "back";
-    const gutterX = graphWidth + GUTTER_GAP + track * 2;
-    const fromCell = from.cells[fromIndex] as RenderedCell;
-    const toCell = to.cells[toIndex] as RenderedCell;
-    const fromEdgeX = (from.centers[fromIndex] as number) + Math.ceil(fromCell.width / 2) + 1;
-    const toEdgeX = (to.centers[toIndex] as number) + Math.ceil(toCell.width / 2) + 1;
-    canvas.hline(from.y, fromEdgeX, gutterX - 1, style);
-    canvas.hline(to.y, toEdgeX + 1, gutterX - 1, style);
-    const [top, bottom] = from.y < to.y ? [from.y, to.y] : [to.y, from.y];
-    // The gutter line always turns left toward the nodes at both ends.
-    canvas.put(gutterX, top, "┐", style);
-    canvas.put(gutterX, bottom, "┘", style);
-    if (bottom - top > 1) {
-      canvas.vline(gutterX, top + 1, bottom - 1, style);
+    const exitLaneY = from.y + cellHeight(nodeStyle) + exit.lane;
+    const aboveCount = lanes.above(toRank).length;
+    const arrowY = to.y - 1;
+    const entryLaneY = arrowY - aboveCount + entry.lane;
+
+    // Downward stub out of the source cell, then right along the exit lane.
+    if (exitLaneY > from.y + cellHeight(nodeStyle)) {
+      canvas.vline(exit.x, from.y + cellHeight(nodeStyle), exitLaneY - 1, style);
     }
-    canvas.put(toEdgeX, to.y, "◀", style);
+    canvas.put(exit.x, exitLaneY, "└", style);
+    canvas.hline(exitLaneY, exit.x + 1, gutterX - 1, style);
+    canvas.put(gutterX, exitLaneY, "┘", style);
+    // Up the gutter, then left along the entry lane into the target.
+    canvas.put(gutterX, entryLaneY, "┐", style);
+    if (exitLaneY - entryLaneY > 1) {
+      canvas.vline(gutterX, entryLaneY + 1, exitLaneY - 1, style);
+    }
+    canvas.hline(entryLaneY, entry.x + 1, gutterX - 1, style);
+    canvas.put(entry.x, entryLaneY, "┌", style);
+    if (arrowY - entryLaneY > 1) {
+      canvas.vline(entry.x, entryLaneY + 1, arrowY - 1, style);
+    }
+    canvas.put(entry.x, arrowY, "▼", style);
     if (edge.label !== undefined) {
-      canvas.text(gutterX + 2, Math.floor((from.y + to.y) / 2), edge.label, style);
+      canvas.text(gutterX + 2, entryLaneY, edge.label, style);
     }
+    // Reserve horizontal room for this gutter and its label before the next.
+    gutterX += 2 + (edge.label === undefined ? 0 : edge.label.length + 1);
   }
+}
+
+/**
+ * Where a back edge touches a node cell: offset right of center so the
+ * stub can never collide with forward-edge lines at the center column,
+ * clamped inside the cell.
+ */
+function cellAnchor(
+  rank: PlacedRank,
+  nodeId: string,
+  laneEdges: GraphEdge[],
+  edge: GraphEdge,
+): { x: number; lane: number } | null {
+  const index = rank.cells.findIndex(
+    (cell) => cell.cell.kind === "node" && cell.cell.nodeId === nodeId,
+  );
+  const lane = laneEdges.findIndex((candidate) => candidate.edgeId === edge.edgeId);
+  if (index === -1 || lane === -1) {
+    return null;
+  }
+  const cell = rank.cells[index] as RenderedCell;
+  const center = rank.centers[index] as number;
+  const rightmost = center + Math.floor(cell.width / 2) - 1;
+  return { x: Math.min(center + 2 + lane * 2, rightmost), lane };
 }

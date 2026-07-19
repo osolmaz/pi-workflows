@@ -16,14 +16,29 @@ imports nothing outside itself and never imports pi. `src/extension` and
 `src/viewer` may import `src/workflows` and never each other. The viewer
 observes runs purely through the bundle files, so it works from any process.
 
-Within the viewer, `graph.ts` computes a pure layered layout (ported from the
-acpx replay viewer: labelled switch expansion, DFS back-edge detection,
+Within `src/render`, `graph.ts` computes a pure layered layout (ported from
+the acpx replay viewer: labelled switch expansion, DFS back-edge detection,
 longest-path layering, barycenter ordering, virtual pass-through cells for
 long edges), `canvas.ts` is a character grid that merges box-drawing
 characters by connectivity, and `graph-render.ts` turns a run bundle plus a
-replay position into the drawn graph. `render.ts` composes the full detail
-view (header, graph, step timeline, step inspector) and stays pure so tests
-can assert on rendered lines.
+replay position into the drawn graph in one of two node styles: `box`
+(bordered nodes, used by the viewer) or `line` (single-line nodes, used by
+the in-pi widget where vertical space is scarce). `render.ts` in `src/viewer`
+composes the full detail view (header, graph, step timeline, step inspector)
+and stays pure so tests can assert on rendered lines.
+
+The renderer is built so that overlaps cannot corrupt the drawing: every
+back edge owns exclusive lane rows and an exclusive gutter column, multiple
+edges leaving one node fan out over separate exit columns, and labels are
+drawn last through `textOverRun`/`textIfEmpty`, which refuse to overwrite
+anything but a plain horizontal run or empty cells. `test/helpers/graph-verify.ts`
+enforces this structurally: it re-parses the rendered characters, checks
+every node box is unbroken, and traces every declared edge through the
+actual box-drawing characters from source box to target arrow.
+`test/graph-verify.test.ts` runs that verifier over 60 seeded random
+workflow shapes at every replay position; if a rendering change breaks a
+line, misplaces an arrow, or lets a label damage an edge, those tests fail
+with the offending drawing in the assertion message.
 
 Inside the engine, the pi-facing seam is the `AgentStepExecutor` interface.
 The extension implements it on top of the live conversation

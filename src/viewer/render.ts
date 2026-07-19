@@ -173,7 +173,9 @@ export function renderRunDetailLines(
   lines.push(ansi.dim("q back · r refresh · ↑/↓ scroll · ←/→ replay steps"));
   lines.push("");
 
-  const graph = renderGraphLines(bundle, selected, now).map((line) => fitWidth(line, size.width));
+  const graph = renderGraphLines(bundle, selected, now, { nodeStyle: "box" }).map((line) =>
+    fitWidth(line, size.width),
+  );
   if (graph.length > 0) {
     lines.push(...graph);
   } else {

@@ -166,7 +166,9 @@ describe("renderGraphLines", () => {
     expect(text).toContain("×2"); // verify ran twice
     expect(text).toContain("issues_found");
     expect(text).toContain("clean");
-    expect(text).toContain("◀"); // back-edge arrow into verify
+    // Six edges, six entry arrows: the loop edge enters verify from above
+    // through the right-hand gutter, so verify receives two arrows.
+    expect(text.match(/▼/g)).toHaveLength(6);
     expect(text).toContain("· done [compute]"); // untouched branch stays queued
   });
 
