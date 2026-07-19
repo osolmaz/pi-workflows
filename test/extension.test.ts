@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import piWorkflows from "../src/extension/index.js";
@@ -179,9 +180,16 @@ describe("pi-workflows extension", () => {
 
   it("warns when no workflows are discoverable", async () => {
     const cwd = await makeTempDir("pi-workflows-ext-empty");
-    const harness = makeHarness({ cwd, respond: () => {} });
-    await harness.command.handler("", harness.ctx);
-    expect(harness.notifications.at(-1)).toContain("No workflows found");
+    // The real home directory may have global workflows installed; point
+    // discovery at an empty home so this test stays hermetic.
+    const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(cwd);
+    try {
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.command.handler("", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("No workflows found");
+    } finally {
+      homedirSpy.mockRestore();
+    }
   });
 
   it("rejects tool calls outside a workflow", async () => {
