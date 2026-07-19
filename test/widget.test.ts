@@ -71,7 +71,7 @@ describe("nodeGlyph", () => {
 });
 
 describe("buildWidgetLines", () => {
-  it("renders a header and the workflow graph", () => {
+  it("renders a header and the boxed graph windowed on the active node", () => {
     const state = makeState({
       currentNode: "second",
       currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
@@ -83,7 +83,7 @@ describe("buildWidgetLines", () => {
           nodeId: "first",
           nodeType: "compute",
           outcome: "ok",
-          startedAt: "2026-01-01T00:00:00.000Z",
+          startedAt: "2026-01-01T00:00:01.000Z",
           finishedAt: "2026-01-01T00:00:01.000Z",
           promptText: null,
           output: 1,
@@ -91,14 +91,14 @@ describe("buildWidgetLines", () => {
       ],
       runTitle: "demo run",
     });
-    const lines = buildWidgetLines(state, snapshot);
+    const lines = buildWidgetLines(state, snapshot, new Date("2026-01-01T00:00:02.000Z"));
     const joined = lines.join("\n");
     expect(lines[0]).toContain("workflow demo — demo run [running]");
-    expect(joined).toContain("✓ first [compute]");
+    // The active node is boxed (heavy border) and centered in the window.
     expect(joined).toMatch(/◐ second \[compute\] running .* · verifying/);
-    expect(joined).toContain("· third [compute]");
-    // The graph body draws edges, not just a node strip.
-    expect(joined).toContain("▼");
+    expect(joined).toContain("┃");
+    expect(joined).toContain("┏");
+    expect(lines.length).toBeLessThanOrEqual(10);
   });
 
   it("windows tall graphs around the active node within pi's line budget", () => {
@@ -129,8 +129,17 @@ describe("buildWidgetLines", () => {
   });
 
   it("shows the whole graph when it fits the budget", () => {
-    const lines = buildWidgetLines(makeState(), snapshot);
+    const pair = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "pair",
+        startAt: "a",
+        nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
+        edges: [{ from: "a", to: "b" }],
+      }),
+    );
+    const lines = buildWidgetLines(makeState({ workflowName: "pair" }), pair);
     expect(lines.join("\n")).not.toMatch(/more/);
+    expect(lines.join("\n")).toContain("┌");
     expect(lines.length).toBeLessThanOrEqual(10);
   });
 

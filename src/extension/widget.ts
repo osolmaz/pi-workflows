@@ -68,7 +68,9 @@ export function buildWidgetLines(
   }
 
   const budget = PI_MAX_WIDGET_LINES - 1 - footer.length;
-  const graph = renderGraphLines({ state, snapshot }, state.steps.length - 1, now);
+  const graph = renderGraphLines({ state, snapshot }, state.steps.length - 1, now, {
+    nodeStyle: "box",
+  });
   const body =
     graph.length > 0
       ? windowAroundFocus(graph, focusLine(graph, state), budget).map((line) => `  ${line}`)
