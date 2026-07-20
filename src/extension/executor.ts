@@ -46,6 +46,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   private readonly maxNudges: number;
   private pending: PendingStep | null = null;
   private streaming = false;
+  private heldByUser = false;
 
   constructor(options: ConversationStepExecutorOptions) {
     this.sendPrompt = options.sendPrompt;
@@ -59,6 +60,39 @@ export class ConversationStepExecutor implements AgentStepExecutor {
 
   get pendingStepId(): string | null {
     return this.pending?.request.contract.nodeId ?? null;
+  }
+
+  /**
+   * Hold the pending step for the user: no nudges are sent while held, so an
+   * escape-interrupted conversation stays quiet until the user resumes.
+   */
+  hold(): void {
+    this.heldByUser = true;
+  }
+
+  get held(): boolean {
+    return this.heldByUser;
+  }
+
+  /**
+   * Release a user hold. When a step is still pending, its prompt is
+   * re-delivered so the model picks the step back up.
+   */
+  release(): void {
+    if (!this.heldByUser) {
+      return;
+    }
+    this.heldByUser = false;
+    const pending = this.pending;
+    if (!pending) {
+      return;
+    }
+    try {
+      this.sendPrompt({ prompt: pending.request.prompt, streaming: this.streaming });
+    } catch (error) {
+      this.clearPending();
+      pending.reject(error);
+    }
   }
 
   async runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission> {
@@ -169,6 +203,11 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   handleAgentSettled(): boolean {
     const pending = this.pending;
     if (!pending) {
+      return false;
+    }
+    if (this.heldByUser) {
+      // The user interrupted deliberately; reminding the model now would
+      // steal the conversation back. The step waits for an explicit resume.
       return false;
     }
     if (pending.nudgesSent >= this.maxNudges) {

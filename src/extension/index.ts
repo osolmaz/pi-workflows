@@ -101,15 +101,37 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  const setStatus = (ctx: ExtensionContext, text: string | undefined) => {
+    try {
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(WIDGET_KEY, text);
+      }
+    } catch {
+      // Stale ctx; the status bar no longer exists.
+    }
+  };
+
+  /** True when the run is held for the user (escape or /workflow pause). */
+  const runHeld = (): boolean =>
+    activeRun !== null && (activeRun.engine.pauseRequested || activeRun.executor.held);
+
+  const footerStatus = (state: WorkflowRunState): string => {
+    const label = runHeld() || state.paused ? "paused" : state.status;
+    const node = state.currentNode ?? state.waitingOn;
+    return `wf ${state.workflowName} [${label}]${node ? ` ${node}` : ""}`;
+  };
+
   const renderWidget = (ctx: ExtensionContext) => {
     if (!widgetSource) {
       return;
     }
+    const held = runHeld();
     const view = buildWidgetView(
       widgetSource.state,
       widgetSource.snapshot,
       new Date(),
       widgetScroll,
+      held,
     );
     widgetShownScroll = view.scroll;
     widgetMaxScroll = view.maxScroll;
@@ -117,6 +139,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       widgetScroll = view.scroll;
     }
     setWidget(ctx, view.lines);
+    setStatus(ctx, footerStatus(widgetSource.state));
   };
 
   const updateWidget = (
@@ -137,6 +160,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     widgetSource = null;
     widgetScroll = null;
     setWidget(ctx, undefined);
+    setStatus(ctx, undefined);
   };
 
   const scrollWidget = (ctx: ExtensionContext, delta: number) => {
@@ -315,11 +339,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
           notify(ctx, "No workflow is running.", "warning");
           return;
         }
-        if (activeRun.engine.pauseRequested) {
+        if (runHeld()) {
           notify(ctx, `Workflow ${activeRun.workflowName} is already pausing or paused.`);
           return;
         }
         activeRun.engine.pause();
+        renderWidget(ctx);
         notify(
           ctx,
           `Pausing workflow ${activeRun.workflowName} — the current step finishes, then the run holds. /workflow resume to continue.`,
@@ -331,11 +356,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
           notify(ctx, "No workflow is running.", "warning");
           return;
         }
-        if (!activeRun.engine.pauseRequested) {
+        if (!runHeld()) {
           notify(ctx, `Workflow ${activeRun.workflowName} is not paused.`);
           return;
         }
         activeRun.engine.resume();
+        activeRun.executor.release();
+        renderWidget(ctx);
         notify(ctx, `Workflow ${activeRun.workflowName} resumed.`);
         return;
       }
@@ -389,6 +416,33 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     activeRun?.executor.setStreaming(true);
+  });
+
+  pi.on("agent_end", (event, ctx) => {
+    const run = activeRun;
+    if (!run) {
+      return;
+    }
+    // An aborted turn means the user hit escape to take the conversation
+    // back. Nudging or dispatching the next step would immediately steal it
+    // again, so hold the run until an explicit /workflow resume.
+    const aborted = event.messages.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "stopReason" in message &&
+        (message as { stopReason?: string }).stopReason === "aborted",
+    );
+    if (!aborted || runHeld()) {
+      return;
+    }
+    run.engine.pause();
+    run.executor.hold();
+    renderWidget(ctx);
+    notify(
+      ctx,
+      `Workflow ${run.workflowName} paused (turn interrupted). /workflow resume to continue, /workflow cancel to stop.`,
+    );
   });
 
   pi.on("agent_settled", () => {

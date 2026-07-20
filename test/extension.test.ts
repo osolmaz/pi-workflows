@@ -24,6 +24,7 @@ type FakeContext = {
   ui: {
     notify: (message: string, type?: string) => void;
     setWidget: (key: string, lines: string[] | undefined) => void;
+    setStatus: (key: string, text: string | undefined) => void;
   };
 };
 
@@ -38,7 +39,8 @@ function makeHarness(options: {
 }) {
   const notifications: string[] = [];
   const widgets: (string[] | undefined)[] = [];
-  const listeners = new Map<string, (() => void)[]>();
+  const statuses: (string | undefined)[] = [];
+  const listeners = new Map<string, ((event?: unknown, ctx?: FakeContext) => void)[]>();
   const shortcuts = new Map<string, (ctx: FakeContext) => void>();
   let command: RegisteredCommand | null = null;
   let tool: RegisteredTool | null = null;
@@ -49,6 +51,7 @@ function makeHarness(options: {
     ui: {
       notify: (message) => notifications.push(message),
       setWidget: (_key, lines) => widgets.push(lines),
+      setStatus: (_key, text) => statuses.push(text),
     },
   };
 
@@ -62,7 +65,7 @@ function makeHarness(options: {
     registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
       shortcuts.set(key, spec.handler);
     },
-    on: (event: string, listener: () => void) => {
+    on: (event: string, listener: (event?: unknown, ctx?: FakeContext) => void) => {
       const queue = listeners.get(event) ?? [];
       queue.push(listener);
       listeners.set(event, queue);
@@ -81,12 +84,13 @@ function makeHarness(options: {
     ctx,
     notifications,
     widgets,
+    statuses,
     command: command as RegisteredCommand,
     tool: tool as RegisteredTool,
     shortcuts,
-    emit: (event: string) => {
+    emit: (event: string, payload?: unknown) => {
       for (const listener of listeners.get(event) ?? []) {
-        listener();
+        listener(payload, ctx);
       }
     },
   };
@@ -275,6 +279,68 @@ export default defineWorkflow({
       expect(harness.notifications.at(-1)).toContain("Workflow mini resumed");
       await harness.command.handler("resume", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("is not paused");
+
+      await harness.command.handler("cancel", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("auto-pauses when the user interrupts the turn and resumes with a reprompt", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const prompts: string[] = [];
+      const harness = makeHarness({ cwd, respond: (prompt) => prompts.push(prompt) });
+
+      await harness.command.handler("mini", harness.ctx);
+      await waitFor(() => prompts.length === 1);
+
+      // Escape aborts the turn; the extension must hold the run instead of
+      // nudging the model and stealing the conversation back.
+      harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] });
+      expect(harness.notifications.at(-1)).toContain("paused (turn interrupted)");
+      expect(harness.statuses.at(-1)).toContain("[paused]");
+
+      harness.emit("agent_settled");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(prompts).toHaveLength(1);
+
+      // A second aborted turn while already held must not renotify.
+      const notificationCount = harness.notifications.length;
+      harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] });
+      expect(harness.notifications).toHaveLength(notificationCount);
+
+      // Resume re-delivers the pending step prompt so the model picks it up.
+      await harness.command.handler("resume", harness.ctx);
+      await waitFor(() => prompts.length === 2);
+      expect(prompts[1]).toContain("Workflow step contract");
+      expect(harness.notifications.at(-1)).toContain("Workflow mini resumed");
+
+      await harness.command.handler("cancel", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("ignores non-aborted turn ends", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.command.handler("mini", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("started")));
+
+      harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+      expect(harness.notifications.some((note) => note.includes("paused (turn interrupted)"))).toBe(
+        false,
+      );
 
       await harness.command.handler("cancel", harness.ctx);
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));

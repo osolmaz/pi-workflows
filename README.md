@@ -58,11 +58,17 @@ Then, from any pi conversation:
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
 lets the current step finish and then holds the run before the next node —
 useful when you want to interject in the conversation mid-workflow —
-and `/workflow resume` continues it. `/workflow cancel` stops the active run;
-if the last run already ended (for example parked at a checkpoint), it clears
-the leftover widget instead. Trailing text becomes `{ task: "..." }`; pass
-arbitrary input with `--input-json {"key": "value"}`. The names `cancel`,
-`list`, `pause`, and `resume` are reserved and rejected as workflow names.
+and `/workflow resume` continues it. Pressing escape to interrupt a turn
+pauses the workflow automatically, so the run never nudges the model while
+you have taken the conversation back; `/workflow resume` re-delivers the
+pending step prompt. `/workflow cancel` stops the active run; if the last run
+already ended (for example parked at a checkpoint), it clears the leftover
+widget instead. Trailing text becomes `{ task: "..." }`; pass arbitrary input
+with `--input-json {"key": "value"}`. The names `cancel`, `list`, `pause`,
+and `resume` are reserved and rejected as workflow names.
+
+While a run is on screen, the footer status bar shows a compact
+`wf <name> [status] <node>` indicator alongside the widget.
 
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The

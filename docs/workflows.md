@@ -242,6 +242,10 @@ possible. Defaults worth knowing:
   then the run holds at the step boundary (`paused: true` in the run state,
   `run_paused` in the trace) until `/workflow resume` or `/workflow cancel`.
   Pausing never interrupts a node mid-flight.
+- Interrupting a turn (escape) auto-pauses the run: the pending agent step is
+  held without nudges and the engine pauses at the next boundary. Node
+  timeouts keep ticking while held, so a long-abandoned step still times out.
+  `/workflow resume` re-delivers the pending step prompt.
 - `/workflow cancel` aborts the current node and marks the run `cancelled`.
   When no run is live but the widget still shows a parked or finished run,
   the same command clears the widget.

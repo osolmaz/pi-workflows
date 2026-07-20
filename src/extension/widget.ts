@@ -62,9 +62,13 @@ export function buildWidgetView(
   snapshot: WorkflowDefinitionSnapshot,
   now: Date = new Date(),
   scroll: number | null = null,
+  held = false,
 ): WidgetView {
-  const glyph = state.paused ? "⏸" : STATUS_GLYPHS[state.status];
-  const statusText = state.paused ? "paused" : state.status;
+  // `held` covers pauses the state cannot see yet: an escape-interrupted
+  // step or a pause requested while the current node is still finishing.
+  const paused = held || state.paused === true;
+  const glyph = paused ? "⏸" : STATUS_GLYPHS[state.status];
+  const statusText = paused ? "paused" : state.status;
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
   const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
