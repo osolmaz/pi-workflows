@@ -180,8 +180,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const { state } = result;
     updateWidget(ctx, state, run.snapshot);
     clearWidgetTimer();
-    widgetTimer = setTimeout(() => clearWidget(ctx), FINAL_WIDGET_TTL_MS);
-    widgetTimer.unref?.();
+    // A waiting run is parked at a checkpoint for a human; keep its widget up
+    // until a new workflow replaces it. Terminal runs fade after a grace TTL.
+    if (state.status !== "waiting") {
+      widgetTimer = setTimeout(() => clearWidget(ctx), FINAL_WIDGET_TTL_MS);
+      widgetTimer.unref?.();
+    }
     const summary = `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
   };

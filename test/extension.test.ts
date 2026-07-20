@@ -197,6 +197,44 @@ describe("pi-workflows extension", () => {
     }
   });
 
+  it("keeps the widget up when a run parks at a checkpoint", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "parked.workflow.ts"),
+        `import { checkpoint, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "parked",
+  startAt: "review",
+  nodes: {
+    review: checkpoint({ summary: "human review", run: () => ({ ok: true }) }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("parked", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("waiting")));
+
+      // The final widget update must still be present, not cleared, and show
+      // the waiting state so the human sees the parked checkpoint.
+      const last = harness.widgets.at(-1);
+      expect(last).toBeDefined();
+      expect(last?.join("\n")).toContain("[waiting]");
+      expect(last?.join("\n")).toContain("waiting on checkpoint: review");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("registers scroll shortcuts that no-op without a widget", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const harness = makeHarness({ cwd, respond: () => {} });
