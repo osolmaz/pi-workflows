@@ -11,6 +11,17 @@ export async function makeTempDir(prefix: string): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
 }
 
+/** Poll until `predicate` is true, failing after `timeoutMs`. */
+export async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitUntil timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 export type ScriptedResponse =
   | { output: unknown }
   | { error: string }

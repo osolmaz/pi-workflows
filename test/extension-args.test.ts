@@ -7,8 +7,10 @@ describe("parseWorkflowArgs", () => {
     expect(parseWorkflowArgs("   ")).toEqual({ kind: "list" });
   });
 
-  it("parses cancel", () => {
+  it("parses cancel, pause, and resume", () => {
     expect(parseWorkflowArgs("cancel")).toEqual({ kind: "cancel" });
+    expect(parseWorkflowArgs("pause")).toEqual({ kind: "pause" });
+    expect(parseWorkflowArgs("resume")).toEqual({ kind: "resume" });
   });
 
   it("parses a bare workflow ref", () => {

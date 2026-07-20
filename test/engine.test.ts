@@ -6,7 +6,7 @@ import { agent, checkpoint, compute, defineWorkflow, shell } from "../src/workfl
 import { WorkflowEngine, appendStepContract } from "../src/workflows/engine.js";
 import { readRunBundle } from "../src/workflows/store.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
-import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
 async function makeEngine(
   executor: ScriptedExecutor,
@@ -58,6 +58,76 @@ describe("WorkflowEngine", () => {
       .map((line) => JSON.parse(line) as WorkflowTraceEvent);
     expect(lines[0]?.type).toBe("run_started");
     expect(lines.map((line) => line.seq)).toEqual(lines.map((_line, index) => index + 1));
+  });
+
+  it("pauses at the step boundary and resumes", async () => {
+    const engineRef: { engine?: WorkflowEngine } = {};
+    const workflow = defineWorkflow({
+      name: "pausable",
+      startAt: "first",
+      nodes: {
+        // Pausing from inside the node proves the current step still
+        // finishes before the hold takes effect.
+        first: compute({
+          run: () => {
+            engineRef.engine?.pause();
+            return 1;
+          },
+        }),
+        second: compute({ run: () => 2 }),
+      },
+      edges: [{ from: "first", to: "second" }],
+    });
+    const executor = new ScriptedExecutor();
+    const { engine, events } = await makeEngine(executor);
+    engineRef.engine = engine;
+
+    const running = engine.run(workflow, {});
+    await waitUntil(() => events.some((event) => event.type === "run_paused"));
+    // The step that requested the pause completed; the next never started.
+    const finishedNodes = events.filter((event) => event.type === "node_finished");
+    expect(finishedNodes.map((event) => event.nodeId)).toEqual(["first"]);
+    expect(events.filter((event) => event.type === "node_started")).toHaveLength(1);
+    expect(engine.pauseRequested).toBe(true);
+
+    engine.resume();
+    const { state } = await running;
+
+    expect(state.status).toBe("completed");
+    expect(state.paused).toBeUndefined();
+    expect(state.steps.map((step) => step.nodeId)).toEqual(["first", "second"]);
+    const types = events.map((event) => event.type);
+    expect(types.indexOf("run_paused")).toBeLessThan(types.indexOf("run_resumed"));
+  });
+
+  it("cancel releases a paused run and marks it cancelled", async () => {
+    const engineRef: { engine?: WorkflowEngine } = {};
+    const workflow = defineWorkflow({
+      name: "pause-cancel",
+      startAt: "first",
+      nodes: {
+        first: compute({
+          run: () => {
+            engineRef.engine?.pause();
+            return 1;
+          },
+        }),
+        second: compute({ run: () => 2 }),
+      },
+      edges: [{ from: "first", to: "second" }],
+    });
+    const executor = new ScriptedExecutor();
+    const { engine, events } = await makeEngine(executor);
+    engineRef.engine = engine;
+
+    const running = engine.run(workflow, {});
+    await waitUntil(() => events.some((event) => event.type === "run_paused"));
+
+    engine.cancel();
+    const { state } = await running;
+    expect(state.status).toBe("cancelled");
+    expect(state.paused).toBeUndefined();
+    expect(state.steps.map((step) => step.nodeId)).toEqual(["first"]);
   });
 
   it("appends the step contract to agent prompts", async () => {

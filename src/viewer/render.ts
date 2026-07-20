@@ -164,9 +164,10 @@ export function renderRunDetailLines(
     selectedStepIndex === null || steps.length === 0
       ? ""
       : ` · step ${Math.min(selected, steps.length - 1) + 1}/${steps.length}`;
+  const paused = state.paused ? ` · ${ansi.yellow("paused")}` : "";
   lines.push(
     fitWidth(
-      `${statusLabel(state.status)} · run ${state.runId} · elapsed ${formatDuration(runElapsedMs(state, now))}${position}`,
+      `${statusLabel(state.status)}${paused} · run ${state.runId} · elapsed ${formatDuration(runElapsedMs(state, now))}${position}`,
       size.width,
     ),
   );

@@ -42,8 +42,9 @@ describe("defineWorkflow validation", () => {
   });
 
   it("rejects reserved workflow names claimed by /workflow subcommands", () => {
-    expect(() => define({ name: "cancel" })).toThrow(/reserved for \/workflow subcommands/);
-    expect(() => define({ name: "list" })).toThrow(/reserved for \/workflow subcommands/);
+    for (const name of ["cancel", "list", "pause", "resume"]) {
+      expect(() => define({ name })).toThrow(/reserved for \/workflow subcommands/);
+    }
   });
 
   it("rejects missing or invalid top-level fields", () => {

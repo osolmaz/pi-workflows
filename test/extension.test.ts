@@ -251,6 +251,38 @@ export default defineWorkflow({
     }
   });
 
+  it("pauses and resumes a live run via subcommands", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      // Never respond, so the agent step stays pending and the run stays live.
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("pause", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("No workflow is running");
+
+      await harness.command.handler("mini", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("started")));
+
+      await harness.command.handler("pause", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Pausing workflow mini");
+      await harness.command.handler("pause", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("already pausing or paused");
+
+      await harness.command.handler("resume", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Workflow mini resumed");
+      await harness.command.handler("resume", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("is not paused");
+
+      await harness.command.handler("cancel", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("registers scroll shortcuts that no-op without a widget", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const harness = makeHarness({ cwd, respond: () => {} });

@@ -70,7 +70,9 @@ The full run projection (`WorkflowRunState` in
 one of `running`, `waiting`, `completed`, `failed`, `timed_out`, or
 `cancelled`. While a node is executing, `currentNode`, `currentNodeType`,
 `currentNodeStartedAt`, and `statusDetail` describe it, and they disappear
-when the node finishes.
+when the node finishes. While a pause request holds the run at a step
+boundary, `paused` is `true` (with matching `run_paused`/`run_resumed` trace
+events); it disappears when the run resumes or ends.
 
 Per-node data lives in `outputs` (the accepted output of each finished node,
 where the latest attempt wins on loops) and in `results` (the full result

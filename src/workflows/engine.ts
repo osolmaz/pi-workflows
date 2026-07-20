@@ -66,6 +66,8 @@ export class WorkflowEngine {
   private readonly onEvent?: WorkflowEngineOptions["onEvent"];
   private activeAbort: AbortController | null = null;
   private cancelled = false;
+  private paused = false;
+  private wakePause: (() => void) | null = null;
 
   constructor(options: WorkflowEngineOptions) {
     this.executor = options.executor;
@@ -83,6 +85,28 @@ export class WorkflowEngine {
   cancel(): void {
     this.cancelled = true;
     this.activeAbort?.abort(new CancelledError());
+    // A run held at a pause boundary has no active node to abort; wake it so
+    // it can observe the cancellation.
+    this.wakePause?.();
+  }
+
+  /**
+   * Request a pause. The current step finishes normally; the engine then
+   * holds before dispatching the next node until `resume` (or `cancel`).
+   */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /** Release a pause requested with `pause`. */
+  resume(): void {
+    this.paused = false;
+    this.wakePause?.();
+  }
+
+  /** True when a pause has been requested or the run is already held. */
+  get pauseRequested(): boolean {
+    return this.paused;
   }
 
   async run(
@@ -96,6 +120,7 @@ export class WorkflowEngine {
     const normalizedInput = input === undefined ? null : input;
     assertJsonSerializable(normalizedInput, "Workflow run input");
     this.cancelled = false;
+    this.paused = false;
 
     const state = await this.createRunState(workflow, normalizedInput, options.workflowPath);
     const runDir = await this.store.initializeRunBundle(workflow, state);
@@ -178,6 +203,7 @@ export class WorkflowEngine {
     let lastOutput: unknown;
 
     while (currentNodeId !== null) {
+      await this.holdWhilePaused(state, runDir);
       executedSteps += 1;
       if (executedSteps > maxSteps) {
         throw new Error(
@@ -226,6 +252,32 @@ export class WorkflowEngine {
     }
 
     await this.finishRun(runDir, state, "completed", { finalOutput: lastOutput });
+  }
+
+  /**
+   * Hold the run at the step boundary while a pause is in effect. Pausing
+   * never interrupts a node mid-flight; it only delays the next dispatch.
+   */
+  private async holdWhilePaused(state: WorkflowRunState, runDir: string): Promise<void> {
+    if (this.cancelled) {
+      throw new CancelledError();
+    }
+    if (!this.paused) {
+      return;
+    }
+    state.paused = true;
+    await this.persist(runDir, state, { scope: "run", type: "run_paused", payload: {} });
+    while (this.paused && !this.cancelled) {
+      await new Promise<void>((resolve) => {
+        this.wakePause = resolve;
+      });
+    }
+    this.wakePause = null;
+    delete state.paused;
+    if (this.cancelled) {
+      throw new CancelledError();
+    }
+    await this.persist(runDir, state, { scope: "run", type: "run_resumed", payload: {} });
   }
 
   private routeAfterFailure(

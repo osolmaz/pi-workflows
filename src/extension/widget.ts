@@ -63,11 +63,12 @@ export function buildWidgetView(
   now: Date = new Date(),
   scroll: number | null = null,
 ): WidgetView {
-  const glyph = STATUS_GLYPHS[state.status];
+  const glyph = state.paused ? "⏸" : STATUS_GLYPHS[state.status];
+  const statusText = state.paused ? "paused" : state.status;
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
   const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
-  const header = `${glyph} workflow ${sanitizeText(state.workflowName)}${title} [${state.status}]`;
+  const header = `${glyph} workflow ${sanitizeText(state.workflowName)}${title} [${statusText}]`;
 
   const footer: string[] = [];
   if (state.error) {

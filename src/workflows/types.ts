@@ -197,6 +197,8 @@ export type WorkflowRunState = {
   currentNodeType?: WorkflowNodeDefinition["nodeType"];
   currentNodeStartedAt?: string;
   statusDetail?: string;
+  /** True while the run is held at a step boundary by a pause request. */
+  paused?: boolean;
   waitingOn?: string;
   finalOutput?: unknown;
   error?: string;

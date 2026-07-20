@@ -32,6 +32,8 @@ type ActiveRun = {
 export type ParsedWorkflowArgs =
   | { kind: "list" }
   | { kind: "cancel" }
+  | { kind: "pause" }
+  | { kind: "resume" }
   | { kind: "run"; ref: string; input: unknown };
 
 /** Parse `/workflow` arguments. Exported for tests. */
@@ -40,8 +42,8 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   if (trimmed.length === 0) {
     return { kind: "list" };
   }
-  if (trimmed === "cancel") {
-    return { kind: "cancel" };
+  if (trimmed === "cancel" || trimmed === "pause" || trimmed === "resume") {
+    return { kind: trimmed };
   }
   const spaceIndex = trimmed.search(/\s/);
   const ref = spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex);
@@ -263,11 +265,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.registerCommand("workflow", {
     description:
-      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; /workflow cancel stops the run or clears the widget",
+      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: pause, resume, cancel",
     getArgumentCompletions: async (prefix: string) => {
       const discovered = await discoverWorkflows({ cwd: process.cwd() });
       const items = [
         ...discovered.map((workflow) => ({ value: workflow.name, label: workflow.name })),
+        { value: "pause", label: "pause" },
+        { value: "resume", label: "resume" },
         { value: "cancel", label: "cancel" },
       ].filter((item) => item.value.startsWith(prefix));
       return items.length > 0 ? items : null;
@@ -304,6 +308,35 @@ export default function piWorkflows(pi: ExtensionAPI) {
           return;
         }
         notify(ctx, "No workflow is running.", "warning");
+        return;
+      }
+      if (parsed.kind === "pause") {
+        if (!activeRun) {
+          notify(ctx, "No workflow is running.", "warning");
+          return;
+        }
+        if (activeRun.engine.pauseRequested) {
+          notify(ctx, `Workflow ${activeRun.workflowName} is already pausing or paused.`);
+          return;
+        }
+        activeRun.engine.pause();
+        notify(
+          ctx,
+          `Pausing workflow ${activeRun.workflowName} — the current step finishes, then the run holds. /workflow resume to continue.`,
+        );
+        return;
+      }
+      if (parsed.kind === "resume") {
+        if (!activeRun) {
+          notify(ctx, "No workflow is running.", "warning");
+          return;
+        }
+        if (!activeRun.engine.pauseRequested) {
+          notify(ctx, `Workflow ${activeRun.workflowName} is not paused.`);
+          return;
+        }
+        activeRun.engine.resume();
+        notify(ctx, `Workflow ${activeRun.workflowName} resumed.`);
         return;
       }
       try {
