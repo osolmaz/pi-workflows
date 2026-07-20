@@ -43,7 +43,7 @@ Top-level fields:
 
 | Field      | Type                   | Notes                                                                                                                         |
 | ---------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `name`     | `string`               | Required. Used in run ids and the step contract.                                                                              |
+| `name`     | `string`               | Required. Used in run ids and the step contract. `cancel` and `list` are reserved for `/workflow` subcommands.                |
 | `title`    | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable. |
 | `startAt`  | `string`               | Required. Id of the first node.                                                                                               |
 | `nodes`    | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                           |
@@ -239,6 +239,8 @@ possible. Defaults worth knowing:
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow cancel` aborts the current node and marks the run `cancelled`.
+  When no run is live but the widget still shows a parked or finished run,
+  the same command clears the widget.
 - One workflow runs per session at a time.
 - Agent nudges: if the model ends its turn without submitting the pending
   step, it gets a reminder, twice by default, then the step fails.

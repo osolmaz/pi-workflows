@@ -222,7 +222,12 @@ export default defineWorkflow({
       const harness = makeHarness({ cwd, respond: () => {} });
 
       await harness.command.handler("parked", harness.ctx);
-      await waitFor(() => harness.notifications.some((note) => note.includes("waiting")));
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("awaiting your decision")),
+      );
+      expect(harness.notifications.at(-1)).toContain(
+        "parked at checkpoint review — run ended, awaiting your decision",
+      );
 
       // The final widget update must still be present, not cleared, and show
       // the waiting state so the human sees the parked checkpoint.
@@ -230,6 +235,17 @@ export default defineWorkflow({
       expect(last).toBeDefined();
       expect(last?.join("\n")).toContain("[waiting]");
       expect(last?.join("\n")).toContain("waiting on checkpoint: review");
+
+      // With no live run, cancel clears the parked widget instead of
+      // claiming nothing exists.
+      await harness.command.handler("cancel", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain(
+        "Workflow parked already ended at checkpoint review; cleared its widget.",
+      );
+      expect(harness.widgets.at(-1)).toBeUndefined();
+
+      await harness.command.handler("cancel", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("No workflow is running");
     } finally {
       vi.unstubAllEnvs();
     }

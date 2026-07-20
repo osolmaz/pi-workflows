@@ -56,8 +56,10 @@ Then, from any pi conversation:
 ```
 
 `/workflow` with no arguments lists discovered workflows. `/workflow cancel`
-stops the active run. Trailing text becomes `{ task: "..." }`; pass arbitrary
-input with `--input-json {"key": "value"}`.
+stops the active run; if the last run already ended (for example parked at a
+checkpoint), it clears the leftover widget instead. Trailing text becomes
+`{ task: "..." }`; pass arbitrary input with `--input-json {"key": "value"}`.
+The names `cancel` and `list` are reserved and rejected as workflow names.
 
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The

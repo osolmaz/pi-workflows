@@ -186,7 +186,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
       widgetTimer = setTimeout(() => clearWidget(ctx), FINAL_WIDGET_TTL_MS);
       widgetTimer.unref?.();
     }
-    const summary = `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
+    const summary =
+      state.status === "waiting" && state.waitingOn
+        ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — run ended, awaiting your decision (run ${state.runId})`
+        : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
   };
 
@@ -260,7 +263,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.registerCommand("workflow", {
     description:
-      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}], /workflow cancel",
+      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; /workflow cancel stops the run or clears the widget",
     getArgumentCompletions: async (prefix: string) => {
       const discovered = await discoverWorkflows({ cwd: process.cwd() });
       const items = [
@@ -282,12 +285,25 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (parsed.kind === "cancel") {
-        if (!activeRun) {
-          notify(ctx, "No workflow is running.", "warning");
+        if (activeRun) {
+          activeRun.engine.cancel();
+          notify(ctx, `Cancelling workflow ${activeRun.workflowName}…`);
           return;
         }
-        activeRun.engine.cancel();
-        notify(ctx, `Cancelling workflow ${activeRun.workflowName}…`);
+        // No live run, but a parked (waiting) or recently finished run may
+        // still occupy the widget; cancel clears it.
+        if (widgetSource) {
+          const { state } = widgetSource;
+          clearWidgetTimer();
+          clearWidget(ctx);
+          const detail =
+            state.status === "waiting" && state.waitingOn
+              ? `already ended at checkpoint ${state.waitingOn}`
+              : `already ${state.status}`;
+          notify(ctx, `Workflow ${state.workflowName} ${detail}; cleared its widget.`);
+          return;
+        }
+        notify(ctx, "No workflow is running.", "warning");
         return;
       }
       try {

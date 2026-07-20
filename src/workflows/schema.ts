@@ -156,10 +156,19 @@ function assertValidEdgeShape(edge: WorkflowEdge, index: number): void {
   }
 }
 
+/**
+ * Names claimed by `/workflow` subcommands; a workflow with one of these
+ * names could never be started because the keyword wins the argument slot.
+ */
+const RESERVED_WORKFLOW_NAMES = new Set(["cancel", "list"]);
+
 export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinition): void {
   assertRecord(definition, "workflow");
   if (typeof definition.name !== "string" || definition.name.length === 0) {
     fail("workflow requires a name");
+  }
+  if (RESERVED_WORKFLOW_NAMES.has(definition.name)) {
+    fail(`workflow name ${JSON.stringify(definition.name)} is reserved for /workflow subcommands`);
   }
   if (
     definition.title !== undefined &&
