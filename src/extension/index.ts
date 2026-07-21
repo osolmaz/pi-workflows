@@ -262,7 +262,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           content: buildPresentationMessage(instructions, state),
           display: false,
         },
-        { deliverAs: "followUp", triggerTurn: true },
+        { deliverAs: "steer", triggerTurn: true },
       );
     } catch (error) {
       if (

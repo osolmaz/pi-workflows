@@ -222,7 +222,7 @@ export default defineWorkflow({
       expect(sent?.message.content).toContain("Explain the answer plainly.");
       expect(sent?.message.content).toContain('"answer": "forty-two"');
       expect(sent?.message.content).toContain("Do not call the `workflow` tool");
-      expect(sent?.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+      expect(sent?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
     } finally {
       vi.unstubAllEnvs();
     }
