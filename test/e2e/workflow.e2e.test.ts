@@ -19,6 +19,7 @@ const choices = ["y", "n"] as const;
 export default defineWorkflow({
   name: "e2e",
   title: ({ input }) => \`e2e: \${(input as { task?: string }).task ?? "unnamed"}\`,
+  presentationPrompt: "Tell the user what was implemented in one plain sentence.",
   startAt: "propose",
   nodes: {
     propose: agent({
@@ -117,6 +118,20 @@ function startPiRpc(options: { cwd: string; env: Record<string, string> }): RpcH
   };
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  onTimeout: () => string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out waiting for condition.\n${onTimeout()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function waitForRunState(
   runsDir: string,
   predicate: (state: WorkflowRunState) => boolean,
@@ -155,6 +170,9 @@ describe.sequential("pi-workflows end to end", () => {
     // The scripted "model": answers each workflow step contract through the
     // workflow tool and ends its turn after each tool result.
     mock = await startMockOpenAiServer(({ lastUserText, lastRole }) => {
+      if (lastUserText.includes("Presentation instructions:")) {
+        return { kind: "text", text: "Implemented the boring, proven design." };
+      }
       if (lastRole === "tool") {
         return { kind: "text", text: "Step submitted." };
       }
@@ -264,11 +282,22 @@ describe.sequential("pi-workflows end to end", () => {
     expect(types.at(-1)).toBe("run_completed");
     expect(types).toContain("agent_prompt_sent");
 
-    // The mock server must have been driven through the workflow tool.
+    // The mock server must have been driven through the workflow tool, then
+    // receive the hidden presentation follow-up and emit normal assistant text.
     const toolRequests = mock.requests.filter((request) =>
       request.messages.some((message) => message.role === "tool"),
     );
     expect(toolRequests.length).toBeGreaterThanOrEqual(2);
+    await waitForCondition(
+      () =>
+        mock.requests.some((request) =>
+          request.messages.some(
+            (message) =>
+              JSON.stringify(message.content)?.includes("Presentation instructions:") === true,
+          ),
+        ) && pi.stdoutLines.some((line) => line.includes("Implemented the boring, proven design.")),
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
   }, 120_000);
 
   it("renders the finished run in the viewer CLI", async () => {

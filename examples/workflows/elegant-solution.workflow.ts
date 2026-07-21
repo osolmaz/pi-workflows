@@ -11,6 +11,15 @@ const sameChoices = ["y", "n"] as const;
 export default defineWorkflow({
   name: "elegant-solution",
   title: "Elegant production-ready solution",
+  presentationPrompt: ({ state }) =>
+    state.status === "waiting"
+      ? [
+          "Explain the elegant proposal, the holy grail, the important gap, and the pragmatic path in plain language.",
+          "End by asking the user whether to implement the pragmatic path.",
+          `Proposal: ${JSON.stringify(state.outputs.propose)}`,
+          `Holy grail: ${JSON.stringify(state.outputs.holy_grail)}`,
+        ].join("\n")
+      : "Summarize what was implemented, what was tested, and what still needs verification.",
   startAt: "propose",
   nodes: {
     propose: agent({

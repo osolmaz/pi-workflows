@@ -7,6 +7,8 @@ type EchoInput = {
 /** Smallest possible workflow: one agent step that submits a JSON reply. */
 export default defineWorkflow({
   name: "echo",
+  presentationPrompt:
+    "Give the user the concise reply from the workflow result, with no extra commentary.",
   startAt: "reply",
   nodes: {
     reply: agent({

@@ -65,6 +65,7 @@ export type {
   WorkflowNodeOutcome,
   WorkflowNodeResult,
   WorkflowNodeSnapshot,
+  WorkflowPresentationContext,
   WorkflowRunManifest,
   WorkflowRunResult,
   WorkflowRunState,

@@ -12,6 +12,10 @@ const classifyChoices = ["continue", "checkpoint"] as const;
  */
 export default defineWorkflow({
   name: "branch",
+  presentationPrompt: ({ state }) =>
+    state.status === "waiting"
+      ? "Explain briefly why the task needs clarification, then ask the user one concrete clarification question."
+      : "Tell the user in one concise sentence how the workflow recommends proceeding.",
   startAt: "classify",
   nodes: {
     classify: decision({
