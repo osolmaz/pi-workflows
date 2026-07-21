@@ -253,8 +253,8 @@ follow-up message. The next visible message is a normal assistant response.
 Returning `undefined`, returning an empty string, or omitting
 `presentationPrompt` produces no follow-up. Cancelled runs are never
 presented. Async prompt builders have 30 seconds to finish and receive an
-`AbortSignal` that fires on timeout, session shutdown, or when another workflow
-starts; stale presentations are discarded. Once a presentation message has
+`AbortSignal` that fires on timeout, session shutdown, or when a new workflow
+or normal user turn starts; stale presentations are discarded. Once a presentation message has
 been queued, another workflow cannot start until that assistant response
 settles, so results cannot interleave.
 

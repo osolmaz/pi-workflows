@@ -516,6 +516,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
+    if (!activeRun && presentationPending === null && presentationAbort) {
+      // A normal user turn started while an async presentation prompt was
+      // still resolving. The user's new request supersedes that old result.
+      supersedePresentation();
+      return;
+    }
     activeRun?.executor.setStreaming(true);
   });
 
