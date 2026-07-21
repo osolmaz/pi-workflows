@@ -223,6 +223,27 @@ export default defineWorkflow({
       expect(sent?.message.content).toContain('"answer": "forty-two"');
       expect(sent?.message.content).toContain("Do not call the `workflow` tool");
       expect(sent?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+
+      await fs.writeFile(
+        path.join(dir, "next.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+export default defineWorkflow({
+  name: "next",
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ next: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      await harness.command.handler("next", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("still being presented");
+
+      harness.emit("agent_settled");
+      await harness.command.handler("next", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow next completed")),
+      );
     } finally {
       vi.unstubAllEnvs();
     }

@@ -94,6 +94,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let sessionClosed = false;
   let runGeneration = 0;
   let presentationAbort: AbortController | null = null;
+  let presentationPending: number | null = null;
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -256,6 +257,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ) {
         return;
       }
+      presentationPending = run.generation;
       pi.sendMessage(
         {
           customType: PRESENTATION_MESSAGE_TYPE,
@@ -265,6 +267,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
         { deliverAs: "steer", triggerTurn: true },
       );
     } catch (error) {
+      if (presentationPending === run.generation) {
+        presentationPending = null;
+      }
       if (
         error instanceof PresentationSupersededError ||
         sessionClosed ||
@@ -314,6 +319,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
         `A workflow is already running: ${activeRun.workflowName}. Use /workflow cancel first.`,
         "error",
       );
+      return;
+    }
+    if (presentationPending !== null) {
+      notify(ctx, "The previous workflow result is still being presented. Wait for it to finish.");
       return;
     }
     supersedePresentation();
@@ -539,6 +548,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("agent_settled", () => {
     if (!activeRun) {
+      presentationPending = null;
       return;
     }
     activeRun.executor.setStreaming(false);
@@ -550,6 +560,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     supersedePresentation();
     activeRun?.engine.cancel();
     activeRun = null;
+    presentationPending = null;
     clearWidgetTimer();
     stopWidgetTicker();
     widgetSource = null;

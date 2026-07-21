@@ -254,7 +254,9 @@ Returning `undefined`, returning an empty string, or omitting
 `presentationPrompt` produces no follow-up. Cancelled runs are never
 presented. Async prompt builders have 30 seconds to finish and receive an
 `AbortSignal` that fires on timeout, session shutdown, or when another workflow
-starts; stale presentations are discarded.
+starts; stale presentations are discarded. Once a presentation message has
+been queued, another workflow cannot start until that assistant response
+settles, so results cannot interleave.
 
 Presentation is outside the workflow graph: it cannot route to another node,
 change the run status, or alter the run bundle. If prompt generation or message
