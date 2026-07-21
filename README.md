@@ -38,6 +38,7 @@ import { agent, defineWorkflow } from "pi-workflows";
 
 export default defineWorkflow({
   name: "echo",
+  presentationPrompt: "Give the user the concise reply from the workflow result.",
   startAt: "reply",
   nodes: {
     reply: agent({
@@ -70,13 +71,20 @@ and `resume` are reserved and rejected as workflow names.
 While a run is on screen, the footer status bar shows a compact
 `wf <name> [status] <node>` indicator alongside the widget.
 
+`presentationPrompt` is optional. When present, pi-workflows uses it after the
+structured run ends to request one normal, human-readable assistant response.
+Workflows without it remain silent after their final structured output, which
+keeps shell-only and machine-consumed workflows model-free.
+
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The
 `elegant-solution` example does exactly that. It asks the model for the most
 elegant long-term production-ready solution to the problem you discussed, then
 for the holy grail, then whether the two are the same (y/n). On `y` it routes
 straight into implementation, and on `n` it asks the model to reconcile the
-gap and pauses at a checkpoint for you to decide.
+gap and pauses at a checkpoint for you to decide. In either case, its
+`presentationPrompt` turns the final structured result into a plain assistant
+response.
 
 ## Watching a run
 

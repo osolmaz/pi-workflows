@@ -24,6 +24,8 @@ export default defineWorkflow({
     const goal = (input as AutoresearchInput).goal;
     return goal ? `autoresearch: ${goal.slice(0, 60)}` : undefined;
   },
+  presentationPrompt:
+    "Report the research conclusion in plain language: the winner and its numbers, or the strongest negative result, plus the journal path.",
   maxSteps: 40,
   startAt: "setup",
   nodes: {

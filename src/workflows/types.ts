@@ -121,12 +121,29 @@ export type WorkflowNodeDefinition =
   | ActionNodeDefinition
   | CheckpointNodeDefinition;
 
+export type WorkflowPresentationContext = {
+  /** Final persisted state of the workflow run. */
+  state: WorkflowRunState;
+  /** Convenience alias for `state.finalOutput`. */
+  finalOutput: unknown;
+  /** Aborted if a new run starts, the session closes, or prompt generation times out. */
+  signal: AbortSignal;
+};
+
 export type WorkflowDefinition = {
   name: string;
   /** Optional human-readable run title (static or derived from input). */
   title?:
     | string
     | ((context: { input: unknown; workflowName: string }) => MaybePromise<string | undefined>);
+  /**
+   * Optional instructions for a normal assistant response after the run ends.
+   * The Pi extension resolves this only after the final state is persisted;
+   * the engine and run bundle remain presentation-agnostic.
+   */
+  presentationPrompt?:
+    | string
+    | ((context: WorkflowPresentationContext) => MaybePromise<string | undefined>);
   startAt: string;
   nodes: Record<string, WorkflowNodeDefinition>;
   edges: WorkflowEdge[];

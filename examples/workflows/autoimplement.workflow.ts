@@ -17,6 +17,8 @@ export default defineWorkflow({
     const task = (input as AutoimplementInput).task;
     return task ? `autoimplement: ${task.slice(0, 60)}` : undefined;
   },
+  presentationPrompt:
+    "Summarize what was implemented, what verification passed, and any remaining limitation. Be concise and direct.",
   maxSteps: 20,
   startAt: "implement",
   nodes: {

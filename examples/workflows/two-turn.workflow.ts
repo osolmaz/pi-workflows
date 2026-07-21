@@ -11,6 +11,8 @@ type TwoTurnInput = {
  */
 export default defineWorkflow({
   name: "two-turn",
+  presentationPrompt:
+    "Present the final validation checklist clearly, including its concrete file references.",
   startAt: "inspect",
   nodes: {
     inspect: agent({

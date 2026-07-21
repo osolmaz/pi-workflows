@@ -18,6 +18,11 @@ type RegisteredCommand = {
   getArgumentCompletions?: (prefix: string) => Promise<{ value: string; label: string }[] | null>;
 };
 
+type SentMessage = {
+  message: { customType: string; content: string; display: boolean };
+  options: { deliverAs: string; triggerTurn: boolean };
+};
+
 type FakeContext = {
   cwd: string;
   hasUI: boolean;
@@ -40,6 +45,7 @@ function makeHarness(options: {
   const notifications: string[] = [];
   const widgets: (string[] | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
+  const sentMessages: SentMessage[] = [];
   const listeners = new Map<string, ((event?: unknown, ctx?: FakeContext) => void)[]>();
   const shortcuts = new Map<string, (ctx: FakeContext) => void>();
   let command: RegisteredCommand | null = null;
@@ -74,6 +80,9 @@ function makeHarness(options: {
       // Deliver asynchronously like the real runtime would.
       queueMicrotask(() => options.respond(prompt, tool as RegisteredTool));
     },
+    sendMessage: (message: SentMessage["message"], messageOptions: SentMessage["options"]) => {
+      sentMessages.push({ message, options: messageOptions });
+    },
   };
 
   piWorkflows(pi as never);
@@ -85,6 +94,7 @@ function makeHarness(options: {
     notifications,
     widgets,
     statuses,
+    sentMessages,
     command: command as RegisteredCommand,
     tool: tool as RegisteredTool,
     shortcuts,
@@ -161,9 +171,285 @@ describe("pi-workflows extension", () => {
         true,
       );
       expect(harness.widgets.length).toBeGreaterThan(0);
+      expect(harness.sentMessages).toHaveLength(0);
 
       const runDirs = await fs.readdir(runsDir);
       expect(runDirs).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("queues an opted-in result presentation after completion", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "present.workflow.ts"),
+        `import { agent, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "present",
+  presentationPrompt: "Explain the answer plainly.",
+  startAt: "reply",
+  nodes: {
+    reply: agent({ prompt: () => "Answer.", expectedOutput: '{ "answer": "text" }' }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("call-1", { ...contract, output: { answer: "forty-two" } });
+          }
+        },
+      });
+
+      await harness.command.handler("present", harness.ctx);
+      await waitFor(() => harness.sentMessages.length === 1);
+
+      const sent = harness.sentMessages[0];
+      expect(sent?.message.customType).toBe("pi-workflows-presentation");
+      expect(sent?.message.display).toBe(false);
+      expect(sent?.message.content).toContain("Explain the answer plainly.");
+      expect(sent?.message.content).toContain('"answer": "forty-two"');
+      expect(sent?.message.content).toContain("Do not call the `workflow` tool");
+      expect(sent?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+
+      await fs.writeFile(
+        path.join(dir, "next.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+export default defineWorkflow({
+  name: "next",
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ next: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      await harness.command.handler("next", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("still being presented");
+
+      harness.emit("agent_settled");
+      await harness.command.handler("next", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow next completed")),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("resolves an async presentation prompt for a waiting checkpoint", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "present-waiting.workflow.ts"),
+        `import { checkpoint, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "present-waiting",
+  presentationPrompt: async ({ state, finalOutput }) => {
+    await Promise.resolve();
+    return \`Ask for a decision about \${state.waitingOn}: \${JSON.stringify(finalOutput)}\`;
+  },
+  startAt: "review",
+  nodes: {
+    review: checkpoint({ run: () => ({ choice: "approve or reject" }) }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("present-waiting", harness.ctx);
+      await waitFor(() => harness.sentMessages.length === 1);
+
+      expect(harness.sentMessages[0]?.message.content).toContain(
+        'Ask for a decision about review: {"choice":"approve or reject"}',
+      );
+      expect(harness.sentMessages[0]?.message.content).toContain('"status": "waiting"');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("discards a delayed presentation when another workflow starts", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "delayed.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "delayed",
+  presentationPrompt: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return "Present the old result.";
+  },
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ old: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(dir, "newer.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "newer",
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ newer: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("delayed", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow delayed completed")),
+      );
+      await harness.command.handler("newer", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow newer completed")),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(harness.sentMessages).toHaveLength(0);
+      expect(harness.notifications.some((note) => note.includes("Could not present"))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("discards a delayed presentation when a normal user turn starts", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "delayed-turn.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "delayed-turn",
+  presentationPrompt: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return "Present the stale result.";
+  },
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ old: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("delayed-turn", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow delayed-turn completed")),
+      );
+      harness.emit("agent_start");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(harness.sentMessages).toHaveLength(0);
+      expect(harness.notifications.some((note) => note.includes("Could not present"))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("isolates presentation failures from the finished run", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "bad-presentation.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "bad-presentation",
+  presentationPrompt: () => { throw new Error("presentation broke"); },
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ ok: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("bad-presentation", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("presentation broke")),
+      );
+
+      expect(harness.notifications.some((note) => note.includes("completed"))).toBe(true);
+      expect(harness.sentMessages).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not present cancelled runs", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "cancel-presentation.workflow.ts"),
+        `import { agent, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "cancel-presentation",
+  presentationPrompt: "This must not be sent.",
+  startAt: "wait",
+  nodes: { wait: agent({ prompt: () => "Wait forever." }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("cancel-presentation", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("started")));
+      await harness.command.handler("cancel", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(harness.sentMessages).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }

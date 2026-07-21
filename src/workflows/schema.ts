@@ -177,6 +177,13 @@ export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinitio
   ) {
     fail("workflow title must be a string or function");
   }
+  if (
+    definition.presentationPrompt !== undefined &&
+    typeof definition.presentationPrompt !== "string" &&
+    typeof definition.presentationPrompt !== "function"
+  ) {
+    fail("workflow presentationPrompt must be a string or function");
+  }
   if (typeof definition.startAt !== "string" || definition.startAt.length === 0) {
     fail("workflow requires startAt");
   }
