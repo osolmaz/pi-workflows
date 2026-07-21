@@ -126,6 +126,8 @@ export type WorkflowPresentationContext = {
   state: WorkflowRunState;
   /** Convenience alias for `state.finalOutput`. */
   finalOutput: unknown;
+  /** Aborted if a new run starts, the session closes, or prompt generation times out. */
+  signal: AbortSignal;
 };
 
 export type WorkflowDefinition = {

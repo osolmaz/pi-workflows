@@ -268,6 +268,62 @@ export default defineWorkflow({
     }
   });
 
+  it("discards a delayed presentation when another workflow starts", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "delayed.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "delayed",
+  presentationPrompt: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return "Present the old result.";
+  },
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ old: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(dir, "newer.workflow.ts"),
+        `import { compute, defineWorkflow } from "pi-workflows";
+
+export default defineWorkflow({
+  name: "newer",
+  startAt: "finish",
+  nodes: { finish: compute({ run: () => ({ newer: true }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("delayed", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow delayed completed")),
+      );
+      await harness.command.handler("newer", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow newer completed")),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(harness.sentMessages).toHaveLength(0);
+      expect(harness.notifications.some((note) => note.includes("Could not present"))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("isolates presentation failures from the finished run", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");

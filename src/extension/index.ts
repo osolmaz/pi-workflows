@@ -22,6 +22,10 @@ const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
 const FINAL_WIDGET_TTL_MS = 60_000;
 const WIDGET_SCROLL_STEP = 3;
 const MAX_PRESENTATION_RESULT_CHARS = 50_000;
+const PRESENTATION_TIMEOUT_MS = 30_000;
+
+class PresentationSupersededError extends Error {}
+class PresentationTimeoutError extends Error {}
 
 type PresentationPromptBuilder = Exclude<
   WorkflowDefinition["presentationPrompt"],
@@ -35,6 +39,7 @@ type ActiveRun = {
   executor: ConversationStepExecutor;
   snapshot: WorkflowDefinitionSnapshot;
   presentationPrompt: WorkflowDefinition["presentationPrompt"];
+  generation: number;
   lastState: WorkflowRunState | null;
 };
 
@@ -87,6 +92,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let widgetMaxScroll = 0;
   let widgetStepCount = 0;
   let sessionClosed = false;
+  let runGeneration = 0;
+  let presentationAbort: AbortController | null = null;
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -208,20 +215,45 @@ export default function piWorkflows(pi: ExtensionAPI) {
     widgetTicker.unref?.();
   };
 
+  const supersedePresentation = () => {
+    runGeneration += 1;
+    presentationAbort?.abort(new PresentationSupersededError());
+    presentationAbort = null;
+  };
+
   const presentRun = async (
     ctx: ExtensionContext,
     run: ActiveRun,
     state: WorkflowRunState,
   ): Promise<void> => {
-    if (sessionClosed || state.status === "cancelled" || run.presentationPrompt === undefined) {
+    if (
+      sessionClosed ||
+      run.generation !== runGeneration ||
+      state.status === "cancelled" ||
+      run.presentationPrompt === undefined
+    ) {
       return;
     }
+    const abort = new AbortController();
+    presentationAbort?.abort(new PresentationSupersededError());
+    presentationAbort = abort;
+    const timer = setTimeout(
+      () => abort.abort(new PresentationTimeoutError()),
+      PRESENTATION_TIMEOUT_MS,
+    );
+    timer.unref?.();
     try {
       const instructions =
         typeof run.presentationPrompt === "function"
-          ? await resolvePresentationPrompt(run.presentationPrompt, state)
+          ? await resolvePresentationPrompt(run.presentationPrompt, state, abort.signal)
           : run.presentationPrompt;
-      if (sessionClosed || instructions === undefined || instructions.trim().length === 0) {
+      if (
+        sessionClosed ||
+        run.generation !== runGeneration ||
+        abort.signal.aborted ||
+        instructions === undefined ||
+        instructions.trim().length === 0
+      ) {
         return;
       }
       pi.sendMessage(
@@ -233,7 +265,23 @@ export default function piWorkflows(pi: ExtensionAPI) {
         { deliverAs: "followUp", triggerTurn: true },
       );
     } catch (error) {
-      notify(ctx, `Could not present workflow result: ${errorMessage(error)}`, "warning");
+      if (
+        error instanceof PresentationSupersededError ||
+        sessionClosed ||
+        run.generation !== runGeneration
+      ) {
+        return;
+      }
+      const message =
+        error instanceof PresentationTimeoutError
+          ? `timed out after ${PRESENTATION_TIMEOUT_MS}ms`
+          : errorMessage(error);
+      notify(ctx, `Could not present workflow result: ${message}`, "warning");
+    } finally {
+      clearTimeout(timer);
+      if (presentationAbort === abort) {
+        presentationAbort = null;
+      }
     }
   };
 
@@ -268,6 +316,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
       );
       return;
     }
+    supersedePresentation();
+    const generation = runGeneration;
     const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
     const workflow = await loadWorkflowFile(resolved.path);
     const snapshot = createDefinitionSnapshot(workflow);
@@ -294,6 +344,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       executor,
       snapshot,
       presentationPrompt: workflow.presentationPrompt,
+      generation,
       lastState: null,
     };
     activeRun = run;
@@ -496,6 +547,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     sessionClosed = true;
+    supersedePresentation();
     activeRun?.engine.cancel();
     activeRun = null;
     clearWidgetTimer();
@@ -508,9 +560,24 @@ export default function piWorkflows(pi: ExtensionAPI) {
 async function resolvePresentationPrompt(
   buildPrompt: PresentationPromptBuilder,
   state: WorkflowRunState,
+  signal: AbortSignal,
 ): Promise<string | undefined> {
   const snapshot = structuredClone(state);
-  return await buildPrompt({ state: snapshot, finalOutput: snapshot.finalOutput });
+  return await Promise.race([
+    buildPrompt({ state: snapshot, finalOutput: snapshot.finalOutput, signal }),
+    abortRejection(signal),
+  ]);
+}
+
+function abortRejection(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new PresentationSupersededError());
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function buildPresentationMessage(instructions: string, state: WorkflowRunState): string {

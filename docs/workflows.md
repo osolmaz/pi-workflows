@@ -42,15 +42,15 @@ export default defineWorkflow({
 
 Top-level fields:
 
-| Field                | Type                   | Notes                                                                                                                                                                                                      |
-| -------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`               | `string`               | Required. Used in run ids and the step contract. `cancel`, `list`, `pause`, and `resume` are reserved for `/workflow` subcommands.                                                                         |
-| `title`              | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                              |
-| `presentationPrompt` | `string` or function   | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
-| `startAt`            | `string`               | Required. Id of the first node.                                                                                                                                                                            |
-| `nodes`              | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                                                                        |
-| `edges`              | `WorkflowEdge[]`       | Required. See routing below.                                                                                                                                                                               |
-| `maxSteps`           | `number`               | Optional loop bound, default 100. The run fails when exceeded.                                                                                                                                             |
+| Field                | Type                   | Notes                                                                                                                                                                                                              |
+| -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`               | `string`               | Required. Used in run ids and the step contract. `cancel`, `list`, `pause`, and `resume` are reserved for `/workflow` subcommands.                                                                                 |
+| `title`              | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                                      |
+| `presentationPrompt` | `string` or function   | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput, signal }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
+| `startAt`            | `string`               | Required. Id of the first node.                                                                                                                                                                                    |
+| `nodes`              | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                                                                                |
+| `edges`              | `WorkflowEdge[]`       | Required. See routing below.                                                                                                                                                                                       |
+| `maxSteps`           | `number`               | Optional loop bound, default 100. The run fails when exceeded.                                                                                                                                                     |
 
 `defineWorkflow` validates the shape eagerly (node ids, edge shapes, function
 fields) and validates the graph (unknown targets, duplicate outgoing edges,
@@ -252,7 +252,9 @@ presentation instructions and bounded final result to the model as a hidden
 follow-up message. The next visible message is a normal assistant response.
 Returning `undefined`, returning an empty string, or omitting
 `presentationPrompt` produces no follow-up. Cancelled runs are never
-presented.
+presented. Async prompt builders have 30 seconds to finish and receive an
+`AbortSignal` that fires on timeout, session shutdown, or when another workflow
+starts; stale presentations are discarded.
 
 Presentation is outside the workflow graph: it cannot route to another node,
 change the run status, or alter the run bundle. If prompt generation or message
