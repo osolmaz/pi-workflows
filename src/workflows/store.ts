@@ -287,24 +287,32 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
   if (!manifest || manifest.schema !== RUN_BUNDLE_SCHEMA) {
     return null;
   }
+  // A schema-tagged manifest may still be malformed (e.g. hand-edited);
+  // treat anything unexpected as an unreadable bundle rather than throwing.
+  const paths: Partial<WorkflowRunManifest["paths"]> =
+    typeof manifest.paths === "object" && manifest.paths !== null ? manifest.paths : {};
   const state = await readJsonFile<WorkflowRunState>(
-    resolveBundlePath(runDir, manifest.paths.state, STATE_PATH),
+    resolveBundlePath(runDir, paths.state, STATE_PATH),
   );
   if (!state || state.schema !== RUN_STATE_SCHEMA) {
     return null;
   }
   const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
-    resolveBundlePath(runDir, manifest.paths.workflow, WORKFLOW_SNAPSHOT_PATH),
+    resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
   );
   return { runDir, manifest, state, snapshot };
 }
 
 /**
- * Resolve a manifest-relative path, rejecting anything that escapes the
- * bundle directory.
+ * Resolve a manifest-relative path, rejecting anything that is not a string
+ * or escapes the bundle directory. Malformed manifests must degrade to an
+ * unreadable bundle, never to a thrown error that aborts a listing.
  */
-function resolveBundlePath(runDir: string, relative: string, fallback: string): string {
-  const candidate = path.resolve(runDir, relative || fallback);
+function resolveBundlePath(runDir: string, relative: unknown, fallback: string): string {
+  const candidate = path.resolve(
+    runDir,
+    typeof relative === "string" && relative ? relative : fallback,
+  );
   if (
     candidate !== path.resolve(runDir) &&
     !candidate.startsWith(path.resolve(runDir) + path.sep)

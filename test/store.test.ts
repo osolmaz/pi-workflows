@@ -217,6 +217,23 @@ describe("listRunBundles", () => {
   it("returns empty for a missing directory", async () => {
     expect(await listRunBundles("/nonexistent/definitely/missing")).toEqual([]);
   });
+
+  it("skips schema-tagged bundles with malformed manifests instead of throwing", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-list");
+    const store = new WorkflowRunStore(outputRoot);
+    const good = makeState();
+    await store.initializeRunBundle(workflow, good);
+
+    const badDir = path.join(outputRoot, "bad-bundle");
+    await fs.mkdir(badDir);
+    await fs.writeFile(
+      path.join(badDir, "manifest.json"),
+      JSON.stringify({ schema: "pi-workflows.run-bundle.v1", paths: { state: 42 } }),
+    );
+
+    const bundles = await listRunBundles(outputRoot);
+    expect(bundles.map((bundle) => bundle.state.runId)).toEqual([good.runId]);
+  });
 });
 
 describe("createDefinitionSnapshot", () => {
