@@ -1,0 +1,223 @@
+{
+  "name": "example-autoimplement",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "autoimplement",
+    "startAt": "implement",
+    "nodes": {
+      "implement": {
+        "nodeType": "agent",
+        "timeoutMs": 3600000,
+        "statusDetail": "implementing",
+        "expectedOutput": "{ \"summary\": \"what was implemented\", \"files\": [\"changed file\", \"changed file\"] }"
+      },
+      "verify": {
+        "nodeType": "agent",
+        "timeoutMs": 1800000,
+        "statusDetail": "verifying",
+        "expectedOutput": "{ \"passed\": true | false, \"details\": \"what was run and what happened\" }"
+      },
+      "review": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"route\": \"clean\" | \"issues_found\", \"reason\": \"short justification\" }"
+      },
+      "fix": {
+        "nodeType": "agent",
+        "timeoutMs": 1800000,
+        "statusDetail": "fixing",
+        "expectedOutput": "{ \"fixed\": \"what was changed\" }"
+      },
+      "finalize": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "implement",
+        "to": "verify"
+      },
+      {
+        "from": "verify",
+        "to": "review"
+      },
+      {
+        "from": "review",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "clean": "finalize",
+            "issues_found": "fix"
+          }
+        }
+      },
+      {
+        "from": "fix",
+        "to": "verify"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "implement"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "verify"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "review"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "finalize"
+        },
+        {
+          "kind": "node",
+          "nodeId": "fix"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "implement->verify#0.0",
+        "from": "implement",
+        "to": "verify",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "verify->review#1.0",
+        "from": "verify",
+        "to": "review",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "review->finalize#2.0",
+        "from": "review",
+        "to": "finalize",
+        "label": "clean",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "review->fix#2.1",
+        "from": "review",
+        "to": "fix",
+        "label": "issues_found",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "fix->verify#3.0",
+        "from": "fix",
+        "to": "verify",
+        "isBackEdge": true
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "implement->verify#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "verify->review#1.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "review->finalize#2.0",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "clean"
+      },
+      {
+        "edgeId": "review->fix#2.1",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 1,
+        "label": "issues_found"
+      }
+    ],
+    "rankOfNode": {
+      "implement": 0,
+      "verify": 1,
+      "review": 2,
+      "finalize": 3,
+      "fix": 3
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-autoimplement",
+    "workflowName": "autoimplement",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "         · implement [agent]",
+        "                  │",
+        "                  │ ┌──────────────────┐",
+        "                  ▼ ▼                  │",
+        "          · verify [agent]             │",
+        "                  │                    │",
+        "                  ▼                    │",
+        "          · review [agent]             │",
+        "          ┌─────┘ └───────────┐        │",
+        "          │ cleanissues_found │        │",
+        "          │                   │        │",
+        "          ▼                   ▼        │",
+        "· finalize [compute]    · fix [agent]  │",
+        "                                └──────┘"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "           ┌─────────────────────┐",
+        "           │ · implement [agent] │",
+        "           └─────────────────────┘",
+        "                      │",
+        "                      │ ┌──────────────────────┐",
+        "                      ▼ ▼                      │",
+        "            ┌──────────────────┐               │",
+        "            │ · verify [agent] │               │",
+        "            └──────────────────┘               │",
+        "                      │                        │",
+        "                      ▼                        │",
+        "            ┌──────────────────┐               │",
+        "            │ · review [agent] │               │",
+        "            └──────────────────┘               │",
+        "            ┌───────┘ └─────────────┐          │",
+        "            │ clean    issues_found │          │",
+        "            │                       │          │",
+        "            ▼                       ▼          │",
+        "┌──────────────────────┐    ┌───────────────┐  │",
+        "│ · finalize [compute] │    │ · fix [agent] │  │",
+        "└──────────────────────┘    └───────────────┘  │",
+        "                                      └────────┘"
+      ]
+    }
+  ]
+}

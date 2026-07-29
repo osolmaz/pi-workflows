@@ -1,0 +1,248 @@
+{
+  "name": "example-autoresearch",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "autoresearch",
+    "startAt": "setup",
+    "nodes": {
+      "setup": {
+        "nodeType": "agent",
+        "timeoutMs": 1200000,
+        "statusDetail": "setting up harness",
+        "expectedOutput": "{ \"dir\": \"loop directory\", \"keepCriterion\": \"what counts as a keeper\", \"baseline\": \"baseline numbers\" }"
+      },
+      "experiment": {
+        "nodeType": "agent",
+        "timeoutMs": 1800000,
+        "statusDetail": "running experiments",
+        "expectedOutput": "{ \"generation\": \"what was tried\", \"best\": \"best numbers so far\", \"kept\": true | false, \"next\": \"most informative next experiment, if any\" }"
+      },
+      "assess": {
+        "nodeType": "agent",
+        "statusDetail": "assessing progress",
+        "expectedOutput": "{ \"route\": \"continue\" | \"plateau\" | \"dead_end\", \"reason\": \"short justification\" }"
+      },
+      "conclude": {
+        "nodeType": "agent",
+        "timeoutMs": 900000,
+        "statusDetail": "writing conclusions",
+        "expectedOutput": "{ \"outcome\": \"plateau\" | \"dead_end\", \"winner\": \"winning feature and numbers, or null\", \"journal\": \"path to the finished journal\" }"
+      },
+      "finalize": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "setup",
+        "to": "experiment"
+      },
+      {
+        "from": "experiment",
+        "to": "assess"
+      },
+      {
+        "from": "assess",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "continue": "experiment",
+            "plateau": "conclude",
+            "dead_end": "conclude"
+          }
+        }
+      },
+      {
+        "from": "conclude",
+        "to": "finalize"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "setup"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "experiment"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "assess"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "conclude"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "finalize"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "setup->experiment#0.0",
+        "from": "setup",
+        "to": "experiment",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "experiment->assess#1.0",
+        "from": "experiment",
+        "to": "assess",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "assess->experiment#2.0",
+        "from": "assess",
+        "to": "experiment",
+        "label": "continue",
+        "isBackEdge": true
+      },
+      {
+        "edgeId": "assess->conclude#2.1",
+        "from": "assess",
+        "to": "conclude",
+        "label": "plateau",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "assess->conclude#2.2",
+        "from": "assess",
+        "to": "conclude",
+        "label": "dead_end",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "conclude->finalize#3.0",
+        "from": "conclude",
+        "to": "finalize",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "setup->experiment#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "experiment->assess#1.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "assess->conclude#2.1",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "plateau"
+      },
+      {
+        "edgeId": "assess->conclude#2.2",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "dead_end"
+      },
+      {
+        "edgeId": "conclude->finalize#3.0",
+        "rank": 3,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "setup": 0,
+      "experiment": 1,
+      "assess": 2,
+      "conclude": 3,
+      "finalize": 4
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-autoresearch",
+    "workflowName": "autoresearch",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "   · setup [agent]",
+        "          │",
+        "          │ ┌─────────┐ continue",
+        "          ▼ ▼         │",
+        "· experiment [agent]  │",
+        "          │           │",
+        "          ▼           │",
+        "  · assess [agent]    │",
+        "        │ │ └─────────┘",
+        "        │ │",
+        "plateau │ │ dead_end",
+        "        │ │",
+        "        ▼ ▼",
+        " · conclude [agent]",
+        "          │",
+        "          ▼",
+        "· finalize [compute]"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "   ┌─────────────────┐",
+        "   │ · setup [agent] │",
+        "   └─────────────────┘",
+        "            │",
+        "            │ ┌───────────┐ continue",
+        "            ▼ ▼           │",
+        "┌──────────────────────┐  │",
+        "│ · experiment [agent] │  │",
+        "└──────────────────────┘  │",
+        "            │             │",
+        "            ▼             │",
+        "  ┌──────────────────┐    │",
+        "  │ · assess [agent] │    │",
+        "  └──────────────────┘    │",
+        "          │ │ └───────────┘",
+        "          │ │",
+        "  plateau │ │ dead_end",
+        "          │ │",
+        "          ▼ ▼",
+        " ┌────────────────────┐",
+        " │ · conclude [agent] │",
+        " └────────────────────┘",
+        "            │",
+        "            ▼",
+        "┌──────────────────────┐",
+        "│ · finalize [compute] │",
+        "└──────────────────────┘"
+      ]
+    }
+  ]
+}

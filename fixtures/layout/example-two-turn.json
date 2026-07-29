@@ -1,0 +1,168 @@
+{
+  "name": "example-two-turn",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "two-turn",
+    "startAt": "inspect",
+    "nodes": {
+      "inspect": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"findings\": [\"short finding\", \"short finding\"], \"repoSummary\": \"short paragraph\" }"
+      },
+      "draft": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"draft\": \"short paragraph\" }"
+      },
+      "checklist": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"checklist\": [\"item\", \"item\"], \"references\": [\"path\", \"path\"] }"
+      },
+      "finalize": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "inspect",
+        "to": "draft"
+      },
+      {
+        "from": "draft",
+        "to": "checklist"
+      },
+      {
+        "from": "checklist",
+        "to": "finalize"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "inspect"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "draft"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "checklist"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "finalize"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "inspect->draft#0.0",
+        "from": "inspect",
+        "to": "draft",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "draft->checklist#1.0",
+        "from": "draft",
+        "to": "checklist",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "checklist->finalize#2.0",
+        "from": "checklist",
+        "to": "finalize",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "inspect->draft#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "draft->checklist#1.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "checklist->finalize#2.0",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "inspect": 0,
+      "draft": 1,
+      "checklist": 2,
+      "finalize": 3
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-two-turn",
+    "workflowName": "two-turn",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "  · inspect [agent]",
+        "          │",
+        "          ▼",
+        "   · draft [agent]",
+        "          │",
+        "          ▼",
+        " · checklist [agent]",
+        "          │",
+        "          ▼",
+        "· finalize [compute]"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "  ┌───────────────────┐",
+        "  │ · inspect [agent] │",
+        "  └───────────────────┘",
+        "            │",
+        "            ▼",
+        "   ┌─────────────────┐",
+        "   │ · draft [agent] │",
+        "   └─────────────────┘",
+        "            │",
+        "            ▼",
+        " ┌─────────────────────┐",
+        " │ · checklist [agent] │",
+        " └─────────────────────┘",
+        "            │",
+        "            ▼",
+        "┌──────────────────────┐",
+        "│ · finalize [compute] │",
+        "└──────────────────────┘"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,492 @@
+{
+  "name": "random-4",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "random-4",
+    "startAt": "n0",
+    "nodes": {
+      "n0": {
+        "nodeType": "checkpoint"
+      },
+      "n1": {
+        "nodeType": "checkpoint"
+      },
+      "n2": {
+        "nodeType": "compute"
+      },
+      "n3": {
+        "nodeType": "compute"
+      },
+      "n4": {
+        "nodeType": "checkpoint"
+      },
+      "n5": {
+        "nodeType": "compute"
+      },
+      "n6": {
+        "nodeType": "checkpoint"
+      },
+      "n7": {
+        "nodeType": "action"
+      },
+      "n8": {
+        "nodeType": "compute"
+      },
+      "n9": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "n0",
+        "to": "n1"
+      },
+      {
+        "from": "n0",
+        "to": "n2"
+      },
+      {
+        "from": "n0",
+        "to": "n3"
+      },
+      {
+        "from": "n0",
+        "to": "n4"
+      },
+      {
+        "from": "n2",
+        "to": "n5"
+      },
+      {
+        "from": "n0",
+        "to": "n6"
+      },
+      {
+        "from": "n6",
+        "to": "n7"
+      },
+      {
+        "from": "n4",
+        "to": "n8"
+      },
+      {
+        "from": "n6",
+        "to": "n9"
+      },
+      {
+        "from": "n3",
+        "to": "n7"
+      },
+      {
+        "from": "n5",
+        "to": "n7"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "n0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n2"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n6"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n0->n3#2.0"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n0->n1#0.0"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n0->n4#3.0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n5"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n6->n7#6.0"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n3"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n6->n9#8.0"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n0->n1#0.0"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n4"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n7"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n9"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n1"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n8"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "from": "n0",
+        "to": "n1",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n0->n2#1.0",
+        "from": "n0",
+        "to": "n2",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n0->n3#2.0",
+        "from": "n0",
+        "to": "n3",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n0->n4#3.0",
+        "from": "n0",
+        "to": "n4",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n2->n5#4.0",
+        "from": "n2",
+        "to": "n5",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n0->n6#5.0",
+        "from": "n0",
+        "to": "n6",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n6->n7#6.0",
+        "from": "n6",
+        "to": "n7",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n4->n8#7.0",
+        "from": "n4",
+        "to": "n8",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n6->n9#8.0",
+        "from": "n6",
+        "to": "n9",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n3->n7#9.0",
+        "from": "n3",
+        "to": "n7",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n5->n7#10.0",
+        "from": "n5",
+        "to": "n7",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 3
+      },
+      {
+        "edgeId": "n0->n1#0.0",
+        "rank": 1,
+        "fromCell": 3,
+        "toCell": 4
+      },
+      {
+        "edgeId": "n0->n1#0.0",
+        "rank": 2,
+        "fromCell": 4,
+        "toCell": 2
+      },
+      {
+        "edgeId": "n0->n2#1.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n0->n3#2.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 2
+      },
+      {
+        "edgeId": "n0->n3#2.0",
+        "rank": 1,
+        "fromCell": 2,
+        "toCell": 2
+      },
+      {
+        "edgeId": "n0->n4#3.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 4
+      },
+      {
+        "edgeId": "n0->n4#3.0",
+        "rank": 1,
+        "fromCell": 4,
+        "toCell": 5
+      },
+      {
+        "edgeId": "n2->n5#4.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n0->n6#5.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 1
+      },
+      {
+        "edgeId": "n6->n7#6.0",
+        "rank": 1,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "n6->n7#6.0",
+        "rank": 2,
+        "fromCell": 1,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n4->n8#7.0",
+        "rank": 2,
+        "fromCell": 5,
+        "toCell": 3
+      },
+      {
+        "edgeId": "n6->n9#8.0",
+        "rank": 1,
+        "fromCell": 1,
+        "toCell": 3
+      },
+      {
+        "edgeId": "n6->n9#8.0",
+        "rank": 2,
+        "fromCell": 3,
+        "toCell": 1
+      },
+      {
+        "edgeId": "n3->n7#9.0",
+        "rank": 2,
+        "fromCell": 2,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n5->n7#10.0",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "n0": 0,
+      "n1": 3,
+      "n2": 1,
+      "n3": 2,
+      "n4": 2,
+      "n6": 1,
+      "n5": 2,
+      "n7": 3,
+      "n8": 3,
+      "n9": 3
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 3,
+    "runId": "run-4",
+    "workflowName": "random-4",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": [
+      {
+        "attemptId": "a0",
+        "nodeId": "n0",
+        "nodeType": "agent",
+        "outcome": "ok",
+        "startedAt": "2025-07-19T04:40:00.000Z",
+        "finishedAt": "2025-07-19T04:40:05.000Z",
+        "prompt": null,
+        "output": {
+          "i": 0
+        }
+      }
+    ],
+    "currentNode": "n0",
+    "currentNodeStartedAt": "2026-01-01T00:00:50.000Z"
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "                           · n0 [checkpoint]",
+        "                 ┌──────────┘└─┼─┼─┼┐",
+        "                 │             └─┼─┼┼────────────┐",
+        "                 │               └─┼┼────────────┼────┐",
+        "                 │                 └┼────────────┼────┼────┐",
+        "                 │                  │            │    │    │",
+        "                 ▼                  ▼            │    │    │",
+        "          · n2 [compute]    · n6 [checkpoint]    │    │    │",
+        "        ┌────────┘ ┌──────────────┘ └─────┐    ┌─┼────┘    │",
+        "        │          │           ┌──────────┼────┼─┘         │",
+        "        │          │           │          │    │           │",
+        "        ▼          │           ▼          │    │           ▼",
+        " · n5 [compute]    │    · n3 [compute]    │    │    · n4 [checkpoint]",
+        "  ┌─────┘          │    ┌──────┼──────────┘┌───┘            └──┐",
+        "  │ ┌──────────────┘    │      │           │                   │",
+        "  │ │ ┌─────────────────┼──────┘           │                   │",
+        "  │ │ │                 │                  │                   │",
+        "  ▼ ▼ ▼                 ▼                  ▼                   ▼",
+        "· n7 [action]    · n9 [compute]    · n1 [checkpoint]    · n8 [compute]"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "                                 ┌───────────────────┐",
+        "                                 │ · n0 [checkpoint] │",
+        "                                 └───────────────────┘",
+        "                       ┌───────────┘ └─┼─┼─┼──┐",
+        "                       │               └─┼─┼──┼──────────────┐",
+        "                       │                 └─┼──┼──────────────┼────┐",
+        "                       │                   └──┼──────────────┼────┼────┐",
+        "                       │                      │              │    │    │",
+        "                       ▼                      ▼              │    │    │",
+        "              ┌────────────────┐    ┌───────────────────┐    │    │    │",
+        "              │ · n2 [compute] │    │ · n6 [checkpoint] │    │    │    │",
+        "              └────────────────┘    └───────────────────┘    │    │    │",
+        "            ┌──────────┘ ┌──────────────────┘ └─────┐    ┌───┼────┘    │",
+        "            │            │             ┌────────────┼────┼───┘         │",
+        "            │            │             │            │    │             │",
+        "            ▼            │             ▼            │    │             ▼",
+        "   ┌────────────────┐    │    ┌────────────────┐    │    │    ┌───────────────────┐",
+        "   │ · n5 [compute] │    │    │ · n3 [compute] │    │    │    │ · n4 [checkpoint] │",
+        "   └────────────────┘    │    └────────────────┘    │    │    └───────────────────┘",
+        "    ┌───────┘            │    ┌────────┼────────────┘┌───┘              └────┐",
+        "    │ ┌──────────────────┘    │        │             │                       │",
+        "    │ │ ┌─────────────────────┼────────┘             │                       │",
+        "    │ │ │                     │                      │                       │",
+        "    ▼ ▼ ▼                     ▼                      ▼                       ▼",
+        "┌───────────────┐    ┌────────────────┐    ┌───────────────────┐    ┌────────────────┐",
+        "│ · n7 [action] │    │ · n9 [compute] │    │ · n1 [checkpoint] │    │ · n8 [compute] │",
+        "└───────────────┘    └────────────────┘    └───────────────────┘    └────────────────┘"
+      ]
+    },
+    {
+      "stepIndex": 0,
+      "nodeStyle": "line",
+      "lines": [
+        "                     ◐ n0 [checkpoint] running 10s",
+        "                 ┌─────────┘ └─┼─┼─┼┐",
+        "                 │             └─┼─┼┼────────────┐",
+        "                 │               └─┼┼────────────┼────┐",
+        "                 │                 └┼────────────┼────┼────┐",
+        "                 │                  │            │    │    │",
+        "                 ▼                  ▼            │    │    │",
+        "          · n2 [compute]    · n6 [checkpoint]    │    │    │",
+        "        ┌────────┘ ┌──────────────┘ └─────┐    ┌─┼────┘    │",
+        "        │          │           ┌──────────┼────┼─┘         │",
+        "        │          │           │          │    │           │",
+        "        ▼          │           ▼          │    │           ▼",
+        " · n5 [compute]    │    · n3 [compute]    │    │    · n4 [checkpoint]",
+        "  ┌─────┘          │    ┌──────┼──────────┘┌───┘            └──┐",
+        "  │ ┌──────────────┘    │      │           │                   │",
+        "  │ │ ┌─────────────────┼──────┘           │                   │",
+        "  │ │ │                 │                  │                   │",
+        "  ▼ ▼ ▼                 ▼                  ▼                   ▼",
+        "· n7 [action]    · n9 [compute]    · n1 [checkpoint]    · n8 [compute]"
+      ]
+    },
+    {
+      "stepIndex": 0,
+      "nodeStyle": "box",
+      "lines": [
+        "                           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+        "                           ┃ ◐ n0 [checkpoint] running 10s ┃",
+        "                           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+        "                       ┌───────────┘ └─┼─┼─┼──┐",
+        "                       │               └─┼─┼──┼──────────────┐",
+        "                       │                 └─┼──┼──────────────┼────┐",
+        "                       │                   └──┼──────────────┼────┼────┐",
+        "                       │                      │              │    │    │",
+        "                       ▼                      ▼              │    │    │",
+        "              ┌────────────────┐    ┌───────────────────┐    │    │    │",
+        "              │ · n2 [compute] │    │ · n6 [checkpoint] │    │    │    │",
+        "              └────────────────┘    └───────────────────┘    │    │    │",
+        "            ┌──────────┘ ┌──────────────────┘ └─────┐    ┌───┼────┘    │",
+        "            │            │             ┌────────────┼────┼───┘         │",
+        "            │            │             │            │    │             │",
+        "            ▼            │             ▼            │    │             ▼",
+        "   ┌────────────────┐    │    ┌────────────────┐    │    │    ┌───────────────────┐",
+        "   │ · n5 [compute] │    │    │ · n3 [compute] │    │    │    │ · n4 [checkpoint] │",
+        "   └────────────────┘    │    └────────────────┘    │    │    └───────────────────┘",
+        "    ┌───────┘            │    ┌────────┼────────────┘┌───┘              └────┐",
+        "    │ ┌──────────────────┘    │        │             │                       │",
+        "    │ │ ┌─────────────────────┼────────┘             │                       │",
+        "    │ │ │                     │                      │                       │",
+        "    ▼ ▼ ▼                     ▼                      ▼                       ▼",
+        "┌───────────────┐    ┌────────────────┐    ┌───────────────────┐    ┌────────────────┐",
+        "│ · n7 [action] │    │ · n9 [compute] │    │ · n1 [checkpoint] │    │ · n8 [compute] │",
+        "└───────────────┘    └────────────────┘    └───────────────────┘    └────────────────┘"
+      ]
+    }
+  ]
+}

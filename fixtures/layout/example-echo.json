@@ -1,0 +1,55 @@
+{
+  "name": "example-echo",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "echo",
+    "startAt": "reply",
+    "nodes": {
+      "reply": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"reply\": \"your concise answer\" }"
+      }
+    },
+    "edges": []
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "reply"
+        }
+      ]
+    ],
+    "edges": [],
+    "segments": [],
+    "rankOfNode": {
+      "reply": 0
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-echo",
+    "workflowName": "echo",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": ["· reply [agent]"]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": ["┌─────────────────┐", "│ · reply [agent] │", "└─────────────────┘"]
+    }
+  ]
+}

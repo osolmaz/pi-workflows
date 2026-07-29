@@ -1,0 +1,134 @@
+{
+  "name": "example-branch",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "branch",
+    "startAt": "classify",
+    "nodes": {
+      "classify": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"route\": \"continue\" | \"checkpoint\", \"reason\": \"short justification\" }"
+      },
+      "continue_lane": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"summary\": \"short explanation\" }"
+      },
+      "checkpoint_lane": {
+        "nodeType": "checkpoint",
+        "summary": "needs clarification"
+      }
+    },
+    "edges": [
+      {
+        "from": "classify",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "continue": "continue_lane",
+            "checkpoint": "checkpoint_lane"
+          }
+        }
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "classify"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "continue_lane"
+        },
+        {
+          "kind": "node",
+          "nodeId": "checkpoint_lane"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "classify->continue_lane#0.0",
+        "from": "classify",
+        "to": "continue_lane",
+        "label": "continue",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "classify->checkpoint_lane#0.1",
+        "from": "classify",
+        "to": "checkpoint_lane",
+        "label": "checkpoint",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "classify->continue_lane#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "continue"
+      },
+      {
+        "edgeId": "classify->checkpoint_lane#0.1",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 1,
+        "label": "checkpoint"
+      }
+    ],
+    "rankOfNode": {
+      "classify": 0,
+      "continue_lane": 1,
+      "checkpoint_lane": 1
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-branch",
+    "workflowName": "branch",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "                   · classify [agent]",
+        "           ┌─ continue ───┘ └─────────────┐",
+        "           │                   checkpoint │",
+        "           │                              │",
+        "           ▼                              ▼",
+        "· continue_lane [agent]    · checkpoint_lane [checkpoint]"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "                     ┌────────────────────┐",
+        "                     │ · classify [agent] │",
+        "                     └────────────────────┘",
+        "             ┌── continue ────┘ └─ checkpoint ──┐",
+        "             │                                  │",
+        "             │                                  │",
+        "             ▼                                  ▼",
+        "┌─────────────────────────┐    ┌────────────────────────────────┐",
+        "│ · continue_lane [agent] │    │ · checkpoint_lane [checkpoint] │",
+        "└─────────────────────────┘    └────────────────────────────────┘"
+      ]
+    }
+  ]
+}
