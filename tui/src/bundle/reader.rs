@@ -86,13 +86,22 @@ pub fn read_contained(bundle_dir: &Path, path: &Path) -> Option<String> {
 }
 
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
+    read_manifest_value(dir).map(|(_, manifest)| manifest)
+}
+
+/// Read and validate the manifest, returning both the raw JSON document
+/// (views must carry the manifest verbatim, including fields this build
+/// does not know) and the typed projection.
+pub fn read_manifest_value(dir: &Path) -> Result<(Value, Manifest)> {
     let path = dir.join("manifest.json");
     // The manifest itself gets the same symlink containment as the documents
     // it names: a manifest.json pointing outside the bundle must not be read.
     let raw = read_contained(dir, &path)
         .with_context(|| format!("reading {} inside the bundle", path.display()))?;
-    let manifest: Manifest =
+    let raw: Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let manifest: Manifest = serde_json::from_value(raw.clone())
+        .with_context(|| format!("parsing {}", path.display()))?;
     anyhow::ensure!(
         manifest.schema == RUN_BUNDLE_SCHEMA,
         "unsupported bundle schema {:?} in {}",
@@ -115,7 +124,7 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest> {
             path.display()
         );
     }
-    Ok(manifest)
+    Ok((raw, manifest))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(bundle_dir: &Path, path: &Path) -> Result<T> {
