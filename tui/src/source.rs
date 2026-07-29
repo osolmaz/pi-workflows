@@ -55,10 +55,14 @@ fn parse_state(raw: &str) -> Option<(Value, RunState)> {
 /// bundle's mutable files, so a run that stalled before we started watching
 /// is flagged as possibly interrupted immediately.
 fn last_write_instant(paths: &BundlePaths) -> Instant {
+    // Appends to files inside session/ do not bump the directory mtime, so
+    // the session documents are listed individually: a run mid-conversation
+    // must not open as possibly interrupted.
     let newest = [
-        Some(&paths.state),
-        Some(&paths.trace),
-        paths.session.as_ref(),
+        Some(paths.state.clone()),
+        Some(paths.trace.clone()),
+        paths.session_binding(),
+        paths.session_entries(),
     ]
     .into_iter()
     .flatten()
