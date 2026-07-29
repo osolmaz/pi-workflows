@@ -30,6 +30,7 @@ run:
 ```json
 {
   "manifest": { … },
+  "workflow": { … },
   "state": { … },
   "events": [ … ],
   "session": { "binding": { … }, "entries": [ … ] },
@@ -38,10 +39,11 @@ run:
 }
 ```
 
-- `manifest`, `state`, `events`, `session.binding`, and `session.entries` are
-  the bundle documents verbatim (`events` are the parsed trace lines,
-  `session.entries` the parsed session records). `session` is `null` until a
-  binding exists.
+- `manifest`, `workflow`, `state`, `events`, `session.binding`, and
+  `session.entries` are the bundle documents verbatim (`workflow` is the
+  definition snapshot the graph is drawn from, `events` are the parsed trace
+  lines, `session.entries` the parsed session records). `session` is `null`
+  until a binding exists.
 - `live` is true while the run status is non-terminal and the bundle is still
   growing. `possiblyInterrupted` is true when the status is `running` but the
   bundle has not changed for 60 seconds.
