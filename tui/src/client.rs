@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub struct RemoteView {
     pub revision: u64,
+    generation: u64,
     pub manifest: Manifest,
     pub state: RunState,
     pub snapshot: Option<DefinitionSnapshot>,
@@ -25,7 +26,7 @@ pub struct RemoteView {
     pub possibly_interrupted: bool,
 }
 
-fn decode_view(revision: u64, raw: &Value) -> Option<RemoteView> {
+fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView> {
     let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
     let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
     let snapshot: Option<DefinitionSnapshot> = raw
@@ -43,6 +44,7 @@ fn decode_view(revision: u64, raw: &Value) -> Option<RemoteView> {
         .unwrap_or_default();
     Some(RemoteView {
         revision,
+        generation,
         manifest,
         state,
         snapshot,
@@ -70,7 +72,8 @@ struct Shared {
     reconnect_attempt: u32,
     error: Option<String>,
     summaries: Vec<Value>,
-    raw_views: HashMap<String, (u64, Value)>,
+    raw_views: HashMap<String, (u64, u64, Value)>,
+    next_view_generation: u64,
     watched: HashSet<String>,
     artifacts: HashMap<(String, String), ArtifactEntry>,
 }
@@ -204,16 +207,18 @@ impl RemoteRuns {
     pub fn view(&mut self, run_id: &str) -> Option<&RemoteView> {
         let raw = {
             let shared = self.shared.lock().unwrap();
-            let (revision, raw) = shared.raw_views.get(run_id)?;
+            let (revision, generation, raw) = shared.raw_views.get(run_id)?;
             let cached = self.decoded.get(run_id);
-            if cached.is_some_and(|view| view.revision == *revision) {
+            if cached
+                .is_some_and(|view| view.revision == *revision && view.generation == *generation)
+            {
                 None
             } else {
-                Some((*revision, raw.clone()))
+                Some((*revision, *generation, raw.clone()))
             }
         };
-        if let Some((revision, raw)) = raw {
-            if let Some(view) = decode_view(revision, &raw) {
+        if let Some((revision, generation, raw)) = raw {
+            if let Some(view) = decode_view(revision, generation, &raw) {
                 self.decoded.insert(run_id.to_string(), view);
             }
         }
@@ -365,13 +370,15 @@ async fn run_socket(
                     ServerMessage::RunSnapshot { run_id, revision, view } => {
                         let mut state = shared.lock().unwrap();
                         if state.watched.contains(&run_id) {
-                            state.raw_views.insert(run_id, (revision, view));
+                            state.next_view_generation = state.next_view_generation.wrapping_add(1);
+                            let generation = state.next_view_generation;
+                            state.raw_views.insert(run_id, (revision, generation, view));
                         }
                     }
                     ServerMessage::RunPatch { run_id, revision, patch } => {
                         let mut state = shared.lock().unwrap();
                         match state.raw_views.get_mut(&run_id) {
-                            Some((current, view)) if revision == *current + 1 => {
+                            Some((current, _, view)) if revision == *current + 1 => {
                                 if apply_patch(view, &patch).is_ok() {
                                     *current = revision;
                                 } else {

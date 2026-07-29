@@ -385,6 +385,16 @@ fn remote_client_reconnects_and_restores_selected_run() {
     }
     assert_eq!(client.status_label(), "reconnecting");
 
+    // Change the bundle while the server is down. A restarted RunSource begins
+    // at revision 0 again, so the client must not treat the same revision as
+    // proof that its decoded cache is current.
+    std::fs::write(
+        runs.path().join("run-reconnect/state.json"),
+        serde_json::to_string_pretty(&state_value("run-reconnect", "completed", 1, vec![]))
+            .unwrap(),
+    )
+    .unwrap();
+
     let (stop, worker) = start_server(addr, runs.path().to_path_buf());
     let reconnect_deadline = Instant::now() + Duration::from_secs(15);
     while !client.connected() {
@@ -394,10 +404,16 @@ fn remote_client_reconnects_and_restores_selected_run() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    while client.view("run-reconnect").is_none() {
+    loop {
+        if client
+            .view("run-reconnect")
+            .is_some_and(|view| view.state.status == piw::bundle::types::RunStatus::Completed)
+        {
+            break;
+        }
         assert!(
             Instant::now() < reconnect_deadline,
-            "selected run was not restored"
+            "fresh same-revision snapshot did not replace the decoded cache"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
