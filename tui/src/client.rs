@@ -61,6 +61,9 @@ struct Shared {
     error: Option<String>,
     summaries: Vec<Value>,
     raw_views: HashMap<String, (u64, Value)>,
+    /// Runs the UI currently wants; shared so the connection task can drop
+    /// snapshots and patches that race an unwatch.
+    watched: HashSet<String>,
 }
 
 pub struct RemoteRuns {
@@ -68,7 +71,6 @@ pub struct RemoteRuns {
     commands: mpsc::UnboundedSender<ClientMessage>,
     /// Typed cache, refreshed when a view's revision changes.
     decoded: HashMap<String, RemoteView>,
-    watched: HashSet<String>,
 }
 
 impl RemoteRuns {
@@ -97,7 +99,6 @@ impl RemoteRuns {
             shared,
             commands: commands_tx,
             decoded: HashMap::new(),
-            watched: HashSet::new(),
         })
     }
 
@@ -117,18 +118,24 @@ impl RemoteRuns {
     /// one run at a time, and keeping old subscriptions alive would stream
     /// (and retain) every previously selected run's history forever.
     pub fn watch(&mut self, run_id: &str) {
-        if self.watched.contains(run_id) {
-            return;
-        }
-        let previous: Vec<String> = self.watched.drain().collect();
+        let previous: Vec<String> = {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.watched.contains(run_id) {
+                return;
+            }
+            let previous: Vec<String> = shared.watched.drain().collect();
+            for old in &previous {
+                shared.raw_views.remove(old);
+            }
+            shared.watched.insert(run_id.to_string());
+            previous
+        };
         for old in previous {
-            let _ = self.commands.send(ClientMessage::UnwatchRun {
-                run_id: old.clone(),
-            });
             self.decoded.remove(&old);
-            self.shared.lock().unwrap().raw_views.remove(&old);
+            let _ = self
+                .commands
+                .send(ClientMessage::UnwatchRun { run_id: old });
         }
-        self.watched.insert(run_id.to_string());
         let _ = self.commands.send(ClientMessage::WatchRun {
             run_id: run_id.to_string(),
         });
@@ -199,7 +206,11 @@ async fn run_connection(
                             None
                         }
                         ServerMessage::RunSnapshot { run_id, revision, view } => {
-                            shared.raw_views.insert(run_id, (revision, view));
+                            // A snapshot can race an unwatch; storing it
+                            // would retain a history nobody is looking at.
+                            if shared.watched.contains(&run_id) {
+                                shared.raw_views.insert(run_id, (revision, view));
+                            }
                             None
                         }
                         ServerMessage::RunPatch { run_id, revision, patch } => {
