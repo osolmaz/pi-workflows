@@ -125,7 +125,7 @@ pub fn render(
         )
     } else {
         Span::styled(
-            format!(" {}x  z: density  ,: theme  q: quit", view.speed),
+            format!(" {}x  f: follow  z: density  ,: theme  q: quit", view.speed),
             Style::default().fg(palette.muted),
         )
     };
@@ -167,7 +167,7 @@ fn render_compact(frame: &mut Frame, area: Rect, view: &TimelineView<'_>, palett
             ),
             Span::styled(
                 format!(
-                    "  {}x  [/]: scrub  space: play  ,: theme{diagnostic}",
+                    "  {}x  [/]: scrub  f: follow  ,: theme{diagnostic}",
                     view.speed
                 ),
                 Style::default().fg(palette.muted),

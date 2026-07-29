@@ -26,7 +26,10 @@ The protocol is the network form of that view.
 The normal layout contains a run browser, graph, inspector, and two-line replay
 timeline. Short terminals use a compact one-line transport. Terminals below 100
 columns start with the run browser collapsed to a status rail; `b` toggles it.
-A directly opened single run hides the browser.
+Drag the run browser's right border to resize it. Drag the inspector's top
+border to resize the bottom panel. PIW saves both sizes in its viewer config and
+clamps them when the terminal is smaller. A directly opened single run hides
+the browser.
 
 - **Run browser:** every bundle, newest first, with status, title, elapsed time,
   and a `?` marker for a possibly interrupted run.
@@ -103,6 +106,10 @@ light_name = "catppuccin-latte"
 # canvas_bg = "#1e1e2e"
 # node_bg = "#313244"
 # accent = "#89b4fa"
+
+[ui]
+# sidebar_width = 34
+# inspector_height = 16
 ```
 
 `PIW_THEME` overrides the config file and `--theme` overrides both. Custom
@@ -122,9 +129,15 @@ layout because layout depends only on the persisted definition snapshot.
 
 Playback is deliberately discrete. The available speeds are 1x, 2x, 5x, and
 10x over the 700 ms base interval. Seeking backward detaches from live;
-selecting Live or pressing `G`, `L`, or End rejoins it. A viewer already at
-latest follows newly appended steps. A detached viewer stays at its chosen
-position.
+selecting Live or pressing `G`, `L`, or End rejoins it and enables graph follow.
+A viewer already at latest follows newly appended steps. A detached viewer
+stays at its chosen position.
+
+Graph follow is on by default and is shown as `FOLLOW` in the graph title. It
+centers the running node, the waiting checkpoint, or the selected replay step,
+including nodes at the graph edges and graphs smaller than the viewport. `f`
+toggles follow. Keyboard or mouse panning turns it off; `f`, `0`, or returning
+to Live turns it back on.
 
 The conversation uses persisted `conversation` entry ranges rather than
 heuristics. Entries after the replay position remain hidden. The selected
@@ -148,12 +161,14 @@ symlink, and 4 MiB limits.
   `G`, or `L` to live, and `{`/`}` to change speed.
 - Focus: Tab cycles Runs → Graph → Inspector. `t` or `1`–`4` changes inspector
   tabs.
-- Graph: arrows or `hjkl` pan, `0` resets, `f` toggles follow, and `z`, `+`, or
-  `-` switches boxed/compact density. Clicking a node selects its latest
-  visible attempt. Dragging pans.
-- Browser: `b` expands or collapses it. Up/Down or `j`/`k` selects a run.
+- Graph: arrows or `hjkl` pan, `0` resets, `f` toggles centered follow, and
+  `z`, `+`, or `-` switches boxed/compact density. Clicking a node selects its
+  latest visible attempt. Dragging inside the graph pans.
+- Browser: `b` expands or collapses it. Up/Down or `j`/`k` selects a run. Drag
+  its right border to resize it.
 - Inspector: Enter expands the selected step, trace payload, or conversation
-  entry. In Trace, `v` changes scope. Page Up/Down scrolls long content.
+  entry. In Trace, `v` changes scope. Page Up/Down scrolls long content. Drag
+  its top border to resize the bottom panel.
 - Theme: `,` opens the picker; arrows or `j`/`k` preview, Enter applies, and
   Escape cancels.
 - `q` or Ctrl-C quits.
