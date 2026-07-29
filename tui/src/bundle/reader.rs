@@ -80,8 +80,10 @@ pub fn read_contained(bundle_dir: &Path, path: &Path) -> Option<String> {
 
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
     let path = dir.join("manifest.json");
-    let raw =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    // The manifest itself gets the same symlink containment as the documents
+    // it names: a manifest.json pointing outside the bundle must not be read.
+    let raw = read_contained(dir, &path)
+        .with_context(|| format!("reading {} inside the bundle", path.display()))?;
     let manifest: Manifest =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     anyhow::ensure!(

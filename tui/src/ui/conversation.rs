@@ -126,7 +126,7 @@ pub fn conversation_lines(
         let highlighted = highlight.is_some_and(|(first, last)| index >= first && index <= last);
         let gutter = if highlighted { "▌" } else { " " };
         let gutter_style = Style::default().fg(Color::Magenta);
-        let role = entry_role(record);
+        let role = sanitize_text(&entry_role(record));
         let text = sanitize_text(&entry_text(record));
         let header = format!("{role}:");
         lines.push(Line::from(vec![
