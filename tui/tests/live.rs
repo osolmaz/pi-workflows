@@ -33,8 +33,7 @@ fn patches_reproduce_the_view_exactly() {
     )
     .unwrap();
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
     manifest["status"] = json!("completed");
     manifest["finishedAt"] = json!("2026-01-01T00:00:03.000Z");
     std::fs::write(
@@ -54,7 +53,10 @@ fn patches_reproduce_the_view_exactly() {
     );
     assert_eq!(tracked["live"], json!(false));
     assert_eq!(tracked["events"].as_array().unwrap().len(), 2);
-    assert!(outcome.listing_changed, "terminal status changes the listing");
+    assert!(
+        outcome.listing_changed,
+        "terminal status changes the listing"
+    );
 }
 
 #[test]
