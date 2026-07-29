@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { decision, decisionEdge } from "../src/workflows/decision.js";
 import { agent, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine, appendStepContract } from "../src/workflows/engine.js";
-import { readRunBundle } from "../src/workflows/store.js";
+import { WorkflowRunStore, readRunBundle } from "../src/workflows/store.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
 import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
@@ -24,6 +24,47 @@ async function makeEngine(
 }
 
 describe("WorkflowEngine", () => {
+  it("awaits onRunStarted so session binding precedes node and terminal events", async () => {
+    const workflow = defineWorkflow({
+      name: "fast",
+      startAt: "one",
+      nodes: { one: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const outputRoot = await makeTempDir("pi-workflows-engine");
+    const store = new WorkflowRunStore(outputRoot);
+    const engine = new WorkflowEngine({
+      executor: new ScriptedExecutor(),
+      store,
+      onRunStarted: async (runDir, state) => {
+        await store.writeSessionBinding(runDir, {
+          schema: "pi-workflows.session-binding.v1",
+          runId: state.runId,
+          piSessionId: "s1",
+          cwd: "/tmp",
+          boundAt: new Date().toISOString(),
+        });
+      },
+    });
+
+    const { runDir, state } = await engine.run(workflow, {});
+
+    const trace = (await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as WorkflowTraceEvent);
+    expect(trace.map((event) => event.type)).toEqual([
+      "run_started",
+      "session_bound",
+      "node_started",
+      "node_finished",
+      "run_completed",
+    ]);
+    // The terminal projection reflects the whole trace.
+    expect(state.traceSeq).toBe(trace.at(-1)?.seq);
+    expect((await readRunBundle(runDir))?.manifest.paths.session).toBe("session");
+  });
+
   it("runs a linear agent + compute workflow to completion", async () => {
     const workflow = defineWorkflow({
       name: "linear",

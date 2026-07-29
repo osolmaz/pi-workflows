@@ -393,6 +393,12 @@ export type WorkflowEngineOptions = {
    * `outputRoot`.
    */
   store?: import("./store.js").WorkflowRunStore;
+  /**
+   * Awaited after `run_started` is persisted, before any node executes. This
+   * is where a session recorder binds, so `session_bound` lands at the start
+   * of the trace and can never trail the terminal event.
+   */
+  onRunStarted?: (runDir: string, state: WorkflowRunState) => MaybePromise<void>;
   /** Default per-node timeout. Defaults to 15 minutes. */
   defaultNodeTimeoutMs?: number;
   /** Guard against unbounded graph loops. Defaults to 100 executed steps. */
