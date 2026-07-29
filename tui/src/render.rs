@@ -212,10 +212,14 @@ fn taken_transitions(visible_steps: &[StepRecord]) -> HashSet<String> {
 }
 
 /// Render the graph pane onto a fresh canvas. `selected_step_index` scrubs
-/// the replay position; pass `steps.len() - 1` (or larger) for the live view.
+/// the replay position; `at_latest_step` says whether the caller is showing
+/// the live view. It cannot be inferred from the index: a detached position
+/// on the final recorded step must not render `currentNode` and the
+/// in-flight edge from the mutable live state.
 pub fn render_graph_canvas(
     view: &GraphView,
     selected_step_index: i64,
+    at_latest_step: bool,
     now_ms: i64,
     node_style: GraphNodeStyle,
 ) -> Option<CharCanvas> {
@@ -223,7 +227,6 @@ pub fn render_graph_canvas(
     let layout = layout_graph(snapshot);
     let steps = &view.state.steps;
     let bounded_index = selected_step_index.max(-1).min(steps.len() as i64 - 1);
-    let at_latest_step = bounded_index >= steps.len() as i64 - 1;
     let visible_steps = &steps[0..(bounded_index + 1) as usize];
     let transitions = taken_transitions(visible_steps);
     let active_pair = derive_pair_in_flight(view, visible_steps, at_latest_step);
@@ -332,14 +335,22 @@ pub fn render_graph_canvas(
 }
 
 /// Render the graph to plain text lines (parity with the TS renderer with
-/// colors disabled).
+/// colors disabled). The TS reference infers "at latest" from the index, so
+/// this entry point does the same.
 pub fn render_graph_lines(
     view: &GraphView,
     selected_step_index: i64,
     now_ms: i64,
     node_style: GraphNodeStyle,
 ) -> Vec<String> {
-    match render_graph_canvas(view, selected_step_index, now_ms, node_style) {
+    let at_latest_step = selected_step_index >= view.state.steps.len() as i64 - 1;
+    match render_graph_canvas(
+        view,
+        selected_step_index,
+        at_latest_step,
+        now_ms,
+        node_style,
+    ) {
         Some(canvas) => canvas.render_plain(),
         None => Vec::new(),
     }

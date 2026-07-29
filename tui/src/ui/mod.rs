@@ -667,7 +667,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     } else {
         bounded_index
     };
-    let rows_runs = render_graph_canvas(&view, render_index, now_ms(), node_style)
+    let rows_runs = render_graph_canvas(&view, render_index, at_latest, now_ms(), node_style)
         .map(|canvas| canvas.render_runs())
         .unwrap_or_default();
     let inner_width = graph_rect.width.saturating_sub(2) as usize;
