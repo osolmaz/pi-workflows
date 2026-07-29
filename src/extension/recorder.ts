@@ -89,11 +89,13 @@ export class SessionRecorder {
   }
 
   /**
-   * Stop recording. Called when the run reaches a terminal state so the
-   * bundle no longer changes afterwards.
+   * Stop recording and drain any in-flight flush. Awaited before the
+   * terminal snapshot is persisted, so nothing can touch the bundle after a
+   * run ends.
    */
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
+    await this.chain;
   }
 
   /** Take a mark before delivering a prompt. */

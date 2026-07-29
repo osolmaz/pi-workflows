@@ -296,9 +296,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (activeRun === run) {
       activeRun = null;
     }
-    // The bundle must not change after the terminal snapshot; stop copying
-    // session entries (e.g. from the presentation turn) into it.
-    run.recorder?.stop();
+    // Normally already stopped via onRunFinishing; this covers observers of
+    // runs that ended without reaching that hook.
+    void run.recorder?.stop();
     stopWidgetTicker();
     const { state } = result;
     updateWidget(ctx, state, run.snapshot);
@@ -363,6 +363,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
           // ephemeral context must not fail the run.
         }
       },
+      // Awaited by the engine before the terminal snapshot: recording stops
+      // and drains, so the bundle is immutable once the run has ended.
+      onRunFinishing: async () => {
+        await run.recorder?.stop();
+      },
       onEvent: (_event, state: WorkflowRunState) => {
         if (run.runId === null) {
           run.runId = state.runId;
@@ -394,7 +399,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (activeRun === run) {
           activeRun = null;
         }
-        run.recorder?.stop();
+        void run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
         notify(ctx, `Workflow ${workflow.name} crashed: ${errorMessage(error)}`, "error");

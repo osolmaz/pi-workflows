@@ -85,18 +85,29 @@ describe("WorkflowRunStore", () => {
     const state = makeState();
     const runDir = await store.initializeRunBundle(workflow, state);
 
+    // The first event carries a payload large enough to externalize, which
+    // makes its transition slow; physical order must still match seq order.
     await Promise.all([
-      store.writeSnapshot(runDir, state, { scope: "node", type: "a", payload: {} }),
+      store.writeSnapshot(runDir, state, {
+        scope: "node",
+        type: "a",
+        payload: { text: "z".repeat(50_000) },
+      }),
       store.writeSnapshot(runDir, state, { scope: "node", type: "b", payload: {} }),
       store.writeSnapshot(runDir, state, { scope: "node", type: "c", payload: {} }),
     ]);
 
     const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-    const seqs = trace
+    const events = trace
       .trim()
       .split("\n")
-      .map((line) => (JSON.parse(line) as { seq: number }).seq);
-    expect([...seqs].sort((a, b) => a - b)).toEqual([1, 2, 3]);
+      .map((line) => JSON.parse(line) as { seq: number; type: string });
+    expect(events.map((event) => [event.seq, event.type])).toEqual([
+      [1, "a"],
+      [2, "b"],
+      [3, "c"],
+    ]);
+    expect((await readRunBundle(runDir))?.state.traceSeq).toBe(3);
   });
 
   it("carries the reflected trace seq in state.json", async () => {

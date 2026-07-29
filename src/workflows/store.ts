@@ -57,6 +57,12 @@ type RunBundleContext = {
   sessionSeq: number;
   sessionBound: boolean;
   artifacts: ArtifactWriter;
+  /**
+   * Serializes complete transitions (encode, trace append, projections) so
+   * concurrent writers cannot interleave sequence assignment with physical
+   * append order.
+   */
+  lock: Promise<unknown>;
 };
 
 /**
@@ -70,7 +76,6 @@ type RunBundleContext = {
 export class WorkflowRunStore {
   readonly outputRoot: string;
   private readonly contexts = new Map<string, RunBundleContext>();
-  private readonly appendChainByPath = new Map<string, Promise<void>>();
 
   constructor(outputRoot: string = workflowRunsBaseDir()) {
     this.outputRoot = outputRoot;
@@ -88,10 +93,25 @@ export class WorkflowRunStore {
         sessionSeq: 0,
         sessionBound: false,
         artifacts: new ArtifactWriter(runDir),
+        lock: Promise.resolve(),
       };
       this.contexts.set(runDir, context);
     }
     return context;
+  }
+
+  /**
+   * Run `task` exclusively for this bundle. Sequence numbers are assigned
+   * inside the lock, so physical file order always matches logical order.
+   */
+  private withRunLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
+    const context = this.contextFor(runDir);
+    const result = context.lock.then(task);
+    context.lock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async initializeRunBundle(
@@ -99,22 +119,17 @@ export class WorkflowRunStore {
     state: WorkflowRunState,
   ): Promise<string> {
     const runDir = this.runDirFor(state.runId);
-    await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
-    this.contexts.set(runDir, {
-      traceSeq: 0,
-      sessionSeq: 0,
-      sessionBound: false,
-      artifacts: new ArtifactWriter(runDir),
+    this.contexts.delete(runDir);
+    return await this.withRunLock(runDir, async () => {
+      await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+      await writeJsonAtomic(
+        path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
+        createDefinitionSnapshot(workflow),
+      );
+      await appendLine(path.join(runDir, TRACE_PATH), null);
+      await this.writeProjections(runDir, state);
+      return runDir;
     });
-
-    await writeJsonAtomic(
-      path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
-      createDefinitionSnapshot(workflow),
-    );
-    await this.appendJsonLine(path.join(runDir, TRACE_PATH), null);
-    await this.writeProjections(runDir, state);
-
-    return runDir;
   }
 
   /**
@@ -126,11 +141,13 @@ export class WorkflowRunStore {
     state: WorkflowRunState,
     event: WorkflowTraceEventDraft,
   ): Promise<WorkflowTraceEvent> {
-    const traceEvent = await this.appendTraceEvent(runDir, state.runId, event);
-    state.traceSeq = traceEvent.seq;
-    state.updatedAt = new Date().toISOString();
-    await this.writeProjections(runDir, state);
-    return traceEvent;
+    return await this.withRunLock(runDir, async () => {
+      const traceEvent = await this.appendTraceEvent(runDir, state.runId, event);
+      state.traceSeq = traceEvent.seq;
+      state.updatedAt = new Date().toISOString();
+      await this.writeProjections(runDir, state);
+      return traceEvent;
+    });
   }
 
   /**
@@ -139,31 +156,35 @@ export class WorkflowRunStore {
    * snapshot.
    */
   async writeSessionBinding(runDir: string, binding: WorkflowSessionBinding): Promise<void> {
-    const context = this.contextFor(runDir);
-    if (context.sessionBound) {
-      return;
-    }
-    context.sessionBound = true;
-    await fs.mkdir(path.join(runDir, SESSION_DIR), { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(path.join(runDir, SESSION_BINDING_PATH), binding);
-    await this.appendTraceEvent(runDir, binding.runId, {
-      scope: "session",
-      type: "session_bound",
-      payload: { piSessionId: binding.piSessionId },
+    await this.withRunLock(runDir, async () => {
+      const context = this.contextFor(runDir);
+      if (context.sessionBound) {
+        return;
+      }
+      context.sessionBound = true;
+      await fs.mkdir(path.join(runDir, SESSION_DIR), { recursive: true, mode: 0o700 });
+      await writeJsonAtomic(path.join(runDir, SESSION_BINDING_PATH), binding);
+      await this.appendTraceEvent(runDir, binding.runId, {
+        scope: "session",
+        type: "session_bound",
+        payload: { piSessionId: binding.piSessionId },
+      });
     });
   }
 
   /** Append one verbatim Pi session entry to `session/entries.ndjson`. */
   async appendSessionEntry(runDir: string, entry: Record<string, unknown>): Promise<number> {
-    const context = this.contextFor(runDir);
-    context.sessionSeq += 1;
-    const record: WorkflowSessionEntryRecord = {
-      seq: context.sessionSeq,
-      at: new Date().toISOString(),
-      entry,
-    };
-    await this.appendJsonLine(path.join(runDir, SESSION_ENTRIES_PATH), record);
-    return record.seq;
+    return await this.withRunLock(runDir, async () => {
+      const context = this.contextFor(runDir);
+      context.sessionSeq += 1;
+      const record: WorkflowSessionEntryRecord = {
+        seq: context.sessionSeq,
+        at: new Date().toISOString(),
+        entry,
+      };
+      await appendLine(path.join(runDir, SESSION_ENTRIES_PATH), record);
+      return record.seq;
+    });
   }
 
   private async appendTraceEvent(
@@ -172,15 +193,15 @@ export class WorkflowRunStore {
     event: WorkflowTraceEventDraft,
   ): Promise<WorkflowTraceEvent> {
     const context = this.contextFor(runDir);
-    context.traceSeq += 1;
     const traceEvent: WorkflowTraceEvent = {
-      seq: context.traceSeq,
+      seq: context.traceSeq + 1,
       at: new Date().toISOString(),
       runId,
       ...event,
       payload: (await encodeValue(event.payload, context.artifacts)) as Record<string, unknown>,
     };
-    await this.appendJsonLine(path.join(runDir, TRACE_PATH), traceEvent);
+    await appendLine(path.join(runDir, TRACE_PATH), traceEvent);
+    context.traceSeq = traceEvent.seq;
     return traceEvent;
   }
 
@@ -196,24 +217,14 @@ export class WorkflowRunStore {
       }),
     );
   }
+}
 
-  private async appendJsonLine(filePath: string, value: unknown): Promise<void> {
-    const prior = this.appendChainByPath.get(filePath) ?? Promise.resolve();
-    const nextWrite = prior.then(async () => {
-      await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-      await fs.appendFile(filePath, value === null ? "" : `${JSON.stringify(value)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    });
-    const tracked = nextWrite.finally(() => {
-      if (this.appendChainByPath.get(filePath) === tracked) {
-        this.appendChainByPath.delete(filePath);
-      }
-    });
-    this.appendChainByPath.set(filePath, tracked);
-    await tracked;
-  }
+async function appendLine(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await fs.appendFile(filePath, value === null ? "" : `${JSON.stringify(value)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
 /**
