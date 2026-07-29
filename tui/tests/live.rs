@@ -60,6 +60,91 @@ fn patches_reproduce_the_view_exactly() {
 }
 
 #[test]
+fn trace_events_wait_for_the_state_projection() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-torn", "running");
+    let mut source = RunSource::new(runs.path());
+    assert_eq!(
+        source.get("run-torn").unwrap().view()["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Writer appended the trace but has not rewritten state.json yet
+    // (state.traceSeq is still 1): the event must be held back.
+    append_trace(
+        &dir,
+        &json!({
+            "seq": 2, "at": "2026-01-01T00:00:02.000Z", "scope": "node",
+            "type": "node_started", "runId": "run-torn", "nodeId": "plan",
+            "attemptId": "a1", "payload": {},
+        }),
+    );
+    source.refresh_all();
+    assert_eq!(
+        source.get("run-torn").unwrap().view()["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "trace tail ahead of state.traceSeq must not be published"
+    );
+
+    // The state catches up: the held event is published with it.
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string(&state_value("run-torn", "running", 2, vec![])).unwrap(),
+    )
+    .unwrap();
+    let outcome = source.refresh_all();
+    assert_eq!(outcome.patches.len(), 1);
+    assert_eq!(
+        source.get("run-torn").unwrap().view()["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn terminal_bundles_are_not_re_read() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-done", "completed");
+    let mut source = RunSource::new(runs.path());
+    assert!(!source.get("run-done").unwrap().live);
+
+    // Growth after terminal status violates the format contract; the source
+    // must not pick it up because terminal bundles are skipped entirely.
+    append_trace(
+        &dir,
+        &json!({
+            "seq": 99, "at": "2026-01-01T00:09:00.000Z", "scope": "run",
+            "type": "bogus", "runId": "run-done", "payload": {},
+        }),
+    );
+    let outcome = source.refresh_all();
+    assert!(outcome.patches.is_empty());
+}
+
+#[test]
+fn unsupported_state_schema_is_skipped() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-future", "running");
+    let mut state = state_value("run-future", "running", 1, vec![]);
+    state["schema"] = json!("pi-workflows.run-state.v99");
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    let source = RunSource::new(runs.path());
+    assert!(source.get("run-future").is_none());
+}
+
+#[test]
 fn single_bundle_mode_survives_refresh() {
     let runs = tempfile::tempdir().unwrap();
     let dir = write_bundle(runs.path(), "run-solo", "running");
@@ -133,7 +218,8 @@ fn server_round_trip_with_live_updates() {
     assert_eq!(client.view("run-live").unwrap().events.len(), 1);
     assert!(client.view("run-live").unwrap().live);
 
-    // Grow the bundle on disk; the server must stream the change through.
+    // Grow the bundle on disk (trace first, then the state projection, as
+    // the writer does); the server must stream the change through.
     append_trace(
         &dir,
         &json!({
@@ -142,6 +228,11 @@ fn server_round_trip_with_live_updates() {
             "attemptId": "a1", "payload": {},
         }),
     );
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string(&state_value("run-live", "running", 2, vec![])).unwrap(),
+    )
+    .unwrap();
     while client.view("run-live").map(|view| view.events.len()) != Some(2) {
         assert!(Instant::now() < deadline, "no patch before timeout");
         std::thread::sleep(Duration::from_millis(25));

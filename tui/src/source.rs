@@ -24,6 +24,9 @@ pub struct RunEntry {
     pub workflow: Value,
     pub state_raw: Value,
     pub events: Vec<Value>,
+    /// Tailed trace events whose `seq` is still ahead of `state.traceSeq`
+    /// (the writer appends the trace before rewriting the state).
+    pending_events: Vec<Value>,
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
     /// Typed forms for rendering.
@@ -37,17 +40,53 @@ pub struct RunEntry {
     last_growth: Instant,
 }
 
+/// Parse and schema-check a state document; unsupported schemas are
+/// rejected so incompatible layouts never render.
+fn parse_state(raw: &str) -> Option<(Value, RunState)> {
+    let state_raw: Value = serde_json::from_str(raw).ok()?;
+    let state: RunState = serde_json::from_value(state_raw.clone()).ok()?;
+    if state.schema != crate::bundle::types::RUN_STATE_SCHEMA {
+        return None;
+    }
+    Some((state_raw, state))
+}
+
+/// The instant corresponding to the newest modification time among the
+/// bundle's mutable files, so a run that stalled before we started watching
+/// is flagged as possibly interrupted immediately.
+fn last_write_instant(paths: &BundlePaths) -> Instant {
+    let newest = [
+        Some(&paths.state),
+        Some(&paths.trace),
+        paths.session.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| std::fs::metadata(path).ok())
+    .filter_map(|metadata| metadata.modified().ok())
+    .max();
+    let age = newest
+        .and_then(|mtime| std::time::SystemTime::now().duration_since(mtime).ok())
+        .unwrap_or_default();
+    Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+}
+
 impl RunEntry {
     fn open(dir: &Path) -> Result<Self> {
         let manifest = read_manifest(dir)?;
         let paths = BundlePaths::from_manifest(dir, &manifest);
-        let state_raw: Value = serde_json::from_str(&std::fs::read_to_string(&paths.state)?)?;
-        let state: RunState = serde_json::from_value(state_raw.clone())?;
+        let (state_raw, state) = parse_state(&std::fs::read_to_string(&paths.state)?)
+            .ok_or_else(|| anyhow::anyhow!("unsupported state schema in {}", dir.display()))?;
         let workflow: Value = std::fs::read_to_string(&paths.workflow)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or(Value::Null);
-        let snapshot: Option<DefinitionSnapshot> = serde_json::from_value(workflow.clone()).ok();
+        let snapshot: Option<DefinitionSnapshot> = serde_json::from_value(workflow.clone())
+            .ok()
+            .filter(|snapshot: &DefinitionSnapshot| {
+                snapshot.schema == crate::bundle::types::DEFINITION_SNAPSHOT_SCHEMA
+            });
+        let last_growth = last_write_instant(&paths);
         let mut entry = Self {
             dir: dir.to_path_buf(),
             trace_tailer: NdjsonTailer::new(&paths.trace),
@@ -56,6 +95,7 @@ impl RunEntry {
             workflow,
             state_raw,
             events: Vec::new(),
+            pending_events: Vec::new(),
             session_binding: None,
             session_entries: Vec::new(),
             state,
@@ -63,15 +103,36 @@ impl RunEntry {
             live: true,
             possibly_interrupted: false,
             revision: 0,
-            last_growth: Instant::now(),
+            last_growth,
         };
-        entry.events = entry.trace_tailer.poll().unwrap_or_default();
+        entry.pending_events = entry.trace_tailer.poll().unwrap_or_default();
+        entry.events = entry.drain_ready_events();
         entry.read_session_binding();
         if let Some(tailer) = entry.session_tailer.as_mut() {
             entry.session_entries = tailer.poll().unwrap_or_default();
         }
         entry.live = !entry.manifest.status.is_terminal();
+        entry.possibly_interrupted = entry.live
+            && entry.state.status == crate::bundle::types::RunStatus::Running
+            && entry.last_growth.elapsed() >= INTERRUPTED_AFTER;
         Ok(entry)
+    }
+
+    /// Take the pending trace events whose `seq` the state projection has
+    /// caught up with. Publishing a trace tail ahead of its state would make
+    /// the panes disagree mid-transition (trace is written first).
+    fn drain_ready_events(&mut self) -> Vec<Value> {
+        let ready_count = self
+            .pending_events
+            .iter()
+            .take_while(|event| {
+                event
+                    .get("seq")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|seq| seq <= self.state.trace_seq)
+            })
+            .count();
+        self.pending_events.drain(..ready_count).collect()
     }
 
     fn read_session_binding(&mut self) {
@@ -127,29 +188,34 @@ impl RunEntry {
     fn refresh(&mut self) -> Option<Vec<PatchOp>> {
         let mut patch: Vec<PatchOp> = Vec::new();
 
-        let new_events = self.trace_tailer.poll().unwrap_or_default();
-        if !new_events.is_empty() {
-            patch.push(PatchOp::Append {
-                path: "/events".into(),
-                value: new_events.clone(),
-            });
-            self.events.extend(new_events);
-        }
+        // Tail the trace first, but publish only after the state below has
+        // been re-read: events past `state.traceSeq` wait in `pending_events`
+        // so a mid-transition read never shows a trace tail ahead of the
+        // projection.
+        let newly_polled = self.trace_tailer.poll().unwrap_or_default();
+        let trace_grew = !newly_polled.is_empty();
+        self.pending_events.extend(newly_polled);
 
         let paths = BundlePaths::from_manifest(&self.dir, &self.manifest);
         if let Ok(raw) = std::fs::read_to_string(&paths.state) {
-            if let Ok(state_raw) = serde_json::from_str::<Value>(&raw) {
+            if let Some((state_raw, state)) = parse_state(&raw) {
                 if state_raw != self.state_raw {
-                    if let Ok(state) = serde_json::from_value::<RunState>(state_raw.clone()) {
-                        self.state = state;
-                        self.state_raw = state_raw;
-                        patch.push(PatchOp::Replace {
-                            path: "/state".into(),
-                            value: self.state_raw.clone(),
-                        });
-                    }
+                    self.state = state;
+                    self.state_raw = state_raw;
+                    patch.push(PatchOp::Replace {
+                        path: "/state".into(),
+                        value: self.state_raw.clone(),
+                    });
                 }
             }
+        }
+        let ready_events = self.drain_ready_events();
+        if !ready_events.is_empty() {
+            patch.push(PatchOp::Append {
+                path: "/events".into(),
+                value: ready_events.clone(),
+            });
+            self.events.extend(ready_events);
         }
         if let Ok(manifest) = read_manifest(&self.dir) {
             if manifest != self.manifest {
@@ -181,7 +247,7 @@ impl RunEntry {
             }
         }
 
-        if !patch.is_empty() {
+        if !patch.is_empty() || trace_grew {
             self.last_growth = Instant::now();
         }
         let live = !self.manifest.status.is_terminal();
@@ -318,6 +384,11 @@ impl RunSource {
         let mut listing_changed = self.scan();
         let mut patches = Vec::new();
         for (run_id, entry) in self.runs.iter_mut() {
+            // Terminal bundles are immutable per the format contract; stop
+            // re-reading them (discovery of new runs still happens above).
+            if !entry.live {
+                continue;
+            }
             let live_before = entry.live;
             let interrupted_before = entry.possibly_interrupted;
             let status_before = entry.manifest.status;
