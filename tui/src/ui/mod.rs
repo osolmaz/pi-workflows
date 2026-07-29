@@ -600,9 +600,18 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     }
 
     let Some(run_id) = app.selected_run.clone() else {
+        // In remote mode an empty screen is ambiguous: say whether we are
+        // still connecting, failed, or genuinely see no runs.
+        let message = match &app.provider {
+            Provider::Remote(remote) => match remote.error() {
+                Some(error) => format!("Connection failed: {}", sanitize_text(&error)),
+                None if !remote.connected() => "Connecting…".to_string(),
+                None => "No runs found.".to_string(),
+            },
+            _ => "No runs found.".to_string(),
+        };
         frame.render_widget(
-            Paragraph::new("No runs found.")
-                .block(Block::default().borders(Borders::ALL).title(" piw ")),
+            Paragraph::new(message).block(Block::default().borders(Borders::ALL).title(" piw ")),
             main_area,
         );
         draw_transport(frame, transport, None, app.playing);
@@ -935,15 +944,14 @@ fn trace_lines(events: &[Value]) -> Vec<Line<'static>> {
         .iter()
         .map(|event| {
             let seq = event.get("seq").and_then(Value::as_u64).unwrap_or(0);
-            let event_type = event
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
+            // Event types and node ids are bundle-derived strings; scrub
+            // them so the trace pane cannot emit terminal escapes.
+            let event_type =
+                sanitize_text(event.get("type").and_then(Value::as_str).unwrap_or("?"));
             let node = event
                 .get("nodeId")
                 .and_then(Value::as_str)
-                .map(|node| format!(" {node}"))
+                .map(|node| format!(" {}", sanitize_text(node)))
                 .unwrap_or_default();
             let style = match event_type.as_str() {
                 "node_failed" | "run_failed" => Style::default().fg(Color::Red),

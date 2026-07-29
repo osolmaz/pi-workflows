@@ -26,6 +26,10 @@ enum Update {
     },
 }
 
+/// Cap on `fetch_artifact` responses: bundles can declare arbitrary sizes,
+/// and a single WebSocket text frame holds the whole content.
+const ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 pub struct ServeOptions {
     pub runs_dir: PathBuf,
     pub bind: String,
@@ -207,7 +211,7 @@ async fn handle_connection(
                         let content = {
                             let source = source.lock().await;
                             source.get(&run_id).and_then(|entry| {
-                                read_artifact_checked(&entry.dir, &path)
+                                read_artifact_checked(&entry.dir, &path, ARTIFACT_MAX_BYTES)
                             })
                         };
                         match content {
