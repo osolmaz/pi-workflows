@@ -128,7 +128,7 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "  · ▶ inspect [agent]",
+        "  · inspect [agent] ▶",
         "           │",
         "           ▼",
         "    · draft [agent]",
@@ -137,7 +137,7 @@
         "  · checklist [agent]",
         "           │",
         "           ▼",
-        "· ■ finalize [compute]"
+        "· finalize [compute] ■"
       ]
     },
     {
@@ -145,7 +145,7 @@
       "nodeStyle": "box",
       "lines": [
         "  ┌─────────────────────┐",
-        "  │ · ▶ inspect [agent] │",
+        "  │ · inspect [agent] ▶ │",
         "  └─────────────────────┘",
         "             │",
         "             ▼",
@@ -160,7 +160,7 @@
         "             │",
         "             ▼",
         "┌────────────────────────┐",
-        "│ · ■ finalize [compute] │",
+        "│ · finalize [compute] ■ │",
         "└────────────────────────┘"
       ]
     }

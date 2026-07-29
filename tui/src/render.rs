@@ -161,23 +161,9 @@ fn render_cell_text(
             })
             .sum::<usize>()
     });
-    let mut semantics = Vec::new();
-    if view
-        .snapshot
-        .is_some_and(|snapshot| snapshot.start_at == *node_id)
-    {
-        semantics.push("▶".to_string());
-    }
-    if outgoing > 1 {
-        semantics.push(format!("◇{outgoing}"));
-    }
-    if outgoing == 0 {
-        semantics.push("■".to_string());
-    }
-    // Node ids and types come from the bundle's workflow definition; scrub
-    // them like statusDetail so untrusted bundles can't emit escapes.
-    semantics.push(sanitize_text(&format!("{node_id} [{node_type}]")));
-    let mut parts = vec![semantics.join(" ")];
+    // Keep the exact node id, type, and dynamic metadata together. Semantic
+    // markers come last so the stable summary remains easy to scan and parse.
+    let mut parts = vec![sanitize_text(&format!("{node_id} [{node_type}]"))];
     if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         let started_at = state
             .current_node_started_at
@@ -196,6 +182,18 @@ fn render_cell_text(
     }
     if attempts > 1 {
         parts.push(format!("×{attempts}"));
+    }
+    if view
+        .snapshot
+        .is_some_and(|snapshot| snapshot.start_at == *node_id)
+    {
+        parts.push("▶".to_string());
+    }
+    if outgoing > 1 {
+        parts.push(format!("◇{outgoing}"));
+    }
+    if outgoing == 0 {
+        parts.push("■".to_string());
     }
     let text = parts.join(" ");
     // Width includes the status glyph and the space after it; boxes add a

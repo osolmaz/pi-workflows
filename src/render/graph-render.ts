@@ -155,12 +155,7 @@ function renderCellText(
         (count, edge) => count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
         0,
       ) ?? 0;
-  const semantics: string[] = [];
-  if (view.snapshot?.startAt === nodeId) semantics.push("▶");
-  if (outgoing > 1) semantics.push(`◇${outgoing}`);
-  if (outgoing === 0) semantics.push("■");
-  semantics.push(`${nodeId} [${nodeType}]`);
-  const parts = [semantics.join(" ")];
+  const parts = [`${nodeId} [${nodeType}]`];
   if (atLatestStep && state.currentNode === nodeId) {
     const startedAt = state.currentNodeStartedAt
       ? Date.parse(state.currentNodeStartedAt)
@@ -177,6 +172,9 @@ function renderCellText(
   if (attempts > 1) {
     parts.push(`×${attempts}`);
   }
+  if (view.snapshot?.startAt === nodeId) parts.push("▶");
+  if (outgoing > 1) parts.push(`◇${outgoing}`);
+  if (outgoing === 0) parts.push("■");
   const text = parts.join(" ");
   // Width includes the status glyph and the space after it; boxes add a
   // border and one padding column on each side.

@@ -199,13 +199,13 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "               · ▶ propose [agent]",
+        "               · propose [agent] ▶",
         "                        │",
         "                        ▼",
         "              · holy_grail [agent]",
         "                        │",
         "                        ▼",
-        "              · ◇2 compare [agent]",
+        "              · compare [agent] ◇2",
         "                      │ └─── y ────┐",
         "                      │ n          │",
         "                      │            │",
@@ -214,7 +214,7 @@
         "           ┌─────────┘             └─┐",
         "           │                         │",
         "           ▼                         ▼",
-        "· ■ review [checkpoint]    · ■ implement [agent]"
+        "· review [checkpoint] ■    · implement [agent] ■"
       ]
     },
     {
@@ -222,7 +222,7 @@
       "nodeStyle": "box",
       "lines": [
         "                 ┌─────────────────────┐",
-        "                 │ · ▶ propose [agent] │",
+        "                 │ · propose [agent] ▶ │",
         "                 └─────────────────────┘",
         "                            │",
         "                            ▼",
@@ -232,7 +232,7 @@
         "                            │",
         "                            ▼",
         "                ┌──────────────────────┐",
-        "                │ · ◇2 compare [agent] │",
+        "                │ · compare [agent] ◇2 │",
         "                └──────────────────────┘",
         "                          │ └──── y ─────┐",
         "                          │ n            │",
@@ -245,7 +245,7 @@
         "             │                             │",
         "             ▼                             ▼",
         "┌─────────────────────────┐    ┌───────────────────────┐",
-        "│ · ■ review [checkpoint] │    │ · ■ implement [agent] │",
+        "│ · review [checkpoint] ■ │    │ · implement [agent] ■ │",
         "└─────────────────────────┘    └───────────────────────┘"
       ]
     }
