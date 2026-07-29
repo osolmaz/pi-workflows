@@ -43,11 +43,12 @@ the protocol is the network form of the in-process state.
   without file growth are marked _possibly interrupted_ (`?`).
 - **Graph pane**: the workflow DAG, laid out with the same algorithm as the
   TypeScript viewer (layering, barycenter ordering, virtual cells for long
-  edges). Node states derive from the steps visible at the current replay
-  position: queued, active, completed, failed, waiting, cancelled. Taken
-  edges are highlighted; back-edges (loops) route through a right-hand
-  gutter. The camera follows the active node by default; panning detaches
-  it.
+  edges). Nodes use the bordered ACPX-style rendering by default, with a
+  heavy border for the active or selected replay node. Node states derive
+  from the steps visible at the current replay position: queued, active,
+  completed, failed, waiting, cancelled. Taken edges are highlighted;
+  back-edges (loops) route through a right-hand gutter. The camera follows
+  the active node by default; panning detaches it.
 - **Inspector**: tabs for steps (with the selected step's prompt, output,
   action receipt, and error), the raw trace events (tailing while live),
   the conversation (see below), and run info. In direct filesystem mode,
@@ -81,8 +82,8 @@ conversation slice is always visible.
 - Focus: `Tab` cycles Runs → Graph → Inspector; panes react to `↑↓`/`jk`
   (select run, pan, scrub or scroll), `t`/`1`–`4` switch inspector tabs.
 - Graph: arrows/`hjkl` pan, `0` resets, `f` toggles follow, `z` (or
-  `+`/`-`) switches node density between line and box style — the same two
-  renderings as the TypeScript viewer.
+  `+`/`-`) switches between the default bordered nodes and the compact line
+  style — the same two renderings as the TypeScript viewer.
 - Mouse: wheel scrolls the pane under the cursor, drag pans the graph,
   click selects runs and focuses panes.
 - `q` or `Ctrl-C` quits.

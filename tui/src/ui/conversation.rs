@@ -5,7 +5,8 @@
 
 use crate::bundle::types::{ConversationRange, StepRecord};
 use crate::format::sanitize_text;
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme::Palette;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
@@ -70,16 +71,16 @@ fn entry_text(record: &Value) -> String {
     }
 }
 
-fn role_style(role: &str) -> Style {
+fn role_style(role: &str, palette: &Palette) -> Style {
     match role {
         "user" => Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.user)
             .add_modifier(Modifier::BOLD),
         "assistant" => Style::default()
-            .fg(Color::Green)
+            .fg(palette.assistant)
             .add_modifier(Modifier::BOLD),
-        "toolResult" | "tool" => Style::default().fg(Color::Yellow),
-        _ => Style::default().fg(Color::DarkGray),
+        "toolResult" | "tool" => Style::default().fg(palette.tool),
+        _ => Style::default().fg(palette.muted),
     }
 }
 
@@ -105,6 +106,7 @@ pub fn conversation_lines(
     at_latest_step: bool,
     selected_step: Option<&StepRecord>,
     width: usize,
+    palette: &Palette,
 ) -> Vec<Line<'static>> {
     let reveal_until = if at_latest_step {
         entries.len()
@@ -125,13 +127,13 @@ pub fn conversation_lines(
     for (index, record) in entries.iter().take(reveal_until).enumerate() {
         let highlighted = highlight.is_some_and(|(first, last)| index >= first && index <= last);
         let gutter = if highlighted { "▌" } else { " " };
-        let gutter_style = Style::default().fg(Color::Magenta);
+        let gutter_style = Style::default().fg(palette.replay_focus);
         let role = sanitize_text(&entry_role(record));
         let text = sanitize_text(&entry_text(record));
         let header = format!("{role}:");
         lines.push(Line::from(vec![
             Span::styled(gutter.to_string(), gutter_style),
-            Span::styled(header, role_style(&role)),
+            Span::styled(header, role_style(&role, palette)),
         ]));
         let body_width = width.saturating_sub(3).max(20);
         for chunk in wrap_text(&text, body_width) {
@@ -149,7 +151,7 @@ pub fn conversation_lines(
                 "… {} more entries past this step",
                 entries.len() - reveal_until
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         )));
     }
     lines

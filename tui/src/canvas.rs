@@ -8,11 +8,18 @@ pub enum CanvasStyle {
     Plain,
     Dim,
     Taken,
-    Active,
+    ActiveEdge,
     Back,
+    NodeText,
+    NodeDim,
+    NodeFocusText,
+    Active,
+    Replay,
     Ok,
     Fail,
+    TimedOut,
     Warn,
+    Cancelled,
 }
 
 impl CanvasStyle {
@@ -22,11 +29,14 @@ impl CanvasStyle {
             CanvasStyle::Plain => 0,
             CanvasStyle::Dim => 1,
             CanvasStyle::Back => 2,
-            CanvasStyle::Warn => 3,
-            CanvasStyle::Ok => 4,
-            CanvasStyle::Fail => 5,
-            CanvasStyle::Taken => 6,
-            CanvasStyle::Active => 7,
+            CanvasStyle::Taken => 3,
+            CanvasStyle::ActiveEdge => 4,
+            CanvasStyle::NodeText | CanvasStyle::NodeDim | CanvasStyle::NodeFocusText => 5,
+            CanvasStyle::Warn | CanvasStyle::Cancelled => 6,
+            CanvasStyle::Ok => 7,
+            CanvasStyle::Fail | CanvasStyle::TimedOut => 8,
+            CanvasStyle::Replay => 9,
+            CanvasStyle::Active => 10,
         }
     }
 }
@@ -118,6 +128,10 @@ impl CharCanvas {
             return;
         }
         if let Some(existing) = row.get(&x).copied() {
+            if existing.char == ' ' {
+                row.insert(x, CanvasChar { char, style });
+                return;
+            }
             let existing_mask = char_to_mask(existing.char);
             let incoming_mask = char_to_mask(char);
             if let (Some(existing_mask), Some(incoming_mask)) = (existing_mask, incoming_mask) {
@@ -187,6 +201,22 @@ impl CharCanvas {
         }
         self.max_x = self.max_x.max(x + chars.len() as i64 - 1);
         true
+    }
+
+    /// Fill a rectangle with intentional styled spaces. Unlike `put`, this
+    /// preserves spaces so node cards can carry a background color.
+    pub fn fill_rect(&mut self, x: i64, y: i64, width: i64, height: i64, style: CanvasStyle) {
+        if x < 0 || y < 0 || width <= 0 || height <= 0 {
+            return;
+        }
+        self.max_x = self.max_x.max(x + width - 1);
+        self.max_y = self.max_y.max(y + height - 1);
+        for row_y in y..y + height {
+            let row = self.cells.entry(row_y).or_default();
+            for column_x in x..x + width {
+                row.insert(column_x, CanvasChar { char: ' ', style });
+            }
+        }
     }
 
     pub fn hline(&mut self, y: i64, x1: i64, x2: i64, style: CanvasStyle) {

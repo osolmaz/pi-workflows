@@ -15,6 +15,14 @@ struct Cli {
     #[arg(long, value_name = "URL", conflicts_with = "path")]
     connect: Option<String>,
 
+    /// Viewer theme name. Overrides PIW_THEME and the config file.
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+
+    /// Print built-in viewer theme names and exit.
+    #[arg(long)]
+    list_themes: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -46,6 +54,13 @@ fn default_runs_dir() -> PathBuf {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.list_themes {
+        for name in piw::theme::THEME_NAMES {
+            println!("{name}");
+        }
+        return Ok(());
+    }
+    let cli_theme = cli.theme.clone();
     match cli.command {
         Some(Command::Serve { runs_dir, bind }) => {
             let runs_dir = runs_dir.unwrap_or_else(default_runs_dir);
@@ -59,7 +74,7 @@ fn main() -> Result<()> {
         }
         None => {
             if let Some(url) = cli.connect {
-                return ui::run_remote(&url);
+                return ui::run_remote(&url, cli_theme.as_deref());
             }
             let path = match cli.path {
                 Some(path) if path.is_dir() => path,
@@ -83,9 +98,9 @@ fn main() -> Result<()> {
             // A directory containing manifest.json is a single bundle;
             // anything else is treated as a runs directory.
             if path.join("manifest.json").is_file() {
-                ui::run_single(&path)
+                ui::run_single(&path, cli_theme.as_deref())
             } else {
-                ui::run_local(&path)
+                ui::run_local(&path, cli_theme.as_deref())
             }
         }
     }
