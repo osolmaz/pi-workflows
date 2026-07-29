@@ -106,12 +106,12 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "                   · ▶ ◇2 classify [agent]",
+        "                   · classify [agent] ▶ ◇2",
         "            ┌── continue ───┘ └──────────────┐",
         "            │                     checkpoint │",
         "            │                                │",
         "            ▼                                ▼",
-        "· ■ continue_lane [agent]    · ■ checkpoint_lane [checkpoint]"
+        "· continue_lane [agent] ■    · checkpoint_lane [checkpoint] ■"
       ]
     },
     {
@@ -119,14 +119,14 @@
       "nodeStyle": "box",
       "lines": [
         "                     ┌─────────────────────────┐",
-        "                     │ · ▶ ◇2 classify [agent] │",
+        "                     │ · classify [agent] ▶ ◇2 │",
         "                     └─────────────────────────┘",
         "              ┌─── continue ────┘ └─ checkpoint ───┐",
         "              │                                    │",
         "              │                                    │",
         "              ▼                                    ▼",
         "┌───────────────────────────┐    ┌──────────────────────────────────┐",
-        "│ · ■ continue_lane [agent] │    │ · ■ checkpoint_lane [checkpoint] │",
+        "│ · continue_lane [agent] ■ │    │ · checkpoint_lane [checkpoint] ■ │",
         "└───────────────────────────┘    └──────────────────────────────────┘"
       ]
     }

@@ -175,19 +175,19 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "         · ▶ implement [agent]",
+        "         · implement [agent] ▶",
         "                   │",
         "                   │ ┌───────────────────┐",
         "                   ▼ ▼                   │",
         "           · verify [agent]              │",
         "                   │                     │",
         "                   ▼                     │",
-        "          · ◇2 review [agent]            │",
+        "          · review [agent] ◇2            │",
         "           ┌─────┘ └────────────┐        │",
         "           │ clean issues_found │        │",
         "           │                    │        │",
         "           ▼                    ▼        │",
-        "· ■ finalize [compute]    · fix [agent]  │",
+        "· finalize [compute] ■    · fix [agent]  │",
         "                                  └──────┘"
       ]
     },
@@ -196,7 +196,7 @@
       "nodeStyle": "box",
       "lines": [
         "           ┌───────────────────────┐",
-        "           │ · ▶ implement [agent] │",
+        "           │ · implement [agent] ▶ │",
         "           └───────────────────────┘",
         "                       │",
         "                       │ ┌───────────────────────┐",
@@ -207,14 +207,14 @@
         "                       │                         │",
         "                       ▼                         │",
         "            ┌─────────────────────┐              │",
-        "            │ · ◇2 review [agent] │              │",
+        "            │ · review [agent] ◇2 │              │",
         "            └─────────────────────┘              │",
         "             ┌───────┘ └──────────────┐          │",
         "             │ clean     issues_found │          │",
         "             │                        │          │",
         "             ▼                        ▼          │",
         "┌────────────────────────┐    ┌───────────────┐  │",
-        "│ · ■ finalize [compute] │    │ · fix [agent] │  │",
+        "│ · finalize [compute] ■ │    │ · fix [agent] │  │",
         "└────────────────────────┘    └───────────────┘  │",
         "                                        └────────┘"
       ]
