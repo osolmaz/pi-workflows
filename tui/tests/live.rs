@@ -297,3 +297,20 @@ fn server_round_trip_with_live_updates() {
     });
     assert!(rejected.is_err(), "browser-origin handshake must fail");
 }
+
+#[test]
+fn non_loopback_binds_are_refused() {
+    let runs = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // On loopback, serve() runs forever; a non-loopback bind must instead
+    // return an error immediately because the protocol is unauthenticated.
+    let result = runtime.block_on(piw::server::serve(piw::server::ServeOptions {
+        runs_dir: runs.path().to_path_buf(),
+        bind: "0.0.0.0:0".to_string(),
+    }));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("non-loopback"), "unexpected error: {error}");
+}
