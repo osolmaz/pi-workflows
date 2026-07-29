@@ -399,6 +399,12 @@ export type WorkflowEngineOptions = {
    * of the trace and can never trail the terminal event.
    */
   onRunStarted?: (runDir: string, state: WorkflowRunState) => MaybePromise<void>;
+  /**
+   * Awaited before the terminal snapshot is persisted. This is where a
+   * session recorder stops and drains, so the bundle is immutable the moment
+   * the terminal event exists. Errors are swallowed: finishing the run wins.
+   */
+  onRunFinishing?: (runDir: string, state: WorkflowRunState) => MaybePromise<void>;
   /** Default per-node timeout. Defaults to 15 minutes. */
   defaultNodeTimeoutMs?: number;
   /** Guard against unbounded graph loops. Defaults to 100 executed steps. */

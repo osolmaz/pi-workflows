@@ -67,6 +67,7 @@ export class WorkflowEngine {
   private readonly maxSteps: number;
   private readonly onEvent?: WorkflowEngineOptions["onEvent"];
   private readonly onRunStarted?: WorkflowEngineOptions["onRunStarted"];
+  private readonly onRunFinishing?: WorkflowEngineOptions["onRunFinishing"];
   private activeAbort: AbortController | null = null;
   private cancelled = false;
   private paused = false;
@@ -79,6 +80,7 @@ export class WorkflowEngine {
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.onEvent = options.onEvent;
     this.onRunStarted = options.onRunStarted;
+    this.onRunFinishing = options.onRunFinishing;
   }
 
   get outputRoot(): string {
@@ -651,6 +653,13 @@ export class WorkflowEngine {
   ): Promise<void> {
     if (status === "failed" && state.status === "timed_out") {
       status = "timed_out";
+    }
+    // Let observers (e.g. the session recorder) stop and drain before the
+    // terminal event exists, so the bundle is immutable from that point on.
+    try {
+      await this.onRunFinishing?.(runDir, state);
+    } catch {
+      // Finishing the run wins over observer failures.
     }
     state.status = status;
     state.finishedAt = new Date().toISOString();

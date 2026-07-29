@@ -125,6 +125,27 @@ describe("SessionRecorder", () => {
     expect(recorder.rangeSince(second)).toEqual({ firstEntryId: "p2", lastEntryId: "p2" });
   });
 
+  it("stops recording: pending and later flushes never touch the bundle", async () => {
+    const { store, runDir, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runDir, runId);
+    const branch: FakeEntry[] = [];
+    await recorder.bind(makeCtx(branch));
+
+    branch.push({ id: "e1", type: "message" });
+    await recorder.record(makeCtx(branch));
+
+    // A flush that has not started when stop() lands is dropped, and stop()
+    // drains the queue before resolving.
+    branch.push({ id: "e2", type: "message" });
+    const pending = recorder.record(makeCtx(branch));
+    await recorder.stop();
+    await pending;
+    branch.push({ id: "e3", type: "message" });
+    await recorder.record(makeCtx(branch));
+
+    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["e1"]);
+  });
+
   it("re-anchors when the user branches away mid-run", async () => {
     const { store, runDir, runId } = await makeRun();
     const recorder = new SessionRecorder(store, runDir, runId);
