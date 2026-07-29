@@ -298,6 +298,50 @@ fn server_round_trip_with_live_updates() {
     assert!(rejected.is_err(), "browser-origin handshake must fail");
 }
 
+#[test]
+fn session_files_are_discovered_before_the_manifest_names_them() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-1", "running");
+    let mut source = RunSource::new(runs.path());
+    assert_eq!(
+        source.get("run-1").unwrap().view()["session"],
+        serde_json::Value::Null
+    );
+
+    // The writer creates session/ between manifest rewrites, so the manifest
+    // does not name it yet; the reader must find it by convention.
+    std::fs::create_dir_all(dir.join("session")).unwrap();
+    std::fs::write(
+        dir.join("session").join("binding.json"),
+        serde_json::to_string(&json!({
+            "schema": "pi-workflows.session-binding.v1",
+            "runId": "run-1",
+            "piSessionId": "s-1",
+            "cwd": "/tmp",
+            "boundAt": "2026-01-01T00:00:01.000Z",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("session").join("entries.ndjson"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&json!({
+                "seq": 1, "at": "2026-01-01T00:00:01.500Z",
+                "entry": { "role": "user", "text": "hi" },
+            }))
+            .unwrap()
+        ),
+    )
+    .unwrap();
+
+    source.refresh_all();
+    let view = source.get("run-1").unwrap().view();
+    assert_eq!(view["session"]["binding"]["piSessionId"], json!("s-1"));
+    assert_eq!(view["session"]["entries"].as_array().unwrap().len(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinked_documents_outside_the_bundle_are_not_read() {
