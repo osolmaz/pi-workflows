@@ -116,6 +116,15 @@ Run listing summaries are the manifest plus `live` and
 The run listing is small and changes rarely, so it is always sent whole; only
 run views use patches.
 
+## Reconnection
+
+The native client treats the run listing, selected run, and pending artifact
+reads as desired state rather than one-shot commands. After a connection closes,
+it keeps the cached run visible with a stale/reconnecting label, retries with
+bounded backoff, sends `watch_runs` after the next valid `hello`, and restores
+the current `watch_run`. A reconnect receives a fresh snapshot before later
+patches. Pending artifact reads are resubmitted once per connection.
+
 ## Filesystem semantics behind the protocol
 
 The server watches the runs directory (inotify with polling fallback) and

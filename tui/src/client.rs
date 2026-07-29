@@ -409,6 +409,14 @@ async fn run_socket(
                         }
                     }
                 }
+                if hello_received {
+                    reconcile_desired(
+                        &mut sink,
+                        &shared,
+                        &mut subscribed,
+                        &mut submitted_artifacts,
+                    ).await?;
+                }
                 if let Some(run_id) = resubscribe {
                     send_message(&mut sink, &ClientMessage::WatchRun { run_id }).await?;
                 }
@@ -457,9 +465,10 @@ async fn reconcile_desired(
         .await?;
         subscribed.insert(run_id);
     }
-    for (run_id, path) in artifacts {
-        let key = (run_id.clone(), path.clone());
-        if submitted_artifacts.insert(key) {
+    if submitted_artifacts.is_empty() {
+        if let Some((run_id, path)) = artifacts.into_iter().next() {
+            let key = (run_id.clone(), path.clone());
+            submitted_artifacts.insert(key);
             send_message(sink, &ClientMessage::FetchArtifact { run_id, path }).await?;
         }
     }

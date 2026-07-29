@@ -8,7 +8,8 @@ authoring workflows, see [workflows.md](workflows.md).
 ```
 src/workflows/   engine core: definitions, graph, engine, store, loader
 src/extension/   pi integration: /workflow command, workflow tool, widget
-src/viewer/      standalone TUI viewer over run bundles
+src/viewer/      standalone TypeScript TUI viewer over run bundles
+tui/             Rust piw viewer and live replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
@@ -30,6 +31,14 @@ the scroll resets to follow mode when the run records a new step. `render.ts`
 in `src/viewer`
 composes the full detail view (header, graph, step timeline, step inspector)
 and stays pure so tests can assert on rendered lines.
+
+The Rust viewer keeps graph layout and plain rendering in parity with
+`src/render`, then applies ratatui-only presentation through semantic canvas
+roles and `tui/src/theme`. Catppuccin is the default. Theme colors must be
+chosen in the theme layer rather than directly in UI components. Graph node
+surfaces are intentional styled spaces, so changing the sparse canvas must
+preserve those spaces as well as box connectivity. Text or geometry changes
+still belong in both renderers and require regenerated fixtures.
 
 The renderer is built so that overlaps cannot corrupt the drawing: every
 back edge owns exclusive lane rows and an exclusive gutter column, multiple

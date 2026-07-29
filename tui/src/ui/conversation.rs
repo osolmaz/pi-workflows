@@ -135,14 +135,27 @@ fn range_indices(entries: &[Value], range: &ConversationRange) -> Option<(usize,
 /// when the replay position is before the end, entries past the last visible
 /// step's conversation range stay hidden. The selected step's range is
 /// marked in the gutter.
+pub struct ConversationRenderOptions<'a> {
+    pub at_latest_step: bool,
+    pub width: usize,
+    pub palette: &'a Palette,
+    pub selected_entry: Option<usize>,
+    pub payload_expanded: bool,
+}
+
 pub fn conversation_lines(
     entries: &[Value],
     visible_steps: &[StepRecord],
-    at_latest_step: bool,
     selected_step: Option<&StepRecord>,
-    width: usize,
-    palette: &Palette,
+    options: ConversationRenderOptions<'_>,
 ) -> Vec<Line<'static>> {
+    let ConversationRenderOptions {
+        at_latest_step,
+        width,
+        palette,
+        selected_entry,
+        payload_expanded,
+    } = options;
     let reveal_until = if at_latest_step {
         entries.len()
     } else {
@@ -158,10 +171,18 @@ pub fn conversation_lines(
         .and_then(|step| step.conversation.as_ref())
         .and_then(|range| range_indices(entries, range));
 
+    let selected_entry =
+        selected_entry.map(|selected| selected.min(reveal_until.saturating_sub(1)));
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (index, record) in entries.iter().take(reveal_until).enumerate() {
         let highlighted = highlight.is_some_and(|(first, last)| index >= first && index <= last);
-        let gutter = if highlighted { "▌" } else { " " };
+        let gutter = if selected_entry == Some(index) {
+            "▶"
+        } else if highlighted {
+            "▌"
+        } else {
+            " "
+        };
         let gutter_style = Style::default().fg(palette.replay_focus);
         let role = sanitize_text(&entry_role(record));
         let text = sanitize_text(&entry_text(record));
@@ -177,6 +198,18 @@ pub fn conversation_lines(
                 Span::raw("  "),
                 Span::raw(chunk),
             ]));
+        }
+        if selected_entry == Some(index) && payload_expanded {
+            let raw = serde_json::to_string_pretty(record).unwrap_or_else(|_| record.to_string());
+            for logical_line in raw.lines() {
+                for chunk in wrap_text(&sanitize_text(logical_line), body_width) {
+                    lines.push(Line::from(vec![
+                        Span::styled(gutter.to_string(), gutter_style),
+                        Span::styled("  raw: ", Style::default().fg(palette.tool)),
+                        Span::styled(chunk, Style::default().fg(palette.subtext)),
+                    ]));
+                }
+            }
         }
         lines.push(Line::from(""));
     }

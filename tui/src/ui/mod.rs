@@ -269,6 +269,8 @@ struct App {
     trace_selected: usize,
     trace_payload_expanded: bool,
     conversation_follow: bool,
+    conversation_selected: usize,
+    conversation_payload_expanded: bool,
     palette: Palette,
     theme_config: ThemeConfig,
     theme_config_path: std::path::PathBuf,
@@ -357,6 +359,8 @@ fn event_loop(
         trace_selected: 0,
         trace_payload_expanded: false,
         conversation_follow: true,
+        conversation_selected: 0,
+        conversation_payload_expanded: false,
         palette: resolved_theme.palette,
         theme_config: resolved_theme.config,
         theme_config_path: resolved_theme.config_path,
@@ -560,6 +564,8 @@ impl App {
             self.trace_selected = 0;
             self.trace_payload_expanded = false;
             self.conversation_follow = true;
+            self.conversation_selected = 0;
+            self.conversation_payload_expanded = false;
             self.graph_offset = (0, 0);
             self.follow = true;
         }
@@ -732,7 +738,8 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                         app.trace_payload_expanded = false;
                     }
                     InspectorTab::Conversation => {
-                        app.inspector_scroll = app.inspector_scroll.saturating_sub(1);
+                        app.conversation_selected = app.conversation_selected.saturating_sub(1);
+                        app.conversation_payload_expanded = false;
                         app.conversation_follow = false;
                     }
                     InspectorTab::Info => {
@@ -746,7 +753,8 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                         app.trace_payload_expanded = false;
                     }
                     InspectorTab::Conversation => {
-                        app.inspector_scroll += 1;
+                        app.conversation_selected = app.conversation_selected.saturating_add(1);
+                        app.conversation_payload_expanded = false;
                         app.conversation_follow = false;
                     }
                     InspectorTab::Info => app.inspector_scroll += 1,
@@ -759,7 +767,10 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                         }
                     }
                     InspectorTab::Trace => app.trace_payload_expanded = !app.trace_payload_expanded,
-                    _ => {}
+                    InspectorTab::Conversation => {
+                        app.conversation_payload_expanded = !app.conversation_payload_expanded
+                    }
+                    InspectorTab::Info => {}
                 },
                 KeyCode::Char('v') if app.tab == InspectorTab::Trace => {
                     app.trace_scope = app.trace_scope.next();
@@ -1060,6 +1071,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let trace_selected = app.trace_selected;
     let trace_payload_expanded = app.trace_payload_expanded;
     let conversation_follow = app.conversation_follow;
+    let conversation_selected = if conversation_follow {
+        usize::MAX
+    } else {
+        app.conversation_selected
+    };
+    let conversation_payload_expanded = app.conversation_payload_expanded;
     let focus = app.focus;
     let playing = app.playing;
     // Captured before `data` takes the mutable borrow: a dead remote
@@ -1207,10 +1224,14 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         InspectorTab::Conversation => conversation::conversation_lines(
             data.session_entries,
             visible_steps,
-            at_latest,
             selected_step,
-            inspector_rect.width.saturating_sub(2) as usize,
-            &palette,
+            conversation::ConversationRenderOptions {
+                at_latest_step: at_latest,
+                width: inspector_rect.width.saturating_sub(2) as usize,
+                palette: &palette,
+                selected_entry: Some(conversation_selected),
+                payload_expanded: conversation_payload_expanded,
+            },
         ),
         InspectorTab::Info => info_lines(&data, &run_id, &palette),
     };
