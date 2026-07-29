@@ -137,7 +137,9 @@ fn render_cell_text(
         .iter()
         .filter(|step| step.node_id == *node_id)
         .count();
-    let mut parts = vec![format!("{node_id} [{node_type}]")];
+    // Node ids and types come from the bundle's workflow definition; scrub
+    // them like statusDetail so untrusted bundles can't emit escapes.
+    let mut parts = vec![sanitize_text(&format!("{node_id} [{node_type}]"))];
     if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         let started_at = state
             .current_node_started_at

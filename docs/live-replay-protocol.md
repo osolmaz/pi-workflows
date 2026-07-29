@@ -7,9 +7,10 @@ protocol below is the network form of that state. Protocol id:
 `pi-workflows.replay.v1`.
 
 The server is a reader like any other: it only consumes run bundles (see
-[run-bundles.md](run-bundles.md)) and never writes them. It binds to
-`127.0.0.1` by default; the protocol has no authentication and must not be
-exposed beyond localhost as bundles contain private data. Handshakes that
+[run-bundles.md](run-bundles.md)) and never writes them. The protocol has no
+authentication, so the server only accepts loopback bind addresses and refuses
+to start on anything else; bundles contain private data, and remote viewing
+goes through an SSH tunnel. Handshakes that
 carry an `Origin` header are rejected: browsers always send one, and a web
 page must not be able to read bundles by opening a WebSocket to localhost.
 

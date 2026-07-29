@@ -35,6 +35,17 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     let listener = TcpListener::bind(&options.bind)
         .await
         .with_context(|| format!("binding {}", options.bind))?;
+    // The protocol has no authentication, so a reachable server hands run
+    // bundles to anyone. Refuse non-loopback binds; view remote runs through
+    // an SSH tunnel instead.
+    let local = listener.local_addr()?;
+    if !local.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to serve on non-loopback address {local}: the live replay \
+             protocol is unauthenticated; bind to 127.0.0.1 and use an SSH tunnel \
+             for remote access"
+        );
+    }
     eprintln!(
         "piw serve: watching {} on ws://{}/ws",
         options.runs_dir.display(),
