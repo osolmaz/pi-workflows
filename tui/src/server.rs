@@ -3,7 +3,7 @@
 //! bundles — and binds to localhost by default because bundles contain
 //! private data.
 
-use crate::bundle::reader::read_artifact_checked;
+use crate::bundle::reader::read_declared_artifact_checked;
 use crate::protocol::{ClientMessage, PatchOp, ServerMessage, PROTOCOL_ID};
 use crate::source::RunSource;
 use anyhow::{Context, Result};
@@ -212,7 +212,13 @@ async fn handle_connection(
                         let content = {
                             let source = source.lock().await;
                             source.get(&run_id).and_then(|entry| {
-                                read_artifact_checked(&entry.dir, &path, ARTIFACT_MAX_BYTES)
+                                let artifact_dir = entry.manifest.paths.artifacts.as_deref()?;
+                                read_declared_artifact_checked(
+                                    &entry.dir,
+                                    artifact_dir,
+                                    &path,
+                                    ARTIFACT_MAX_BYTES,
+                                )
                             })
                         };
                         match content {

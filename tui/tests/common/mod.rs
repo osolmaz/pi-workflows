@@ -33,6 +33,7 @@ pub fn write_bundle(runs_dir: &Path, run_id: &str, status: &str) -> PathBuf {
             "workflow": "workflow.json",
             "state": "state.json",
             "trace": "trace.ndjson",
+            "artifacts": "artifacts",
         },
     });
     let workflow = json!({

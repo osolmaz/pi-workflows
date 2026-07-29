@@ -299,6 +299,22 @@ fn server_round_trip_with_live_updates() {
         "remote artifact body"
     );
 
+    client.request_artifact("run-live", "state.json");
+    while client.artifact_content("run-live", "state.json").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "rejected artifact response timed out"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        client
+            .artifact_content("run-live", "state.json")
+            .unwrap()
+            .is_err(),
+        "bundle documents must not be readable through fetch_artifact"
+    );
+
     // A handshake carrying an Origin header (i.e. a browser) must be
     // rejected: the protocol is unauthenticated.
     let runtime = tokio::runtime::Builder::new_current_thread()

@@ -270,6 +270,29 @@ pub fn read_artifact_checked(bundle_dir: &Path, relative: &str, max_bytes: u64) 
     std::fs::read_to_string(canonical).ok()
 }
 
+/// Read a remotely requested artifact only when both its declared path and
+/// canonical target stay under the artifact directory named by the manifest.
+pub fn read_declared_artifact_checked(
+    bundle_dir: &Path,
+    artifact_dir: &str,
+    relative: &str,
+    max_bytes: u64,
+) -> Option<String> {
+    let artifact_dir = Path::new(artifact_dir);
+    let relative = Path::new(relative);
+    if artifact_dir.as_os_str().is_empty() || !relative.starts_with(artifact_dir) {
+        return None;
+    }
+    let canonical_root = contained_path(bundle_dir, &bundle_dir.join(artifact_dir))?;
+    let canonical_file = contained_path(bundle_dir, &bundle_dir.join(relative))?;
+    if !canonical_file.starts_with(&canonical_root)
+        || std::fs::metadata(&canonical_file).ok()?.len() > max_bytes
+    {
+        return None;
+    }
+    std::fs::read_to_string(canonical_file).ok()
+}
+
 /// Replace `$artifact` references with compact placeholders for previews,
 /// mirroring the TypeScript viewer's `withArtifactPlaceholders`.
 pub fn with_artifact_placeholders(value: &Value) -> Value {
