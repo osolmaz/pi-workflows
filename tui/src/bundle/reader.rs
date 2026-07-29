@@ -27,7 +27,14 @@ impl BundlePaths {
             workflow: dir.join(&manifest.paths.workflow),
             state: dir.join(&manifest.paths.state),
             trace: dir.join(&manifest.paths.trace),
-            session: manifest.paths.session.as_ref().map(|p| dir.join(p)),
+            // The session directory has a fixed conventional name and the
+            // writer only records it in the manifest at the next state
+            // snapshot; a reader waiting for `paths.session` would miss the
+            // start of a live conversation, so probe the convention too.
+            session: Some(match manifest.paths.session.as_ref() {
+                Some(p) => dir.join(p),
+                None => dir.join("session"),
+            }),
             artifacts: manifest.paths.artifacts.as_ref().map(|p| dir.join(p)),
         }
     }
