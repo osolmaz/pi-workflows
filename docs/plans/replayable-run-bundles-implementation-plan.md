@@ -51,6 +51,10 @@ strategy). Outcomes:
 - **Rejected** — renaming trace/session `at` to `occurredAt`: `at` is the
   event-envelope convention used throughout the trace format; the `…At`
   suffix rule applies to document fields, and the deviation is deliberate.
+- **Rejected** — `ArtifactRef.bytes` (lets viewers show sizes and verify
+  truncation without stat-ing every artifact) and
+  `WorkflowSessionBinding.boundAt` (binding.json stays self-describing
+  without consulting the trace).
 
 ## Non-goals
 
