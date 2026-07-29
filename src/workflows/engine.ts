@@ -66,6 +66,7 @@ export class WorkflowEngine {
   private readonly defaultNodeTimeoutMs: number;
   private readonly maxSteps: number;
   private readonly onEvent?: WorkflowEngineOptions["onEvent"];
+  private readonly onRunStarted?: WorkflowEngineOptions["onRunStarted"];
   private activeAbort: AbortController | null = null;
   private cancelled = false;
   private paused = false;
@@ -77,6 +78,7 @@ export class WorkflowEngine {
     this.defaultNodeTimeoutMs = options.defaultNodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.onEvent = options.onEvent;
+    this.onRunStarted = options.onRunStarted;
   }
 
   get outputRoot(): string {
@@ -135,6 +137,10 @@ export class WorkflowEngine {
         input: state.input,
       },
     });
+    // Awaited so anything the hook writes (e.g. a session binding and its
+    // `session_bound` event) lands before node events and can never trail
+    // the terminal event of a fast run.
+    await this.onRunStarted?.(runDir, state);
 
     try {
       await this.executeGraph(workflow, state, runDir);

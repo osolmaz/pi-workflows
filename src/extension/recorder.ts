@@ -22,6 +22,7 @@ export class SessionRecorder {
   /** Ids of recorded entries, in recording order. */
   private readonly recorded: string[] = [];
   private bound = false;
+  private stopped = false;
   private chain: Promise<void> = Promise.resolve();
 
   constructor(store: WorkflowRunStore, runDir: string, runId: string) {
@@ -58,7 +59,7 @@ export class SessionRecorder {
    */
   record(ctx: ExtensionContext): Promise<void> {
     const task = this.chain.then(async () => {
-      if (!this.bound) {
+      if (!this.bound || this.stopped) {
         return;
       }
       const branch = ctx.sessionManager.getBranch() as Array<{ id: string }>;
@@ -85,6 +86,14 @@ export class SessionRecorder {
     });
     this.chain = task.catch(() => undefined);
     return task;
+  }
+
+  /**
+   * Stop recording. Called when the run reaches a terminal state so the
+   * bundle no longer changes afterwards.
+   */
+  stop(): void {
+    this.stopped = true;
   }
 
   /** Take a mark before delivering a prompt. */

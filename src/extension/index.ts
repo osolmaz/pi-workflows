@@ -1,4 +1,3 @@
-import path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -297,6 +296,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (activeRun === run) {
       activeRun = null;
     }
+    // The bundle must not change after the terminal snapshot; stop copying
+    // session entries (e.g. from the presentation turn) into it.
+    run.recorder?.stop();
     stopWidgetTicker();
     const { state } = result;
     updateWidget(ctx, state, run.snapshot);
@@ -349,20 +351,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const engine = new WorkflowEngine({
       executor,
       store,
+      // Awaited by the engine after run_started is persisted, so the session
+      // binding and its trace event always precede node and terminal events.
+      onRunStarted: async (runDir, state) => {
+        const recorder = new SessionRecorder(store, runDir, state.runId);
+        try {
+          await recorder.bind(ctx);
+          run.recorder = recorder;
+        } catch {
+          // Binding is best-effort: a session without UI access or an
+          // ephemeral context must not fail the run.
+        }
+      },
       onEvent: (_event, state: WorkflowRunState) => {
         if (run.runId === null) {
           run.runId = state.runId;
-          const recorder = new SessionRecorder(
-            store,
-            path.join(engine.outputRoot, state.runId),
-            state.runId,
-          );
-          run.recorder = recorder;
-          recorder.bind(ctx).catch(() => {
-            // Binding is best-effort: a session without UI access or an
-            // ephemeral context must not fail the run.
-            run.recorder = null;
-          });
         }
         run.lastState = state;
         updateWidget(ctx, state, snapshot);
@@ -391,6 +394,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (activeRun === run) {
           activeRun = null;
         }
+        run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
         notify(ctx, `Workflow ${workflow.name} crashed: ${errorMessage(error)}`, "error");
@@ -519,7 +523,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
       }
       // Flush the conversation into the bundle before accepting, so the
       // attempt's recorded range includes the assistant message that carries
-      // this submission.
+      // this submission. Pi guarantees ctx.sessionManager is synchronized
+      // through the current assistant tool-calling message before tool_call
+      // dispatch, which precedes tool execution (docs/extensions.md, "Tool
+      // Events"). The tool result of this call itself lands after the range
+      // by design: it is the submission receipt, not the submission.
       await activeRun.recorder?.record(ctx).catch(() => undefined);
       const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
       if (!result.accepted) {
