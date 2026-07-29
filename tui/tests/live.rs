@@ -299,6 +299,47 @@ fn server_round_trip_with_live_updates() {
 }
 
 #[test]
+fn terminal_run_stays_live_until_the_trace_tail_is_observed() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-1", "running");
+    let mut source = RunSource::new(runs.path());
+    assert!(source.get("run-1").unwrap().live);
+
+    // Terminal state and manifest referencing trace seq 2, while the trace
+    // file still ends at seq 1 (the reader's poll can race the final
+    // append). The run must not settle with the final event unseen.
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string(&state_value("run-1", "completed", 2, vec![])).unwrap(),
+    )
+    .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    manifest["status"] = json!("completed");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    source.refresh_all();
+    let entry = source.get("run-1").unwrap();
+    assert!(entry.live, "must stay live while the trace tail is missing");
+    assert_eq!(entry.view()["events"].as_array().unwrap().len(), 1);
+
+    append_trace(
+        &dir,
+        &json!({
+            "seq": 2, "at": "2026-01-01T00:00:02.000Z", "scope": "run",
+            "type": "run_completed", "runId": "run-1", "payload": {},
+        }),
+    );
+    source.refresh_all();
+    let entry = source.get("run-1").unwrap();
+    assert_eq!(entry.view()["events"].as_array().unwrap().len(), 2);
+    assert!(!entry.live, "fully observed terminal bundle must settle");
+}
+
+#[test]
 fn session_files_are_discovered_before_the_manifest_names_them() {
     let runs = tempfile::tempdir().unwrap();
     let dir = write_bundle(runs.path(), "run-1", "running");
