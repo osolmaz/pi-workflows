@@ -1447,7 +1447,12 @@ fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
         paths.push(artifact.path);
         return;
     }
-    if crate::bundle::types::as_escaped(value).is_some() {
+    if let Some(escaped) = crate::bundle::types::as_escaped(value) {
+        if let Some(object) = escaped.as_object() {
+            for item in object.values() {
+                collect_artifact_paths(item, paths);
+            }
+        }
         return;
     }
     match value {
@@ -1477,7 +1482,15 @@ fn resolve_remote_artifacts(
         };
     }
     if let Some(escaped) = crate::bundle::types::as_escaped(value) {
-        return escaped.clone();
+        return match escaped.as_object() {
+            Some(object) => Value::Object(
+                object
+                    .iter()
+                    .map(|(key, item)| (key.clone(), resolve_remote_artifacts(item, artifacts)))
+                    .collect(),
+            ),
+            None => escaped.clone(),
+        };
     }
     match value {
         Value::Array(items) => Value::Array(
@@ -1978,10 +1991,11 @@ fn draw_transport(
 #[cfg(test)]
 mod tests {
     use super::{
-        graph_position_label, trace_events_for_scope, GraphNodeStyle, StepRecord, TraceScope,
-        DEFAULT_NODE_STYLE,
+        collect_artifact_paths, graph_position_label, resolve_remote_artifacts,
+        trace_events_for_scope, GraphNodeStyle, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn bordered_nodes_are_the_default() {
@@ -1994,6 +2008,31 @@ mod tests {
         assert_eq!(graph_position_label(false, false), "(replay)");
         assert_eq!(graph_position_label(true, true), "(live)");
         assert_eq!(graph_position_label(true, false), "(latest)");
+    }
+
+    #[test]
+    fn remote_artifacts_recurse_into_escaped_object_children() {
+        let value = json!({
+            "$escaped": {
+                "nested": {
+                    "$artifact": {
+                        "path": "artifacts/sha256/a.txt",
+                        "mediaType": "text/plain",
+                        "bytes": 4,
+                        "sha256": "a"
+                    }
+                }
+            }
+        });
+        let mut paths = Vec::new();
+        collect_artifact_paths(&value, &mut paths);
+        assert_eq!(paths, vec!["artifacts/sha256/a.txt"]);
+        let artifacts =
+            HashMap::from([("artifacts/sha256/a.txt".to_string(), Ok("body".to_string()))]);
+        assert_eq!(
+            resolve_remote_artifacts(&value, &artifacts),
+            json!({"nested": "body"})
+        );
     }
 
     #[test]
