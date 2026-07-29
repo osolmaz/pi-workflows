@@ -298,6 +298,52 @@ fn server_round_trip_with_live_updates() {
     assert!(rejected.is_err(), "browser-origin handshake must fail");
 }
 
+#[cfg(unix)]
+#[test]
+fn symlinked_documents_outside_the_bundle_are_not_read() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.json");
+    std::fs::write(
+        &secret,
+        serde_json::to_string(&state_value("run-1", "running", 1, vec![])).unwrap(),
+    )
+    .unwrap();
+
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-1", "running");
+    std::fs::remove_file(dir.join("state.json")).unwrap();
+    std::os::unix::fs::symlink(&secret, dir.join("state.json")).unwrap();
+
+    // The manifest path is lexically fine, but the file resolves outside the
+    // bundle; the run must be skipped rather than expose external content.
+    let source = RunSource::new(runs.path());
+    assert!(source.get("run-1").is_none());
+}
+
+#[test]
+fn artifact_reads_enforce_the_actual_file_size() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-1", "running");
+    std::fs::create_dir_all(dir.join("artifacts")).unwrap();
+    std::fs::write(dir.join("artifacts").join("blob.txt"), "x".repeat(100)).unwrap();
+
+    // The reference lies about its size; the limit must apply to the file.
+    let value = json!({
+        "$artifact": {
+            "path": "artifacts/blob.txt", "mediaType": "text/plain",
+            "bytes": 5, "sha256": "0".repeat(64),
+        },
+    });
+    let resolved = piw::bundle::reader::resolve_artifacts(&value, &dir, 10);
+    assert_eq!(
+        resolved,
+        json!("«artifact 5B artifacts/blob.txt»"),
+        "an oversized artifact must fall back to a placeholder"
+    );
+    let resolved = piw::bundle::reader::resolve_artifacts(&value, &dir, 1000);
+    assert_eq!(resolved, json!("x".repeat(100)));
+}
+
 #[test]
 fn non_loopback_binds_are_refused() {
     let runs = tempfile::tempdir().unwrap();

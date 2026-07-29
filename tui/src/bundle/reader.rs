@@ -63,6 +63,21 @@ fn is_contained(relative: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
+/// Resolve a bundle file to its canonical path, requiring the target to stay
+/// inside the bundle after following symlinks. The lexical check above
+/// rejects `..` and absolute components, but a plain-looking name can still
+/// be a symlink pointing outside the bundle.
+pub fn contained_path(bundle_dir: &Path, path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    let base = bundle_dir.canonicalize().ok()?;
+    canonical.starts_with(&base).then_some(canonical)
+}
+
+/// Read a bundle document, refusing targets that resolve outside the bundle.
+pub fn read_contained(bundle_dir: &Path, path: &Path) -> Option<String> {
+    std::fs::read_to_string(contained_path(bundle_dir, path)?).ok()
+}
+
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
     let path = dir.join("manifest.json");
     let raw =
@@ -94,9 +109,9 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+fn read_json<T: serde::de::DeserializeOwned>(bundle_dir: &Path, path: &Path) -> Result<T> {
+    let raw = read_contained(bundle_dir, path)
+        .with_context(|| format!("reading {} inside the bundle", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -112,17 +127,17 @@ pub fn parse_ndjson<T: serde::de::DeserializeOwned>(raw: &str) -> Vec<T> {
 pub fn read_bundle(dir: &Path) -> Result<LoadedBundle> {
     let manifest = read_manifest(dir)?;
     let paths = BundlePaths::from_manifest(dir, &manifest);
-    let state: RunState = read_json(&paths.state)?;
-    let snapshot: Option<DefinitionSnapshot> = read_json(&paths.workflow).ok();
-    let trace: Vec<TraceEvent> = std::fs::read_to_string(&paths.trace)
+    let state: RunState = read_json(dir, &paths.state)?;
+    let snapshot: Option<DefinitionSnapshot> = read_json(dir, &paths.workflow).ok();
+    let trace: Vec<TraceEvent> = read_contained(dir, &paths.trace)
         .map(|raw| parse_ndjson(&raw))
         .unwrap_or_default();
     let session_binding = paths
         .session_binding()
-        .and_then(|path| read_json(&path).ok());
+        .and_then(|path| read_json(dir, &path).ok());
     let session_entries = paths
         .session_entries()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|path| read_contained(dir, &path))
         .map(|raw| parse_ndjson(&raw))
         .unwrap_or_default();
     Ok(LoadedBundle {
@@ -177,8 +192,11 @@ pub fn resolve_artifacts(value: &Value, bundle_dir: &Path, max_bytes: u64) -> Va
     match value {
         Value::Object(_) => {
             if let Some(reference) = as_artifact_ref(value) {
+                // The declared size is a cheap first filter; the read below
+                // re-checks the actual file size, which a malformed bundle
+                // can understate.
                 let text = if reference.bytes <= max_bytes {
-                    read_artifact_checked(bundle_dir, &reference.path)
+                    read_artifact_checked(bundle_dir, &reference.path, max_bytes)
                 } else {
                     None
                 };
@@ -210,12 +228,12 @@ pub fn resolve_artifacts(value: &Value, bundle_dir: &Path, max_bytes: u64) -> Va
     }
 }
 
-/// Read an artifact file, refusing paths that escape the bundle directory.
-pub fn read_artifact_checked(bundle_dir: &Path, relative: &str) -> Option<String> {
-    let resolved = bundle_dir.join(relative);
-    let canonical = resolved.canonicalize().ok()?;
-    let base = bundle_dir.canonicalize().ok()?;
-    if !canonical.starts_with(&base) {
+/// Read an artifact file, refusing paths that escape the bundle directory
+/// and files whose actual size exceeds `max_bytes` (the size declared by the
+/// reference is untrusted).
+pub fn read_artifact_checked(bundle_dir: &Path, relative: &str, max_bytes: u64) -> Option<String> {
+    let canonical = contained_path(bundle_dir, &bundle_dir.join(relative))?;
+    if std::fs::metadata(&canonical).ok()?.len() > max_bytes {
         return None;
     }
     std::fs::read_to_string(canonical).ok()

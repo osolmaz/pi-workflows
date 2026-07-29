@@ -113,12 +113,25 @@ impl RemoteRuns {
         self.shared.lock().unwrap().summaries.clone()
     }
 
+    /// Subscribe to a run, replacing any previous subscription: the UI shows
+    /// one run at a time, and keeping old subscriptions alive would stream
+    /// (and retain) every previously selected run's history forever.
     pub fn watch(&mut self, run_id: &str) {
-        if self.watched.insert(run_id.to_string()) {
-            let _ = self.commands.send(ClientMessage::WatchRun {
-                run_id: run_id.to_string(),
-            });
+        if self.watched.contains(run_id) {
+            return;
         }
+        let previous: Vec<String> = self.watched.drain().collect();
+        for old in previous {
+            let _ = self.commands.send(ClientMessage::UnwatchRun {
+                run_id: old.clone(),
+            });
+            self.decoded.remove(&old);
+            self.shared.lock().unwrap().raw_views.remove(&old);
+        }
+        self.watched.insert(run_id.to_string());
+        let _ = self.commands.send(ClientMessage::WatchRun {
+            run_id: run_id.to_string(),
+        });
     }
 
     /// The typed view for a run, refreshed from the raw view when its
@@ -190,19 +203,22 @@ async fn run_connection(
                             None
                         }
                         ServerMessage::RunPatch { run_id, revision, patch } => {
-                            let stale = match shared.raw_views.get_mut(&run_id) {
+                            match shared.raw_views.get_mut(&run_id) {
                                 Some((current, view)) if revision == *current + 1 => {
                                     match apply_patch(view, &patch) {
                                         Ok(()) => {
                                             *current = revision;
-                                            false
+                                            None
                                         }
-                                        Err(_) => true,
+                                        Err(_) => Some(run_id),
                                     }
                                 }
-                                _ => true,
-                            };
-                            stale.then_some(run_id)
+                                // Revision gap: take a fresh snapshot.
+                                Some(_) => Some(run_id),
+                                // A patch for a run we no longer track raced
+                                // an unwatch; resubscribing would undo it.
+                                None => None,
+                            }
                         }
                         ServerMessage::Artifact { .. } => None,
                         ServerMessage::Error { message, .. } => {
