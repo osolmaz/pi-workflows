@@ -20,7 +20,9 @@ pub struct GraphView<'a> {
 pub enum NodeStatus {
     Completed,
     Failed,
+    TimedOut,
     Active,
+    ReplayFocus,
     Waiting,
     Queued,
     Cancelled,
@@ -31,7 +33,9 @@ impl NodeStatus {
         match self {
             NodeStatus::Completed => '✓',
             NodeStatus::Failed => '✗',
+            NodeStatus::TimedOut => '×',
             NodeStatus::Active => '◐',
+            NodeStatus::ReplayFocus => '◆',
             NodeStatus::Waiting => '⏸',
             NodeStatus::Cancelled => '~',
             NodeStatus::Queued => '·',
@@ -42,11 +46,17 @@ impl NodeStatus {
         match self {
             NodeStatus::Completed => CanvasStyle::Ok,
             NodeStatus::Failed => CanvasStyle::Fail,
+            NodeStatus::TimedOut => CanvasStyle::TimedOut,
             NodeStatus::Active => CanvasStyle::Active,
+            NodeStatus::ReplayFocus => CanvasStyle::Replay,
             NodeStatus::Waiting => CanvasStyle::Warn,
-            NodeStatus::Cancelled => CanvasStyle::Warn,
-            NodeStatus::Queued => CanvasStyle::Dim,
+            NodeStatus::Cancelled => CanvasStyle::Cancelled,
+            NodeStatus::Queued => CanvasStyle::NodeDim,
         }
+    }
+
+    fn is_focused(self) -> bool {
+        matches!(self, NodeStatus::Active | NodeStatus::ReplayFocus)
     }
 }
 
@@ -92,14 +102,15 @@ fn derive_node_status(
     let Some(attempt) = latest_visible_attempt(visible_steps, node_id) else {
         return NodeStatus::Queued;
     };
-    // While scrubbing, the selected step's node reads as the active position.
+    // While scrubbing, the selected step is a replay cursor, not a live node.
     if !at_latest_step && visible_steps.last().map(|step| step.node_id.as_str()) == Some(node_id) {
-        return NodeStatus::Active;
+        return NodeStatus::ReplayFocus;
     }
     match attempt.outcome {
         NodeOutcome::Ok => NodeStatus::Completed,
+        NodeOutcome::TimedOut => NodeStatus::TimedOut,
         NodeOutcome::Cancelled => NodeStatus::Cancelled,
-        _ => NodeStatus::Failed,
+        NodeOutcome::Failed => NodeStatus::Failed,
     }
 }
 
@@ -689,12 +700,20 @@ fn draw_node_box(
     rendered: &RenderedCell,
     status: NodeStatus,
 ) {
-    let chars = if status == NodeStatus::Active {
+    let chars = if status.is_focused() {
         &BOX_HEAVY
     } else {
         &BOX_LIGHT
     };
     let style = status.style();
+    let content_style = if status.is_focused() {
+        CanvasStyle::NodeFocusText
+    } else if status == NodeStatus::Queued {
+        CanvasStyle::NodeDim
+    } else {
+        CanvasStyle::NodeText
+    };
+    canvas.fill_rect(start_x, y, rendered.width, 3, content_style);
     let inner_width = (rendered.width - 2) as usize;
     let horizontal: String = std::iter::repeat_n(chars.h, inner_width).collect();
     canvas.text(
@@ -705,16 +724,7 @@ fn draw_node_box(
     );
     canvas.text(start_x, y + 1, &chars.v.to_string(), style);
     canvas.put(start_x + 2, y + 1, status.glyph(), style);
-    canvas.text(
-        start_x + 4,
-        y + 1,
-        &rendered.text,
-        if status == NodeStatus::Queued {
-            CanvasStyle::Dim
-        } else {
-            CanvasStyle::Plain
-        },
-    );
+    canvas.text(start_x + 4, y + 1, &rendered.text, content_style);
     canvas.text(
         start_x + rendered.width - 1,
         y + 1,
@@ -735,7 +745,7 @@ fn edge_style(
     active_pair: Option<&str>,
 ) -> CanvasStyle {
     if active_pair == Some(pair_key) {
-        return CanvasStyle::Active;
+        return CanvasStyle::ActiveEdge;
     }
     if transitions.contains(pair_key) {
         return CanvasStyle::Taken;
