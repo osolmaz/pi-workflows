@@ -75,8 +75,11 @@ pub enum PatchOp {
 pub fn apply_patch(target: &mut Value, patch: &[PatchOp]) -> Result<(), String> {
     for op in patch {
         match op {
-            PatchOp::Add { path, value } | PatchOp::Replace { path, value } => {
-                set_path(target, path, value.clone())?;
+            PatchOp::Add { path, value } => {
+                set_path(target, path, value.clone(), false)?;
+            }
+            PatchOp::Replace { path, value } => {
+                set_path(target, path, value.clone(), true)?;
             }
             PatchOp::Remove { path } => {
                 remove_path(target, path)?;
@@ -118,29 +121,39 @@ fn resolve_path<'a>(target: &'a mut Value, path: &str) -> Result<&'a mut Value, 
     Ok(current)
 }
 
-fn set_path(target: &mut Value, path: &str, value: Value) -> Result<(), String> {
-    let Some((parent_path, key)) = path.rsplit_once('/') else {
-        return Err(format!("bad path {path}"));
-    };
-    if parent_path.is_empty() && key.is_empty() {
+fn set_path(target: &mut Value, path: &str, value: Value, replace: bool) -> Result<(), String> {
+    if path.is_empty() {
         *target = value;
         return Ok(());
     }
+    let Some((parent_path, key)) = path.rsplit_once('/') else {
+        return Err(format!("bad path {path}"));
+    };
     let parent = resolve_path(target, parent_path)?;
     let key = unescape_token(key);
     match parent {
         Value::Object(object) => {
+            if replace && !object.contains_key(&key) {
+                return Err(format!("missing key {key} in {path}"));
+            }
             object.insert(key, value);
             Ok(())
         }
         Value::Array(array) => {
-            if key == "-" {
+            if !replace && key == "-" {
                 array.push(value);
                 return Ok(());
             }
             let index: usize = key
                 .parse()
                 .map_err(|_| format!("bad array index {key} in {path}"))?;
+            if replace {
+                let member = array
+                    .get_mut(index)
+                    .ok_or_else(|| format!("index {index} out of bounds in {path}"))?;
+                *member = value;
+                return Ok(());
+            }
             if index > array.len() {
                 return Err(format!("index {index} out of bounds in {path}"));
             }
@@ -220,6 +233,26 @@ mod tests {
         )
         .unwrap();
         assert!(view.get("session").is_none());
+    }
+
+    #[test]
+    fn array_add_inserts_but_replace_overwrites() {
+        let mut view = json!({ "events": [1, 2] });
+        apply_patch(
+            &mut view,
+            &[
+                PatchOp::Add {
+                    path: "/events/1".into(),
+                    value: json!(3),
+                },
+                PatchOp::Replace {
+                    path: "/events/0".into(),
+                    value: json!(4),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(view, json!({ "events": [4, 3, 2] }));
     }
 
     #[test]
