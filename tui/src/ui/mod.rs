@@ -328,11 +328,11 @@ impl App {
         self.last_play_step = Instant::now();
         let steps = self.step_count();
         match self.replay {
-            Some(position) if position + 1 < steps - 1 => {
+            Some(position) if position + 1 < steps => {
                 self.replay = Some(position + 1);
             }
             _ => {
-                // Reached the end: rejoin the live view and stop.
+                // Past the final recorded step: rejoin the live view and stop.
                 self.replay = None;
                 self.playing = false;
             }
@@ -349,7 +349,10 @@ impl App {
     fn step_forward(&mut self) {
         let steps = self.step_count();
         match self.replay {
-            Some(position) if position + 1 >= steps - 1 => {
+            // The final recorded step is a valid detached position (on a
+            // live run it differs from the live view); rejoin only when
+            // stepping past it.
+            Some(position) if position + 1 >= steps => {
                 self.replay = None;
             }
             Some(position) => self.replay = Some(position + 1),
@@ -626,6 +629,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let inspector_scroll = app.inspector_scroll;
     let focus = app.focus;
     let playing = app.playing;
+    // Captured before `data` takes the mutable borrow: a dead remote
+    // connection must be visible while a cached run is still displayed.
+    let disconnected = match &app.provider {
+        Provider::Remote(remote) => !remote.connected(),
+        _ => false,
+    };
 
     let Some(data) = app.provider.data(&run_id) else {
         frame.render_widget(
@@ -685,9 +694,14 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .map(|runs| graph::viewport_line(runs, offset.0, inner_width))
         .collect();
     let graph_title = format!(
-        " {} {} ",
+        " {} {}{} ",
         sanitize_text(&data.state.workflow_name),
-        if at_latest { "(live)" } else { "(replay)" }
+        if at_latest { "(live)" } else { "(replay)" },
+        if disconnected {
+            " — DISCONNECTED"
+        } else {
+            ""
+        }
     );
     let graph_block = Block::default()
         .borders(Borders::ALL)
