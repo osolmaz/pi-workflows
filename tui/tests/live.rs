@@ -389,6 +389,32 @@ fn artifact_reads_enforce_the_actual_file_size() {
 }
 
 #[test]
+fn escaped_artifact_sentinels_stay_literal() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-1", "running");
+    std::fs::create_dir_all(dir.join("artifacts")).unwrap();
+    std::fs::write(dir.join("artifacts").join("blob.txt"), "secret").unwrap();
+
+    // User data that happens to look like a sentinel is persisted wrapped in
+    // $escaped; decoding must unwrap it as literal data, not read the file.
+    let literal = json!({
+        "$artifact": {
+            "path": "artifacts/blob.txt", "mediaType": "text/plain",
+            "bytes": 6, "sha256": "0".repeat(64),
+        },
+    });
+    let value = json!({ "$escaped": literal });
+    assert_eq!(
+        piw::bundle::reader::resolve_artifacts(&value, &dir, 1024),
+        literal
+    );
+    assert_eq!(
+        piw::bundle::reader::with_artifact_placeholders(&value),
+        literal
+    );
+}
+
+#[test]
 fn non_loopback_binds_are_refused() {
     let runs = tempfile::tempdir().unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
