@@ -73,12 +73,7 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": [
-        "· ▶ echo_text [action]",
-        "           │",
-        "           ▼",
-        "· ■ finalize [compute]"
-      ]
+      "lines": ["· ▶ echo_text [action]", "           │", "           ▼", "· ■ finalize [compute]"]
     },
     {
       "stepIndex": -1,

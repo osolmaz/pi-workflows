@@ -44,18 +44,12 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": [
-        "· ▶ ■ reply [agent]"
-      ]
+      "lines": ["· ▶ ■ reply [agent]"]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
-      "lines": [
-        "┌─────────────────────┐",
-        "│ · ▶ ■ reply [agent] │",
-        "└─────────────────────┘"
-      ]
+      "lines": ["┌─────────────────────┐", "│ · ▶ ■ reply [agent] │", "└─────────────────────┘"]
     }
   ]
 }

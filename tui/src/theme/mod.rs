@@ -889,4 +889,22 @@ mod tests {
         std::env::remove_var("PIW_CONFIG_PATH");
         assert_eq!(resolved.palette.name, "catppuccin-latte");
     }
+
+    #[test]
+    fn auto_switch_uses_the_configured_light_theme() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[theme]\nname = \"nord\"\nauto_switch = true\ndark_name = \"nord\"\nlight_name = \"one-light\"\n",
+        )
+        .unwrap();
+        std::env::set_var("PIW_CONFIG_PATH", &path);
+        std::env::set_var("PIW_THEME_APPEARANCE", "light");
+        let resolved = resolve(None);
+        std::env::remove_var("PIW_THEME_APPEARANCE");
+        std::env::remove_var("PIW_CONFIG_PATH");
+        assert_eq!(resolved.palette.name, "one-light");
+    }
 }

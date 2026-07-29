@@ -72,12 +72,7 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": [
-        "· ▶ n0 [action]",
-        "       │",
-        "       ▼",
-        "· ■ n1 [action]"
-      ]
+      "lines": ["· ▶ n0 [action]", "       │", "       ▼", "· ■ n1 [action]"]
     },
     {
       "stepIndex": -1,

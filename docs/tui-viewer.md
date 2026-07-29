@@ -1,96 +1,170 @@
 # Rust TUI viewer (piw)
 
 `tui/` contains `piw`, a Rust terminal viewer for workflow runs. It renders
-the same graph as the bundled TypeScript viewer (pinned by the golden
-fixtures under `fixtures/layout/`) and adds live following, full replay with
-a transport bar, and a conversation pane fed by the recorded Pi session
-entries.
+the same graph as the bundled TypeScript viewer, pinned by the golden fixtures
+under `fixtures/layout/`, and adds live following, replay, detailed inspection,
+a recorded Pi conversation, themes, and remote viewing.
 
 ## Modes
 
-- `piw` — browse and view runs from the local runs directory
-  (`PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`).
-- `piw <runId|runDir>` — open one run directly (a bare run id resolves
-  inside the default runs directory).
-- `piw serve [--runs-dir <dir>] [--bind 127.0.0.1:9377]` — expose the runs
+- `piw` browses the local runs directory (`PI_WORKFLOWS_RUNS_DIR` or
+  `~/.pi/agent/workflows/runs`).
+- `piw <runId|runDir>` opens one run. A bare run id resolves inside the default
+  runs directory.
+- `piw serve [--runs-dir <dir>] [--bind 127.0.0.1:9377]` exposes the runs
   directory over the [live replay protocol](live-replay-protocol.md). Only
-  loopback addresses are accepted; tunnel over SSH to view runs remotely.
-- `piw --connect ws://…` — view runs served by another process or machine.
+  loopback addresses are accepted; use an SSH tunnel for remote viewing.
+- `piw --connect ws://…` reads from another `piw serve` process.
+- `piw --theme <name>` selects a theme for this invocation.
+- `piw --list-themes` prints the built-in theme names.
 
-Direct filesystem mode and connected mode share the same semantic-state code;
-the protocol is the network form of the in-process state.
+Direct filesystem mode and connected mode use the same semantic run view.
+The protocol is the network form of that view.
 
 ## Layout
 
-```
-┌ runs ─────────┬ graph ──────────────────────────────┐
-│ ● two-turn    │       ┌────────┐                    │
-│ ○ autoimpl…   │       │ plan ✓ │                    │
-│ ○ echo        │       └───┬────┘                    │
-│               │       ┌───▼────────┐                │
-│               │       │ implement ◐│                │
-│               │       └────────────┘                │
-├───────────────┴─────────────────────────────────────┤
-│ inspector: [output] [prompt] [conversation] [trace] │
-│ …                                                   │
-├─────────────────────────────────────────────────────┤
-│ ⏮ ◀ ▶ ⏭  ▮▮▮▮▮▮▯▯▯▯ 12/17  LIVE                    │
-└─────────────────────────────────────────────────────┘
+The normal layout contains a run browser, graph, inspector, and two-line replay
+timeline. Short terminals use a compact one-line transport. Terminals below 100
+columns start with the run browser collapsed to a status rail; `b` toggles it.
+A directly opened single run hides the browser.
+
+- **Run browser:** every bundle, newest first, with status, title, elapsed time,
+  and a `?` marker for a possibly interrupted run.
+- **Graph:** the complete workflow definition using the same layered layout as
+  the TypeScript renderer. Bordered nodes are the default. Compact line nodes
+  remain available with `z`. Start nodes carry `▶`, branch nodes carry `◇N`,
+  and terminal nodes carry `■`. Branch labels remain on edges and loops use a
+  right-hand gutter.
+- **Inspector:** Steps, Trace, Conversation, and Info tabs. Steps can expand to
+  full prompt, output, timestamps, error, and action receipt fields. Trace can
+  show the selected attempt, the replay-visible prefix, or the full run, with
+  expandable JSON payloads. Conversation rows preserve exact recorded entry
+  ranges and support expandable raw entries. Info shows run-level metadata and
+  final output.
+- **Timeline:** run status, elapsed time, replay track, playhead, position,
+  playback controls, and speed. The track and controls accept mouse clicks;
+  the track supports drag seeking.
+
+## State presentation
+
+The graph distinguishes these states:
+
+- queued;
+- running;
+- replay focus;
+- completed;
+- failed;
+- timed out;
+- waiting; and
+- cancelled.
+
+A live running node uses a blue heavy border and `◐`. A selected historical
+step uses a mauve heavy border and `◆`, so replay never looks live. Timed-out
+nodes use `×` and a separate color. The graph title distinguishes `(live)`,
+`(latest)`, and `(replay)` and also reports paused, reconnecting, and
+disconnected states.
+
+## Themes
+
+Catppuccin Mocha is the default. The whole frame uses the theme: application,
+panels, graph canvas, node surfaces, selected rows, borders, states,
+conversation roles, and timeline. Boxed nodes use a surface color different
+from the graph canvas.
+
+Press `,` to open the theme picker. Moving through the list previews a theme
+immediately. Enter applies and saves it; Escape restores the exact original
+palette. Mouse selection is supported.
+
+Built-in themes are:
+
+- Catppuccin Mocha and Latte;
+- terminal palette;
+- Tokyo Night and Day;
+- Dracula;
+- Nord;
+- Gruvbox Dark and Light;
+- One Dark and Light;
+- Solarized Dark and Light;
+- Kanagawa and Lotus;
+- Rosé Pine and Dawn; and
+- Vesper.
+
+Theme configuration is loaded from `PIW_CONFIG_PATH`, then
+`$XDG_CONFIG_HOME/piw/config.toml`, then `~/.config/piw/config.toml`:
+
+```toml
+[theme]
+name = "catppuccin"
+auto_switch = false
+dark_name = "catppuccin"
+light_name = "catppuccin-latte"
+
+[theme.custom]
+# canvas_bg = "#1e1e2e"
+# node_bg = "#313244"
+# accent = "#89b4fa"
 ```
 
-- **Runs sidebar**: every bundle, most recent first, with status glyph,
-  title (or workflow name), and elapsed time. Runs stuck in `running`
-  without file growth are marked _possibly interrupted_ (`?`).
-- **Graph pane**: the workflow DAG, laid out with the same algorithm as the
-  TypeScript viewer (layering, barycenter ordering, virtual cells for long
-  edges). Nodes use the bordered ACPX-style rendering by default, with a
-  heavy border for the active or selected replay node. Node states derive
-  from the steps visible at the current replay position: queued, active,
-  completed, failed, waiting, cancelled. Taken edges are highlighted;
-  back-edges (loops) route through a right-hand gutter. The camera follows
-  the active node by default; panning detaches it.
-- **Inspector**: tabs for steps (with the selected step's prompt, output,
-  action receipt, and error), the raw trace events (tailing while live),
-  the conversation (see below), and run info. In direct filesystem mode,
-  artifact references in previews are resolved by reading the bundle;
-  connected mode shows compact placeholders.
-- **Transport bar**: run status and elapsed time, the replay position
-  (`step n/m` or `LIVE`), a play indicator, and the key hints. Following
-  the live edge is the default; any backward navigation detaches, and
-  `G`/`L`/`End` jump back to live.
+`PIW_THEME` overrides the config file and `--theme` overrides both. Custom
+colors accept `#rrggbb`, `#rgb`, `rgb(r,g,b)`, named terminal colors, and
+`reset`. Invalid fields are reported without discarding valid fields.
+
+When `auto_switch` is enabled, `PIW_THEME_APPEARANCE=dark|light` or the host's
+`COLORFGBG` value selects `dark_name` or `light_name` at startup. A manual
+selection in the picker disables automatic switching.
 
 ## Replay semantics
 
-Replay position is a step index (`-1` = before any step; detached from live
-whenever it is set). The view at a position derives everything from the
-steps visible up to it — graph statuses, taken transitions, the in-flight
-transition, and the conversation reveal — matching the TypeScript renderer's
-scrubbing semantics exactly. Rewinding is stable: layouts do not reflow
-while scrubbing (the graph depends only on the definition snapshot).
+Replay position is a step index. `-1` means before the first step and `None`
+means latest/live. Graph states, taken edges, the trace prefix, and conversation
+reveal derive from steps visible at that position. Rewinding never changes the
+layout because layout depends only on the persisted definition snapshot.
 
-The conversation pane renders the recorded Pi session entries (user prompts,
-assistant messages, tool results) with progressive reveal in replay: entries
-past the last visible step's `conversation` range stay hidden, using the
-explicit entry ranges in step records — never heuristics. The selected
-step's entry range is highlighted in the gutter, so an attempt's exact
-conversation slice is always visible.
+Playback is deliberately discrete. The available speeds are 1x, 2x, 5x, and
+10x over the 700 ms base interval. Seeking backward detaches from live;
+selecting Live or pressing `G`, `L`, or End rejoins it. A viewer already at
+latest follows newly appended steps. A detached viewer stays at its chosen
+position.
+
+The conversation uses persisted `conversation` entry ranges rather than
+heuristics. Entries after the replay position remain hidden. The selected
+attempt's range is marked in the gutter. Live auto-follow stays at the bottom
+until the user moves to an older entry and returns with End.
+
+## Remote behavior
+
+The client reconnects automatically with bounded backoff. It restores the run
+listing and selected-run subscription after the server returns. Cached content
+stays visible but is labeled reconnecting or disconnected, never current.
+Revision gaps still force a fresh snapshot.
+
+Expanded remote prompt and output fields fetch artifact content on demand.
+The client caches bounded responses while the server enforces bundle path,
+symlink, and 4 MiB limits.
 
 ## Interaction
 
-- Replay (global): `[`/`]` step back/forward, `space` play/pause, `Home`/`g`
-  to start, `End`/`G`/`L` to live.
-- Focus: `Tab` cycles Runs → Graph → Inspector; panes react to `↑↓`/`jk`
-  (select run, pan, scrub or scroll), `t`/`1`–`4` switch inspector tabs.
-- Graph: arrows/`hjkl` pan, `0` resets, `f` toggles follow, `z` (or
-  `+`/`-`) switches between the default bordered nodes and the compact line
-  style — the same two renderings as the TypeScript viewer.
-- Mouse: wheel scrolls the pane under the cursor, drag pans the graph,
-  click selects runs and focuses panes.
-- `q` or `Ctrl-C` quits.
+- Replay: `[`/`]` previous/next, Space play/pause, Home or `g` to start, End,
+  `G`, or `L` to live, and `{`/`}` to change speed.
+- Focus: Tab cycles Runs → Graph → Inspector. `t` or `1`–`4` changes inspector
+  tabs.
+- Graph: arrows or `hjkl` pan, `0` resets, `f` toggles follow, and `z`, `+`, or
+  `-` switches boxed/compact density. Clicking a node selects its latest
+  visible attempt. Dragging pans.
+- Browser: `b` expands or collapses it. Up/Down or `j`/`k` selects a run.
+- Inspector: Enter expands the selected step, trace payload, or conversation
+  entry. In Trace, `v` changes scope. Page Up/Down scrolls long content.
+- Theme: `,` opens the picker; arrows or `j`/`k` preview, Enter applies, and
+  Escape cancels.
+- `q` or Ctrl-C quits.
 
-## Parity with the TypeScript viewer
+## TypeScript renderer parity
 
-The layout and render port must reproduce the golden fixtures
-byte-for-byte (`fixtures/layout/*.json`; regenerate with `npm run
-fixtures`). Any intentional algorithm change updates the fixtures and both
-implementations in the same commit.
+The Rust and TypeScript renderers must reproduce the same plain graph and
+layout fixtures under `fixtures/layout/`. Theme backgrounds and ratatui styles
+are Rust-only and do not change plain fixture output. Any node text or geometry
+change must be made in both renderers and committed with regenerated fixtures:
+
+```bash
+npm run fixtures
+```
