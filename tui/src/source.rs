@@ -3,7 +3,7 @@
 //! JSON patches as bundles grow. Both the in-process TUI and the WebSocket
 //! server consume this; the protocol is just its network form.
 
-use crate::bundle::reader::{list_bundles, read_manifest, BundlePaths};
+use crate::bundle::reader::{list_bundles, read_manifest_value, BundlePaths};
 use crate::bundle::tail::NdjsonTailer;
 use crate::bundle::types::{DefinitionSnapshot, Manifest, RunState};
 use crate::protocol::PatchOp;
@@ -20,7 +20,10 @@ const INTERRUPTED_AFTER: Duration = Duration::from_secs(60);
 pub struct RunEntry {
     pub dir: PathBuf,
     pub manifest: Manifest,
-    /// Bundle documents verbatim, as sent over the wire.
+    /// Bundle documents verbatim, as sent over the wire. The raw manifest is
+    /// kept beside the typed one because views must carry it unmodified,
+    /// including forward-compatible fields this build does not know about.
+    pub manifest_raw: Value,
     pub workflow: Value,
     pub state_raw: Value,
     pub events: Vec<Value>,
@@ -77,7 +80,7 @@ fn last_write_instant(paths: &BundlePaths) -> Instant {
 
 impl RunEntry {
     fn open(dir: &Path) -> Result<Self> {
-        let manifest = read_manifest(dir)?;
+        let (manifest_raw, manifest) = read_manifest_value(dir)?;
         let paths = BundlePaths::from_manifest(dir, &manifest);
         let state_text = crate::bundle::reader::read_contained(dir, &paths.state)
             .ok_or_else(|| anyhow::anyhow!("unreadable state in {}", dir.display()))?;
@@ -99,6 +102,7 @@ impl RunEntry {
                 .session_entries()
                 .map(|path| NdjsonTailer::contained(&path, dir)),
             manifest,
+            manifest_raw,
             workflow,
             state_raw,
             events: Vec::new(),
@@ -184,7 +188,7 @@ impl RunEntry {
 
     pub fn view(&self) -> Value {
         json!({
-            "manifest": self.manifest,
+            "manifest": self.manifest_raw,
             "workflow": self.workflow,
             "state": self.state_raw,
             "events": self.events,
@@ -196,7 +200,7 @@ impl RunEntry {
 
     pub fn summary(&self) -> Value {
         json!({
-            "manifest": self.manifest,
+            "manifest": self.manifest_raw,
             "live": self.live,
             "possiblyInterrupted": self.possibly_interrupted,
         })
@@ -236,12 +240,15 @@ impl RunEntry {
             });
             self.events.extend(ready_events);
         }
-        if let Ok(manifest) = read_manifest(&self.dir) {
-            if manifest != self.manifest {
+        if let Ok((manifest_raw, manifest)) = read_manifest_value(&self.dir) {
+            // Compare the raw document: a change confined to a field this
+            // build does not know must still produce a patch.
+            if manifest_raw != self.manifest_raw {
                 self.manifest = manifest;
+                self.manifest_raw = manifest_raw;
                 patch.push(PatchOp::Replace {
                     path: "/manifest".into(),
-                    value: serde_json::to_value(&self.manifest).unwrap_or(Value::Null),
+                    value: self.manifest_raw.clone(),
                 });
             }
         }
