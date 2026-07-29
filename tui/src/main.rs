@@ -33,6 +33,9 @@ enum Command {
 }
 
 fn default_runs_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("PI_WORKFLOWS_RUNS_DIR") {
+        return PathBuf::from(dir);
+    }
     std::env::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".pi")
@@ -58,8 +61,25 @@ fn main() -> Result<()> {
             if let Some(url) = cli.connect {
                 return ui::run_remote(&url);
             }
-            let path = cli.path.unwrap_or_else(default_runs_dir);
-            anyhow::ensure!(path.is_dir(), "{} does not exist", path.display());
+            let path = match cli.path {
+                Some(path) if path.is_dir() => path,
+                // A bare run id resolves inside the default runs directory.
+                Some(path) => {
+                    let candidate = default_runs_dir().join(&path);
+                    anyhow::ensure!(
+                        candidate.is_dir(),
+                        "{} is neither a directory nor a run id under {}",
+                        path.display(),
+                        default_runs_dir().display()
+                    );
+                    candidate
+                }
+                None => {
+                    let dir = default_runs_dir();
+                    anyhow::ensure!(dir.is_dir(), "{} does not exist", dir.display());
+                    dir
+                }
+            };
             // A directory containing manifest.json is a single bundle;
             // anything else is treated as a runs directory.
             if path.join("manifest.json").is_file() {

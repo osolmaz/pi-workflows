@@ -10,9 +10,10 @@ entries.
 
 - `piw` — browse and view runs from the local runs directory
   (`PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`).
-- `piw <runId|runDir>` — open one run directly.
-- `piw serve [--bind 127.0.0.1:0]` — expose the runs directory over the
-  [live replay protocol](live-replay-protocol.md).
+- `piw <runId|runDir>` — open one run directly (a bare run id resolves
+  inside the default runs directory).
+- `piw serve [--runs-dir <dir>] [--bind 127.0.0.1:9377]` — expose the runs
+  directory over the [live replay protocol](live-replay-protocol.md).
 - `piw --connect ws://…` — view runs served by another process or machine.
 
 Direct filesystem mode and connected mode share the same semantic-state code;
@@ -37,44 +38,53 @@ the protocol is the network form of the in-process state.
 ```
 
 - **Runs sidebar**: every bundle, most recent first, with status glyph,
-  workflow name, title, and elapsed time. Runs stuck in `running` without
-  file growth are labelled _possibly interrupted_.
+  title (or workflow name), and elapsed time. Runs stuck in `running`
+  without file growth are marked _possibly interrupted_ (`?`).
 - **Graph pane**: the workflow DAG, laid out with the same algorithm as the
   TypeScript viewer (layering, barycenter ordering, virtual cells for long
-  edges). Node states at the current replay position: pending, running,
-  ok, failed, waiting. Taken edges are highlighted; back-edges (loops) are
-  drawn as return paths.
-- **Inspector**: tabs for the selected step — accepted output, full prompt,
-  the conversation slice (see below), and the raw trace events. Artifact
-  references are resolved transparently.
-- **Transport bar**: replay position over the trace (`seq`), play/pause with
-  adjustable speed, step forward/back, jump to start/end, and a LIVE
-  indicator. Following the live edge is the default for non-terminal runs;
-  any backward navigation detaches, and `L` jumps back to live.
+  edges). Node states derive from the steps visible at the current replay
+  position: queued, active, completed, failed, waiting, cancelled. Taken
+  edges are highlighted; back-edges (loops) route through a right-hand
+  gutter. The camera follows the active node by default; panning detaches
+  it.
+- **Inspector**: tabs for steps (with the selected step's prompt, output,
+  action receipt, and error), the raw trace events (tailing while live),
+  the conversation (see below), and run info. In direct filesystem mode,
+  artifact references in previews are resolved by reading the bundle;
+  connected mode shows compact placeholders.
+- **Transport bar**: run status and elapsed time, the replay position
+  (`step n/m` or `LIVE`), a play indicator, and the key hints. Following
+  the live edge is the default; any backward navigation detaches, and
+  `G`/`L`/`End` jump back to live.
 
 ## Replay semantics
 
-Replay position is a trace `seq`. The view at position `n` is the state
-reconstructed from events `1..=n` — the graph, steps, and conversation all
-derive from the same position, so scrubbing is coherent across panes.
-Rewinding is stable: layouts do not reflow while scrubbing (the graph depends
-only on the definition snapshot).
+Replay position is a step index (`-1` = before any step; detached from live
+whenever it is set). The view at a position derives everything from the
+steps visible up to it — graph statuses, taken transitions, the in-flight
+transition, and the conversation reveal — matching the TypeScript renderer's
+scrubbing semantics exactly. Rewinding is stable: layouts do not reflow
+while scrubbing (the graph depends only on the definition snapshot).
 
 The conversation pane renders the recorded Pi session entries (user prompts,
 assistant messages, tool results) with progressive reveal in replay: entries
-appear at the position of the step that produced them, using the explicit
-`conversation` entry ranges in step records. Entries outside any attempt
-range (user interruptions, nudges between steps) are shown attributed to the
-gap between steps.
+past the last visible step's `conversation` range stay hidden, using the
+explicit entry ranges in step records — never heuristics. The selected
+step's entry range is highlighted in the gutter, so an attempt's exact
+conversation slice is always visible.
 
 ## Interaction
 
-- Keyboard: arrows/`hjkl` pan, `+`/`-` zoom density, `tab` cycles inspector
-  tabs, `space` play/pause, `[`/`]` step, `g`/`G` start/end, `L` live,
-  `enter` open run, `q` back/quit.
-- Mouse: wheel scrolls, drag pans the graph, click selects nodes and steps.
-- Zoom densities switch node rendering between full boxes, compact boxes,
-  and line style — same set as the TypeScript renderer.
+- Replay (global): `[`/`]` step back/forward, `space` play/pause, `Home`/`g`
+  to start, `End`/`G`/`L` to live.
+- Focus: `Tab` cycles Runs → Graph → Inspector; panes react to `↑↓`/`jk`
+  (select run, pan, scrub or scroll), `t`/`1`–`4` switch inspector tabs.
+- Graph: arrows/`hjkl` pan, `0` resets, `f` toggles follow, `z` (or
+  `+`/`-`) switches node density between line and box style — the same two
+  renderings as the TypeScript viewer.
+- Mouse: wheel scrolls the pane under the cursor, drag pans the graph,
+  click selects runs and focuses panes.
+- `q` or `Ctrl-C` quits.
 
 ## Parity with the TypeScript viewer
 
