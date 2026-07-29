@@ -171,8 +171,9 @@ The full run projection (`WorkflowRunState` in
 - `status` is one of `running`, `waiting`, `completed`, `failed`, `timed_out`,
   or `cancelled`.
 - While a node is executing, `currentNode`, `currentAttemptId`,
-  `currentNodeType`, `currentNodeStartedAt`, and `statusDetail` describe it;
-  they disappear when the node finishes.
+  `currentNodeStartedAt`, and `statusDetail` describe it; they disappear when
+  the node finishes. The executing node's type comes from the definition
+  snapshot, not from the state.
 - While a pause request holds the run at a step boundary, `paused` is `true`
   (with matching `run_paused`/`run_resumed` trace events); it disappears when
   the run resumes or ends.
