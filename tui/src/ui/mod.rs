@@ -686,7 +686,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .collect();
     let graph_title = format!(
         " {} {} ",
-        data.state.workflow_name,
+        sanitize_text(&data.state.workflow_name),
         if at_latest { "(live)" } else { "(replay)" }
     );
     let graph_block = Block::default()
@@ -869,24 +869,26 @@ fn preview_value(value: &Value, bundle_dir: Option<&std::path::Path>) -> String 
 
 fn steps_lines(
     data: &RunData,
-    _visible_steps: &[StepRecord],
+    visible_steps: &[StepRecord],
     selected_step: Option<&StepRecord>,
     bounded_index: i64,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (index, step) in data.state.steps.iter().enumerate() {
+    // Only the steps visible at the replay position: while scrubbing, the
+    // pane must not reveal outcomes the graph does not show yet.
+    for (index, step) in visible_steps.iter().enumerate() {
         let (glyph, style) = outcome_glyph(step.outcome);
         let selected = bounded_index >= 0 && index == bounded_index as usize;
         let marker = if selected { "▶" } else { " " };
         let mut line = vec![
             Span::raw(format!("{marker} ")),
             Span::styled(glyph.to_string(), style),
-            Span::raw(format!(
+            Span::raw(sanitize_text(&format!(
                 " {} [{}] {}",
                 step.node_id,
                 step.node_type,
                 step_duration(step)
-            )),
+            ))),
         ];
         if step.conversation.is_some() {
             line.push(Span::styled(
@@ -905,7 +907,10 @@ fn steps_lines(
     if let Some(step) = selected_step {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("── step {} ({}) ──", step.node_id, step.attempt_id),
+            sanitize_text(&format!(
+                "── step {} ({}) ──",
+                step.node_id, step.attempt_id
+            )),
             Style::default().fg(Color::DarkGray),
         )));
         if !step.prompt.is_null() {
@@ -922,11 +927,10 @@ fn steps_lines(
             let command = action.command.clone().unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled("action: ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!(
+                Span::raw(sanitize_text(&format!(
                     "{} {}",
-                    action.action_type,
-                    sanitize_text(&command)
-                )),
+                    action.action_type, command
+                ))),
             ]));
         }
         if let Some(error) = &step.error {
@@ -971,26 +975,33 @@ fn trace_lines(events: &[Value]) -> Vec<Line<'static>> {
 fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
     let state = data.state;
     let label = |text: &str| Span::styled(format!("{text:<14}"), Style::default().fg(Color::Cyan));
+    // Everything below except the derived counts is bundle-derived text.
     let mut lines = vec![
-        Line::from(vec![label("run"), Span::raw(run_id.to_string())]),
+        Line::from(vec![label("run"), Span::raw(sanitize_text(run_id))]),
         Line::from(vec![
             label("workflow"),
-            Span::raw(state.workflow_name.clone()),
+            Span::raw(sanitize_text(&state.workflow_name)),
         ]),
         Line::from(vec![
             label("status"),
             Span::styled(state.status.label().to_string(), status_style(state.status)),
         ]),
-        Line::from(vec![label("started"), Span::raw(state.started_at.clone())]),
+        Line::from(vec![
+            label("started"),
+            Span::raw(sanitize_text(&state.started_at)),
+        ]),
     ];
     if let Some(finished) = &state.finished_at {
         lines.push(Line::from(vec![
             label("finished"),
-            Span::raw(finished.clone()),
+            Span::raw(sanitize_text(finished)),
         ]));
     }
     if let Some(path) = &state.workflow_path {
-        lines.push(Line::from(vec![label("source"), Span::raw(path.clone())]));
+        lines.push(Line::from(vec![
+            label("source"),
+            Span::raw(sanitize_text(path)),
+        ]));
     }
     if let Some(detail) = &state.status_detail {
         lines.push(Line::from(vec![
