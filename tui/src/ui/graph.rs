@@ -2,25 +2,46 @@
 //! applies a scroll/zoom viewport.
 
 use crate::canvas::{CanvasStyle, StyledRun};
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme::Palette;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-pub fn style_for(style: CanvasStyle) -> Style {
+pub fn style_for(style: CanvasStyle, palette: &Palette) -> Style {
     match style {
-        CanvasStyle::Plain => Style::default(),
-        CanvasStyle::Dim => Style::default().fg(Color::DarkGray),
-        CanvasStyle::Taken | CanvasStyle::Ok => Style::default().fg(Color::Green),
-        CanvasStyle::Active => Style::default()
-            .fg(Color::Cyan)
+        CanvasStyle::Plain => Style::default().fg(palette.text),
+        CanvasStyle::Dim => Style::default().fg(palette.muted),
+        CanvasStyle::Taken => Style::default().fg(palette.success),
+        CanvasStyle::ActiveEdge => Style::default()
+            .fg(palette.running)
             .add_modifier(Modifier::BOLD),
-        CanvasStyle::Back | CanvasStyle::Warn => Style::default().fg(Color::Yellow),
-        CanvasStyle::Fail => Style::default().fg(Color::Red),
+        CanvasStyle::Back => Style::default().fg(palette.warning),
+        CanvasStyle::NodeText => Style::default().fg(palette.text).bg(palette.node_bg),
+        CanvasStyle::NodeDim => Style::default().fg(palette.muted).bg(palette.node_bg),
+        CanvasStyle::NodeFocusText => Style::default().fg(palette.text).bg(palette.node_focus_bg),
+        CanvasStyle::Active => Style::default()
+            .fg(palette.running)
+            .bg(palette.node_focus_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::Replay => Style::default()
+            .fg(palette.replay_focus)
+            .bg(palette.node_focus_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::Ok => Style::default().fg(palette.success).bg(palette.node_bg),
+        CanvasStyle::Fail => Style::default().fg(palette.error).bg(palette.node_bg),
+        CanvasStyle::TimedOut => Style::default().fg(palette.timed_out).bg(palette.node_bg),
+        CanvasStyle::Warn => Style::default().fg(palette.warning).bg(palette.node_bg),
+        CanvasStyle::Cancelled => Style::default().fg(palette.cancelled).bg(palette.node_bg),
     }
 }
 
 /// Cut a row of styled runs to the viewport columns `[offset, offset+width)`
 /// (measured in characters) and convert to a ratatui line.
-pub fn viewport_line(runs: &[StyledRun], offset_x: usize, width: usize) -> Line<'static> {
+pub fn viewport_line(
+    runs: &[StyledRun],
+    offset_x: usize,
+    width: usize,
+    palette: &Palette,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut position = 0usize;
     let end = offset_x + width;
@@ -39,7 +60,7 @@ pub fn viewport_line(runs: &[StyledRun], offset_x: usize, width: usize) -> Line<
         let take = (run_end.min(end)) - (run_start + skip);
         let slice: String = text.chars().skip(skip).take(take).collect();
         if !slice.is_empty() {
-            spans.push(Span::styled(slice, style_for(*style)));
+            spans.push(Span::styled(slice, style_for(*style, palette)));
         }
     }
     Line::from(spans)
@@ -55,14 +76,13 @@ pub fn content_size(rows: &[Vec<StyledRun>]) -> (usize, usize) {
     (width, rows.len())
 }
 
-/// Find the row/column of the first cell drawn in the active style, used to
-/// keep the camera on the running node while following.
-pub fn find_active(rows: &[Vec<StyledRun>]) -> Option<(usize, usize)> {
+/// Find the row/column of the running or replay-focused node.
+pub fn find_focus(rows: &[Vec<StyledRun>]) -> Option<(usize, usize)> {
     for (y, runs) in rows.iter().enumerate() {
         let mut x = 0usize;
         for (text, style) in runs {
             let len = text.chars().count();
-            if *style == CanvasStyle::Active {
+            if matches!(style, CanvasStyle::Active | CanvasStyle::Replay) {
                 return Some((y, x));
             }
             x += len;

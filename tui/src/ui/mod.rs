@@ -5,6 +5,7 @@
 
 mod conversation;
 mod graph;
+mod theme_picker;
 
 use crate::bundle::reader::with_artifact_placeholders;
 use crate::bundle::types::{DefinitionSnapshot, NodeOutcome, RunState, RunStatus, StepRecord};
@@ -12,13 +13,14 @@ use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::render::{render_graph_canvas, GraphNodeStyle, GraphView};
 use crate::source::RunSource;
+use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize as _};
+use ratatui::style::{Modifier, Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -28,6 +30,7 @@ use std::time::{Duration, Instant};
 
 const LOCAL_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 const PLAY_STEP_INTERVAL: Duration = Duration::from_millis(700);
+const DEFAULT_NODE_STYLE: GraphNodeStyle = GraphNodeStyle::Box;
 
 pub struct RunSummary {
     pub run_id: String,
@@ -208,14 +211,20 @@ struct App {
     dragging: Option<(u16, u16, usize, usize)>,
     tab: InspectorTab,
     inspector_scroll: usize,
+    palette: Palette,
+    theme_config: ThemeConfig,
+    theme_config_path: std::path::PathBuf,
+    theme_picker: Option<theme_picker::ThemePicker>,
+    theme_diagnostic: Option<String>,
     /// Pane rectangles from the last draw, for mouse routing.
+    frame_rect: Rect,
     runs_rect: Rect,
     graph_rect: Rect,
     inspector_rect: Rect,
     quit: bool,
 }
 
-pub fn run_local(runs_dir: &Path) -> Result<()> {
+pub fn run_local(runs_dir: &Path, cli_theme: Option<&str>) -> Result<()> {
     let source = RunSource::new(runs_dir);
     run_app(
         Provider::Local {
@@ -223,10 +232,11 @@ pub fn run_local(runs_dir: &Path) -> Result<()> {
             last_refresh: Instant::now(),
         },
         true,
+        cli_theme,
     )
 }
 
-pub fn run_single(bundle_dir: &Path) -> Result<()> {
+pub fn run_single(bundle_dir: &Path, cli_theme: Option<&str>) -> Result<()> {
     let source = RunSource::single(bundle_dir)?;
     run_app(
         Provider::Local {
@@ -234,18 +244,20 @@ pub fn run_single(bundle_dir: &Path) -> Result<()> {
             last_refresh: Instant::now(),
         },
         false,
+        cli_theme,
     )
 }
 
-pub fn run_remote(url: &str) -> Result<()> {
+pub fn run_remote(url: &str, cli_theme: Option<&str>) -> Result<()> {
     let remote = RemoteRuns::connect(url)?;
-    run_app(Provider::Remote(remote), true)
+    run_app(Provider::Remote(remote), true, cli_theme)
 }
 
-fn run_app(provider: Provider, show_sidebar: bool) -> Result<()> {
+fn run_app(provider: Provider, show_sidebar: bool, cli_theme: Option<&str>) -> Result<()> {
+    let resolved_theme = theme::resolve(cli_theme);
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
-    let result = event_loop(&mut terminal, provider, show_sidebar);
+    let result = event_loop(&mut terminal, provider, show_sidebar, resolved_theme);
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -255,6 +267,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     provider: Provider,
     show_sidebar: bool,
+    resolved_theme: theme::ResolvedTheme,
 ) -> Result<()> {
     let mut app = App {
         provider,
@@ -269,12 +282,18 @@ fn event_loop(
         replay: None,
         playing: false,
         last_play_step: Instant::now(),
-        node_style: GraphNodeStyle::Line,
+        node_style: DEFAULT_NODE_STYLE,
         follow: true,
         graph_offset: (0, 0),
         dragging: None,
         tab: InspectorTab::Steps,
         inspector_scroll: 0,
+        palette: resolved_theme.palette,
+        theme_config: resolved_theme.config,
+        theme_config_path: resolved_theme.config_path,
+        theme_picker: None,
+        theme_diagnostic: resolved_theme.diagnostics.into_iter().next(),
+        frame_rect: Rect::default(),
         runs_rect: Rect::default(),
         graph_rect: Rect::default(),
         inspector_rect: Rect::default(),
@@ -378,6 +397,74 @@ impl App {
             self.follow = true;
         }
     }
+
+    fn open_theme_picker(&mut self) {
+        self.theme_picker = Some(theme_picker::ThemePicker::new(&self.palette));
+    }
+
+    fn preview_selected_theme(&mut self) {
+        let Some(name) = self
+            .theme_picker
+            .as_ref()
+            .map(|picker| picker.selected_name().to_string())
+        else {
+            return;
+        };
+        let (palette, diagnostics) = theme::palette_with_config(&name, &self.theme_config);
+        self.palette = palette;
+        if let Some(picker) = self.theme_picker.as_mut() {
+            picker.error = diagnostics.into_iter().next();
+        }
+    }
+
+    fn cancel_theme_picker(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            self.palette = picker.original_palette;
+        }
+    }
+
+    fn apply_theme_picker(&mut self) {
+        let Some(name) = self
+            .theme_picker
+            .as_ref()
+            .map(|picker| picker.selected_name().to_string())
+        else {
+            return;
+        };
+        match theme::save_theme(&self.theme_config_path, &name) {
+            Ok(()) => {
+                self.theme_config.name = Some(name);
+                self.theme_config.auto_switch = false;
+                self.theme_picker = None;
+                self.theme_diagnostic = None;
+            }
+            Err(error) => {
+                if let Some(picker) = self.theme_picker.as_mut() {
+                    picker.error = Some(sanitize_text(&format!("{error:#}")));
+                }
+            }
+        }
+    }
+}
+
+fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(picker) = app.theme_picker.as_mut() {
+                picker.move_previous();
+            }
+            app.preview_selected_theme();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(picker) = app.theme_picker.as_mut() {
+                picker.move_next();
+            }
+            app.preview_selected_theme();
+        }
+        KeyCode::Enter => app.apply_theme_picker(),
+        KeyCode::Esc => app.cancel_theme_picker(),
+        _ => {}
+    }
 }
 
 fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
@@ -385,8 +472,13 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
         app.quit = true;
         return;
     }
+    if app.theme_picker.is_some() {
+        handle_theme_picker_key(app, key);
+        return;
+    }
     match key.code {
         KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char(',') => app.open_theme_picker(),
         KeyCode::Tab => {
             app.focus = match (app.focus, app.show_sidebar) {
                 (Focus::Runs, _) => Focus::Graph,
@@ -486,6 +578,10 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
 }
 
 fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
+    if app.theme_picker.is_some() {
+        handle_theme_picker_mouse(app, mouse);
+        return;
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let delta: i64 = if mouse.kind == MouseEventKind::ScrollUp {
@@ -547,14 +643,54 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
     }
 }
 
-fn status_style(status: RunStatus) -> Style {
-    match status {
-        RunStatus::Running => Style::default().fg(Color::Cyan),
-        RunStatus::Waiting => Style::default().fg(Color::Yellow),
-        RunStatus::Completed => Style::default().fg(Color::Green),
-        RunStatus::Failed | RunStatus::TimedOut => Style::default().fg(Color::Red),
-        RunStatus::Cancelled => Style::default().fg(Color::Yellow),
+fn handle_theme_picker_mouse(app: &mut App, mouse: MouseEvent) {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return;
     }
+    let popup = theme_picker::popup_rect(app.frame_rect);
+    if !contains(popup, mouse.column, mouse.row) {
+        return;
+    }
+    let inner_y = popup.y.saturating_add(1);
+    let footer_height = if app
+        .theme_picker
+        .as_ref()
+        .is_some_and(|picker| picker.error.is_some())
+    {
+        3
+    } else {
+        2
+    };
+    let list_height = popup.height.saturating_sub(2).saturating_sub(footer_height);
+    if mouse.row >= inner_y && mouse.row < inner_y.saturating_add(list_height) {
+        let index = mouse.row.saturating_sub(inner_y) as usize;
+        if index < theme::THEME_NAMES.len() {
+            if let Some(picker) = app.theme_picker.as_mut() {
+                picker.selected = index;
+                picker.error = None;
+            }
+            app.preview_selected_theme();
+        }
+    } else if mouse.row >= popup.y + popup.height.saturating_sub(2) {
+        let relative = mouse.column.saturating_sub(popup.x);
+        if relative < popup.width / 2 {
+            app.apply_theme_picker();
+        } else {
+            app.cancel_theme_picker();
+        }
+    }
+}
+
+fn status_style(status: RunStatus, palette: &Palette) -> Style {
+    let color = match status {
+        RunStatus::Running => palette.running,
+        RunStatus::Waiting => palette.warning,
+        RunStatus::Completed => palette.success,
+        RunStatus::Failed => palette.error,
+        RunStatus::TimedOut => palette.timed_out,
+        RunStatus::Cancelled => palette.cancelled,
+    };
+    Style::default().fg(color)
 }
 
 fn status_glyph(status: RunStatus) -> &'static str {
@@ -562,7 +698,8 @@ fn status_glyph(status: RunStatus) -> &'static str {
         RunStatus::Running => "◐",
         RunStatus::Waiting => "⏸",
         RunStatus::Completed => "✓",
-        RunStatus::Failed | RunStatus::TimedOut => "✗",
+        RunStatus::Failed => "✗",
+        RunStatus::TimedOut => "×",
         RunStatus::Cancelled => "~",
     }
 }
@@ -573,6 +710,12 @@ fn now_ms() -> i64 {
 
 fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let area = frame.area();
+    app.frame_rect = area;
+    let palette = app.palette.clone();
+    frame.render_widget(
+        Block::default().style(Style::default().fg(palette.text).bg(palette.app_bg)),
+        area,
+    );
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(1)])
@@ -614,10 +757,28 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             _ => "No runs found.".to_string(),
         };
         frame.render_widget(
-            Paragraph::new(message).block(Block::default().borders(Borders::ALL).title(" piw ")),
+            Paragraph::new(message)
+                .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" piw ")
+                        .style(Style::default().bg(palette.panel_bg))
+                        .border_style(pane_border(&palette, false)),
+                ),
             main_area,
         );
-        draw_transport(frame, transport, None, app.playing);
+        draw_transport(
+            frame,
+            transport,
+            None,
+            app.playing,
+            &palette,
+            app.theme_diagnostic.as_deref(),
+        );
+        if let Some(picker) = &app.theme_picker {
+            theme_picker::render(frame, area, picker, &palette);
+        }
         return;
     };
     let replay = app.replay;
@@ -639,10 +800,27 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let Some(data) = app.provider.data(&run_id) else {
         frame.render_widget(
             Paragraph::new("Loading run…")
-                .block(Block::default().borders(Borders::ALL).title(" piw ")),
+                .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" piw ")
+                        .style(Style::default().bg(palette.panel_bg))
+                        .border_style(pane_border(&palette, false)),
+                ),
             main_area,
         );
-        draw_transport(frame, transport, None, app.playing);
+        draw_transport(
+            frame,
+            transport,
+            None,
+            app.playing,
+            &palette,
+            app.theme_diagnostic.as_deref(),
+        );
+        if let Some(picker) = &app.theme_picker {
+            theme_picker::render(frame, area, picker, &palette);
+        }
         return;
     };
 
@@ -675,7 +853,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let (content_width, content_height) = graph::content_size(&rows_runs);
     let mut offset = app.graph_offset;
     if follow {
-        if let Some((row, column)) = graph::find_active(&rows_runs) {
+        if let Some((row, column)) = graph::find_focus(&rows_runs) {
             offset = (
                 column.saturating_sub(inner_width / 2),
                 row.saturating_sub(inner_height / 2),
@@ -691,12 +869,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .iter()
         .skip(offset.1)
         .take(inner_height)
-        .map(|runs| graph::viewport_line(runs, offset.0, inner_width))
+        .map(|runs| graph::viewport_line(runs, offset.0, inner_width, &palette))
         .collect();
     let graph_title = format!(
         " {} {}{} ",
         sanitize_text(&data.state.workflow_name),
-        if at_latest { "(live)" } else { "(replay)" },
+        graph_position_label(at_latest, data.live),
         if disconnected {
             " — DISCONNECTED"
         } else {
@@ -706,21 +884,30 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let graph_block = Block::default()
         .borders(Borders::ALL)
         .title(graph_title)
-        .border_style(pane_border(focus == Focus::Graph));
-    frame.render_widget(Paragraph::new(lines).block(graph_block), graph_rect);
+        .style(Style::default().bg(palette.canvas_bg))
+        .border_style(pane_border(&palette, focus == Focus::Graph));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(palette.text).bg(palette.canvas_bg))
+            .block(graph_block),
+        graph_rect,
+    );
 
     // Inspector pane.
     let inspector_lines = match tab {
-        InspectorTab::Steps => steps_lines(&data, visible_steps, selected_step, bounded_index),
-        InspectorTab::Trace => trace_lines(data.events),
+        InspectorTab::Steps => {
+            steps_lines(&data, visible_steps, selected_step, bounded_index, &palette)
+        }
+        InspectorTab::Trace => trace_lines(data.events, &palette),
         InspectorTab::Conversation => conversation::conversation_lines(
             data.session_entries,
             visible_steps,
             at_latest,
             selected_step,
             inspector_rect.width.saturating_sub(2) as usize,
+            &palette,
         ),
-        InspectorTab::Info => info_lines(&data, &run_id),
+        InspectorTab::Info => info_lines(&data, &run_id, &palette),
     };
     let inspector_height = inspector_rect.height.saturating_sub(2) as usize;
     let max_scroll = inspector_lines.len().saturating_sub(inspector_height);
@@ -758,26 +945,46 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let inspector_block = Block::default()
         .borders(Borders::ALL)
         .title(tabs_title)
-        .border_style(pane_border(focus == Focus::Inspector));
-    frame.render_widget(Paragraph::new(shown).block(inspector_block), inspector_rect);
+        .style(Style::default().bg(palette.panel_bg))
+        .border_style(pane_border(&palette, focus == Focus::Inspector));
+    frame.render_widget(
+        Paragraph::new(shown)
+            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+            .block(inspector_block),
+        inspector_rect,
+    );
 
     draw_transport(
         frame,
         transport,
         Some((&data, bounded_index, at_latest)),
         playing,
+        &palette,
+        app.theme_diagnostic.as_deref(),
     );
-}
-
-fn pane_border(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    if let Some(picker) = &app.theme_picker {
+        theme_picker::render(frame, area, picker, &palette);
     }
 }
 
+fn graph_position_label(at_latest: bool, live: bool) -> &'static str {
+    match (at_latest, live) {
+        (false, _) => "(replay)",
+        (true, true) => "(live)",
+        (true, false) => "(latest)",
+    }
+}
+
+fn pane_border(palette: &Palette, focused: bool) -> Style {
+    Style::default().fg(if focused {
+        palette.border_focused
+    } else {
+        palette.border
+    })
+}
+
 fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: Rect) {
+    let palette = &app.palette;
     let height = area.height.saturating_sub(2) as usize;
     let selected = summaries
         .iter()
@@ -816,16 +1023,25 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
                 Span::raw(marker.to_string()),
                 Span::styled(
                     format!("{} ", status_glyph(summary.status)),
-                    status_style(summary.status),
+                    status_style(summary.status, palette),
                 ),
                 Span::raw(sanitize_text(&name)),
-                Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
-                Span::styled(interrupted.to_string(), Style::default().fg(Color::Yellow)),
+                Span::styled(elapsed, Style::default().fg(palette.muted)),
+                Span::styled(
+                    interrupted.to_string(),
+                    Style::default().fg(palette.timed_out),
+                ),
             ];
             if index == selected {
                 spans = spans
                     .into_iter()
-                    .map(|span| span.add_modifier(Modifier::BOLD))
+                    .map(|span| {
+                        span.patch_style(
+                            Style::default()
+                                .bg(palette.selection_bg)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    })
                     .collect();
             }
             Line::from(spans)
@@ -834,16 +1050,22 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Runs ({}) ", summaries.len()))
-        .border_style(pane_border(app.focus == Focus::Runs));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+        .style(Style::default().bg(palette.panel_bg))
+        .border_style(pane_border(palette, app.focus == Focus::Runs));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+            .block(block),
+        area,
+    );
 }
 
-fn outcome_glyph(outcome: NodeOutcome) -> (&'static str, Style) {
+fn outcome_glyph(outcome: NodeOutcome, palette: &Palette) -> (&'static str, Style) {
     match outcome {
-        NodeOutcome::Ok => ("✓", Style::default().fg(Color::Green)),
-        NodeOutcome::Failed => ("✗", Style::default().fg(Color::Red)),
-        NodeOutcome::TimedOut => ("✗", Style::default().fg(Color::Red)),
-        NodeOutcome::Cancelled => ("~", Style::default().fg(Color::Yellow)),
+        NodeOutcome::Ok => ("✓", Style::default().fg(palette.success)),
+        NodeOutcome::Failed => ("✗", Style::default().fg(palette.error)),
+        NodeOutcome::TimedOut => ("×", Style::default().fg(palette.timed_out)),
+        NodeOutcome::Cancelled => ("~", Style::default().fg(palette.cancelled)),
     }
 }
 
@@ -886,12 +1108,13 @@ fn steps_lines(
     visible_steps: &[StepRecord],
     selected_step: Option<&StepRecord>,
     bounded_index: i64,
+    palette: &Palette,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     // Only the steps visible at the replay position: while scrubbing, the
     // pane must not reveal outcomes the graph does not show yet.
     for (index, step) in visible_steps.iter().enumerate() {
-        let (glyph, style) = outcome_glyph(step.outcome);
+        let (glyph, style) = outcome_glyph(step.outcome, palette);
         let selected = bounded_index >= 0 && index == bounded_index as usize;
         let marker = if selected { "▶" } else { " " };
         let mut line = vec![
@@ -907,7 +1130,7 @@ fn steps_lines(
         if step.conversation.is_some() {
             line.push(Span::styled(
                 " ◆".to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(palette.replay_focus),
             ));
         }
         if selected {
@@ -925,22 +1148,22 @@ fn steps_lines(
                 "── step {} ({}) ──",
                 step.node_id, step.attempt_id
             )),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.muted),
         )));
         if !step.prompt.is_null() {
             lines.push(Line::from(vec![
-                Span::styled("prompt: ", Style::default().fg(Color::Cyan)),
+                Span::styled("prompt: ", Style::default().fg(palette.accent)),
                 Span::raw(preview_value(&step.prompt, data.bundle_dir)),
             ]));
         }
         lines.push(Line::from(vec![
-            Span::styled("output: ", Style::default().fg(Color::Cyan)),
+            Span::styled("output: ", Style::default().fg(palette.accent)),
             Span::raw(preview_value(&step.output, data.bundle_dir)),
         ]));
         if let Some(action) = &step.action {
             let command = action.command.clone().unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::styled("action: ", Style::default().fg(Color::Cyan)),
+                Span::styled("action: ", Style::default().fg(palette.accent)),
                 Span::raw(sanitize_text(&format!(
                     "{} {}",
                     action.action_type, command
@@ -949,7 +1172,7 @@ fn steps_lines(
         }
         if let Some(error) = &step.error {
             lines.push(Line::from(vec![
-                Span::styled("error: ", Style::default().fg(Color::Red)),
+                Span::styled("error: ", Style::default().fg(palette.error)),
                 Span::raw(sanitize_text(error)),
             ]));
         }
@@ -957,7 +1180,7 @@ fn steps_lines(
     lines
 }
 
-fn trace_lines(events: &[Value]) -> Vec<Line<'static>> {
+fn trace_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>> {
     events
         .iter()
         .map(|event| {
@@ -972,13 +1195,13 @@ fn trace_lines(events: &[Value]) -> Vec<Line<'static>> {
                 .map(|node| format!(" {}", sanitize_text(node)))
                 .unwrap_or_default();
             let style = match event_type.as_str() {
-                "node_failed" | "run_failed" => Style::default().fg(Color::Red),
-                "run_completed" => Style::default().fg(Color::Green),
-                "node_started" => Style::default().fg(Color::Cyan),
-                _ => Style::default(),
+                "node_failed" | "run_failed" => Style::default().fg(palette.error),
+                "run_completed" => Style::default().fg(palette.success),
+                "node_started" => Style::default().fg(palette.running),
+                _ => Style::default().fg(palette.text),
             };
             Line::from(vec![
-                Span::styled(format!("{seq:>5} "), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{seq:>5} "), Style::default().fg(palette.muted)),
                 Span::styled(event_type, style),
                 Span::raw(node),
             ])
@@ -986,9 +1209,10 @@ fn trace_lines(events: &[Value]) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
+fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'static>> {
     let state = data.state;
-    let label = |text: &str| Span::styled(format!("{text:<14}"), Style::default().fg(Color::Cyan));
+    let label =
+        |text: &str| Span::styled(format!("{text:<14}"), Style::default().fg(palette.accent));
     // Everything below except the derived counts is bundle-derived text.
     let mut lines = vec![
         Line::from(vec![label("run"), Span::raw(sanitize_text(run_id))]),
@@ -998,7 +1222,10 @@ fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             label("status"),
-            Span::styled(state.status.label().to_string(), status_style(state.status)),
+            Span::styled(
+                state.status.label().to_string(),
+                status_style(state.status, palette),
+            ),
         ]),
         Line::from(vec![
             label("started"),
@@ -1026,7 +1253,7 @@ fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
     if let Some(error) = &state.error {
         lines.push(Line::from(vec![
             label("error"),
-            Span::styled(sanitize_text(error), Style::default().fg(Color::Red)),
+            Span::styled(sanitize_text(error), Style::default().fg(palette.error)),
         ]));
     }
     lines.push(Line::from(vec![
@@ -1048,7 +1275,7 @@ fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
     if data.possibly_interrupted {
         lines.push(Line::from(Span::styled(
             "run may have been interrupted (no writes for 60s)",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.timed_out),
         )));
     }
     if let Some(output) = &state.final_output {
@@ -1066,13 +1293,20 @@ fn draw_transport(
     area: Rect,
     data: Option<(&RunData, i64, bool)>,
     playing: bool,
+    palette: &Palette,
+    diagnostic: Option<&str>,
 ) {
     let mut spans: Vec<Span> = Vec::new();
     if let Some((data, bounded_index, at_latest)) = data {
         let state = data.state;
+        let status_label = if state.paused == Some(true) {
+            "paused"
+        } else {
+            state.status.label()
+        };
         spans.push(Span::styled(
-            format!(" {} {} ", status_glyph(state.status), state.status.label()),
-            status_style(state.status).add_modifier(Modifier::BOLD),
+            format!(" {} {} ", status_glyph(state.status), status_label),
+            status_style(state.status, palette).add_modifier(Modifier::BOLD),
         ));
         let elapsed = {
             let end = state
@@ -1083,7 +1317,10 @@ fn draw_transport(
             let start = parse_timestamp_ms(&state.started_at).unwrap_or(end);
             format_duration((end - start).max(0))
         };
-        spans.push(Span::raw(format!("{elapsed}  ")));
+        spans.push(Span::styled(
+            format!("{elapsed}  "),
+            Style::default().fg(palette.subtext),
+        ));
         let steps = state.steps.len() as i64;
         let position = if at_latest {
             if data.live {
@@ -1098,23 +1335,57 @@ fn draw_transport(
             position,
             if at_latest && data.live {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.running)
+                    .add_modifier(Modifier::BOLD)
+            } else if !at_latest {
+                Style::default()
+                    .fg(palette.replay_focus)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD)
             },
         ));
         if playing {
             spans.push(Span::styled(
                 " ▶".to_string(),
-                Style::default().fg(Color::Green),
+                Style::default().fg(palette.success),
             ));
         }
         spans.push(Span::raw("  "));
     }
+    if let Some(diagnostic) = diagnostic {
+        spans.push(Span::styled(
+            format!("{}  ", sanitize_text(diagnostic)),
+            Style::default().fg(palette.warning),
+        ));
+    }
     spans.push(Span::styled(
-        "[/]: scrub  space: play  g/G: start/live  z: zoom  f: follow  t: tab  Tab: focus  q: quit",
-        Style::default().fg(Color::DarkGray),
+        "[/]: scrub  space: play  g/G: start/live  z: compact/boxed  ,: theme  f: follow  t: tab  Tab: focus  q: quit",
+        Style::default().fg(palette.muted),
     ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().fg(palette.text).bg(palette.app_bg)),
+        area,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{graph_position_label, GraphNodeStyle, DEFAULT_NODE_STYLE};
+
+    #[test]
+    fn bordered_nodes_are_the_default() {
+        assert_eq!(DEFAULT_NODE_STYLE, GraphNodeStyle::Box);
+    }
+
+    #[test]
+    fn graph_title_separates_replay_position_from_run_liveness() {
+        assert_eq!(graph_position_label(false, true), "(replay)");
+        assert_eq!(graph_position_label(false, false), "(replay)");
+        assert_eq!(graph_position_label(true, true), "(live)");
+        assert_eq!(graph_position_label(true, false), "(latest)");
+    }
 }
