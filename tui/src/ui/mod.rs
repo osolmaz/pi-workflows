@@ -554,21 +554,26 @@ impl App {
             .position(|summary| Some(&summary.run_id) == self.selected_run.as_ref())
             .unwrap_or(0) as i64;
         let next = (current + delta).clamp(0, summaries.len() as i64 - 1) as usize;
-        if summaries[next].run_id != self.selected_run.clone().unwrap_or_default() {
-            self.selected_run = Some(summaries[next].run_id.clone());
-            self.replay = None;
-            self.playing = false;
-            self.inspector_scroll = 0;
-            self.inspector_scrolls = [0; 4];
-            self.inspector_expanded = false;
-            self.trace_selected = 0;
-            self.trace_payload_expanded = false;
-            self.conversation_follow = true;
-            self.conversation_selected = 0;
-            self.conversation_payload_expanded = false;
-            self.graph_offset = (0, 0);
-            self.follow = true;
+        self.select_run_id(summaries[next].run_id.clone());
+    }
+
+    fn select_run_id(&mut self, run_id: String) {
+        if self.selected_run.as_deref() == Some(&run_id) {
+            return;
         }
+        self.selected_run = Some(run_id);
+        self.replay = None;
+        self.playing = false;
+        self.inspector_scroll = 0;
+        self.inspector_scrolls = [0; 4];
+        self.inspector_expanded = false;
+        self.trace_selected = 0;
+        self.trace_payload_expanded = false;
+        self.conversation_follow = true;
+        self.conversation_selected = 0;
+        self.conversation_payload_expanded = false;
+        self.graph_offset = (0, 0);
+        self.follow = true;
     }
 
     fn open_theme_picker(&mut self) {
@@ -854,14 +859,7 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
                 let row = mouse.row.saturating_sub(app.runs_rect.y + 1) as usize;
                 let index = app.runs_scroll + row;
                 if index < summaries.len() {
-                    let target = summaries[index].run_id.clone();
-                    if Some(&target) != app.selected_run.as_ref() {
-                        app.selected_run = Some(target);
-                        app.replay = None;
-                        app.playing = false;
-                        app.graph_offset = (0, 0);
-                        app.follow = true;
-                    }
+                    app.select_run_id(summaries[index].run_id.clone());
                 }
             } else if contains(app.inspector_rect, mouse.column, mouse.row) {
                 app.focus = Focus::Inspector;
