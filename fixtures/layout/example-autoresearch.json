@@ -192,14 +192,14 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "   · ▶ setup [agent]",
+        "   · setup [agent] ▶",
         "           │",
         "           │ ┌──────────┐ continue",
         "           ▼ ▼          │",
         " · experiment [agent]   │",
         "           │            │",
         "           ▼            │",
-        "  · ◇3 assess [agent]   │",
+        "  · assess [agent] ◇3   │",
         "         │ │ └──────────┘",
         "         │ │",
         " plateau │ │ dead_end",
@@ -208,7 +208,7 @@
         "  · conclude [agent]",
         "           │",
         "           ▼",
-        "· ■ finalize [compute]"
+        "· finalize [compute] ■"
       ]
     },
     {
@@ -216,7 +216,7 @@
       "nodeStyle": "box",
       "lines": [
         "   ┌───────────────────┐",
-        "   │ · ▶ setup [agent] │",
+        "   │ · setup [agent] ▶ │",
         "   └───────────────────┘",
         "             │",
         "             │ ┌────────────┐ continue",
@@ -227,7 +227,7 @@
         "             │              │",
         "             ▼              │",
         "  ┌─────────────────────┐   │",
-        "  │ · ◇3 assess [agent] │   │",
+        "  │ · assess [agent] ◇3 │   │",
         "  └─────────────────────┘   │",
         "           │ │ └────────────┘",
         "           │ │",
@@ -240,7 +240,7 @@
         "             │",
         "             ▼",
         "┌────────────────────────┐",
-        "│ · ■ finalize [compute] │",
+        "│ · finalize [compute] ■ │",
         "└────────────────────────┘"
       ]
     }
