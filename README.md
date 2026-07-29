@@ -113,8 +113,9 @@ status as of that step, with the selected step's full output shown below;
 scrubbing to the end snaps back to following the run live.
 
 The Rust `piw` viewer under `tui/` adds a Catppuccin interface, selectable
-themes, a run browser, detailed trace and conversation inspection, a replay
-timeline, and reconnecting remote viewing. See [the piw guide](docs/tui-viewer.md).
+themes, centered active-node following, draggable browser and inspector sizes,
+detailed trace and conversation inspection, a replay timeline, and reconnecting
+remote viewing. See [the piw guide](docs/tui-viewer.md).
 
 ```
               │ ┌──────────────────┐

@@ -33,6 +33,11 @@ use std::time::{Duration, Instant};
 const LOCAL_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 const PLAY_STEP_INTERVAL: Duration = Duration::from_millis(700);
 const DEFAULT_NODE_STYLE: GraphNodeStyle = GraphNodeStyle::Box;
+const DEFAULT_SIDEBAR_WIDTH: u16 = 34;
+const MIN_SIDEBAR_WIDTH: u16 = 12;
+const MIN_MAIN_WIDTH: u16 = 24;
+const MIN_GRAPH_HEIGHT: u16 = 5;
+const MIN_INSPECTOR_HEIGHT: u16 = 5;
 
 pub struct RunSummary {
     pub run_id: String,
@@ -241,12 +246,26 @@ impl TraceScope {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DragTarget {
+    Graph {
+        start_x: u16,
+        start_y: u16,
+        origin_x: i64,
+        origin_y: i64,
+    },
+    Sidebar,
+    Inspector,
+}
+
 struct App {
     provider: Provider,
     /// Whether the sidebar is shown (single-bundle mode hides it).
     show_sidebar: bool,
     sidebar_collapsed: bool,
     sidebar_explicit: bool,
+    sidebar_width: u16,
+    inspector_height: Option<u16>,
     selected_run: Option<String>,
     runs_scroll: usize,
     focus: Focus,
@@ -258,9 +277,11 @@ struct App {
     playback_speed_index: usize,
     node_style: GraphNodeStyle,
     follow: bool,
-    graph_offset: (usize, usize),
+    /// Canvas coordinate shown at the viewport's top-left. Negative origins
+    /// provide the padding needed to truly center edge nodes and small graphs.
+    graph_offset: (i64, i64),
     graph_nodes: Vec<NodeBounds>,
-    dragging: Option<(u16, u16, usize, usize)>,
+    dragging: Option<DragTarget>,
     tab: InspectorTab,
     inspector_scroll: usize,
     inspector_scrolls: [usize; 4],
@@ -278,6 +299,7 @@ struct App {
     theme_diagnostic: Option<String>,
     /// Pane rectangles from the last draw, for mouse routing.
     frame_rect: Rect,
+    main_rect: Rect,
     runs_rect: Rect,
     timeline: timeline::TimelineGeometry,
     graph_rect: Rect,
@@ -333,11 +355,18 @@ fn event_loop(
     show_sidebar: bool,
     resolved_theme: theme::ResolvedTheme,
 ) -> Result<()> {
+    let sidebar_width = resolved_theme
+        .ui
+        .sidebar_width
+        .unwrap_or(DEFAULT_SIDEBAR_WIDTH);
+    let inspector_height = resolved_theme.ui.inspector_height;
     let mut app = App {
         provider,
         show_sidebar,
         sidebar_collapsed: false,
         sidebar_explicit: false,
+        sidebar_width,
+        inspector_height,
         selected_run: None,
         runs_scroll: 0,
         focus: if show_sidebar {
@@ -370,6 +399,7 @@ fn event_loop(
         theme_picker: None,
         theme_diagnostic: resolved_theme.diagnostics.into_iter().next(),
         frame_rect: Rect::default(),
+        main_rect: Rect::default(),
         runs_rect: Rect::default(),
         timeline: timeline::TimelineGeometry::default(),
         graph_rect: Rect::default(),
@@ -431,10 +461,16 @@ impl App {
             }
             _ => {
                 // Past the final recorded step: rejoin the live view and stop.
-                self.replay = None;
-                self.playing = false;
+                self.rejoin_live();
             }
         }
+    }
+
+    fn rejoin_live(&mut self) {
+        self.replay = None;
+        self.playing = false;
+        self.follow = true;
+        self.conversation_follow = true;
     }
 
     fn slower_playback(&mut self) {
@@ -461,10 +497,7 @@ impl App {
                 self.last_play_step = Instant::now();
             }
             timeline::TimelineAction::Next => self.step_forward(),
-            timeline::TimelineAction::Live => {
-                self.replay = None;
-                self.playing = false;
-            }
+            timeline::TimelineAction::Live => self.rejoin_live(),
             timeline::TimelineAction::Slower => self.slower_playback(),
             timeline::TimelineAction::Faster => self.faster_playback(),
         }
@@ -483,9 +516,7 @@ impl App {
             // The final recorded step is a valid detached position (on a
             // live run it differs from the live view); rejoin only when
             // stepping past it.
-            Some(position) if position + 1 >= steps => {
-                self.replay = None;
-            }
+            Some(position) if position + 1 >= steps => self.rejoin_live(),
             Some(position) => self.replay = Some(position + 1),
             None => {}
         }
@@ -577,6 +608,26 @@ impl App {
         self.conversation_payload_expanded = false;
         self.graph_offset = (0, 0);
         self.follow = true;
+    }
+
+    fn resize_sidebar(&mut self, divider_column: u16) {
+        self.sidebar_width = sidebar_width_for_drag(self.frame_rect, divider_column);
+        self.sidebar_collapsed = false;
+        self.sidebar_explicit = true;
+    }
+
+    fn resize_inspector(&mut self, divider_row: u16) {
+        self.inspector_height = Some(inspector_height_for_drag(self.main_rect, divider_row));
+    }
+
+    fn persist_layout(&mut self) {
+        if let Err(error) = theme::save_layout(
+            &self.theme_config_path,
+            self.sidebar_width,
+            self.inspector_height,
+        ) {
+            self.theme_diagnostic = Some(sanitize_text(&format!("layout not saved: {error}")));
+        }
     }
 
     fn open_theme_picker(&mut self) {
@@ -689,11 +740,7 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
             app.replay = Some(-1);
             app.playing = false;
         }
-        KeyCode::End | KeyCode::Char('G') | KeyCode::Char('L') => {
-            app.replay = None;
-            app.playing = false;
-            app.conversation_follow = true;
-        }
+        KeyCode::End | KeyCode::Char('G') | KeyCode::Char('L') => app.rejoin_live(),
         KeyCode::Char('z') | KeyCode::Char('+') | KeyCode::Char('-') => {
             app.node_style = match app.node_style {
                 GraphNodeStyle::Line => GraphNodeStyle::Box,
@@ -716,7 +763,7 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                 let (x, y) = app.graph_offset;
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
-                        app.graph_offset = (x, y.saturating_sub(2));
+                        app.graph_offset = (x, y - 2);
                         app.follow = false;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -724,7 +771,7 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                         app.follow = false;
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
-                        app.graph_offset = (x.saturating_sub(4), y);
+                        app.graph_offset = (x - 4, y);
                         app.follow = false;
                     }
                     KeyCode::Right | KeyCode::Char('l') => {
@@ -798,21 +845,89 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
+fn sidebar_width_for_drag(frame: Rect, divider_column: u16) -> u16 {
+    let requested = divider_column.saturating_sub(frame.x).saturating_add(1);
+    let max_width = frame.width.saturating_sub(MIN_MAIN_WIDTH);
+    requested.clamp(MIN_SIDEBAR_WIDTH, max_width.max(MIN_SIDEBAR_WIDTH))
+}
+
+fn inspector_height_for_drag(main: Rect, divider_row: u16) -> u16 {
+    let requested = main.bottom().saturating_sub(divider_row);
+    let max_height = main.height.saturating_sub(MIN_GRAPH_HEIGHT);
+    requested.clamp(MIN_INSPECTOR_HEIGHT.min(max_height), max_height)
+}
+
+fn resolved_inspector_height(total: u16, requested: Option<u16>) -> u16 {
+    let available = total.saturating_sub(MIN_GRAPH_HEIGHT);
+    if available == 0 {
+        return 0;
+    }
+    let default = total.saturating_mul(40) / 100;
+    requested
+        .unwrap_or(default)
+        .clamp(MIN_INSPECTOR_HEIGHT.min(available), available)
+}
+
+fn clamp_camera_axis(origin: i64, content: usize, viewport: usize) -> i64 {
+    if viewport == 0 {
+        return 0;
+    }
+    let half = viewport as i64 / 2;
+    origin.clamp(-half, content as i64 - half)
+}
+
+fn centered_camera(
+    node: Option<&NodeBounds>,
+    content: (usize, usize),
+    viewport: (usize, usize),
+) -> (i64, i64) {
+    let (center_x, center_y) = node
+        .map_or((content.0 as i64 / 2, content.1 as i64 / 2), |bounds| {
+            (bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+        });
+    (
+        center_x - viewport.0 as i64 / 2,
+        center_y - viewport.1 as i64 / 2,
+    )
+}
+
+fn on_sidebar_divider(app: &App, column: u16, row: u16) -> bool {
+    app.show_sidebar
+        && app.runs_rect.width > 0
+        && column == app.runs_rect.x + app.runs_rect.width - 1
+        && row >= app.runs_rect.y
+        && row < app.runs_rect.y + app.runs_rect.height
+}
+
+fn on_inspector_divider(app: &App, column: u16, row: u16) -> bool {
+    let on_boundary = row == app.inspector_rect.y
+        || (app.graph_rect.height > 0
+            && row == app.graph_rect.y + app.graph_rect.height.saturating_sub(1));
+    on_boundary && column >= app.main_rect.x && column < app.main_rect.x + app.main_rect.width
+}
+
 fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
     if app.theme_picker.is_some() {
         handle_theme_picker_mouse(app, mouse);
         return;
     }
-    if matches!(
-        mouse.kind,
-        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
-    ) && contains(app.timeline.track, mouse.column, mouse.row)
+    if app.dragging.is_none()
+        && matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+        )
+        && contains(app.timeline.track, mouse.column, mouse.row)
     {
         let steps = app.step_count() as usize;
         let column = mouse.column.saturating_sub(app.timeline.track.x) as usize;
-        app.replay =
+        let position =
             timeline::position_from_column(steps, column, app.timeline.track.width as usize);
-        app.playing = false;
+        if position.is_none() {
+            app.rejoin_live();
+        } else {
+            app.replay = position;
+            app.playing = false;
+        }
         return;
     }
     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -836,7 +951,7 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
             };
             if contains(app.graph_rect, mouse.column, mouse.row) {
                 let (x, y) = app.graph_offset;
-                app.graph_offset = (x, (y as i64 + delta).max(0) as usize);
+                app.graph_offset = (x, y + delta);
                 app.follow = false;
             } else if contains(app.runs_rect, mouse.column, mouse.row) {
                 app.select_run(summaries, delta.signum());
@@ -848,14 +963,20 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if contains(app.graph_rect, mouse.column, mouse.row) {
+            if on_sidebar_divider(app, mouse.column, mouse.row) {
+                app.dragging = Some(DragTarget::Sidebar);
+                app.resize_sidebar(mouse.column);
+            } else if on_inspector_divider(app, mouse.column, mouse.row) {
+                app.dragging = Some(DragTarget::Inspector);
+                app.resize_inspector(mouse.row);
+            } else if contains(app.graph_rect, mouse.column, mouse.row) {
                 app.focus = Focus::Graph;
-                app.dragging = Some((
-                    mouse.column,
-                    mouse.row,
-                    app.graph_offset.0,
-                    app.graph_offset.1,
-                ));
+                app.dragging = Some(DragTarget::Graph {
+                    start_x: mouse.column,
+                    start_y: mouse.row,
+                    origin_x: app.graph_offset.0,
+                    origin_y: app.graph_offset.1,
+                });
             } else if contains(app.runs_rect, mouse.column, mouse.row) {
                 app.focus = Focus::Runs;
                 // Row 0 of the pane is the border/title.
@@ -868,37 +989,44 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
                 app.focus = Focus::Inspector;
             }
         }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some((start_x, start_y, offset_x, offset_y)) = app.dragging {
+        MouseEventKind::Drag(MouseButton::Left) => match app.dragging {
+            Some(DragTarget::Graph {
+                start_x,
+                start_y,
+                origin_x,
+                origin_y,
+            }) => {
                 let dx = start_x as i64 - mouse.column as i64;
                 let dy = start_y as i64 - mouse.row as i64;
-                app.graph_offset = (
-                    (offset_x as i64 + dx).max(0) as usize,
-                    (offset_y as i64 + dy).max(0) as usize,
-                );
+                app.graph_offset = (origin_x + dx, origin_y + dy);
                 app.follow = false;
             }
-        }
-        MouseEventKind::Up(MouseButton::Left) => {
-            if let Some((start_x, start_y, _, _)) = app.dragging.take() {
+            Some(DragTarget::Sidebar) => app.resize_sidebar(mouse.column),
+            Some(DragTarget::Inspector) => app.resize_inspector(mouse.row),
+            None => {}
+        },
+        MouseEventKind::Up(MouseButton::Left) => match app.dragging.take() {
+            Some(DragTarget::Graph {
+                start_x, start_y, ..
+            }) => {
                 let moved = start_x.abs_diff(mouse.column) + start_y.abs_diff(mouse.row);
                 if moved <= 1 && contains(app.graph_rect, mouse.column, mouse.row) {
-                    let canvas_x = mouse
-                        .column
-                        .saturating_sub(app.graph_rect.x.saturating_add(1))
-                        as usize
-                        + app.graph_offset.0;
-                    let canvas_y = mouse.row.saturating_sub(app.graph_rect.y.saturating_add(1))
-                        as usize
-                        + app.graph_offset.1;
+                    let canvas_x = i64::from(
+                        mouse
+                            .column
+                            .saturating_sub(app.graph_rect.x.saturating_add(1)),
+                    ) + app.graph_offset.0;
+                    let canvas_y =
+                        i64::from(mouse.row.saturating_sub(app.graph_rect.y.saturating_add(1)))
+                            + app.graph_offset.1;
                     let node_id = app
                         .graph_nodes
                         .iter()
                         .find(|node| {
-                            (canvas_x as i64) >= node.x
-                                && (canvas_x as i64) < node.x + node.width
-                                && (canvas_y as i64) >= node.y
-                                && (canvas_y as i64) < node.y + node.height
+                            canvas_x >= node.x
+                                && canvas_x < node.x + node.width
+                                && canvas_y >= node.y
+                                && canvas_y < node.y + node.height
                         })
                         .map(|node| node.node_id.clone());
                     if let Some(node_id) = node_id {
@@ -906,7 +1034,9 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
                     }
                 }
             }
-        }
+            Some(DragTarget::Sidebar | DragTarget::Inspector) => app.persist_layout(),
+            None => {}
+        },
         _ => {}
     }
 }
@@ -998,20 +1128,34 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
 
     let sidebar_collapsed = app.sidebar_collapsed || (!app.sidebar_explicit && area.width < 100);
     let (runs_area, main_area) = if app.show_sidebar {
-        let sidebar_width = if sidebar_collapsed { 8 } else { 34 };
+        let max_sidebar = body.width.saturating_sub(MIN_MAIN_WIDTH);
+        let sidebar_width = if sidebar_collapsed {
+            8
+        } else {
+            app.sidebar_width
+                .clamp(MIN_SIDEBAR_WIDTH, max_sidebar.max(MIN_SIDEBAR_WIDTH))
+        };
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(sidebar_width), Constraint::Min(20)])
+            .constraints([
+                Constraint::Length(sidebar_width),
+                Constraint::Min(MIN_MAIN_WIDTH),
+            ])
             .split(body);
         (Some(columns[0]), columns[1])
     } else {
         (None, body)
     };
 
+    let inspector_height = resolved_inspector_height(main_area.height, app.inspector_height);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([
+            Constraint::Min(MIN_GRAPH_HEIGHT),
+            Constraint::Length(inspector_height),
+        ])
         .split(main_area);
+    app.main_rect = main_area;
     app.graph_rect = rows[0];
     app.inspector_rect = rows[1];
     app.runs_rect = runs_area.unwrap_or_default();
@@ -1136,6 +1280,15 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     } else {
         bounded_index
     };
+    let followed_node_id = if at_latest {
+        data.state
+            .current_node
+            .as_deref()
+            .or(data.state.waiting_on.as_deref())
+            .or_else(|| selected_step.map(|step| step.node_id.as_str()))
+    } else {
+        selected_step.map(|step| step.node_id.as_str())
+    };
     let rendered_graph = render_graph(&view, render_index, at_latest, now_ms(), node_style);
     let rows_runs = rendered_graph
         .as_ref()
@@ -1146,28 +1299,33 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .unwrap_or_default();
     let inner_width = graph_rect.width.saturating_sub(2) as usize;
     let inner_height = graph_rect.height.saturating_sub(2) as usize;
-    let (content_width, content_height) = graph::content_size(&rows_runs);
+    let content_size = graph::content_size(&rows_runs);
     let mut offset = app.graph_offset;
     if follow {
-        if let Some((row, column)) = graph::find_focus(&rows_runs) {
-            offset = (
-                column.saturating_sub(inner_width / 2),
-                row.saturating_sub(inner_height / 2),
-            );
-        } else {
-            offset = (0, 0);
-        }
+        let focused = followed_node_id
+            .and_then(|node_id| app.graph_nodes.iter().find(|node| node.node_id == node_id));
+        offset = centered_camera(focused, content_size, (inner_width, inner_height));
     }
-    offset.0 = offset.0.min(content_width.saturating_sub(inner_width));
-    offset.1 = offset.1.min(content_height.saturating_sub(inner_height));
+    offset.0 = clamp_camera_axis(offset.0, content_size.0, inner_width);
+    offset.1 = clamp_camera_axis(offset.1, content_size.1, inner_height);
     app.graph_offset = offset;
-    let lines: Vec<Line> = rows_runs
-        .iter()
-        .skip(offset.1)
-        .take(inner_height)
-        .map(|runs| graph::viewport_line(runs, offset.0, inner_width, &palette))
+    let lines: Vec<Line> = (0..inner_height)
+        .map(|viewport_y| {
+            let canvas_y = offset.1 + viewport_y as i64;
+            if canvas_y < 0 {
+                Line::from("")
+            } else {
+                rows_runs
+                    .get(canvas_y as usize)
+                    .map(|runs| graph::viewport_line(runs, offset.0, inner_width, &palette))
+                    .unwrap_or_else(|| Line::from(""))
+            }
+        })
         .collect();
     let mut graph_flags = Vec::new();
+    if follow {
+        graph_flags.push("FOLLOW");
+    }
     if data.state.paused == Some(true) {
         graph_flags.push("PAUSED");
     }
@@ -1253,7 +1411,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .take(inspector_height)
         .collect();
     let tabs_title = format!(
-        " {} (t to switch) ",
+        " ↕ {} (t to switch) ",
         [
             InspectorTab::Steps,
             InspectorTab::Trace,
@@ -1412,7 +1570,7 @@ fn draw_runs(
         .title(if collapsed {
             " R ".to_string()
         } else {
-            format!(" Runs ({}) ", summaries.len())
+            format!(" Runs ({}) ↔ ", summaries.len())
         })
         .style(Style::default().bg(palette.panel_bg))
         .border_style(pane_border(palette, app.focus == Focus::Runs));
@@ -1993,8 +2151,10 @@ fn draw_transport(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_artifact_paths, graph_position_label, resolve_remote_artifacts,
-        trace_events_for_scope, GraphNodeStyle, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        centered_camera, clamp_camera_axis, collect_artifact_paths, graph_position_label,
+        inspector_height_for_drag, resolve_remote_artifacts, resolved_inspector_height,
+        sidebar_width_for_drag, trace_events_for_scope, GraphNodeStyle, NodeBounds, Rect,
+        StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2010,6 +2170,31 @@ mod tests {
         assert_eq!(graph_position_label(false, false), "(replay)");
         assert_eq!(graph_position_label(true, true), "(live)");
         assert_eq!(graph_position_label(true, false), "(latest)");
+    }
+
+    #[test]
+    fn follow_camera_centers_the_node_even_at_canvas_edges() {
+        let node = NodeBounds {
+            node_id: "first".into(),
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 3,
+        };
+        assert_eq!(centered_camera(Some(&node), (100, 30), (80, 20)), (-30, -9));
+        assert_eq!(clamp_camera_axis(-30, 100, 80), -30);
+        assert_eq!(clamp_camera_axis(-9, 30, 20), -9);
+    }
+
+    #[test]
+    fn manual_panel_sizes_stay_responsive() {
+        assert_eq!(resolved_inspector_height(40, None), 16);
+        assert_eq!(resolved_inspector_height(40, Some(100)), 35);
+        assert_eq!(resolved_inspector_height(8, Some(20)), 3);
+        assert_eq!(sidebar_width_for_drag(Rect::new(5, 0, 120, 30), 44), 40);
+        assert_eq!(sidebar_width_for_drag(Rect::new(5, 0, 40, 30), 100), 16);
+        assert_eq!(inspector_height_for_drag(Rect::new(20, 2, 100, 26), 18), 10);
+        assert_eq!(inspector_height_for_drag(Rect::new(20, 2, 100, 8), 2), 3);
     }
 
     #[test]

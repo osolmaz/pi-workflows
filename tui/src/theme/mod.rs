@@ -583,6 +583,14 @@ impl Palette {
 #[serde(default)]
 pub struct ViewerConfig {
     pub theme: ThemeConfig,
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub sidebar_width: Option<u16>,
+    pub inspector_height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -631,6 +639,7 @@ pub struct CustomTheme {
 pub struct ResolvedTheme {
     pub palette: Palette,
     pub config: ThemeConfig,
+    pub ui: UiConfig,
     pub diagnostics: Vec<String>,
     pub config_path: PathBuf,
 }
@@ -665,20 +674,21 @@ pub fn palette_with_config(name: &str, config: &ThemeConfig) -> (Palette, Vec<St
 pub fn resolve(cli_theme: Option<&str>) -> ResolvedTheme {
     let path = config_path();
     let mut diagnostics = Vec::new();
-    let config = match std::fs::read_to_string(&path) {
+    let viewer_config = match std::fs::read_to_string(&path) {
         Ok(content) => match toml::from_str::<ViewerConfig>(&content) {
-            Ok(config) => config.theme,
+            Ok(config) => config,
             Err(error) => {
                 diagnostics.push(format!("failed to parse {}: {error}", path.display()));
-                ThemeConfig::default()
+                ViewerConfig::default()
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ThemeConfig::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ViewerConfig::default(),
         Err(error) => {
             diagnostics.push(format!("failed to read {}: {error}", path.display()));
-            ThemeConfig::default()
+            ViewerConfig::default()
         }
     };
+    let config = viewer_config.theme;
     let explicit = cli_theme
         .map(str::to_owned)
         .or_else(|| std::env::var("PIW_THEME").ok());
@@ -710,6 +720,7 @@ pub fn resolve(cli_theme: Option<&str>) -> ResolvedTheme {
     ResolvedTheme {
         palette,
         config,
+        ui: viewer_config.ui,
         diagnostics,
         config_path: path,
     }
@@ -730,6 +741,34 @@ pub fn save_theme(path: &Path, name: &str) -> Result<()> {
     };
     document["theme"]["name"] = value(name);
     document["theme"]["auto_switch"] = value(false);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp, document.to_string())
+        .with_context(|| format!("writing {}", temp.display()))?;
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+pub fn save_layout(path: &Path, sidebar_width: u16, inspector_height: Option<u16>) -> Result<()> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut document = if content.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        content
+            .parse::<DocumentMut>()
+            .with_context(|| format!("parsing {}", path.display()))?
+    };
+    document["ui"]["sidebar_width"] = value(i64::from(sidebar_width));
+    if let Some(height) = inspector_height {
+        document["ui"]["inspector_height"] = value(i64::from(height));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -878,6 +917,22 @@ mod tests {
         assert!(saved.contains("answer = 42"));
         assert!(saved.contains("name = \"dracula\""));
         assert!(saved.contains("auto_switch = false"));
+    }
+
+    #[test]
+    fn layout_save_preserves_theme_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "answer = 42\n\n[theme]\nname = \"nord\"\n").unwrap();
+        save_layout(&path, 40, Some(18)).unwrap();
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(saved.contains("answer = 42"));
+        assert!(saved.contains("name = \"nord\""));
+        assert!(saved.contains("sidebar_width = 40"));
+        assert!(saved.contains("inspector_height = 18"));
+        let loaded: ViewerConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(loaded.ui.sidebar_width, Some(40));
+        assert_eq!(loaded.ui.inspector_height, Some(18));
     }
 
     #[test]

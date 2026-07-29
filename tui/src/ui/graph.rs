@@ -38,13 +38,23 @@ pub fn style_for(style: CanvasStyle, palette: &Palette) -> Style {
 /// (measured in characters) and convert to a ratatui line.
 pub fn viewport_line(
     runs: &[StyledRun],
-    offset_x: usize,
+    origin_x: i64,
     width: usize,
     palette: &Palette,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let leading = if origin_x < 0 {
+        (-origin_x).min(width as i64) as usize
+    } else {
+        0
+    };
+    if leading > 0 {
+        spans.push(Span::raw(" ".repeat(leading)));
+    }
+    let offset_x = origin_x.max(0) as usize;
+    let available = width.saturating_sub(leading);
     let mut position = 0usize;
-    let end = offset_x + width;
+    let end = offset_x.saturating_add(available);
     for (text, style) in runs {
         let run_len = text.chars().count();
         let run_start = position;
@@ -76,21 +86,6 @@ pub fn content_size(rows: &[Vec<StyledRun>]) -> (usize, usize) {
     (width, rows.len())
 }
 
-/// Find the row/column of the running or replay-focused node.
-pub fn find_focus(rows: &[Vec<StyledRun>]) -> Option<(usize, usize)> {
-    for (y, runs) in rows.iter().enumerate() {
-        let mut x = 0usize;
-        for (text, style) in runs {
-            let len = text.chars().count();
-            if matches!(style, CanvasStyle::Active | CanvasStyle::Replay) {
-                return Some((y, x));
-            }
-            x += len;
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +102,12 @@ mod tests {
             style_for(CanvasStyle::NodeFocusText, &palette).bg,
             Some(palette.node_focus_bg)
         );
+    }
+
+    #[test]
+    fn viewport_supports_negative_origins_for_real_centering() {
+        let palette = Palette::catppuccin();
+        let line = viewport_line(&[("abc".to_string(), CanvasStyle::Plain)], -2, 5, &palette);
+        assert_eq!(line.to_string(), "  abc");
     }
 }
