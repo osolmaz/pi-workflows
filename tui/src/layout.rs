@@ -78,7 +78,9 @@ pub fn expand_edges(snapshot: &DefinitionSnapshot) -> Vec<GraphEdge> {
                         edge_id: format!("{from}->{target}#{index}.{branch}"),
                         from: from.clone(),
                         to: target,
-                        label: Some(case_key.clone()),
+                        // Case keys are author-controlled text from the bundle;
+                        // scrub them so drawing a label can't emit escapes.
+                        label: Some(crate::format::sanitize_text(case_key)),
                         is_back_edge: false,
                     });
                 }
@@ -430,5 +432,26 @@ fn order_ranks_by_barycenter(ranks: &mut [Vec<GraphCell>], segments: &mut [Graph
         for rank in (0..ranks.len().saturating_sub(1)).rev() {
             sort_rank(ranks, segments, rank, Direction::Up);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_case_labels_are_scrubbed_of_escapes() {
+        let snapshot: DefinitionSnapshot = serde_json::from_value(serde_json::json!({
+            "schema": "pi-workflows.workflow.v1",
+            "name": "test",
+            "startAt": "a",
+            "nodes": { "a": { "nodeType": "agent" }, "b": { "nodeType": "agent" } },
+            "edges": [
+                { "from": "a", "switch": { "on": "x", "cases": { "\u{1b}]52;c;evil\u{7}ok": "b" } } },
+            ],
+        }))
+        .unwrap();
+        let edges = expand_edges(&snapshot);
+        assert_eq!(edges[0].label.as_deref(), Some("]52;c;evilok"));
     }
 }

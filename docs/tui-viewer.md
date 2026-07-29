@@ -13,7 +13,8 @@ entries.
 - `piw <runId|runDir>` — open one run directly (a bare run id resolves
   inside the default runs directory).
 - `piw serve [--runs-dir <dir>] [--bind 127.0.0.1:9377]` — expose the runs
-  directory over the [live replay protocol](live-replay-protocol.md).
+  directory over the [live replay protocol](live-replay-protocol.md). Only
+  loopback addresses are accepted; tunnel over SSH to view runs remotely.
 - `piw --connect ws://…` — view runs served by another process or machine.
 
 Direct filesystem mode and connected mode share the same semantic-state code;
