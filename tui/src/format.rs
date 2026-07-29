@@ -73,7 +73,9 @@ pub fn sanitize_text(text: &str) -> String {
             result.push(' ');
             pending_space = false;
         }
-        if ('\u{0}'..='\u{1f}').contains(&char) || char == '\u{7f}' {
+        // C0 controls, DEL, and C1 controls (U+0080..U+009F): some terminals
+        // treat 8-bit C1 bytes like 0x9B as CSI, so they must go too.
+        if ('\u{0}'..='\u{1f}').contains(&char) || ('\u{7f}'..='\u{9f}').contains(&char) {
             continue;
         }
         result.push(char);
@@ -109,5 +111,9 @@ mod tests {
         assert_eq!(sanitize_text("a\n\nb\tc"), "a b c");
         assert_eq!(sanitize_text("\u{1b}[31mred\u{1b}[0m"), "red");
         assert_eq!(sanitize_text("bell\u{7}!"), "bell!");
+        // 8-bit C1 controls (e.g. C1 CSI and OSC) must be removed too.
+        assert_eq!(sanitize_text("a\u{9b}2Jb"), "a2Jb");
+        assert_eq!(sanitize_text("a\u{9d}52;xb"), "a52;xb");
+        assert_eq!(sanitize_text("del\u{7f}!"), "del!");
     }
 }
