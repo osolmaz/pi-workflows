@@ -35,6 +35,7 @@ pub struct RunSummary {
     pub run_title: Option<String>,
     pub status: RunStatus,
     pub started_at: String,
+    pub finished_at: Option<String>,
     pub live: bool,
     pub possibly_interrupted: bool,
 }
@@ -47,6 +48,9 @@ pub struct RunData<'a> {
     pub session_entries: &'a [Value],
     pub live: bool,
     pub possibly_interrupted: bool,
+    /// Bundle directory when reading the filesystem directly; lets previews
+    /// inline small artifacts instead of showing placeholders.
+    pub bundle_dir: Option<&'a std::path::Path>,
 }
 
 pub enum Provider {
@@ -89,6 +93,7 @@ impl Provider {
                     run_title: entry.manifest.run_title.clone(),
                     status: entry.manifest.status,
                     started_at: entry.manifest.started_at.clone(),
+                    finished_at: entry.manifest.finished_at.clone(),
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
                 })
@@ -105,6 +110,7 @@ impl Provider {
                         run_title: manifest.run_title,
                         status: manifest.status,
                         started_at: manifest.started_at,
+                        finished_at: manifest.finished_at,
                         live: summary
                             .get("live")
                             .and_then(Value::as_bool)
@@ -130,6 +136,7 @@ impl Provider {
                     session_entries: &entry.session_entries,
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
+                    bundle_dir: Some(&entry.dir),
                 })
             }
             Provider::Remote(remote) => {
@@ -141,6 +148,7 @@ impl Provider {
                     session_entries: &view.session_entries,
                     live: view.live,
                     possibly_interrupted: view.possibly_interrupted,
+                    bundle_dir: None,
                 })
             }
         }
@@ -395,15 +403,15 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
             app.playing = !app.playing;
             app.last_play_step = Instant::now();
         }
-        KeyCode::Home => {
+        KeyCode::Home | KeyCode::Char('g') => {
             app.replay = Some(-1);
             app.playing = false;
         }
-        KeyCode::End => {
+        KeyCode::End | KeyCode::Char('G') | KeyCode::Char('L') => {
             app.replay = None;
             app.playing = false;
         }
-        KeyCode::Char('z') => {
+        KeyCode::Char('z') | KeyCode::Char('+') | KeyCode::Char('-') => {
             app.node_style = match app.node_style {
                 GraphNodeStyle::Line => GraphNodeStyle::Box,
                 GraphNodeStyle::Box => GraphNodeStyle::Line,
@@ -773,6 +781,14 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
             } else {
                 ""
             };
+            let end = summary
+                .finished_at
+                .as_deref()
+                .and_then(parse_timestamp_ms)
+                .unwrap_or_else(now_ms);
+            let elapsed = parse_timestamp_ms(&summary.started_at)
+                .map(|start| format!(" {}", format_duration((end - start).max(0))))
+                .unwrap_or_default();
             let mut spans = vec![
                 Span::raw(marker.to_string()),
                 Span::styled(
@@ -780,6 +796,7 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
                     status_style(summary.status),
                 ),
                 Span::raw(sanitize_text(&name)),
+                Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
                 Span::styled(interrupted.to_string(), Style::default().fg(Color::Yellow)),
             ];
             if index == selected {
@@ -813,10 +830,20 @@ fn step_duration(step: &StepRecord) -> String {
     format_duration(duration)
 }
 
-/// Compact single-line preview of a persisted value, with artifact
-/// references replaced by placeholders.
-fn preview_value(value: &Value) -> String {
-    let decoded = with_artifact_placeholders(value);
+/// Small artifacts are inlined into previews when reading the filesystem
+/// directly; larger ones (and remote mode) show placeholders.
+const PREVIEW_ARTIFACT_MAX_BYTES: u64 = 64 * 1024;
+
+/// Compact single-line preview of a persisted value. With a bundle
+/// directory, artifact references resolve to their contents; otherwise they
+/// render as placeholders.
+fn preview_value(value: &Value, bundle_dir: Option<&std::path::Path>) -> String {
+    let decoded = match bundle_dir {
+        Some(dir) => {
+            crate::bundle::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
+        }
+        None => with_artifact_placeholders(value),
+    };
     let text = match decoded {
         Value::String(text) => text,
         Value::Null => return "—".to_string(),
@@ -875,12 +902,12 @@ fn steps_lines(
         if !step.prompt.is_null() {
             lines.push(Line::from(vec![
                 Span::styled("prompt: ", Style::default().fg(Color::Cyan)),
-                Span::raw(preview_value(&step.prompt)),
+                Span::raw(preview_value(&step.prompt, data.bundle_dir)),
             ]));
         }
         lines.push(Line::from(vec![
             Span::styled("output: ", Style::default().fg(Color::Cyan)),
-            Span::raw(preview_value(&step.output)),
+            Span::raw(preview_value(&step.output, data.bundle_dir)),
         ]));
         if let Some(action) = &step.action {
             let command = action.command.clone().unwrap_or_default();
@@ -995,7 +1022,7 @@ fn info_lines(data: &RunData, run_id: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             label("final output"),
-            Span::raw(preview_value(output)),
+            Span::raw(preview_value(output, data.bundle_dir)),
         ]));
     }
     lines
@@ -1053,7 +1080,7 @@ fn draw_transport(
         spans.push(Span::raw("  "));
     }
     spans.push(Span::styled(
-        "[/]: scrub  space: play  End: live  z: zoom  f: follow  t: tab  Tab: focus  q: quit",
+        "[/]: scrub  space: play  g/G: start/live  z: zoom  f: follow  t: tab  Tab: focus  q: quit",
         Style::default().fg(Color::DarkGray),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
