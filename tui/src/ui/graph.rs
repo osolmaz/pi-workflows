@@ -90,3 +90,22 @@ pub fn find_focus(rows: &[Vec<StyledRun>]) -> Option<(usize, usize)> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_roles_use_a_surface_distinct_from_the_canvas() {
+        let palette = Palette::catppuccin();
+        assert_ne!(palette.node_bg, palette.canvas_bg);
+        assert_eq!(
+            style_for(CanvasStyle::NodeText, &palette).bg,
+            Some(palette.node_bg)
+        );
+        assert_eq!(
+            style_for(CanvasStyle::NodeFocusText, &palette).bg,
+            Some(palette.node_focus_bg)
+        );
+    }
+}

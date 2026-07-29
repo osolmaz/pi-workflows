@@ -1,6 +1,6 @@
-//! WebSocket client for remote mode (`piw --connect ws://…`). A background
-//! task owns the connection and maintains raw run views by applying the
-//! snapshot/patch stream; the UI reads a shared, typed projection.
+//! Reconnecting WebSocket client for remote mode (`piw --connect ws://…`).
+//! The background task treats subscriptions and artifact requests as desired
+//! state, so reconnects cannot replay stale commands.
 
 use crate::bundle::types::{DefinitionSnapshot, Manifest, RunState};
 use crate::protocol::{apply_patch, ClientMessage, ServerMessage, PROTOCOL_ID};
@@ -9,10 +9,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-/// A run view decoded for rendering, refreshed whenever the revision moves.
 pub struct RemoteView {
     pub revision: u64,
     pub manifest: Manifest,
@@ -55,55 +56,72 @@ fn decode_view(revision: u64, raw: &Value) -> Option<RemoteView> {
     })
 }
 
+#[derive(Debug, Clone)]
+enum ArtifactEntry {
+    Loading,
+    Ready(String),
+    Error(String),
+}
+
 #[derive(Default)]
 struct Shared {
     connected: bool,
+    connecting: bool,
+    reconnect_attempt: u32,
     error: Option<String>,
     summaries: Vec<Value>,
     raw_views: HashMap<String, (u64, Value)>,
-    /// Runs the UI currently wants; shared so the connection task can drop
-    /// snapshots and patches that race an unwatch.
     watched: HashSet<String>,
+    artifacts: HashMap<(String, String), ArtifactEntry>,
 }
 
 pub struct RemoteRuns {
     shared: Arc<Mutex<Shared>>,
-    commands: mpsc::UnboundedSender<ClientMessage>,
-    /// Typed cache, refreshed when a view's revision changes.
+    wake: Option<mpsc::UnboundedSender<()>>,
+    worker: Option<JoinHandle<()>>,
     decoded: HashMap<String, RemoteView>,
 }
 
 impl RemoteRuns {
     pub fn connect(url: &str) -> Result<Self> {
-        let shared = Arc::new(Mutex::new(Shared::default()));
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Mutex::new(Shared {
+            connecting: true,
+            ..Shared::default()
+        }));
+        let (wake_tx, wake_rx) = mpsc::unbounded_channel();
         let task_shared = Arc::clone(&shared);
         let url = url.to_string();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            runtime.block_on(async move {
-                if let Err(error) = run_connection(&url, task_shared.clone(), commands_rx).await {
-                    let mut shared = task_shared.lock().unwrap();
-                    shared.connected = false;
-                    shared.error = Some(format!("{error:#}"));
-                }
-            });
+            runtime.block_on(run_reconnecting(&url, task_shared, wake_rx));
         });
-        commands_tx
-            .send(ClientMessage::WatchRuns)
-            .context("queueing watch_runs")?;
+        let _ = wake_tx.send(());
         Ok(Self {
             shared,
-            commands: commands_tx,
+            wake: Some(wake_tx),
+            worker: Some(worker),
             decoded: HashMap::new(),
         })
     }
 
     pub fn connected(&self) -> bool {
         self.shared.lock().unwrap().connected
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        let shared = self.shared.lock().unwrap();
+        if shared.connected {
+            "connected"
+        } else if shared.reconnect_attempt > 0 {
+            "reconnecting"
+        } else if shared.connecting {
+            "connecting"
+        } else {
+            "disconnected"
+        }
     }
 
     pub fn error(&self) -> Option<String> {
@@ -114,13 +132,10 @@ impl RemoteRuns {
         self.shared.lock().unwrap().summaries.clone()
     }
 
-    /// Subscribe to a run, replacing any previous subscription: the UI shows
-    /// one run at a time, and keeping old subscriptions alive would stream
-    /// (and retain) every previously selected run's history forever.
     pub fn watch(&mut self, run_id: &str) {
         let previous: Vec<String> = {
             let mut shared = self.shared.lock().unwrap();
-            if shared.watched.contains(run_id) {
+            if shared.watched.len() == 1 && shared.watched.contains(run_id) {
                 return;
             }
             let previous: Vec<String> = shared.watched.drain().collect();
@@ -132,17 +147,60 @@ impl RemoteRuns {
         };
         for old in previous {
             self.decoded.remove(&old);
-            let _ = self
-                .commands
-                .send(ClientMessage::UnwatchRun { run_id: old });
         }
-        let _ = self.commands.send(ClientMessage::WatchRun {
-            run_id: run_id.to_string(),
-        });
+        self.wake();
     }
 
-    /// The typed view for a run, refreshed from the raw view when its
-    /// revision changed since the last call.
+    pub fn request_artifact(&self, run_id: &str, path: &str) {
+        let inserted = {
+            let mut shared = self.shared.lock().unwrap();
+            let key = (run_id.to_string(), path.to_string());
+            if let std::collections::hash_map::Entry::Vacant(entry) = shared.artifacts.entry(key) {
+                entry.insert(ArtifactEntry::Loading);
+                true
+            } else {
+                false
+            }
+        };
+        if inserted {
+            self.wake();
+        }
+    }
+
+    pub fn artifact_content(&self, run_id: &str, path: &str) -> Option<Result<String, String>> {
+        match self
+            .shared
+            .lock()
+            .unwrap()
+            .artifacts
+            .get(&(run_id.to_string(), path.to_string()))
+            .cloned()?
+        {
+            ArtifactEntry::Loading => None,
+            ArtifactEntry::Ready(content) => Some(Ok(content)),
+            ArtifactEntry::Error(error) => Some(Err(error)),
+        }
+    }
+
+    pub fn artifact_snapshot(&self, run_id: &str) -> HashMap<String, Result<String, String>> {
+        self.shared
+            .lock()
+            .unwrap()
+            .artifacts
+            .iter()
+            .filter_map(|((candidate_run, path), entry)| {
+                if candidate_run != run_id {
+                    return None;
+                }
+                match entry {
+                    ArtifactEntry::Loading => None,
+                    ArtifactEntry::Ready(content) => Some((path.clone(), Ok(content.clone()))),
+                    ArtifactEntry::Error(error) => Some((path.clone(), Err(error.clone()))),
+                }
+            })
+            .collect()
+    }
+
     pub fn view(&mut self, run_id: &str) -> Option<&RemoteView> {
         let raw = {
             let shared = self.shared.lock().unwrap();
@@ -161,97 +219,258 @@ impl RemoteRuns {
         }
         self.decoded.get(run_id)
     }
+
+    fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(());
+        }
+    }
 }
 
-async fn run_connection(
+impl Drop for RemoteRuns {
+    fn drop(&mut self) {
+        self.wake.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+async fn run_reconnecting(
     url: &str,
     shared: Arc<Mutex<Shared>>,
-    mut commands: mpsc::UnboundedReceiver<ClientMessage>,
+    mut wake: mpsc::UnboundedReceiver<()>,
+) {
+    let mut attempt = 0u32;
+    loop {
+        {
+            let mut shared = shared.lock().unwrap();
+            shared.connected = false;
+            shared.connecting = true;
+            shared.reconnect_attempt = attempt;
+        }
+        let connection = tokio::select! {
+            connection = tokio_tungstenite::connect_async(url) => connection,
+            message = wake.recv() => {
+                if message.is_none() {
+                    return;
+                }
+                continue;
+            }
+        };
+        match connection {
+            Ok((socket, _)) => {
+                attempt = 0;
+                let result = run_socket(socket, Arc::clone(&shared), &mut wake).await;
+                let mut state = shared.lock().unwrap();
+                state.connected = false;
+                state.connecting = false;
+                if state.error.is_none() {
+                    state.error = Some(match result {
+                        Ok(()) => "connection closed".to_string(),
+                        Err(error) => format!("{error:#}"),
+                    });
+                }
+            }
+            Err(error) => {
+                let mut state = shared.lock().unwrap();
+                state.connected = false;
+                state.connecting = false;
+                state.error = Some(format!("connecting to {url}: {error}"));
+            }
+        }
+        attempt = attempt.saturating_add(1);
+        {
+            let mut state = shared.lock().unwrap();
+            state.reconnect_attempt = attempt;
+        }
+        let base_ms = (250u64.saturating_mul(1u64 << attempt.min(5))).min(10_000);
+        let jitter_ms = (u64::from(attempt).wrapping_mul(137)) % 251;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)) => {}
+            message = wake.recv() => {
+                if message.is_none() {
+                    return;
+                }
+            }
+        }
+        if wake.is_closed() {
+            return;
+        }
+    }
+}
+
+async fn run_socket(
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    shared: Arc<Mutex<Shared>>,
+    wake: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .with_context(|| format!("connecting to {url}"))?;
-    let (mut sink, mut reads) = ws.split();
+    let (mut sink, mut reads) = socket.split();
+    let mut hello_received = false;
+    let mut subscribed = HashSet::new();
+    let mut submitted_artifacts = HashSet::new();
+
     loop {
         tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else { break };
-                let text = serde_json::to_string(&command)?;
-                sink.send(Message::Text(text.into())).await?;
+            wake_message = wake.recv() => {
+                if wake_message.is_none() {
+                    return Ok(());
+                }
+                if hello_received {
+                    reconcile_desired(
+                        &mut sink,
+                        &shared,
+                        &mut subscribed,
+                        &mut submitted_artifacts,
+                    ).await?;
+                }
             }
             incoming = reads.next() => {
-                let Some(incoming) = incoming else { break };
+                let Some(incoming) = incoming else { return Ok(()) };
                 let text = match incoming? {
                     Message::Text(text) => text,
-                    Message::Close(_) => break,
+                    Message::Close(_) => return Ok(()),
                     _ => continue,
                 };
                 let Ok(message) = serde_json::from_str::<ServerMessage>(&text) else {
                     continue;
                 };
-                // Apply under the lock, then send any follow-up requests
-                // after the guard is dropped.
-                let resubscribe: Option<String> = {
-                    let mut shared = shared.lock().unwrap();
-                    match message {
-                        ServerMessage::Hello { protocol } => {
-                            if protocol != PROTOCOL_ID {
-                                anyhow::bail!("unsupported protocol {protocol}");
-                            }
-                            shared.connected = true;
-                            None
+                let mut resubscribe = None;
+                match message {
+                    ServerMessage::Hello { protocol } => {
+                        if protocol != PROTOCOL_ID {
+                            anyhow::bail!("unsupported protocol {protocol}");
                         }
-                        ServerMessage::Runs { runs } => {
-                            shared.summaries = runs;
-                            None
+                        {
+                            let mut state = shared.lock().unwrap();
+                            state.connected = true;
+                            state.connecting = false;
+                            state.reconnect_attempt = 0;
+                            state.error = None;
                         }
-                        ServerMessage::RunSnapshot { run_id, revision, view } => {
-                            // A snapshot can race an unwatch; storing it
-                            // would retain a history nobody is looking at.
-                            if shared.watched.contains(&run_id) {
-                                shared.raw_views.insert(run_id, (revision, view));
-                            }
-                            None
-                        }
-                        ServerMessage::RunPatch { run_id, revision, patch } => {
-                            match shared.raw_views.get_mut(&run_id) {
-                                Some((current, view)) if revision == *current + 1 => {
-                                    match apply_patch(view, &patch) {
-                                        Ok(()) => {
-                                            *current = revision;
-                                            None
-                                        }
-                                        Err(_) => Some(run_id),
-                                    }
-                                }
-                                // Revision gap: take a fresh snapshot.
-                                Some(_) => Some(run_id),
-                                // A patch for a run we no longer track raced
-                                // an unwatch; resubscribing would undo it.
-                                None => None,
-                            }
-                        }
-                        ServerMessage::Artifact { .. } => None,
-                        ServerMessage::Error { message, .. } => {
-                            shared.error = Some(message);
-                            None
+                        hello_received = true;
+                        send_message(&mut sink, &ClientMessage::WatchRuns).await?;
+                        reconcile_desired(
+                            &mut sink,
+                            &shared,
+                            &mut subscribed,
+                            &mut submitted_artifacts,
+                        ).await?;
+                    }
+                    ServerMessage::Runs { runs } => {
+                        shared.lock().unwrap().summaries = runs;
+                    }
+                    ServerMessage::RunSnapshot { run_id, revision, view } => {
+                        let mut state = shared.lock().unwrap();
+                        if state.watched.contains(&run_id) {
+                            state.raw_views.insert(run_id, (revision, view));
                         }
                     }
-                };
+                    ServerMessage::RunPatch { run_id, revision, patch } => {
+                        let mut state = shared.lock().unwrap();
+                        match state.raw_views.get_mut(&run_id) {
+                            Some((current, view)) if revision == *current + 1 => {
+                                if apply_patch(view, &patch).is_ok() {
+                                    *current = revision;
+                                } else {
+                                    resubscribe = Some(run_id);
+                                }
+                            }
+                            Some(_) => resubscribe = Some(run_id),
+                            None => {}
+                        }
+                    }
+                    ServerMessage::Artifact { run_id, path, content } => {
+                        let key = (run_id, path);
+                        submitted_artifacts.remove(&key);
+                        shared
+                            .lock()
+                            .unwrap()
+                            .artifacts
+                            .insert(key, ArtifactEntry::Ready(content));
+                    }
+                    ServerMessage::Error { message, run_id } => {
+                        let mut state = shared.lock().unwrap();
+                        if let Some(run_id) = run_id {
+                            if let Some(key) = submitted_artifacts
+                                .iter()
+                                .find(|(candidate_run, _)| candidate_run == &run_id)
+                                .cloned()
+                            {
+                                submitted_artifacts.remove(&key);
+                                state.artifacts.insert(key, ArtifactEntry::Error(message));
+                            } else {
+                                state.error = Some(message);
+                            }
+                        } else {
+                            state.error = Some(message);
+                        }
+                    }
+                }
                 if let Some(run_id) = resubscribe {
-                    // Gap or bad patch: take a fresh snapshot.
-                    let text = serde_json::to_string(&ClientMessage::WatchRun { run_id })?;
-                    sink.send(Message::Text(text.into())).await?;
+                    send_message(&mut sink, &ClientMessage::WatchRun { run_id }).await?;
                 }
             }
         }
     }
-    // A clean close (server restart, network drop) must not leave a stale
-    // view looking current: record why updates stopped.
-    let mut shared = shared.lock().unwrap();
-    shared.connected = false;
-    if shared.error.is_none() {
-        shared.error = Some("connection closed".to_string());
+}
+
+async fn reconcile_desired(
+    sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    shared: &Arc<Mutex<Shared>>,
+    subscribed: &mut HashSet<String>,
+    submitted_artifacts: &mut HashSet<(String, String)>,
+) -> Result<()> {
+    let (desired, artifacts) = {
+        let state = shared.lock().unwrap();
+        let desired = state.watched.clone();
+        let artifacts = state
+            .artifacts
+            .iter()
+            .filter_map(|(key, entry)| {
+                matches!(entry, ArtifactEntry::Loading).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        (desired, artifacts)
+    };
+    let removals: Vec<String> = subscribed.difference(&desired).cloned().collect();
+    let additions: Vec<String> = desired.difference(subscribed).cloned().collect();
+    for run_id in removals {
+        send_message(
+            sink,
+            &ClientMessage::UnwatchRun {
+                run_id: run_id.clone(),
+            },
+        )
+        .await?;
+        subscribed.remove(&run_id);
     }
+    for run_id in additions {
+        send_message(
+            sink,
+            &ClientMessage::WatchRun {
+                run_id: run_id.clone(),
+            },
+        )
+        .await?;
+        subscribed.insert(run_id);
+    }
+    for (run_id, path) in artifacts {
+        let key = (run_id.clone(), path.clone());
+        if submitted_artifacts.insert(key) {
+            send_message(sink, &ClientMessage::FetchArtifact { run_id, path }).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn send_message(
+    sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    message: &ClientMessage,
+) -> Result<()> {
+    let text = serde_json::to_string(message).context("encoding client message")?;
+    sink.send(Message::Text(text.into())).await?;
     Ok(())
 }

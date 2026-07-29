@@ -6,12 +6,13 @@
 mod conversation;
 mod graph;
 mod theme_picker;
+mod timeline;
 
 use crate::bundle::reader::with_artifact_placeholders;
 use crate::bundle::types::{DefinitionSnapshot, NodeOutcome, RunState, RunStatus, StepRecord};
 use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
-use crate::render::{render_graph_canvas, GraphNodeStyle, GraphView};
+use crate::render::{render_graph, GraphNodeStyle, GraphView, NodeBounds};
 use crate::source::RunSource;
 use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
@@ -25,6 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -54,6 +56,7 @@ pub struct RunData<'a> {
     /// Bundle directory when reading the filesystem directly; lets previews
     /// inline small artifacts instead of showing placeholders.
     pub bundle_dir: Option<&'a std::path::Path>,
+    pub remote_artifacts: HashMap<String, std::result::Result<String, String>>,
 }
 
 pub enum Provider {
@@ -140,9 +143,11 @@ impl Provider {
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
                     bundle_dir: Some(&entry.dir),
+                    remote_artifacts: HashMap::new(),
                 })
             }
             Provider::Remote(remote) => {
+                let remote_artifacts = remote.artifact_snapshot(run_id);
                 let view = remote.view(run_id)?;
                 Some(RunData {
                     state: &view.state,
@@ -152,7 +157,16 @@ impl Provider {
                     live: view.live,
                     possibly_interrupted: view.possibly_interrupted,
                     bundle_dir: None,
+                    remote_artifacts,
                 })
+            }
+        }
+    }
+
+    fn request_artifacts(&mut self, run_id: &str, paths: &[String]) {
+        if let Provider::Remote(remote) = self {
+            for path in paths {
+                remote.request_artifact(run_id, path);
             }
         }
     }
@@ -183,6 +197,15 @@ impl InspectorTab {
         }
     }
 
+    fn index(self) -> usize {
+        match self {
+            InspectorTab::Steps => 0,
+            InspectorTab::Trace => 1,
+            InspectorTab::Conversation => 2,
+            InspectorTab::Info => 3,
+        }
+    }
+
     fn title(self) -> &'static str {
         match self {
             InspectorTab::Steps => "Steps",
@@ -193,10 +216,37 @@ impl InspectorTab {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TraceScope {
+    SelectedAttempt,
+    ReplayVisible,
+    FullRun,
+}
+
+impl TraceScope {
+    fn next(self) -> Self {
+        match self {
+            Self::SelectedAttempt => Self::ReplayVisible,
+            Self::ReplayVisible => Self::FullRun,
+            Self::FullRun => Self::SelectedAttempt,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SelectedAttempt => "selected attempt",
+            Self::ReplayVisible => "replay visible",
+            Self::FullRun => "full run",
+        }
+    }
+}
+
 struct App {
     provider: Provider,
     /// Whether the sidebar is shown (single-bundle mode hides it).
     show_sidebar: bool,
+    sidebar_collapsed: bool,
+    sidebar_explicit: bool,
     selected_run: Option<String>,
     runs_scroll: usize,
     focus: Focus,
@@ -205,12 +255,20 @@ struct App {
     replay: Option<i64>,
     playing: bool,
     last_play_step: Instant,
+    playback_speed_index: usize,
     node_style: GraphNodeStyle,
     follow: bool,
     graph_offset: (usize, usize),
+    graph_nodes: Vec<NodeBounds>,
     dragging: Option<(u16, u16, usize, usize)>,
     tab: InspectorTab,
     inspector_scroll: usize,
+    inspector_scrolls: [usize; 4],
+    inspector_expanded: bool,
+    trace_scope: TraceScope,
+    trace_selected: usize,
+    trace_payload_expanded: bool,
+    conversation_follow: bool,
     palette: Palette,
     theme_config: ThemeConfig,
     theme_config_path: std::path::PathBuf,
@@ -219,6 +277,7 @@ struct App {
     /// Pane rectangles from the last draw, for mouse routing.
     frame_rect: Rect,
     runs_rect: Rect,
+    timeline: timeline::TimelineGeometry,
     graph_rect: Rect,
     inspector_rect: Rect,
     quit: bool,
@@ -272,6 +331,8 @@ fn event_loop(
     let mut app = App {
         provider,
         show_sidebar,
+        sidebar_collapsed: false,
+        sidebar_explicit: false,
         selected_run: None,
         runs_scroll: 0,
         focus: if show_sidebar {
@@ -282,12 +343,20 @@ fn event_loop(
         replay: None,
         playing: false,
         last_play_step: Instant::now(),
+        playback_speed_index: 0,
         node_style: DEFAULT_NODE_STYLE,
         follow: true,
         graph_offset: (0, 0),
+        graph_nodes: Vec::new(),
         dragging: None,
         tab: InspectorTab::Steps,
         inspector_scroll: 0,
+        inspector_scrolls: [0; 4],
+        inspector_expanded: false,
+        trace_scope: TraceScope::SelectedAttempt,
+        trace_selected: 0,
+        trace_payload_expanded: false,
+        conversation_follow: true,
         palette: resolved_theme.palette,
         theme_config: resolved_theme.config,
         theme_config_path: resolved_theme.config_path,
@@ -295,6 +364,7 @@ fn event_loop(
         theme_diagnostic: resolved_theme.diagnostics.into_iter().next(),
         frame_rect: Rect::default(),
         runs_rect: Rect::default(),
+        timeline: timeline::TimelineGeometry::default(),
         graph_rect: Rect::default(),
         inspector_rect: Rect::default(),
         quit: false,
@@ -341,7 +411,9 @@ impl App {
     }
 
     fn advance_playback(&mut self) {
-        if !self.playing || self.last_play_step.elapsed() < PLAY_STEP_INTERVAL {
+        let speed = u32::from(timeline::PLAYBACK_SPEEDS[self.playback_speed_index]);
+        let interval = PLAY_STEP_INTERVAL / speed;
+        if !self.playing || self.last_play_step.elapsed() < interval {
             return;
         }
         self.last_play_step = Instant::now();
@@ -355,6 +427,39 @@ impl App {
                 self.replay = None;
                 self.playing = false;
             }
+        }
+    }
+
+    fn slower_playback(&mut self) {
+        self.playback_speed_index = self.playback_speed_index.saturating_sub(1);
+    }
+
+    fn faster_playback(&mut self) {
+        self.playback_speed_index =
+            (self.playback_speed_index + 1).min(timeline::PLAYBACK_SPEEDS.len() - 1);
+    }
+
+    fn apply_timeline_action(&mut self, action: timeline::TimelineAction) {
+        match action {
+            timeline::TimelineAction::Start => {
+                self.replay = Some(-1);
+                self.playing = false;
+            }
+            timeline::TimelineAction::Previous => self.step_back(),
+            timeline::TimelineAction::TogglePlayback => {
+                if self.replay.is_none() {
+                    self.replay = Some(-1);
+                }
+                self.playing = !self.playing;
+                self.last_play_step = Instant::now();
+            }
+            timeline::TimelineAction::Next => self.step_forward(),
+            timeline::TimelineAction::Live => {
+                self.replay = None;
+                self.playing = false;
+            }
+            timeline::TimelineAction::Slower => self.slower_playback(),
+            timeline::TimelineAction::Faster => self.faster_playback(),
         }
     }
 
@@ -379,6 +484,63 @@ impl App {
         }
     }
 
+    fn select_inspector_tab(&mut self, tab: InspectorTab) {
+        self.inspector_scrolls[self.tab.index()] = self.inspector_scroll;
+        self.tab = tab;
+        self.inspector_scroll = self.inspector_scrolls[tab.index()];
+    }
+
+    fn request_selected_artifacts(&mut self) {
+        let Some(run_id) = self.selected_run.clone() else {
+            return;
+        };
+        let replay = self.replay;
+        let paths = {
+            let Some(data) = self.provider.data(&run_id) else {
+                return;
+            };
+            let index = replay.unwrap_or(data.state.steps.len() as i64 - 1);
+            let Some(step) = usize::try_from(index)
+                .ok()
+                .and_then(|index| data.state.steps.get(index))
+            else {
+                return;
+            };
+            let mut paths = Vec::new();
+            collect_artifact_paths(&step.prompt, &mut paths);
+            collect_artifact_paths(&step.output, &mut paths);
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        self.provider.request_artifacts(&run_id, &paths);
+    }
+
+    fn select_graph_node(&mut self, node_id: &str) {
+        let Some(run_id) = self.selected_run.clone() else {
+            return;
+        };
+        let replay = self.replay;
+        let selected = {
+            let Some(data) = self.provider.data(&run_id) else {
+                return;
+            };
+            let upper = replay.unwrap_or(data.state.steps.len() as i64 - 1);
+            data.state
+                .steps
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(index, step)| *index as i64 <= upper && step.node_id == node_id)
+                .map(|(index, _)| index as i64)
+        };
+        if let Some(index) = selected {
+            self.replay = Some(index);
+            self.playing = false;
+            self.follow = true;
+        }
+    }
+
     fn select_run(&mut self, summaries: &[RunSummary], delta: i64) {
         if summaries.is_empty() {
             return;
@@ -393,6 +555,11 @@ impl App {
             self.replay = None;
             self.playing = false;
             self.inspector_scroll = 0;
+            self.inspector_scrolls = [0; 4];
+            self.inspector_expanded = false;
+            self.trace_selected = 0;
+            self.trace_payload_expanded = false;
+            self.conversation_follow = true;
             self.graph_offset = (0, 0);
             self.follow = true;
         }
@@ -479,6 +646,10 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char(',') => app.open_theme_picker(),
+        KeyCode::Char('b') if app.show_sidebar => {
+            app.sidebar_collapsed = !app.sidebar_collapsed;
+            app.sidebar_explicit = true;
+        }
         KeyCode::Tab => {
             app.focus = match (app.focus, app.show_sidebar) {
                 (Focus::Runs, _) => Focus::Graph,
@@ -490,6 +661,8 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
         // Replay transport (global).
         KeyCode::Char('[') => app.step_back(),
         KeyCode::Char(']') => app.step_forward(),
+        KeyCode::Char('{') => app.slower_playback(),
+        KeyCode::Char('}') => app.faster_playback(),
         KeyCode::Char(' ') => {
             if app.replay.is_none() {
                 // Start playback from the beginning of the run.
@@ -505,6 +678,7 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
         KeyCode::End | KeyCode::Char('G') | KeyCode::Char('L') => {
             app.replay = None;
             app.playing = false;
+            app.conversation_follow = true;
         }
         KeyCode::Char('z') | KeyCode::Char('+') | KeyCode::Char('-') => {
             app.node_style = match app.node_style {
@@ -513,11 +687,11 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
             };
         }
         KeyCode::Char('f') => app.follow = !app.follow,
-        KeyCode::Char('t') => app.tab = app.tab.next(),
-        KeyCode::Char('1') => app.tab = InspectorTab::Steps,
-        KeyCode::Char('2') => app.tab = InspectorTab::Trace,
-        KeyCode::Char('3') => app.tab = InspectorTab::Conversation,
-        KeyCode::Char('4') => app.tab = InspectorTab::Info,
+        KeyCode::Char('t') => app.select_inspector_tab(app.tab.next()),
+        KeyCode::Char('1') => app.select_inspector_tab(InspectorTab::Steps),
+        KeyCode::Char('2') => app.select_inspector_tab(InspectorTab::Trace),
+        KeyCode::Char('3') => app.select_inspector_tab(InspectorTab::Conversation),
+        KeyCode::Char('4') => app.select_inspector_tab(InspectorTab::Info),
         _ => match app.focus {
             Focus::Runs => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.select_run(summaries, -1),
@@ -551,19 +725,47 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                 }
             }
             Focus::Inspector => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if app.tab == InspectorTab::Steps {
-                        app.step_back();
-                    } else {
+                KeyCode::Up | KeyCode::Char('k') => match app.tab {
+                    InspectorTab::Steps => app.step_back(),
+                    InspectorTab::Trace => {
+                        app.trace_selected = app.trace_selected.saturating_sub(1);
+                        app.trace_payload_expanded = false;
+                    }
+                    InspectorTab::Conversation => {
                         app.inspector_scroll = app.inspector_scroll.saturating_sub(1);
+                        app.conversation_follow = false;
                     }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if app.tab == InspectorTab::Steps {
-                        app.step_forward();
-                    } else {
+                    InspectorTab::Info => {
+                        app.inspector_scroll = app.inspector_scroll.saturating_sub(1)
+                    }
+                },
+                KeyCode::Down | KeyCode::Char('j') => match app.tab {
+                    InspectorTab::Steps => app.step_forward(),
+                    InspectorTab::Trace => {
+                        app.trace_selected = app.trace_selected.saturating_add(1);
+                        app.trace_payload_expanded = false;
+                    }
+                    InspectorTab::Conversation => {
                         app.inspector_scroll += 1;
+                        app.conversation_follow = false;
                     }
+                    InspectorTab::Info => app.inspector_scroll += 1,
+                },
+                KeyCode::Enter => match app.tab {
+                    InspectorTab::Steps => {
+                        app.inspector_expanded = !app.inspector_expanded;
+                        if app.inspector_expanded {
+                            app.request_selected_artifacts();
+                        }
+                    }
+                    InspectorTab::Trace => app.trace_payload_expanded = !app.trace_payload_expanded,
+                    _ => {}
+                },
+                KeyCode::Char('v') if app.tab == InspectorTab::Trace => {
+                    app.trace_scope = app.trace_scope.next();
+                    app.trace_selected = 0;
+                    app.trace_payload_expanded = false;
+                    app.inspector_scroll = 0;
                 }
                 KeyCode::PageUp => app.inspector_scroll = app.inspector_scroll.saturating_sub(10),
                 KeyCode::PageDown => app.inspector_scroll += 10,
@@ -582,6 +784,30 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
         handle_theme_picker_mouse(app, mouse);
         return;
     }
+    if matches!(
+        mouse.kind,
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+    ) && contains(app.timeline.track, mouse.column, mouse.row)
+    {
+        let steps = app.step_count() as usize;
+        let column = mouse.column.saturating_sub(app.timeline.track.x) as usize;
+        app.replay =
+            timeline::position_from_column(steps, column, app.timeline.track.width as usize);
+        app.playing = false;
+        return;
+    }
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        if let Some(action) = app
+            .timeline
+            .hits
+            .iter()
+            .find(|hit| contains(hit.rect, mouse.column, mouse.row))
+            .map(|hit| hit.action)
+        {
+            app.apply_timeline_action(action);
+            return;
+        }
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let delta: i64 = if mouse.kind == MouseEventKind::ScrollUp {
@@ -597,6 +823,9 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
                 app.select_run(summaries, delta.signum());
             } else if contains(app.inspector_rect, mouse.column, mouse.row) {
                 app.inspector_scroll = (app.inspector_scroll as i64 + delta).max(0) as usize;
+                if app.tab == InspectorTab::Conversation {
+                    app.conversation_follow = false;
+                }
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -638,7 +867,34 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
                 app.follow = false;
             }
         }
-        MouseEventKind::Up(MouseButton::Left) => app.dragging = None,
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some((start_x, start_y, _, _)) = app.dragging.take() {
+                let moved = start_x.abs_diff(mouse.column) + start_y.abs_diff(mouse.row);
+                if moved <= 1 && contains(app.graph_rect, mouse.column, mouse.row) {
+                    let canvas_x = mouse
+                        .column
+                        .saturating_sub(app.graph_rect.x.saturating_add(1))
+                        as usize
+                        + app.graph_offset.0;
+                    let canvas_y = mouse.row.saturating_sub(app.graph_rect.y.saturating_add(1))
+                        as usize
+                        + app.graph_offset.1;
+                    let node_id = app
+                        .graph_nodes
+                        .iter()
+                        .find(|node| {
+                            (canvas_x as i64) >= node.x
+                                && (canvas_x as i64) < node.x + node.width
+                                && (canvas_y as i64) >= node.y
+                                && (canvas_y as i64) < node.y + node.height
+                        })
+                        .map(|node| node.node_id.clone());
+                    if let Some(node_id) = node_id {
+                        app.select_graph_node(&node_id);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -716,17 +972,24 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         Block::default().style(Style::default().fg(palette.text).bg(palette.app_bg)),
         area,
     );
+    let transport_height = if area.height >= 18 && area.width >= 60 {
+        2
+    } else {
+        1
+    };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(1)])
+        .constraints([Constraint::Min(4), Constraint::Length(transport_height)])
         .split(area);
     let body = vertical[0];
     let transport = vertical[1];
 
+    let sidebar_collapsed = app.sidebar_collapsed || (!app.sidebar_explicit && area.width < 100);
     let (runs_area, main_area) = if app.show_sidebar {
+        let sidebar_width = if sidebar_collapsed { 8 } else { 34 };
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(34), Constraint::Min(20)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(20)])
             .split(body);
         (Some(columns[0]), columns[1])
     } else {
@@ -742,18 +1005,21 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     app.runs_rect = runs_area.unwrap_or_default();
 
     if let Some(runs_area) = runs_area {
-        draw_runs(frame, app, summaries, runs_area);
+        draw_runs(frame, app, summaries, runs_area, sidebar_collapsed);
     }
 
     let Some(run_id) = app.selected_run.clone() else {
         // In remote mode an empty screen is ambiguous: say whether we are
         // still connecting, failed, or genuinely see no runs.
         let message = match &app.provider {
-            Provider::Remote(remote) => match remote.error() {
-                Some(error) => format!("Connection failed: {}", sanitize_text(&error)),
-                None if !remote.connected() => "Connecting…".to_string(),
-                None => "No runs found.".to_string(),
-            },
+            Provider::Remote(remote) if !remote.connected() => {
+                let detail = remote
+                    .error()
+                    .map(|error| format!(": {}", sanitize_text(&error)))
+                    .unwrap_or_default();
+                format!("{}…{detail}", remote.status_label())
+            }
+            Provider::Remote(_) => "No runs found.".to_string(),
             _ => "No runs found.".to_string(),
         };
         frame.render_widget(
@@ -768,11 +1034,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
                 ),
             main_area,
         );
-        draw_transport(
+        app.timeline = draw_transport(
             frame,
             transport,
             None,
             app.playing,
+            timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
             &palette,
             app.theme_diagnostic.as_deref(),
         );
@@ -788,13 +1055,18 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let inspector_rect = app.inspector_rect;
     let tab = app.tab;
     let inspector_scroll = app.inspector_scroll;
+    let inspector_expanded = app.inspector_expanded;
+    let trace_scope = app.trace_scope;
+    let trace_selected = app.trace_selected;
+    let trace_payload_expanded = app.trace_payload_expanded;
+    let conversation_follow = app.conversation_follow;
     let focus = app.focus;
     let playing = app.playing;
     // Captured before `data` takes the mutable borrow: a dead remote
     // connection must be visible while a cached run is still displayed.
-    let disconnected = match &app.provider {
-        Provider::Remote(remote) => !remote.connected(),
-        _ => false,
+    let remote_status = match &app.provider {
+        Provider::Remote(remote) if !remote.connected() => Some(remote.status_label()),
+        _ => None,
     };
 
     let Some(data) = app.provider.data(&run_id) else {
@@ -810,11 +1082,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
                 ),
             main_area,
         );
-        draw_transport(
+        app.timeline = draw_transport(
             frame,
             transport,
             None,
             app.playing,
+            timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
             &palette,
             app.theme_diagnostic.as_deref(),
         );
@@ -845,8 +1118,13 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     } else {
         bounded_index
     };
-    let rows_runs = render_graph_canvas(&view, render_index, at_latest, now_ms(), node_style)
-        .map(|canvas| canvas.render_runs())
+    let rendered_graph = render_graph(&view, render_index, at_latest, now_ms(), node_style);
+    let rows_runs = rendered_graph
+        .as_ref()
+        .map(|rendered| rendered.canvas.render_runs())
+        .unwrap_or_default();
+    app.graph_nodes = rendered_graph
+        .map(|rendered| rendered.node_bounds)
         .unwrap_or_default();
     let inner_width = graph_rect.width.saturating_sub(2) as usize;
     let inner_height = graph_rect.height.saturating_sub(2) as usize;
@@ -871,15 +1149,27 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .take(inner_height)
         .map(|runs| graph::viewport_line(runs, offset.0, inner_width, &palette))
         .collect();
+    let mut graph_flags = Vec::new();
+    if data.state.paused == Some(true) {
+        graph_flags.push("PAUSED");
+    }
+    if let Some(status) = remote_status {
+        graph_flags.push(match status {
+            "connecting" => "CONNECTING",
+            "reconnecting" => "RECONNECTING",
+            _ => "DISCONNECTED",
+        });
+    }
+    let suffix = if graph_flags.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", graph_flags.join(" · "))
+    };
     let graph_title = format!(
         " {} {}{} ",
         sanitize_text(&data.state.workflow_name),
         graph_position_label(at_latest, data.live),
-        if disconnected {
-            " — DISCONNECTED"
-        } else {
-            ""
-        }
+        suffix
     );
     let graph_block = Block::default()
         .borders(Borders::ALL)
@@ -895,10 +1185,25 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
 
     // Inspector pane.
     let inspector_lines = match tab {
-        InspectorTab::Steps => {
-            steps_lines(&data, visible_steps, selected_step, bounded_index, &palette)
-        }
-        InspectorTab::Trace => trace_lines(data.events, &palette),
+        InspectorTab::Steps => steps_lines(
+            &data,
+            visible_steps,
+            selected_step,
+            bounded_index,
+            inspector_expanded,
+            inspector_rect.width.saturating_sub(2) as usize,
+            &palette,
+        ),
+        InspectorTab::Trace => trace_lines(
+            data.events,
+            visible_steps,
+            selected_step,
+            trace_scope,
+            trace_selected,
+            trace_payload_expanded,
+            inspector_rect.width.saturating_sub(2) as usize,
+            &palette,
+        ),
         InspectorTab::Conversation => conversation::conversation_lines(
             data.session_entries,
             visible_steps,
@@ -911,13 +1216,15 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     };
     let inspector_height = inspector_rect.height.saturating_sub(2) as usize;
     let max_scroll = inspector_lines.len().saturating_sub(inspector_height);
-    let scroll = if tab == InspectorTab::Trace && at_latest {
-        // Tail the trace while live.
+    let scroll = if (tab == InspectorTab::Trace && at_latest && trace_scope == TraceScope::FullRun)
+        || (tab == InspectorTab::Conversation && at_latest && conversation_follow)
+    {
         max_scroll
     } else {
         inspector_scroll.min(max_scroll)
     };
     app.inspector_scroll = scroll;
+    app.inspector_scrolls[tab.index()] = scroll;
     let shown: Vec<Line> = inspector_lines
         .into_iter()
         .skip(scroll)
@@ -954,11 +1261,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         inspector_rect,
     );
 
-    draw_transport(
+    app.timeline = draw_transport(
         frame,
         transport,
         Some((&data, bounded_index, at_latest)),
         playing,
+        timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
         &palette,
         app.theme_diagnostic.as_deref(),
     );
@@ -983,7 +1291,13 @@ fn pane_border(palette: &Palette, focused: bool) -> Style {
     })
 }
 
-fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: Rect) {
+fn draw_runs(
+    frame: &mut Frame,
+    app: &mut App,
+    summaries: &[RunSummary],
+    area: Rect,
+    collapsed: bool,
+) {
     let palette = &app.palette;
     let height = area.height.saturating_sub(2) as usize;
     let selected = summaries
@@ -1019,19 +1333,43 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
             let elapsed = parse_timestamp_ms(&summary.started_at)
                 .map(|start| format!(" {}", format_duration((end - start).max(0))))
                 .unwrap_or_default();
-            let mut spans = vec![
-                Span::raw(marker.to_string()),
-                Span::styled(
-                    format!("{} ", status_glyph(summary.status)),
-                    status_style(summary.status, palette),
-                ),
-                Span::raw(sanitize_text(&name)),
-                Span::styled(elapsed, Style::default().fg(palette.muted)),
-                Span::styled(
-                    interrupted.to_string(),
-                    Style::default().fg(palette.timed_out),
-                ),
-            ];
+            let mut spans = if collapsed {
+                let initial = sanitize_text(&name)
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_string();
+                vec![
+                    Span::raw(if index == selected { "▶" } else { " " }),
+                    Span::styled(
+                        status_glyph(summary.status),
+                        status_style(summary.status, palette),
+                    ),
+                    Span::raw(initial),
+                    Span::styled(
+                        if summary.possibly_interrupted {
+                            "?"
+                        } else {
+                            " "
+                        },
+                        Style::default().fg(palette.timed_out),
+                    ),
+                ]
+            } else {
+                vec![
+                    Span::raw(marker.to_string()),
+                    Span::styled(
+                        format!("{} ", status_glyph(summary.status)),
+                        status_style(summary.status, palette),
+                    ),
+                    Span::raw(sanitize_text(&name)),
+                    Span::styled(elapsed, Style::default().fg(palette.muted)),
+                    Span::styled(
+                        interrupted.to_string(),
+                        Style::default().fg(palette.timed_out),
+                    ),
+                ]
+            };
             if index == selected {
                 spans = spans
                     .into_iter()
@@ -1049,7 +1387,11 @@ fn draw_runs(frame: &mut Frame, app: &mut App, summaries: &[RunSummary], area: R
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Runs ({}) ", summaries.len()))
+        .title(if collapsed {
+            " R ".to_string()
+        } else {
+            format!(" Runs ({}) ", summaries.len())
+        })
         .style(Style::default().bg(palette.panel_bg))
         .border_style(pane_border(palette, app.focus == Focus::Runs));
     frame.render_widget(
@@ -1079,15 +1421,72 @@ fn step_duration(step: &StepRecord) -> String {
 /// directly; larger ones (and remote mode) show placeholders.
 const PREVIEW_ARTIFACT_MAX_BYTES: u64 = 64 * 1024;
 
-/// Compact single-line preview of a persisted value. With a bundle
-/// directory, artifact references resolve to their contents; otherwise they
-/// render as placeholders.
-fn preview_value(value: &Value, bundle_dir: Option<&std::path::Path>) -> String {
+fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
+    if let Some(artifact) = crate::bundle::types::as_artifact_ref(value) {
+        paths.push(artifact.path);
+        return;
+    }
+    if crate::bundle::types::as_escaped(value).is_some() {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_artifact_paths(item, paths);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values() {
+                collect_artifact_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_remote_artifacts(
+    value: &Value,
+    artifacts: &HashMap<String, std::result::Result<String, String>>,
+) -> Value {
+    if let Some(artifact) = crate::bundle::types::as_artifact_ref(value) {
+        return match artifacts.get(&artifact.path) {
+            Some(Ok(content)) => Value::String(content.clone()),
+            Some(Err(error)) => Value::String(format!("«artifact error: {error}»")),
+            None => with_artifact_placeholders(value),
+        };
+    }
+    if let Some(escaped) = crate::bundle::types::as_escaped(value) {
+        return escaped.clone();
+    }
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| resolve_remote_artifacts(item, artifacts))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, item)| (key.clone(), resolve_remote_artifacts(item, artifacts)))
+                .collect(),
+        ),
+        scalar => scalar.clone(),
+    }
+}
+
+/// Compact single-line preview of a persisted value. Artifact references use
+/// local checked reads or the bounded remote artifact cache.
+fn preview_value(
+    value: &Value,
+    bundle_dir: Option<&std::path::Path>,
+    remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
+) -> String {
     let decoded = match bundle_dir {
         Some(dir) => {
             crate::bundle::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
         }
-        None => with_artifact_placeholders(value),
+        None => resolve_remote_artifacts(value, remote_artifacts),
     };
     let text = match decoded {
         Value::String(text) => text,
@@ -1103,11 +1502,78 @@ fn preview_value(value: &Value, bundle_dir: Option<&std::path::Path>) -> String 
     }
 }
 
+fn push_detail_line(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    width: usize,
+    palette: &Palette,
+) {
+    let label_width = 14usize.min(width.saturating_sub(1));
+    let body_width = width.saturating_sub(label_width).max(20);
+    let text = sanitize_text(value);
+    let chars: Vec<char> = text.chars().collect();
+    let chunks: Vec<String> = if chars.is_empty() {
+        vec!["—".to_string()]
+    } else {
+        chars
+            .chunks(body_width)
+            .map(|chunk| chunk.iter().collect())
+            .collect()
+    };
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let label_text = if index == 0 {
+            format!("{label:<label_width$}")
+        } else {
+            " ".repeat(label_width)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(label_text, Style::default().fg(palette.accent)),
+            Span::styled(chunk, Style::default().fg(palette.text)),
+        ]));
+    }
+}
+
+fn push_value_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &Value,
+    bundle_dir: Option<&std::path::Path>,
+    remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
+    width: usize,
+    palette: &Palette,
+) {
+    let decoded = match bundle_dir {
+        Some(dir) => {
+            crate::bundle::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
+        }
+        None => resolve_remote_artifacts(value, remote_artifacts),
+    };
+    let rendered = match decoded {
+        Value::String(text) => text,
+        other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
+    };
+    for (index, logical_line) in rendered.lines().enumerate() {
+        push_detail_line(
+            lines,
+            if index == 0 { label } else { "" },
+            logical_line,
+            width,
+            palette,
+        );
+    }
+    if rendered.is_empty() {
+        push_detail_line(lines, label, "—", width, palette);
+    }
+}
+
 fn steps_lines(
     data: &RunData,
     visible_steps: &[StepRecord],
     selected_step: Option<&StepRecord>,
     bounded_index: i64,
+    expanded: bool,
+    width: usize,
     palette: &Palette,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1150,63 +1616,225 @@ fn steps_lines(
             )),
             Style::default().fg(palette.muted),
         )));
-        if !step.prompt.is_null() {
+        lines.push(Line::from(Span::styled(
+            if expanded {
+                "expanded details (Enter to collapse)"
+            } else {
+                "summary (Enter to expand)"
+            },
+            Style::default().fg(palette.muted),
+        )));
+        if expanded {
+            if !step.prompt.is_null() {
+                push_value_lines(
+                    &mut lines,
+                    "prompt",
+                    &step.prompt,
+                    data.bundle_dir,
+                    &data.remote_artifacts,
+                    width,
+                    palette,
+                );
+            }
+            push_value_lines(
+                &mut lines,
+                "output",
+                &step.output,
+                data.bundle_dir,
+                &data.remote_artifacts,
+                width,
+                palette,
+            );
+            if let Some(action) = &step.action {
+                push_detail_line(
+                    &mut lines,
+                    "action type",
+                    &action.action_type,
+                    width,
+                    palette,
+                );
+                if let Some(command) = &action.command {
+                    push_detail_line(&mut lines, "command", command, width, palette);
+                }
+                if let Some(args) = &action.args {
+                    push_detail_line(
+                        &mut lines,
+                        "arguments",
+                        &serde_json::to_string(args).unwrap_or_default(),
+                        width,
+                        palette,
+                    );
+                }
+                if let Some(cwd) = &action.cwd {
+                    push_detail_line(&mut lines, "working dir", cwd, width, palette);
+                }
+                if let Some(exit_code) = &action.exit_code {
+                    push_detail_line(
+                        &mut lines,
+                        "exit code",
+                        &exit_code.to_string(),
+                        width,
+                        palette,
+                    );
+                }
+                if let Some(signal) = &action.signal {
+                    push_detail_line(&mut lines, "signal", &signal.to_string(), width, palette);
+                }
+                if let Some(duration) = action.duration_ms {
+                    push_detail_line(
+                        &mut lines,
+                        "action time",
+                        &format_duration(duration as i64),
+                        width,
+                        palette,
+                    );
+                }
+            }
+            if let Some(error) = &step.error {
+                push_detail_line(&mut lines, "error", error, width, palette);
+            }
+            push_detail_line(&mut lines, "started", &step.started_at, width, palette);
+            push_detail_line(&mut lines, "finished", &step.finished_at, width, palette);
+        } else {
+            if !step.prompt.is_null() {
+                lines.push(Line::from(vec![
+                    Span::styled("prompt: ", Style::default().fg(palette.accent)),
+                    Span::raw(preview_value(
+                        &step.prompt,
+                        data.bundle_dir,
+                        &data.remote_artifacts,
+                    )),
+                ]));
+            }
             lines.push(Line::from(vec![
-                Span::styled("prompt: ", Style::default().fg(palette.accent)),
-                Span::raw(preview_value(&step.prompt, data.bundle_dir)),
+                Span::styled("output: ", Style::default().fg(palette.accent)),
+                Span::raw(preview_value(
+                    &step.output,
+                    data.bundle_dir,
+                    &data.remote_artifacts,
+                )),
             ]));
-        }
-        lines.push(Line::from(vec![
-            Span::styled("output: ", Style::default().fg(palette.accent)),
-            Span::raw(preview_value(&step.output, data.bundle_dir)),
-        ]));
-        if let Some(action) = &step.action {
-            let command = action.command.clone().unwrap_or_default();
-            lines.push(Line::from(vec![
-                Span::styled("action: ", Style::default().fg(palette.accent)),
-                Span::raw(sanitize_text(&format!(
-                    "{} {}",
-                    action.action_type, command
-                ))),
-            ]));
-        }
-        if let Some(error) = &step.error {
-            lines.push(Line::from(vec![
-                Span::styled("error: ", Style::default().fg(palette.error)),
-                Span::raw(sanitize_text(error)),
-            ]));
+            if let Some(action) = &step.action {
+                let command = action.command.clone().unwrap_or_default();
+                lines.push(Line::from(vec![
+                    Span::styled("action: ", Style::default().fg(palette.accent)),
+                    Span::raw(sanitize_text(&format!(
+                        "{} {}",
+                        action.action_type, command
+                    ))),
+                ]));
+            }
+            if let Some(error) = &step.error {
+                lines.push(Line::from(vec![
+                    Span::styled("error: ", Style::default().fg(palette.error)),
+                    Span::raw(sanitize_text(error)),
+                ]));
+            }
         }
     }
     lines
 }
 
-fn trace_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>> {
-    events
-        .iter()
-        .map(|event| {
-            let seq = event.get("seq").and_then(Value::as_u64).unwrap_or(0);
-            // Event types and node ids are bundle-derived strings; scrub
-            // them so the trace pane cannot emit terminal escapes.
-            let event_type =
-                sanitize_text(event.get("type").and_then(Value::as_str).unwrap_or("?"));
-            let node = event
-                .get("nodeId")
-                .and_then(Value::as_str)
-                .map(|node| format!(" {}", sanitize_text(node)))
-                .unwrap_or_default();
-            let style = match event_type.as_str() {
-                "node_failed" | "run_failed" => Style::default().fg(palette.error),
-                "run_completed" => Style::default().fg(palette.success),
-                "node_started" => Style::default().fg(palette.running),
-                _ => Style::default().fg(palette.text),
+fn trace_events_for_scope<'a>(
+    events: &'a [Value],
+    visible_steps: &[StepRecord],
+    selected_step: Option<&StepRecord>,
+    scope: TraceScope,
+) -> Vec<&'a Value> {
+    match scope {
+        TraceScope::SelectedAttempt => {
+            let Some(attempt_id) = selected_step.map(|step| step.attempt_id.as_str()) else {
+                return Vec::new();
             };
-            Line::from(vec![
-                Span::styled(format!("{seq:>5} "), Style::default().fg(palette.muted)),
-                Span::styled(event_type, style),
-                Span::raw(node),
-            ])
-        })
-        .collect()
+            events
+                .iter()
+                .filter(|event| event.get("attemptId").and_then(Value::as_str) == Some(attempt_id))
+                .collect()
+        }
+        TraceScope::ReplayVisible => {
+            let attempts: HashSet<&str> = visible_steps
+                .iter()
+                .map(|step| step.attempt_id.as_str())
+                .collect();
+            let cutoff = events
+                .iter()
+                .filter(|event| {
+                    event
+                        .get("attemptId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|attempt| attempts.contains(attempt))
+                })
+                .filter_map(|event| event.get("seq").and_then(Value::as_u64))
+                .max();
+            cutoff.map_or_else(Vec::new, |cutoff| {
+                events
+                    .iter()
+                    .filter(|event| event.get("seq").and_then(Value::as_u64).unwrap_or(0) <= cutoff)
+                    .collect()
+            })
+        }
+        TraceScope::FullRun => events.iter().collect(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_lines(
+    events: &[Value],
+    visible_steps: &[StepRecord],
+    selected_step: Option<&StepRecord>,
+    scope: TraceScope,
+    selected_index: usize,
+    payload_expanded: bool,
+    width: usize,
+    palette: &Palette,
+) -> Vec<Line<'static>> {
+    let filtered = trace_events_for_scope(events, visible_steps, selected_step, scope);
+    let selected_index = selected_index.min(filtered.len().saturating_sub(1));
+    let mut lines = vec![Line::from(vec![
+        Span::styled("scope: ", Style::default().fg(palette.accent)),
+        Span::styled(scope.label(), Style::default().fg(palette.text)),
+        Span::styled(
+            "  v: change scope  Enter: payload",
+            Style::default().fg(palette.muted),
+        ),
+    ])];
+    for (index, event) in filtered.iter().enumerate() {
+        let seq = event.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        let event_type = sanitize_text(event.get("type").and_then(Value::as_str).unwrap_or("?"));
+        let node = event
+            .get("nodeId")
+            .and_then(Value::as_str)
+            .map(|node| format!(" {}", sanitize_text(node)))
+            .unwrap_or_default();
+        let style = match event_type.as_str() {
+            "node_failed" | "run_failed" => Style::default().fg(palette.error),
+            "run_completed" => Style::default().fg(palette.success),
+            "node_started" => Style::default().fg(palette.running),
+            _ => Style::default().fg(palette.text),
+        };
+        let marker = if index == selected_index { "▶" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(palette.replay_focus)),
+            Span::styled(format!("{seq:>5} "), Style::default().fg(palette.muted)),
+            Span::styled(event_type, style),
+            Span::styled(node, Style::default().fg(palette.subtext)),
+        ]));
+        if index == selected_index && payload_expanded {
+            let payload = event.get("payload").unwrap_or(&Value::Null);
+            let rendered =
+                serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+            for logical_line in rendered.lines() {
+                push_detail_line(&mut lines, "", logical_line, width, palette);
+            }
+        }
+    }
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No events in this scope.",
+            Style::default().fg(palette.muted),
+        )));
+    }
+    lines
 }
 
 fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'static>> {
@@ -1282,7 +1910,11 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             label("final output"),
-            Span::raw(preview_value(output, data.bundle_dir)),
+            Span::raw(preview_value(
+                output,
+                data.bundle_dir,
+                &data.remote_artifacts,
+            )),
         ]));
     }
     lines
@@ -1293,88 +1925,42 @@ fn draw_transport(
     area: Rect,
     data: Option<(&RunData, i64, bool)>,
     playing: bool,
+    speed: u16,
     palette: &Palette,
     diagnostic: Option<&str>,
-) {
-    let mut spans: Vec<Span> = Vec::new();
-    if let Some((data, bounded_index, at_latest)) = data {
+) -> timeline::TimelineGeometry {
+    let elapsed = data.map(|(data, _, _)| {
         let state = data.state;
-        let status_label = if state.paused == Some(true) {
-            "paused"
-        } else {
-            state.status.label()
-        };
-        spans.push(Span::styled(
-            format!(" {} {} ", status_glyph(state.status), status_label),
-            status_style(state.status, palette).add_modifier(Modifier::BOLD),
-        ));
-        let elapsed = {
-            let end = state
-                .finished_at
-                .as_deref()
-                .and_then(parse_timestamp_ms)
-                .unwrap_or_else(now_ms);
-            let start = parse_timestamp_ms(&state.started_at).unwrap_or(end);
-            format_duration((end - start).max(0))
-        };
-        spans.push(Span::styled(
-            format!("{elapsed}  "),
-            Style::default().fg(palette.subtext),
-        ));
-        let steps = state.steps.len() as i64;
-        let position = if at_latest {
-            if data.live {
-                "LIVE".to_string()
-            } else {
-                format!("step {steps}/{steps}")
-            }
-        } else {
-            format!("step {}/{}", bounded_index + 1, steps)
-        };
-        spans.push(Span::styled(
-            position,
-            if at_latest && data.live {
-                Style::default()
-                    .fg(palette.running)
-                    .add_modifier(Modifier::BOLD)
-            } else if !at_latest {
-                Style::default()
-                    .fg(palette.replay_focus)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(palette.text)
-                    .add_modifier(Modifier::BOLD)
-            },
-        ));
-        if playing {
-            spans.push(Span::styled(
-                " ▶".to_string(),
-                Style::default().fg(palette.success),
-            ));
-        }
-        spans.push(Span::raw("  "));
-    }
-    if let Some(diagnostic) = diagnostic {
-        spans.push(Span::styled(
-            format!("{}  ", sanitize_text(diagnostic)),
-            Style::default().fg(palette.warning),
-        ));
-    }
-    spans.push(Span::styled(
-        "[/]: scrub  space: play  g/G: start/live  z: compact/boxed  ,: theme  f: follow  t: tab  Tab: focus  q: quit",
-        Style::default().fg(palette.muted),
-    ));
-    frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().fg(palette.text).bg(palette.app_bg)),
-        area,
-    );
+        let end = state
+            .finished_at
+            .as_deref()
+            .and_then(parse_timestamp_ms)
+            .unwrap_or_else(now_ms);
+        let start = parse_timestamp_ms(&state.started_at).unwrap_or(end);
+        format_duration((end - start).max(0))
+    });
+    let view = data.map(|(data, bounded_index, at_latest)| timeline::TimelineView {
+        status: data.state.status,
+        paused: data.state.paused == Some(true),
+        elapsed: elapsed.as_deref().unwrap_or("0ms"),
+        steps: data.state.steps.len(),
+        position: bounded_index,
+        at_latest,
+        live: data.live,
+        playing,
+        speed,
+        diagnostic,
+    });
+    timeline::render(frame, area, view, palette)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{graph_position_label, GraphNodeStyle, DEFAULT_NODE_STYLE};
+    use super::{
+        graph_position_label, trace_events_for_scope, GraphNodeStyle, StepRecord, TraceScope,
+        DEFAULT_NODE_STYLE,
+    };
+    use serde_json::json;
 
     #[test]
     fn bordered_nodes_are_the_default() {
@@ -1387,5 +1973,41 @@ mod tests {
         assert_eq!(graph_position_label(false, false), "(replay)");
         assert_eq!(graph_position_label(true, true), "(live)");
         assert_eq!(graph_position_label(true, false), "(latest)");
+    }
+
+    #[test]
+    fn replay_visible_trace_stops_before_future_attempts() {
+        let step: StepRecord = serde_json::from_value(json!({
+            "attemptId": "a1",
+            "nodeId": "plan",
+            "nodeType": "agent",
+            "outcome": "ok",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "finishedAt": "2026-01-01T00:00:01Z",
+            "prompt": null,
+            "output": null
+        }))
+        .unwrap();
+        let events = vec![
+            json!({"seq": 1, "type": "run_started"}),
+            json!({"seq": 2, "type": "node_started", "attemptId": "a1"}),
+            json!({"seq": 3, "type": "node_completed", "attemptId": "a1"}),
+            json!({"seq": 4, "type": "node_started", "attemptId": "a2"}),
+        ];
+        let visible = trace_events_for_scope(
+            &events,
+            std::slice::from_ref(&step),
+            Some(&step),
+            TraceScope::ReplayVisible,
+        );
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible.last().unwrap()["seq"], 3);
+        let selected = trace_events_for_scope(
+            &events,
+            std::slice::from_ref(&step),
+            Some(&step),
+            TraceScope::SelectedAttempt,
+        );
+        assert_eq!(selected.len(), 2);
     }
 }

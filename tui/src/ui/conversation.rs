@@ -54,13 +54,33 @@ fn entry_text(record: &Value) -> String {
                     "toolCall" | "tool_use" | "toolUse" => {
                         let name = part
                             .get("name")
-                            .or_else(|| part.pointer("/toolName"))
+                            .or_else(|| part.get("toolName"))
                             .and_then(Value::as_str)
                             .unwrap_or("tool");
-                        pieces.push(format!("[tool call: {name}]"));
+                        let arguments = part
+                            .get("arguments")
+                            .or_else(|| part.get("input"))
+                            .map(compact_json_preview)
+                            .filter(|value| !value.is_empty())
+                            .map(|value| format!(" {value}"))
+                            .unwrap_or_default();
+                        pieces.push(format!("[tool call: {name}]{arguments}"));
                     }
                     "toolResult" | "tool_result" => {
-                        pieces.push("[tool result]".to_string());
+                        let failed = part
+                            .get("isError")
+                            .or_else(|| part.get("is_error"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let status = if failed { "failed" } else { "completed" };
+                        let preview = part
+                            .get("content")
+                            .or_else(|| part.get("output"))
+                            .map(compact_json_preview)
+                            .filter(|value| !value.is_empty())
+                            .map(|value| format!(": {value}"))
+                            .unwrap_or_default();
+                        pieces.push(format!("[tool result: {status}]{preview}"));
                     }
                     _ => {}
                 }
@@ -68,6 +88,21 @@ fn entry_text(record: &Value) -> String {
             pieces.join(" ")
         }
         _ => serde_json::to_string(entry).unwrap_or_default(),
+    }
+}
+
+fn compact_json_preview(value: &Value) -> String {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    let sanitized = sanitize_text(&text);
+    let mut chars = sanitized.chars();
+    let preview: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
     }
 }
 

@@ -106,28 +106,28 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "                   · classify [agent]",
-        "           ┌─ continue ───┘ └─────────────┐",
-        "           │                   checkpoint │",
-        "           │                              │",
-        "           ▼                              ▼",
-        "· continue_lane [agent]    · checkpoint_lane [checkpoint]"
+        "                   · ▶ ◇2 classify [agent]",
+        "            ┌── continue ───┘ └──────────────┐",
+        "            │                     checkpoint │",
+        "            │                                │",
+        "            ▼                                ▼",
+        "· ■ continue_lane [agent]    · ■ checkpoint_lane [checkpoint]"
       ]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
       "lines": [
-        "                     ┌────────────────────┐",
-        "                     │ · classify [agent] │",
-        "                     └────────────────────┘",
-        "             ┌── continue ────┘ └─ checkpoint ──┐",
-        "             │                                  │",
-        "             │                                  │",
-        "             ▼                                  ▼",
-        "┌─────────────────────────┐    ┌────────────────────────────────┐",
-        "│ · continue_lane [agent] │    │ · checkpoint_lane [checkpoint] │",
-        "└─────────────────────────┘    └────────────────────────────────┘"
+        "                     ┌─────────────────────────┐",
+        "                     │ · ▶ ◇2 classify [agent] │",
+        "                     └─────────────────────────┘",
+        "              ┌─── continue ────┘ └─ checkpoint ───┐",
+        "              │                                    │",
+        "              │                                    │",
+        "              ▼                                    ▼",
+        "┌───────────────────────────┐    ┌──────────────────────────────────┐",
+        "│ · ■ continue_lane [agent] │    │ · ■ checkpoint_lane [checkpoint] │",
+        "└───────────────────────────┘    └──────────────────────────────────┘"
       ]
     }
   ]
