@@ -764,6 +764,9 @@ pub fn parse_color(input: &str) -> Option<Color> {
         _ => {}
     }
     if let Some(hex) = normalized.strip_prefix('#') {
+        if !hex.is_ascii() {
+            return None;
+        }
         return match hex.len() {
             3 => {
                 let mut chars = hex.chars();
@@ -862,6 +865,7 @@ mod tests {
         assert_eq!(parse_color("rgb(1, 2, 3)"), Some(Color::Rgb(1, 2, 3)));
         assert_eq!(parse_color("reset"), Some(Color::Reset));
         assert_eq!(parse_color("not-a-color"), None);
+        assert_eq!(parse_color("#aéaaa"), None);
     }
 
     #[test]
