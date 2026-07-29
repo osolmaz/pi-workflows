@@ -102,6 +102,10 @@ Server to client:
 | `artifact`     | `runId`, `path`, `content`   | artifact contents (UTF-8)                       |
 | `error`        | `message`, `runId?`          | request failed                                  |
 
+Artifact requests are answered from files inside the bundle only (paths and
+symlinks resolving elsewhere are refused) and are capped at 4 MiB of actual
+file size; anything else produces an `error`.
+
 Run listing summaries are the manifest plus `live` and
 `possiblyInterrupted`:
 

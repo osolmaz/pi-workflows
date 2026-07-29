@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 pub struct NdjsonTailer {
     path: PathBuf,
+    /// When set, the path must canonicalize inside this directory on every
+    /// poll: the file name comes from an untrusted manifest and could be a
+    /// symlink out of the bundle.
+    base: Option<PathBuf>,
     offset: u64,
     partial: Vec<u8>,
 }
@@ -16,15 +20,35 @@ impl NdjsonTailer {
     pub fn new(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
+            base: None,
             offset: 0,
             partial: Vec::new(),
+        }
+    }
+
+    /// A tailer that refuses to read once `path` resolves outside `base`.
+    pub fn contained(path: &Path, base: &Path) -> Self {
+        Self {
+            base: Some(base.to_path_buf()),
+            ..Self::new(path)
         }
     }
 
     /// Read complete new lines appended since the last poll and parse each
     /// as `T`. Unparsable lines are skipped.
     pub fn poll<T: serde::de::DeserializeOwned>(&mut self) -> std::io::Result<Vec<T>> {
-        let mut file = match std::fs::File::open(&self.path) {
+        let path = match &self.base {
+            Some(base) => {
+                // A missing file canonicalizes to None too; treat both the
+                // not-yet-written and the escaping case as "nothing to read".
+                match crate::bundle::reader::contained_path(base, &self.path) {
+                    Some(path) => path,
+                    None => return Ok(Vec::new()),
+                }
+            }
+            None => self.path.clone(),
+        };
+        let mut file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),

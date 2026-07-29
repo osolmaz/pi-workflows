@@ -75,10 +75,11 @@ impl RunEntry {
     fn open(dir: &Path) -> Result<Self> {
         let manifest = read_manifest(dir)?;
         let paths = BundlePaths::from_manifest(dir, &manifest);
-        let (state_raw, state) = parse_state(&std::fs::read_to_string(&paths.state)?)
+        let state_text = crate::bundle::reader::read_contained(dir, &paths.state)
+            .ok_or_else(|| anyhow::anyhow!("unreadable state in {}", dir.display()))?;
+        let (state_raw, state) = parse_state(&state_text)
             .ok_or_else(|| anyhow::anyhow!("unsupported state schema in {}", dir.display()))?;
-        let workflow: Value = std::fs::read_to_string(&paths.workflow)
-            .ok()
+        let workflow: Value = crate::bundle::reader::read_contained(dir, &paths.workflow)
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or(Value::Null);
         let snapshot: Option<DefinitionSnapshot> = serde_json::from_value(workflow.clone())
@@ -89,8 +90,10 @@ impl RunEntry {
         let last_growth = last_write_instant(&paths);
         let mut entry = Self {
             dir: dir.to_path_buf(),
-            trace_tailer: NdjsonTailer::new(&paths.trace),
-            session_tailer: paths.session_entries().map(|path| NdjsonTailer::new(&path)),
+            trace_tailer: NdjsonTailer::contained(&paths.trace, dir),
+            session_tailer: paths
+                .session_entries()
+                .map(|path| NdjsonTailer::contained(&path, dir)),
             manifest,
             workflow,
             state_raw,
@@ -151,7 +154,7 @@ impl RunEntry {
         }
         let paths = BundlePaths::from_manifest(&self.dir, &self.manifest);
         if let Some(path) = paths.session_binding() {
-            if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Some(raw) = crate::bundle::reader::read_contained(&self.dir, &path) {
                 self.session_binding = serde_json::from_str(&raw).ok();
             }
         }
@@ -159,7 +162,9 @@ impl RunEntry {
         // written (it is recorded in manifest.paths from the start), so the
         // tailer may need to be created late.
         if self.session_tailer.is_none() {
-            self.session_tailer = paths.session_entries().map(|path| NdjsonTailer::new(&path));
+            self.session_tailer = paths
+                .session_entries()
+                .map(|path| NdjsonTailer::contained(&path, &self.dir));
         }
     }
 
@@ -207,7 +212,7 @@ impl RunEntry {
         self.pending_events.extend(newly_polled);
 
         let paths = BundlePaths::from_manifest(&self.dir, &self.manifest);
-        if let Ok(raw) = std::fs::read_to_string(&paths.state) {
+        if let Some(raw) = crate::bundle::reader::read_contained(&self.dir, &paths.state) {
             if let Some((state_raw, state)) = parse_state(&raw) {
                 if state_raw != self.state_raw {
                     self.state = state;
