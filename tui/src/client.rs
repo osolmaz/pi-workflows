@@ -235,6 +235,12 @@ async fn run_connection(
             }
         }
     }
-    shared.lock().unwrap().connected = false;
+    // A clean close (server restart, network drop) must not leave a stale
+    // view looking current: record why updates stopped.
+    let mut shared = shared.lock().unwrap();
+    shared.connected = false;
+    if shared.error.is_none() {
+        shared.error = Some("connection closed".to_string());
+    }
     Ok(())
 }
