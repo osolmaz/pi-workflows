@@ -29,8 +29,18 @@ export {
 export { renderShellCommand, runShellAction } from "./shell.js";
 export { sanitizeText, stripAnsi } from "./text.js";
 export {
+  ARTIFACT_THRESHOLD_BYTES,
+  ArtifactWriter,
+  decodeValueWith,
+  encodeValue,
+  isArtifactValue,
+  resolveArtifacts,
+} from "./artifacts.js";
+export {
   DEFINITION_SNAPSHOT_SCHEMA,
   RUN_BUNDLE_SCHEMA,
+  RUN_STATE_SCHEMA,
+  SESSION_BINDING_SCHEMA,
   TRACE_EVENT_SCHEMA,
   WorkflowRunStore,
   createDefinitionSnapshot,
@@ -47,7 +57,10 @@ export type {
   AgentStepRequest,
   AgentStepSubmission,
   ActionNodeDefinition,
+  ArtifactRef,
+  ArtifactValue,
   CheckpointNodeDefinition,
+  ConversationRange,
   ComputeNodeDefinition,
   FunctionActionNodeDefinition,
   MaybePromise,
@@ -70,6 +83,8 @@ export type {
   WorkflowRunResult,
   WorkflowRunState,
   WorkflowRunStatus,
+  WorkflowSessionBinding,
+  WorkflowSessionEntryRecord,
   WorkflowStepRecord,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,

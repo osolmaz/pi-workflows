@@ -153,6 +153,34 @@ export type WorkflowDefinition = {
 
 export type WorkflowNodeOutcome = "ok" | "timed_out" | "failed" | "cancelled";
 
+/**
+ * Reference to a content-addressed file under the bundle's `artifacts/`
+ * directory. Large string leaves inside persisted values are replaced by
+ * `{ "$artifact": ArtifactRef }` at write time (see `docs/run-bundles.md`).
+ */
+export type ArtifactRef = {
+  /** Bundle-relative path, `artifacts/sha256-<64 hex>.txt`. */
+  path: string;
+  mediaType: string;
+  bytes: number;
+  /** Hex digest of the artifact bytes. */
+  sha256: string;
+};
+
+/** The sentinel wrapper that replaces an externalized value. */
+export type ArtifactValue = { $artifact: ArtifactRef };
+
+/**
+ * Explicit linkage from a workflow attempt to the Pi conversation slice it
+ * produced. Ids address entries in `session/entries.ndjson` by Pi entry id.
+ */
+export type ConversationRange = {
+  /** First Pi session entry id of the attempt. */
+  firstEntryId: string;
+  /** Last Pi session entry id of the attempt, inclusive. */
+  lastEntryId: string;
+};
+
 export type WorkflowNodeResult = {
   attemptId: string;
   nodeId: string;
@@ -182,10 +210,16 @@ export type WorkflowStepRecord = {
   outcome: WorkflowNodeOutcome;
   startedAt: string;
   finishedAt: string;
-  promptText: string | null;
+  /**
+   * Full prompt text for agent steps, `null` for other node types. In a
+   * persisted bundle a large prompt may be an `ArtifactValue`.
+   */
+  prompt: string | ArtifactValue | null;
   output: unknown;
   error?: string;
   action?: WorkflowActionReceipt;
+  /** For agent steps recorded inside a Pi conversation. */
+  conversation?: ConversationRange;
 };
 
 export type WorkflowRunStatus =
@@ -197,6 +231,13 @@ export type WorkflowRunStatus =
   | "cancelled";
 
 export type WorkflowRunState = {
+  schema: "pi-workflows.run-state.v1";
+  /**
+   * `seq` of the trace event this projection reflects. `trace.ndjson` is the
+   * source of truth; a state whose `traceSeq` is older than the trace tail is
+   * a stale projection.
+   */
+  traceSeq: number;
   runId: string;
   workflowName: string;
   runTitle?: string;
@@ -241,12 +282,41 @@ export type WorkflowDefinitionSnapshot = {
 export type WorkflowTraceEvent = {
   seq: number;
   at: string;
-  scope: "run" | "node" | "agent" | "action";
+  scope: "run" | "node" | "agent" | "action" | "session";
   type: string;
   runId: string;
   nodeId?: string;
   attemptId?: string;
   payload: Record<string, unknown>;
+};
+
+/** `session/binding.json`: written once when a run binds to a conversation. */
+export type WorkflowSessionBinding = {
+  schema: "pi-workflows.session-binding.v1";
+  runId: string;
+  /** Pi session UUID. */
+  piSessionId: string;
+  /**
+   * Absolute path of the Pi session file; provenance only, never read back.
+   * Absent for in-memory sessions.
+   */
+  piSessionFile?: string;
+  /** Working directory of the conversation. */
+  cwd: string;
+  boundAt: string;
+};
+
+/**
+ * One line of `session/entries.ndjson`: a verbatim Pi session entry recorded
+ * while the run was active. The inner entry shape is owned by Pi.
+ */
+export type WorkflowSessionEntryRecord = {
+  /** Starts at 1, increases by exactly 1 within the file. */
+  seq: number;
+  /** When the entry was recorded into the bundle. */
+  at: string;
+  /** Verbatim Pi session entry (has its own id/parentId/timestamp). */
+  entry: Record<string, unknown>;
 };
 
 export type WorkflowTraceEventDraft = Omit<WorkflowTraceEvent, "seq" | "at" | "runId">;
@@ -265,6 +335,10 @@ export type WorkflowRunManifest = {
     workflow: string;
     state: string;
     trace: string;
+    /** Bundle-relative session directory, present once a session is bound. */
+    session?: string;
+    /** Bundle-relative artifacts directory, present once a value was externalized. */
+    artifacts?: string;
   };
 };
 
@@ -294,6 +368,11 @@ export type AgentStepRequest = {
 
 export type AgentStepSubmission = {
   output: unknown;
+  /**
+   * The Pi conversation slice this step produced, when the executor records
+   * one. Persisted verbatim into the step record and terminal node event.
+   */
+  conversation?: ConversationRange;
 };
 
 /**
@@ -309,6 +388,12 @@ export type WorkflowEngineOptions = {
   executor: AgentStepExecutor;
   /** Root directory for run bundles. Defaults to `~/.pi/agent/workflows/runs`. */
   outputRoot?: string;
+  /**
+   * Shared run store. Pass the same instance used by a session recorder so
+   * trace sequence numbers stay single-writer. Defaults to a new store on
+   * `outputRoot`.
+   */
+  store?: import("./store.js").WorkflowRunStore;
   /** Default per-node timeout. Defaults to 15 minutes. */
   defaultNodeTimeoutMs?: number;
   /** Guard against unbounded graph loops. Defaults to 100 executed steps. */

@@ -2,6 +2,7 @@ import type {
   AgentStepExecutor,
   AgentStepRequest,
   AgentStepSubmission,
+  ConversationRange,
 } from "../workflows/types.js";
 
 export type SubmissionResult =
@@ -14,11 +15,23 @@ export type PromptDelivery = {
   streaming: boolean;
 };
 
+/**
+ * Bracketing hooks for conversation linkage: a mark is taken when the step
+ * prompt is first delivered, and the recorded entry range since that mark is
+ * attached to the accepted submission.
+ */
+export type ConversationHooks = {
+  mark: () => number;
+  rangeSince: (mark: number) => ConversationRange | undefined;
+};
+
 export type ConversationStepExecutorOptions = {
   /** Deliver a prompt into the pi conversation. */
   sendPrompt: (delivery: PromptDelivery) => void;
   /** Reminders sent when the agent settles without submitting. Default 2. */
   maxNudges?: number;
+  /** Conversation linkage hooks, wired to the session recorder. */
+  conversation?: ConversationHooks;
 };
 
 type PendingStep = {
@@ -26,6 +39,8 @@ type PendingStep = {
   resolve: (submission: AgentStepSubmission) => void;
   reject: (error: unknown) => void;
   nudgesSent: number;
+  /** Conversation mark taken when the prompt was first delivered. */
+  mark: number | null;
   cleanup: () => void;
   /** Resolves when this step stops being the pending step. */
   cleared: Promise<void>;
@@ -44,6 +59,7 @@ const DEFAULT_MAX_NUDGES = 2;
 export class ConversationStepExecutor implements AgentStepExecutor {
   private readonly sendPrompt: (delivery: PromptDelivery) => void;
   private readonly maxNudges: number;
+  private readonly conversation: ConversationHooks | undefined;
   private pending: PendingStep | null = null;
   private streaming = false;
   private heldByUser = false;
@@ -51,6 +67,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   constructor(options: ConversationStepExecutorOptions) {
     this.sendPrompt = options.sendPrompt;
     this.maxNudges = options.maxNudges ?? DEFAULT_MAX_NUDGES;
+    this.conversation = options.conversation;
   }
 
   /** Track agent streaming state (wire to agent_start / agent_settled). */
@@ -115,6 +132,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         resolve,
         reject,
         nudgesSent: 0,
+        mark: this.conversation?.mark() ?? null,
         cleanup: () => signal.removeEventListener("abort", onAbort),
         cleared,
         markCleared,
@@ -185,7 +203,12 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       };
     }
     this.clearPending();
-    pending.resolve({ output: result.value });
+    const conversation =
+      pending.mark !== null ? this.conversation?.rangeSince(pending.mark) : undefined;
+    pending.resolve({
+      output: result.value,
+      ...(conversation !== undefined ? { conversation } : {}),
+    });
     return {
       accepted: true,
       message: [

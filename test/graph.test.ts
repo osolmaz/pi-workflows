@@ -60,7 +60,7 @@ function makeStep(
     outcome,
     startedAt: startedAt.toISOString(),
     finishedAt: new Date(startedAt.getTime() + 8_000).toISOString(),
-    promptText: null,
+    prompt: null,
     output: { step: index },
   };
 }
@@ -71,6 +71,8 @@ function makeBundle(
   overrides: Partial<WorkflowRunState> = {},
 ): LoadedRunBundle {
   const state: WorkflowRunState = {
+    schema: "pi-workflows.run-state.v1",
+    traceSeq: 1,
     runId: "run-graph",
     workflowName: snapshot.name,
     startedAt: steps[0]?.startedAt ?? new Date().toISOString(),

@@ -1,10 +1,27 @@
 import { ansi, fitWidth, sanitizeText } from "../render/ansi.js";
 import { formatDuration, runElapsedMs } from "../render/format.js";
 import { renderGraphLines } from "../render/graph-render.js";
+import { decodeValueWith } from "../workflows/artifacts.js";
 import type { LoadedRunBundle } from "../workflows/store.js";
 import type { WorkflowRunStatus, WorkflowStepRecord } from "../workflows/types.js";
 
 export { formatDuration, runElapsedMs };
+
+/**
+ * Replace `$artifact` references with a compact placeholder for display. The
+ * terminal viewer shows summaries; full artifact contents are for replay
+ * tooling.
+ */
+function withArtifactPlaceholders(value: unknown): unknown {
+  return decodeValueWith(value, (ref) => `«artifact ${formatBytes(ref.bytes)} ${ref.path}»`);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes}B`;
+  }
+  return `${(bytes / 1024).toFixed(1)}KB`;
+}
 
 export type ViewportSize = {
   width: number;
@@ -24,10 +41,11 @@ export function statusLabel(status: WorkflowRunStatus): string {
   return STATUS_COLORS[status](status);
 }
 
-function previewValue(value: unknown, maxLength: number): string {
-  if (value === undefined) {
+function previewValue(rawValue: unknown, maxLength: number): string {
+  if (rawValue === undefined) {
     return "";
   }
+  const value = withArtifactPlaceholders(rawValue);
   const text = typeof value === "string" ? value : JSON.stringify(value);
   // Model-controlled values must not carry escape sequences into the terminal.
   const singleLine = sanitizeText(text ?? "")
@@ -120,7 +138,7 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
 /** Pretty-printed JSON body of the selected step for the inspector pane. */
 function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
   const lines: string[] = [];
-  const body = step.error !== undefined ? step.error : step.output;
+  const body = step.error !== undefined ? step.error : withArtifactPlaceholders(step.output);
   const rendered =
     typeof body === "string" && step.error !== undefined ? body : JSON.stringify(body, null, 2);
   for (const raw of (rendered ?? "null").split("\n")) {
