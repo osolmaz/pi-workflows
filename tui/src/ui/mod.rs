@@ -317,7 +317,10 @@ pub fn run_remote(url: &str, cli_theme: Option<&str>) -> Result<()> {
 fn run_app(provider: Provider, show_sidebar: bool, cli_theme: Option<&str>) -> Result<()> {
     let resolved_theme = theme::resolve(cli_theme);
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+    if let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture) {
+        ratatui::restore();
+        return Err(error.into());
+    }
     let result = event_loop(&mut terminal, provider, show_sidebar, resolved_theme);
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -1437,8 +1440,9 @@ fn step_duration(step: &StepRecord) -> String {
 }
 
 /// Small artifacts are inlined into previews when reading the filesystem
-/// directly; larger ones (and remote mode) show placeholders.
+/// directly; expanded details use the live protocol's larger bounded limit.
 const PREVIEW_ARTIFACT_MAX_BYTES: u64 = 64 * 1024;
+const DETAIL_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
     if let Some(artifact) = crate::bundle::types::as_artifact_ref(value) {
@@ -1577,7 +1581,7 @@ fn push_value_lines(
 ) {
     let decoded = match bundle_dir {
         Some(dir) => {
-            crate::bundle::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
+            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
         }
         None => resolve_remote_artifacts(value, remote_artifacts),
     };
