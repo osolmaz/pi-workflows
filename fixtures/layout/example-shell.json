@@ -1,0 +1,93 @@
+{
+  "name": "example-shell",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "shell",
+    "startAt": "echo_text",
+    "nodes": {
+      "echo_text": {
+        "nodeType": "action",
+        "actionExecution": "shell"
+      },
+      "finalize": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "echo_text",
+        "to": "finalize"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "echo_text"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "finalize"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "echo_text->finalize#0.0",
+        "from": "echo_text",
+        "to": "finalize",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "echo_text->finalize#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "echo_text": 0,
+      "finalize": 1
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-shell",
+    "workflowName": "shell",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": ["· echo_text [action]", "          │", "          ▼", "· finalize [compute]"]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "┌──────────────────────┐",
+        "│ · echo_text [action] │",
+        "└──────────────────────┘",
+        "            │",
+        "            ▼",
+        "┌──────────────────────┐",
+        "│ · finalize [compute] │",
+        "└──────────────────────┘"
+      ]
+    }
+  ]
+}

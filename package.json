@@ -42,6 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:coverage",
+    "fixtures": "node scripts/export-layout-fixtures.mjs",
     "format": "oxfmt --write",
     "format:check": "oxfmt --check",
     "lint": "oxlint --deny-warnings src test examples",

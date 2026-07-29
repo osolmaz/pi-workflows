@@ -1,0 +1,253 @@
+{
+  "name": "example-elegant-solution",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "elegant-solution",
+    "startAt": "propose",
+    "nodes": {
+      "propose": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"solution\": \"the proposed solution\", \"rationale\": \"why it is the most elegant long-term choice\" }"
+      },
+      "holy_grail": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"holyGrail\": \"the ideal end state\" }"
+      },
+      "compare": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"route\": \"y\" | \"n\", \"reason\": \"short justification\" }"
+      },
+      "implement": {
+        "nodeType": "agent",
+        "timeoutMs": 3600000,
+        "statusDetail": "implementing",
+        "expectedOutput": "{ \"implemented\": true, \"summary\": \"what was built\", \"tested\": \"what was verified\", \"untested\": \"what still needs verification\" }"
+      },
+      "reconcile": {
+        "nodeType": "agent",
+        "expectedOutput": "{ \"gap\": \"how they differ\", \"path\": \"what to build now and how it evolves\" }"
+      },
+      "review": {
+        "nodeType": "checkpoint",
+        "summary": "human decides between proposal and holy grail path"
+      }
+    },
+    "edges": [
+      {
+        "from": "propose",
+        "to": "holy_grail"
+      },
+      {
+        "from": "holy_grail",
+        "to": "compare"
+      },
+      {
+        "from": "compare",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "y": "implement",
+            "n": "reconcile"
+          }
+        }
+      },
+      {
+        "from": "reconcile",
+        "to": "review"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "propose"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "holy_grail"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "compare"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "reconcile"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "compare->implement#2.0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "review"
+        },
+        {
+          "kind": "node",
+          "nodeId": "implement"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "propose->holy_grail#0.0",
+        "from": "propose",
+        "to": "holy_grail",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "holy_grail->compare#1.0",
+        "from": "holy_grail",
+        "to": "compare",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "compare->implement#2.0",
+        "from": "compare",
+        "to": "implement",
+        "label": "y",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "compare->reconcile#2.1",
+        "from": "compare",
+        "to": "reconcile",
+        "label": "n",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "reconcile->review#3.0",
+        "from": "reconcile",
+        "to": "review",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "propose->holy_grail#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "holy_grail->compare#1.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "compare->implement#2.0",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 1,
+        "label": "y"
+      },
+      {
+        "edgeId": "compare->implement#2.0",
+        "rank": 3,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "compare->reconcile#2.1",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "n"
+      },
+      {
+        "edgeId": "reconcile->review#3.0",
+        "rank": 3,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "propose": 0,
+      "holy_grail": 1,
+      "compare": 2,
+      "implement": 4,
+      "reconcile": 3,
+      "review": 4
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-elegant-solution",
+    "workflowName": "elegant-solution",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "              · propose [agent]",
+        "                      │",
+        "                      ▼",
+        "            · holy_grail [agent]",
+        "                      │",
+        "                      ▼",
+        "              · compare [agent]",
+        "                    │ └─── y ────┐",
+        "                    │ n          │",
+        "                    │            │",
+        "                    ▼            │",
+        "          · reconcile [agent]    │",
+        "          ┌────────┘             │",
+        "          │                      │",
+        "          ▼                      ▼",
+        "· review [checkpoint]    · implement [agent]"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "                ┌───────────────────┐",
+        "                │ · propose [agent] │",
+        "                └───────────────────┘",
+        "                          │",
+        "                          ▼",
+        "              ┌──────────────────────┐",
+        "              │ · holy_grail [agent] │",
+        "              └──────────────────────┘",
+        "                          │",
+        "                          ▼",
+        "                ┌───────────────────┐",
+        "                │ · compare [agent] │",
+        "                └───────────────────┘",
+        "                        │ └──── y ─────┐",
+        "                        │ n            │",
+        "                        │              │",
+        "                        ▼              │",
+        "            ┌─────────────────────┐    │",
+        "            │ · reconcile [agent] │    │",
+        "            └─────────────────────┘    │",
+        "            ┌──────────┘               │",
+        "            │                          │",
+        "            ▼                          ▼",
+        "┌───────────────────────┐    ┌─────────────────────┐",
+        "│ · review [checkpoint] │    │ · implement [agent] │",
+        "└───────────────────────┘    └─────────────────────┘"
+      ]
+    }
+  ]
+}

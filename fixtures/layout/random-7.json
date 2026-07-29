@@ -1,0 +1,92 @@
+{
+  "name": "random-7",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "random-7",
+    "startAt": "n0",
+    "nodes": {
+      "n0": {
+        "nodeType": "action"
+      },
+      "n1": {
+        "nodeType": "action"
+      }
+    },
+    "edges": [
+      {
+        "from": "n0",
+        "to": "n1"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "n0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n1"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "from": "n0",
+        "to": "n1",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "n0": 0,
+      "n1": 1
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-7",
+    "workflowName": "random-7",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "completed",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": ["· n0 [action]", "      │", "      ▼", "· n1 [action]"]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "┌───────────────┐",
+        "│ · n0 [action] │",
+        "└───────────────┘",
+        "        │",
+        "        ▼",
+        "┌───────────────┐",
+        "│ · n1 [action] │",
+        "└───────────────┘"
+      ]
+    }
+  ]
+}

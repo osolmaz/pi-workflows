@@ -1,0 +1,335 @@
+{
+  "name": "random-15",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "random-15",
+    "startAt": "n0",
+    "nodes": {
+      "n0": {
+        "nodeType": "agent"
+      },
+      "n1": {
+        "nodeType": "action"
+      },
+      "n2": {
+        "nodeType": "agent"
+      },
+      "n3": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "n0",
+        "to": "n1"
+      },
+      {
+        "from": "n0",
+        "to": "n2"
+      },
+      {
+        "from": "n1",
+        "to": "n3"
+      },
+      {
+        "from": "n3",
+        "to": "n0"
+      },
+      {
+        "from": "n1",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "y": "n3",
+            "n": "n1"
+          }
+        }
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "n0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n1"
+        },
+        {
+          "kind": "virtual",
+          "edgeId": "n0->n2#1.0"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "n3"
+        },
+        {
+          "kind": "node",
+          "nodeId": "n2"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "from": "n0",
+        "to": "n1",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n0->n2#1.0",
+        "from": "n0",
+        "to": "n2",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n1->n3#2.0",
+        "from": "n1",
+        "to": "n3",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n3->n0#3.0",
+        "from": "n3",
+        "to": "n0",
+        "isBackEdge": true
+      },
+      {
+        "edgeId": "n1->n3#4.0",
+        "from": "n1",
+        "to": "n3",
+        "label": "y",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "n1->n1#4.1",
+        "from": "n1",
+        "to": "n1",
+        "label": "n",
+        "isBackEdge": true
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "n0->n1#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n0->n2#1.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 1
+      },
+      {
+        "edgeId": "n0->n2#1.0",
+        "rank": 1,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "n1->n3#2.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "n1->n3#4.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "y"
+      }
+    ],
+    "rankOfNode": {
+      "n0": 0,
+      "n1": 1,
+      "n2": 2,
+      "n3": 2
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 11,
+    "runId": "run-15",
+    "workflowName": "random-15",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "completed",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": [
+      {
+        "attemptId": "a0",
+        "nodeId": "n0",
+        "nodeType": "agent",
+        "outcome": "ok",
+        "startedAt": "2025-07-19T04:40:00.000Z",
+        "finishedAt": "2025-07-19T04:40:05.000Z",
+        "prompt": null,
+        "output": {
+          "i": 0
+        }
+      },
+      {
+        "attemptId": "a1",
+        "nodeId": "n1",
+        "nodeType": "agent",
+        "outcome": "ok",
+        "startedAt": "2025-07-19T04:40:10.000Z",
+        "finishedAt": "2025-07-19T04:40:15.000Z",
+        "prompt": null,
+        "output": {
+          "i": 1
+        }
+      },
+      {
+        "attemptId": "a2",
+        "nodeId": "n3",
+        "nodeType": "agent",
+        "outcome": "ok",
+        "startedAt": "2025-07-19T04:40:20.000Z",
+        "finishedAt": "2025-07-19T04:40:25.000Z",
+        "prompt": null,
+        "output": {
+          "i": 2
+        }
+      },
+      {
+        "attemptId": "a3",
+        "nodeId": "n0",
+        "nodeType": "agent",
+        "outcome": "failed",
+        "startedAt": "2025-07-19T04:40:30.000Z",
+        "finishedAt": "2025-07-19T04:40:35.000Z",
+        "prompt": null,
+        "output": {
+          "i": 3
+        }
+      },
+      {
+        "attemptId": "a4",
+        "nodeId": "n1",
+        "nodeType": "agent",
+        "outcome": "ok",
+        "startedAt": "2025-07-19T04:40:40.000Z",
+        "finishedAt": "2025-07-19T04:40:45.000Z",
+        "prompt": null,
+        "output": {
+          "i": 4
+        }
+      }
+    ]
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "                 ┌──────────────┐",
+        "                 ▼              │",
+        "         · n0 [agent]           │",
+        "             │ └───────┐        │",
+        "             │         │        │",
+        "             │┌────────┼────────┼─┐ n",
+        "             ▼▼        │        │ │",
+        "      · n1 [action]    │        │ │",
+        "          │ │ └────────┼────────┼─┘",
+        "     ┌────┘ │          │        │",
+        "     │ ┌────┘          │        │",
+        "     │ │ y             │        │",
+        "     │ │               │        │",
+        "     ▼ ▼               ▼        │",
+        "· n3 [compute]    · n2 [agent]  │",
+        "         └──────────────────────┘"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "                     ┌──────────────────┐",
+        "                     ▼                  │",
+        "           ┌──────────────┐             │",
+        "           │ · n0 [agent] │             │",
+        "           └──────────────┘             │",
+        "                 │ └─────────┐          │",
+        "                 │           │          │",
+        "                 │┌──────────┼──────────┼─┐ n",
+        "                 ▼▼          │          │ │",
+        "        ┌───────────────┐    │          │ │",
+        "        │ · n1 [action] │    │          │ │",
+        "        └───────────────┘    │          │ │",
+        "              │ │ └──────────┼──────────┼─┘",
+        "       ┌──────┘ │            │          │",
+        "       │ ┌─ y ──┘            │          │",
+        "       │ │                   │          │",
+        "       │ │                   │          │",
+        "       ▼ ▼                   ▼          │",
+        "┌────────────────┐    ┌──────────────┐  │",
+        "│ · n3 [compute] │    │ · n2 [agent] │  │",
+        "└────────────────┘    └──────────────┘  │",
+        "           └────────────────────────────┘"
+      ]
+    },
+    {
+      "stepIndex": 4,
+      "nodeStyle": "line",
+      "lines": [
+        "                   ┌─────────────────┐",
+        "                   ▼                 │",
+        "       ✗ n0 [agent] 5.0s ×2          │",
+        "               │ └───────────┐       │",
+        "               │             │       │",
+        "               │┌────────────┼───────┼─┐ n",
+        "               ▼▼            │       │ │",
+        "    ✓ n1 [action] 5.0s ×2    │       │ │",
+        "            │ │ └────────────┼───────┼─┘",
+        "       ┌────┘ │              │       │",
+        "       │ ┌────┘              │       │",
+        "       │ │ y                 │       │",
+        "       │ │                   │       │",
+        "       ▼ ▼                   ▼       │",
+        "✓ n3 [compute] 5.0s    · n2 [agent]  │",
+        "           └─────────────────────────┘"
+      ]
+    },
+    {
+      "stepIndex": 4,
+      "nodeStyle": "box",
+      "lines": [
+        "                       ┌─────────────────────┐",
+        "                       ▼                     │",
+        "         ┌──────────────────────┐            │",
+        "         │ ✗ n0 [agent] 5.0s ×2 │            │",
+        "         └──────────────────────┘            │",
+        "                   │ └─────────────┐         │",
+        "                   │               │         │",
+        "                   │┌──────────────┼─────────┼─┐ n",
+        "                   ▼▼              │         │ │",
+        "      ┌───────────────────────┐    │         │ │",
+        "      │ ✓ n1 [action] 5.0s ×2 │    │         │ │",
+        "      └───────────────────────┘    │         │ │",
+        "                │ │ └──────────────┼─────────┼─┘",
+        "         ┌──────┘ │                │         │",
+        "         │ ┌─ y ──┘                │         │",
+        "         │ │                       │         │",
+        "         │ │                       │         │",
+        "         ▼ ▼                       ▼         │",
+        "┌─────────────────────┐    ┌──────────────┐  │",
+        "│ ✓ n3 [compute] 5.0s │    │ · n2 [agent] │  │",
+        "└─────────────────────┘    └──────────────┘  │",
+        "             └───────────────────────────────┘"
+      ]
+    }
+  ]
+}
