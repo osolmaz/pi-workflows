@@ -281,6 +281,24 @@ fn server_round_trip_with_live_updates() {
     }
     assert_eq!(client.error(), None);
 
+    std::fs::create_dir_all(dir.join("artifacts")).unwrap();
+    std::fs::write(dir.join("artifacts/output.txt"), "remote artifact body").unwrap();
+    client.request_artifact("run-live", "artifacts/output.txt");
+    while client
+        .artifact_content("run-live", "artifacts/output.txt")
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "artifact response timed out");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        client
+            .artifact_content("run-live", "artifacts/output.txt")
+            .unwrap()
+            .unwrap(),
+        "remote artifact body"
+    );
+
     // A handshake carrying an Origin header (i.e. a browser) must be
     // rejected: the protocol is unauthenticated.
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -296,6 +314,80 @@ fn server_round_trip_with_live_updates() {
         tokio_tungstenite::connect_async(request).await
     });
     assert!(rejected.is_err(), "browser-origin handshake must fail");
+}
+
+#[test]
+fn remote_client_reconnects_and_restores_selected_run() {
+    fn start_server(
+        addr: std::net::SocketAddr,
+        runs_dir: std::path::PathBuf,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                ready_tx.send(()).unwrap();
+                tokio::select! {
+                    _ = piw::server::serve_on(listener, runs_dir) => {}
+                    _ = tokio::task::spawn_blocking(move || stop_rx.recv()) => {}
+                }
+            });
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        (stop_tx, worker)
+    }
+
+    let runs = tempfile::tempdir().unwrap();
+    write_bundle(runs.path(), "run-reconnect", "running");
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let (stop, worker) = start_server(addr, runs.path().to_path_buf());
+    let mut client = piw::client::RemoteRuns::connect(&format!("ws://{addr}/ws")).unwrap();
+    client.watch("run-reconnect");
+    let first_deadline = Instant::now() + Duration::from_secs(10);
+    while client.view("run-reconnect").is_none() {
+        assert!(
+            Instant::now() < first_deadline,
+            "initial snapshot timed out"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    stop.send(()).unwrap();
+    worker.join().unwrap();
+    let disconnect_deadline = Instant::now() + Duration::from_secs(5);
+    while client.connected() {
+        assert!(
+            Instant::now() < disconnect_deadline,
+            "client did not notice disconnect"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(client.status_label(), "reconnecting");
+
+    let (stop, worker) = start_server(addr, runs.path().to_path_buf());
+    let reconnect_deadline = Instant::now() + Duration::from_secs(15);
+    while !client.connected() {
+        assert!(
+            Instant::now() < reconnect_deadline,
+            "client did not reconnect"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    while client.view("run-reconnect").is_none() {
+        assert!(
+            Instant::now() < reconnect_deadline,
+            "selected run was not restored"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    stop.send(()).unwrap();
+    worker.join().unwrap();
 }
 
 #[test]

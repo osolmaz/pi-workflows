@@ -679,11 +679,32 @@ pub fn resolve(cli_theme: Option<&str>) -> ResolvedTheme {
             ThemeConfig::default()
         }
     };
-    let requested = cli_theme
+    let explicit = cli_theme
         .map(str::to_owned)
-        .or_else(|| std::env::var("PIW_THEME").ok())
-        .or_else(|| config.name.clone())
-        .unwrap_or_else(|| "catppuccin".to_string());
+        .or_else(|| std::env::var("PIW_THEME").ok());
+    let requested = explicit.unwrap_or_else(|| {
+        if config.auto_switch {
+            match detected_appearance() {
+                Some(HostAppearance::Dark) => config
+                    .dark_name
+                    .clone()
+                    .unwrap_or_else(|| "catppuccin".to_string()),
+                Some(HostAppearance::Light) => config
+                    .light_name
+                    .clone()
+                    .unwrap_or_else(|| "catppuccin-latte".to_string()),
+                None => config
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "catppuccin".to_string()),
+            }
+        } else {
+            config
+                .name
+                .clone()
+                .unwrap_or_else(|| "catppuccin".to_string())
+        }
+    });
     let (palette, mut palette_diagnostics) = palette_with_config(&requested, &config);
     diagnostics.append(&mut palette_diagnostics);
     ResolvedTheme {
@@ -775,6 +796,33 @@ pub fn parse_color(input: &str) -> Option<Color> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostAppearance {
+    Dark,
+    Light,
+}
+
+fn detected_appearance() -> Option<HostAppearance> {
+    if let Ok(value) = std::env::var("PIW_THEME_APPEARANCE") {
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "dark" => Some(HostAppearance::Dark),
+            "light" => Some(HostAppearance::Light),
+            _ => None,
+        };
+    }
+    let background = std::env::var("COLORFGBG")
+        .ok()?
+        .split(';')
+        .next_back()?
+        .parse::<u8>()
+        .ok()?;
+    Some(if matches!(background, 7 | 15) {
+        HostAppearance::Light
+    } else {
+        HostAppearance::Dark
+    })
 }
 
 fn normalize_name(name: &str) -> String {

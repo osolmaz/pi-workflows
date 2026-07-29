@@ -73,20 +73,25 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": ["· echo_text [action]", "          │", "          ▼", "· finalize [compute]"]
+      "lines": [
+        "· ▶ echo_text [action]",
+        "           │",
+        "           ▼",
+        "· ■ finalize [compute]"
+      ]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
       "lines": [
-        "┌──────────────────────┐",
-        "│ · echo_text [action] │",
-        "└──────────────────────┘",
-        "            │",
-        "            ▼",
-        "┌──────────────────────┐",
-        "│ · finalize [compute] │",
-        "└──────────────────────┘"
+        "┌────────────────────────┐",
+        "│ · ▶ echo_text [action] │",
+        "└────────────────────────┘",
+        "             │",
+        "             ▼",
+        "┌────────────────────────┐",
+        "│ · ■ finalize [compute] │",
+        "└────────────────────────┘"
       ]
     }
   ]

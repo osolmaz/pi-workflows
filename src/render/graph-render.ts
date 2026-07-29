@@ -148,7 +148,20 @@ function renderCellText(
   const nodeType = view.snapshot?.nodes[nodeId]?.nodeType ?? "?";
   const attempt = latestVisibleAttempt(visibleSteps, nodeId);
   const attempts = visibleSteps.filter((step) => step.nodeId === nodeId).length;
-  const parts = [`${nodeId} [${nodeType}]`];
+  const outgoing =
+    view.snapshot?.edges
+      .filter((edge) => edge.from === nodeId)
+      .reduce(
+        (count, edge) =>
+          count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
+        0,
+      ) ?? 0;
+  const semantics: string[] = [];
+  if (view.snapshot?.startAt === nodeId) semantics.push("▶");
+  if (outgoing > 1) semantics.push(`◇${outgoing}`);
+  if (outgoing === 0) semantics.push("■");
+  semantics.push(`${nodeId} [${nodeType}]`);
+  const parts = [semantics.join(" ")];
   if (atLatestStep && state.currentNode === nodeId) {
     const startedAt = state.currentNodeStartedAt
       ? Date.parse(state.currentNodeStartedAt)

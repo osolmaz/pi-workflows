@@ -4,7 +4,9 @@
 //! loop edges route through a right-hand gutter. Output is pinned to the
 //! TypeScript renderer through the golden fixtures.
 
-use crate::bundle::types::{DefinitionSnapshot, NodeOutcome, RunState, RunStatus, StepRecord};
+use crate::bundle::types::{
+    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, StepRecord,
+};
 use crate::canvas::{CanvasStyle, CharCanvas};
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::layout::{layout_graph, GraphCell, GraphEdge, GraphLayout, GraphSegment};
@@ -148,9 +150,34 @@ fn render_cell_text(
         .iter()
         .filter(|step| step.node_id == *node_id)
         .count();
+    let outgoing = view.snapshot.map_or(0, |snapshot| {
+        snapshot
+            .edges
+            .iter()
+            .filter_map(|edge| match edge {
+                EdgeDef::Simple { from, .. } if from == node_id => Some(1),
+                EdgeDef::Switch { from, switch } if from == node_id => Some(switch.cases.len()),
+                _ => None,
+            })
+            .sum::<usize>()
+    });
+    let mut semantics = Vec::new();
+    if view
+        .snapshot
+        .is_some_and(|snapshot| snapshot.start_at == *node_id)
+    {
+        semantics.push("▶".to_string());
+    }
+    if outgoing > 1 {
+        semantics.push(format!("◇{outgoing}"));
+    }
+    if outgoing == 0 {
+        semantics.push("■".to_string());
+    }
     // Node ids and types come from the bundle's workflow definition; scrub
     // them like statusDetail so untrusted bundles can't emit escapes.
-    let mut parts = vec![sanitize_text(&format!("{node_id} [{node_type}]"))];
+    semantics.push(sanitize_text(&format!("{node_id} [{node_type}]")));
+    let mut parts = vec![semantics.join(" ")];
     if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         let started_at = state
             .current_node_started_at
@@ -222,18 +249,30 @@ fn taken_transitions(visible_steps: &[StepRecord]) -> HashSet<String> {
         .collect()
 }
 
-/// Render the graph pane onto a fresh canvas. `selected_step_index` scrubs
-/// the replay position; `at_latest_step` says whether the caller is showing
-/// the live view. It cannot be inferred from the index: a detached position
-/// on the final recorded step must not render `currentNode` and the
-/// in-flight edge from the mutable live state.
-pub fn render_graph_canvas(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeBounds {
+    pub node_id: String,
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+}
+
+pub struct RenderedGraph {
+    pub canvas: CharCanvas,
+    pub node_bounds: Vec<NodeBounds>,
+}
+
+/// Render the graph pane and retain node bounds for camera targeting and hit
+/// testing. `selected_step_index` scrubs the replay position;
+/// `at_latest_step` says whether the caller is showing the live view.
+pub fn render_graph(
     view: &GraphView,
     selected_step_index: i64,
     at_latest_step: bool,
     now_ms: i64,
     node_style: GraphNodeStyle,
-) -> Option<CharCanvas> {
+) -> Option<RenderedGraph> {
     let snapshot = view.snapshot?;
     let layout = layout_graph(snapshot);
     let steps = &view.state.steps;
@@ -315,6 +354,25 @@ pub fn render_graph_canvas(
             + lanes.above(rank_index + 1).len() as i64;
     }
 
+    let node_bounds = placed
+        .iter()
+        .flat_map(|rank| {
+            rank.cells
+                .iter()
+                .zip(&rank.centers)
+                .filter_map(|(cell, center)| match &cell.cell {
+                    GraphCell::Node { node_id } => Some(NodeBounds {
+                        node_id: node_id.clone(),
+                        x: center - cell.width / 2,
+                        y: rank.y,
+                        width: cell.width,
+                        height: cell_height(node_style),
+                    }),
+                    GraphCell::Virtual { .. } => None,
+                })
+        })
+        .collect();
+
     let mut canvas = CharCanvas::new();
     draw_nodes(&mut canvas, &placed, &layout, &transitions, node_style);
     let labels = draw_segments(
@@ -342,7 +400,28 @@ pub fn render_graph_canvas(
     for label in labels {
         draw_segment_label(&mut canvas, &label);
     }
-    Some(canvas)
+    Some(RenderedGraph {
+        canvas,
+        node_bounds,
+    })
+}
+
+/// Render only the graph canvas for callers that do not need hit regions.
+pub fn render_graph_canvas(
+    view: &GraphView,
+    selected_step_index: i64,
+    at_latest_step: bool,
+    now_ms: i64,
+    node_style: GraphNodeStyle,
+) -> Option<CharCanvas> {
+    render_graph(
+        view,
+        selected_step_index,
+        at_latest_step,
+        now_ms,
+        node_style,
+    )
+    .map(|rendered| rendered.canvas)
 }
 
 /// Render the graph to plain text lines (parity with the TS renderer with
