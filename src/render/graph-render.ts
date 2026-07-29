@@ -152,8 +152,7 @@ function renderCellText(
     view.snapshot?.edges
       .filter((edge) => edge.from === nodeId)
       .reduce(
-        (count, edge) =>
-          count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
+        (count, edge) => count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
         0,
       ) ?? 0;
   const semantics: string[] = [];
