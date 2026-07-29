@@ -100,12 +100,36 @@ async fn send(
     Ok(())
 }
 
+// The error type (a full HTTP response) is dictated by tungstenite's
+// handshake callback signature.
+#[allow(clippy::result_large_err)]
+fn reject_browser_origins(
+    request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+    response: tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
+    if request.headers().contains_key("origin") {
+        let mut rejection = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(
+            Some("browser origins are not allowed".to_string()),
+        );
+        *rejection.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
+        return Err(rejection);
+    }
+    Ok(response)
+}
+
 async fn handle_connection(
     stream: TcpStream,
     source: Arc<Mutex<RunSource>>,
     mut updates_rx: broadcast::Receiver<Update>,
 ) -> Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await?;
+    // Browsers always send an Origin header; native clients do not. The
+    // protocol is unauthenticated, so a web page must never be able to read
+    // run bundles by opening a WebSocket to localhost — reject any
+    // browser-originated handshake outright.
+    let ws = tokio_tungstenite::accept_hdr_async(stream, reject_browser_origins).await?;
     let (mut sink, mut reads) = ws.split();
     send(
         &mut sink,
@@ -142,14 +166,19 @@ async fn handle_connection(
                         send(&mut sink, &ServerMessage::Runs { runs }).await?;
                     }
                     ClientMessage::WatchRun { run_id } => {
-                        let source = source.lock().await;
-                        match source.get(&run_id) {
-                            Some(entry) => {
-                                watched.insert(run_id.clone(), entry.revision);
+                        // Snapshot under the lock, send after releasing it: a
+                        // slow client must not stall the refresh loop.
+                        let snapshot = {
+                            let source = source.lock().await;
+                            source.get(&run_id).map(|entry| (entry.revision, entry.view()))
+                        };
+                        match snapshot {
+                            Some((revision, view)) => {
+                                watched.insert(run_id.clone(), revision);
                                 send(&mut sink, &ServerMessage::RunSnapshot {
                                     run_id,
-                                    revision: entry.revision,
-                                    view: entry.view(),
+                                    revision,
+                                    view,
                                 }).await?;
                             }
                             None => {

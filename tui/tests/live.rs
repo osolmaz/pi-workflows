@@ -60,6 +60,35 @@ fn patches_reproduce_the_view_exactly() {
 }
 
 #[test]
+fn single_bundle_mode_survives_refresh() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-solo", "running");
+    let mut source = RunSource::single(&dir).unwrap();
+    assert!(source.get("run-solo").is_some());
+    // Refreshing must not scan the bundle directory as a runs root and
+    // drop the only run.
+    source.refresh_all();
+    assert!(source.get("run-solo").is_some());
+}
+
+#[test]
+fn manifest_paths_escaping_the_bundle_are_rejected() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-evil", "running");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    manifest["paths"]["trace"] = json!("../../etc/passwd");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert!(piw::bundle::reader::read_manifest(&dir).is_err());
+    let source = RunSource::new(runs.path());
+    assert!(source.get("run-evil").is_none(), "bundle must be skipped");
+}
+
+#[test]
 fn source_discovers_new_runs() {
     let runs = tempfile::tempdir().unwrap();
     write_bundle(runs.path(), "run-a", "completed");
@@ -118,4 +147,20 @@ fn server_round_trip_with_live_updates() {
         std::thread::sleep(Duration::from_millis(25));
     }
     assert_eq!(client.error(), None);
+
+    // A handshake carrying an Origin header (i.e. a browser) must be
+    // rejected: the protocol is unauthenticated.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let rejected = runtime.block_on(async {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", "http://evil.example".parse().unwrap());
+        tokio_tungstenite::connect_async(request).await
+    });
+    assert!(rejected.is_err(), "browser-origin handshake must fail");
 }

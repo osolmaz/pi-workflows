@@ -52,6 +52,17 @@ pub struct LoadedBundle {
     pub session_entries: Vec<SessionEntryRecord>,
 }
 
+/// True when a manifest-relative path stays inside the bundle directory:
+/// relative, and made of plain name components only (no `..`, no roots).
+fn is_contained(relative: &str) -> bool {
+    let path = Path::new(relative);
+    !relative.is_empty()
+        && path.is_relative()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
     let path = dir.join("manifest.json");
     let raw =
@@ -64,6 +75,22 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest> {
         manifest.schema,
         path.display()
     );
+    // Manifest paths are attacker-adjacent input (bundles can be copied
+    // around); a path escaping the bundle directory must never be read.
+    let entries = [
+        Some(&manifest.paths.workflow),
+        Some(&manifest.paths.state),
+        Some(&manifest.paths.trace),
+        manifest.paths.session.as_ref(),
+        manifest.paths.artifacts.as_ref(),
+    ];
+    for entry in entries.into_iter().flatten() {
+        anyhow::ensure!(
+            is_contained(entry),
+            "manifest path {entry:?} escapes the bundle in {}",
+            path.display()
+        );
+    }
     Ok(manifest)
 }
 

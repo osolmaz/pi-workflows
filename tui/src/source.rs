@@ -215,6 +215,10 @@ impl RunEntry {
 pub struct RunSource {
     runs_dir: PathBuf,
     runs: BTreeMap<String, RunEntry>,
+    /// Single-bundle mode: `runs_dir` is the bundle itself, so directory
+    /// scanning must not run (it would treat the bundle as an empty listing
+    /// and drop the run).
+    single: bool,
 }
 
 /// One refresh round: patches per changed run, and whether the listing
@@ -229,6 +233,7 @@ impl RunSource {
         let mut source = Self {
             runs_dir: runs_dir.to_path_buf(),
             runs: BTreeMap::new(),
+            single: false,
         };
         source.scan();
         source
@@ -243,6 +248,7 @@ impl RunSource {
         Ok(Self {
             runs_dir: bundle_dir.to_path_buf(),
             runs,
+            single: true,
         })
     }
 
@@ -277,8 +283,11 @@ impl RunSource {
     }
 
     /// Discover new bundles and drop deleted ones. Returns whether the run
-    /// listing membership changed.
+    /// listing membership changed. No-op in single-bundle mode.
     pub fn scan(&mut self) -> bool {
+        if self.single {
+            return false;
+        }
         let found = list_bundles(&self.runs_dir);
         let mut changed = false;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();

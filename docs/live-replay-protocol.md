@@ -9,7 +9,9 @@ protocol below is the network form of that state. Protocol id:
 The server is a reader like any other: it only consumes run bundles (see
 [run-bundles.md](run-bundles.md)) and never writes them. It binds to
 `127.0.0.1` by default; the protocol has no authentication and must not be
-exposed beyond localhost as bundles contain private data.
+exposed beyond localhost as bundles contain private data. Handshakes that
+carry an `Origin` header are rejected: browsers always send one, and a web
+page must not be able to read bundles by opening a WebSocket to localhost.
 
 ## Transport and framing
 
