@@ -4,6 +4,8 @@ import type { WorkflowNodeContext, WorkflowRunState } from "../src/workflows/typ
 
 function makeContext(): WorkflowNodeContext {
   const state = {
+    schema: "pi-workflows.run-state.v1",
+    traceSeq: 0,
     runId: "r",
     workflowName: "w",
     startedAt: "",

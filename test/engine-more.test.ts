@@ -138,6 +138,8 @@ describe("render status colors", () => {
         paths: { workflow: "workflow.json", state: "state.json", trace: "trace.ndjson" },
       },
       state: {
+        schema: "pi-workflows.run-state.v1" as const,
+        traceSeq: 1,
         runId: `run-${index}`,
         workflowName: "demo",
         runTitle: `title ${index}`,

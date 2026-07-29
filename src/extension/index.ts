@@ -1,3 +1,4 @@
+import path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -7,7 +8,7 @@ import { Type } from "typebox";
 import { WorkflowEngine } from "../workflows/engine.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
-import { createDefinitionSnapshot } from "../workflows/store.js";
+import { WorkflowRunStore, createDefinitionSnapshot } from "../workflows/store.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -15,6 +16,7 @@ import type {
   WorkflowRunState,
 } from "../workflows/types.js";
 import { ConversationStepExecutor } from "./executor.js";
+import { SessionRecorder } from "./recorder.js";
 import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
@@ -37,6 +39,7 @@ type ActiveRun = {
   workflowName: string;
   engine: WorkflowEngine;
   executor: ConversationStepExecutor;
+  recorder: SessionRecorder | null;
   snapshot: WorkflowDefinitionSnapshot;
   presentationPrompt: WorkflowDefinition["presentationPrompt"];
   generation: number;
@@ -335,12 +338,31 @@ export default function piWorkflows(pi: ExtensionAPI) {
       sendPrompt: ({ prompt, streaming }) => {
         pi.sendUserMessage(prompt, streaming ? { deliverAs: "steer" } : undefined);
       },
+      conversation: {
+        mark: () => run.recorder?.mark() ?? 0,
+        rangeSince: (mark) => run.recorder?.rangeSince(mark),
+      },
     });
+    // The store is shared between the engine and the session recorder so the
+    // trace sequence stays single-writer (see docs/run-bundles.md).
+    const store = new WorkflowRunStore();
     const engine = new WorkflowEngine({
       executor,
+      store,
       onEvent: (_event, state: WorkflowRunState) => {
         if (run.runId === null) {
           run.runId = state.runId;
+          const recorder = new SessionRecorder(
+            store,
+            path.join(engine.outputRoot, state.runId),
+            state.runId,
+          );
+          run.recorder = recorder;
+          recorder.bind(ctx).catch(() => {
+            // Binding is best-effort: a session without UI access or an
+            // ephemeral context must not fail the run.
+            run.recorder = null;
+          });
         }
         run.lastState = state;
         updateWidget(ctx, state, snapshot);
@@ -351,6 +373,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       workflowName: workflow.name,
       engine,
       executor,
+      recorder: null,
       snapshot,
       presentationPrompt: workflow.presentationPrompt,
       generation,
@@ -488,12 +511,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
       attempt: Type.String({ description: "The attempt id from the workflow step contract" }),
       output: Type.Unknown({ description: "The step output, matching the expected output shape" }),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!activeRun) {
         throw new Error(
           "No workflow is running. Do not call the workflow tool outside a workflow.",
         );
       }
+      // Flush the conversation into the bundle before accepting, so the
+      // attempt's recorded range includes the assistant message that carries
+      // this submission.
+      await activeRun.recorder?.record(ctx).catch(() => undefined);
       const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
       if (!result.accepted) {
         throw new Error(result.message);
@@ -552,11 +579,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
     );
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("message_end", (_event, ctx) => {
+    // Record the conversation as it grows; entries are copied verbatim into
+    // the run bundle so replay never needs Pi's global session store.
+    void activeRun?.recorder?.record(ctx).catch(() => undefined);
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
     if (!activeRun) {
       presentationPending = null;
       return;
     }
+    void activeRun.recorder?.record(ctx).catch(() => undefined);
     activeRun.executor.setStreaming(false);
     activeRun.executor.handleAgentSettled();
   });

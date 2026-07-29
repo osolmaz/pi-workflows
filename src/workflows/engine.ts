@@ -4,12 +4,13 @@ import { CancelledError, errorMessage, isAbortLikeError, TimeoutError } from "./
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
-import { WorkflowRunStore, createRunId } from "./store.js";
+import { RUN_STATE_SCHEMA, WorkflowRunStore, createRunId } from "./store.js";
 import type {
   AgentNodeDefinition,
   AgentStepExecutor,
   ActionNodeDefinition,
   CheckpointNodeDefinition,
+  ConversationRange,
   ShellActionNodeDefinition,
   ShellActionResult,
   WorkflowActionReceipt,
@@ -35,6 +36,7 @@ type NodeExecution = {
   output: unknown;
   promptText: string | null;
   action?: WorkflowActionReceipt;
+  conversation?: ConversationRange;
 };
 
 /**
@@ -71,7 +73,7 @@ export class WorkflowEngine {
 
   constructor(options: WorkflowEngineOptions) {
     this.executor = options.executor;
-    this.store = new WorkflowRunStore(options.outputRoot);
+    this.store = options.store ?? new WorkflowRunStore(options.outputRoot);
     this.defaultNodeTimeoutMs = options.defaultNodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.onEvent = options.onEvent;
@@ -130,6 +132,7 @@ export class WorkflowEngine {
       payload: {
         workflowName: workflow.name,
         ...(state.runTitle ? { runTitle: state.runTitle } : {}),
+        input: state.input,
       },
     });
 
@@ -178,6 +181,8 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunState> {
     const now = new Date().toISOString();
     return {
+      schema: RUN_STATE_SCHEMA,
+      traceSeq: 0,
       runId: createRunId(workflow.name),
       workflowName: workflow.name,
       ...(await this.resolveTitleBounded(workflow, input)),
@@ -218,6 +223,8 @@ export class WorkflowEngine {
 
       const attempt = await this.executeNode(workflow, state, runDir, currentNodeId, node);
       this.recordAttempt(state, attempt);
+      // The terminal node event carries the output, receipt, and conversation
+      // linkage so the trace alone is sufficient to reconstruct the run.
       await this.persist(runDir, state, {
         scope: "node",
         type: attempt.result.outcome === "ok" ? "node_finished" : "node_failed",
@@ -226,7 +233,12 @@ export class WorkflowEngine {
         payload: {
           outcome: attempt.result.outcome,
           durationMs: attempt.result.durationMs,
+          ...(attempt.result.outcome === "ok" ? { output: attempt.result.output ?? null } : {}),
           ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
+          ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
+          ...(attempt.execution?.conversation !== undefined
+            ? { conversation: attempt.execution.conversation }
+            : {}),
         },
       });
 
@@ -316,11 +328,14 @@ export class WorkflowEngine {
       outcome: attempt.result.outcome,
       startedAt: attempt.result.startedAt,
       finishedAt: attempt.result.finishedAt,
-      promptText: attempt.execution?.promptText ?? null,
+      prompt: attempt.execution?.promptText ?? null,
       // `undefined` would drop the required field during JSON serialization.
       output: attempt.result.output ?? null,
       ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
       ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
+      ...(attempt.execution?.conversation !== undefined
+        ? { conversation: attempt.execution.conversation }
+        : {}),
     };
     state.steps.push(step);
     delete state.currentNode;
@@ -571,7 +586,11 @@ export class WorkflowEngine {
       },
       signal,
     );
-    return { output: submission.output, promptText: prompt };
+    return {
+      output: submission.output,
+      promptText: prompt,
+      ...(submission.conversation !== undefined ? { conversation: submission.conversation } : {}),
+    };
   }
 
   private async acceptSubmission(
@@ -651,6 +670,7 @@ export class WorkflowEngine {
         status,
         ...(fields.error !== undefined ? { error: fields.error } : {}),
         ...(fields.waitingOn !== undefined ? { waitingOn: fields.waitingOn } : {}),
+        ...(fields.finalOutput !== undefined ? { finalOutput: fields.finalOutput } : {}),
       },
     });
   }

@@ -40,6 +40,34 @@ describe("ConversationStepExecutor", () => {
     expect(executor.pendingStepId).toBeNull();
   });
 
+  it("attaches the recorded conversation range to accepted submissions", async () => {
+    const sent: PromptDelivery[] = [];
+    const recorded: string[] = [];
+    const executor = new ConversationStepExecutor({
+      sendPrompt: (delivery) => {
+        sent.push(delivery);
+        // The prompt entry and the assistant reply land after the mark.
+        recorded.push("p1", "a1");
+      },
+      conversation: {
+        mark: () => recorded.length,
+        rangeSince: (mark) =>
+          recorded.length > mark
+            ? {
+                firstEntryId: recorded[mark] as string,
+                lastEntryId: recorded.at(-1) as string,
+              }
+            : undefined,
+      },
+    });
+    const stepPromise = executor.runAgentStep(makeRequest(), new AbortController().signal);
+    await executor.submit("step1", "a1", { x: 1 });
+    await expect(stepPromise).resolves.toEqual({
+      output: { x: 1 },
+      conversation: { firstEntryId: "p1", lastEntryId: "a1" },
+    });
+  });
+
   it("marks deliveries as streaming when the agent is mid-run", async () => {
     const { executor, sent } = makeExecutor();
     executor.setStreaming(true);

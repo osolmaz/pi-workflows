@@ -26,6 +26,8 @@ const workflow = defineWorkflow({
 
 function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedRunBundle {
   const state: WorkflowRunState = {
+    schema: "pi-workflows.run-state.v1",
+    traceSeq: 1,
     runId: "run-1",
     workflowName: "demo",
     startedAt: "2026-07-19T00:00:00.000Z",
@@ -115,7 +117,7 @@ describe("renderRunDetailLines", () => {
           outcome: "ok",
           startedAt: "2026-07-19T00:00:00.000Z",
           finishedAt: "2026-07-19T00:00:01.000Z",
-          promptText: null,
+          prompt: null,
           output: { value: 1 },
         },
       ],
@@ -164,7 +166,7 @@ describe("renderRunDetailLines", () => {
         outcome: "ok" as const,
         startedAt: "2026-07-19T00:00:00.000Z",
         finishedAt: "2026-07-19T00:00:01.000Z",
-        promptText: null,
+        prompt: null,
         output: { value: 1 },
       },
       {
@@ -174,7 +176,7 @@ describe("renderRunDetailLines", () => {
         outcome: "failed" as const,
         startedAt: "2026-07-19T00:00:01.000Z",
         finishedAt: "2026-07-19T00:00:02.000Z",
-        promptText: null,
+        prompt: null,
         output: null,
         error: "two exploded",
         action: {

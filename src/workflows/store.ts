@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { ArtifactWriter, encodeValue } from "./artifacts.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -9,18 +10,25 @@ import type {
   WorkflowNodeSnapshot,
   WorkflowRunManifest,
   WorkflowRunState,
+  WorkflowSessionBinding,
+  WorkflowSessionEntryRecord,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
 } from "./types.js";
 
 export const RUN_BUNDLE_SCHEMA = "pi-workflows.run-bundle.v1" as const;
+export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
 export const TRACE_EVENT_SCHEMA = "pi-workflows.trace-event.v1" as const;
 export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" as const;
+export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const;
 
 const MANIFEST_PATH = "manifest.json";
 const WORKFLOW_SNAPSHOT_PATH = "workflow.json";
 const STATE_PATH = "state.json";
 const TRACE_PATH = "trace.ndjson";
+const SESSION_DIR = "session";
+const SESSION_BINDING_PATH = `${SESSION_DIR}/binding.json`;
+const SESSION_ENTRIES_PATH = `${SESSION_DIR}/entries.ndjson`;
 
 /** Runs directory: `$PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`. */
 export function workflowRunsBaseDir(homeDir: string = os.homedir()): string {
@@ -44,14 +52,24 @@ export function createRunId(workflowName: string, now: Date = new Date()): strin
   return `${stamp}-${slug || "workflow"}-${randomUUID().slice(0, 8)}`;
 }
 
+type RunBundleContext = {
+  traceSeq: number;
+  sessionSeq: number;
+  sessionBound: boolean;
+  artifacts: ArtifactWriter;
+};
+
 /**
- * Persists run bundles. A bundle directory contains `manifest.json`,
- * `workflow.json` (definition snapshot), `state.json` (full run projection,
- * atomically replaced), and `trace.ndjson` (append-only event log).
+ * Persists run bundles (see docs/run-bundles.md). `trace.ndjson` is the
+ * append-only source of truth; every transition appends the trace event
+ * first, then atomically replaces `state.json` (carrying `traceSeq`) and
+ * `manifest.json`. Large string leaves in persisted values are externalized
+ * into content-addressed `artifacts/`. Bundles are private: directories are
+ * 0700 and files 0600.
  */
 export class WorkflowRunStore {
   readonly outputRoot: string;
-  private readonly traceSeqByRun = new Map<string, number>();
+  private readonly contexts = new Map<string, RunBundleContext>();
   private readonly appendChainByPath = new Map<string, Promise<void>>();
 
   constructor(outputRoot: string = workflowRunsBaseDir()) {
@@ -62,62 +80,131 @@ export class WorkflowRunStore {
     return path.join(this.outputRoot, runId);
   }
 
+  private contextFor(runDir: string): RunBundleContext {
+    let context = this.contexts.get(runDir);
+    if (!context) {
+      context = {
+        traceSeq: 0,
+        sessionSeq: 0,
+        sessionBound: false,
+        artifacts: new ArtifactWriter(runDir),
+      };
+      this.contexts.set(runDir, context);
+    }
+    return context;
+  }
+
   async initializeRunBundle(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
   ): Promise<string> {
     const runDir = this.runDirFor(state.runId);
-    await fs.mkdir(runDir, { recursive: true });
-    this.traceSeqByRun.set(runDir, 0);
+    await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+    this.contexts.set(runDir, {
+      traceSeq: 0,
+      sessionSeq: 0,
+      sessionBound: false,
+      artifacts: new ArtifactWriter(runDir),
+    });
 
     await writeJsonAtomic(
       path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
       createDefinitionSnapshot(workflow),
     );
-    await writeJsonAtomic(path.join(runDir, MANIFEST_PATH), createManifest(state));
-    await writeJsonAtomic(path.join(runDir, STATE_PATH), state);
     await this.appendJsonLine(path.join(runDir, TRACE_PATH), null);
+    await this.writeProjections(runDir, state);
 
     return runDir;
   }
 
+  /**
+   * Persist one transition: append the trace event, then rewrite the
+   * projections reflecting it.
+   */
   async writeSnapshot(
     runDir: string,
     state: WorkflowRunState,
     event: WorkflowTraceEventDraft,
   ): Promise<WorkflowTraceEvent> {
+    const traceEvent = await this.appendTraceEvent(runDir, state.runId, event);
+    state.traceSeq = traceEvent.seq;
     state.updatedAt = new Date().toISOString();
-    await writeJsonAtomic(path.join(runDir, STATE_PATH), state);
-    await writeJsonAtomic(path.join(runDir, MANIFEST_PATH), createManifest(state));
-    return await this.appendTrace(runDir, state, event);
+    await this.writeProjections(runDir, state);
+    return traceEvent;
   }
 
-  async appendTrace(
+  /**
+   * Bind the run to a Pi conversation: write `session/binding.json` once and
+   * append a `session_bound` trace event. Projections catch up on the next
+   * snapshot.
+   */
+  async writeSessionBinding(runDir: string, binding: WorkflowSessionBinding): Promise<void> {
+    const context = this.contextFor(runDir);
+    if (context.sessionBound) {
+      return;
+    }
+    context.sessionBound = true;
+    await fs.mkdir(path.join(runDir, SESSION_DIR), { recursive: true, mode: 0o700 });
+    await writeJsonAtomic(path.join(runDir, SESSION_BINDING_PATH), binding);
+    await this.appendTraceEvent(runDir, binding.runId, {
+      scope: "session",
+      type: "session_bound",
+      payload: { piSessionId: binding.piSessionId },
+    });
+  }
+
+  /** Append one verbatim Pi session entry to `session/entries.ndjson`. */
+  async appendSessionEntry(runDir: string, entry: Record<string, unknown>): Promise<number> {
+    const context = this.contextFor(runDir);
+    context.sessionSeq += 1;
+    const record: WorkflowSessionEntryRecord = {
+      seq: context.sessionSeq,
+      at: new Date().toISOString(),
+      entry,
+    };
+    await this.appendJsonLine(path.join(runDir, SESSION_ENTRIES_PATH), record);
+    return record.seq;
+  }
+
+  private async appendTraceEvent(
     runDir: string,
-    state: WorkflowRunState,
+    runId: string,
     event: WorkflowTraceEventDraft,
   ): Promise<WorkflowTraceEvent> {
+    const context = this.contextFor(runDir);
+    context.traceSeq += 1;
     const traceEvent: WorkflowTraceEvent = {
-      seq: this.nextTraceSeq(runDir),
+      seq: context.traceSeq,
       at: new Date().toISOString(),
-      runId: state.runId,
+      runId,
       ...event,
+      payload: (await encodeValue(event.payload, context.artifacts)) as Record<string, unknown>,
     };
     await this.appendJsonLine(path.join(runDir, TRACE_PATH), traceEvent);
     return traceEvent;
   }
 
-  private nextTraceSeq(runDir: string): number {
-    const next = (this.traceSeqByRun.get(runDir) ?? 0) + 1;
-    this.traceSeqByRun.set(runDir, next);
-    return next;
+  private async writeProjections(runDir: string, state: WorkflowRunState): Promise<void> {
+    const context = this.contextFor(runDir);
+    const encoded = await encodeRunState(state, context.artifacts);
+    await writeJsonAtomic(path.join(runDir, STATE_PATH), encoded);
+    await writeJsonAtomic(
+      path.join(runDir, MANIFEST_PATH),
+      createManifest(state, {
+        session: context.sessionBound,
+        artifacts: context.artifacts.hasArtifacts,
+      }),
+    );
   }
 
   private async appendJsonLine(filePath: string, value: unknown): Promise<void> {
     const prior = this.appendChainByPath.get(filePath) ?? Promise.resolve();
     const nextWrite = prior.then(async () => {
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      await fs.appendFile(filePath, value === null ? "" : `${JSON.stringify(value)}\n`, "utf8");
+      await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+      await fs.appendFile(filePath, value === null ? "" : `${JSON.stringify(value)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
     });
     const tracked = nextWrite.finally(() => {
       if (this.appendChainByPath.get(filePath) === tracked) {
@@ -127,6 +214,53 @@ export class WorkflowRunStore {
     this.appendChainByPath.set(filePath, tracked);
     await tracked;
   }
+}
+
+/**
+ * Encode the externalizable value positions of the state document. The
+ * in-memory state always holds raw values; the persisted copy may carry
+ * `$artifact` references instead of large strings.
+ */
+async function encodeRunState(
+  state: WorkflowRunState,
+  artifacts: ArtifactWriter,
+): Promise<WorkflowRunState> {
+  const results = Object.fromEntries(
+    await Promise.all(
+      Object.entries(state.results).map(async ([nodeId, result]) => [
+        nodeId,
+        "output" in result
+          ? { ...result, output: await encodeValue(result.output, artifacts) }
+          : result,
+      ]),
+    ),
+  ) as WorkflowRunState["results"];
+  return {
+    ...state,
+    input: await encodeValue(state.input, artifacts),
+    outputs: Object.fromEntries(
+      await Promise.all(
+        Object.entries(state.outputs).map(async ([nodeId, output]) => [
+          nodeId,
+          await encodeValue(output, artifacts),
+        ]),
+      ),
+    ),
+    results,
+    steps: await Promise.all(
+      state.steps.map(async (step) => ({
+        ...step,
+        prompt: (await encodeValue(
+          step.prompt,
+          artifacts,
+        )) as WorkflowRunState["steps"][number]["prompt"],
+        output: await encodeValue(step.output, artifacts),
+      })),
+    ),
+    ...(state.finalOutput !== undefined
+      ? { finalOutput: await encodeValue(state.finalOutput, artifacts) }
+      : {}),
+  };
 }
 
 export type LoadedRunBundle = {
@@ -139,14 +273,34 @@ export type LoadedRunBundle = {
 /** Read a run bundle from disk. Returns null when the bundle is unreadable. */
 export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | null> {
   const manifest = await readJsonFile<WorkflowRunManifest>(path.join(runDir, MANIFEST_PATH));
-  const state = await readJsonFile<WorkflowRunState>(path.join(runDir, STATE_PATH));
-  if (!manifest || !state || manifest.schema !== RUN_BUNDLE_SCHEMA) {
+  if (!manifest || manifest.schema !== RUN_BUNDLE_SCHEMA) {
+    return null;
+  }
+  const state = await readJsonFile<WorkflowRunState>(
+    resolveBundlePath(runDir, manifest.paths.state, STATE_PATH),
+  );
+  if (!state || state.schema !== RUN_STATE_SCHEMA) {
     return null;
   }
   const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
-    path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
+    resolveBundlePath(runDir, manifest.paths.workflow, WORKFLOW_SNAPSHOT_PATH),
   );
   return { runDir, manifest, state, snapshot };
+}
+
+/**
+ * Resolve a manifest-relative path, rejecting anything that escapes the
+ * bundle directory.
+ */
+function resolveBundlePath(runDir: string, relative: string, fallback: string): string {
+  const candidate = path.resolve(runDir, relative || fallback);
+  if (
+    candidate !== path.resolve(runDir) &&
+    !candidate.startsWith(path.resolve(runDir) + path.sep)
+  ) {
+    return path.join(runDir, fallback);
+  }
+  return candidate;
 }
 
 /** List run bundles under `outputRoot`, most recently started first. */
@@ -177,7 +331,10 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-function createManifest(state: WorkflowRunState): WorkflowRunManifest {
+function createManifest(
+  state: WorkflowRunState,
+  present: { session: boolean; artifacts: boolean },
+): WorkflowRunManifest {
   return {
     schema: RUN_BUNDLE_SCHEMA,
     runId: state.runId,
@@ -192,6 +349,8 @@ function createManifest(state: WorkflowRunState): WorkflowRunManifest {
       workflow: WORKFLOW_SNAPSHOT_PATH,
       state: STATE_PATH,
       trace: TRACE_PATH,
+      ...(present.session ? { session: SESSION_DIR } : {}),
+      ...(present.artifacts ? { artifacts: "artifacts" } : {}),
     },
   };
 }
@@ -228,7 +387,10 @@ function snapshotNode(node: WorkflowNodeDefinition): WorkflowNodeSnapshot {
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
   const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await fs.rename(tempPath, filePath);
 }

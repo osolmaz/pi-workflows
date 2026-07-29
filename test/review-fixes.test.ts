@@ -541,7 +541,7 @@ describe("failure metadata retention", () => {
     const executor = new ScriptedExecutor().respond("ask", { error: "executor gave up" });
     const { state } = await (await makeEngine({ executor })).run(workflow, {});
     expect(state.status).toBe("failed");
-    expect(state.steps.at(-1)?.promptText).toContain("Please answer");
+    expect(state.steps.at(-1)?.prompt).toContain("Please answer");
   });
 });
 

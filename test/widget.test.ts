@@ -38,6 +38,8 @@ function makeResult(nodeId: string, outcome: WorkflowNodeResult["outcome"]): Wor
 
 function makeState(overrides: Partial<WorkflowRunState> = {}): WorkflowRunState {
   return {
+    schema: "pi-workflows.run-state.v1",
+    traceSeq: 1,
     runId: "r1",
     workflowName: "demo",
     startedAt: "2026-01-01T00:00:00.000Z",
@@ -90,7 +92,7 @@ describe("buildWidgetLines", () => {
           outcome: "ok",
           startedAt: "2026-01-01T00:00:01.000Z",
           finishedAt: "2026-01-01T00:00:01.000Z",
-          promptText: null,
+          prompt: null,
           output: 1,
         },
       ],
