@@ -110,6 +110,48 @@ fn trace_events_wait_for_the_state_projection() {
 }
 
 #[test]
+fn terminal_transition_waits_for_the_projection() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = write_bundle(runs.path(), "run-race", "running");
+    let mut source = RunSource::new(runs.path());
+
+    // A refresh can observe the new trace tail and the terminal manifest
+    // while still holding the old state.json (the reader raced the writer).
+    // The run must stay live so the final projection is not lost.
+    append_trace(
+        &dir,
+        &json!({
+            "seq": 2, "at": "2026-01-01T00:00:02.000Z", "scope": "run",
+            "type": "run_completed", "runId": "run-race", "payload": {},
+        }),
+    );
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    manifest["status"] = json!("completed");
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    source.refresh_all();
+    let entry = source.get("run-race").unwrap();
+    assert!(entry.live, "must stay live until the state catches up");
+    assert_eq!(entry.view()["events"].as_array().unwrap().len(), 1);
+
+    // The state projection lands: the run settles with everything present.
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_string(&state_value("run-race", "completed", 2, vec![])).unwrap(),
+    )
+    .unwrap();
+    source.refresh_all();
+    let entry = source.get("run-race").unwrap();
+    assert!(!entry.live);
+    assert_eq!(entry.view()["events"].as_array().unwrap().len(), 2);
+    assert_eq!(entry.view()["state"]["status"], json!("completed"));
+}
+
+#[test]
 fn terminal_bundles_are_not_re_read() {
     let runs = tempfile::tempdir().unwrap();
     let dir = write_bundle(runs.path(), "run-done", "completed");

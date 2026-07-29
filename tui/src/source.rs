@@ -111,11 +111,21 @@ impl RunEntry {
         if let Some(tailer) = entry.session_tailer.as_mut() {
             entry.session_entries = tailer.poll().unwrap_or_default();
         }
-        entry.live = !entry.manifest.status.is_terminal();
+        entry.live = !entry.settled();
         entry.possibly_interrupted = entry.live
             && entry.state.status == crate::bundle::types::RunStatus::Running
             && entry.last_growth.elapsed() >= INTERRUPTED_AFTER;
         Ok(entry)
+    }
+
+    /// A bundle is settled (immutable, safe to stop watching) only when the
+    /// terminal status has propagated through every document we track: a
+    /// terminal manifest alone can race a refresh that still holds the old
+    /// state or an undrained trace tail.
+    fn settled(&self) -> bool {
+        self.manifest.status.is_terminal()
+            && self.state.status.is_terminal()
+            && self.pending_events.is_empty()
     }
 
     /// Take the pending trace events whose `seq` the state projection has
@@ -229,28 +239,31 @@ impl RunEntry {
 
         let had_binding = self.session_binding.is_some();
         self.read_session_binding();
+        // Tail entries before deciding what to publish: a binding first
+        // observed together with existing entries must not go out empty.
+        let new_entries: Vec<Value> = self
+            .session_tailer
+            .as_mut()
+            .map(|tailer| tailer.poll().unwrap_or_default())
+            .unwrap_or_default();
+        let session_grew = !new_entries.is_empty();
+        self.session_entries.extend(new_entries.clone());
         if !had_binding && self.session_binding.is_some() {
             patch.push(PatchOp::Replace {
                 path: "/session".into(),
                 value: self.session_value(),
             });
-        } else if let Some(tailer) = self.session_tailer.as_mut() {
-            let new_entries: Vec<Value> = tailer.poll().unwrap_or_default();
-            if !new_entries.is_empty() {
-                self.session_entries.extend(new_entries.clone());
-                if self.session_binding.is_some() {
-                    patch.push(PatchOp::Append {
-                        path: "/session/entries".into(),
-                        value: new_entries,
-                    });
-                }
-            }
+        } else if session_grew && self.session_binding.is_some() {
+            patch.push(PatchOp::Append {
+                path: "/session/entries".into(),
+                value: new_entries,
+            });
         }
 
-        if !patch.is_empty() || trace_grew {
+        if !patch.is_empty() || trace_grew || session_grew {
             self.last_growth = Instant::now();
         }
-        let live = !self.manifest.status.is_terminal();
+        let live = !self.settled();
         if live != self.live {
             self.live = live;
             patch.push(PatchOp::Replace {
