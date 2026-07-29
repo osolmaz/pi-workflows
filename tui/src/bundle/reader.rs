@@ -215,7 +215,20 @@ pub fn resolve_artifacts(value: &Value, bundle_dir: &Path, max_bytes: u64) -> Va
                 };
             }
             if let Some(inner) = crate::bundle::types::as_escaped(value) {
-                return resolve_artifacts(inner, bundle_dir, max_bytes);
+                // The unwrapped object is user data that merely looks like a
+                // sentinel: decode its children, but do not re-test the
+                // object itself (mirrors the TypeScript decodeValueWith).
+                return match inner.as_object() {
+                    Some(object) => Value::Object(
+                        object
+                            .iter()
+                            .map(|(key, value)| {
+                                (key.clone(), resolve_artifacts(value, bundle_dir, max_bytes))
+                            })
+                            .collect(),
+                    ),
+                    None => inner.clone(),
+                };
             }
             let object = value.as_object().unwrap();
             Value::Object(
@@ -257,7 +270,16 @@ pub fn with_artifact_placeholders(value: &Value) -> Value {
                 return Value::String(artifact_placeholder(&reference.path, reference.bytes));
             }
             if let Some(inner) = crate::bundle::types::as_escaped(value) {
-                return with_artifact_placeholders(inner);
+                // See resolve_artifacts: children only, no sentinel re-test.
+                return match inner.as_object() {
+                    Some(object) => Value::Object(
+                        object
+                            .iter()
+                            .map(|(key, value)| (key.clone(), with_artifact_placeholders(value)))
+                            .collect(),
+                    ),
+                    None => inner.clone(),
+                };
             }
             let object = value.as_object().unwrap();
             Value::Object(
