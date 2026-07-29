@@ -252,7 +252,6 @@ export type WorkflowRunState = {
   steps: WorkflowStepRecord[];
   currentNode?: string;
   currentAttemptId?: string;
-  currentNodeType?: WorkflowNodeDefinition["nodeType"];
   currentNodeStartedAt?: string;
   statusDetail?: string;
   /** True while the run is held at a step boundary by a pause request. */

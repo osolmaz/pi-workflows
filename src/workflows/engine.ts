@@ -340,7 +340,6 @@ export class WorkflowEngine {
     state.steps.push(step);
     delete state.currentNode;
     delete state.currentAttemptId;
-    delete state.currentNodeType;
     delete state.currentNodeStartedAt;
     delete state.statusDetail;
   }
@@ -356,7 +355,6 @@ export class WorkflowEngine {
     const startedAt = new Date().toISOString();
     state.currentNode = nodeId;
     state.currentAttemptId = attemptId;
-    state.currentNodeType = node.nodeType;
     state.currentNodeStartedAt = startedAt;
     if (node.statusDetail !== undefined) {
       state.statusDetail = node.statusDetail;
@@ -661,7 +659,6 @@ export class WorkflowEngine {
     }
     delete state.currentNode;
     delete state.currentAttemptId;
-    delete state.currentNodeType;
     delete state.currentNodeStartedAt;
     await this.persist(runDir, state, {
       scope: "run",
