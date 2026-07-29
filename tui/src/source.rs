@@ -132,11 +132,23 @@ impl RunEntry {
     /// A bundle is settled (immutable, safe to stop watching) only when the
     /// terminal status has propagated through every document we track: a
     /// terminal manifest alone can race a refresh that still holds the old
-    /// state or an undrained trace tail.
+    /// state or an undrained trace tail. The tail must also have reached the
+    /// state's `traceSeq`: the final append can land between our trace poll
+    /// and the terminal state read, and settling then would lose it.
     fn settled(&self) -> bool {
         self.manifest.status.is_terminal()
             && self.state.status.is_terminal()
             && self.pending_events.is_empty()
+            && self.last_seen_seq() >= self.state.trace_seq
+    }
+
+    /// Highest trace sequence this entry has observed (published or pending).
+    fn last_seen_seq(&self) -> u64 {
+        self.pending_events
+            .last()
+            .or_else(|| self.events.last())
+            .and_then(|event| event.get("seq").and_then(Value::as_u64))
+            .unwrap_or(0)
     }
 
     /// Take the pending trace events whose `seq` the state projection has
@@ -216,7 +228,7 @@ impl RunEntry {
         // so a mid-transition read never shows a trace tail ahead of the
         // projection.
         let newly_polled = self.trace_tailer.poll().unwrap_or_default();
-        let trace_grew = !newly_polled.is_empty();
+        let mut trace_grew = !newly_polled.is_empty();
         self.pending_events.extend(newly_polled);
 
         let paths = BundlePaths::from_manifest(&self.dir, &self.manifest);
@@ -231,6 +243,15 @@ impl RunEntry {
                     });
                 }
             }
+        }
+        // The writer appends the trace before rewriting the state, so a
+        // freshly read state can reference sequences that landed after the
+        // poll above; re-poll rather than wait for a change notification the
+        // finished writer will never produce again.
+        if self.state.status.is_terminal() && self.last_seen_seq() < self.state.trace_seq {
+            let late = self.trace_tailer.poll().unwrap_or_default();
+            trace_grew = trace_grew || !late.is_empty();
+            self.pending_events.extend(late);
         }
         let ready_events = self.drain_ready_events();
         if !ready_events.is_empty() {
