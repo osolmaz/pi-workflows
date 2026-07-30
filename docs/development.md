@@ -118,29 +118,30 @@ Nothing outside the temp directories is touched, and no real model is called.
 
 ## Publishing
 
-The npm package is `@osolmaz/pi-workflows`. The first version must be published
-locally because npm cannot configure a trusted publisher until the package
-exists:
+The npm package is `@osolmaz/pi-workflows`. The crates.io package is
+`pi-workflows`, and it installs the `piw` executable. Keep both package versions
+in sync so one GitHub Release can publish both artifacts.
 
-```bash
-npm publish --access public
-```
+Trusted publishing uses separate GitHub environments and workflows. Neither
+workflow stores a long-lived registry token:
 
-After that first publish, configure npm trusted publishing for the
-`osolmaz/pi-workflows` repository, `.github/workflows/publish.yml`, and the
-`npm` GitHub environment. The workflow does not use a stored npm token.
+- npm: repository `osolmaz/pi-workflows`, workflow
+  `.github/workflows/publish.yml`, environment `npm`;
+- crates.io: repository owner `osolmaz`, repository `pi-workflows`, workflow
+  `publish-crate.yml`, environment `crates-io`.
 
 For later versions:
 
-1. Update `version` in `package.json` and `package-lock.json`, then merge that
-   change into the default branch.
+1. Update `version` in `package.json`, `package-lock.json`, `tui/Cargo.toml`,
+   and `tui/Cargo.lock`, then merge that change into the default branch.
 2. Publish a GitHub Release whose tag is `v<version>`, such as `v0.2.0`.
-3. Wait for the **Publish npm package** workflow to finish and verify the new
-   version on npm.
+3. Wait for the **Publish npm package** and **Publish crates.io package**
+   workflows to finish.
+4. Verify the version on both npm and crates.io.
 
-The workflow rejects mismatched tags, commits outside the default branch, and
-versions already present on npm. It runs the full checks and end-to-end tests
-before `npm publish --provenance`.
+Both workflows reject mismatched tags, commits outside the default branch, and
+versions already present in their registry. They run their package checks
+before publishing.
 
 ## Conventions
 

@@ -1,0 +1,119 @@
+name: Publish crates.io package
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: publish-crate-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: ${{ !github.event.release.draft && !github.event.release.prerelease }}
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Validate release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          metadata="$(cargo metadata --manifest-path tui/Cargo.toml --no-deps --format-version 1)"
+          package_name="$(jq -r '.packages[0].name' <<<"$metadata")"
+          version="$(jq -r '.packages[0].version' <<<"$metadata")"
+          expected_tag="v${version}"
+
+          if [[ "$package_name" != "pi-workflows" ]]; then
+            echo "Cargo package is $package_name, expected pi-workflows." >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "The release tag $RELEASE_TAG does not match Cargo version $version (expected $expected_tag)." >&2
+            exit 1
+          fi
+
+          git fetch origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"; then
+            echo "The release commit is not on origin/$DEFAULT_BRANCH." >&2
+            exit 1
+          fi
+
+          registry_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --output /tmp/crates-io-version.json \
+              --write-out '%{http_code}' \
+              --user-agent 'pi-workflows-release-workflow (https://github.com/osolmaz/pi-workflows)' \
+              "https://crates.io/api/v1/crates/${package_name}/${version}"
+          )"
+          case "$registry_status" in
+            404) ;;
+            200)
+              echo "${package_name} ${version} is already published." >&2
+              exit 1
+              ;;
+            *)
+              echo "crates.io version lookup returned HTTP ${registry_status}." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check package
+        run: |
+          cargo fmt --manifest-path tui/Cargo.toml -- --check
+          cargo clippy --manifest-path tui/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path tui/Cargo.toml
+          cargo publish --manifest-path tui/Cargo.toml --dry-run
+
+      - name: Authenticate with crates.io
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish --manifest-path tui/Cargo.toml
+
+      - name: Verify registry
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --manifest-path tui/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          for attempt in {1..12}; do
+            status="$(
+              curl \
+                --silent \
+                --show-error \
+                --output /tmp/crates-io-version.json \
+                --write-out '%{http_code}' \
+                --user-agent 'pi-workflows-release-workflow (https://github.com/osolmaz/pi-workflows)' \
+                "https://crates.io/api/v1/crates/pi-workflows/${version}"
+            )"
+            if [[ "$status" == "200" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "crates.io did not report pi-workflows ${version} after publication." >&2
+          exit 1
