@@ -4,7 +4,20 @@
  * edge polylines join instead of overwriting each other.
  */
 
-export type CanvasStyle = "plain" | "dim" | "taken" | "active" | "back" | "ok" | "fail" | "warn";
+export type CanvasStyle =
+  | "plain"
+  | "dim"
+  | "taken"
+  | "active"
+  | "back"
+  | "ok"
+  | "fail"
+  | "warn"
+  | "branch"
+  | "agent"
+  | "compute"
+  | "action"
+  | "checkpoint";
 
 type CanvasChar = { char: string; style: CanvasStyle };
 
@@ -40,6 +53,11 @@ const STYLE_PRIORITY: CanvasStyle[] = [
   "warn",
   "ok",
   "fail",
+  "branch",
+  "agent",
+  "compute",
+  "action",
+  "checkpoint",
   "taken",
   "active",
 ];

@@ -105,9 +105,12 @@ pi-workflows view --once   # print a snapshot and exit (good for scripts)
 ```
 
 The run detail view draws the workflow as a boxed graph, like the acpx replay
-viewer: every node sits in a box (heavy border for the active node), branches
-carry their case labels, the taken path is highlighted, and loops route
-through a gutter on the right back into their target from above. `←/→` scrubs
+viewer. Every card has a centered step-name header and a divider above its
+structured metadata. Node type, status, attempts, and timing use compact symbol
+rows; start and terminal markers sit outside the card. Node types have distinct
+semantic colors, active cards use a heavy border, branches carry their case
+labels, the taken path is highlighted, and loops route through a gutter on the
+right back into their target from above. `←/→` scrubs
 backwards and forwards through the recorded steps and re-derives every node's
 status as of that step, with the selected step's full output shown below;
 scrubbing to the end snaps back to following the run live.
@@ -122,15 +125,15 @@ then reconciles settled messages to verbatim Pi entries. See
 [the piw guide](docs/tui-viewer.md).
 
 ```
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ ◐ running [agent]                        ┃
-┃ review                                   ┃
-┃ ◇2 branch                                ┃
-┃ ↳ clean                                  ┃
-┃ ↳ issues_found                           ┃
-┃ 2 attempts · running 12s                 ┃
-┃ reviewing implementation                 ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃            review            ┃
+  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+  ┃ ● agent            ◐ running ┃
+  ┃ ↻ 2                    ◷ 12s ┃
+  ┃ ◇ clean                     ┃
+  ┃ ◇ issues_found              ┃
+  ┃ … reviewing implementation  ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
 Inside pi, a widget above the editor shows the same boxed graph while a

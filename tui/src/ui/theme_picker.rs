@@ -1,3 +1,4 @@
+use super::controls;
 use crate::theme::{Palette, THEME_NAMES};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -63,6 +64,71 @@ pub fn popup_rect(area: Rect) -> Rect {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeAction {
+    Apply,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThemeHit {
+    rect: Rect,
+    action: ThemeAction,
+}
+
+fn footer_hits(area: Rect) -> Vec<ThemeHit> {
+    let apply = controls::button_label("✓", "Apply");
+    let cancel = controls::button_label("×", "Cancel");
+    let buttons_width = apply.chars().count() as u16 + 1 + cancel.chars().count() as u16;
+    let mut x = if area.width >= buttons_width.saturating_add(12) {
+        area.x.saturating_add(12)
+    } else {
+        area.x
+    };
+    [(ThemeAction::Apply, apply), (ThemeAction::Cancel, cancel)]
+        .into_iter()
+        .filter_map(|(action, label)| {
+            let width = label.chars().count() as u16;
+            if x.saturating_add(width) > area.right() {
+                return None;
+            }
+            let hit = ThemeHit {
+                rect: Rect::new(x, area.y, width, 1),
+                action,
+            };
+            x = x.saturating_add(width).saturating_add(1);
+            Some(hit)
+        })
+        .collect()
+}
+
+pub fn action_at(frame_area: Rect, has_error: bool, column: u16, row: u16) -> Option<ThemeAction> {
+    let popup = popup_rect(frame_area);
+    let inner = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(1),
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    let footer_height = if has_error { 3 } else { 2 };
+    let list_height = inner.height.saturating_sub(footer_height);
+    let footer = Rect::new(
+        inner.x,
+        inner.y.saturating_add(list_height),
+        inner.width,
+        footer_height,
+    );
+    footer_hits(footer)
+        .into_iter()
+        .find(|hit| {
+            column >= hit.rect.x
+                && column < hit.rect.right()
+                && row >= hit.rect.y
+                && row < hit.rect.bottom()
+        })
+        .map(|hit| hit.action)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, picker: &ThemePicker, palette: &Palette) {
     let popup = popup_rect(area);
     frame.render_widget(Clear, popup);
@@ -111,22 +177,71 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &ThemePicker, palette: &Pal
     let mut state = ListState::default().with_selected(Some(picker.selected));
     frame.render_stateful_widget(list, list_area, &mut state);
 
-    let mut lines = vec![Line::from(vec![
-        Span::styled(" ↑↓", Style::default().fg(palette.accent)),
-        Span::styled(" preview  ", Style::default().fg(palette.subtext)),
-        Span::styled("Enter", Style::default().fg(palette.accent)),
-        Span::styled(" apply  ", Style::default().fg(palette.subtext)),
-        Span::styled("Esc", Style::default().fg(palette.accent)),
-        Span::styled(" cancel", Style::default().fg(palette.subtext)),
-    ])];
-    if let Some(error) = &picker.error {
-        lines.push(Line::from(Span::styled(
-            format!(" {error}"),
-            Style::default().fg(palette.error),
-        )));
-    }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(palette.panel_bg)),
+        Paragraph::new("").style(Style::default().bg(palette.panel_bg)),
         footer_area,
     );
+    let hits = footer_hits(footer_area);
+    if hits.first().is_some_and(|hit| hit.rect.x > footer_area.x) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("↑↓", Style::default().fg(palette.accent)),
+                Span::styled(" Preview", Style::default().fg(palette.subtext)),
+            ]))
+            .style(Style::default().bg(palette.panel_bg)),
+            Rect::new(footer_area.x, footer_area.y, 10.min(footer_area.width), 1),
+        );
+    }
+    for hit in hits {
+        let (symbol, text) = match hit.action {
+            ThemeAction::Apply => ("✓", "Apply"),
+            ThemeAction::Cancel => ("×", "Cancel"),
+        };
+        frame.render_widget(
+            Paragraph::new(controls::button_label(symbol, text))
+                .style(controls::button_style(palette, false)),
+            hit.rect,
+        );
+    }
+    if let Some(error) = &picker.error {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {error}"),
+                Style::default().fg(palette.error),
+            )))
+            .style(Style::default().bg(palette.panel_bg)),
+            Rect::new(
+                footer_area.x,
+                footer_area.y.saturating_add(1),
+                footer_area.width,
+                footer_area.height.saturating_sub(1),
+            ),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_actions_only_activate_the_rendered_buttons() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let popup = popup_rect(frame);
+        let inner = Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, popup.height - 2);
+        let footer = Rect::new(inner.x, inner.bottom() - 2, inner.width, 2);
+        let hits = footer_hits(footer);
+        assert_eq!(hits.len(), 2);
+        for hit in &hits {
+            assert_eq!(
+                action_at(frame, false, hit.rect.x, hit.rect.y),
+                Some(hit.action)
+            );
+        }
+        assert_eq!(
+            action_at(frame, false, hits[0].rect.right(), footer.y),
+            None
+        );
+        assert_eq!(action_at(frame, false, footer.right() - 1, footer.y), None);
+    }
 }

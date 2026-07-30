@@ -86,7 +86,8 @@ describe("pi-workflows CLI", () => {
     const runId = await makeCompletedRun(outputRoot);
     expect(await main(["view", runId, "--dir", outputRoot, "--once"])).toBe(0);
     expect(stdout).toContain("workflow cli-demo");
-    expect(stdout).toContain("✓ completed [compute]");
+    expect(stdout).toContain("ƒ compute");
+    expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("one");
   });
 

@@ -1,3 +1,4 @@
+use super::controls;
 use crate::bundle::types::RunStatus;
 use crate::theme::Palette;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -68,7 +69,7 @@ pub fn render(
         return TimelineGeometry::default();
     };
 
-    if area.height < 2 || area.width < 60 {
+    if area.height < 2 || area.width < 72 {
         render_compact(frame, area, &view, palette);
         return TimelineGeometry::default();
     }
@@ -86,38 +87,69 @@ pub fn render(
     render_track(frame, top[1], &view, palette);
     render_position(frame, top[2], &view, palette);
 
-    let button_widths = [8, 8, 9, 8, 8, 8, 8];
-    let mut constraints: Vec<Constraint> = button_widths
+    let specs = [
+        (
+            TimelineAction::Start,
+            controls::button_label("⌂", "Home"),
+            false,
+        ),
+        (
+            TimelineAction::Previous,
+            controls::button_label("←", "Prev"),
+            false,
+        ),
+        (
+            TimelineAction::TogglePlayback,
+            controls::button_label(
+                if view.playing { "⏸" } else { "▶" },
+                if view.playing { "Pause" } else { "Play" },
+            ),
+            view.playing,
+        ),
+        (
+            TimelineAction::Next,
+            controls::button_label("→", "Next"),
+            false,
+        ),
+        (
+            TimelineAction::Live,
+            controls::button_label("●", "Live"),
+            view.at_latest,
+        ),
+        (
+            TimelineAction::Slower,
+            controls::button_label("−", "Slow"),
+            false,
+        ),
+        (
+            TimelineAction::Faster,
+            controls::button_label("+", "Fast"),
+            false,
+        ),
+    ];
+    let button_count = specs.len();
+    let mut constraints: Vec<Constraint> = specs
         .iter()
-        .copied()
-        .map(Constraint::Length)
+        .map(|(_, label, _)| Constraint::Length(label.chars().count() as u16 + 1))
         .collect();
     constraints.push(Constraint::Min(0));
     let bottom = Layout::horizontal(constraints).split(rows[1]);
-    let specs = [
-        (TimelineAction::Start, " Home "),
-        (TimelineAction::Previous, " [ Prev "),
-        (
-            TimelineAction::TogglePlayback,
-            if view.playing { " Pause " } else { " Play " },
-        ),
-        (TimelineAction::Next, " Next ] "),
-        (TimelineAction::Live, " Live "),
-        (TimelineAction::Slower, " { Slow "),
-        (TimelineAction::Faster, " Fast } "),
-    ];
     let mut hits = Vec::with_capacity(specs.len());
-    for (index, (action, label)) in specs.into_iter().enumerate() {
-        let rect = bottom[index];
+    for (index, (action, label, active)) in specs.into_iter().enumerate() {
+        let slot = bottom[index];
+        let hit_rect = Rect::new(slot.x, slot.y, label.chars().count() as u16, slot.height);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 label,
-                Style::default().fg(palette.text).bg(palette.selection_bg),
+                controls::button_style(palette, active),
             )))
             .style(Style::default().bg(palette.app_bg)),
-            rect,
+            slot,
         );
-        hits.push(TimelineHit { rect, action });
+        hits.push(TimelineHit {
+            rect: hit_rect,
+            action,
+        });
     }
     let hint = if let Some(diagnostic) = view.diagnostic {
         Span::styled(
@@ -132,7 +164,7 @@ pub fn render(
     };
     frame.render_widget(
         Paragraph::new(Line::from(hint)).style(Style::default().bg(palette.app_bg)),
-        bottom[7],
+        bottom[button_count],
     );
 
     TimelineGeometry {
@@ -312,6 +344,8 @@ fn status_color(status: RunStatus, palette: &Palette) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn timeline_maps_before_middle_and_latest() {
@@ -321,5 +355,59 @@ mod tests {
         assert_eq!(position_from_column(4, 0, 9), Some(-1));
         assert_eq!(position_from_column(4, 4, 9), Some(1));
         assert_eq!(position_from_column(4, 8, 9), None);
+    }
+
+    #[test]
+    fn transport_renders_separate_symbol_buttons_with_exact_hitboxes() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut geometry = TimelineGeometry::default();
+        terminal
+            .draw(|frame| {
+                geometry = render(
+                    frame,
+                    frame.area(),
+                    Some(TimelineView {
+                        status: RunStatus::Running,
+                        paused: false,
+                        elapsed: "1s",
+                        steps: 8,
+                        position: 7,
+                        temporal: true,
+                        at_latest: true,
+                        live: true,
+                        playing: false,
+                        speed: 1,
+                        diagnostic: None,
+                    }),
+                    &Palette::catppuccin(),
+                );
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        for label in [
+            "[⌂ Home]",
+            "[← Prev]",
+            "[▶ Play]",
+            "[→ Next]",
+            "[● Live]",
+            "[− Slow]",
+            "[+ Fast]",
+        ] {
+            assert!(
+                rendered.contains(label),
+                "missing {label:?} in {rendered:?}"
+            );
+        }
+        assert_eq!(geometry.hits.len(), 7);
+        for pair in geometry.hits.windows(2) {
+            assert_eq!(pair[1].rect.x, pair[0].rect.right() + 1);
+        }
     }
 }

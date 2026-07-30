@@ -70,10 +70,46 @@ const STATUS_STYLES: Record<NodeStatus, CanvasStyle> = {
   queued: "dim",
 };
 
-const CELL_GAP = 4;
+const CELL_GAP = 6;
 const GUTTER_GAP = 2;
-const CARD_MIN_CONTENT_WIDTH = 24;
-const CARD_DYNAMIC_RESERVE = "100 attempts · running 9999d 23h 59m 59s";
+const GRAPH_SIDE_MARGIN = 2;
+const CARD_MIN_CONTENT_WIDTH = 28;
+const CARD_DYNAMIC_RESERVE = "↻ 100  ◷ 9999d 23h 59m 59s";
+
+const NODE_TYPE_GLYPHS: Record<string, string> = {
+  agent: "●",
+  compute: "ƒ",
+  action: "⚙",
+  checkpoint: "◆",
+};
+
+function nodeTypeStyle(nodeType: string): CanvasStyle {
+  switch (nodeType) {
+    case "agent":
+    case "compute":
+    case "action":
+    case "checkpoint":
+      return nodeType;
+    default:
+      return "dim";
+  }
+}
+
+function nodeTypeBadge(nodeType: string): string {
+  return `${NODE_TYPE_GLYPHS[nodeType] ?? "?"} ${nodeType}`;
+}
+
+function fitText(text: string, width: number): string {
+  const chars = [...text];
+  if (chars.length <= width) return text;
+  return width <= 1 ? chars.slice(0, width).join("") : `${chars.slice(0, width - 1).join("")}…`;
+}
+
+function centeredText(text: string, width: number): string {
+  const fitted = fitText(text, width);
+  const left = Math.max(0, Math.floor((width - [...fitted].length) / 2));
+  return `${" ".repeat(left)}${fitted}`;
+}
 
 /** How node cells are drawn: single text lines or bordered boxes. */
 export type GraphNodeStyle = "line" | "box";
@@ -102,9 +138,18 @@ function paint(text: string, style: CanvasStyle): string {
       return ansi.cyan(text);
     case "back":
     case "warn":
+    case "action":
       return ansi.yellow(text);
     case "fail":
       return ansi.red(text);
+    case "agent":
+      return ansi.green(text);
+    case "compute":
+      return ansi.blue(text);
+    case "checkpoint":
+      return ansi.magenta(text);
+    case "branch":
+      return ansi.cyan(text);
     case "dim":
       return ansi.dim(text);
     default:
@@ -175,17 +220,15 @@ function cardMetrics(view: GraphView): CardMetrics {
     contentWidth = Math.max(contentWidth, text.length);
   };
   measure(CARD_DYNAMIC_RESERVE);
-  for (const status of Object.values(STATUS_LABELS)) {
-    measure(`${status} [checkpoint]`);
+  for (const status of Object.keys(STATUS_LABELS) as NodeStatus[]) {
+    measure(`${nodeTypeBadge("checkpoint")}  ${STATUS_GLYPHS[status]} ${STATUS_LABELS[status]}`);
   }
   for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
     measure(sanitizeText(nodeId));
-    measure(`[${node.nodeType}]`);
-    if (node.statusDetail) measure(sanitizeText(node.statusDetail));
-    if (node.summary) measure(sanitizeText(node.summary));
+    measure(nodeTypeBadge(node.nodeType));
     const labels = nodeBranchLabels(view, nodeId);
     branchRows = Math.max(branchRows, labels.length);
-    for (const label of labels) measure(`↳ ${label}`);
+    for (const label of labels) measure(`◇ ${label}`);
   }
   return {
     width: contentWidth + 4,
@@ -204,8 +247,15 @@ export function graphCardSize(view: GraphView): { width: number; height: number 
 type RenderedCell = {
   cell: GraphCell;
   text: string;
-  lines: string[];
+  nodeId: string;
+  nodeType: string;
   status: NodeStatus | null;
+  attempts: number;
+  elapsed: string;
+  detail: string;
+  branchLines: string[];
+  isStart: boolean;
+  isEnd: boolean;
   width: number;
 };
 
@@ -219,7 +269,20 @@ function renderCellText(
   metrics: CardMetrics,
 ): RenderedCell {
   if (cell.kind === "virtual") {
-    return { cell, text: "", lines: [], status: null, width: 1 };
+    return {
+      cell,
+      text: "",
+      nodeId: "",
+      nodeType: "",
+      status: null,
+      attempts: 0,
+      elapsed: "",
+      detail: "",
+      branchLines: [],
+      isStart: false,
+      isEnd: false,
+      width: 1,
+    };
   }
   const state = view.state;
   const nodeId = cell.nodeId;
@@ -236,20 +299,17 @@ function renderCellText(
         (count, edge) => count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
         0,
       ) ?? 0;
-  const markers: string[] = [];
-  if (view.snapshot?.startAt === nodeId) markers.push("▶ start");
-  if (outgoing > 1) markers.push(`◇${outgoing} branch`);
-  if (outgoing === 0) markers.push("■ end");
-  let timing = "not visited";
+  const isStart = view.snapshot?.startAt === nodeId;
+  const isEnd = outgoing === 0;
+  let elapsed = "—";
   if (atLatestStep && state.currentNode === nodeId) {
     const startedAt = state.currentNodeStartedAt
       ? Date.parse(state.currentNodeStartedAt)
       : now.getTime();
-    const count = Math.max(attempts, 1);
-    timing = `${count} attempt${count === 1 ? "" : "s"} · running ${formatDuration(now.getTime() - startedAt)}`;
+    elapsed = formatDuration(now.getTime() - startedAt);
   } else if (attempt) {
     const durationMs = Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
-    timing = `${attempts} attempt${attempts === 1 ? "" : "s"} · ${formatDuration(durationMs)}`;
+    elapsed = formatDuration(durationMs);
   }
   const detail =
     atLatestStep && state.currentNode === nodeId && state.statusDetail
@@ -258,26 +318,26 @@ function renderCellText(
         ? sanitizeText(node.statusDetail)
         : node?.summary
           ? sanitizeText(node.summary)
-          : status === "queued"
-            ? ""
-            : STATUS_LABELS[status];
+          : "";
   const branchLines = Array.from({ length: metrics.branchRows }, (_, index) =>
-    labels[index] ? `↳ ${labels[index]}` : "",
+    labels[index] ? `◇ ${labels[index]}` : "",
   );
-  const lines = [
-    `${STATUS_LABELS[status]} [${nodeType}]`,
-    sanitizeText(nodeId),
-    markers.join("  "),
-    ...branchLines,
-    timing,
-    detail,
-  ];
-  const text = `${nodeId} [${nodeType}] ${timing} ${markers.join(" ")}`.trim();
+  const count = atLatestStep && state.currentNode === nodeId ? Math.max(attempts, 1) : attempts;
+  const timing =
+    attempt || count > 0 ? `${count} attempt${count === 1 ? "" : "s"} · ${elapsed}` : "not visited";
+  const text = `${nodeId} [${nodeType}] ${timing}`;
   return {
     cell,
     text,
-    lines,
+    nodeId: sanitizeText(nodeId),
+    nodeType,
     status,
+    attempts: count,
+    elapsed,
+    detail,
+    branchLines,
+    isStart,
+    isEnd,
     width: nodeStyle === "box" ? metrics.width : text.length + 2,
   };
 }
@@ -352,7 +412,7 @@ export function renderGraphLines(
     (cells) =>
       cells.reduce((sum, cell) => sum + cell.width, 0) + Math.max(0, cells.length - 1) * CELL_GAP,
   );
-  const graphWidth = Math.max(0, ...rankWidths);
+  const graphWidth = Math.max(0, ...rankWidths) + GRAPH_SIDE_MARGIN * 2;
   const geometry: RankGeometry[] = rendered.map((cells, rankIndex) => {
     const centers: number[] = [];
     let x = Math.floor((graphWidth - (rankWidths[rankIndex] ?? 0)) / 2);
@@ -577,8 +637,8 @@ function fanOffsets(
 }
 
 const BOX_CHARS = {
-  light: { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" },
-  heavy: { tl: "┏", tr: "┓", bl: "┗", br: "┛", h: "━", v: "┃" },
+  light: { tl: "┌", tr: "┐", ml: "├", mr: "┤", bl: "└", br: "┘", h: "─", v: "│" },
+  heavy: { tl: "┏", tr: "┓", ml: "┣", mr: "┫", bl: "┗", br: "┛", h: "━", v: "┃" },
 } as const;
 
 function drawNodes(
@@ -611,8 +671,12 @@ function drawNodes(
       if (nodeStyle === "box") {
         drawNodeBox(canvas, startX, rank.y, rendered, status);
       } else {
+        if (rendered.isStart) canvas.put(startX - 2, rank.y, "▶", nodeTypeStyle(rendered.nodeType));
         canvas.put(startX, rank.y, STATUS_GLYPHS[status], STATUS_STYLES[status]);
         canvas.text(startX + 2, rank.y, rendered.text, status === "queued" ? "dim" : "plain");
+        if (rendered.isEnd) {
+          canvas.put(startX + rendered.width + 1, rank.y, "■", nodeTypeStyle(rendered.nodeType));
+        }
       }
     }
   }
@@ -630,23 +694,62 @@ function drawNodeBox(
   rendered: RenderedCell,
   status: NodeStatus,
 ): void {
-  const chars = status === "active" ? BOX_CHARS.heavy : BOX_CHARS.light;
-  const style = STATUS_STYLES[status];
+  const chars =
+    status === "active" || status === "replay_focus" ? BOX_CHARS.heavy : BOX_CHARS.light;
+  const borderStyle = STATUS_STYLES[status];
+  const typeStyle = nodeTypeStyle(rendered.nodeType);
+  const contentStyle = status === "queued" ? "dim" : "plain";
   const innerWidth = rendered.width - 2;
-  const height = rendered.lines.length + 2;
-  canvas.text(startX, y, `${chars.tl}${chars.h.repeat(innerWidth)}${chars.tr}`, style);
-  for (const [index, line] of rendered.lines.entries()) {
-    const row = y + 1 + index;
-    canvas.text(startX, row, chars.v, style);
-    if (index === 0) {
-      canvas.put(startX + 2, row, STATUS_GLYPHS[status], style);
-      canvas.text(startX + 4, row, line, status === "queued" ? "dim" : "plain");
-    } else {
-      canvas.text(startX + 2, row, line, status === "queued" ? "dim" : "plain");
-    }
-    canvas.text(startX + rendered.width - 1, row, chars.v, style);
+  const height = 7 + rendered.branchLines.length;
+  const rightX = startX + rendered.width - 1;
+  const horizontal = chars.h.repeat(innerWidth);
+  const rowBorder = (row: number) => {
+    canvas.text(startX, row, chars.v, borderStyle);
+    canvas.text(rightX, row, chars.v, borderStyle);
+  };
+  const pairedRow = (
+    row: number,
+    left: string,
+    leftStyle: CanvasStyle,
+    right: string,
+    rightStyle: CanvasStyle,
+  ) => {
+    rowBorder(row);
+    canvas.text(startX + 2, row, fitText(left, innerWidth - 2), leftStyle);
+    const rightText = fitText(right, innerWidth - 2);
+    canvas.text(rightX - 1 - [...rightText].length, row, rightText, rightStyle);
+  };
+
+  canvas.text(startX, y, `${chars.tl}${horizontal}${chars.tr}`, borderStyle);
+  rowBorder(y + 1);
+  canvas.text(startX + 1, y + 1, centeredText(rendered.nodeId, innerWidth), contentStyle);
+  canvas.text(startX, y + 2, `${chars.ml}${horizontal}${chars.mr}`, typeStyle);
+  pairedRow(
+    y + 3,
+    nodeTypeBadge(rendered.nodeType),
+    typeStyle,
+    `${STATUS_GLYPHS[status]} ${STATUS_LABELS[status]}`,
+    borderStyle,
+  );
+  pairedRow(y + 4, `↻ ${rendered.attempts}`, contentStyle, `◷ ${rendered.elapsed}`, contentStyle);
+  for (const [index, branch] of rendered.branchLines.entries()) {
+    const row = y + 5 + index;
+    rowBorder(row);
+    canvas.text(startX + 2, row, fitText(branch, innerWidth - 2), "branch");
   }
-  canvas.text(startX, y + height - 1, `${chars.bl}${chars.h.repeat(innerWidth)}${chars.br}`, style);
+  const detailRow = y + 5 + rendered.branchLines.length;
+  rowBorder(detailRow);
+  if (rendered.detail) {
+    canvas.text(
+      startX + 2,
+      detailRow,
+      fitText(`… ${rendered.detail}`, innerWidth - 2),
+      contentStyle,
+    );
+  }
+  canvas.text(startX, y + height - 1, `${chars.bl}${horizontal}${chars.br}`, borderStyle);
+  if (rendered.isStart) canvas.put(startX - 2, y + 1, "▶", typeStyle);
+  if (rendered.isEnd) canvas.put(startX + rendered.width + 1, y + 1, "■", typeStyle);
 }
 
 function edgeStyle(

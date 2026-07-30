@@ -20,9 +20,9 @@ type Rect = {
   bottom: number;
 };
 
-const LIGHT = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" };
-const HEAVY = { tl: "┏", tr: "┓", bl: "┗", br: "┛", h: "━", v: "┃" };
-const VERTICAL_BORDERS = new Set([LIGHT.v, HEAVY.v]);
+const LIGHT = { tl: "┌", tr: "┐", ml: "├", mr: "┤", bl: "└", br: "┘", h: "─", v: "│" };
+const HEAVY = { tl: "┏", tr: "┓", ml: "┣", mr: "┫", bl: "┗", br: "┛", h: "━", v: "┃" };
+const VERTICAL_BORDERS = new Set([LIGHT.v, LIGHT.ml, LIGHT.mr, HEAVY.v, HEAVY.ml, HEAVY.mr]);
 
 export type GraphVerifyResult = {
   /** Human-readable problems; empty means the render passed. */
@@ -122,6 +122,7 @@ function checkBoxIntegrity(grid: string[][], rect: Rect, problems: string[]): vo
   const style = charAt(rect.left, rect.mid) === HEAVY.v ? HEAVY : LIGHT;
   const rows: [number, string, string, string][] = [
     [rect.top, style.tl, style.h, style.tr],
+    [rect.top + 2, style.ml, style.h, style.mr],
     [rect.bottom, style.bl, style.h, style.br],
   ];
   for (const [y, first, middle, last] of rows) {

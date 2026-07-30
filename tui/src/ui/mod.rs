@@ -3,6 +3,7 @@
 //! transport. Works against a local runs directory, a single bundle, or a
 //! `piw serve` WebSocket server; all three feed the same view model.
 
+mod controls;
 mod conversation;
 mod graph;
 mod theme_picker;
@@ -210,7 +211,7 @@ enum Focus {
     Inspector,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
     Steps,
     Trace,
@@ -237,6 +238,8 @@ impl InspectorTab {
         }
     }
 
+    const ALL: [Self; 4] = [Self::Steps, Self::Trace, Self::Conversation, Self::Info];
+
     fn title(self) -> &'static str {
         match self {
             InspectorTab::Steps => "Steps",
@@ -245,6 +248,21 @@ impl InspectorTab {
             InspectorTab::Info => "Info",
         }
     }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            InspectorTab::Steps => "◆",
+            InspectorTab::Trace => "≡",
+            InspectorTab::Conversation => "●",
+            InspectorTab::Info => "ⓘ",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InspectorTabHit {
+    rect: Rect,
+    tab: InspectorTab,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -332,6 +350,7 @@ struct App {
     timeline: timeline::TimelineGeometry,
     graph_rect: Rect,
     inspector_rect: Rect,
+    inspector_tab_hits: Vec<InspectorTabHit>,
     quit: bool,
 }
 
@@ -433,6 +452,7 @@ fn event_loop(
         timeline: timeline::TimelineGeometry::default(),
         graph_rect: Rect::default(),
         inspector_rect: Rect::default(),
+        inspector_tab_hits: Vec::new(),
         quit: false,
     };
 
@@ -1003,6 +1023,61 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
+fn inspector_tab_label(tab: InspectorTab, available_width: u16) -> String {
+    if available_width >= 48 {
+        controls::button_label(tab.symbol(), tab.title())
+    } else if available_width >= 39 {
+        let title = if tab == InspectorTab::Conversation {
+            "Chat"
+        } else {
+            tab.title()
+        };
+        controls::button_label(tab.symbol(), title)
+    } else {
+        format!("[{}]", tab.symbol())
+    }
+}
+
+fn inspector_tab_layout(area: Rect) -> Vec<InspectorTabHit> {
+    let mut hits = Vec::with_capacity(InspectorTab::ALL.len());
+    let mut x = area.x;
+    let right = area.right();
+    for tab in InspectorTab::ALL {
+        let label = inspector_tab_label(tab, area.width);
+        let width = label.chars().count() as u16;
+        if width == 0 || x.saturating_add(width) > right {
+            break;
+        }
+        hits.push(InspectorTabHit {
+            rect: Rect::new(x, area.y, width, area.height.min(1)),
+            tab,
+        });
+        x = x.saturating_add(width).saturating_add(1);
+    }
+    hits
+}
+
+fn render_inspector_tabs(
+    frame: &mut Frame,
+    area: Rect,
+    selected: InspectorTab,
+    palette: &Palette,
+) -> Vec<InspectorTabHit> {
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(palette.panel_bg)),
+        area,
+    );
+    let hits = inspector_tab_layout(area);
+    for hit in &hits {
+        let label = inspector_tab_label(hit.tab, area.width);
+        frame.render_widget(
+            Paragraph::new(label).style(controls::button_style(palette, hit.tab == selected)),
+            hit.rect,
+        );
+    }
+    hits
+}
+
 fn sidebar_width_for_drag(frame: Rect, divider_column: u16) -> u16 {
     let requested = divider_column.saturating_sub(frame.x).saturating_add(1);
     let max_width = frame.width.saturating_sub(MIN_MAIN_WIDTH);
@@ -1106,6 +1181,16 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
             .map(|hit| hit.action)
         {
             app.apply_timeline_action(action);
+            return;
+        }
+        if let Some(tab) = app
+            .inspector_tab_hits
+            .iter()
+            .find(|hit| contains(hit.rect, mouse.column, mouse.row))
+            .map(|hit| hit.tab)
+        {
+            app.focus = Focus::Inspector;
+            app.select_inspector_tab(tab);
             return;
         }
     }
@@ -1236,12 +1321,12 @@ fn handle_theme_picker_mouse(app: &mut App, mouse: MouseEvent) {
             }
             app.preview_selected_theme();
         }
-    } else if mouse.row >= popup.y + popup.height.saturating_sub(2) {
-        let relative = mouse.column.saturating_sub(popup.x);
-        if relative < popup.width / 2 {
-            app.apply_theme_picker();
-        } else {
-            app.cancel_theme_picker();
+    } else if let Some(action) =
+        theme_picker::action_at(app.frame_rect, footer_height == 3, mouse.column, mouse.row)
+    {
+        match action {
+            theme_picker::ThemeAction::Apply => app.apply_theme_picker(),
+            theme_picker::ThemeAction::Cancel => app.cancel_theme_picker(),
         }
     }
 }
@@ -1276,6 +1361,7 @@ fn now_ms() -> i64 {
 fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let area = frame.area();
     app.frame_rect = area;
+    app.inspector_tab_hits.clear();
     let palette = app.palette.clone();
     frame.render_widget(
         Block::default().style(Style::default().fg(palette.text).bg(palette.app_bg)),
@@ -1548,7 +1634,47 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         graph_rect,
     );
 
-    // Inspector pane.
+    // Inspector pane. Tabs get their own control row so their complete visual
+    // labels are also their complete mouse targets.
+    let inspector_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Inspector · click a tab ")
+        .style(Style::default().bg(palette.panel_bg))
+        .border_style(pane_border(&palette, focus == Focus::Inspector));
+    let inspector_inner = inspector_block.inner(inspector_rect);
+    frame.render_widget(inspector_block, inspector_rect);
+    let tabs_height = inspector_inner.height.min(1);
+    let separator_height = u16::from(inspector_inner.height >= 3);
+    let tabs_rect = Rect::new(
+        inspector_inner.x,
+        inspector_inner.y,
+        inspector_inner.width,
+        tabs_height,
+    );
+    let separator_rect = Rect::new(
+        inspector_inner.x,
+        inspector_inner.y.saturating_add(tabs_height),
+        inspector_inner.width,
+        separator_height,
+    );
+    let content_rect = Rect::new(
+        inspector_inner.x,
+        separator_rect.y.saturating_add(separator_height),
+        inspector_inner.width,
+        inspector_inner
+            .height
+            .saturating_sub(tabs_height)
+            .saturating_sub(separator_height),
+    );
+    app.inspector_tab_hits = render_inspector_tabs(frame, tabs_rect, tab, &palette);
+    if separator_height > 0 {
+        frame.render_widget(
+            Paragraph::new("─".repeat(separator_rect.width as usize))
+                .style(Style::default().fg(palette.border).bg(palette.panel_bg)),
+            separator_rect,
+        );
+    }
+
     let inspector_lines = match tab {
         InspectorTab::Steps => steps_lines(
             &data,
@@ -1556,7 +1682,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             selected_step,
             bounded_index,
             inspector_expanded,
-            inspector_rect.width.saturating_sub(2) as usize,
+            content_rect.width as usize,
             &palette,
         ),
         InspectorTab::Trace => trace_lines(
@@ -1566,7 +1692,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             trace_scope,
             trace_selected,
             trace_payload_expanded,
-            inspector_rect.width.saturating_sub(2) as usize,
+            content_rect.width as usize,
             &palette,
         ),
         InspectorTab::Conversation => conversation::conversation_lines(
@@ -1577,7 +1703,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             conversation::ConversationRenderOptions {
                 at_latest_step: at_latest,
                 through_event_seq,
-                width: inspector_rect.width.saturating_sub(2) as usize,
+                width: content_rect.width as usize,
                 palette: &palette,
                 bundle_dir: data.bundle_dir,
                 remote_artifacts: &data.remote_artifacts,
@@ -1587,7 +1713,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         ),
         InspectorTab::Info => info_lines(&data, &run_id, &palette),
     };
-    let inspector_height = inspector_rect.height.saturating_sub(2) as usize;
+    let inspector_height = content_rect.height as usize;
     let max_scroll = inspector_lines.len().saturating_sub(inspector_height);
     let scroll = if (tab == InspectorTab::Trace && at_latest && trace_scope == TraceScope::FullRun)
         || (tab == InspectorTab::Conversation && at_latest && conversation_follow)
@@ -1603,35 +1729,9 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .skip(scroll)
         .take(inspector_height)
         .collect();
-    let tabs_title = format!(
-        " ↕ {} (t to switch) ",
-        [
-            InspectorTab::Steps,
-            InspectorTab::Trace,
-            InspectorTab::Conversation,
-            InspectorTab::Info,
-        ]
-        .iter()
-        .map(|candidate| {
-            if *candidate == tab {
-                format!("[{}]", candidate.title())
-            } else {
-                candidate.title().to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-    );
-    let inspector_block = Block::default()
-        .borders(Borders::ALL)
-        .title(tabs_title)
-        .style(Style::default().bg(palette.panel_bg))
-        .border_style(pane_border(&palette, focus == Focus::Inspector));
     frame.render_widget(
-        Paragraph::new(shown)
-            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
-            .block(inspector_block),
-        inspector_rect,
+        Paragraph::new(shown).style(Style::default().fg(palette.text).bg(palette.panel_bg)),
+        content_rect,
     );
 
     let capture_diagnostic = matches!(capture.status, "failed" | "invalid").then(|| {
@@ -2469,11 +2569,11 @@ fn draw_transport(
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at,
-        graph_position_label, inspector_height_for_drag, resolve_remote_artifacts,
-        resolved_inspector_height, sidebar_width_for_drag, temporal_through_seq,
-        trace_events_for_scope, valid_session_binding, GraphNodeStyle, NodeBounds, Rect,
-        StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
+        graph_position_label, inspector_height_for_drag, inspector_tab_label, inspector_tab_layout,
+        resolve_remote_artifacts, resolved_inspector_height, sidebar_width_for_drag,
+        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
+        InspectorTab, NodeBounds, Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2481,6 +2581,38 @@ mod tests {
     #[test]
     fn bordered_nodes_are_the_default() {
         assert_eq!(DEFAULT_NODE_STYLE, GraphNodeStyle::Box);
+    }
+
+    #[test]
+    fn inspector_tabs_are_visible_full_label_mouse_targets() {
+        let area = Rect::new(10, 4, 80, 1);
+        let hits = inspector_tab_layout(area);
+        assert_eq!(hits.len(), InspectorTab::ALL.len());
+        for hit in &hits {
+            let label = inspector_tab_label(hit.tab, area.width);
+            assert_eq!(hit.rect.width, label.chars().count() as u16);
+            assert_eq!(
+                hits.iter()
+                    .find(|candidate| { contains(candidate.rect, hit.rect.x, hit.rect.y) })
+                    .map(|candidate| candidate.tab),
+                Some(hit.tab)
+            );
+        }
+        for pair in hits.windows(2) {
+            assert_eq!(pair[1].rect.x, pair[0].rect.right() + 1);
+            assert!(!contains(
+                pair[0].rect,
+                pair[0].rect.right(),
+                pair[0].rect.y
+            ));
+        }
+    }
+
+    #[test]
+    fn inspector_tabs_keep_all_icon_buttons_on_narrow_panes() {
+        let hits = inspector_tab_layout(Rect::new(0, 0, 20, 1));
+        assert_eq!(hits.len(), InspectorTab::ALL.len());
+        assert!(hits.iter().all(|hit| hit.rect.width == 3));
     }
 
     #[test]

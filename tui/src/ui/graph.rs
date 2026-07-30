@@ -31,6 +31,23 @@ pub fn style_for(style: CanvasStyle, palette: &Palette) -> Style {
         CanvasStyle::TimedOut => Style::default().fg(palette.timed_out).bg(palette.node_bg),
         CanvasStyle::Warn => Style::default().fg(palette.warning).bg(palette.node_bg),
         CanvasStyle::Cancelled => Style::default().fg(palette.cancelled).bg(palette.node_bg),
+        CanvasStyle::Branch => Style::default().fg(palette.branch).bg(palette.node_bg),
+        CanvasStyle::Agent => Style::default()
+            .fg(palette.assistant)
+            .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::Compute => Style::default()
+            .fg(palette.accent)
+            .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::Action => Style::default()
+            .fg(palette.tool)
+            .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::Checkpoint => Style::default()
+            .fg(palette.replay_focus)
+            .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -102,6 +119,20 @@ mod tests {
             style_for(CanvasStyle::NodeFocusText, &palette).bg,
             Some(palette.node_focus_bg)
         );
+    }
+
+    #[test]
+    fn node_types_have_distinct_semantic_accents() {
+        let palette = Palette::catppuccin();
+        let colors = [
+            style_for(CanvasStyle::Agent, &palette).fg,
+            style_for(CanvasStyle::Compute, &palette).fg,
+            style_for(CanvasStyle::Action, &palette).fg,
+            style_for(CanvasStyle::Checkpoint, &palette).fg,
+        ];
+        for (index, color) in colors.iter().enumerate() {
+            assert!(!colors[..index].contains(color));
+        }
     }
 
     #[test]

@@ -35,23 +35,29 @@ the browser.
   and a `?` marker for a possibly interrupted run.
 - **Graph:** the complete workflow definition using the same layered layout as
   the TypeScript renderer. Full bordered cards are the default. Every card in
-  one graph has the same width and height, fixed before layout, with reserved
-  rows for status, exact id and type, graph markers, branch labels, attempts,
-  timing, and short detail. Updates fill those rows without moving nodes or
-  edges. Narrow terminals pan over the fixed graph. Compact line nodes remain
-  available with `z`. Start nodes carry `▶`, branch nodes carry `◇N`, and
-  terminal nodes carry `■`. Branch labels remain on edges and loops use a
-  right-hand gutter.
-- **Inspector:** Steps, Trace, Conversation, and Info tabs. Steps can expand to
-  full prompt, output, timestamps, error, and action receipt fields. Trace can
+  one graph has the same width and height, fixed before layout. The exact step
+  id is centered in a header above a horizontal divider. Structured body rows
+  pair a type badge with status (`●` agent, `ƒ` compute, `⚙` action, `◆`
+  checkpoint), then attempts (`↻`) with elapsed time (`◷`). Branch labels use
+  `◇`; the final reserved row carries a short detail while unbounded content
+  stays in the inspector. Type badges and header dividers have distinct
+  semantic colors. Updates fill reserved rows without moving nodes or edges.
+  Narrow terminals pan over the fixed graph. Compact line nodes remain
+  available with `z`. Start `▶` and terminal `■` markers sit outside the card.
+  Branch labels remain on edges and loops use a right-hand gutter.
+- **Inspector:** Steps, Trace, Conversation, and Info tabs. Each tab is a
+  bracketed symbol button with a full-label mouse target; the selected tab uses
+  the accent surface. Steps can expand to full prompt, output, timestamps,
+  error, and action receipt fields. Trace can
   show the selected attempt, the replay-visible prefix, or the full run, with
   expandable JSON payloads. Conversation shows live text, thinking, tool-call
   construction, and tool execution, then switches settled messages to the
   verbatim Pi entry. Raw records remain expandable. Info shows run metadata,
   final output, capture status, counts, and integrity diagnostics.
 - **Timeline:** run status, elapsed time, replay track, playhead, position,
-  playback controls, and speed. The track and controls accept mouse clicks;
-  the track supports drag seeking.
+  playback controls, and speed. Every playback action uses the same bracketed
+  symbol-button style as the inspector and theme actions. The controls accept
+  full-label mouse clicks; the track supports click and drag seeking.
 
 ## State presentation
 
@@ -68,7 +74,9 @@ The graph distinguishes these states:
 
 A live running node uses a blue heavy border and `◐`. A selected historical
 step uses a mauve heavy border and `◆`, so replay never looks live. Timed-out
-nodes use `×` and a separate color. The graph title distinguishes `(live)`,
+nodes use `×` and a separate color. Type color is independent of state: agent
+is green, compute is blue, action is yellow, and checkpoint is mauve. The graph
+title distinguishes `(live)`,
 `(latest)`, and `(replay)` and also reports paused, reconnecting, disconnected,
 and failed or invalid capture states.
 
@@ -170,8 +178,8 @@ symlink, and 4 MiB limits.
 
 - Replay: `[`/`]` previous/next, Space play/pause, Home or `g` to start, End,
   `G`, or `L` to live, and `{`/`}` to change speed.
-- Focus: Tab cycles Runs → Graph → Inspector. `t` or `1`–`4` changes inspector
-  tabs.
+- Focus: Tab cycles Runs → Graph → Inspector. Click the full `[symbol Tab]`
+  buttons, or use `t` or `1`–`4`, to change inspector tabs.
 - Graph: arrows or `hjkl` pan, `0` resets, `f` toggles centered follow, and
   `z`, `+`, or `-` switches boxed/compact density. Clicking a node selects its
   latest visible attempt. Dragging inside the graph pans.
@@ -180,8 +188,8 @@ symlink, and 4 MiB limits.
 - Inspector: Enter expands the selected step, trace payload, or conversation
   entry. In Trace, `v` changes scope. Page Up/Down scrolls long content. Drag
   its top border to resize the bottom panel.
-- Theme: `,` opens the picker; arrows or `j`/`k` preview, Enter applies, and
-  Escape cancels.
+- Theme: `,` opens the picker; arrows or `j`/`k` preview. Click `[✓ Apply]` or
+  `[× Cancel]`; Enter and Escape remain the keyboard equivalents.
 - `q` or Ctrl-C quits.
 
 ## TypeScript renderer parity

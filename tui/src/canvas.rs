@@ -20,6 +20,11 @@ pub enum CanvasStyle {
     TimedOut,
     Warn,
     Cancelled,
+    Branch,
+    Agent,
+    Compute,
+    Action,
+    Checkpoint,
 }
 
 impl CanvasStyle {
@@ -35,8 +40,13 @@ impl CanvasStyle {
             CanvasStyle::Warn | CanvasStyle::Cancelled => 6,
             CanvasStyle::Ok => 7,
             CanvasStyle::Fail | CanvasStyle::TimedOut => 8,
-            CanvasStyle::Replay => 9,
-            CanvasStyle::Active => 10,
+            CanvasStyle::Branch
+            | CanvasStyle::Agent
+            | CanvasStyle::Compute
+            | CanvasStyle::Action
+            | CanvasStyle::Checkpoint => 9,
+            CanvasStyle::Replay => 10,
+            CanvasStyle::Active => 11,
         }
     }
 }

@@ -44,19 +44,19 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": ["· reply [agent] not visited ▶ start ■ end"]
+      "lines": ["▶ · reply [agent] not visited ■"]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
       "lines": [
-        "┌──────────────────────────────────────────┐",
-        "│ · queued [agent]                         │",
-        "│ reply                                    │",
-        "│ ▶ start  ■ end                           │",
-        "│ not visited                              │",
-        "│                                          │",
-        "└──────────────────────────────────────────┘"
+        "  ┌──────────────────────────────┐",
+        "▶ │            reply             │ ■",
+        "  ├──────────────────────────────┤",
+        "  │ ● agent             · queued │",
+        "  │ ↻ 0                      ◷ — │",
+        "  │                              │",
+        "  └──────────────────────────────┘"
       ]
     }
   ]

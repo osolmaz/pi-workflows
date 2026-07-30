@@ -130,10 +130,12 @@ describe("renderRunDetailLines", () => {
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
     expect(text).toContain("workflow demo");
     expect(text).toContain("completed · run run-1 · elapsed 45s");
-    expect(text).toContain("✓ completed [compute]");
+    expect(text).toContain("ƒ compute");
+    expect(text).toContain("✓ completed");
     expect(text).toContain("one");
-    expect(text).toContain("1 attempt · 1.0s");
-    expect(text).toContain("· queued [compute]");
+    expect(text).toContain("↻ 1");
+    expect(text).toContain("◷ 1.0s");
+    expect(text).toContain("· queued");
     expect(text).toContain("two");
     expect(text).toContain(`{"value":1}`);
     expect(text).toContain(`output {"done":true}`);
@@ -146,9 +148,11 @@ describe("renderRunDetailLines", () => {
       error: "exploded",
     });
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
-    expect(text).toContain("◐ running [compute]");
+    expect(text).toContain("ƒ compute");
+    expect(text).toContain("◐ running");
     expect(text).toContain("two");
-    expect(text).toContain("1 attempt · running 10s");
+    expect(text).toContain("↻ 1");
+    expect(text).toContain("◷ 10s");
     expect(text).toContain("error: exploded");
   });
 
@@ -164,9 +168,11 @@ describe("renderRunDetailLines", () => {
       statusDetail: "reviewing",
     });
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
-    expect(text).toContain("◐ running [compute]");
-    expect(text).toContain("1 attempt · running 10s");
-    expect(text).toContain("reviewing");
+    expect(text).toContain("ƒ compute");
+    expect(text).toContain("◐ running");
+    expect(text).toContain("↻ 1");
+    expect(text).toContain("◷ 10s");
+    expect(text).toContain("… reviewing");
   });
 
   it("scrubs to a selected step with position and inspector", () => {
@@ -206,7 +212,8 @@ describe("renderRunDetailLines", () => {
     expect(first).toContain("step output — one (ok)");
     expect(first).toContain(`"value": 1`);
     // Scrubbed to step 1: node two has no visible attempt yet.
-    expect(first).toContain("· queued [compute]");
+    expect(first).toContain("ƒ compute");
+    expect(first).toContain("· queued");
     expect(first).toContain("two");
 
     const second = renderRunDetailLines(bundle, size, NOW, 0, 1).map(stripAnsi).join("\n");
@@ -214,7 +221,8 @@ describe("renderRunDetailLines", () => {
     expect(second).toContain("step output — two (failed)");
     expect(second).toContain("two exploded");
     expect(second).toContain("shell false --now → exit 1");
-    expect(second).toContain("✗ failed [compute]");
+    expect(second).toContain("ƒ compute");
+    expect(second).toContain("✗ failed");
     expect(second).toContain("two");
   });
 

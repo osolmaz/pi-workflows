@@ -621,10 +621,12 @@ export default function captureFailureExtension(pi: unknown) {
       { cwd: REPO_ROOT, env: { ...process.env, PI_WORKFLOWS_RUNS_DIR: runsDir, NO_COLOR: "1" } },
     );
     expect(stdout).toContain("workflow e2e");
-    expect(stdout).toContain("✓ completed [agent]");
+    expect(stdout).toContain("● agent");
+    expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("propose");
     expect(stdout).toContain("confirm");
-    expect(stdout).toContain("✓ completed [action]");
+    expect(stdout).toContain("⚙ action");
+    expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("implement");
   }, 30_000);
 });

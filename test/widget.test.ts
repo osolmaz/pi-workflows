@@ -102,9 +102,11 @@ describe("buildWidgetLines", () => {
     const joined = lines.join("\n");
     expect(lines[0]).toContain("workflow demo — demo run [running]");
     // The active node is boxed (heavy border) and centered in the window.
-    expect(joined).toContain("◐ running [compute]");
+    expect(joined).toContain("ƒ compute");
+    expect(joined).toContain("◐ running");
     expect(joined).toContain("second");
-    expect(joined).toContain("1 attempt · running 2.0s");
+    expect(joined).toContain("↻ 1");
+    expect(joined).toContain("◷ 2.0s");
     expect(joined).toContain("verifying");
     expect(joined).toContain("┃");
     expect(joined).toContain("┏");
@@ -131,7 +133,8 @@ describe("buildWidgetLines", () => {
     expect(lines.length).toBeLessThanOrEqual(10);
     const joined = lines.join("\n");
     // The window centers on the active node and marks hidden rows.
-    expect(joined).toContain("◐ running [compute]");
+    expect(joined).toContain("ƒ compute");
+    expect(joined).toContain("◐ running");
     expect(joined).toContain("n10");
     expect(joined).toMatch(/↑ \d+/);
     expect(joined).toMatch(/↓ \d+/);
@@ -186,7 +189,8 @@ describe("buildWidgetLines", () => {
     const followed = buildWidgetView(state, tall, now);
     expect(followed.maxScroll).toBeGreaterThan(0);
     expect(followed.scroll).toBeGreaterThan(0);
-    expect(followed.lines.join("\n")).toContain("◐ running [compute]");
+    expect(followed.lines.join("\n")).toContain("ƒ compute");
+    expect(followed.lines.join("\n")).toContain("◐ running");
     expect(followed.lines.join("\n")).toContain("n10");
 
     const top = buildWidgetView(state, tall, now, 0);

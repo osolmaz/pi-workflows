@@ -189,6 +189,23 @@ describe("renderGraphLines", () => {
     expect(text).toContain("· review [agent]");
   });
 
+  it("renders structured cards with centered headers and external endpoints", () => {
+    const bundle = makeBundle(LOOP_SNAPSHOT, [], { status: "running" });
+    const lines = renderGraphLines(bundle, -1, new Date(), { nodeStyle: "box" }).map(stripAnsi);
+    const planRow = lines.findIndex((line) => line.includes("plan"));
+    expect(planRow).toBeGreaterThan(0);
+    expect(lines[planRow - 1]).toMatch(/┌─+┐/);
+    expect(lines[planRow]).toMatch(/▶ │\s+plan\s+│/);
+    expect(lines[planRow + 1]).toMatch(/├─+┤/);
+    expect(lines[planRow + 2]).toContain("ƒ compute");
+    expect(lines[planRow + 2]).toContain("· queued");
+    expect(lines[planRow + 3]).toContain("↻ 0");
+    expect(lines[planRow + 3]).toContain("◷ —");
+    expect(lines.find((line) => /│\s+done\s+│ ■/.test(line))).toBeDefined();
+    expect(lines.join("\n")).not.toContain("▶ start");
+    expect(lines.join("\n")).not.toContain("■ end");
+  });
+
   it("keeps full card bounds fixed across replay positions", () => {
     const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, { status: "completed" });
     const sizes = [

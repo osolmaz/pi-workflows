@@ -76,10 +76,52 @@ impl NodeStatus {
     }
 }
 
-const CELL_GAP: i64 = 4;
+const CELL_GAP: i64 = 6;
 const GUTTER_GAP: i64 = 2;
-const CARD_MIN_CONTENT_WIDTH: i64 = 24;
-const CARD_DYNAMIC_RESERVE: &str = "100 attempts · running 9999d 23h 59m 59s";
+const GRAPH_SIDE_MARGIN: i64 = 2;
+const CARD_MIN_CONTENT_WIDTH: i64 = 28;
+const CARD_DYNAMIC_RESERVE: &str = "↻ 100  ◷ 9999d 23h 59m 59s";
+
+fn node_type_glyph(node_type: &str) -> char {
+    match node_type {
+        "agent" => '●',
+        "compute" => 'ƒ',
+        "action" => '⚙',
+        "checkpoint" => '◆',
+        _ => '?',
+    }
+}
+
+fn node_type_style(node_type: &str) -> CanvasStyle {
+    match node_type {
+        "agent" => CanvasStyle::Agent,
+        "compute" => CanvasStyle::Compute,
+        "action" => CanvasStyle::Action,
+        "checkpoint" => CanvasStyle::Checkpoint,
+        _ => CanvasStyle::NodeDim,
+    }
+}
+
+fn node_type_badge(node_type: &str) -> String {
+    format!("{} {node_type}", node_type_glyph(node_type))
+}
+
+fn fit_text(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return chars.into_iter().take(width).collect();
+    }
+    format!("{}…", chars.into_iter().take(width - 1).collect::<String>())
+}
+
+fn centered_text(text: &str, width: usize) -> String {
+    let fitted = fit_text(text, width);
+    let left = width.saturating_sub(fitted.chars().count()) / 2;
+    format!("{}{fitted}", " ".repeat(left))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphNodeStyle {
@@ -177,22 +219,22 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
         NodeStatus::Queued,
         NodeStatus::Cancelled,
     ] {
-        content_width = content_width.max(js_len(&format!("{} [checkpoint]", status.label())));
+        content_width = content_width.max(js_len(&format!(
+            "{}  {} {}",
+            node_type_badge("checkpoint"),
+            status.glyph(),
+            status.label()
+        )));
     }
     for (node_id, node) in &snapshot.nodes {
         content_width = content_width.max(js_len(&sanitize_text(node_id)));
         if let Some(node_type) = node.get("nodeType").and_then(Value::as_str) {
-            content_width = content_width.max(js_len(&format!("[{node_type}]")));
-        }
-        for field in ["statusDetail", "summary"] {
-            if let Some(value) = node.get(field).and_then(Value::as_str) {
-                content_width = content_width.max(js_len(&sanitize_text(value)));
-            }
+            content_width = content_width.max(js_len(&node_type_badge(node_type)));
         }
         let labels = node_branch_labels(view, node_id);
         branch_rows = branch_rows.max(labels.len());
         for label in labels {
-            content_width = content_width.max(js_len(&format!("↳ {label}")));
+            content_width = content_width.max(js_len(&format!("◇ {label}")));
         }
     }
     CardMetrics {
@@ -205,8 +247,15 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
 struct RenderedCell {
     cell: GraphCell,
     text: String,
-    lines: Vec<String>,
+    node_id: String,
+    node_type: String,
     status: Option<NodeStatus>,
+    attempts: usize,
+    elapsed: String,
+    detail: String,
+    branch_lines: Vec<String>,
+    is_start: bool,
+    is_end: bool,
     width: i64,
 }
 
@@ -223,8 +272,15 @@ fn render_cell_text(
         return RenderedCell {
             cell: cell.clone(),
             text: String::new(),
-            lines: Vec::new(),
+            node_id: String::new(),
+            node_type: String::new(),
             status: None,
+            attempts: 0,
+            elapsed: String::new(),
+            detail: String::new(),
+            branch_lines: Vec::new(),
+            is_start: false,
+            is_end: false,
             width: 1,
         };
     };
@@ -254,48 +310,30 @@ fn render_cell_text(
             })
             .sum::<usize>()
     });
-    let mut markers = Vec::new();
-    if view
+    let is_start = view
         .snapshot
-        .is_some_and(|snapshot| snapshot.start_at == *node_id)
-    {
-        markers.push("▶ start".to_string());
-    }
-    if outgoing > 1 {
-        markers.push(format!("◇{outgoing} branch"));
-    }
-    if outgoing == 0 {
-        markers.push("■ end".to_string());
-    }
-    let timing = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+        .is_some_and(|snapshot| snapshot.start_at == *node_id);
+    let is_end = outgoing == 0;
+    let elapsed = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         let started_at = state
             .current_node_started_at
             .as_deref()
             .and_then(parse_timestamp_ms)
             .unwrap_or(now_ms);
-        let count = attempts.max(1);
-        format!(
-            "{count} attempt{} · running {}",
-            if count == 1 { "" } else { "s" },
-            format_duration(now_ms - started_at)
-        )
+        format_duration(now_ms - started_at)
     } else if let Some(attempt) = attempt {
         let duration_ms = parse_timestamp_ms(&attempt.finished_at).unwrap_or(0)
             - parse_timestamp_ms(&attempt.started_at).unwrap_or(0);
-        format!(
-            "{attempts} attempt{} · {}",
-            if attempts == 1 { "" } else { "s" },
-            format_duration(duration_ms)
-        )
+        format_duration(duration_ms)
     } else {
-        "not visited".to_string()
+        "—".to_string()
     };
     let detail = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         state
             .status_detail
             .as_deref()
             .map(sanitize_text)
-            .unwrap_or_else(|| status.label().to_string())
+            .unwrap_or_default()
     } else {
         node.and_then(|node| {
             node.get("statusDetail")
@@ -303,35 +341,39 @@ fn render_cell_text(
                 .and_then(Value::as_str)
         })
         .map(sanitize_text)
-        .unwrap_or_else(|| {
-            if status == NodeStatus::Queued {
-                String::new()
-            } else {
-                status.label().to_string()
-            }
-        })
+        .unwrap_or_default()
     };
     let mut branch_lines: Vec<String> = labels
         .into_iter()
-        .map(|label| format!("↳ {label}"))
+        .map(|label| format!("◇ {label}"))
         .collect();
     branch_lines.resize(metrics.branch_rows, String::new());
-    let mut lines = vec![
-        format!("{} [{node_type}]", status.label()),
-        sanitize_text(node_id),
-        markers.join("  "),
-    ];
-    lines.extend(branch_lines);
-    lines.push(timing.clone());
-    lines.push(detail);
-    let text = format!("{node_id} [{node_type}] {timing} {}", markers.join(" "))
-        .trim()
-        .to_string();
+    let count = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+        attempts.max(1)
+    } else {
+        attempts
+    };
+    let timing = if attempt.is_some() || count > 0 {
+        format!(
+            "{count} attempt{} · {elapsed}",
+            if count == 1 { "" } else { "s" }
+        )
+    } else {
+        "not visited".to_string()
+    };
+    let text = format!("{node_id} [{node_type}] {timing}");
     RenderedCell {
         cell: cell.clone(),
         text: text.clone(),
-        lines,
+        node_id: sanitize_text(node_id),
+        node_type: node_type.to_string(),
         status: Some(status),
+        attempts: count,
+        elapsed,
+        detail,
+        branch_lines,
+        is_start,
+        is_end,
         width: match node_style {
             GraphNodeStyle::Box => metrics.width,
             GraphNodeStyle::Line => js_len(&text) + 2,
@@ -438,7 +480,7 @@ pub fn render_graph(
                 + 0.max(cells.len() as i64 - 1) * CELL_GAP
         })
         .collect();
-    let graph_width = rank_widths.iter().copied().max().unwrap_or(0).max(0);
+    let graph_width = rank_widths.iter().copied().max().unwrap_or(0).max(0) + GRAPH_SIDE_MARGIN * 2;
     let geometry: Vec<RankGeometry> = rendered
         .into_iter()
         .enumerate()
@@ -829,6 +871,8 @@ fn fan_offsets(
 struct BoxChars {
     tl: char,
     tr: char,
+    ml: char,
+    mr: char,
     bl: char,
     br: char,
     h: char,
@@ -838,6 +882,8 @@ struct BoxChars {
 const BOX_LIGHT: BoxChars = BoxChars {
     tl: '┌',
     tr: '┐',
+    ml: '├',
+    mr: '┤',
     bl: '└',
     br: '┘',
     h: '─',
@@ -847,6 +893,8 @@ const BOX_LIGHT: BoxChars = BoxChars {
 const BOX_HEAVY: BoxChars = BoxChars {
     tl: '┏',
     tr: '┓',
+    ml: '┣',
+    mr: '┫',
     bl: '┗',
     br: '┛',
     h: '━',
@@ -892,6 +940,14 @@ fn draw_nodes(
                     if node_style == GraphNodeStyle::Box {
                         draw_node_box(canvas, start_x, rank.y, rendered, status);
                     } else {
+                        if rendered.is_start {
+                            canvas.put(
+                                start_x - 2,
+                                rank.y,
+                                '▶',
+                                node_type_style(&rendered.node_type),
+                            );
+                        }
                         canvas.put(start_x, rank.y, status.glyph(), status.style());
                         canvas.text(
                             start_x + 2,
@@ -903,6 +959,14 @@ fn draw_nodes(
                                 CanvasStyle::Plain
                             },
                         );
+                        if rendered.is_end {
+                            canvas.put(
+                                start_x + rendered.width + 1,
+                                rank.y,
+                                '■',
+                                node_type_style(&rendered.node_type),
+                            );
+                        }
                     }
                 }
             }
@@ -923,7 +987,8 @@ fn draw_node_box(
     } else {
         &BOX_LIGHT
     };
-    let style = status.style();
+    let border_style = status.style();
+    let type_style = node_type_style(&rendered.node_type);
     let content_style = if status.is_focused() {
         CanvasStyle::NodeFocusText
     } else if status == NodeStatus::Queued {
@@ -931,38 +996,94 @@ fn draw_node_box(
     } else {
         CanvasStyle::NodeText
     };
-    let height = rendered.lines.len() as i64 + 2;
-    canvas.fill_rect(start_x, y, rendered.width, height, content_style);
+    let height = 7 + rendered.branch_lines.len() as i64;
     let inner_width = (rendered.width - 2) as usize;
+    let right_x = start_x + rendered.width - 1;
+    canvas.fill_rect(start_x, y, rendered.width, height, content_style);
     let horizontal: String = std::iter::repeat_n(chars.h, inner_width).collect();
+
     canvas.text(
         start_x,
         y,
         &format!("{}{horizontal}{}", chars.tl, chars.tr),
-        style,
+        border_style,
     );
-    for (index, line) in rendered.lines.iter().enumerate() {
-        let row = y + 1 + index as i64;
-        canvas.text(start_x, row, &chars.v.to_string(), style);
-        if index == 0 {
-            canvas.put(start_x + 2, row, status.glyph(), style);
-            canvas.text(start_x + 4, row, line, content_style);
-        } else {
-            canvas.text(start_x + 2, row, line, content_style);
-        }
+    canvas.text(start_x, y + 1, &chars.v.to_string(), border_style);
+    canvas.text(right_x, y + 1, &chars.v.to_string(), border_style);
+    canvas.text(
+        start_x + 1,
+        y + 1,
+        &centered_text(&rendered.node_id, inner_width),
+        content_style,
+    );
+    canvas.text(
+        start_x,
+        y + 2,
+        &format!("{}{horizontal}{}", chars.ml, chars.mr),
+        type_style,
+    );
+
+    let type_badge = fit_text(&node_type_badge(&rendered.node_type), inner_width - 2);
+    let status_badge = fit_text(
+        &format!("{} {}", status.glyph(), status.label()),
+        inner_width - 2,
+    );
+    canvas.text(start_x, y + 3, &chars.v.to_string(), border_style);
+    canvas.text(right_x, y + 3, &chars.v.to_string(), border_style);
+    canvas.text(start_x + 2, y + 3, &type_badge, type_style);
+    canvas.text(
+        right_x - 1 - status_badge.chars().count() as i64,
+        y + 3,
+        &status_badge,
+        border_style,
+    );
+
+    let attempts = format!("↻ {}", rendered.attempts);
+    let elapsed = format!("◷ {}", rendered.elapsed);
+    canvas.text(start_x, y + 4, &chars.v.to_string(), border_style);
+    canvas.text(right_x, y + 4, &chars.v.to_string(), border_style);
+    canvas.text(start_x + 2, y + 4, &attempts, content_style);
+    canvas.text(
+        right_x - 1 - elapsed.chars().count() as i64,
+        y + 4,
+        &elapsed,
+        content_style,
+    );
+
+    for (index, branch) in rendered.branch_lines.iter().enumerate() {
+        let row = y + 5 + index as i64;
+        canvas.text(start_x, row, &chars.v.to_string(), border_style);
+        canvas.text(right_x, row, &chars.v.to_string(), border_style);
         canvas.text(
-            start_x + rendered.width - 1,
+            start_x + 2,
             row,
-            &chars.v.to_string(),
-            style,
+            &fit_text(branch, inner_width - 2),
+            CanvasStyle::Branch,
+        );
+    }
+    let detail_row = y + 5 + rendered.branch_lines.len() as i64;
+    canvas.text(start_x, detail_row, &chars.v.to_string(), border_style);
+    canvas.text(right_x, detail_row, &chars.v.to_string(), border_style);
+    if !rendered.detail.is_empty() {
+        canvas.text(
+            start_x + 2,
+            detail_row,
+            &fit_text(&format!("… {}", rendered.detail), inner_width - 2),
+            content_style,
         );
     }
     canvas.text(
         start_x,
         y + height - 1,
         &format!("{}{horizontal}{}", chars.bl, chars.br),
-        style,
+        border_style,
     );
+    if rendered.is_start {
+        canvas.put(start_x - 2, y + 1, '▶', type_style);
+    }
+    if rendered.is_end {
+        canvas.put(start_x + rendered.width + 1, y + 1, '■', type_style);
+    }
 }
 
 fn edge_style(
