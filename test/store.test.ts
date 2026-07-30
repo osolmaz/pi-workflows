@@ -123,6 +123,14 @@ describe("WorkflowRunStore", () => {
     expect((await readRunBundle(runDir))?.state.traceSeq).toBe(2);
   });
 
+  it("declares the artifact directory before live payloads can reference it", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-artifact-manifest");
+    const store = new WorkflowRunStore(outputRoot);
+    const runDir = await store.initializeRunBundle(workflow, makeState());
+    expect((await readRunBundle(runDir))?.manifest.paths.artifacts).toBe("artifacts");
+    await expect(fs.stat(path.join(runDir, "artifacts"))).rejects.toThrow();
+  });
+
   it("externalizes large values into content-addressed artifacts", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store");
     const store = new WorkflowRunStore(outputRoot);

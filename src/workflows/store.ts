@@ -313,7 +313,6 @@ export class WorkflowRunStore {
       path.join(runDir, MANIFEST_PATH),
       createManifest(state, {
         session: context.sessionBound,
-        artifacts: context.artifacts.hasArtifacts,
       }),
     );
   }
@@ -764,7 +763,7 @@ function failureMessageForDiagnostic(error: unknown): string {
 
 function createManifest(
   state: WorkflowRunState,
-  present: { session: boolean; artifacts: boolean },
+  present: { session: boolean },
 ): WorkflowRunManifest {
   return {
     schema: RUN_BUNDLE_SCHEMA,
@@ -781,7 +780,10 @@ function createManifest(
       state: STATE_PATH,
       trace: TRACE_PATH,
       ...(present.session ? { session: SESSION_DIR } : {}),
-      ...(present.artifacts ? { artifacts: "artifacts" } : {}),
+      // Declare this before any payload can externalize a string. Live
+      // session-event patches may reference a newly written artifact before
+      // the next workflow state projection refreshes the manifest.
+      artifacts: "artifacts",
     },
   };
 }

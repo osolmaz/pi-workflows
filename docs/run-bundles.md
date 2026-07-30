@@ -138,10 +138,12 @@ Identity and pointers, kept in sync with the state on every snapshot:
 }
 ```
 
-`paths.session` and `paths.artifacts` are present only when those directories
-exist. Readers must start from `manifest.json`, check `schema`, skip bundles
-they do not understand, resolve files through `paths`, and reject any path
-that escapes the bundle directory.
+`paths.artifacts` is declared from bundle creation so a live session-event
+patch can safely reference a newly written artifact before the next workflow
+state projection. The directory itself is created only when needed.
+`paths.session` appears when the run binds to Pi. Readers must start from
+`manifest.json`, check `schema`, skip bundles they do not understand, resolve
+files through `paths`, and reject any path that escapes the bundle directory.
 
 ## workflow.json
 
