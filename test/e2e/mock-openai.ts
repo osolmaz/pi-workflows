@@ -13,14 +13,26 @@ type ChatRequest = {
 };
 
 export type MockModelReply =
-  | { kind: "text"; text: string }
-  | { kind: "tool"; toolName: string; args: Record<string, unknown> };
+  | { kind: "text"; text: string; thinking?: string }
+  | {
+      kind: "tool";
+      toolName: string;
+      args: Record<string, unknown>;
+      thinking?: string;
+    };
 
 export type MockModelScript = (request: {
   messages: ChatMessage[];
   lastUserText: string;
   lastRole: string;
 }) => MockModelReply;
+
+export type MockStreamOptions = {
+  textChunkSize?: number;
+  thinkingChunkSize?: number;
+  toolArgumentChunkSize?: number;
+  chunkDelayMs?: number;
+};
 
 function messageText(message: ChatMessage | undefined): string {
   if (!message) {
@@ -42,7 +54,18 @@ function messageText(message: ChatMessage | undefined): string {
   return "";
 }
 
-function sseChunks(reply: MockModelReply): string[] {
+function splitChunks(value: string, size: number | undefined): string[] {
+  if (size === undefined || size <= 0 || value.length <= size) {
+    return [value];
+  }
+  const chunks: string[] = [];
+  for (let offset = 0; offset < value.length; offset += size) {
+    chunks.push(value.slice(offset, offset + size));
+  }
+  return chunks;
+}
+
+function sseChunks(reply: MockModelReply, options: MockStreamOptions): string[] {
   const id = `chatcmpl-mock-${Date.now()}`;
   const base = {
     id,
@@ -51,20 +74,41 @@ function sseChunks(reply: MockModelReply): string[] {
     model: "mock-model",
   };
   const chunks: object[] = [];
+  if (reply.thinking !== undefined) {
+    const thinkingChunks = splitChunks(reply.thinking, options.thinkingChunkSize);
+    for (const [index, reasoningContent] of thinkingChunks.entries()) {
+      chunks.push({
+        ...base,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              ...(index === 0 ? { role: "assistant" } : {}),
+              reasoning_content: reasoningContent,
+            },
+            finish_reason: null,
+          },
+        ],
+      });
+    }
+  }
+  const initialRole = reply.thinking === undefined ? { role: "assistant" } : {};
   if (reply.kind === "tool") {
+    const argumentChunks = splitChunks(JSON.stringify(reply.args), options.toolArgumentChunkSize);
+    const callId = `call-${Date.now()}`;
     chunks.push({
       ...base,
       choices: [
         {
           index: 0,
           delta: {
-            role: "assistant",
+            ...initialRole,
             tool_calls: [
               {
                 index: 0,
-                id: `call-${Date.now()}`,
+                id: callId,
                 type: "function",
-                function: { name: reply.toolName, arguments: JSON.stringify(reply.args) },
+                function: { name: reply.toolName, arguments: argumentChunks[0] },
               },
             ],
           },
@@ -72,14 +116,39 @@ function sseChunks(reply: MockModelReply): string[] {
         },
       ],
     });
+    for (const argumentsDelta of argumentChunks.slice(1)) {
+      chunks.push({
+        ...base,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: argumentsDelta } }],
+            },
+            finish_reason: null,
+          },
+        ],
+      });
+    }
     chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] });
   } else {
+    const textChunks = splitChunks(reply.text, options.textChunkSize);
     chunks.push({
       ...base,
       choices: [
-        { index: 0, delta: { role: "assistant", content: reply.text }, finish_reason: null },
+        {
+          index: 0,
+          delta: { ...initialRole, content: textChunks[0] },
+          finish_reason: null,
+        },
       ],
     });
+    for (const content of textChunks.slice(1)) {
+      chunks.push({
+        ...base,
+        choices: [{ index: 0, delta: { content }, finish_reason: null }],
+      });
+    }
     chunks.push({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
   }
   const usage = { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 };
@@ -96,7 +165,10 @@ function sseChunks(reply: MockModelReply): string[] {
  * tests. The provided script decides, per request, whether the fake model
  * answers with text or calls a tool.
  */
-export async function startMockOpenAiServer(script: MockModelScript): Promise<{
+export async function startMockOpenAiServer(
+  script: MockModelScript,
+  options: MockStreamOptions = {},
+): Promise<{
   baseUrl: string;
   requests: ChatRequest[];
   close: () => Promise<void>;
@@ -126,10 +198,16 @@ export async function startMockOpenAiServer(script: MockModelScript): Promise<{
         "cache-control": "no-cache",
         connection: "keep-alive",
       });
-      for (const chunk of sseChunks(reply)) {
-        res.write(chunk);
-      }
-      res.end();
+      const stream = async () => {
+        for (const chunk of sseChunks(reply, options)) {
+          res.write(chunk);
+          if ((options.chunkDelayMs ?? 0) > 0) {
+            await new Promise((resolve) => setTimeout(resolve, options.chunkDelayMs));
+          }
+        }
+        res.end();
+      };
+      void stream().catch(() => res.destroy());
     });
   });
 

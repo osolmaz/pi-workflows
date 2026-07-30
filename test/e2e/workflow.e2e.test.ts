@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { WorkflowRunState } from "../../src/workflows/types.js";
+import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
+import type {
+  WorkflowRunState,
+  WorkflowSessionEntryRecord,
+  WorkflowSessionEventRecord,
+} from "../../src/workflows/types.js";
 import { makeTempDir } from "../helpers.js";
 import { startMockOpenAiServer } from "./mock-openai.js";
 
@@ -123,16 +128,17 @@ function startPiRpc(options: {
 }
 
 async function waitForCondition(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   onTimeout: () => string,
   timeoutMs = 10_000,
+  intervalMs = 100,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) {
       throw new Error(`Timed out waiting for condition.\n${onTimeout()}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
 
@@ -174,42 +180,56 @@ describe.sequential("pi-workflows end to end", () => {
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
     // workflow tool and ends its turn after each tool result.
-    mock = await startMockOpenAiServer(({ lastUserText, lastRole }) => {
-      if (lastUserText.includes("Presentation instructions:")) {
-        return { kind: "text", text: "Implemented the boring, proven design." };
-      }
-      if (lastRole === "tool") {
-        return { kind: "text", text: "Step submitted." };
-      }
-      const stepMatch = lastUserText.match(
-        /workflow step contract \(workflow: e2e, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
-      );
-      const step = stepMatch?.[1];
-      const attempt = stepMatch?.[2] ?? "";
-      if (step === "propose") {
-        return {
-          kind: "tool",
-          toolName: "workflow",
-          args: {
-            step: "propose",
-            attempt,
-            output: { proposal: "Ship the boring, proven design." },
-          },
-        };
-      }
-      if (step === "confirm") {
-        return {
-          kind: "tool",
-          toolName: "workflow",
-          args: {
-            step: "confirm",
-            attempt,
-            output: { route: "y", reason: "proposal matches the holy grail" },
-          },
-        };
-      }
-      return { kind: "text", text: "Nothing to do." };
-    });
+    mock = await startMockOpenAiServer(
+      ({ lastUserText, lastRole }) => {
+        if (lastUserText.includes("Presentation instructions:")) {
+          return { kind: "text", text: "Implemented the boring, proven design." };
+        }
+        if (lastRole === "tool") {
+          return {
+            kind: "text",
+            thinking: "Confirm the workflow tool result before stopping.",
+            text: "Step submitted.",
+          };
+        }
+        const stepMatch = lastUserText.match(
+          /workflow step contract \(workflow: e2e, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
+        );
+        const step = stepMatch?.[1];
+        const attempt = stepMatch?.[2] ?? "";
+        if (step === "propose") {
+          return {
+            kind: "tool",
+            thinking: "Build and submit the proposed workflow output.",
+            toolName: "workflow",
+            args: {
+              step: "propose",
+              attempt,
+              output: { proposal: "Ship the boring, proven design." },
+            },
+          };
+        }
+        if (step === "confirm") {
+          return {
+            kind: "tool",
+            thinking: "Choose the accepted workflow route.",
+            toolName: "workflow",
+            args: {
+              step: "confirm",
+              attempt,
+              output: { route: "y", reason: "proposal matches the holy grail" },
+            },
+          };
+        }
+        return { kind: "text", text: "Nothing to do." };
+      },
+      {
+        textChunkSize: 5,
+        thinkingChunkSize: 6,
+        toolArgumentChunkSize: 12,
+        chunkDelayMs: 15,
+      },
+    );
 
     projectDir = await makeTempDir("pi-workflows-e2e-project");
     runsDir = await makeTempDir("pi-workflows-e2e-runs");
@@ -259,6 +279,51 @@ describe.sequential("pi-workflows end to end", () => {
   it("runs a workflow to completion inside a real pi session", async () => {
     pi.send({ id: "wf-1", type: "prompt", message: "/workflow e2e ship it" });
 
+    // Observe the durable journal while the first tool call is still streaming,
+    // not only after Pi and the workflow have reached a terminal state.
+    await waitForCondition(
+      async () => {
+        const runNames = await fs.readdir(runsDir).catch(() => [] as string[]);
+        for (const runName of runNames) {
+          try {
+            const raw = await fs.readFile(
+              path.join(runsDir, runName, "session", "events.ndjson"),
+              "utf8",
+            );
+            const events = raw
+              .trim()
+              .split("\n")
+              .filter(Boolean)
+              .map((line) => JSON.parse(line) as WorkflowSessionEventRecord);
+            const deltas = events.filter(
+              (event) =>
+                event.type === "assistant_event" &&
+                event.payload.type === "toolcall_delta" &&
+                event.messageId !== undefined,
+            );
+            const messageId = deltas[0]?.messageId;
+            if (deltas.length >= 2 && messageId !== undefined) {
+              const alreadyEnded = events.some(
+                (event) =>
+                  event.type === "assistant_event" &&
+                  event.messageId === messageId &&
+                  event.payload.type === "toolcall_end",
+              );
+              if (!alreadyEnded) {
+                return true;
+              }
+            }
+          } catch {
+            // The bundle or journal is not visible yet; keep polling.
+          }
+        }
+        return false;
+      },
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+      20_000,
+      10,
+    );
+
     const { state, runDir } = await waitForRunState(
       runsDir,
       (candidate) => candidate.status === "completed" || candidate.status === "failed",
@@ -294,15 +359,7 @@ describe.sequential("pi-workflows end to end", () => {
     const sessionEvents = sessionEventsRaw
       .trim()
       .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            seq: number;
-            type: string;
-            messageId?: string;
-            payload: Record<string, unknown>;
-          },
-      );
+      .map((line) => JSON.parse(line) as WorkflowSessionEventRecord);
     expect(sessionEvents.map((event) => event.seq)).toEqual(
       Array.from({ length: sessionEvents.length }, (_, index) => index + 1),
     );
@@ -314,12 +371,119 @@ describe.sequential("pi-workflows end to end", () => {
     expect(sessionEventsRaw).not.toContain('"partialResult"');
 
     const entriesRaw = await fs.readFile(path.join(runDir, "session", "entries.ndjson"), "utf8");
-    const entryIds = new Set(
-      entriesRaw
-        .trim()
-        .split("\n")
-        .map((line) => (JSON.parse(line) as { entry: { id: string } }).entry.id),
+    const sessionEntries = entriesRaw
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as WorkflowSessionEntryRecord);
+    const entryIds = new Set(sessionEntries.map((record) => record.entry.id));
+
+    const streamGroups = (deltaType: "text_delta" | "thinking_delta" | "toolcall_delta") => {
+      const groups = new Map<string, WorkflowSessionEventRecord[]>();
+      for (const event of sessionEvents) {
+        if (
+          event.type !== "assistant_event" ||
+          event.payload.type !== deltaType ||
+          event.messageId === undefined ||
+          typeof event.payload.contentIndex !== "number"
+        ) {
+          continue;
+        }
+        const key = `${event.messageId}:${event.payload.contentIndex}`;
+        const group = groups.get(key) ?? [];
+        group.push(event);
+        groups.set(key, group);
+      }
+      return groups;
+    };
+    const textGroups = streamGroups("text_delta");
+    const thinkingGroups = streamGroups("thinking_delta");
+    const toolGroups = streamGroups("toolcall_delta");
+    const fragmentedTextGroups = [...textGroups.values()].filter((group) => group.length > 1);
+    const fragmentedThinkingGroups = [...thinkingGroups.values()].filter(
+      (group) => group.length > 1,
     );
+    const fragmentedToolGroups = [...toolGroups.values()].filter((group) => group.length > 1);
+    expect(fragmentedTextGroups.length).toBeGreaterThanOrEqual(2);
+    expect(fragmentedThinkingGroups.length).toBeGreaterThanOrEqual(4);
+    expect(fragmentedToolGroups.length).toBeGreaterThanOrEqual(2);
+    for (const group of [
+      ...fragmentedTextGroups,
+      ...fragmentedThinkingGroups,
+      ...fragmentedToolGroups,
+    ]) {
+      expect(new Set(group.map((event) => event.at)).size).toBe(group.length);
+    }
+
+    const textEnds = sessionEvents.filter(
+      (event) => event.type === "assistant_event" && event.payload.type === "text_end",
+    );
+    for (const end of textEnds) {
+      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
+      const deltas = textGroups.get(key) ?? [];
+      expect(deltas.map((event) => event.payload.delta).join("")).toBe(end.payload.content);
+    }
+    const thinkingEnds = sessionEvents.filter(
+      (event) => event.type === "assistant_event" && event.payload.type === "thinking_end",
+    );
+    for (const end of thinkingEnds) {
+      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
+      const deltas = thinkingGroups.get(key) ?? [];
+      expect(deltas.map((event) => event.payload.delta).join("")).toBe(end.payload.content);
+    }
+    const toolEnds = sessionEvents.filter(
+      (event) => event.type === "assistant_event" && event.payload.type === "toolcall_end",
+    );
+    for (const end of toolEnds) {
+      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
+      const deltas = toolGroups.get(key) ?? [];
+      const toolCall = end.payload.toolCall as { arguments?: unknown };
+      expect(JSON.parse(deltas.map((event) => event.payload.delta).join(""))).toEqual(
+        toolCall.arguments,
+      );
+    }
+
+    const textPrefix = fragmentedTextGroups[0]!;
+    const textReplay = reduceSessionEvents(sessionEntries, sessionEvents, textPrefix[1]!.seq);
+    const textMessage = textReplay.messages.find(
+      (message) => message.messageId === textPrefix[0]!.messageId,
+    );
+    expect(textMessage?.status).toBe("streaming");
+    expect(
+      textMessage?.blocks.find(
+        (block) => block.contentIndex === textPrefix[0]!.payload.contentIndex,
+      )?.text,
+    ).toBe(
+      textPrefix
+        .slice(0, 2)
+        .map((event) => event.payload.delta)
+        .join(""),
+    );
+    expect(textReplay.diagnostics).toEqual([]);
+
+    const toolPrefix = fragmentedToolGroups[0]!;
+    const toolReplay = reduceSessionEvents(sessionEntries, sessionEvents, toolPrefix[1]!.seq);
+    const toolMessage = toolReplay.messages.find(
+      (message) => message.messageId === toolPrefix[0]!.messageId,
+    );
+    expect(toolMessage?.status).toBe("streaming");
+    expect(
+      toolMessage?.blocks.find(
+        (block) => block.contentIndex === toolPrefix[0]!.payload.contentIndex,
+      )?.text,
+    ).toBe(
+      toolPrefix
+        .slice(0, 2)
+        .map((event) => event.payload.delta)
+        .join(""),
+    );
+    expect(toolReplay.diagnostics).toEqual([]);
+
+    const finalReplay = reduceSessionEvents(sessionEntries, sessionEvents);
+    expect(finalReplay.diagnostics).toEqual([]);
+    expect(finalReplay.messages.every((message) => message.status !== "streaming")).toBe(true);
+    expect(finalReplay.tools.every((tool) => tool.status === "finished")).toBe(true);
+    expect(mock.requests.every((request) => request.stream === true)).toBe(true);
+
     const agentSteps = state.steps.filter((step) => step.nodeType === "agent");
     expect(agentSteps.every((step) => step.conversation !== undefined)).toBe(true);
     expect(
