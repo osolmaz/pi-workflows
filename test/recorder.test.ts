@@ -8,7 +8,12 @@ import { WorkflowRunStore, createRunId } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
-type FakeEntry = { id: string; type: string; content?: string };
+type FakeEntry = {
+  id: string;
+  type: string;
+  content?: string;
+  message?: { role: string; content?: unknown };
+};
 
 /** Minimal stand-in for the documented `ctx.sessionManager` read API. */
 function makeCtx(branch: FakeEntry[]): ExtensionContext {
@@ -57,6 +62,14 @@ async function readEntries(runDir: string): Promise<Array<{ seq: number; entry: 
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as { seq: number; entry: FakeEntry });
+}
+
+async function readEvents(runDir: string): Promise<Array<Record<string, unknown>>> {
+  const raw = await fs.readFile(path.join(runDir, "session/events.ndjson"), "utf8");
+  return raw
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 describe("SessionRecorder", () => {
@@ -134,8 +147,7 @@ describe("SessionRecorder", () => {
     branch.push({ id: "e1", type: "message" });
     await recorder.record(makeCtx(branch));
 
-    // A flush that has not started when stop() lands is dropped, and stop()
-    // drains the queue before resolving.
+    // A flush accepted before stop() is drained before the terminal capture.
     branch.push({ id: "e2", type: "message" });
     const pending = recorder.record(makeCtx(branch));
     await recorder.stop();
@@ -143,7 +155,159 @@ describe("SessionRecorder", () => {
     branch.push({ id: "e3", type: "message" });
     await recorder.record(makeCtx(branch));
 
-    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["e1"]);
+    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["e1", "e2"]);
+  });
+
+  it("records normalized temporal events with stable ownership and entry linkage", async () => {
+    const { store, runDir, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runDir, runId);
+    const branch: FakeEntry[] = [];
+    const ctx = makeCtx(branch);
+    await recorder.bind(ctx);
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "review",
+      attemptId: "attempt-1",
+    });
+
+    const assistant = { role: "assistant", content: [] };
+    recorder.handleTurnStart({ turnIndex: 0 });
+    recorder.handleMessageStart({ message: assistant });
+    recorder.handleMessageUpdate({
+      message: assistant,
+      assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: assistant },
+    });
+    recorder.handleMessageUpdate({
+      message: assistant,
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "hello",
+        partial: { ...assistant, content: [{ type: "text", text: "hello" }] },
+      },
+    });
+    recorder.handleMessageUpdate({
+      message: assistant,
+      assistantMessageEvent: {
+        type: "toolcall_end",
+        contentIndex: 1,
+        toolCall: { id: "call-1", name: "read", arguments: { path: "README.md" } },
+        partial: assistant,
+      },
+    });
+    recorder.handleToolStart({
+      toolCallId: "call-1",
+      toolName: "read",
+      args: { path: "README.md" },
+    });
+    recorder.handleToolUpdate({ toolCallId: "call-1" });
+    recorder.handleToolEnd({
+      toolCallId: "call-1",
+      toolName: "read",
+      result: { content: "ok" },
+      isError: false,
+    });
+
+    branch.push({ id: "entry-1", type: "message", message: assistant });
+    await recorder.handleMessageEnd({ message: assistant }, ctx);
+    // Ownership was captured at start and must not follow a later attempt.
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "next",
+      attemptId: "attempt-2",
+    });
+    recorder.handleTurnEnd({ turnIndex: 0, message: assistant });
+    await recorder.stop();
+
+    const events = await readEvents(runDir);
+    expect(events.map((event) => event.seq)).toEqual(
+      Array.from({ length: events.length }, (_, index) => index + 1),
+    );
+    expect(events.every((event) => event.nodeId === "review")).toBe(true);
+    expect(events.every((event) => event.attemptId === "attempt-1")).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      "turn_started",
+      "message_started",
+      "assistant_event",
+      "assistant_event",
+      "assistant_event",
+      "tool_execution_started",
+      "tool_execution_updated",
+      "tool_execution_finished",
+      "message_finished",
+      "turn_finished",
+    ]);
+    expect(JSON.stringify(events)).not.toContain('"partial"');
+    expect(events.at(-2)?.payload).toMatchObject({
+      role: "assistant",
+      settled: true,
+      entryId: "entry-1",
+    });
+
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(capture).toMatchObject({
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "complete",
+      eventCount: events.length,
+      entryCount: 1,
+      lastEventSeq: events.length,
+    });
+  });
+
+  it("keeps workflow recording alive when temporal event writes fail", async () => {
+    class FailingEventStore extends WorkflowRunStore {
+      override async appendSessionEventBatch(): Promise<void> {
+        throw new Error("injected event failure");
+      }
+    }
+    const outputRoot = await makeTempDir("pi-workflows-recorder-failure");
+    const store = new FailingEventStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "demo",
+      startAt: "one",
+      nodes: { one: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const runId = createRunId("demo");
+    const now = new Date().toISOString();
+    const state: WorkflowRunState = {
+      schema: "pi-workflows.run-state.v1",
+      traceSeq: 0,
+      runId,
+      workflowName: "demo",
+      startedAt: now,
+      updatedAt: now,
+      status: "running",
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const recorder = new SessionRecorder(store, runDir, runId);
+    const branch: FakeEntry[] = [];
+    await recorder.bind(makeCtx(branch));
+    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    recorder.handleTurnStart({ turnIndex: 0 });
+    await recorder.stop();
+
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(capture).toMatchObject({
+      status: "failed",
+      eventCount: 0,
+      lastEventSeq: 0,
+      failure: { code: "event_write_failed", message: "injected event failure" },
+    });
+    await expect(
+      store.writeSnapshot(runDir, state, { scope: "run", type: "still_runs", payload: {} }),
+    ).resolves.toBeDefined();
   });
 
   it("re-anchors when the user branches away mid-run", async () => {

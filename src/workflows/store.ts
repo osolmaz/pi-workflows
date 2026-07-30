@@ -11,7 +11,9 @@ import type {
   WorkflowRunManifest,
   WorkflowRunState,
   WorkflowSessionBinding,
+  WorkflowSessionCapture,
   WorkflowSessionEntryRecord,
+  WorkflowSessionEventRecord,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
 } from "./types.js";
@@ -21,6 +23,8 @@ export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
 export const TRACE_EVENT_SCHEMA = "pi-workflows.trace-event.v1" as const;
 export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" as const;
 export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const;
+export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
+export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
 
 const MANIFEST_PATH = "manifest.json";
 const WORKFLOW_SNAPSHOT_PATH = "workflow.json";
@@ -29,6 +33,8 @@ const TRACE_PATH = "trace.ndjson";
 const SESSION_DIR = "session";
 const SESSION_BINDING_PATH = `${SESSION_DIR}/binding.json`;
 const SESSION_ENTRIES_PATH = `${SESSION_DIR}/entries.ndjson`;
+const SESSION_EVENTS_PATH = `${SESSION_DIR}/events.ndjson`;
+const SESSION_CAPTURE_PATH = `${SESSION_DIR}/capture.json`;
 
 /** Runs directory: `$PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`. */
 export function workflowRunsBaseDir(homeDir: string = os.homedir()): string {
@@ -55,7 +61,9 @@ export function createRunId(workflowName: string, now: Date = new Date()): strin
 type RunBundleContext = {
   traceSeq: number;
   sessionSeq: number;
+  sessionEventSeq: number;
   sessionBound: boolean;
+  sessionEventsStopped: boolean;
   artifacts: ArtifactWriter;
   /**
    * Serializes complete transitions (encode, trace append, projections) so
@@ -63,6 +71,9 @@ type RunBundleContext = {
    * append order.
    */
   lock: Promise<unknown>;
+  /** Session events have a separate append chain so token traffic cannot
+   * queue ahead of workflow transitions. */
+  sessionEventLock: Promise<unknown>;
 };
 
 /**
@@ -91,9 +102,12 @@ export class WorkflowRunStore {
       context = {
         traceSeq: 0,
         sessionSeq: 0,
+        sessionEventSeq: 0,
         sessionBound: false,
+        sessionEventsStopped: false,
         artifacts: new ArtifactWriter(runDir),
         lock: Promise.resolve(),
+        sessionEventLock: Promise.resolve(),
       };
       this.contexts.set(runDir, context);
     }
@@ -108,6 +122,16 @@ export class WorkflowRunStore {
     const context = this.contextFor(runDir);
     const result = context.lock.then(task);
     context.lock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private withSessionEventLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
+    const context = this.contextFor(runDir);
+    const result = context.sessionEventLock.then(task);
+    context.sessionEventLock = result.then(
       () => undefined,
       () => undefined,
     );
@@ -187,6 +211,74 @@ export class WorkflowRunStore {
     });
   }
 
+  /** Append a fully stamped ordered batch to `session/events.ndjson`. */
+  async appendSessionEventBatch(
+    runDir: string,
+    records: WorkflowSessionEventRecord[],
+  ): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    await this.withSessionEventLock(runDir, async () => {
+      const context = this.contextFor(runDir);
+      if (context.sessionEventsStopped) {
+        throw new Error("Session event capture has stopped");
+      }
+      try {
+        let expected = context.sessionEventSeq + 1;
+        for (const record of records) {
+          validateSessionEventRecord(record);
+          if (record.seq !== expected) {
+            throw new Error(`Expected session event seq ${expected}, got ${record.seq}`);
+          }
+          expected += 1;
+        }
+        const encoded = await Promise.all(
+          records.map(async (record) => ({
+            ...record,
+            payload:
+              record.type === "tool_execution_started" || record.type === "tool_execution_finished"
+                ? ((await encodeValue(record.payload, context.artifacts)) as Record<
+                    string,
+                    unknown
+                  >)
+                : record.payload,
+          })),
+        );
+        await appendLines(path.join(runDir, SESSION_EVENTS_PATH), encoded);
+        context.sessionEventSeq = records.at(-1)?.seq ?? context.sessionEventSeq;
+      } catch (error) {
+        context.sessionEventsStopped = true;
+        throw error;
+      }
+    });
+  }
+
+  /** Atomically replace the temporal capture integrity projection. */
+  async writeSessionCapture(runDir: string, capture: WorkflowSessionCapture): Promise<void> {
+    validateSessionCapture(capture);
+    await this.withSessionEventLock(runDir, async () => {
+      const context = this.contextFor(runDir);
+      if (capture.status !== "recording") {
+        context.sessionEventsStopped = true;
+      }
+      await writeJsonAtomic(path.join(runDir, SESSION_CAPTURE_PATH), capture);
+    });
+  }
+
+  /** Count complete durable session records after both writers have drained. */
+  async sessionCounts(
+    runDir: string,
+  ): Promise<{ eventCount: number; entryCount: number; lastEventSeq: number }> {
+    const events = await readCompleteNdjson(path.join(runDir, SESSION_EVENTS_PATH));
+    const entries = await readCompleteNdjson(path.join(runDir, SESSION_ENTRIES_PATH));
+    return {
+      eventCount: events.length,
+      entryCount: entries.length,
+      lastEventSeq: events.at(-1)?.seq ?? 0,
+    };
+  }
+
   private async appendTraceEvent(
     runDir: string,
     runId: string,
@@ -225,6 +317,94 @@ async function appendLine(filePath: string, value: unknown): Promise<void> {
     encoding: "utf8",
     mode: 0o600,
   });
+}
+
+async function appendLines(filePath: string, values: unknown[]): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const text = values.map((value) => `${JSON.stringify(value)}\n`).join("");
+  await fs.appendFile(filePath, text, { encoding: "utf8", mode: 0o600 });
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
+  if (!Number.isSafeInteger(record.seq) || record.seq < 1) {
+    throw new Error("Session event seq must be a positive safe integer");
+  }
+  if (
+    !isNonEmptyString(record.at) ||
+    !isNonEmptyString(record.nodeId) ||
+    !isNonEmptyString(record.attemptId) ||
+    typeof record.payload !== "object" ||
+    record.payload === null ||
+    Array.isArray(record.payload)
+  ) {
+    throw new Error("Session event is missing required envelope fields");
+  }
+  const needsTurn = true;
+  const needsMessage = !["turn_started", "turn_finished"].includes(record.type);
+  const needsTool = record.type.startsWith("tool_execution_");
+  if (needsTurn && !isNonEmptyString(record.turnId)) {
+    throw new Error(`${record.type} requires turnId`);
+  }
+  if (needsMessage && !isNonEmptyString(record.messageId)) {
+    throw new Error(`${record.type} requires messageId`);
+  }
+  if (needsTool && !isNonEmptyString(record.toolCallId)) {
+    throw new Error(`${record.type} requires toolCallId`);
+  }
+}
+
+function validateSessionCapture(capture: WorkflowSessionCapture): void {
+  if (
+    capture.schema !== SESSION_CAPTURE_SCHEMA ||
+    capture.eventSchema !== SESSION_EVENT_SCHEMA ||
+    !Number.isSafeInteger(capture.eventCount) ||
+    capture.eventCount < 0 ||
+    !Number.isSafeInteger(capture.entryCount) ||
+    capture.entryCount < 0 ||
+    !Number.isSafeInteger(capture.lastEventSeq) ||
+    capture.lastEventSeq < 0
+  ) {
+    throw new Error("Invalid session capture projection");
+  }
+  if (capture.status === "failed" && capture.failure === undefined) {
+    throw new Error("Failed session capture requires failure details");
+  }
+  if (capture.status !== "failed" && capture.failure !== undefined) {
+    throw new Error("Only failed session capture may contain failure details");
+  }
+}
+
+async function readCompleteNdjson(filePath: string): Promise<Array<{ seq: number }>> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = raw.split("\n");
+  if (!raw.endsWith("\n")) {
+    lines.pop();
+  }
+  const records: Array<{ seq: number }> = [];
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    try {
+      const value = JSON.parse(line) as { seq?: unknown };
+      if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 1) {
+        break;
+      }
+      records.push({ seq: value.seq as number });
+    } catch {
+      break;
+    }
+  }
+  return records;
 }
 
 /**

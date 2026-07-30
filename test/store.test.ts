@@ -10,7 +10,7 @@ import {
   readRunBundle,
   workflowRunsBaseDir,
 } from "../src/workflows/store.js";
-import type { WorkflowRunState } from "../src/workflows/types.js";
+import type { WorkflowRunState, WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
 function makeState(overrides: Partial<WorkflowRunState> = {}): WorkflowRunState {
@@ -184,6 +184,91 @@ describe("WorkflowRunStore", () => {
     // The next snapshot advertises the session directory in the manifest.
     await store.writeSnapshot(runDir, state, { scope: "run", type: "run_completed", payload: {} });
     expect((await readRunBundle(runDir))?.manifest.paths.session).toBe("session");
+  });
+
+  it("appends session event batches and writes verified capture counts", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-events");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "recording",
+      eventCount: 0,
+      entryCount: 0,
+      lastEventSeq: 0,
+    });
+    const records: WorkflowSessionEventRecord[] = [
+      {
+        seq: 1,
+        at: "2026-07-30T00:00:00.000Z",
+        nodeId: "one",
+        attemptId: "a1",
+        turnId: "t1",
+        type: "turn_started",
+        payload: { turnIndex: 0 },
+      },
+      {
+        seq: 2,
+        at: "2026-07-30T00:00:00.001Z",
+        nodeId: "one",
+        attemptId: "a1",
+        turnId: "t1",
+        messageId: "m1",
+        type: "message_started",
+        payload: { role: "assistant" },
+      },
+    ];
+    await store.appendSessionEventBatch(runDir, records);
+    await store.appendSessionEntry(runDir, { id: "entry-1", type: "message" });
+    const counts = await store.sessionCounts(runDir);
+    expect(counts).toEqual({ eventCount: 2, entryCount: 1, lastEventSeq: 2 });
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "complete",
+      ...counts,
+    });
+
+    const lines = (await fs.readFile(path.join(runDir, "session/events.ndjson"), "utf8"))
+      .trim()
+      .split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[1] as string)).toMatchObject({ seq: 2, type: "message_started" });
+    await expect(store.appendSessionEventBatch(runDir, [])).resolves.toBeUndefined();
+    await expect(
+      store.appendSessionEventBatch(runDir, [{ ...records[1]!, seq: 3 }]),
+    ).rejects.toThrow("stopped");
+  });
+
+  it("rejects sequence gaps and stops later temporal appends", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-event-gaps");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const event: WorkflowSessionEventRecord = {
+      seq: 2,
+      at: new Date().toISOString(),
+      nodeId: "one",
+      attemptId: "a1",
+      turnId: "t1",
+      type: "turn_started",
+      payload: { turnIndex: 0 },
+    };
+    await expect(store.appendSessionEventBatch(runDir, [event])).rejects.toThrow(
+      "Expected session event seq 1",
+    );
+    await expect(store.appendSessionEventBatch(runDir, [{ ...event, seq: 1 }])).rejects.toThrow(
+      "stopped",
+    );
   });
 
   it("keeps bundle files private", async () => {

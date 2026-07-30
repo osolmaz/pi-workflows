@@ -21,6 +21,7 @@ export type PromptDelivery = {
  * attached to the accepted submission.
  */
 export type ConversationHooks = {
+  beginAttempt?: (contract: AgentStepRequest["contract"]) => void;
   mark: () => number;
   rangeSince: (mark: number) => ConversationRange | undefined;
 };
@@ -127,6 +128,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       const cleared = new Promise<void>((resolveCleared) => {
         markCleared = resolveCleared;
       });
+      this.conversation?.beginAttempt?.(request.contract);
       this.pending = {
         request,
         resolve,

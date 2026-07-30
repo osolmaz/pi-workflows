@@ -318,6 +318,48 @@ export type WorkflowSessionEntryRecord = {
   entry: Record<string, unknown>;
 };
 
+export type WorkflowSessionEventType =
+  | "turn_started"
+  | "turn_finished"
+  | "message_started"
+  | "assistant_event"
+  | "message_finished"
+  | "tool_execution_started"
+  | "tool_execution_updated"
+  | "tool_execution_finished";
+
+/** One normalized temporal Pi event in `session/events.ndjson`. */
+export type WorkflowSessionEventRecord = {
+  /** Starts at 1 and increases by exactly 1 within the file. */
+  seq: number;
+  /** Time when the extension received the public Pi event. */
+  at: string;
+  nodeId: string;
+  attemptId: string;
+  turnId?: string;
+  messageId?: string;
+  toolCallId?: string;
+  type: WorkflowSessionEventType;
+  payload: Record<string, unknown>;
+};
+
+export type WorkflowSessionCaptureFailure = {
+  failedAt: string;
+  code: string;
+  message: string;
+};
+
+/** Atomic integrity projection for the temporal session journal. */
+export type WorkflowSessionCapture = {
+  schema: "pi-workflows.session-capture.v1";
+  eventSchema: "pi-workflows.session-event.v1";
+  status: "recording" | "complete" | "failed";
+  eventCount: number;
+  entryCount: number;
+  lastEventSeq: number;
+  failure?: WorkflowSessionCaptureFailure;
+};
+
 export type WorkflowTraceEventDraft = Omit<WorkflowTraceEvent, "seq" | "at" | "runId">;
 
 export type WorkflowRunManifest = {

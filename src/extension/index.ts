@@ -341,6 +341,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         pi.sendUserMessage(prompt, streaming ? { deliverAs: "steer" } : undefined);
       },
       conversation: {
+        beginAttempt: (contract) => run.recorder?.beginAttempt(contract),
         mark: () => run.recorder?.mark() ?? 0,
         rangeSince: (mark) => run.recorder?.rangeSince(mark),
       },
@@ -592,10 +593,38 @@ export default function piWorkflows(pi: ExtensionAPI) {
     );
   });
 
-  pi.on("message_end", (_event, ctx) => {
+  pi.on("turn_start", (event) => {
+    activeRun?.recorder?.handleTurnStart(event);
+  });
+
+  pi.on("turn_end", (event) => {
+    activeRun?.recorder?.handleTurnEnd(event);
+  });
+
+  pi.on("message_start", (event) => {
+    activeRun?.recorder?.handleMessageStart(event);
+  });
+
+  pi.on("message_update", (event) => {
+    activeRun?.recorder?.handleMessageUpdate(event);
+  });
+
+  pi.on("message_end", async (event, ctx) => {
     // Record the conversation as it grows; entries are copied verbatim into
     // the run bundle so replay never needs Pi's global session store.
-    void activeRun?.recorder?.record(ctx).catch(() => undefined);
+    await activeRun?.recorder?.handleMessageEnd(event, ctx).catch(() => undefined);
+  });
+
+  pi.on("tool_execution_start", (event) => {
+    activeRun?.recorder?.handleToolStart(event);
+  });
+
+  pi.on("tool_execution_update", (event) => {
+    activeRun?.recorder?.handleToolUpdate(event);
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    activeRun?.recorder?.handleToolEnd(event);
   });
 
   pi.on("agent_settled", (_event, ctx) => {
