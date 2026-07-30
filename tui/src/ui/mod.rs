@@ -9,10 +9,14 @@ mod theme_picker;
 mod timeline;
 
 use crate::bundle::reader::with_artifact_placeholders;
-use crate::bundle::types::{DefinitionSnapshot, NodeOutcome, RunState, RunStatus, StepRecord};
+use crate::bundle::types::{
+    DefinitionSnapshot, NodeOutcome, RunState, RunStatus, SessionCapture, SessionEntryRecord,
+    SessionEventRecord, StepRecord,
+};
 use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::render::{render_graph, GraphNodeStyle, GraphView, NodeBounds};
+use crate::session::{assess_capture, CaptureIntegrity};
 use crate::source::RunSource;
 use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
@@ -55,6 +59,7 @@ pub struct RunData<'a> {
     pub state: &'a RunState,
     pub snapshot: Option<&'a DefinitionSnapshot>,
     pub events: &'a [Value],
+    pub session_bound: bool,
     pub session_entries: &'a [Value],
     pub session_events: &'a [Value],
     pub session_capture: Option<&'a Value>,
@@ -146,6 +151,7 @@ impl Provider {
                     state: &entry.state,
                     snapshot: entry.snapshot.as_ref(),
                     events: &entry.events,
+                    session_bound: entry.session_binding.is_some(),
                     session_entries: &entry.session_entries,
                     session_events: &entry.session_events,
                     session_capture: entry.session_capture.as_ref(),
@@ -162,6 +168,7 @@ impl Provider {
                     state: &view.state,
                     snapshot: view.snapshot.as_ref(),
                     events: &view.events,
+                    session_bound: view.session_binding.is_some(),
                     session_entries: &view.session_entries,
                     session_events: &view.session_events,
                     session_capture: view.session_capture.as_ref(),
@@ -275,9 +282,11 @@ struct App {
     selected_run: Option<String>,
     runs_scroll: usize,
     focus: Focus,
-    /// Replay position: `None` = live/latest; `Some(i)` = after step i
-    /// (`-1` = before any step).
+    /// Workflow replay position: `None` = live/latest; `Some(i)` = after step i.
     replay: Option<i64>,
+    /// Temporal replay position: `None` = newest event; `Some(-1)` = before
+    /// capture; other values are zero-based session-event indices.
+    temporal_replay: Option<i64>,
     playing: bool,
     last_play_step: Instant,
     playback_speed_index: usize,
@@ -381,6 +390,7 @@ fn event_loop(
             Focus::Graph
         },
         replay: None,
+        temporal_replay: None,
         playing: false,
         last_play_step: Instant::now(),
         playback_speed_index: 0,
@@ -443,37 +453,129 @@ fn event_loop(
 }
 
 impl App {
-    fn step_count(&mut self) -> i64 {
+    fn replay_counts(&mut self) -> (i64, i64, bool) {
         let Some(run_id) = self.selected_run.clone() else {
-            return 0;
+            return (0, 0, false);
         };
         self.provider
             .data(&run_id)
-            .map(|data| data.state.steps.len() as i64)
-            .unwrap_or(0)
+            .map(|data| {
+                (
+                    data.state.steps.len() as i64,
+                    data.session_events.len() as i64,
+                    data.live,
+                )
+            })
+            .unwrap_or((0, 0, false))
+    }
+
+    fn temporal_delay(&mut self, current: i64, speed: u32) -> Option<Duration> {
+        let run_id = self.selected_run.clone()?;
+        let data = self.provider.data(&run_id)?;
+        let next = usize::try_from(current + 1).ok()?;
+        let next_at = data
+            .session_events
+            .get(next)?
+            .get("at")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp_ms)?;
+        if current < 0 {
+            return Some(Duration::ZERO);
+        }
+        let current_at = data
+            .session_events
+            .get(current as usize)?
+            .get("at")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp_ms)?;
+        let scaled = (next_at - current_at).max(0) as u64 / u64::from(speed.max(1));
+        Some(Duration::from_millis(scaled.max(1)))
+    }
+
+    fn sync_step_to_temporal(&mut self) {
+        let Some(position) = self.temporal_replay else {
+            return;
+        };
+        if position < 0 {
+            self.replay = Some(-1);
+            return;
+        }
+        let Some(run_id) = self.selected_run.clone() else {
+            return;
+        };
+        let selected = {
+            let Some(data) = self.provider.data(&run_id) else {
+                return;
+            };
+            let Some(event) = data.session_events.get(position as usize) else {
+                return;
+            };
+            let attempt_id = event.get("attemptId").and_then(Value::as_str);
+            let event_at = event
+                .get("at")
+                .and_then(Value::as_str)
+                .and_then(parse_timestamp_ms);
+            data.state
+                .steps
+                .iter()
+                .enumerate()
+                .rfind(|(_, step)| {
+                    attempt_id == Some(step.attempt_id.as_str())
+                        || event_at.is_some_and(|at| {
+                            parse_timestamp_ms(&step.finished_at)
+                                .is_some_and(|finished| finished <= at)
+                        })
+                })
+                .map(|(index, _)| index as i64)
+                .unwrap_or(-1)
+        };
+        self.replay = Some(selected);
     }
 
     fn advance_playback(&mut self) {
+        if !self.playing {
+            return;
+        }
         let speed = u32::from(timeline::PLAYBACK_SPEEDS[self.playback_speed_index]);
+        let (steps, temporal_events, live) = self.replay_counts();
+        if temporal_events > 0 {
+            // Consume every event due on the timestamp clock, including ties,
+            // without letting one UI frame monopolize the terminal.
+            for _ in 0..256 {
+                let current = self.temporal_replay.unwrap_or(-1);
+                if current + 1 >= temporal_events {
+                    if !live {
+                        self.rejoin_live();
+                    }
+                    return;
+                }
+                let Some(interval) = self.temporal_delay(current, speed) else {
+                    self.playing = false;
+                    return;
+                };
+                if self.last_play_step.elapsed() < interval {
+                    return;
+                }
+                self.last_play_step += interval;
+                self.temporal_replay = Some(current + 1);
+                self.sync_step_to_temporal();
+            }
+            return;
+        }
         let interval = PLAY_STEP_INTERVAL / speed;
-        if !self.playing || self.last_play_step.elapsed() < interval {
+        if self.last_play_step.elapsed() < interval {
             return;
         }
         self.last_play_step = Instant::now();
-        let steps = self.step_count();
         match self.replay {
-            Some(position) if position + 1 < steps => {
-                self.replay = Some(position + 1);
-            }
-            _ => {
-                // Past the final recorded step: rejoin the live view and stop.
-                self.rejoin_live();
-            }
+            Some(position) if position + 1 < steps => self.replay = Some(position + 1),
+            _ => self.rejoin_live(),
         }
     }
 
     fn rejoin_live(&mut self) {
         self.replay = None;
+        self.temporal_replay = None;
         self.playing = false;
         self.follow = true;
         self.conversation_follow = true;
@@ -488,16 +590,21 @@ impl App {
             (self.playback_speed_index + 1).min(timeline::PLAYBACK_SPEEDS.len() - 1);
     }
 
+    fn move_to_start(&mut self) {
+        self.replay = Some(-1);
+        let (_, temporal_events, _) = self.replay_counts();
+        self.temporal_replay = (temporal_events > 0).then_some(-1);
+        self.playing = false;
+        self.follow = true;
+    }
+
     fn apply_timeline_action(&mut self, action: timeline::TimelineAction) {
         match action {
-            timeline::TimelineAction::Start => {
-                self.replay = Some(-1);
-                self.playing = false;
-            }
+            timeline::TimelineAction::Start => self.move_to_start(),
             timeline::TimelineAction::Previous => self.step_back(),
             timeline::TimelineAction::TogglePlayback => {
-                if self.replay.is_none() {
-                    self.replay = Some(-1);
+                if self.replay.is_none() && self.temporal_replay.is_none() {
+                    self.move_to_start();
                 }
                 self.playing = !self.playing;
                 self.last_play_step = Instant::now();
@@ -510,22 +617,37 @@ impl App {
     }
 
     fn step_back(&mut self) {
-        let steps = self.step_count();
-        let current = self.replay.unwrap_or(steps - 1);
-        self.replay = Some((current - 1).max(-1));
+        let (steps, temporal_events, _) = self.replay_counts();
+        if temporal_events > 0 {
+            let current = self.temporal_replay.unwrap_or(temporal_events - 1);
+            self.temporal_replay = Some((current - 1).max(-1));
+            self.sync_step_to_temporal();
+        } else {
+            let current = self.replay.unwrap_or(steps - 1);
+            self.replay = Some((current - 1).max(-1));
+        }
         self.playing = false;
     }
 
     fn step_forward(&mut self) {
-        let steps = self.step_count();
-        match self.replay {
-            // The final recorded step is a valid detached position (on a
-            // live run it differs from the live view); rejoin only when
-            // stepping past it.
-            Some(position) if position + 1 >= steps => self.rejoin_live(),
-            Some(position) => self.replay = Some(position + 1),
-            None => {}
+        let (steps, temporal_events, _) = self.replay_counts();
+        if temporal_events > 0 {
+            match self.temporal_replay {
+                Some(position) if position + 1 >= temporal_events => self.rejoin_live(),
+                Some(position) => {
+                    self.temporal_replay = Some(position + 1);
+                    self.sync_step_to_temporal();
+                }
+                None => {}
+            }
+        } else {
+            match self.replay {
+                Some(position) if position + 1 >= steps => self.rejoin_live(),
+                Some(position) => self.replay = Some(position + 1),
+                None => {}
+            }
         }
+        self.playing = false;
     }
 
     fn select_inspector_tab(&mut self, tab: InspectorTab) {
@@ -560,6 +682,25 @@ impl App {
         self.provider.request_artifacts(&run_id, &paths);
     }
 
+    fn request_conversation_artifacts(&mut self) {
+        let Some(run_id) = self.selected_run.clone() else {
+            return;
+        };
+        let paths = {
+            let Some(data) = self.provider.data(&run_id) else {
+                return;
+            };
+            let mut paths = Vec::new();
+            for value in data.session_events.iter().chain(data.session_entries) {
+                collect_artifact_paths(value, &mut paths);
+            }
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        self.provider.request_artifacts(&run_id, &paths);
+    }
+
     fn select_graph_node(&mut self, node_id: &str) {
         let Some(run_id) = self.selected_run.clone() else {
             return;
@@ -576,10 +717,21 @@ impl App {
                 .enumerate()
                 .rev()
                 .find(|(index, step)| *index as i64 <= upper && step.node_id == node_id)
-                .map(|(index, _)| index as i64)
+                .map(|(index, step)| {
+                    let temporal = data
+                        .session_events
+                        .iter()
+                        .rposition(|event| {
+                            event.get("attemptId").and_then(Value::as_str)
+                                == Some(step.attempt_id.as_str())
+                        })
+                        .map(|index| index as i64);
+                    (index as i64, temporal)
+                })
         };
-        if let Some(index) = selected {
+        if let Some((index, temporal)) = selected {
             self.replay = Some(index);
+            self.temporal_replay = temporal;
             self.playing = false;
             self.follow = true;
         }
@@ -603,6 +755,7 @@ impl App {
         }
         self.selected_run = Some(run_id);
         self.replay = None;
+        self.temporal_replay = None;
         self.playing = false;
         self.inspector_scroll = 0;
         self.inspector_scrolls = [0; 4];
@@ -734,18 +887,8 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
         KeyCode::Char(']') => app.step_forward(),
         KeyCode::Char('{') => app.slower_playback(),
         KeyCode::Char('}') => app.faster_playback(),
-        KeyCode::Char(' ') => {
-            if app.replay.is_none() {
-                // Start playback from the beginning of the run.
-                app.replay = Some(-1);
-            }
-            app.playing = !app.playing;
-            app.last_play_step = Instant::now();
-        }
-        KeyCode::Home | KeyCode::Char('g') => {
-            app.replay = Some(-1);
-            app.playing = false;
-        }
+        KeyCode::Char(' ') => app.apply_timeline_action(timeline::TimelineAction::TogglePlayback),
+        KeyCode::Home | KeyCode::Char('g') => app.move_to_start(),
         KeyCode::End | KeyCode::Char('G') | KeyCode::Char('L') => app.rejoin_live(),
         KeyCode::Char('z') | KeyCode::Char('+') | KeyCode::Char('-') => {
             app.node_style = match app.node_style {
@@ -829,7 +972,10 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                     }
                     InspectorTab::Trace => app.trace_payload_expanded = !app.trace_payload_expanded,
                     InspectorTab::Conversation => {
-                        app.conversation_payload_expanded = !app.conversation_payload_expanded
+                        app.conversation_payload_expanded = !app.conversation_payload_expanded;
+                        if app.conversation_payload_expanded {
+                            app.request_conversation_artifacts();
+                        }
                     }
                     InspectorTab::Info => {}
                 },
@@ -924,12 +1070,21 @@ fn handle_mouse(app: &mut App, summaries: &[RunSummary], mouse: MouseEvent) {
         )
         && contains(app.timeline.track, mouse.column, mouse.row)
     {
-        let steps = app.step_count() as usize;
+        let (steps, temporal_events, _) = app.replay_counts();
+        let item_count = if temporal_events > 0 {
+            temporal_events
+        } else {
+            steps
+        } as usize;
         let column = mouse.column.saturating_sub(app.timeline.track.x) as usize;
         let position =
-            timeline::position_from_column(steps, column, app.timeline.track.width as usize);
+            timeline::position_from_column(item_count, column, app.timeline.track.width as usize);
         if position.is_none() {
             app.rejoin_live();
+        } else if temporal_events > 0 {
+            app.temporal_replay = position;
+            app.sync_step_to_temporal();
+            app.playing = false;
         } else {
             app.replay = position;
             app.playing = false;
@@ -1200,10 +1355,13 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             frame,
             transport,
             None,
-            app.playing,
-            timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+            TransportOptions {
+                temporal_replay: None,
+                playing: app.playing,
+                speed: timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+                diagnostic: app.theme_diagnostic.as_deref(),
+            },
             &palette,
-            app.theme_diagnostic.as_deref(),
         );
         if let Some(picker) = &app.theme_picker {
             theme_picker::render(frame, area, picker, &palette);
@@ -1211,6 +1369,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         return;
     };
     let replay = app.replay;
+    let temporal_replay = app.temporal_replay;
     let node_style = app.node_style;
     let follow = app.follow;
     let graph_rect = app.graph_rect;
@@ -1254,10 +1413,13 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             frame,
             transport,
             None,
-            app.playing,
-            timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+            TransportOptions {
+                temporal_replay: None,
+                playing: app.playing,
+                speed: timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+                diagnostic: app.theme_diagnostic.as_deref(),
+            },
             &palette,
-            app.theme_diagnostic.as_deref(),
         );
         if let Some(picker) = &app.theme_picker {
             theme_picker::render(frame, area, picker, &palette);
@@ -1268,7 +1430,14 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let steps = &data.state.steps;
     let selected_index = replay.unwrap_or(steps.len() as i64 - 1);
     let bounded_index = selected_index.max(-1).min(steps.len() as i64 - 1);
-    let at_latest = replay.is_none();
+    let at_latest = replay.is_none() && temporal_replay.is_none();
+    let through_event_seq = temporal_replay.and_then(|position| {
+        usize::try_from(position)
+            .ok()
+            .and_then(|index| data.session_events.get(index))
+            .and_then(|event| event.get("seq"))
+            .and_then(Value::as_u64)
+    });
     let visible_steps = &steps[0..(bounded_index + 1).max(0) as usize];
     let selected_step = if bounded_index >= 0 {
         steps.get(bounded_index as usize)
@@ -1328,12 +1497,18 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             }
         })
         .collect();
+    let capture = capture_integrity(&data);
     let mut graph_flags = Vec::new();
     if follow {
         graph_flags.push("FOLLOW");
     }
     if data.state.paused == Some(true) {
         graph_flags.push("PAUSED");
+    }
+    if capture.status == "failed" {
+        graph_flags.push("CAPTURE FAILED");
+    } else if capture.status == "invalid" {
+        graph_flags.push("CAPTURE INVALID");
     }
     if let Some(status) = remote_status {
         graph_flags.push(match status {
@@ -1388,12 +1563,16 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         ),
         InspectorTab::Conversation => conversation::conversation_lines(
             data.session_entries,
+            data.session_events,
             visible_steps,
             selected_step,
             conversation::ConversationRenderOptions {
                 at_latest_step: at_latest,
+                through_event_seq,
                 width: inspector_rect.width.saturating_sub(2) as usize,
                 palette: &palette,
+                bundle_dir: data.bundle_dir,
+                remote_artifacts: &data.remote_artifacts,
                 selected_entry: Some(conversation_selected),
                 payload_expanded: conversation_payload_expanded,
             },
@@ -1447,14 +1626,27 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         inspector_rect,
     );
 
+    let capture_diagnostic = matches!(capture.status, "failed" | "invalid").then(|| {
+        capture
+            .diagnostics
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("session capture {}", capture.status))
+    });
     app.timeline = draw_transport(
         frame,
         transport,
         Some((&data, bounded_index, at_latest)),
-        playing,
-        timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+        TransportOptions {
+            temporal_replay,
+            playing,
+            speed: timeline::PLAYBACK_SPEEDS[app.playback_speed_index],
+            diagnostic: app
+                .theme_diagnostic
+                .as_deref()
+                .or(capture_diagnostic.as_deref()),
+        },
         &palette,
-        app.theme_diagnostic.as_deref(),
     );
     if let Some(picker) = &app.theme_picker {
         theme_picker::render(frame, area, picker, &palette);
@@ -1672,6 +1864,19 @@ fn resolve_remote_artifacts(
                 .collect(),
         ),
         scalar => scalar.clone(),
+    }
+}
+
+fn resolve_detail_value(
+    value: &Value,
+    bundle_dir: Option<&std::path::Path>,
+    remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
+) -> Value {
+    match bundle_dir {
+        Some(dir) => {
+            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
+        }
+        None => resolve_remote_artifacts(value, remote_artifacts),
     }
 }
 
@@ -2037,6 +2242,39 @@ fn trace_lines(
     lines
 }
 
+fn capture_integrity(data: &RunData) -> CaptureIntegrity {
+    let entries: Result<Vec<SessionEntryRecord>, _> = data
+        .session_entries
+        .iter()
+        .cloned()
+        .map(serde_json::from_value)
+        .collect();
+    let events: Result<Vec<SessionEventRecord>, _> = data
+        .session_events
+        .iter()
+        .cloned()
+        .map(serde_json::from_value)
+        .collect();
+    let capture: Result<Option<SessionCapture>, _> = data
+        .session_capture
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose();
+    let (Ok(entries), Ok(events), Ok(capture)) = (entries, events, capture) else {
+        return CaptureIntegrity {
+            status: "invalid",
+            diagnostics: vec!["invalid temporal session record".into()],
+        };
+    };
+    assess_capture(
+        data.session_bound,
+        &entries,
+        &events,
+        capture.as_ref(),
+        data.state.status.is_terminal(),
+    )
+}
+
 fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'static>> {
     let state = data.state;
     let label =
@@ -2092,14 +2330,39 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
             state.trace_seq
         )),
     ]));
+    let capture = capture_integrity(data);
     lines.push(Line::from(vec![
         label("session"),
-        Span::raw(if data.session_entries.is_empty() {
-            "no conversation captured".to_string()
+        Span::raw(if data.session_bound {
+            format!(
+                "{} entries · {} events",
+                data.session_entries.len(),
+                data.session_events.len()
+            )
         } else {
-            format!("{} entries", data.session_entries.len())
+            "not bound".to_string()
         }),
     ]));
+    lines.push(Line::from(vec![
+        label("capture"),
+        Span::styled(
+            capture.status.to_string(),
+            if matches!(capture.status, "failed" | "invalid") {
+                Style::default().fg(palette.error)
+            } else {
+                Style::default().fg(palette.subtext)
+            },
+        ),
+    ]));
+    for diagnostic in capture.diagnostics {
+        lines.push(Line::from(vec![
+            label("capture issue"),
+            Span::styled(
+                sanitize_text(&diagnostic),
+                Style::default().fg(palette.warning),
+            ),
+        ]));
+    }
     if data.possibly_interrupted {
         lines.push(Line::from(Span::styled(
             "run may have been interrupted (no writes for 60s)",
@@ -2120,14 +2383,19 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
     lines
 }
 
+struct TransportOptions<'a> {
+    temporal_replay: Option<i64>,
+    playing: bool,
+    speed: u16,
+    diagnostic: Option<&'a str>,
+}
+
 fn draw_transport(
     frame: &mut Frame,
     area: Rect,
     data: Option<(&RunData, i64, bool)>,
-    playing: bool,
-    speed: u16,
+    options: TransportOptions<'_>,
     palette: &Palette,
-    diagnostic: Option<&str>,
 ) -> timeline::TimelineGeometry {
     let elapsed = data.map(|(data, _, _)| {
         let state = data.state;
@@ -2139,17 +2407,31 @@ fn draw_transport(
         let start = parse_timestamp_ms(&state.started_at).unwrap_or(end);
         format_duration((end - start).max(0))
     });
-    let view = data.map(|(data, bounded_index, at_latest)| timeline::TimelineView {
-        status: data.state.status,
-        paused: data.state.paused == Some(true),
-        elapsed: elapsed.as_deref().unwrap_or("0ms"),
-        steps: data.state.steps.len(),
-        position: bounded_index,
-        at_latest,
-        live: data.live,
-        playing,
-        speed,
-        diagnostic,
+    let view = data.map(|(data, bounded_index, at_latest)| {
+        let temporal = !data.session_events.is_empty();
+        timeline::TimelineView {
+            status: data.state.status,
+            paused: data.state.paused == Some(true),
+            elapsed: elapsed.as_deref().unwrap_or("0ms"),
+            steps: if temporal {
+                data.session_events.len()
+            } else {
+                data.state.steps.len()
+            },
+            position: if temporal {
+                options
+                    .temporal_replay
+                    .unwrap_or(data.session_events.len() as i64 - 1)
+            } else {
+                bounded_index
+            },
+            temporal,
+            at_latest,
+            live: data.live,
+            playing: options.playing,
+            speed: options.speed,
+            diagnostic: options.diagnostic,
+        }
     });
     timeline::render(frame, area, view, palette)
 }

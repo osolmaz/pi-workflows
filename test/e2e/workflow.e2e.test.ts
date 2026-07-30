@@ -55,7 +55,11 @@ type RpcHandle = {
   stop: () => Promise<void>;
 };
 
-function startPiRpc(options: { cwd: string; env: Record<string, string> }): RpcHandle {
+function startPiRpc(options: {
+  cwd: string;
+  env: Record<string, string>;
+  extensionPath?: string;
+}): RpcHandle {
   const child = spawn(
     process.execPath,
     [
@@ -70,7 +74,7 @@ function startPiRpc(options: { cwd: string; env: Record<string, string> }): RpcH
       "--no-context-files",
       "--offline",
       "-e",
-      EXTENSION_PATH,
+      options.extensionPath ?? EXTENSION_PATH,
       "--provider",
       "mock",
       "--model",
@@ -165,6 +169,7 @@ describe.sequential("pi-workflows end to end", () => {
   let pi: RpcHandle;
   let runsDir: string;
   let projectDir: string;
+  let agentDir: string;
 
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
@@ -208,7 +213,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     projectDir = await makeTempDir("pi-workflows-e2e-project");
     runsDir = await makeTempDir("pi-workflows-e2e-runs");
-    const agentDir = await makeTempDir("pi-workflows-e2e-agent");
+    agentDir = await makeTempDir("pi-workflows-e2e-agent");
 
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
     await fs.writeFile(
@@ -282,6 +287,60 @@ describe.sequential("pi-workflows end to end", () => {
     expect(types.at(-1)).toBe("run_completed");
     expect(types).toContain("agent_prompt_sent");
 
+    const sessionEventsRaw = await fs.readFile(
+      path.join(runDir, "session", "events.ndjson"),
+      "utf8",
+    );
+    const sessionEvents = sessionEventsRaw
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            seq: number;
+            type: string;
+            messageId?: string;
+            payload: Record<string, unknown>;
+          },
+      );
+    expect(sessionEvents.map((event) => event.seq)).toEqual(
+      Array.from({ length: sessionEvents.length }, (_, index) => index + 1),
+    );
+    expect(sessionEvents.map((event) => event.type)).toContain("assistant_event");
+    expect(sessionEvents.map((event) => event.type)).toContain("tool_execution_started");
+    expect(sessionEvents.map((event) => event.type)).toContain("tool_execution_finished");
+    expect(sessionEventsRaw).not.toContain('"partial"');
+    expect(sessionEventsRaw).not.toContain('"partialResult"');
+
+    const entriesRaw = await fs.readFile(path.join(runDir, "session", "entries.ndjson"), "utf8");
+    const entryIds = new Set(
+      entriesRaw
+        .trim()
+        .split("\n")
+        .map((line) => (JSON.parse(line) as { entry: { id: string } }).entry.id),
+    );
+    const linkedEntryIds = sessionEvents.flatMap((event) => {
+      const id = event.type === "message_finished" ? event.payload.entryId : undefined;
+      return typeof id === "string" ? [id] : [];
+    });
+    expect(linkedEntryIds.length).toBeGreaterThan(0);
+    expect(linkedEntryIds.every((id) => entryIds.has(id))).toBe(true);
+
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session", "capture.json"), "utf8"),
+    ) as {
+      status: string;
+      eventCount: number;
+      entryCount: number;
+      lastEventSeq: number;
+    };
+    expect(capture).toMatchObject({
+      status: "complete",
+      eventCount: sessionEvents.length,
+      entryCount: entryIds.size,
+      lastEventSeq: sessionEvents.length,
+    });
+
     // The mock server must have been driven through the workflow tool, then
     // receive the hidden presentation follow-up and emit normal assistant text.
     const toolRequests = mock.requests.filter((request) =>
@@ -298,6 +357,71 @@ describe.sequential("pi-workflows end to end", () => {
         ) && pi.stdoutLines.some((line) => line.includes("Implemented the boring, proven design.")),
       () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
+
+    const terminalFiles = [
+      "manifest.json",
+      "state.json",
+      "trace.ndjson",
+      "session/entries.ndjson",
+      "session/events.ndjson",
+      "session/capture.json",
+    ];
+    const terminalContents = await Promise.all(
+      terminalFiles.map((file) => fs.readFile(path.join(runDir, file), "utf8")),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await expect(
+      Promise.all(terminalFiles.map((file) => fs.readFile(path.join(runDir, file), "utf8"))),
+    ).resolves.toEqual(terminalContents);
+  }, 120_000);
+
+  it("keeps a real workflow successful when temporal capture fails", async () => {
+    const failedRunsDir = await makeTempDir("pi-workflows-e2e-capture-failure");
+    const wrapperPath = path.join(projectDir, "capture-failure-extension.ts");
+    await fs.writeFile(
+      wrapperPath,
+      `import workflowExtension from ${JSON.stringify(EXTENSION_PATH)};
+import { WorkflowRunStore } from ${JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "store.ts"))};
+
+export default function captureFailureExtension(pi: unknown) {
+  WorkflowRunStore.prototype.appendSessionEventBatch = async function () {
+    throw new Error("injected real-pi event failure");
+  };
+  return workflowExtension(pi as never);
+}
+`,
+      "utf8",
+    );
+    const failingPi = startPiRpc({
+      cwd: projectDir,
+      extensionPath: wrapperPath,
+      env: {
+        PI_CODING_AGENT_DIR: agentDir,
+        PI_WORKFLOWS_RUNS_DIR: failedRunsDir,
+      },
+    });
+    try {
+      failingPi.send({ id: "wf-failure", type: "prompt", message: "/workflow e2e still ship it" });
+      const { state, runDir } = await waitForRunState(
+        failedRunsDir,
+        (candidate) => candidate.status === "completed" || candidate.status === "failed",
+        () =>
+          `pi stderr:\n${failingPi.stderr()}\npi stdout tail:\n${failingPi.stdoutLines.slice(-15).join("\n")}`,
+      );
+      expect(state.status).toBe("completed");
+      const capture = JSON.parse(
+        await fs.readFile(path.join(runDir, "session", "capture.json"), "utf8"),
+      ) as { status: string; failure: { code: string; message: string } };
+      expect(capture).toMatchObject({
+        status: "failed",
+        failure: {
+          code: "event_write_failed",
+          message: "injected real-pi event failure",
+        },
+      });
+    } finally {
+      await failingPi.stop();
+    }
   }, 120_000);
 
   it("renders the finished run in the viewer CLI", async () => {
@@ -320,8 +444,10 @@ describe.sequential("pi-workflows end to end", () => {
       { cwd: REPO_ROOT, env: { ...process.env, PI_WORKFLOWS_RUNS_DIR: runsDir, NO_COLOR: "1" } },
     );
     expect(stdout).toContain("workflow e2e");
-    expect(stdout).toContain("✓ propose [agent]");
-    expect(stdout).toContain("✓ confirm [agent]");
-    expect(stdout).toContain("✓ implement [action]");
+    expect(stdout).toContain("✓ completed [agent]");
+    expect(stdout).toContain("propose");
+    expect(stdout).toContain("confirm");
+    expect(stdout).toContain("✓ completed [action]");
+    expect(stdout).toContain("implement");
   }, 30_000);
 });

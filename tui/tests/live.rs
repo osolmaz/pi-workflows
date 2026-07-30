@@ -8,6 +8,7 @@ use common::{append_trace, state_value, write_bundle};
 use piw::protocol::apply_patch;
 use piw::source::RunSource;
 use serde_json::json;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -500,11 +501,66 @@ fn session_files_are_discovered_before_the_manifest_names_them() {
         ),
     )
     .unwrap();
+    let event = |seq: u64| {
+        json!({
+            "seq": seq, "at": format!("2026-01-01T00:00:0{seq}.000Z"),
+            "nodeId": "agent", "attemptId": "a-1", "turnId": "t1",
+            "type": "turn_started", "payload": { "turnIndex": 0 },
+        })
+    };
+    std::fs::write(
+        dir.join("session").join("events.ndjson"),
+        format!("{}\n", serde_json::to_string(&event(1)).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("session").join("capture.json"),
+        serde_json::to_string(&json!({
+            "schema": "pi-workflows.session-capture.v1",
+            "eventSchema": "pi-workflows.session-event.v1",
+            "status": "recording", "eventCount": 1, "entryCount": 1,
+            "lastEventSeq": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     source.refresh_all();
     let view = source.get("run-1").unwrap().view();
     assert_eq!(view["session"]["binding"]["piSessionId"], json!("s-1"));
     assert_eq!(view["session"]["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(view["session"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(view["session"]["capture"]["status"], json!("recording"));
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("session").join("events.ndjson"))
+        .unwrap()
+        .write_all(format!("{}\n", serde_json::to_string(&event(2)).unwrap()).as_bytes())
+        .unwrap();
+    std::fs::write(
+        dir.join("session").join("capture.json"),
+        serde_json::to_string(&json!({
+            "schema": "pi-workflows.session-capture.v1",
+            "eventSchema": "pi-workflows.session-event.v1",
+            "status": "recording", "eventCount": 2, "entryCount": 1,
+            "lastEventSeq": 2,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outcome = source.refresh_all();
+    let patch = &outcome.patches[0].2;
+    let encoded = serde_json::to_value(patch).unwrap();
+    assert!(encoded.to_string().contains("/session/events"));
+    assert!(encoded.to_string().contains("/session/capture"));
+    assert_eq!(
+        source.get("run-1").unwrap().view()["session"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[cfg(unix)]

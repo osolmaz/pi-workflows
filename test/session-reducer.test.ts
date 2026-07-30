@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { reduceSessionEvents, type TemporalSessionState } from "../src/viewer/session-reducer.js";
+import {
+  reduceSessionEvents,
+  SessionReplayIndex,
+  type TemporalSessionState,
+} from "../src/viewer/session-reducer.js";
 import type {
   WorkflowSessionEntryRecord,
   WorkflowSessionEventRecord,
@@ -34,6 +38,17 @@ describe("session event reducer fixtures", () => {
         );
       }
     }
+  });
+
+  it("seeks through viewer-only checkpoints and timestamps", async () => {
+    const fixture = (await fixtures()).find(({ events }) => events.length > 5)!;
+    const index = new SessionReplayIndex(fixture.entries, fixture.events, 2);
+    for (const position of fixture.positions) {
+      expect(index.stateAtSeq(position.throughSeq)).toEqual(position.expected);
+    }
+    const event = fixture.events[4]!;
+    expect(index.seqAtOrBefore(Date.parse(event.at))).toBe(event.seq);
+    expect(index.seqAtOrBefore(Date.parse(fixture.events[0]!.at) - 1)).toBe(0);
   });
 
   it("reports sequence and reconciliation errors without discarding final content", () => {

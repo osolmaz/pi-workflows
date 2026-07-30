@@ -82,6 +82,9 @@ pub async fn serve_on(listener: TcpListener, runs_dir: PathBuf) -> Result<()> {
                     }
                     None => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
                 }
+                // Coalesce a token burst into one revision while preserving
+                // each durable event as a distinct append record.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let outcome = source.lock().await.refresh_all();
                 for (run_id, revision, patch) in outcome.patches {
                     let _ = updates_tx.send(Update::Patch {

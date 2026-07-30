@@ -1105,6 +1105,7 @@ fn draw_segment_label(canvas: &mut CharCanvas, label: &PendingLabel) {
 /// Each back edge leaves its source cell downward into its own lane row,
 /// runs right to a private gutter column, climbs the gutter, and re-enters
 /// through its target's entry lane and arrow row from above.
+#[allow(clippy::too_many_arguments)]
 fn draw_back_edges(
     canvas: &mut CharCanvas,
     placed: &[PlacedRank],

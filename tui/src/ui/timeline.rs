@@ -38,6 +38,7 @@ pub struct TimelineView<'a> {
     pub steps: usize,
     /// `-1` means before the first step.
     pub position: i64,
+    pub temporal: bool,
     pub at_latest: bool,
     pub live: bool,
     pub playing: bool,
@@ -256,14 +257,15 @@ pub fn position_from_column(steps: usize, column: usize, width: usize) -> Option
 }
 
 fn position_label(view: &TimelineView<'_>) -> String {
+    let unit = if view.temporal { "event" } else { "step" };
     if view.at_latest && view.live {
         "LIVE".to_string()
     } else if view.at_latest {
-        format!("step {0}/{0}", view.steps)
+        format!("{unit} {0}/{0}", view.steps)
     } else if view.position < 0 {
         format!("before 0/{}", view.steps)
     } else {
-        format!("step {}/{}", view.position + 1, view.steps)
+        format!("{unit} {}/{}", view.position + 1, view.steps)
     }
 }
 

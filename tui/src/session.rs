@@ -4,6 +4,7 @@ use crate::bundle::types::{
     SessionCapture, SessionCaptureStatus, SessionEntryRecord, SessionEventRecord,
     SESSION_CAPTURE_SCHEMA, SESSION_EVENT_SCHEMA,
 };
+use crate::format::parse_timestamp_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -128,6 +129,7 @@ pub fn assess_capture(
     }
 }
 
+#[derive(Clone)]
 struct MutableMessage {
     message_id: String,
     role: String,
@@ -160,10 +162,11 @@ fn ensure_block<'a>(
         })
 }
 
-pub fn reduce_session_events(
+fn fold_session_events(
     entries: &[SessionEntryRecord],
     events: &[SessionEventRecord],
     through_seq: u64,
+    initial: Option<&TemporalSessionState>,
 ) -> TemporalSessionState {
     let known_entries: HashSet<String> = entries
         .iter()
@@ -171,14 +174,45 @@ pub fn reduce_session_events(
         .collect();
     let mut messages: HashMap<String, MutableMessage> = HashMap::new();
     let mut message_order: Vec<String> = Vec::new();
+    for message in initial.into_iter().flat_map(|state| &state.messages) {
+        messages.insert(
+            message.message_id.clone(),
+            MutableMessage {
+                message_id: message.message_id.clone(),
+                role: message.role.clone(),
+                status: message.status.clone(),
+                entry_id: message.entry_id.clone(),
+                blocks: message
+                    .blocks
+                    .iter()
+                    .map(|block| (block.content_index, block.clone()))
+                    .collect(),
+            },
+        );
+        message_order.push(message.message_id.clone());
+    }
     let mut tools: HashMap<String, TemporalTool> = HashMap::new();
     let mut tool_order: Vec<String> = Vec::new();
-    let mut settled_entry_ids = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut expected_seq = 1;
-    let mut last_seq = 0;
+    for tool in initial.into_iter().flat_map(|state| &state.tools) {
+        tools.insert(tool.tool_call_id.clone(), tool.clone());
+        tool_order.push(tool.tool_call_id.clone());
+    }
+    let mut settled_entry_ids = initial
+        .map(|state| state.settled_entry_ids.clone())
+        .unwrap_or_default();
+    let mut diagnostics = initial
+        .map(|state| state.diagnostics.clone())
+        .unwrap_or_default();
+    let mut expected_seq = initial.map_or(1, |state| state.through_seq + 1);
+    let mut last_seq = initial.map_or(0, |state| state.through_seq);
 
-    for event in events.iter().filter(|event| event.seq <= through_seq) {
+    for event in events {
+        if event.seq <= last_seq {
+            continue;
+        }
+        if event.seq > through_seq {
+            break;
+        }
         if event.seq != expected_seq {
             diagnostics.push(format!("session event sequence gap at {expected_seq}"));
             expected_seq = event.seq;
@@ -387,5 +421,74 @@ pub fn reduce_session_events(
             .collect(),
         settled_entry_ids,
         diagnostics,
+    }
+}
+
+pub fn reduce_session_events(
+    entries: &[SessionEntryRecord],
+    events: &[SessionEventRecord],
+    through_seq: u64,
+) -> TemporalSessionState {
+    fold_session_events(entries, events, through_seq, None)
+}
+
+/// Viewer-only checkpoint and timestamp index for efficient temporal seeks.
+pub struct SessionReplayIndex<'a> {
+    entries: &'a [SessionEntryRecord],
+    events: &'a [SessionEventRecord],
+    checkpoints: Vec<(u64, TemporalSessionState)>,
+    timestamps: Vec<(i64, u64)>,
+}
+
+impl<'a> SessionReplayIndex<'a> {
+    pub fn new(
+        entries: &'a [SessionEntryRecord],
+        events: &'a [SessionEventRecord],
+        checkpoint_interval: usize,
+    ) -> Self {
+        let interval = checkpoint_interval.max(1);
+        let mut checkpoints = Vec::new();
+        let mut state = fold_session_events(entries, events, 0, None);
+        checkpoints.push((0, state.clone()));
+        for end in ((interval - 1)..events.len()).step_by(interval) {
+            let seq = events[end].seq;
+            state = fold_session_events(entries, events, seq, Some(&state));
+            checkpoints.push((seq, state.clone()));
+        }
+        let mut last_timestamp = i64::MIN;
+        let timestamps = events
+            .iter()
+            .map(|event| {
+                let parsed = parse_timestamp_ms(&event.at).unwrap_or(last_timestamp);
+                last_timestamp = last_timestamp.max(parsed);
+                (last_timestamp, event.seq)
+            })
+            .collect();
+        Self {
+            entries,
+            events,
+            checkpoints,
+            timestamps,
+        }
+    }
+
+    pub fn state_at_seq(&self, through_seq: u64) -> TemporalSessionState {
+        let initial = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|(seq, _)| *seq <= through_seq)
+            .map(|(_, state)| state);
+        fold_session_events(self.entries, self.events, through_seq, initial)
+    }
+
+    pub fn seq_at_or_before(&self, timestamp_ms: i64) -> u64 {
+        let index = self
+            .timestamps
+            .partition_point(|(at, _)| *at <= timestamp_ms);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.timestamps.get(index))
+            .map_or(0, |(_, seq)| *seq)
     }
 }

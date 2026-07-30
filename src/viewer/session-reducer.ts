@@ -70,23 +70,37 @@ function entryIds(entries: WorkflowSessionEntryRecord[]): Set<string> {
   );
 }
 
-/** Fold the durable semantic journal through one sequence position. */
-export function reduceSessionEvents(
+function foldSessionEvents(
   entries: WorkflowSessionEntryRecord[],
   events: WorkflowSessionEventRecord[],
-  throughSeq: number = Number.MAX_SAFE_INTEGER,
+  throughSeq: number,
+  initial?: TemporalSessionState,
 ): TemporalSessionState {
   const messages = new Map<string, MutableMessage>();
   const messageOrder: string[] = [];
+  for (const message of initial?.messages ?? []) {
+    messages.set(message.messageId, {
+      ...message,
+      blocks: new Map(message.blocks.map((block) => [block.contentIndex, { ...block }] as const)),
+    });
+    messageOrder.push(message.messageId);
+  }
   const tools = new Map<string, TemporalTool>();
   const toolOrder: string[] = [];
-  const settledEntryIds: string[] = [];
+  for (const tool of initial?.tools ?? []) {
+    tools.set(tool.toolCallId, { ...tool });
+    toolOrder.push(tool.toolCallId);
+  }
+  const settledEntryIds: string[] = [...(initial?.settledEntryIds ?? [])];
   const knownEntries = entryIds(entries);
-  const diagnostics: string[] = [];
-  let expectedSeq = 1;
-  let lastSeq = 0;
+  const diagnostics: string[] = [...(initial?.diagnostics ?? [])];
+  let expectedSeq = (initial?.throughSeq ?? 0) + 1;
+  let lastSeq = initial?.throughSeq ?? 0;
 
   for (const event of events) {
+    if (event.seq <= lastSeq) {
+      continue;
+    }
     if (event.seq > throughSeq) {
       break;
     }
@@ -269,4 +283,65 @@ export function reduceSessionEvents(
     settledEntryIds,
     diagnostics,
   };
+}
+
+/** Fold the durable semantic journal through one sequence position. */
+export function reduceSessionEvents(
+  entries: WorkflowSessionEntryRecord[],
+  events: WorkflowSessionEventRecord[],
+  throughSeq: number = Number.MAX_SAFE_INTEGER,
+): TemporalSessionState {
+  return foldSessionEvents(entries, events, throughSeq);
+}
+
+/**
+ * In-memory seek index. Checkpoints are viewer-only cache state and are never
+ * persisted into a run bundle.
+ */
+export class SessionReplayIndex {
+  private readonly entries: WorkflowSessionEntryRecord[];
+  private readonly events: WorkflowSessionEventRecord[];
+  private readonly checkpoints: Array<{ seq: number; state: TemporalSessionState }> = [];
+  private readonly timestamps: Array<{ at: number; seq: number }>;
+
+  constructor(
+    entries: WorkflowSessionEntryRecord[],
+    events: WorkflowSessionEventRecord[],
+    checkpointInterval = 256,
+  ) {
+    this.entries = entries;
+    this.events = events;
+    let lastTimestamp = Number.NEGATIVE_INFINITY;
+    this.timestamps = events.map((event) => {
+      const parsed = Date.parse(event.at);
+      lastTimestamp = Math.max(lastTimestamp, Number.isFinite(parsed) ? parsed : lastTimestamp);
+      return { at: lastTimestamp, seq: event.seq };
+    });
+    let state = foldSessionEvents(entries, events, 0);
+    this.checkpoints.push({ seq: 0, state });
+    for (let end = checkpointInterval - 1; end < events.length; end += checkpointInterval) {
+      const seq = events[end]?.seq ?? state.throughSeq;
+      state = foldSessionEvents(entries, events, seq, state);
+      this.checkpoints.push({ seq, state });
+    }
+  }
+
+  stateAtSeq(throughSeq: number): TemporalSessionState {
+    const checkpoint = this.checkpoints.findLast(({ seq }) => seq <= throughSeq);
+    return foldSessionEvents(this.entries, this.events, throughSeq, checkpoint?.state);
+  }
+
+  seqAtOrBefore(timestampMs: number): number {
+    let low = 0;
+    let high = this.timestamps.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if ((this.timestamps[middle]?.at ?? Number.POSITIVE_INFINITY) <= timestampMs) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low === 0 ? 0 : (this.timestamps[low - 1]?.seq ?? 0);
+  }
 }

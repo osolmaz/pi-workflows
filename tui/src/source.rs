@@ -150,18 +150,10 @@ impl RunEntry {
     /// state's `traceSeq`: the final append can land between our trace poll
     /// and the terminal state read, and settling then would lose it.
     fn settled(&self) -> bool {
-        let capture_settled = self.session_binding.is_none()
-            || self.session_capture.as_ref().is_some_and(|capture| {
-                matches!(
-                    capture.get("status").and_then(Value::as_str),
-                    Some("complete" | "failed")
-                )
-            });
         self.manifest.status.is_terminal()
             && self.state.status.is_terminal()
             && self.pending_events.is_empty()
             && self.last_seen_seq() >= self.state.trace_seq
-            && capture_settled
     }
 
     /// Highest trace sequence this entry has observed (published or pending).
