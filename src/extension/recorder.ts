@@ -31,6 +31,7 @@ import {
 } from "./session-events.js";
 
 const FLUSH_INTERVAL_MS = 25;
+const FINISH_TURN_TIMEOUT_MS = 30_000;
 const FLUSH_MAX_RECORDS = 256;
 const FLUSH_MAX_BYTES = 256 * 1024;
 const QUEUE_MAX_RECORDS = 8_192;
@@ -97,6 +98,10 @@ export class SessionRecorder {
   private currentAttempt: AttemptOwner | null = null;
   private currentTurn: TurnOwner | null = null;
   private currentMessage: MessageOwner | null = null;
+  private lastFinishedAttempt: AttemptOwner | null = null;
+  private finishPromise: Promise<void> | null = null;
+  private resolveFinish: (() => void) | null = null;
+  private finishTimer: NodeJS.Timeout | null = null;
   private readonly messageOwners = new WeakMap<object, MessageOwner>();
   private readonly stableMessageOwners = new Map<string, MessageOwner>();
   private readonly toolOwners = new Map<string, MessageOwner>();
@@ -146,6 +151,20 @@ export class SessionRecorder {
     this.currentAttempt = { nodeId: contract.nodeId, attemptId: contract.attemptId };
   }
 
+  /** Release ownership of the turn that Pi has fully settled. */
+  settleAttempt(): void {
+    const finished = this.lastFinishedAttempt;
+    this.lastFinishedAttempt = null;
+    if (
+      this.currentTurn === null &&
+      (finished === null ||
+        (this.currentAttempt?.nodeId === finished.nodeId &&
+          this.currentAttempt.attemptId === finished.attemptId))
+    ) {
+      this.currentAttempt = null;
+    }
+  }
+
   handleTurnStart(event: TurnStartEventLike): void {
     const owner = this.currentAttempt;
     if (!owner) {
@@ -176,6 +195,10 @@ export class SessionRecorder {
     );
     this.currentTurn = null;
     this.currentMessage = null;
+    this.lastFinishedAttempt = { nodeId: turn.nodeId, attemptId: turn.attemptId };
+    if (this.finishPromise) {
+      await this.stop();
+    }
   }
 
   async handleMessageStart(event: MessageStartEventLike, ctx: ExtensionContext): Promise<void> {
@@ -334,9 +357,40 @@ export class SessionRecorder {
     }
   }
 
+  /**
+   * Finalize immediately when no Pi turn is active. Otherwise wait for
+   * `turn_end`, which is the last documented lifecycle boundary needed to
+   * include the workflow tool result and any following assistant output.
+   */
+  async finish(): Promise<void> {
+    if (this.stopPromise || this.currentTurn === null) {
+      return await this.stop();
+    }
+    if (!this.finishPromise) {
+      this.finishPromise = new Promise<void>((resolve) => {
+        this.resolveFinish = resolve;
+      });
+      this.finishTimer = setTimeout(() => {
+        this.failCapture(
+          "turn_settle_timeout",
+          `active Pi turn did not finish within ${FINISH_TURN_TIMEOUT_MS}ms`,
+        );
+        void this.stop();
+      }, FINISH_TURN_TIMEOUT_MS);
+      this.finishTimer.unref?.();
+    }
+    return await this.finishPromise;
+  }
+
   async stop(): Promise<void> {
     if (this.stopPromise) {
       return await this.stopPromise;
+    }
+    if (this.currentTurn !== null) {
+      this.failCapture(
+        "turn_interrupted",
+        "session capture stopped before the active Pi turn finished",
+      );
     }
     this.acceptingEntries = false;
     this.acceptingEvents = false;
@@ -376,6 +430,13 @@ export class SessionRecorder {
         } catch {
           // The viewer will report the missing/invalid capture file.
         }
+      } finally {
+        if (this.finishTimer) {
+          clearTimeout(this.finishTimer);
+          this.finishTimer = null;
+        }
+        this.resolveFinish?.();
+        this.resolveFinish = null;
       }
     })();
     return await this.stopPromise;

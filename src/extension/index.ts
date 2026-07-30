@@ -364,10 +364,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
           // ephemeral context must not fail the run.
         }
       },
-      // Awaited by the engine before the terminal snapshot: recording stops
-      // and drains, so the bundle is immutable once the run has ended.
+      // Awaited by the engine before the terminal snapshot. If completion was
+      // submitted from the workflow tool, capture stays open through Pi's
+      // final tool, message, and turn hooks before it drains.
       onRunFinishing: async () => {
-        await run.recorder?.stop();
+        await run.recorder?.finish();
       },
       onEvent: (_event, state: WorkflowRunState) => {
         if (run.runId === null) {
@@ -632,6 +633,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       return;
     }
     await run.recorder?.synchronize(ctx).catch(() => undefined);
+    run.recorder?.settleAttempt();
     run.executor.setStreaming(false);
     run.executor.handleAgentSettled();
   });
@@ -639,7 +641,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     sessionClosed = true;
     supersedePresentation();
-    activeRun?.engine.cancel();
+    const run = activeRun;
+    run?.engine.cancel();
+    void run?.recorder?.stop();
     activeRun = null;
     presentationPending = null;
     clearWidgetTimer();

@@ -231,6 +231,11 @@ pub fn assess_capture(
     if capture.schema != SESSION_CAPTURE_SCHEMA || capture.event_schema != SESSION_EVENT_SCHEMA {
         diagnostics.push("unsupported session capture schema".into());
     }
+    if capture.status == SessionCaptureStatus::Failed && capture.failure.is_none() {
+        diagnostics.push("failed session capture requires failure details".into());
+    } else if capture.status != SessionCaptureStatus::Failed && capture.failure.is_some() {
+        diagnostics.push("only failed session capture may contain failure details".into());
+    }
     for (index, event) in events.iter().enumerate() {
         if event.seq != index as u64 + 1 {
             diagnostics.push(format!("session event sequence gap at {}", index + 1));
@@ -685,5 +690,38 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("requires turnId")));
+    }
+
+    #[test]
+    fn capture_rejects_failure_details_in_the_wrong_status() {
+        let unknown = event("future_event");
+        let missing_failure = SessionCapture {
+            status: SessionCaptureStatus::Failed,
+            ..capture()
+        };
+        assert_eq!(
+            assess_capture(
+                true,
+                &[],
+                std::slice::from_ref(&unknown),
+                Some(&missing_failure),
+                true,
+            )
+            .status,
+            "invalid"
+        );
+
+        let unexpected_failure = SessionCapture {
+            failure: Some(crate::bundle::types::SessionCaptureFailure {
+                failed_at: "2026-01-01T00:00:00.000Z".into(),
+                code: "failed".into(),
+                message: "failed".into(),
+            }),
+            ..capture()
+        };
+        assert_eq!(
+            assess_capture(true, &[], &[unknown], Some(&unexpected_failure), true).status,
+            "invalid"
+        );
     }
 }

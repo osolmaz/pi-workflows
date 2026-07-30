@@ -447,6 +447,7 @@ function validateSessionCapture(capture: WorkflowSessionCapture): void {
   if (
     capture.schema !== SESSION_CAPTURE_SCHEMA ||
     capture.eventSchema !== SESSION_EVENT_SCHEMA ||
+    !["recording", "complete", "failed"].includes(capture.status) ||
     !Number.isSafeInteger(capture.eventCount) ||
     capture.eventCount < 0 ||
     !Number.isSafeInteger(capture.entryCount) ||

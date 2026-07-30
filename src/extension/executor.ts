@@ -106,6 +106,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       return;
     }
     try {
+      this.conversation?.beginAttempt?.(pending.request.contract);
       this.sendPrompt({ prompt: pending.request.prompt, streaming: this.streaming });
     } catch (error) {
       this.clearPending();
@@ -249,6 +250,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     pending.nudgesSent += 1;
     const { nodeId, attemptId } = pending.request.contract;
     try {
+      this.conversation?.beginAttempt?.(pending.request.contract);
       this.sendPrompt({
         prompt: [
           `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,

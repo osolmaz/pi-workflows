@@ -131,9 +131,11 @@ temporal recording. Silent dropping is forbidden.
 The writer keeps each event record intact. It may write many lines together,
 but it must not combine adjacent text or thinking deltas.
 
-`SessionRecorder.stop()` must stop accepting events, flush the queue, drain
-entry recording, write terminal capture status, and return. The engine's
-existing `onRunFinishing` hook must await this before it writes the terminal
+`SessionRecorder.finish()` must wait for an active Pi turn through `turn_end`,
+then stop accepting events, flush the queue, drain entry recording, write
+terminal capture status, and return. `SessionRecorder.stop()` handles session
+shutdown and marks an active turn as interrupted. The engine's existing
+`onRunFinishing` hook must await `finish()` before it writes the terminal
 workflow event.
 
 Exit criterion: a 10,000-event synthetic stream keeps queue use bounded,

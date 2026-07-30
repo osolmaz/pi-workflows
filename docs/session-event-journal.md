@@ -351,13 +351,17 @@ The recorder follows this order:
 7. At `message_end`, buffer that receipt and later events until a subsequent
    synchronized hook exposes the durable Pi entry, then attach its exact id
    without changing event order or receipt timestamps.
-8. Stop accepting events when the workflow begins terminal persistence.
-9. Drain the event and entry writers.
+8. When the workflow requests terminal persistence during an active Pi turn,
+   keep capture routed through that turn's final tool, message, and `turn_end`
+   hooks.
+9. Stop accepting events and drain the event and entry writers.
 10. Write terminal `capture.json` atomically.
 11. Allow the engine to append its terminal workflow event.
 
 This order keeps the bundle immutable once the terminal workflow event exists.
-A capture failure must never fail the workflow.
+Waiting for the active turn is bounded at 30 seconds. If the turn does not
+finish, capture stops as failed so it cannot hold workflow persistence
+indefinitely. A capture failure must never fail the workflow.
 
 The queue must have tested byte and record limits. Reaching either limit marks
 capture as failed and stops temporal capture. Silent event dropping is

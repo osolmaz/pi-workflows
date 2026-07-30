@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SessionRecorder } from "../src/extension/recorder.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowRunStore, createRunId } from "../src/workflows/store.js";
@@ -207,6 +207,12 @@ describe("SessionRecorder", () => {
       args: { path: "README.md" },
     });
     recorder.handleToolUpdate({ toolCallId: "call-1" });
+    let finished = false;
+    const finishing = recorder.finish().then(() => {
+      finished = true;
+    });
+    await Promise.resolve();
+    expect(finished).toBe(false);
     recorder.handleToolEnd({
       toolCallId: "call-1",
       toolName: "read",
@@ -222,7 +228,8 @@ describe("SessionRecorder", () => {
       attemptId: "attempt-2",
     });
     await recorder.handleTurnEnd({ turnIndex: 0, message: { ...assistant } }, ctx);
-    await recorder.stop();
+    await finishing;
+    expect(finished).toBe(true);
 
     const events = await readEvents(runDir);
     expect(events.map((event) => event.seq)).toEqual(
@@ -262,6 +269,55 @@ describe("SessionRecorder", () => {
     });
   });
 
+  it("does not attribute ordinary turns after an attempt settles", async () => {
+    const { store, runDir, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runDir, runId);
+    const ctx = makeCtx([]);
+    await recorder.bind(ctx);
+    const contract = { runId, workflowName: "demo", nodeId: "one", attemptId: "a1" };
+    recorder.beginAttempt(contract);
+    recorder.handleTurnStart({ turnIndex: 0 });
+    await recorder.handleTurnEnd({ turnIndex: 0, message: { role: "assistant" } }, ctx);
+    recorder.settleAttempt();
+
+    recorder.handleTurnStart({ turnIndex: 1 });
+    recorder.beginAttempt(contract);
+    recorder.handleTurnStart({ turnIndex: 2 });
+    await recorder.handleTurnEnd({ turnIndex: 2, message: { role: "assistant" } }, ctx);
+    await recorder.stop();
+
+    expect((await readEvents(runDir)).map((event) => event.type)).toEqual([
+      "turn_started",
+      "turn_finished",
+      "turn_started",
+      "turn_finished",
+    ]);
+  });
+
+  it("fails capture instead of holding terminal persistence on an unfinished turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, runDir, runId } = await makeRun();
+      const recorder = new SessionRecorder(store, runDir, runId);
+      await recorder.bind(makeCtx([]));
+      recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+      recorder.handleTurnStart({ turnIndex: 0 });
+      const finishing = recorder.finish();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await finishing;
+
+      const capture = JSON.parse(
+        await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(capture).toMatchObject({
+        status: "failed",
+        failure: { code: "turn_settle_timeout" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("externalizes large tool payloads before enforcing the event limit", async () => {
     const { store, runDir, runId } = await makeRun();
     const recorder = new SessionRecorder(store, runDir, runId);
@@ -284,6 +340,7 @@ describe("SessionRecorder", () => {
         partial: assistant,
       },
     });
+    await recorder.handleTurnEnd({ turnIndex: 0, message: assistant }, ctx);
     await recorder.stop();
 
     const events = await readEvents(runDir);
@@ -298,7 +355,7 @@ describe("SessionRecorder", () => {
     const capture = JSON.parse(
       await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
     ) as Record<string, unknown>;
-    expect(capture).toMatchObject({ status: "complete", eventCount: 3 });
+    expect(capture).toMatchObject({ status: "complete", eventCount: 4 });
   });
 
   it("keeps workflow recording alive when temporal event writes fail", async () => {
@@ -336,6 +393,7 @@ describe("SessionRecorder", () => {
     await recorder.bind(makeCtx(branch));
     recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
     recorder.handleTurnStart({ turnIndex: 0 });
+    await recorder.handleTurnEnd({ turnIndex: 0, message: { role: "assistant" } }, makeCtx(branch));
     await recorder.stop();
 
     const capture = JSON.parse(

@@ -309,6 +309,7 @@ describe.sequential("pi-workflows end to end", () => {
     expect(sessionEvents.map((event) => event.type)).toContain("assistant_event");
     expect(sessionEvents.map((event) => event.type)).toContain("tool_execution_started");
     expect(sessionEvents.map((event) => event.type)).toContain("tool_execution_finished");
+    expect(sessionEvents.map((event) => event.type)).toContain("turn_finished");
     expect(sessionEventsRaw).not.toContain('"partial"');
     expect(sessionEventsRaw).not.toContain('"partialResult"');
 

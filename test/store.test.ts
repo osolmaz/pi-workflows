@@ -279,6 +279,35 @@ describe("WorkflowRunStore", () => {
     });
   });
 
+  it("rejects unknown session capture statuses", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-invalid-capture-status");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await fs.writeFile(
+      path.join(runDir, "session/capture.json"),
+      JSON.stringify({
+        schema: "pi-workflows.session-capture.v1",
+        eventSchema: "pi-workflows.session-event.v1",
+        status: "finished",
+        eventCount: 0,
+        entryCount: 0,
+        lastEventSeq: 0,
+      }),
+    );
+    expect((await readRunBundle(runDir))?.sessionIntegrity).toEqual({
+      status: "invalid",
+      diagnostics: ["Invalid session capture projection"],
+    });
+  });
+
   it("accepts unknown future event types without invented correlation requirements", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store-unknown-event");
     const store = new WorkflowRunStore(outputRoot);

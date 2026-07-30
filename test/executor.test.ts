@@ -170,6 +170,26 @@ describe("ConversationStepExecutor", () => {
     expect(executor.pendingStepId).toBeNull();
   });
 
+  it("re-establishes attempt ownership for nudge and resume deliveries", async () => {
+    const owners: string[] = [];
+    const executor = new ConversationStepExecutor({
+      sendPrompt: () => undefined,
+      conversation: {
+        beginAttempt: (contract) => owners.push(contract.attemptId),
+        mark: () => 0,
+        rangeSince: () => undefined,
+      },
+    });
+    const stepPromise = executor.runAgentStep(makeRequest(), new AbortController().signal);
+    expect(executor.handleAgentSettled()).toBe(true);
+    executor.hold();
+    expect(executor.handleAgentSettled()).toBe(false);
+    executor.release();
+    expect(owners).toEqual(["a1", "a1", "a1"]);
+    await executor.submit("step1", "a1", {});
+    await stepPromise;
+  });
+
   it("does nothing on settle without a pending step", () => {
     const { executor, sent } = makeExecutor();
     expect(executor.handleAgentSettled()).toBe(false);
