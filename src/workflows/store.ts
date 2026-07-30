@@ -594,6 +594,7 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
     entries,
     events,
     capture: sessionCapture,
+    runTerminal: state.status !== "running",
   });
   return {
     runDir,
@@ -694,6 +695,7 @@ function assessSessionIntegrity(input: {
   entries: NdjsonRead<WorkflowSessionEntryRecord>;
   events: NdjsonRead<WorkflowSessionEventRecord>;
   capture: WorkflowSessionCapture | null;
+  runTerminal: boolean;
 }): SessionCaptureIntegrity {
   const anySessionFile =
     input.binding !== null || input.entries.exists || input.events.exists || input.capture !== null;
@@ -719,6 +721,9 @@ function assessSessionIntegrity(input: {
   }
   if (input.events.tornTail && input.capture.status !== "recording") {
     diagnostics.push("terminal session event journal has a torn tail");
+  }
+  if (input.runTerminal && input.capture.status === "recording") {
+    diagnostics.push("terminal run still reports recording capture");
   }
   let expected = 1;
   for (const event of input.events.records) {

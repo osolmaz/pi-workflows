@@ -326,52 +326,52 @@ fn render_temporal_state(
                 bundle_dir,
                 remote_artifacts,
             );
-            for tool in state
-                .tools
-                .iter()
-                .filter(|tool| tool.message_id == message.message_id)
-            {
-                let summary = format!(
-                    "tool {} [{}] · {} update{}",
-                    sanitize_text(&tool.tool_name),
-                    tool.status,
-                    tool.updates,
-                    if tool.updates == 1 { "" } else { "s" }
-                );
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        gutter.to_string(),
-                        Style::default().fg(palette.replay_focus),
+        }
+        for tool in state
+            .tools
+            .iter()
+            .filter(|tool| tool.message_id == message.message_id)
+        {
+            let summary = format!(
+                "tool {} [{}] · {} update{}",
+                sanitize_text(&tool.tool_name),
+                tool.status,
+                tool.updates,
+                if tool.updates == 1 { "" } else { "s" }
+            );
+            lines.push(Line::from(vec![
+                Span::styled(
+                    gutter.to_string(),
+                    Style::default().fg(palette.replay_focus),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(summary, Style::default().fg(palette.tool)),
+            ]));
+            if let Some(args) = tool.args.as_ref() {
+                push_body_line(
+                    &mut lines,
+                    gutter,
+                    &format!(
+                        "args: {}",
+                        super::preview_value(args, bundle_dir, remote_artifacts)
                     ),
-                    Span::styled("  ", Style::default()),
-                    Span::styled(summary, Style::default().fg(palette.tool)),
-                ]));
-                if let Some(args) = tool.args.as_ref() {
-                    push_body_line(
-                        &mut lines,
-                        gutter,
-                        &format!(
-                            "args: {}",
-                            super::preview_value(args, bundle_dir, remote_artifacts)
-                        ),
-                        body_width,
-                        Style::default().fg(palette.subtext),
-                        palette,
-                    );
-                }
-                if let Some(result) = tool.result.as_ref() {
-                    push_body_line(
-                        &mut lines,
-                        gutter,
-                        &format!(
-                            "result: {}",
-                            super::preview_value(result, bundle_dir, remote_artifacts)
-                        ),
-                        body_width,
-                        Style::default().fg(palette.subtext),
-                        palette,
-                    );
-                }
+                    body_width,
+                    Style::default().fg(palette.subtext),
+                    palette,
+                );
+            }
+            if let Some(result) = tool.result.as_ref() {
+                push_body_line(
+                    &mut lines,
+                    gutter,
+                    &format!(
+                        "result: {}",
+                        super::preview_value(result, bundle_dir, remote_artifacts)
+                    ),
+                    body_width,
+                    Style::default().fg(palette.subtext),
+                    palette,
+                );
             }
         }
         if selected == Some(index) && payload_expanded {
@@ -568,6 +568,9 @@ mod tests {
         let settled = rendered(None);
         assert!(settled.contains("assistant: settled"));
         assert!(settled.contains("plan hello"));
+        assert!(settled.contains("tool read [finished] · 1 update"));
+        assert!(settled.contains("args: {\"path\":\"README.md\"}"));
+        assert!(settled.contains("result: {\"content\":\"ok\"}"));
         assert!(!settled.contains("more session events"));
     }
 

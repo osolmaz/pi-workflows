@@ -287,6 +287,32 @@ describe("WorkflowRunStore", () => {
     });
   });
 
+  it("rejects recording capture after the workflow is terminal", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-terminal-recording");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState({ status: "completed", finishedAt: new Date().toISOString() });
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "recording",
+      eventCount: 0,
+      entryCount: 0,
+      lastEventSeq: 0,
+    });
+    expect((await readRunBundle(runDir))?.sessionIntegrity).toEqual({
+      status: "invalid",
+      diagnostics: ["terminal run still reports recording capture"],
+    });
+  });
+
   it("rejects unknown session capture statuses", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store-invalid-capture-status");
     const store = new WorkflowRunStore(outputRoot);
