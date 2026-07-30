@@ -319,8 +319,10 @@ describe.sequential("pi-workflows end to end", () => {
         .split("\n")
         .map((line) => (JSON.parse(line) as { entry: { id: string } }).entry.id),
     );
-    const linkedEntryIds = sessionEvents.flatMap((event) => {
-      const id = event.type === "message_finished" ? event.payload.entryId : undefined;
+    const finishedMessages = sessionEvents.filter((event) => event.type === "message_finished");
+    expect(finishedMessages.every((event) => event.payload.settled === true)).toBe(true);
+    const linkedEntryIds = finishedMessages.flatMap((event) => {
+      const id = event.payload.entryId;
       return typeof id === "string" ? [id] : [];
     });
     expect(linkedEntryIds.length).toBeGreaterThan(0);

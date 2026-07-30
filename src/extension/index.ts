@@ -534,7 +534,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       // dispatch, which precedes tool execution (docs/extensions.md, "Tool
       // Events"). The tool result of this call itself lands after the range
       // by design: it is the submission receipt, not the submission.
-      await activeRun.recorder?.record(ctx).catch(() => undefined);
+      await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
       const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
       if (!result.accepted) {
         throw new Error(result.message);
@@ -597,22 +597,20 @@ export default function piWorkflows(pi: ExtensionAPI) {
     activeRun?.recorder?.handleTurnStart(event);
   });
 
-  pi.on("turn_end", (event) => {
-    activeRun?.recorder?.handleTurnEnd(event);
+  pi.on("turn_end", async (event, ctx) => {
+    await activeRun?.recorder?.handleTurnEnd(event, ctx).catch(() => undefined);
   });
 
-  pi.on("message_start", (event) => {
-    activeRun?.recorder?.handleMessageStart(event);
+  pi.on("message_start", async (event, ctx) => {
+    await activeRun?.recorder?.handleMessageStart(event, ctx).catch(() => undefined);
   });
 
   pi.on("message_update", (event) => {
     activeRun?.recorder?.handleMessageUpdate(event);
   });
 
-  pi.on("message_end", async (event, ctx) => {
-    // Record the conversation as it grows; entries are copied verbatim into
-    // the run bundle so replay never needs Pi's global session store.
-    await activeRun?.recorder?.handleMessageEnd(event, ctx).catch(() => undefined);
+  pi.on("message_end", (event) => {
+    activeRun?.recorder?.handleMessageEnd(event);
   });
 
   pi.on("tool_execution_start", (event) => {

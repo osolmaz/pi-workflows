@@ -191,11 +191,13 @@ Each end event uses the owner saved at its matching start. It must not read the
 workflow's current node again. This prevents a late event from moving to the
 next attempt.
 
-Change entry recording so `message_end` can obtain the exact Pi entry ids it
-just persisted. Write `message_finished` with `settled: true` and `entryId` only
-when that explicit link exists. Use `settled: false` for an aborted or otherwise
-unrecorded message. Do not match messages by text, timestamp, or position during
-replay.
+Pi persists a message entry after `message_end` handlers return. Buffer that
+receipt and later events until the next synchronized boundary hook or workflow
+tool execution can record the branch entry. Then release the buffered records
+in original hook order. Write `message_finished` with `settled: true` and
+`entryId` only when the exact stable message identity matches a durable entry.
+Use `settled: false` for an aborted or otherwise unrecorded message. Do not
+match messages by text, timestamp, or position during replay.
 
 Exit criterion: tests advance the workflow between start and finish hooks and
 confirm that every late event retains its original `nodeId` and `attemptId`.

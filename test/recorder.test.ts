@@ -173,7 +173,7 @@ describe("SessionRecorder", () => {
 
     const assistant = { role: "assistant", content: [], timestamp: 1_723_000_000_000 };
     recorder.handleTurnStart({ turnIndex: 0 });
-    recorder.handleMessageStart({ message: assistant });
+    await recorder.handleMessageStart({ message: assistant }, ctx);
     recorder.handleMessageUpdate({
       message: { ...assistant },
       assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: assistant },
@@ -196,6 +196,11 @@ describe("SessionRecorder", () => {
         partial: assistant,
       },
     });
+    // Pi persists the session entry only after message_end returns. Tool
+    // lifecycle events can arrive before the next synchronized hook and must
+    // remain ordered behind the deferred message end.
+    recorder.handleMessageEnd({ message: { ...assistant } });
+    branch.push({ id: "entry-1", type: "message", message: assistant });
     recorder.handleToolStart({
       toolCallId: "call-1",
       toolName: "read",
@@ -209,8 +214,6 @@ describe("SessionRecorder", () => {
       isError: false,
     });
 
-    branch.push({ id: "entry-1", type: "message", message: assistant });
-    await recorder.handleMessageEnd({ message: { ...assistant } }, ctx);
     // Ownership was captured at start and must not follow a later attempt.
     recorder.beginAttempt({
       runId,
@@ -218,7 +221,7 @@ describe("SessionRecorder", () => {
       nodeId: "next",
       attemptId: "attempt-2",
     });
-    recorder.handleTurnEnd({ turnIndex: 0, message: { ...assistant } });
+    await recorder.handleTurnEnd({ turnIndex: 0, message: { ...assistant } }, ctx);
     await recorder.stop();
 
     const events = await readEvents(runDir);
@@ -233,14 +236,14 @@ describe("SessionRecorder", () => {
       "assistant_event",
       "assistant_event",
       "assistant_event",
+      "message_finished",
       "tool_execution_started",
       "tool_execution_updated",
       "tool_execution_finished",
-      "message_finished",
       "turn_finished",
     ]);
     expect(JSON.stringify(events)).not.toContain('"partial"');
-    expect(events.at(-2)?.payload).toMatchObject({
+    expect(events.find((event) => event.type === "message_finished")?.payload).toMatchObject({
       role: "assistant",
       settled: true,
       entryId: "entry-1",
@@ -262,11 +265,12 @@ describe("SessionRecorder", () => {
   it("externalizes large tool payloads before enforcing the event limit", async () => {
     const { store, runDir, runId } = await makeRun();
     const recorder = new SessionRecorder(store, runDir, runId);
-    await recorder.bind(makeCtx([]));
+    const ctx = makeCtx([]);
+    await recorder.bind(ctx);
     recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
     const assistant = { role: "assistant", content: [], timestamp: 1 };
     recorder.handleTurnStart({ turnIndex: 0 });
-    recorder.handleMessageStart({ message: assistant });
+    await recorder.handleMessageStart({ message: assistant }, ctx);
     recorder.handleMessageUpdate({
       message: assistant,
       assistantMessageEvent: {

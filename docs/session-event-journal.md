@@ -348,7 +348,9 @@ The recorder follows this order:
 5. Queue normalized records in memory and return immediately from high-rate
    update hooks.
 6. Append queued records in ordered batches on a dedicated writer.
-7. Flush earlier events before linking a finished message to its Pi entry.
+7. At `message_end`, buffer that receipt and later events until a subsequent
+   synchronized hook exposes the durable Pi entry, then attach its exact id
+   without changing event order or receipt timestamps.
 8. Stop accepting events when the workflow begins terminal persistence.
 9. Drain the event and entry writers.
 10. Write terminal `capture.json` atomically.

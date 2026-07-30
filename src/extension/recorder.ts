@@ -40,6 +40,7 @@ type AttemptOwner = { nodeId: string; attemptId: string };
 type TurnOwner = AttemptOwner & { turnId: string; turnIndex: number };
 type MessageOwner = TurnOwner & { messageId: string; role: string };
 type QueuedEvent = { record: WorkflowSessionEventRecord; bytes: number };
+type PendingMessageEnd = { queued: QueuedEvent; role: string; message: unknown };
 type RecordedEntry = { id: string; entry: Record<string, unknown>; claimed: boolean };
 
 function objectKey(value: unknown): object | null {
@@ -102,6 +103,7 @@ export class SessionRecorder {
   private readonly turnToolCallIds = new Map<string, string[]>();
 
   private eventQueue: QueuedEvent[] = [];
+  private readonly pendingMessageEnds: PendingMessageEnd[] = [];
   private outstandingRecords = 0;
   private outstandingBytes = 0;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -160,12 +162,13 @@ export class SessionRecorder {
     this.enqueue(turn, "turn_started", { turnIndex: event.turnIndex });
   }
 
-  handleTurnEnd(event: TurnEndEventLike): void {
+  async handleTurnEnd(event: TurnEndEventLike, ctx: ExtensionContext): Promise<void> {
     const turn = this.currentTurn;
     if (!turn) {
       return;
     }
     const message = this.ownerForMessage(event.message);
+    await this.synchronize(ctx);
     this.enqueue(
       turn,
       "turn_finished",
@@ -175,11 +178,12 @@ export class SessionRecorder {
     this.currentMessage = null;
   }
 
-  handleMessageStart(event: MessageStartEventLike): void {
+  async handleMessageStart(event: MessageStartEventLike, ctx: ExtensionContext): Promise<void> {
     const turn = this.currentTurn;
     if (!turn) {
       return;
     }
+    await this.synchronize(ctx);
     const owner: MessageOwner = {
       ...turn,
       messageId: `m${this.nextMessageId}`,
@@ -216,21 +220,27 @@ export class SessionRecorder {
     this.enqueue(owner, "assistant_event", normalized as unknown as Record<string, unknown>);
   }
 
-  async handleMessageEnd(event: MessageEndEventLike, ctx: ExtensionContext): Promise<void> {
+  handleMessageEnd(event: MessageEndEventLike): void {
     const owner = this.ownerForMessage(event.message);
     if (!owner) {
       return;
     }
-    const at = new Date().toISOString();
-    await this.flushAllEvents();
-    await this.record(ctx);
-    const entryId = this.claimEntry(owner.role);
-    this.enqueue(
+    // Pi appends the final session entry after message_end handlers return.
+    // Keep this record and every later event queued until a documented hook
+    // with synchronized session state can attach the exact entry id.
+    this.clearFlushTimer();
+    const queued = this.enqueue(
       owner,
       "message_finished",
-      entryId ? { role: owner.role, settled: true, entryId } : { role: owner.role, settled: false },
-      at,
+      { role: owner.role, settled: false },
+      undefined,
+      {},
+      true,
     );
+    if (queued) {
+      this.pendingMessageEnds.push({ queued, role: owner.role, message: event.message });
+      this.clearFlushTimer();
+    }
     if (this.currentMessage?.messageId === owner.messageId) {
       this.currentMessage = null;
     }
@@ -302,12 +312,37 @@ export class SessionRecorder {
     return task;
   }
 
+  /** Record durable entries, then release deferred message-end events in order. */
+  async synchronize(ctx: ExtensionContext): Promise<void> {
+    if (this.pendingMessageEnds.length === 0) {
+      return;
+    }
+    await this.record(ctx);
+    for (const pending of this.pendingMessageEnds.splice(0)) {
+      const entryId = this.claimEntry(pending.role, pending.message);
+      pending.queued.record.payload = entryId
+        ? { role: pending.role, settled: true, entryId }
+        : { role: pending.role, settled: false };
+      const bytes = Buffer.byteLength(JSON.stringify(pending.queued.record), "utf8") + 1;
+      this.outstandingBytes += bytes - pending.queued.bytes;
+      pending.queued.bytes = bytes;
+    }
+    if (this.eventQueue.length >= FLUSH_MAX_RECORDS || this.queuedBytes() >= FLUSH_MAX_BYTES) {
+      this.startFlush();
+    } else {
+      this.scheduleFlush();
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.stopPromise) {
       return await this.stopPromise;
     }
     this.acceptingEntries = false;
     this.acceptingEvents = false;
+    // If Pi closes before another synchronized hook, preserve the message-end
+    // receipts as explicitly unsettled rather than hanging finalization.
+    this.pendingMessageEnds.splice(0);
     this.clearFlushTimer();
     this.stopPromise = (async () => {
       try {
@@ -370,10 +405,14 @@ export class SessionRecorder {
     );
   }
 
-  private claimEntry(role: string): string | undefined {
-    const entry = this.unclaimedEntries.find(
-      (candidate) => !candidate.claimed && entryRole(candidate.entry) === role,
-    );
+  private claimEntry(role: string, message: unknown): string | undefined {
+    const messageKey = stableMessageKey(message);
+    const entry = this.unclaimedEntries.find((candidate) => {
+      if (candidate.claimed || entryRole(candidate.entry) !== role) {
+        return false;
+      }
+      return messageKey === null || stableMessageKey(candidate.entry.message) === messageKey;
+    });
     if (!entry) {
       return undefined;
     }
@@ -387,9 +426,10 @@ export class SessionRecorder {
     payload: Record<string, unknown>,
     at: string = new Date().toISOString(),
     extra: { toolCallId?: string } = {},
-  ): void {
+    deferFlush = false,
+  ): QueuedEvent | null {
     if (!this.bound || !this.acceptingEvents || this.captureFailure) {
-      return;
+      return null;
     }
     const messageId = "messageId" in owner ? owner.messageId : undefined;
     const record: WorkflowSessionEventRecord = {
@@ -413,24 +453,28 @@ export class SessionRecorder {
         "event_too_large",
         `session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`,
       );
-      return;
+      return null;
     }
     if (
       this.outstandingRecords + 1 > QUEUE_MAX_RECORDS ||
       this.outstandingBytes + bytes > QUEUE_MAX_BYTES
     ) {
       this.failCapture("event_queue_overflow", "session event queue limit exceeded");
-      return;
+      return null;
     }
     this.nextEventSeq += 1;
-    this.eventQueue.push({ record, bytes });
+    const queued = { record, bytes };
+    this.eventQueue.push(queued);
     this.outstandingRecords += 1;
     this.outstandingBytes += bytes;
-    if (this.eventQueue.length >= FLUSH_MAX_RECORDS || this.queuedBytes() >= FLUSH_MAX_BYTES) {
-      this.startFlush();
-    } else {
-      this.scheduleFlush();
+    if (!deferFlush) {
+      if (this.eventQueue.length >= FLUSH_MAX_RECORDS || this.queuedBytes() >= FLUSH_MAX_BYTES) {
+        this.startFlush();
+      } else {
+        this.scheduleFlush();
+      }
     }
+    return queued;
   }
 
   private queuedBytes(): number {
@@ -438,7 +482,7 @@ export class SessionRecorder {
   }
 
   private scheduleFlush(): void {
-    if (this.flushTimer || this.flushPromise) {
+    if (this.pendingMessageEnds.length > 0 || this.flushTimer || this.flushPromise) {
       return;
     }
     this.flushTimer = setTimeout(() => {
@@ -449,7 +493,7 @@ export class SessionRecorder {
   }
 
   private startFlush(): void {
-    if (this.flushPromise || this.eventQueue.length === 0) {
+    if (this.pendingMessageEnds.length > 0 || this.flushPromise || this.eventQueue.length === 0) {
       return;
     }
     this.clearFlushTimer();
