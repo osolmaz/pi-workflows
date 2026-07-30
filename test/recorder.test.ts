@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SessionRecorder } from "../src/extension/recorder.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowRunStore, createRunId } from "../src/workflows/store.js";
-import type { WorkflowRunState } from "../src/workflows/types.js";
+import type { WorkflowRunState, WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
 type FakeEntry = {
@@ -171,11 +171,11 @@ describe("SessionRecorder", () => {
       attemptId: "attempt-1",
     });
 
-    const assistant = { role: "assistant", content: [] };
+    const assistant = { role: "assistant", content: [], timestamp: 1_723_000_000_000 };
     recorder.handleTurnStart({ turnIndex: 0 });
     recorder.handleMessageStart({ message: assistant });
     recorder.handleMessageUpdate({
-      message: assistant,
+      message: { ...assistant },
       assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: assistant },
     });
     recorder.handleMessageUpdate({
@@ -210,7 +210,7 @@ describe("SessionRecorder", () => {
     });
 
     branch.push({ id: "entry-1", type: "message", message: assistant });
-    await recorder.handleMessageEnd({ message: assistant }, ctx);
+    await recorder.handleMessageEnd({ message: { ...assistant } }, ctx);
     // Ownership was captured at start and must not follow a later attempt.
     recorder.beginAttempt({
       runId,
@@ -218,7 +218,7 @@ describe("SessionRecorder", () => {
       nodeId: "next",
       attemptId: "attempt-2",
     });
-    recorder.handleTurnEnd({ turnIndex: 0, message: assistant });
+    recorder.handleTurnEnd({ turnIndex: 0, message: { ...assistant } });
     await recorder.stop();
 
     const events = await readEvents(runDir);
@@ -257,6 +257,44 @@ describe("SessionRecorder", () => {
       entryCount: 1,
       lastEventSeq: events.length,
     });
+  });
+
+  it("externalizes large tool payloads before enforcing the event limit", async () => {
+    const { store, runDir, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runDir, runId);
+    await recorder.bind(makeCtx([]));
+    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    const assistant = { role: "assistant", content: [], timestamp: 1 };
+    recorder.handleTurnStart({ turnIndex: 0 });
+    recorder.handleMessageStart({ message: assistant });
+    recorder.handleMessageUpdate({
+      message: assistant,
+      assistantMessageEvent: {
+        type: "toolcall_end",
+        contentIndex: 0,
+        toolCall: {
+          id: "large-call",
+          name: "write",
+          arguments: { text: "x".repeat(1_100_000) },
+        },
+        partial: assistant,
+      },
+    });
+    await recorder.stop();
+
+    const events = await readEvents(runDir);
+    const toolCall = events.find(
+      (event) =>
+        event.type === "assistant_event" &&
+        (event.payload as Record<string, unknown>).type === "toolcall_end",
+    );
+    expect(toolCall?.payload).toMatchObject({
+      toolCall: { arguments: { text: { $artifact: { mediaType: "text/plain" } } } },
+    });
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(capture).toMatchObject({ status: "complete", eventCount: 3 });
   });
 
   it("keeps workflow recording alive when temporal event writes fail", async () => {
@@ -308,6 +346,72 @@ describe("SessionRecorder", () => {
     await expect(
       store.writeSnapshot(runDir, state, { scope: "run", type: "still_runs", payload: {} }),
     ).resolves.toBeDefined();
+  });
+
+  it("drains accepted records after bounded queue overflow", async () => {
+    let releaseFirstWrite: () => void = () => undefined;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    class BlockingEventStore extends WorkflowRunStore {
+      private firstWrite = true;
+
+      override async appendSessionEventBatch(
+        runDir: string,
+        records: WorkflowSessionEventRecord[],
+      ): Promise<void> {
+        if (this.firstWrite) {
+          this.firstWrite = false;
+          await firstWriteGate;
+        }
+        await super.appendSessionEventBatch(runDir, records);
+      }
+    }
+    const outputRoot = await makeTempDir("pi-workflows-recorder-overflow");
+    const store = new BlockingEventStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "demo",
+      startAt: "one",
+      nodes: { one: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const runId = createRunId("demo");
+    const now = new Date().toISOString();
+    const state: WorkflowRunState = {
+      schema: "pi-workflows.run-state.v1",
+      traceSeq: 0,
+      runId,
+      workflowName: "demo",
+      startedAt: now,
+      updatedAt: now,
+      status: "running",
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const recorder = new SessionRecorder(store, runDir, runId);
+    await recorder.bind(makeCtx([]));
+    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    for (let index = 0; index < 8_300; index += 1) {
+      recorder.handleTurnStart({ turnIndex: index });
+    }
+    releaseFirstWrite();
+    await recorder.stop();
+
+    const events = await readEvents(runDir);
+    expect(events).toHaveLength(8_192);
+    expect(events.at(-1)?.seq).toBe(8_192);
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(capture).toMatchObject({
+      status: "failed",
+      eventCount: 8_192,
+      lastEventSeq: 8_192,
+      failure: { code: "event_queue_overflow" },
+    });
   });
 
   it("re-anchors when the user branches away mid-run", async () => {

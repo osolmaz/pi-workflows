@@ -25,6 +25,7 @@ export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" 
 export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const;
 export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
 export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
+export const SESSION_EVENT_MAX_BYTES = 1024 * 1024;
 
 const MANIFEST_PATH = "manifest.json";
 const WORKFLOW_SNAPSHOT_PATH = "workflow.json";
@@ -237,7 +238,9 @@ export class WorkflowRunStore {
           records.map(async (record) => ({
             ...record,
             payload:
-              record.type === "tool_execution_started" || record.type === "tool_execution_finished"
+              record.type === "tool_execution_started" ||
+              record.type === "tool_execution_finished" ||
+              (record.type === "assistant_event" && record.payload.type === "toolcall_end")
                 ? ((await encodeValue(record.payload, context.artifacts)) as Record<
                     string,
                     unknown
@@ -245,6 +248,11 @@ export class WorkflowRunStore {
                 : record.payload,
           })),
         );
+        for (const record of encoded) {
+          if (Buffer.byteLength(JSON.stringify(record), "utf8") + 1 > SESSION_EVENT_MAX_BYTES) {
+            throw new Error(`session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`);
+          }
+        }
         await appendLines(path.join(runDir, SESSION_EVENTS_PATH), encoded);
         context.sessionEventSeq = records.at(-1)?.seq ?? context.sessionEventSeq;
       } catch (error) {

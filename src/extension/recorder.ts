@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   SESSION_BINDING_SCHEMA,
   SESSION_CAPTURE_SCHEMA,
+  SESSION_EVENT_MAX_BYTES,
   SESSION_EVENT_SCHEMA,
   type WorkflowRunStore,
 } from "../workflows/store.js";
@@ -34,7 +35,6 @@ const FLUSH_MAX_RECORDS = 256;
 const FLUSH_MAX_BYTES = 256 * 1024;
 const QUEUE_MAX_RECORDS = 8_192;
 const QUEUE_MAX_BYTES = 16 * 1024 * 1024;
-const EVENT_MAX_BYTES = 1024 * 1024;
 
 type AttemptOwner = { nodeId: string; attemptId: string };
 type TurnOwner = AttemptOwner & { turnId: string; turnIndex: number };
@@ -44,6 +44,23 @@ type RecordedEntry = { id: string; entry: Record<string, unknown>; claimed: bool
 
 function objectKey(value: unknown): object | null {
   return typeof value === "object" && value !== null ? value : null;
+}
+
+function stableMessageKey(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const message = value as { id?: unknown; role?: unknown; timestamp?: unknown };
+  if (typeof message.id === "string" && message.id.length > 0) {
+    return `id:${message.id}`;
+  }
+  if (
+    (typeof message.timestamp === "number" || typeof message.timestamp === "string") &&
+    typeof message.role === "string"
+  ) {
+    return `timestamp:${message.role}:${message.timestamp}`;
+  }
+  return null;
 }
 
 function entryRole(entry: Record<string, unknown>): string {
@@ -80,6 +97,7 @@ export class SessionRecorder {
   private currentTurn: TurnOwner | null = null;
   private currentMessage: MessageOwner | null = null;
   private readonly messageOwners = new WeakMap<object, MessageOwner>();
+  private readonly stableMessageOwners = new Map<string, MessageOwner>();
   private readonly toolOwners = new Map<string, MessageOwner>();
   private readonly turnToolCallIds = new Map<string, string[]>();
 
@@ -171,6 +189,10 @@ export class SessionRecorder {
     const key = objectKey(event.message);
     if (key) {
       this.messageOwners.set(key, owner);
+    }
+    const stableKey = stableMessageKey(event.message);
+    if (stableKey) {
+      this.stableMessageOwners.set(stableKey, owner);
     }
     this.currentMessage = owner;
     this.enqueue(owner, "message_started", { role: owner.role });
@@ -274,7 +296,9 @@ export class SessionRecorder {
       }
       return appended;
     });
-    this.entryChain = task.catch(() => undefined);
+    this.entryChain = task.catch((error: unknown) => {
+      this.failCapture("entry_write_failed", failureMessage(error));
+    });
     return task;
   }
 
@@ -286,16 +310,38 @@ export class SessionRecorder {
     this.acceptingEvents = false;
     this.clearFlushTimer();
     this.stopPromise = (async () => {
-      await this.flushAllEvents();
-      await this.entryChain;
-      const counts = await this.store.sessionCounts(this.runDir);
-      await this.store.writeSessionCapture(this.runDir, {
-        schema: SESSION_CAPTURE_SCHEMA,
-        eventSchema: SESSION_EVENT_SCHEMA,
-        status: this.captureFailure ? "failed" : "complete",
-        ...counts,
-        ...(this.captureFailure ? { failure: this.captureFailure } : {}),
-      });
+      try {
+        await this.flushAllEvents();
+        await this.entryChain;
+        const counts = await this.store.sessionCounts(this.runDir);
+        await this.store.writeSessionCapture(this.runDir, {
+          schema: SESSION_CAPTURE_SCHEMA,
+          eventSchema: SESSION_EVENT_SCHEMA,
+          status: this.captureFailure ? "failed" : "complete",
+          ...counts,
+          ...(this.captureFailure ? { failure: this.captureFailure } : {}),
+        });
+      } catch (error) {
+        // Capture is observational. A finalization failure must never reject
+        // the workflow's terminal persistence hook.
+        this.failCapture("capture_finalize_failed", failureMessage(error));
+        try {
+          const counts = await this.store.sessionCounts(this.runDir);
+          await this.store.writeSessionCapture(this.runDir, {
+            schema: SESSION_CAPTURE_SCHEMA,
+            eventSchema: SESSION_EVENT_SCHEMA,
+            status: "failed",
+            ...counts,
+            failure: this.captureFailure ?? {
+              failedAt: new Date().toISOString(),
+              code: "capture_finalize_failed",
+              message: failureMessage(error),
+            },
+          });
+        } catch {
+          // The viewer will report the missing/invalid capture file.
+        }
+      }
     })();
     return await this.stopPromise;
   }
@@ -316,7 +362,12 @@ export class SessionRecorder {
 
   private ownerForMessage(message: unknown): MessageOwner | null {
     const key = objectKey(message);
-    return (key ? this.messageOwners.get(key) : undefined) ?? this.currentMessage;
+    const stableKey = stableMessageKey(message);
+    return (
+      (key ? this.messageOwners.get(key) : undefined) ??
+      (stableKey ? this.stableMessageOwners.get(stableKey) : undefined) ??
+      this.currentMessage
+    );
   }
 
   private claimEntry(role: string): string | undefined {
@@ -353,8 +404,15 @@ export class SessionRecorder {
       payload,
     };
     const bytes = Buffer.byteLength(JSON.stringify(record), "utf8") + 1;
-    if (bytes > EVENT_MAX_BYTES) {
-      this.failCapture("event_too_large", `session event exceeded ${EVENT_MAX_BYTES} bytes`);
+    const externalizable =
+      type === "tool_execution_started" ||
+      type === "tool_execution_finished" ||
+      (type === "assistant_event" && payload.type === "toolcall_end");
+    if (bytes > SESSION_EVENT_MAX_BYTES && !externalizable) {
+      this.failCapture(
+        "event_too_large",
+        `session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`,
+      );
       return;
     }
     if (
@@ -411,7 +469,13 @@ export class SessionRecorder {
         batch.map((queued) => queued.record),
       )
       .catch((error: unknown) => {
-        this.failCapture("event_write_failed", failureMessage(error));
+        const message = failureMessage(error);
+        this.failCapture(
+          message.includes(`exceeded ${SESSION_EVENT_MAX_BYTES} bytes`)
+            ? "event_too_large"
+            : "event_write_failed",
+          message,
+        );
         for (const queued of this.eventQueue.splice(0)) {
           this.outstandingRecords -= 1;
           this.outstandingBytes -= queued.bytes;
@@ -423,7 +487,7 @@ export class SessionRecorder {
           this.outstandingBytes -= queued.bytes;
         }
         this.flushPromise = null;
-        if (this.eventQueue.length > 0 && !this.captureFailure) {
+        if (this.eventQueue.length > 0 && this.captureFailure?.code !== "event_write_failed") {
           this.startFlush();
         }
       });
