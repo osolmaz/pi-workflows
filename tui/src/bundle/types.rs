@@ -10,6 +10,8 @@ pub const RUN_BUNDLE_SCHEMA: &str = "pi-workflows.run-bundle.v1";
 pub const RUN_STATE_SCHEMA: &str = "pi-workflows.run-state.v1";
 pub const DEFINITION_SNAPSHOT_SCHEMA: &str = "pi-workflows.definition-snapshot.v1";
 pub const SESSION_BINDING_SCHEMA: &str = "pi-workflows.session-binding.v1";
+pub const SESSION_EVENT_SCHEMA: &str = "pi-workflows.session-event.v1";
+pub const SESSION_CAPTURE_SCHEMA: &str = "pi-workflows.session-capture.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +234,57 @@ pub struct SessionEntryRecord {
     pub seq: u64,
     pub at: String,
     pub entry: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionEventRecord {
+    pub seq: u64,
+    pub at: String,
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
+    #[serde(rename = "attemptId")]
+    pub attempt_id: String,
+    #[serde(rename = "turnId", skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCaptureStatus {
+    Recording,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCaptureFailure {
+    #[serde(rename = "failedAt")]
+    pub failed_at: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCapture {
+    pub schema: String,
+    #[serde(rename = "eventSchema")]
+    pub event_schema: String,
+    pub status: SessionCaptureStatus,
+    #[serde(rename = "eventCount")]
+    pub event_count: u64,
+    #[serde(rename = "entryCount")]
+    pub entry_count: u64,
+    #[serde(rename = "lastEventSeq")]
+    pub last_event_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<SessionCaptureFailure>,
 }
 
 // --- Definition snapshot ---

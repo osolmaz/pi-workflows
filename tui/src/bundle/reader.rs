@@ -3,8 +3,8 @@
 //! TypeScript store's `listRunBundles` behavior.
 
 use crate::bundle::types::{
-    as_artifact_ref, DefinitionSnapshot, Manifest, RunState, SessionBinding, SessionEntryRecord,
-    TraceEvent, RUN_BUNDLE_SCHEMA,
+    as_artifact_ref, DefinitionSnapshot, Manifest, RunState, SessionBinding, SessionCapture,
+    SessionEntryRecord, SessionEventRecord, TraceEvent, RUN_BUNDLE_SCHEMA,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -46,6 +46,14 @@ impl BundlePaths {
     pub fn session_entries(&self) -> Option<PathBuf> {
         self.session.as_ref().map(|dir| dir.join("entries.ndjson"))
     }
+
+    pub fn session_events(&self) -> Option<PathBuf> {
+        self.session.as_ref().map(|dir| dir.join("events.ndjson"))
+    }
+
+    pub fn session_capture(&self) -> Option<PathBuf> {
+        self.session.as_ref().map(|dir| dir.join("capture.json"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +65,8 @@ pub struct LoadedBundle {
     pub trace: Vec<TraceEvent>,
     pub session_binding: Option<SessionBinding>,
     pub session_entries: Vec<SessionEntryRecord>,
+    pub session_events: Vec<SessionEventRecord>,
+    pub session_capture: Option<SessionCapture>,
 }
 
 /// True when a manifest-relative path stays inside the bundle directory:
@@ -158,6 +168,14 @@ pub fn read_bundle(dir: &Path) -> Result<LoadedBundle> {
         .and_then(|path| read_contained(dir, &path))
         .map(|raw| parse_ndjson(&raw))
         .unwrap_or_default();
+    let session_events = paths
+        .session_events()
+        .and_then(|path| read_contained(dir, &path))
+        .map(|raw| parse_ndjson(&raw))
+        .unwrap_or_default();
+    let session_capture = paths
+        .session_capture()
+        .and_then(|path| read_json(dir, &path).ok());
     Ok(LoadedBundle {
         manifest,
         paths,
@@ -166,6 +184,8 @@ pub fn read_bundle(dir: &Path) -> Result<LoadedBundle> {
         trace,
         session_binding,
         session_entries,
+        session_events,
+        session_capture,
     })
 }
 

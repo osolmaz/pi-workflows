@@ -1,0 +1,268 @@
+{
+  "schema": "pi-workflows.session-event-fixture.v1",
+  "entries": [
+    {
+      "seq": 1,
+      "at": "2026-07-30T10:00:01.000Z",
+      "entry": {
+        "type": "message",
+        "id": "entry-1",
+        "parentId": null,
+        "timestamp": "2026-07-30T10:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            { "type": "thinking", "thinking": "plan" },
+            { "type": "text", "text": "hello" },
+            {
+              "type": "toolCall",
+              "id": "call-1",
+              "name": "read",
+              "arguments": { "path": "README.md" }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "at": "2026-07-30T10:00:00.001Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "type": "turn_started",
+      "payload": { "turnIndex": 0 }
+    },
+    {
+      "seq": 2,
+      "at": "2026-07-30T10:00:00.002Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "message_started",
+      "payload": { "role": "assistant" }
+    },
+    {
+      "seq": 3,
+      "at": "2026-07-30T10:00:00.003Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "thinking_start", "contentIndex": 0 }
+    },
+    {
+      "seq": 4,
+      "at": "2026-07-30T10:00:00.004Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "thinking_delta", "contentIndex": 0, "delta": "plan" }
+    },
+    {
+      "seq": 5,
+      "at": "2026-07-30T10:00:00.005Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "thinking_end", "contentIndex": 0, "content": "plan" }
+    },
+    {
+      "seq": 6,
+      "at": "2026-07-30T10:00:00.006Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "text_start", "contentIndex": 1 }
+    },
+    {
+      "seq": 7,
+      "at": "2026-07-30T10:00:00.007Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "text_delta", "contentIndex": 1, "delta": "hello" }
+    },
+    {
+      "seq": 8,
+      "at": "2026-07-30T10:00:00.008Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "text_end", "contentIndex": 1, "content": "hello" }
+    },
+    {
+      "seq": 9,
+      "at": "2026-07-30T10:00:00.009Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "toolcall_start", "contentIndex": 2 }
+    },
+    {
+      "seq": 10,
+      "at": "2026-07-30T10:00:00.010Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": {
+        "type": "toolcall_delta",
+        "contentIndex": 2,
+        "delta": "{\"path\":\"README.md\"}"
+      }
+    },
+    {
+      "seq": 11,
+      "at": "2026-07-30T10:00:00.011Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": {
+        "type": "toolcall_end",
+        "contentIndex": 2,
+        "toolCall": { "id": "call-1", "name": "read", "arguments": { "path": "README.md" } }
+      }
+    },
+    {
+      "seq": 12,
+      "at": "2026-07-30T10:00:00.012Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "toolCallId": "call-1",
+      "type": "tool_execution_started",
+      "payload": { "toolName": "read", "args": { "path": "README.md" } }
+    },
+    {
+      "seq": 13,
+      "at": "2026-07-30T10:00:00.013Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "toolCallId": "call-1",
+      "type": "tool_execution_updated",
+      "payload": {}
+    },
+    {
+      "seq": 14,
+      "at": "2026-07-30T10:00:00.014Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "toolCallId": "call-1",
+      "type": "tool_execution_finished",
+      "payload": { "toolName": "read", "isError": false, "result": { "content": "ok" } }
+    },
+    {
+      "seq": 15,
+      "at": "2026-07-30T10:00:00.015Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "done", "reason": "toolUse" }
+    },
+    {
+      "seq": 16,
+      "at": "2026-07-30T10:00:01.001Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "message_finished",
+      "payload": { "role": "assistant", "settled": true, "entryId": "entry-1" }
+    },
+    {
+      "seq": 17,
+      "at": "2026-07-30T10:00:01.002Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "type": "turn_finished",
+      "payload": { "turnIndex": 0, "messageId": "m1", "toolCallIds": ["call-1"] }
+    }
+  ],
+  "positions": [
+    {
+      "throughSeq": 7,
+      "expected": {
+        "throughSeq": 7,
+        "messages": [
+          {
+            "messageId": "m1",
+            "role": "assistant",
+            "status": "streaming",
+            "blocks": [
+              { "contentIndex": 0, "kind": "thinking", "text": "plan" },
+              { "contentIndex": 1, "kind": "text", "text": "hello" }
+            ]
+          }
+        ],
+        "tools": [],
+        "settledEntryIds": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "throughSeq": 17,
+      "expected": {
+        "throughSeq": 17,
+        "messages": [
+          {
+            "messageId": "m1",
+            "role": "assistant",
+            "status": "settled",
+            "entryId": "entry-1",
+            "blocks": [
+              { "contentIndex": 0, "kind": "thinking", "text": "plan" },
+              { "contentIndex": 1, "kind": "text", "text": "hello" },
+              {
+                "contentIndex": 2,
+                "kind": "toolCall",
+                "text": "{\"path\":\"README.md\"}",
+                "value": { "id": "call-1", "name": "read", "arguments": { "path": "README.md" } }
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "toolCallId": "call-1",
+            "messageId": "m1",
+            "toolName": "read",
+            "status": "finished",
+            "updates": 1,
+            "args": { "path": "README.md" },
+            "result": { "content": "ok" }
+          }
+        ],
+        "settledEntryIds": ["entry-1"],
+        "diagnostics": []
+      }
+    }
+  ]
+}

@@ -32,6 +32,8 @@ pub struct RunEntry {
     pending_events: Vec<Value>,
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
+    pub session_events: Vec<Value>,
+    pub session_capture: Option<Value>,
     /// Typed forms for rendering.
     pub state: RunState,
     pub snapshot: Option<DefinitionSnapshot>,
@@ -40,6 +42,7 @@ pub struct RunEntry {
     pub revision: u64,
     trace_tailer: NdjsonTailer,
     session_tailer: Option<NdjsonTailer>,
+    session_event_tailer: Option<NdjsonTailer>,
     last_growth: Instant,
 }
 
@@ -66,6 +69,8 @@ fn last_write_instant(paths: &BundlePaths) -> Instant {
         Some(paths.trace.clone()),
         paths.session_binding(),
         paths.session_entries(),
+        paths.session_events(),
+        paths.session_capture(),
     ]
     .into_iter()
     .flatten()
@@ -101,6 +106,9 @@ impl RunEntry {
             session_tailer: paths
                 .session_entries()
                 .map(|path| NdjsonTailer::contained(&path, dir)),
+            session_event_tailer: paths
+                .session_events()
+                .map(|path| NdjsonTailer::contained(&path, dir)),
             manifest,
             manifest_raw,
             workflow,
@@ -109,6 +117,8 @@ impl RunEntry {
             pending_events: Vec::new(),
             session_binding: None,
             session_entries: Vec::new(),
+            session_events: Vec::new(),
+            session_capture: None,
             state,
             snapshot,
             live: true,
@@ -122,6 +132,10 @@ impl RunEntry {
         if let Some(tailer) = entry.session_tailer.as_mut() {
             entry.session_entries = tailer.poll().unwrap_or_default();
         }
+        if let Some(tailer) = entry.session_event_tailer.as_mut() {
+            entry.session_events = tailer.poll().unwrap_or_default();
+        }
+        entry.read_session_capture();
         entry.live = !entry.settled();
         entry.possibly_interrupted = entry.live
             && entry.state.status == crate::bundle::types::RunStatus::Running
@@ -136,10 +150,18 @@ impl RunEntry {
     /// state's `traceSeq`: the final append can land between our trace poll
     /// and the terminal state read, and settling then would lose it.
     fn settled(&self) -> bool {
+        let capture_settled = self.session_binding.is_none()
+            || self.session_capture.as_ref().is_some_and(|capture| {
+                matches!(
+                    capture.get("status").and_then(Value::as_str),
+                    Some("complete" | "failed")
+                )
+            });
         self.manifest.status.is_terminal()
             && self.state.status.is_terminal()
             && self.pending_events.is_empty()
             && self.last_seen_seq() >= self.state.trace_seq
+            && capture_settled
     }
 
     /// Highest trace sequence this entry has observed (published or pending).
@@ -186,6 +208,20 @@ impl RunEntry {
                 .session_entries()
                 .map(|path| NdjsonTailer::contained(&path, &self.dir));
         }
+        if self.session_event_tailer.is_none() {
+            self.session_event_tailer = paths
+                .session_events()
+                .map(|path| NdjsonTailer::contained(&path, &self.dir));
+        }
+    }
+
+    fn read_session_capture(&mut self) {
+        let paths = BundlePaths::from_manifest(&self.dir, &self.manifest);
+        if let Some(path) = paths.session_capture() {
+            if let Some(raw) = crate::bundle::reader::read_contained(&self.dir, &path) {
+                self.session_capture = serde_json::from_str(&raw).ok();
+            }
+        }
     }
 
     fn session_value(&self) -> Value {
@@ -193,6 +229,8 @@ impl RunEntry {
             Some(binding) => json!({
                 "binding": binding,
                 "entries": self.session_entries,
+                "events": self.session_events,
+                "capture": self.session_capture,
             }),
             None => Value::Null,
         }
@@ -275,29 +313,52 @@ impl RunEntry {
         }
 
         let had_binding = self.session_binding.is_some();
+        let previous_capture = self.session_capture.clone();
         self.read_session_binding();
-        // Tail entries before deciding what to publish: a binding first
-        // observed together with existing entries must not go out empty.
+        // Tail session journals before publishing a newly discovered binding,
+        // so the first session value is already internally consistent.
         let new_entries: Vec<Value> = self
             .session_tailer
             .as_mut()
             .map(|tailer| tailer.poll().unwrap_or_default())
             .unwrap_or_default();
-        let session_grew = !new_entries.is_empty();
+        let new_session_events: Vec<Value> = self
+            .session_event_tailer
+            .as_mut()
+            .map(|tailer| tailer.poll().unwrap_or_default())
+            .unwrap_or_default();
+        let session_grew = !new_entries.is_empty() || !new_session_events.is_empty();
         self.session_entries.extend(new_entries.clone());
+        self.session_events.extend(new_session_events.clone());
+        self.read_session_capture();
+        let capture_changed = self.session_capture != previous_capture;
         if !had_binding && self.session_binding.is_some() {
             patch.push(PatchOp::Replace {
                 path: "/session".into(),
                 value: self.session_value(),
             });
-        } else if session_grew && self.session_binding.is_some() {
-            patch.push(PatchOp::Append {
-                path: "/session/entries".into(),
-                value: new_entries,
-            });
+        } else if self.session_binding.is_some() {
+            if !new_entries.is_empty() {
+                patch.push(PatchOp::Append {
+                    path: "/session/entries".into(),
+                    value: new_entries,
+                });
+            }
+            if !new_session_events.is_empty() {
+                patch.push(PatchOp::Append {
+                    path: "/session/events".into(),
+                    value: new_session_events,
+                });
+            }
+            if capture_changed {
+                patch.push(PatchOp::Replace {
+                    path: "/session/capture".into(),
+                    value: self.session_capture.clone().unwrap_or(Value::Null),
+                });
+            }
         }
 
-        if !patch.is_empty() || trace_grew || session_grew {
+        if !patch.is_empty() || trace_grew || session_grew || capture_changed {
             self.last_growth = Instant::now();
         }
         let live = !self.settled();

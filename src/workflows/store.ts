@@ -454,11 +454,21 @@ async function encodeRunState(
   };
 }
 
+export type SessionCaptureIntegrity = {
+  status: "unavailable" | "recording" | "complete" | "failed" | "invalid";
+  diagnostics: string[];
+};
+
 export type LoadedRunBundle = {
   runDir: string;
   manifest: WorkflowRunManifest;
   state: WorkflowRunState;
   snapshot: WorkflowDefinitionSnapshot | null;
+  sessionBinding: WorkflowSessionBinding | null;
+  sessionEntries: WorkflowSessionEntryRecord[];
+  sessionEvents: WorkflowSessionEventRecord[];
+  sessionCapture: WorkflowSessionCapture | null;
+  sessionIntegrity: SessionCaptureIntegrity;
 };
 
 /** Read a run bundle from disk. Returns null when the bundle is unreadable. */
@@ -480,7 +490,36 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
   const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
     resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
   );
-  return { runDir, manifest, state, snapshot };
+  const sessionDir = resolveBundlePath(runDir, paths.session, SESSION_DIR);
+  const sessionBinding = await readJsonFile<WorkflowSessionBinding>(
+    path.join(sessionDir, "binding.json"),
+  );
+  const entries = await readNdjsonFile<WorkflowSessionEntryRecord>(
+    path.join(sessionDir, "entries.ndjson"),
+  );
+  const events = await readNdjsonFile<WorkflowSessionEventRecord>(
+    path.join(sessionDir, "events.ndjson"),
+  );
+  const sessionCapture = await readJsonFile<WorkflowSessionCapture>(
+    path.join(sessionDir, "capture.json"),
+  );
+  const sessionIntegrity = assessSessionIntegrity({
+    binding: sessionBinding,
+    entries,
+    events,
+    capture: sessionCapture,
+  });
+  return {
+    runDir,
+    manifest,
+    state,
+    snapshot,
+    sessionBinding,
+    sessionEntries: entries.records,
+    sessionEvents: events.records,
+    sessionCapture,
+    sessionIntegrity,
+  };
 }
 
 /**
@@ -528,6 +567,111 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+type NdjsonRead<T> = {
+  records: T[];
+  exists: boolean;
+  tornTail: boolean;
+  malformed: boolean;
+};
+
+async function readNdjsonFile<T>(filePath: string): Promise<NdjsonRead<T>> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch {
+    return { records: [], exists: false, tornTail: false, malformed: false };
+  }
+  const tornTail = raw.length > 0 && !raw.endsWith("\n");
+  const lines = raw.split("\n");
+  if (tornTail) {
+    lines.pop();
+  }
+  const records: T[] = [];
+  let malformed = false;
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(line) as T);
+    } catch {
+      malformed = true;
+    }
+  }
+  return { records, exists: true, tornTail, malformed };
+}
+
+function assessSessionIntegrity(input: {
+  binding: WorkflowSessionBinding | null;
+  entries: NdjsonRead<WorkflowSessionEntryRecord>;
+  events: NdjsonRead<WorkflowSessionEventRecord>;
+  capture: WorkflowSessionCapture | null;
+}): SessionCaptureIntegrity {
+  const anySessionFile =
+    input.binding !== null || input.entries.exists || input.events.exists || input.capture !== null;
+  if (!anySessionFile) {
+    return { status: "unavailable", diagnostics: [] };
+  }
+  const diagnostics: string[] = [];
+  if (!input.binding || input.binding.schema !== SESSION_BINDING_SCHEMA) {
+    diagnostics.push("missing or invalid session binding");
+  }
+  if (!input.capture) {
+    diagnostics.push("missing session capture status");
+    return { status: "invalid", diagnostics };
+  }
+  try {
+    validateSessionCapture(input.capture);
+  } catch (error) {
+    diagnostics.push(failureMessageForDiagnostic(error));
+    return { status: "invalid", diagnostics };
+  }
+  if (input.entries.malformed || input.events.malformed) {
+    diagnostics.push("malformed NDJSON line before the journal tail");
+  }
+  if (input.events.tornTail && input.capture.status !== "recording") {
+    diagnostics.push("terminal session event journal has a torn tail");
+  }
+  let expected = 1;
+  for (const event of input.events.records) {
+    try {
+      validateSessionEventRecord(event);
+    } catch (error) {
+      diagnostics.push(failureMessageForDiagnostic(error));
+      break;
+    }
+    if (event.seq !== expected) {
+      diagnostics.push(`session event sequence gap at ${expected}`);
+      break;
+    }
+    expected += 1;
+  }
+  if (input.capture.status !== "recording") {
+    const lastEventSeq = input.events.records.at(-1)?.seq ?? 0;
+    if (
+      input.capture.eventCount !== input.events.records.length ||
+      input.capture.entryCount !== input.entries.records.length ||
+      input.capture.lastEventSeq !== lastEventSeq
+    ) {
+      diagnostics.push("session capture counts do not match durable files");
+    }
+  }
+  if (diagnostics.length > 0) {
+    return { status: "invalid", diagnostics };
+  }
+  if (input.capture.status === "failed") {
+    return {
+      status: "failed",
+      diagnostics: [input.capture.failure?.message ?? "session capture failed"],
+    };
+  }
+  return { status: input.capture.status, diagnostics: [] };
+}
+
+function failureMessageForDiagnostic(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function createManifest(

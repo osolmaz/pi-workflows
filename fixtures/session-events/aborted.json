@@ -1,0 +1,110 @@
+{
+  "schema": "pi-workflows.session-event-fixture.v1",
+  "entries": [],
+  "events": [
+    {
+      "seq": 1,
+      "at": "2026-07-30T11:00:00.001Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "type": "turn_started",
+      "payload": { "turnIndex": 0 }
+    },
+    {
+      "seq": 2,
+      "at": "2026-07-30T11:00:00.002Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "message_started",
+      "payload": { "role": "assistant" }
+    },
+    {
+      "seq": 3,
+      "at": "2026-07-30T11:00:00.003Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "text_start", "contentIndex": 0 }
+    },
+    {
+      "seq": 4,
+      "at": "2026-07-30T11:00:00.004Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "text_delta", "contentIndex": 0, "delta": "partial" }
+    },
+    {
+      "seq": 5,
+      "at": "2026-07-30T11:00:00.005Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "assistant_event",
+      "payload": { "type": "error", "reason": "aborted" }
+    },
+    {
+      "seq": 6,
+      "at": "2026-07-30T11:00:00.006Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "messageId": "m1",
+      "type": "message_finished",
+      "payload": { "role": "assistant", "settled": false }
+    },
+    {
+      "seq": 7,
+      "at": "2026-07-30T11:00:00.007Z",
+      "nodeId": "review",
+      "attemptId": "a1",
+      "turnId": "t1",
+      "type": "turn_finished",
+      "payload": { "turnIndex": 0, "messageId": "m1", "toolCallIds": [] }
+    }
+  ],
+  "positions": [
+    {
+      "throughSeq": 4,
+      "expected": {
+        "throughSeq": 4,
+        "messages": [
+          {
+            "messageId": "m1",
+            "role": "assistant",
+            "status": "streaming",
+            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "partial" }]
+          }
+        ],
+        "tools": [],
+        "settledEntryIds": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "throughSeq": 7,
+      "expected": {
+        "throughSeq": 7,
+        "messages": [
+          {
+            "messageId": "m1",
+            "role": "assistant",
+            "status": "unsettled",
+            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "partial" }]
+          }
+        ],
+        "tools": [],
+        "settledEntryIds": [],
+        "diagnostics": []
+      }
+    }
+  ]
+}

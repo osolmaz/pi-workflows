@@ -243,10 +243,40 @@ describe("WorkflowRunStore", () => {
       .split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1] as string)).toMatchObject({ seq: 2, type: "message_started" });
+    const bundle = await readRunBundle(runDir);
+    expect(bundle?.sessionEvents).toHaveLength(2);
+    expect(bundle?.sessionEntries).toHaveLength(1);
+    expect(bundle?.sessionIntegrity).toEqual({ status: "complete", diagnostics: [] });
     await expect(store.appendSessionEventBatch(runDir, [])).resolves.toBeUndefined();
     await expect(
       store.appendSessionEventBatch(runDir, [{ ...records[1]!, seq: 3 }]),
     ).rejects.toThrow("stopped");
+  });
+
+  it("reports invalid terminal capture counts", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-event-integrity");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "complete",
+      eventCount: 1,
+      entryCount: 0,
+      lastEventSeq: 1,
+    });
+    expect((await readRunBundle(runDir))?.sessionIntegrity).toEqual({
+      status: "invalid",
+      diagnostics: ["session capture counts do not match durable files"],
+    });
   });
 
   it("rejects sequence gaps and stops later temporal appends", async () => {

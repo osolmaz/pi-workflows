@@ -153,6 +153,11 @@ describe("render status colors", () => {
         steps: [],
       },
       snapshot: null,
+      sessionBinding: null,
+      sessionEntries: [],
+      sessionEvents: [],
+      sessionCapture: null,
+      sessionIntegrity: { status: "unavailable" as const, diagnostics: [] },
     }));
     const lines = renderRunListLines(bundles, 25, { width: 120, height: 10 }, new Date());
     const text = lines.map(stripAnsi).join("\n");

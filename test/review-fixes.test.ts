@@ -693,7 +693,17 @@ describe("terminal output sanitization", () => {
     const engine = await makeEngine({ executor });
     const { state, runDir } = await engine.run(workflow, {});
     const lines = renderRunDetailLines(
-      { runDir, manifest: null as never, state, snapshot: createDefinitionSnapshot(workflow) },
+      {
+        runDir,
+        manifest: null as never,
+        state,
+        snapshot: createDefinitionSnapshot(workflow),
+        sessionBinding: null,
+        sessionEntries: [],
+        sessionEvents: [],
+        sessionCapture: null,
+        sessionIntegrity: { status: "unavailable", diagnostics: [] },
+      },
       { width: 120, height: 100 },
     );
     const joined = lines.join("\n");

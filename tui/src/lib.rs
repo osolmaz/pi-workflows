@@ -9,6 +9,7 @@ pub mod layout;
 pub mod protocol;
 pub mod render;
 pub mod server;
+pub mod session;
 pub mod source;
 pub mod theme;
 pub mod ui;
