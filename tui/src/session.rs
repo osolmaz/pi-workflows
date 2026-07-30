@@ -213,6 +213,8 @@ pub fn assess_capture(
     entries: &[SessionEntryRecord],
     events: &[SessionEventRecord],
     capture: Option<&SessionCapture>,
+    events_malformed: bool,
+    events_torn_tail: bool,
     run_terminal: bool,
 ) -> CaptureIntegrity {
     if !session_bound {
@@ -235,6 +237,12 @@ pub fn assess_capture(
         diagnostics.push("failed session capture requires failure details".into());
     } else if capture.status != SessionCaptureStatus::Failed && capture.failure.is_some() {
         diagnostics.push("only failed session capture may contain failure details".into());
+    }
+    if events_malformed {
+        diagnostics.push("malformed NDJSON line before the journal tail".into());
+    }
+    if events_torn_tail && capture.status != SessionCaptureStatus::Recording {
+        diagnostics.push("terminal session event journal has a torn tail".into());
     }
     for (index, event) in events.iter().enumerate() {
         if event.seq != index as u64 + 1 {
@@ -679,17 +687,56 @@ mod tests {
     fn capture_accepts_unknown_events_but_rejects_invalid_known_events() {
         let unknown = event("future_event");
         assert_eq!(
-            assess_capture(true, &[], &[unknown], Some(&capture()), true).status,
+            assess_capture(true, &[], &[unknown], Some(&capture()), false, false, true).status,
             "complete"
         );
 
         let invalid = event("message_finished");
-        let integrity = assess_capture(true, &[], &[invalid], Some(&capture()), true);
+        let integrity = assess_capture(true, &[], &[invalid], Some(&capture()), false, false, true);
         assert_eq!(integrity.status, "invalid");
         assert!(integrity
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.contains("requires turnId")));
+    }
+
+    #[test]
+    fn capture_rejects_malformed_or_terminal_torn_event_journals() {
+        let unknown = event("future_event");
+        assert_eq!(
+            assess_capture(
+                true,
+                &[],
+                std::slice::from_ref(&unknown),
+                Some(&capture()),
+                true,
+                false,
+                true,
+            )
+            .status,
+            "invalid"
+        );
+        assert_eq!(
+            assess_capture(
+                true,
+                &[],
+                std::slice::from_ref(&unknown),
+                Some(&capture()),
+                false,
+                true,
+                true,
+            )
+            .status,
+            "invalid"
+        );
+        let recording = SessionCapture {
+            status: SessionCaptureStatus::Recording,
+            ..capture()
+        };
+        assert_eq!(
+            assess_capture(true, &[], &[unknown], Some(&recording), false, true, false,).status,
+            "recording"
+        );
     }
 
     #[test]
@@ -705,6 +752,8 @@ mod tests {
                 &[],
                 std::slice::from_ref(&unknown),
                 Some(&missing_failure),
+                false,
+                false,
                 true,
             )
             .status,
@@ -720,7 +769,16 @@ mod tests {
             ..capture()
         };
         assert_eq!(
-            assess_capture(true, &[], &[unknown], Some(&unexpected_failure), true).status,
+            assess_capture(
+                true,
+                &[],
+                &[unknown],
+                Some(&unexpected_failure),
+                false,
+                false,
+                true,
+            )
+            .status,
             "invalid"
         );
     }

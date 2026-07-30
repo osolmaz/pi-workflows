@@ -40,6 +40,8 @@ run:
     "binding": { … },
     "entries": [ … ],
     "events": [ … ],
+    "eventsMalformed": false,
+    "eventsTornTail": false,
     "capture": { … }
   },
   "live": true,
@@ -51,8 +53,9 @@ run:
   bundle documents verbatim. `workflow` is the definition snapshot,
   top-level `events` are parsed workflow trace lines, `session.entries` are
   settled Pi entries, `session.events` are normalized temporal events, and
-  `session.capture` is capture integrity. `session` is `null` until a binding
-  exists.
+  `session.capture` is capture integrity. `session.eventsMalformed` and
+  `session.eventsTornTail` are derived transport diagnostics from the live
+  tailer, not bundle documents. `session` is `null` until a binding exists.
 - `live` is true while the run status is non-terminal and the bundle is still
   growing. `possiblyInterrupted` is true when the status is `running` but the
   bundle has not changed for 60 seconds.
@@ -85,7 +88,9 @@ subscribes to a run, the server sends one `run_snapshot`, then a stream of
   `append` equals a sequence of `add` ops at `/-`; it exists so that the
   common case (trace and session growth) stays compact and readable.
 - Session growth uses `append` at `/session/entries` and `/session/events`.
-  Capture changes use `replace` at `/session/capture`.
+  Capture changes use `replace` at `/session/capture`. Changes to the derived
+  tail diagnostics use `replace` at `/session/eventsMalformed` and
+  `/session/eventsTornTail`.
 - The server waits 50 ms after a filesystem notification before refreshing,
   so one token burst normally becomes one revision. Batch boundaries never
   merge or alter event records.

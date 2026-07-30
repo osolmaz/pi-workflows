@@ -14,6 +14,7 @@ pub struct NdjsonTailer {
     base: Option<PathBuf>,
     offset: u64,
     partial: Vec<u8>,
+    malformed: bool,
 }
 
 impl NdjsonTailer {
@@ -23,6 +24,7 @@ impl NdjsonTailer {
             base: None,
             offset: 0,
             partial: Vec::new(),
+            malformed: false,
         }
     }
 
@@ -34,8 +36,17 @@ impl NdjsonTailer {
         }
     }
 
+    pub fn malformed(&self) -> bool {
+        self.malformed
+    }
+
+    pub fn has_partial_line(&self) -> bool {
+        !self.partial.is_empty()
+    }
+
     /// Read complete new lines appended since the last poll and parse each
-    /// as `T`. Unparsable lines are skipped.
+    /// as `T`. Unparsable lines are omitted from values but retained as an
+    /// integrity flag.
     pub fn poll<T: serde::de::DeserializeOwned>(&mut self) -> std::io::Result<Vec<T>> {
         let path = match &self.base {
             Some(base) => {
@@ -77,6 +88,8 @@ impl NdjsonTailer {
             }
             if let Ok(record) = serde_json::from_slice::<T>(line) {
                 records.push(record);
+            } else {
+                self.malformed = true;
             }
         }
         Ok(records)
@@ -105,6 +118,8 @@ mod tests {
             tailer.poll::<Row>().unwrap(),
             vec![Row { seq: 1 }, Row { seq: 2 }]
         );
+        assert!(tailer.has_partial_line());
+        assert!(!tailer.malformed());
 
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -113,6 +128,16 @@ mod tests {
         file.write_all(b"q\":3}\n").unwrap();
         drop(file);
         assert_eq!(tailer.poll::<Row>().unwrap(), vec![Row { seq: 3 }]);
+        assert!(!tailer.has_partial_line());
         assert_eq!(tailer.poll::<Row>().unwrap(), Vec::<Row>::new());
+
+        file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"not json\n").unwrap();
+        drop(file);
+        assert_eq!(tailer.poll::<Row>().unwrap(), Vec::<Row>::new());
+        assert!(tailer.malformed());
     }
 }

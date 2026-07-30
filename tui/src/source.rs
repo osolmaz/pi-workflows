@@ -33,6 +33,8 @@ pub struct RunEntry {
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
     pub session_events: Vec<Value>,
+    pub session_events_malformed: bool,
+    pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
     /// Typed forms for rendering.
     pub state: RunState,
@@ -118,6 +120,8 @@ impl RunEntry {
             session_binding: None,
             session_entries: Vec::new(),
             session_events: Vec::new(),
+            session_events_malformed: false,
+            session_events_torn_tail: false,
             session_capture: None,
             state,
             snapshot,
@@ -134,6 +138,8 @@ impl RunEntry {
         }
         if let Some(tailer) = entry.session_event_tailer.as_mut() {
             entry.session_events = tailer.poll().unwrap_or_default();
+            entry.session_events_malformed = tailer.malformed();
+            entry.session_events_torn_tail = tailer.has_partial_line();
         }
         entry.read_session_capture();
         entry.live = !entry.settled();
@@ -222,6 +228,8 @@ impl RunEntry {
                 "binding": binding,
                 "entries": self.session_entries,
                 "events": self.session_events,
+                "eventsMalformed": self.session_events_malformed,
+                "eventsTornTail": self.session_events_torn_tail,
                 "capture": self.session_capture,
             }),
             None => Value::Null,
@@ -306,6 +314,8 @@ impl RunEntry {
 
         let had_binding = self.session_binding.is_some();
         let previous_capture = self.session_capture.clone();
+        let previous_events_malformed = self.session_events_malformed;
+        let previous_events_torn_tail = self.session_events_torn_tail;
         self.read_session_binding();
         // Tail session journals before publishing a newly discovered binding,
         // so the first session value is already internally consistent.
@@ -319,6 +329,10 @@ impl RunEntry {
             .as_mut()
             .map(|tailer| tailer.poll().unwrap_or_default())
             .unwrap_or_default();
+        if let Some(tailer) = self.session_event_tailer.as_ref() {
+            self.session_events_malformed = tailer.malformed();
+            self.session_events_torn_tail = tailer.has_partial_line();
+        }
         let session_grew = !new_entries.is_empty() || !new_session_events.is_empty();
         self.session_entries.extend(new_entries.clone());
         self.session_events.extend(new_session_events.clone());
@@ -342,6 +356,18 @@ impl RunEntry {
                     value: new_session_events,
                 });
             }
+            if self.session_events_malformed != previous_events_malformed {
+                patch.push(PatchOp::Replace {
+                    path: "/session/eventsMalformed".into(),
+                    value: json!(self.session_events_malformed),
+                });
+            }
+            if self.session_events_torn_tail != previous_events_torn_tail {
+                patch.push(PatchOp::Replace {
+                    path: "/session/eventsTornTail".into(),
+                    value: json!(self.session_events_torn_tail),
+                });
+            }
             if capture_changed {
                 patch.push(PatchOp::Replace {
                     path: "/session/capture".into(),
@@ -350,7 +376,14 @@ impl RunEntry {
             }
         }
 
-        if !patch.is_empty() || trace_grew || session_grew || capture_changed {
+        let session_integrity_changed = self.session_events_malformed != previous_events_malformed
+            || self.session_events_torn_tail != previous_events_torn_tail;
+        if !patch.is_empty()
+            || trace_grew
+            || session_grew
+            || session_integrity_changed
+            || capture_changed
+        {
             self.last_growth = Instant::now();
         }
         let live = !self.settled();

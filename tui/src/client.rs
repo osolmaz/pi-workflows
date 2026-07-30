@@ -24,6 +24,8 @@ pub struct RemoteView {
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
     pub session_events: Vec<Value>,
+    pub session_events_malformed: bool,
+    pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
     pub live: bool,
     pub possibly_interrupted: bool,
@@ -51,6 +53,14 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let session_events_malformed = raw
+        .pointer("/session/eventsMalformed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let session_events_torn_tail = raw
+        .pointer("/session/eventsTornTail")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let session_capture = raw.pointer("/session/capture").cloned();
     Some(RemoteView {
         revision,
@@ -62,6 +72,8 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         session_binding,
         session_entries,
         session_events,
+        session_events_malformed,
+        session_events_torn_tail,
         session_capture,
         live: raw.get("live").and_then(Value::as_bool).unwrap_or(false),
         possibly_interrupted: raw
