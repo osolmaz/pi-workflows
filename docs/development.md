@@ -59,6 +59,19 @@ The extension implements it on top of the live conversation
 (`test/helpers.ts`). Anything that would couple the engine to pi belongs on
 the extension side of that seam.
 
+Temporal session capture follows the same boundary. `src/extension` listens to
+Pi's documented `turn_*`, `message_*`, and `tool_execution_*` hooks and
+normalizes them before passing records to `WorkflowRunStore`. The workflows
+layer owns persisted shapes, ordered append chains, schemas, and validation but
+never imports Pi types. High-rate hooks only stamp and enqueue bounded records;
+disk writes run on a separate chain. Capture failures are explicit in
+`session/capture.json` and never fail workflow execution.
+
+`src/viewer/session-reducer.ts` and `tui/src/session.rs` implement the same
+sequence-ordered fold. Shared fixtures in `fixtures/session-events/` pin their
+output. Seeking uses viewer-only checkpoints every 256 events and an in-memory
+timestamp index. Neither cache is persisted.
+
 ## Toolchain
 
 Node 22+, ESM, TypeScript strict (including `exactOptionalPropertyTypes`).
@@ -99,8 +112,9 @@ the real pi CLI from `devDependencies` in RPC mode with:
 - the extension loaded from source with `-e src/extension/index.ts`.
 
 It drives `/workflow` over the RPC protocol and asserts on the resulting run
-bundle, then renders the finished run through the viewer CLI. Nothing outside
-the temp directories is touched, and no real model is called.
+bundle, including temporal events, final entry linkage, capture integrity, and
+terminal immutability, then renders the finished run through the viewer CLI.
+Nothing outside the temp directories is touched, and no real model is called.
 
 ## Publishing
 

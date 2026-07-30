@@ -34,16 +34,21 @@ the browser.
 - **Run browser:** every bundle, newest first, with status, title, elapsed time,
   and a `?` marker for a possibly interrupted run.
 - **Graph:** the complete workflow definition using the same layered layout as
-  the TypeScript renderer. Bordered nodes are the default. Compact line nodes
-  remain available with `z`. Start nodes carry `▶`, branch nodes carry `◇N`,
-  and terminal nodes carry `■`. Branch labels remain on edges and loops use a
+  the TypeScript renderer. Full bordered cards are the default. Every card in
+  one graph has the same width and height, fixed before layout, with reserved
+  rows for status, exact id and type, graph markers, branch labels, attempts,
+  timing, and short detail. Updates fill those rows without moving nodes or
+  edges. Narrow terminals pan over the fixed graph. Compact line nodes remain
+  available with `z`. Start nodes carry `▶`, branch nodes carry `◇N`, and
+  terminal nodes carry `■`. Branch labels remain on edges and loops use a
   right-hand gutter.
 - **Inspector:** Steps, Trace, Conversation, and Info tabs. Steps can expand to
   full prompt, output, timestamps, error, and action receipt fields. Trace can
   show the selected attempt, the replay-visible prefix, or the full run, with
-  expandable JSON payloads. Conversation rows preserve exact recorded entry
-  ranges and support expandable raw entries. Info shows run-level metadata and
-  final output.
+  expandable JSON payloads. Conversation shows live text, thinking, tool-call
+  construction, and tool execution, then switches settled messages to the
+  verbatim Pi entry. Raw records remain expandable. Info shows run metadata,
+  final output, capture status, counts, and integrity diagnostics.
 - **Timeline:** run status, elapsed time, replay track, playhead, position,
   playback controls, and speed. The track and controls accept mouse clicks;
   the track supports drag seeking.
@@ -64,8 +69,8 @@ The graph distinguishes these states:
 A live running node uses a blue heavy border and `◐`. A selected historical
 step uses a mauve heavy border and `◆`, so replay never looks live. Timed-out
 nodes use `×` and a separate color. The graph title distinguishes `(live)`,
-`(latest)`, and `(replay)` and also reports paused, reconnecting, and
-disconnected states.
+`(latest)`, and `(replay)` and also reports paused, reconnecting, disconnected,
+and failed or invalid capture states.
 
 ## Themes
 
@@ -122,16 +127,20 @@ selection in the picker disables automatic switching.
 
 ## Replay semantics
 
-Replay position is a step index. `-1` means before the first step and `None`
-means latest/live. Graph states, taken edges, the trace prefix, and conversation
-reveal derive from steps visible at that position. Rewinding never changes the
-layout because layout depends only on the persisted definition snapshot.
+A session-bound run uses the temporal session event journal as its replay
+track. `-1` means before capture and `None` means latest/live. Each event cursor
+folds text, thinking, tool calls, and tool execution through that event's
+sequence. PIW keeps a workflow-step selection beside the temporal cursor so
+the graph, trace, and attempt inspectors stay aligned. Runs without session
+events retain step-based replay.
 
-Playback is deliberately discrete. The available speeds are 1x, 2x, 5x, and
-10x over the 700 ms base interval. Seeking backward detaches from live;
-selecting Live or pressing `G`, `L`, or End rejoins it and enables graph follow.
-A viewer already at latest follows newly appended steps. A detached viewer
-stays at its chosen position.
+Playback uses event timestamps at 1x, 2x, 5x, or 10x and breaks timestamp ties
+by event sequence. Step-only runs use the 700 ms base interval. Seeking
+backward detaches from live; selecting Live or pressing `G`, `L`, or End
+rejoins it and enables graph follow. A viewer already at latest follows newly
+appended events. A detached viewer stays at its chosen position. Rewinding
+never changes graph geometry because card size and layout depend only on the
+persisted definition snapshot.
 
 Graph follow is on by default and is shown as `FOLLOW` in the graph title. It
 centers the running node, the waiting checkpoint, or the selected replay step,
@@ -139,10 +148,12 @@ including nodes at the graph edges and graphs smaller than the viewport. `f`
 toggles follow. Keyboard or mouse panning turns it off; `f`, `0`, or returning
 to Live turns it back on.
 
-The conversation uses persisted `conversation` entry ranges rather than
-heuristics. Entries after the replay position remain hidden. The selected
-attempt's range is marked in the gutter. Live auto-follow stays at the bottom
-until the user moves to an older entry and returns with End.
+The conversation folds `session/events.ndjson` through the temporal cursor.
+Unsealed messages stay visible as partial output. A settled `message_finished`
+with `entryId` switches that message to the matching verbatim record from
+`session/entries.ndjson`. Capture failures, sequence gaps, count mismatches,
+and reconciliation diagnostics remain visible. Live auto-follow stays at the
+bottom until the user moves to an older message and returns with End.
 
 ## Remote behavior
 

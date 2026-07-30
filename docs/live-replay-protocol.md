@@ -36,17 +36,23 @@ run:
   "workflow": { … },
   "state": { … },
   "events": [ … ],
-  "session": { "binding": { … }, "entries": [ … ] },
+  "session": {
+    "binding": { … },
+    "entries": [ … ],
+    "events": [ … ],
+    "capture": { … }
+  },
   "live": true,
   "possiblyInterrupted": false
 }
 ```
 
-- `manifest`, `workflow`, `state`, `events`, `session.binding`, and
-  `session.entries` are the bundle documents verbatim (`workflow` is the
-  definition snapshot the graph is drawn from, `events` are the parsed trace
-  lines, `session.entries` the parsed session records). `session` is `null`
-  until a binding exists.
+- `manifest`, `workflow`, `state`, `events`, and every `session` field are the
+  bundle documents verbatim. `workflow` is the definition snapshot,
+  top-level `events` are parsed workflow trace lines, `session.entries` are
+  settled Pi entries, `session.events` are normalized temporal events, and
+  `session.capture` is capture integrity. `session` is `null` until a binding
+  exists.
 - `live` is true while the run status is non-terminal and the bundle is still
   growing. `possiblyInterrupted` is true when the status is `running` but the
   bundle has not changed for 60 seconds.
@@ -55,7 +61,8 @@ run:
 
 Because the full trace and session history are part of the view, replay
 scrubbing is a pure client-side operation; rewinding never requires the
-server.
+server. Clients order session events by `seq` and use `at` only for playback
+timing.
 
 ## Snapshot, then patches
 
@@ -77,6 +84,11 @@ subscribes to a run, the server sends one `run_snapshot`, then a stream of
   `value` is an array of items appended to the array at `path`. Semantically
   `append` equals a sequence of `add` ops at `/-`; it exists so that the
   common case (trace and session growth) stays compact and readable.
+- Session growth uses `append` at `/session/entries` and `/session/events`.
+  Capture changes use `replace` at `/session/capture`.
+- The server waits 50 ms after a filesystem notification before refreshing,
+  so one token burst normally becomes one revision. Batch boundaries never
+  merge or alter event records.
 - Patches are computed against the previous view revision; applying them in
   order reproduces the server's view exactly.
 
@@ -129,8 +141,10 @@ patches. Pending artifact reads are resubmitted once per connection.
 ## Filesystem semantics behind the protocol
 
 The server watches the runs directory (inotify with polling fallback) and
-tails `trace.ndjson` and `session/entries.ndjson` incrementally. Torn final
-NDJSON lines are ignored until complete. `state.json` and `manifest.json` are
+tails `trace.ndjson`, `session/entries.ndjson`, and `session/events.ndjson`
+incrementally. Torn final NDJSON lines are buffered until complete. The server
+also re-reads atomic `session/capture.json` changes. `state.json` and
+`manifest.json` are
 re-read on change; a `state.json` whose `traceSeq` is older than the last
 tailed trace event is stale and is replaced when the writer catches up. After
 a terminal status, watching stops.

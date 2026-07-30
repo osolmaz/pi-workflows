@@ -4,9 +4,8 @@ This document defines the target format for temporal Pi session history in a
 workflow run bundle. The journal records the order and timing of turns,
 messages, assistant output, and tool execution while a workflow runs.
 
-The format extends the bundle described in [run-bundles.md](run-bundles.md).
-It is a target contract until the matching implementation lands. The current
-bundle format remains the implemented contract in the meantime.
+The format extends the authoritative bundle contract in
+[run-bundles.md](run-bundles.md).
 
 ## Bundle structure
 

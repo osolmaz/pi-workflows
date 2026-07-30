@@ -114,26 +114,23 @@ scrubbing to the end snaps back to following the run live.
 
 The Rust `piw` viewer under `tui/` adds a Catppuccin interface, selectable
 themes, centered active-node following, draggable browser and inspector sizes,
-detailed trace and conversation inspection, a replay timeline, and reconnecting
-remote viewing. See [the piw guide](docs/tui-viewer.md).
+detailed trace and conversation inspection, temporal replay, and reconnecting
+remote viewing. Full cards have one fixed graph-wide size, so streaming,
+selection, timer ticks, and replay never move nodes or edges. Live conversation
+capture shows text, thinking, tool calls, and tool execution as they happen,
+then reconciles settled messages to verbatim Pi entries. See
+[the piw guide](docs/tui-viewer.md).
 
 ```
-              │ ┌──────────────────┐
-              ▼ ▼                  │
-  ┌──────────────────────────┐     │
-  │ ✓ verify [action] 8.0s ×2 │    │
-  └──────────────────────────┘     │
-              │                    │
-              ▼                    │
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓     │
-  ┃ ◐ review [agent] 12s ×2  ┃     │
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛     │
-     ┌─ clean ─┘ └─ issues ─┐      │
-     ▼                      ▼      │
-┌───────────┐    ┌───────────────┐ │
-│ · done    │    │ ✓ fix [agent] │ │
-└───────────┘    └───────────────┘ │
-                        └──────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ◐ running [agent]                        ┃
+┃ review                                   ┃
+┃ ◇2 branch                                ┃
+┃ ↳ clean                                  ┃
+┃ ↳ issues_found                           ┃
+┃ 2 attempts · running 12s                 ┃
+┃ reviewing implementation                 ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
 Inside pi, a widget above the editor shows the same boxed graph while a

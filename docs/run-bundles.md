@@ -26,6 +26,8 @@ temporary directories.
     session/          # present when the run executed inside a Pi conversation
       binding.json    # pi-workflows.session-binding.v1
       entries.ndjson  # pi-workflows.session-entry.v1, append-only
+      events.ndjson   # pi-workflows.session-event.v1, append-only
+      capture.json    # pi-workflows.session-capture.v1, atomic projection
     artifacts/        # present when any persisted value was externalized
       sha256-<64 hex>.txt
 ```
@@ -40,9 +42,11 @@ exporting.
 
 ## Source of truth and write discipline
 
-`trace.ndjson` is the source of truth. Every other file is either immutable
-after run start (`workflow.json`, `session/binding.json`, artifacts) or a
-derived projection (`state.json`, `manifest.json`).
+`trace.ndjson` is the source of truth for workflow execution. Final Pi
+conversation entries and temporal session history have separate authority in
+`session/entries.ndjson` and `session/events.ndjson`. `session/capture.json`
+reports whether temporal capture is complete. These sequence spaces are
+independent and must not be compared.
 
 Write order for every transition:
 
@@ -60,6 +64,8 @@ Consequences for readers:
 - `state.json` with `traceSeq` older than the last trace line is a stale
   projection: either re-read after the writer catches up or fold the trace
   tail on top of it.
+- Before the engine writes a terminal workflow event, session recording stops,
+  drains accepted entries and events, and atomically writes `capture.json`.
 - After a run reaches a terminal status (`completed`, `failed`, `timed_out`,
   `cancelled`, or `waiting`), the bundle no longer changes, and
   `state.traceSeq` equals the final trace `seq`.
@@ -321,6 +327,46 @@ while the run was active, schema `pi-workflows.session-entry.v1`:
   workflow prompts, nudges, and user interruptions are all part of the record.
 - `conversation` ranges in step records and `node_finished` events address
   entries by Pi entry id (`entry.id`).
+
+### events.ndjson
+
+The temporal journal records documented Pi `turn_*`, `message_*`, and
+`tool_execution_*` hooks with schema `pi-workflows.session-event.v1`. Each
+record has a per-file `seq`, timestamp, `nodeId`, `attemptId`, optional
+`turnId`, `messageId`, and `toolCallId`, a normalized `type`, and `payload`.
+The full contract and event catalog are in
+[session-event-journal.md](session-event-journal.md).
+
+Events preserve semantic deltas. Assistant `partial`, terminal `message`, and
+terminal `error` snapshots are never stored. Tool update records omit Pi's
+cumulative `partialResult`. Final `message_finished` records link to settled
+Pi entries with `entryId`; after that linkage, `entries.ndjson` is the
+verbatim content authority.
+
+Readers process events by `seq`. Timestamps schedule playback but never reorder
+records. A torn final line is buffered while capture is `recording`; malformed
+complete lines, sequence gaps, and terminal torn tails are integrity failures.
+
+### capture.json
+
+`capture.json` is an atomically replaced integrity projection:
+
+```json
+{
+  "schema": "pi-workflows.session-capture.v1",
+  "eventSchema": "pi-workflows.session-event.v1",
+  "status": "complete",
+  "eventCount": 241,
+  "entryCount": 7,
+  "lastEventSeq": 241
+}
+```
+
+`status` is `recording`, `complete`, or `failed`. Failed capture adds
+`failure` with `failedAt`, `code`, and `message`. Capture failure is visible to
+readers but does not fail the workflow. Terminal readers verify the counts,
+last sequence, schemas, and contiguous event sequence. Missing temporal files
+in a session-bound bundle are invalid, not an older supported layout.
 
 ## Versioning
 
