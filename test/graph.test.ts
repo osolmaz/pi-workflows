@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../src/render/ansi.js";
-import { renderGraphLines } from "../src/render/graph-render.js";
+import { graphCardSize, renderGraphLines } from "../src/render/graph-render.js";
 import { expandEdges, layoutGraph } from "../src/render/graph.js";
 import type { LoadedRunBundle } from "../src/workflows/store.js";
 import type {
@@ -187,6 +187,17 @@ describe("renderGraphLines", () => {
     expect(text).toContain("◆ implement [agent]");
     expect(text).toContain("· verify [action]");
     expect(text).toContain("· review [agent]");
+  });
+
+  it("keeps full card bounds fixed across replay positions", () => {
+    const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, { status: "completed" });
+    const sizes = [
+      graphCardSize(bundle),
+      graphCardSize({ ...bundle, state: { ...bundle.state, currentNode: "review" } }),
+      graphCardSize({ ...bundle, state: { ...bundle.state, status: "failed" } }),
+    ];
+    expect(sizes[1]).toEqual(sizes[0]);
+    expect(sizes[2]).toEqual(sizes[0]);
   });
 
   it("marks failed steps", () => {

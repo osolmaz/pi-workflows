@@ -195,6 +195,12 @@ function cardMetrics(view: GraphView): CardMetrics {
   };
 }
 
+/** Canonical outer dimensions shared by every full card in this graph. */
+export function graphCardSize(view: GraphView): { width: number; height: number } {
+  const { width, height } = cardMetrics(view);
+  return { width, height };
+}
+
 type RenderedCell = {
   cell: GraphCell;
   text: string;

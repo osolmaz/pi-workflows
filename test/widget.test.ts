@@ -102,7 +102,10 @@ describe("buildWidgetLines", () => {
     const joined = lines.join("\n");
     expect(lines[0]).toContain("workflow demo — demo run [running]");
     // The active node is boxed (heavy border) and centered in the window.
-    expect(joined).toMatch(/◐ second \[compute\] running .* · verifying/);
+    expect(joined).toContain("◐ running [compute]");
+    expect(joined).toContain("second");
+    expect(joined).toContain("1 attempt · running 2.0s");
+    expect(joined).toContain("verifying");
     expect(joined).toContain("┃");
     expect(joined).toContain("┏");
     expect(lines.length).toBeLessThanOrEqual(10);
@@ -128,23 +131,24 @@ describe("buildWidgetLines", () => {
     expect(lines.length).toBeLessThanOrEqual(10);
     const joined = lines.join("\n");
     // The window centers on the active node and marks hidden rows.
-    expect(joined).toContain("◐ n10");
-    expect(joined).toMatch(/↑ \d+ more/);
-    expect(joined).toMatch(/↓ \d+ more/);
+    expect(joined).toContain("◐ running [compute]");
+    expect(joined).toContain("n10");
+    expect(joined).toMatch(/↑ \d+/);
+    expect(joined).toMatch(/↓ \d+/);
     expect(joined).not.toContain("n0 ");
     expect(joined).not.toContain("n19");
   });
 
   it("shows the whole graph when it fits the budget", () => {
-    const pair = createDefinitionSnapshot(
+    const single = createDefinitionSnapshot(
       defineWorkflow({
-        name: "pair",
+        name: "single",
         startAt: "a",
-        nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
-        edges: [{ from: "a", to: "b" }],
+        nodes: { a: compute({ run: () => 1 }) },
+        edges: [],
       }),
     );
-    const lines = buildWidgetLines(makeState({ workflowName: "pair" }), pair);
+    const lines = buildWidgetLines(makeState({ workflowName: "single" }), single);
     expect(lines.join("\n")).not.toMatch(/more/);
     expect(lines.join("\n")).toContain("┌");
     expect(lines.length).toBeLessThanOrEqual(10);
@@ -182,7 +186,8 @@ describe("buildWidgetLines", () => {
     const followed = buildWidgetView(state, tall, now);
     expect(followed.maxScroll).toBeGreaterThan(0);
     expect(followed.scroll).toBeGreaterThan(0);
-    expect(followed.lines.join("\n")).toContain("◐ n10");
+    expect(followed.lines.join("\n")).toContain("◐ running [compute]");
+    expect(followed.lines.join("\n")).toContain("n10");
 
     const top = buildWidgetView(state, tall, now, 0);
     expect(top.scroll).toBe(0);
@@ -198,15 +203,15 @@ describe("buildWidgetLines", () => {
   });
 
   it("reports no scroll range when the graph fits", () => {
-    const pair = createDefinitionSnapshot(
+    const single = createDefinitionSnapshot(
       defineWorkflow({
-        name: "pair",
+        name: "single",
         startAt: "a",
-        nodes: { a: compute({ run: () => 1 }), b: compute({ run: () => 2 }) },
-        edges: [{ from: "a", to: "b" }],
+        nodes: { a: compute({ run: () => 1 }) },
+        edges: [],
       }),
     );
-    const view = buildWidgetView(makeState({ workflowName: "pair" }), pair);
+    const view = buildWidgetView(makeState({ workflowName: "single" }), single);
     expect(view.maxScroll).toBe(0);
     expect(view.scroll).toBe(0);
   });

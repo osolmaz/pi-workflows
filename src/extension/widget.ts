@@ -113,16 +113,24 @@ export function buildWidgetLines(
 /** The graph row the window should center on: the active or waiting node. */
 function focusLine(graph: string[], state: WorkflowRunState): number {
   const active = graph.findIndex((line) => stripAnsi(line).includes("◐"));
-  if (active !== -1) {
-    return active;
+  const focus =
+    active !== -1
+      ? active
+      : state.waitingOn
+        ? graph.findIndex((line) => stripAnsi(line).includes(state.waitingOn as string))
+        : -1;
+  if (focus === -1) {
+    return graph.length - 1;
   }
-  if (state.waitingOn) {
-    const waiting = graph.findIndex((line) => stripAnsi(line).includes(state.waitingOn as string));
-    if (waiting !== -1) {
-      return waiting;
-    }
+  let top = focus;
+  while (top > 0 && !/[┌┏]/u.test(stripAnsi(graph[top] ?? ""))) {
+    top -= 1;
   }
-  return graph.length - 1;
+  let bottom = focus;
+  while (bottom + 1 < graph.length && !/[└┗]/u.test(stripAnsi(graph[bottom] ?? ""))) {
+    bottom += 1;
+  }
+  return Math.floor((top + bottom) / 2);
 }
 
 /**
@@ -139,24 +147,18 @@ function windowLines(
   if (lines.length <= budget) {
     return { lines, scroll: 0, maxScroll: 0 };
   }
-  // First pass decides which markers exist; the second re-fits within the
-  // remaining space. A marker flag can only turn on (never off) in the
-  // second pass, so the result stays within budget.
-  let inner = budget;
-  for (let pass = 0; pass < 2; pass += 1) {
-    const start = clampStart(anchor, inner, lines.length, anchorIsStart);
-    inner = budget - (start > 0 ? 1 : 0) - (start + inner < lines.length ? 1 : 0);
-  }
+  // Reserve one combined overflow row, leaving seven rows for a complete
+  // full card even when the widget also has an error footer.
+  const inner = Math.max(1, budget - 1);
   const start = clampStart(anchor, inner, lines.length, anchorIsStart);
   const end = start + inner;
-  const out: string[] = [];
-  if (start > 0) {
-    out.push(ansi.dim(`↑ ${start} more`));
-  }
-  out.push(...lines.slice(start, end));
-  if (end < lines.length) {
-    out.push(ansi.dim(`↓ ${lines.length - end} more · shift+↑/↓ scroll`));
-  }
+  const above = start;
+  const below = Math.max(0, lines.length - end);
+  const out = lines.slice(start, end);
+  const directions = [above > 0 ? `↑ ${above}` : "", below > 0 ? `↓ ${below}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  out.push(ansi.dim(`${directions} more · shift+↑/↓ scroll`));
   return { lines: out, scroll: start, maxScroll: Math.max(0, lines.length - inner) };
 }
 
