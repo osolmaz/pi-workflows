@@ -46,6 +46,54 @@ Adopt ACPX ideas that improve inspection and state comprehension:
 Do not adopt ELK, React Flow, browser card decoration, smooth zoom, animated
 edges, multiple ACP-session concepts, or character-by-character replay.
 
+### Stable full node cards
+
+Box mode is the canonical graph presentation. Each node is a full card with a
+border, an interior surface, and enough padding to keep its outer dimensions
+stable. Compact line mode remains an explicit density option and does not set
+the box-mode contract.
+
+The graph computes one card width and one card height before it runs layout.
+Every real node uses those dimensions. The calculation uses the largest card
+required by the immutable definition and reserves fixed rows for every runtime
+field. Shorter cards receive blank padding. A status change, timer tick, new
+attempt, replay seek, selection change, or live event may replace text inside a
+reserved slot, but it must never resize a node or move the graph. Terminal
+resize changes the viewport only. A small viewport pans over the graph instead
+of shrinking or clipping cards.
+
+A full card contains the same classes of information as an ACPX workflow card:
+
+- the exact node id and full node type;
+- a status symbol with its text label;
+- semantic markers for start, branch count, and terminal position;
+- every branch label associated with the node;
+- not-visited or attempt-count metadata;
+- live elapsed time or final duration; and
+- the complete node `statusDetail` or short terminal outcome when present.
+
+Use the established symbols consistently:
+
+| Meaning       | Symbol |
+| ------------- | ------ |
+| queued        | `·`    |
+| running       | `◐`    |
+| replay focus  | `◆`    |
+| completed     | `✓`    |
+| failed        | `✗`    |
+| timed out     | `×`    |
+| waiting       | `⏸`    |
+| cancelled     | `~`    |
+| start node    | `▶`    |
+| branch node   | `◇N`   |
+| terminal node | `■`    |
+
+Node-card fields must not use ellipses or disappear because another state needs
+the space. Long fixed text wraps during the initial card measurement, and all
+nodes are padded to the resulting graph-wide dimensions. Prompts, outputs,
+errors, tool payloads, and other unbounded attempt details remain in the
+inspector; they are not node-card fields.
+
 ### Theme model
 
 Use a purpose-built `piw` theme contract rather than Pi's 51-token theme JSON
@@ -337,18 +385,24 @@ feature.
 
 ### Graph semantics
 
-Add compact markers for:
+Replace the current one-line box interior with the stable full-card contract.
+Every boxed node shows identity, type, current status, semantic markers, and
+branch labels. It also shows attempt metadata and timing plus the available
+short detail or outcome. The exact node id remains visible.
 
-- the definition start node;
-- terminal nodes;
-- branching nodes and branch count; and
-- checkpoint summary where space permits.
+Compute canonical graph-wide card dimensions before placing ranks and routing
+edges. Pass those fixed bounds into layout, drawing, camera targeting, mouse hit
+testing, and edge attachment. Fill unused rows and columns with intentional
+node-surface padding. Live and replay updates redraw card cells without
+re-running layout.
 
-Keep branch labels on edges. Do not blindly humanize node ids; the exact id
-must remain visible.
+Keep branch labels on edges as routing labels and repeat them inside branch
+cards as node metadata, matching ACPX. Show all labels instead of taking a
+fixed prefix.
 
-If these markers alter node width or text, implement them in both graph
-renderers and regenerate parity fixtures.
+Implement card measurement and rendering in both graph renderers, regenerate
+parity fixtures, and verify that every replay position has identical
+`NodeBounds` for each node.
 
 ### Graph selection
 
@@ -470,12 +524,16 @@ and cached data is never presented as current while disconnected.
 
 ### 7. Graph and browser interaction
 
+- Replace one-line boxed interiors with stable full node cards.
+- Measure one canonical card size from all node-card fields before layout.
 - Add node bounds and click selection.
-- Add start/branch/end/checkpoint semantics in both renderers as needed.
+- Add start/end semantics and branch metadata in both renderers. Include status
+  and attempt counts. Timing and the short detail use their own slots.
 - Add collapsed run browser and responsive layout tiers.
 
-Exit criterion: graph nodes are selectable, semantics are visible, and an
-80-column terminal remains usable.
+Exit criterion: every node-card field is visible, node bounds stay unchanged
+across every live and replay state, graph nodes are selectable, and an
+80-column terminal remains usable through panning.
 
 ### 8. Conversation polish and host-theme switching
 
@@ -540,10 +598,19 @@ parsing, resolution, and style derivation belong under `tui/src/theme/`.
   and after terminal resize.
 - Trace replay cutoffs cannot reveal later attempt events.
 - Node hit testing accounts for viewport offsets.
+- Every boxed node in one graph has the same outer dimensions.
+- Node bounds remain identical across every runtime state. Selection and replay
+  focus also leave the bounds unchanged.
+- Long node ids, status details, and branch labels wrap without truncation and
+  without changing the graph-wide card size after layout.
+- Every documented status and semantic symbol appears with the matching text
+  label and color role.
 
 ### Integration tests
 
-- Existing plain graph parity fixtures continue to pass.
+- Existing plain graph parity fixtures are regenerated for the full-card
+  geometry and continue to match between TypeScript and Rust.
+- Shared fixtures assert identical node bounds at every replay position.
 - Theme changes do not alter plain fixture output unless an intentional shared
   graph change updates both renderers.
 - A remote client reconnects after a server restart and receives a fresh
@@ -565,7 +632,9 @@ Exercise at least:
 - replay before the first step, detached replay, and return to live;
 - theme preview followed by Cancel and Apply;
 - a stopped and restarted remote server; and
-- tool calls, action receipts, long output, and artifact-backed values.
+- tool calls, action receipts, long output, and artifact-backed values;
+- a graph containing every node state and semantic symbol; and
+- long ids, status details, and branch labels in an 80-column viewport.
 
 ### Repository checks
 
@@ -587,7 +656,8 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 The work is complete when:
 
 1. Catppuccin Mocha is the default and colors every visible viewer surface.
-2. Boxed nodes have a tested background distinct from the graph canvas.
+2. Boxed nodes are full cards with one stable graph-wide size, intentional
+   padding, and every documented card field visible without truncation.
 3. Users can preview, apply, persist, and cancel built-in theme choices from
    the TUI.
 4. No component chooses ad hoc colors outside the theme layer.
@@ -597,5 +667,8 @@ The work is complete when:
 7. The timeline supports keyboard and mouse seeking plus playback speeds.
 8. Remote viewing reconnects safely and labels stale cached data.
 9. Graph selection and the collapsed browser work in narrow terminals.
-10. Graph parity, bundle schemas, Pi session state, and Pi internals remain
+10. Node status and semantic markers use the documented ACPX-style slots and
+    symbols. Attempt counts and timing use reserved slots, as do short details,
+    without changing node bounds.
+11. Graph parity, bundle schemas, Pi session state, and Pi internals remain
     unchanged except for intentional shared renderer fixture updates.

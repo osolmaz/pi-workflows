@@ -26,6 +26,8 @@ roles.
 - Keep capture failures separate from workflow failures.
 - Keep `src/workflows` independent of Pi and both viewer layers.
 - Preserve TypeScript and Rust reducer behavior through shared fixtures.
+- Keep boxed node dimensions fixed while temporal events change their status or
+  metadata. Live updates must never reflow the graph.
 - Replace the session-bound bundle contract in place. Do not add a legacy
   reader, dual writer, migration, or fallback path.
 - Keep bundle permissions, artifact containment, terminal sanitization, and
@@ -285,9 +287,25 @@ seeking detaches it, and the existing live controls reattach it. Capture
 failure or unverified capture must remain visible in the status area and Info
 inspector.
 
+Temporal state also fills the stable full node cards defined in
+[piw-viewer-experience-implementation-plan.md](piw-viewer-experience-implementation-plan.md).
+A node card reserves slots for its status symbol and label plus its exact id
+and type. Separate slots hold start, branch, or terminal markers and every
+branch label. Attempt metadata and timing remain visible beside the short detail
+or outcome. Every node in the graph uses one canonical outer width
+and height chosen before layout. Blank padding fills unused slots. Streaming
+and timer ticks may change card contents. Replay and terminal settlement may do
+the same without changing node bounds or edge routes.
+
+The boxed card must show all of those fields without ellipses. Long immutable
+text wraps during initial measurement, which increases the canonical size for
+every node. Narrow terminals pan over the fixed graph. Unbounded prompts and
+outputs remain in the inspector, along with error text and tool payloads.
+
 Exit criterion: a manual run visibly streams text and thinking, shows tool
 lifecycle changes, can seek into an unfinished message, and reaches the same
-final conversation as `entries.ndjson`.
+final conversation as `entries.ndjson`. Its node cards keep identical bounds at
+every temporal cursor while their status and timing fields update.
 
 ### Live transport
 
@@ -367,6 +385,19 @@ all examples validate against real produced bundles.
 - Unknown events do not change known state.
 - Reconciliation mismatches produce diagnostics while final entries remain
   authoritative.
+
+### Node-card stability
+
+- Every boxed node uses the same graph-wide outer width and height.
+- Node bounds and edge routes remain unchanged at every temporal cursor.
+- Symbols for every status from queued through cancelled use their documented
+  slots and text labels.
+- Start and terminal symbols remain visible beside runtime status data, as does
+  the branch count.
+- Full node ids and types render without ellipses. Every branch label remains
+  visible. Attempt counts and timing fields remain visible, as do short details.
+- Long card text expands the initial canonical dimensions and pads every shorter
+  card instead of causing later layout changes.
 
 ### Local and remote viewing
 
@@ -453,5 +484,7 @@ The work is complete when:
 6. Final reducer state reconciles with the verbatim Pi entries.
 7. TypeScript and Rust pass the same temporal fixtures.
 8. Terminal bundles never change after the terminal workflow event.
-9. The full repository and E2E checks pass.
-10. The implemented docs contain no legacy session format or fallback path.
+9. Full boxed nodes show the documented ACPX-style fields and symbols while
+   keeping identical bounds across live updates and replay.
+10. The full repository and E2E checks pass.
+11. The implemented docs contain no legacy session format or fallback path.
