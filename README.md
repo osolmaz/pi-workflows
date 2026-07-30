@@ -29,8 +29,16 @@ Or try the npm package without installing it:
 pi -e npm:@osolmaz/pi-workflows
 ```
 
-The `pi-workflows` viewer binary is part of the same package. To get it on
-your PATH, clone the repo and run `npm install && npm run build && npm link`,
+Install the interactive terminal viewer separately from crates.io. The crate
+is named `pi-workflows`; its command is `piw`:
+
+```bash
+cargo install pi-workflows
+piw
+```
+
+The npm package also includes the simpler `pi-workflows` snapshot viewer. To
+link that command from a clone, run `npm install && npm run build && npm link`,
 or run it in place with `npx tsx src/viewer/cli.ts`.
 
 ## Quick start

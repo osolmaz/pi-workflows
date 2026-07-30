@@ -5,6 +5,15 @@ the same graph as the bundled TypeScript viewer, pinned by the golden fixtures
 under `fixtures/layout/`, and adds live following, replay, detailed inspection,
 a recorded Pi conversation, themes, and remote viewing.
 
+## Install
+
+The crates.io package uses the project name and installs the shorter `piw`
+command:
+
+```bash
+cargo install pi-workflows
+```
+
 ## Modes
 
 - `piw` browses the local runs directory (`PI_WORKFLOWS_RUNS_DIR` or

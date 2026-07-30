@@ -1,9 +1,19 @@
 [package]
-name = "piw"
+name = "pi-workflows"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal viewer and live replay server for pi-workflows run bundles"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/osolmaz/pi-workflows"
+homepage = "https://github.com/osolmaz/pi-workflows"
+documentation = "https://docs.rs/pi-workflows"
+keywords = ["workflow", "terminal", "replay", "pi"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "piw"
+path = "src/lib.rs"
 
 [[bin]]
 name = "piw"
