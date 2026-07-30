@@ -68,9 +68,9 @@ export function verifyBoxedGraphRender(
   return { problems };
 }
 
-/** Locate a node's box from its unique "nodeId [" label occurrence. */
+/** Locate a node's box from its exact node-id row. */
 function findNodeRect(grid: string[][], nodeId: string, problems: string[]): Rect | null {
-  const needle = ` ${nodeId} [`;
+  const needle = ` ${nodeId}`;
   const hits: { row: number; col: number }[] = [];
   for (const [row, chars] of grid.entries()) {
     const line = chars.join("");
@@ -102,7 +102,19 @@ function findNodeRect(grid: string[][], nodeId: string, problems: string[]): Rec
     problems.push(`node ${nodeId}: label row has no enclosing box borders`);
     return null;
   }
-  return { nodeId, left, right, top: row - 1, mid: row, bottom: row + 1 };
+  let top = row;
+  while (top >= 0 && ![LIGHT.tl, HEAVY.tl].includes(grid[top]?.[left] ?? "")) {
+    top -= 1;
+  }
+  let bottom = row;
+  while (bottom < grid.length && ![LIGHT.bl, HEAVY.bl].includes(grid[bottom]?.[left] ?? "")) {
+    bottom += 1;
+  }
+  if (top < 0 || bottom >= grid.length) {
+    problems.push(`node ${nodeId}: could not find full box height`);
+    return null;
+  }
+  return { nodeId, left, right, top, mid: row, bottom };
 }
 
 function checkBoxIntegrity(grid: string[][], rect: Rect, problems: string[]): void {
@@ -121,6 +133,15 @@ function checkBoxIntegrity(grid: string[][], rect: Rect, problems: string[]): vo
         problems.push(`node ${rect.nodeId}: box border broken at (${x}, ${y})`);
         break;
       }
+    }
+  }
+  for (let y = rect.top + 1; y < rect.bottom; y += 1) {
+    if (
+      !VERTICAL_BORDERS.has(charAt(rect.left, y)) ||
+      !VERTICAL_BORDERS.has(charAt(rect.right, y))
+    ) {
+      problems.push(`node ${rect.nodeId}: side border broken on row ${y}`);
+      break;
     }
   }
 }

@@ -73,20 +73,33 @@
     {
       "stepIndex": -1,
       "nodeStyle": "line",
-      "lines": ["· echo_text [action] ▶", "           │", "           ▼", "· finalize [compute] ■"]
+      "lines": [
+        "· echo_text [action] not visited ▶ start",
+        "                    │",
+        "                    ▼",
+        " · finalize [compute] not visited ■ end"
+      ]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
       "lines": [
-        "┌────────────────────────┐",
-        "│ · echo_text [action] ▶ │",
-        "└────────────────────────┘",
-        "             │",
-        "             ▼",
-        "┌────────────────────────┐",
-        "│ · finalize [compute] ■ │",
-        "└────────────────────────┘"
+        "┌──────────────────────────────────────────┐",
+        "│ · queued [action]                        │",
+        "│ echo_text                                │",
+        "│ ▶ start                                  │",
+        "│ not visited                              │",
+        "│                                          │",
+        "└──────────────────────────────────────────┘",
+        "                      │",
+        "                      ▼",
+        "┌──────────────────────────────────────────┐",
+        "│ · queued [compute]                       │",
+        "│ finalize                                 │",
+        "│ ■ end                                    │",
+        "│ not visited                              │",
+        "│                                          │",
+        "└──────────────────────────────────────────┘"
       ]
     }
   ]

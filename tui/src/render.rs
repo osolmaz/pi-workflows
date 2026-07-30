@@ -10,6 +10,7 @@ use crate::bundle::types::{
 use crate::canvas::{CanvasStyle, CharCanvas};
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::layout::{layout_graph, GraphCell, GraphEdge, GraphLayout, GraphSegment};
+use serde_json::Value;
 use std::collections::HashSet;
 
 /// Everything the graph needs from a loaded bundle.
@@ -44,6 +45,19 @@ impl NodeStatus {
         }
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            NodeStatus::Completed => "completed",
+            NodeStatus::Failed => "failed",
+            NodeStatus::TimedOut => "timed out",
+            NodeStatus::Active => "running",
+            NodeStatus::ReplayFocus => "replay focus",
+            NodeStatus::Waiting => "waiting",
+            NodeStatus::Cancelled => "cancelled",
+            NodeStatus::Queued => "queued",
+        }
+    }
+
     fn style(self) -> CanvasStyle {
         match self {
             NodeStatus::Completed => CanvasStyle::Ok,
@@ -64,6 +78,8 @@ impl NodeStatus {
 
 const CELL_GAP: i64 = 4;
 const GUTTER_GAP: i64 = 2;
+const CARD_MIN_CONTENT_WIDTH: i64 = 24;
+const CARD_DYNAMIC_RESERVE: &str = "100 attempts · running 9999d 23h 59m 59s";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphNodeStyle {
@@ -71,10 +87,16 @@ pub enum GraphNodeStyle {
     Box,
 }
 
-/// Rows a node cell occupies: boxes add a border row above and below.
-fn cell_height(node_style: GraphNodeStyle) -> i64 {
+#[derive(Debug, Clone, Copy)]
+struct CardMetrics {
+    width: i64,
+    height: i64,
+    branch_rows: usize,
+}
+
+fn cell_height(node_style: GraphNodeStyle, box_height: i64) -> i64 {
     match node_style {
-        GraphNodeStyle::Box => 3,
+        GraphNodeStyle::Box => box_height,
         GraphNodeStyle::Line => 1,
     }
 }
@@ -116,9 +138,74 @@ fn derive_node_status(
     }
 }
 
+fn node_branch_labels(view: &GraphView, node_id: &str) -> Vec<String> {
+    view.snapshot
+        .map(|snapshot| {
+            snapshot
+                .edges
+                .iter()
+                .flat_map(|edge| match edge {
+                    EdgeDef::Switch { from, switch } if from == node_id => switch
+                        .cases
+                        .keys()
+                        .map(|label| sanitize_text(label))
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn card_metrics(view: &GraphView) -> CardMetrics {
+    let Some(snapshot) = view.snapshot else {
+        return CardMetrics {
+            width: CARD_MIN_CONTENT_WIDTH + 4,
+            height: 7,
+            branch_rows: 0,
+        };
+    };
+    let mut content_width = CARD_MIN_CONTENT_WIDTH.max(js_len(CARD_DYNAMIC_RESERVE));
+    let mut branch_rows = 0usize;
+    for status in [
+        NodeStatus::Completed,
+        NodeStatus::Failed,
+        NodeStatus::TimedOut,
+        NodeStatus::Active,
+        NodeStatus::ReplayFocus,
+        NodeStatus::Waiting,
+        NodeStatus::Queued,
+        NodeStatus::Cancelled,
+    ] {
+        content_width = content_width.max(js_len(&format!("{} [checkpoint]", status.label())));
+    }
+    for (node_id, node) in &snapshot.nodes {
+        content_width = content_width.max(js_len(&sanitize_text(node_id)));
+        if let Some(node_type) = node.get("nodeType").and_then(Value::as_str) {
+            content_width = content_width.max(js_len(&format!("[{node_type}]")));
+        }
+        for field in ["statusDetail", "summary"] {
+            if let Some(value) = node.get(field).and_then(Value::as_str) {
+                content_width = content_width.max(js_len(&sanitize_text(value)));
+            }
+        }
+        let labels = node_branch_labels(view, node_id);
+        branch_rows = branch_rows.max(labels.len());
+        for label in labels {
+            content_width = content_width.max(js_len(&format!("↳ {label}")));
+        }
+    }
+    CardMetrics {
+        width: content_width + 4,
+        height: 7 + branch_rows as i64,
+        branch_rows,
+    }
+}
+
 struct RenderedCell {
     cell: GraphCell,
     text: String,
+    lines: Vec<String>,
     status: Option<NodeStatus>,
     width: i64,
 }
@@ -130,17 +217,22 @@ fn render_cell_text(
     at_latest_step: bool,
     now_ms: i64,
     node_style: GraphNodeStyle,
+    metrics: CardMetrics,
 ) -> RenderedCell {
     let GraphCell::Node { node_id } = cell else {
         return RenderedCell {
             cell: cell.clone(),
             text: String::new(),
+            lines: Vec::new(),
             status: None,
             width: 1,
         };
     };
     let state = view.state;
     let status = derive_node_status(view, node_id, visible_steps, at_latest_step);
+    let node = view
+        .snapshot
+        .and_then(|snapshot| snapshot.nodes.get(node_id));
     let node_type = view
         .snapshot
         .and_then(|snapshot| snapshot.node_type(node_id))
@@ -150,6 +242,7 @@ fn render_cell_text(
         .iter()
         .filter(|step| step.node_id == *node_id)
         .count();
+    let labels = node_branch_labels(view, node_id);
     let outgoing = view.snapshot.map_or(0, |snapshot| {
         snapshot
             .edges
@@ -161,51 +254,87 @@ fn render_cell_text(
             })
             .sum::<usize>()
     });
-    // Keep the exact node id, type, and dynamic metadata together. Semantic
-    // markers come last so the stable summary remains easy to scan and parse.
-    let mut parts = vec![sanitize_text(&format!("{node_id} [{node_type}]"))];
-    if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+    let mut markers = Vec::new();
+    if view
+        .snapshot
+        .is_some_and(|snapshot| snapshot.start_at == *node_id)
+    {
+        markers.push("▶ start".to_string());
+    }
+    if outgoing > 1 {
+        markers.push(format!("◇{outgoing} branch"));
+    }
+    if outgoing == 0 {
+        markers.push("■ end".to_string());
+    }
+    let timing = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         let started_at = state
             .current_node_started_at
             .as_deref()
             .and_then(parse_timestamp_ms)
             .unwrap_or(now_ms);
-        parts.push(format!("running {}", format_duration(now_ms - started_at)));
-        if let Some(detail) = state.status_detail.as_deref().filter(|d| !d.is_empty()) {
-            // statusDetail can be set by workflow authors; keep terminal-safe.
-            parts.push(format!("· {}", sanitize_text(detail)));
-        }
+        let count = attempts.max(1);
+        format!(
+            "{count} attempt{} · running {}",
+            if count == 1 { "" } else { "s" },
+            format_duration(now_ms - started_at)
+        )
     } else if let Some(attempt) = attempt {
         let duration_ms = parse_timestamp_ms(&attempt.finished_at).unwrap_or(0)
             - parse_timestamp_ms(&attempt.started_at).unwrap_or(0);
-        parts.push(format_duration(duration_ms));
-    }
-    if attempts > 1 {
-        parts.push(format!("×{attempts}"));
-    }
-    if view
-        .snapshot
-        .is_some_and(|snapshot| snapshot.start_at == *node_id)
-    {
-        parts.push("▶".to_string());
-    }
-    if outgoing > 1 {
-        parts.push(format!("◇{outgoing}"));
-    }
-    if outgoing == 0 {
-        parts.push("■".to_string());
-    }
-    let text = parts.join(" ");
-    // Width includes the status glyph and the space after it; boxes add a
-    // border and one padding column on each side.
-    let content_width = js_len(&text) + 2;
+        format!(
+            "{attempts} attempt{} · {}",
+            if attempts == 1 { "" } else { "s" },
+            format_duration(duration_ms)
+        )
+    } else {
+        "not visited".to_string()
+    };
+    let detail = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+        state
+            .status_detail
+            .as_deref()
+            .map(sanitize_text)
+            .unwrap_or_else(|| status.label().to_string())
+    } else {
+        node.and_then(|node| {
+            node.get("statusDetail")
+                .or_else(|| node.get("summary"))
+                .and_then(Value::as_str)
+        })
+        .map(sanitize_text)
+        .unwrap_or_else(|| {
+            if status == NodeStatus::Queued {
+                String::new()
+            } else {
+                status.label().to_string()
+            }
+        })
+    };
+    let mut branch_lines: Vec<String> = labels
+        .into_iter()
+        .map(|label| format!("↳ {label}"))
+        .collect();
+    branch_lines.resize(metrics.branch_rows, String::new());
+    let mut lines = vec![
+        format!("{} [{node_type}]", status.label()),
+        sanitize_text(node_id),
+        markers.join("  "),
+    ];
+    lines.extend(branch_lines);
+    lines.push(timing.clone());
+    lines.push(detail);
+    let text = format!("{node_id} [{node_type}] {timing} {}", markers.join(" "))
+        .trim()
+        .to_string();
     RenderedCell {
         cell: cell.clone(),
-        text,
+        text: text.clone(),
+        lines,
         status: Some(status),
         width: match node_style {
-            GraphNodeStyle::Box => content_width + 4,
-            GraphNodeStyle::Line => content_width,
+            GraphNodeStyle::Box => metrics.width,
+            GraphNodeStyle::Line => js_len(&text) + 2,
         },
     }
 }
@@ -272,6 +401,7 @@ pub fn render_graph(
     node_style: GraphNodeStyle,
 ) -> Option<RenderedGraph> {
     let snapshot = view.snapshot?;
+    let metrics = card_metrics(view);
     let layout = layout_graph(snapshot);
     let steps = &view.state.steps;
     let bounded_index = selected_step_index.max(-1).min(steps.len() as i64 - 1);
@@ -292,6 +422,7 @@ pub fn render_graph(
                         at_latest_step,
                         now_ms,
                         node_style,
+                        metrics,
                     )
                 })
                 .collect()
@@ -346,7 +477,7 @@ pub fn render_graph(
             centers: rank.centers,
             y,
         });
-        y += cell_height(node_style)
+        y += cell_height(node_style, metrics.height)
             + lanes.below(rank_index).len() as i64
             + gap_rows(&strips[rank_index], rank_index, rank_count)
             + lanes.above(rank_index + 1).len() as i64;
@@ -364,7 +495,7 @@ pub fn render_graph(
                         x: center - cell.width / 2,
                         y: rank.y,
                         width: cell.width,
-                        height: cell_height(node_style),
+                        height: cell_height(node_style, metrics.height),
                     }),
                     GraphCell::Virtual { .. } => None,
                 })
@@ -372,7 +503,14 @@ pub fn render_graph(
         .collect();
 
     let mut canvas = CharCanvas::new();
-    draw_nodes(&mut canvas, &placed, &layout, &transitions, node_style);
+    draw_nodes(
+        &mut canvas,
+        &placed,
+        &layout,
+        &transitions,
+        node_style,
+        metrics.height,
+    );
     let labels = draw_segments(
         &mut canvas,
         &placed,
@@ -382,6 +520,7 @@ pub fn render_graph(
         active_pair.as_deref(),
         graph_width,
         node_style,
+        metrics.height,
         &lanes,
     );
     draw_back_edges(
@@ -391,6 +530,7 @@ pub fn render_graph(
         &transitions,
         graph_width,
         node_style,
+        metrics.height,
         &lanes,
     );
     // Labels go on last, once every line is on the canvas: placement can then
@@ -719,6 +859,7 @@ fn draw_nodes(
     layout: &GraphLayout,
     transitions: &HashSet<String>,
     node_style: GraphNodeStyle,
+    box_height: i64,
 ) {
     for rank in placed {
         for (index, rendered) in rank.cells.iter().enumerate() {
@@ -737,7 +878,7 @@ fn draw_nodes(
                     canvas.vline(
                         center,
                         rank.y,
-                        rank.y + cell_height(node_style) - 1,
+                        rank.y + cell_height(node_style, box_height) - 1,
                         if taken {
                             CanvasStyle::Taken
                         } else {
@@ -790,7 +931,8 @@ fn draw_node_box(
     } else {
         CanvasStyle::NodeText
     };
-    canvas.fill_rect(start_x, y, rendered.width, 3, content_style);
+    let height = rendered.lines.len() as i64 + 2;
+    canvas.fill_rect(start_x, y, rendered.width, height, content_style);
     let inner_width = (rendered.width - 2) as usize;
     let horizontal: String = std::iter::repeat_n(chars.h, inner_width).collect();
     canvas.text(
@@ -799,18 +941,25 @@ fn draw_node_box(
         &format!("{}{horizontal}{}", chars.tl, chars.tr),
         style,
     );
-    canvas.text(start_x, y + 1, &chars.v.to_string(), style);
-    canvas.put(start_x + 2, y + 1, status.glyph(), style);
-    canvas.text(start_x + 4, y + 1, &rendered.text, content_style);
-    canvas.text(
-        start_x + rendered.width - 1,
-        y + 1,
-        &chars.v.to_string(),
-        style,
-    );
+    for (index, line) in rendered.lines.iter().enumerate() {
+        let row = y + 1 + index as i64;
+        canvas.text(start_x, row, &chars.v.to_string(), style);
+        if index == 0 {
+            canvas.put(start_x + 2, row, status.glyph(), style);
+            canvas.text(start_x + 4, row, line, content_style);
+        } else {
+            canvas.text(start_x + 2, row, line, content_style);
+        }
+        canvas.text(
+            start_x + rendered.width - 1,
+            row,
+            &chars.v.to_string(),
+            style,
+        );
+    }
     canvas.text(
         start_x,
-        y + 2,
+        y + height - 1,
         &format!("{}{horizontal}{}", chars.bl, chars.br),
         style,
     );
@@ -850,6 +999,7 @@ fn draw_segments(
     active_pair: Option<&str>,
     graph_width: i64,
     node_style: GraphNodeStyle,
+    box_height: i64,
     lanes: &BackEdgeLanes,
 ) -> Vec<PendingLabel> {
     let mut labels = Vec::new();
@@ -863,7 +1013,7 @@ fn draw_segments(
         // Forward lines start right below the source cell, cross any
         // back-edge lane rows (as ┼ crossings), run their strip tracks, then
         // cross the entry lanes to the arrow row directly above the target.
-        let stub_top = top.y + cell_height(node_style);
+        let stub_top = top.y + cell_height(node_style, box_height);
         let strip_top = stub_top + lanes.below(rank).len() as i64;
         let arrow_y = bottom.y - 1;
         let strip_bottom = arrow_y - 1 - lanes.above(rank + 1).len() as i64;
@@ -962,6 +1112,7 @@ fn draw_back_edges(
     transitions: &HashSet<String>,
     graph_width: i64,
     node_style: GraphNodeStyle,
+    box_height: i64,
     lanes: &BackEdgeLanes,
 ) {
     let mut gutter_x = graph_width + GUTTER_GAP;
@@ -987,16 +1138,16 @@ fn draw_back_edges(
         } else {
             CanvasStyle::Back
         };
-        let exit_lane_y = from.y + cell_height(node_style) + exit.lane;
+        let exit_lane_y = from.y + cell_height(node_style, box_height) + exit.lane;
         let above_count = above.len() as i64;
         let arrow_y = to.y - 1;
         let entry_lane_y = arrow_y - above_count + entry.lane;
 
         // Downward stub out of the source cell, then right along the exit lane.
-        if exit_lane_y > from.y + cell_height(node_style) {
+        if exit_lane_y > from.y + cell_height(node_style, box_height) {
             canvas.vline(
                 exit.x,
-                from.y + cell_height(node_style),
+                from.y + cell_height(node_style, box_height),
                 exit_lane_y - 1,
                 style,
             );

@@ -97,6 +97,11 @@ function makeBundle(
     },
     state,
     snapshot,
+    sessionBinding: null,
+    sessionEntries: [],
+    sessionEvents: [],
+    sessionCapture: null,
+    sessionIntegrity: { status: "unavailable", diagnostics: [] },
   };
 }
 
@@ -164,8 +169,8 @@ describe("renderGraphLines", () => {
       .map(stripAnsi)
       .join("\n");
     expect(text).toContain("✓ plan [compute]");
-    expect(text).toContain("◐ review [agent] running");
-    expect(text).toContain("×2"); // verify ran twice
+    expect(text).toContain("◐ review [agent]");
+    expect(text).toContain("2 attempts"); // verify ran twice
     expect(text).toContain("issues_found");
     expect(text).toContain("clean");
     // Six edges, six entry arrows: the loop edge enters verify from above
@@ -179,7 +184,7 @@ describe("renderGraphLines", () => {
     // Scrub to step index 1 (implement): verify/review/fix must be queued.
     const text = renderGraphLines(bundle, 1).map(stripAnsi).join("\n");
     expect(text).toContain("✓ plan [compute]");
-    expect(text).toContain("◐ implement [agent]");
+    expect(text).toContain("◆ implement [agent]");
     expect(text).toContain("· verify [action]");
     expect(text).toContain("· review [agent]");
   });

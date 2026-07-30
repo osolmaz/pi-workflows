@@ -52,6 +52,11 @@ function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedRunBundle 
     },
     state,
     snapshot: createDefinitionSnapshot(workflow),
+    sessionBinding: null,
+    sessionEntries: [],
+    sessionEvents: [],
+    sessionCapture: null,
+    sessionIntegrity: { status: "unavailable", diagnostics: [] },
   };
 }
 
@@ -125,8 +130,11 @@ describe("renderRunDetailLines", () => {
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
     expect(text).toContain("workflow demo");
     expect(text).toContain("completed · run run-1 · elapsed 45s");
-    expect(text).toContain("✓ one [compute] 1.0s");
-    expect(text).toContain("· two [compute]");
+    expect(text).toContain("✓ completed [compute]");
+    expect(text).toContain("one");
+    expect(text).toContain("1 attempt · 1.0s");
+    expect(text).toContain("· queued [compute]");
+    expect(text).toContain("two");
     expect(text).toContain(`{"value":1}`);
     expect(text).toContain(`output {"done":true}`);
   });
@@ -138,7 +146,9 @@ describe("renderRunDetailLines", () => {
       error: "exploded",
     });
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
-    expect(text).toContain("◐ two [compute] running 10s");
+    expect(text).toContain("◐ running [compute]");
+    expect(text).toContain("two");
+    expect(text).toContain("1 attempt · running 10s");
     expect(text).toContain("error: exploded");
   });
 
@@ -154,7 +164,9 @@ describe("renderRunDetailLines", () => {
       statusDetail: "reviewing",
     });
     const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
-    expect(text).toContain("◐ two [compute] running 10s · reviewing");
+    expect(text).toContain("◐ running [compute]");
+    expect(text).toContain("1 attempt · running 10s");
+    expect(text).toContain("reviewing");
   });
 
   it("scrubs to a selected step with position and inspector", () => {
@@ -194,14 +206,16 @@ describe("renderRunDetailLines", () => {
     expect(first).toContain("step output — one (ok)");
     expect(first).toContain(`"value": 1`);
     // Scrubbed to step 1: node two has no visible attempt yet.
-    expect(first).toContain("· two [compute]");
+    expect(first).toContain("· queued [compute]");
+    expect(first).toContain("two");
 
     const second = renderRunDetailLines(bundle, size, NOW, 0, 1).map(stripAnsi).join("\n");
     expect(second).toContain("step 2/2");
     expect(second).toContain("step output — two (failed)");
     expect(second).toContain("two exploded");
     expect(second).toContain("shell false --now → exit 1");
-    expect(second).toContain("✗ two [compute]");
+    expect(second).toContain("✗ failed [compute]");
+    expect(second).toContain("two");
   });
 
   it("falls back to a flat node list without a snapshot", () => {

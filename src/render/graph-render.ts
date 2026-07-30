@@ -27,21 +27,44 @@ export type GraphView = {
   snapshot: WorkflowDefinitionSnapshot | null;
 };
 
-type NodeStatus = "completed" | "failed" | "active" | "waiting" | "queued" | "cancelled";
+type NodeStatus =
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "active"
+  | "replay_focus"
+  | "waiting"
+  | "queued"
+  | "cancelled";
 
 const STATUS_GLYPHS: Record<NodeStatus, string> = {
   completed: "✓",
   failed: "✗",
+  timed_out: "×",
   active: "◐",
+  replay_focus: "◆",
   waiting: "⏸",
   cancelled: "~",
   queued: "·",
 };
 
+const STATUS_LABELS: Record<NodeStatus, string> = {
+  completed: "completed",
+  failed: "failed",
+  timed_out: "timed out",
+  active: "running",
+  replay_focus: "replay focus",
+  waiting: "waiting",
+  cancelled: "cancelled",
+  queued: "queued",
+};
+
 const STATUS_STYLES: Record<NodeStatus, CanvasStyle> = {
   completed: "ok",
   failed: "fail",
+  timed_out: "fail",
   active: "active",
+  replay_focus: "active",
   waiting: "warn",
   cancelled: "warn",
   queued: "dim",
@@ -49,6 +72,8 @@ const STATUS_STYLES: Record<NodeStatus, CanvasStyle> = {
 
 const CELL_GAP = 4;
 const GUTTER_GAP = 2;
+const CARD_MIN_CONTENT_WIDTH = 24;
+const CARD_DYNAMIC_RESERVE = "100 attempts · running 9999d 23h 59m 59s";
 
 /** How node cells are drawn: single text lines or bordered boxes. */
 export type GraphNodeStyle = "line" | "box";
@@ -57,9 +82,15 @@ export type GraphRenderOptions = {
   nodeStyle?: GraphNodeStyle;
 };
 
-/** Rows a node cell occupies: boxes add a border row above and below. */
-function cellHeight(nodeStyle: GraphNodeStyle): number {
-  return nodeStyle === "box" ? 3 : 1;
+type CardMetrics = {
+  width: number;
+  height: number;
+  contentWidth: number;
+  branchRows: number;
+};
+
+function cellHeight(nodeStyle: GraphNodeStyle, boxHeight: number): number {
+  return nodeStyle === "box" ? boxHeight : 1;
 }
 
 function paint(text: string, style: CanvasStyle): string {
@@ -110,13 +141,14 @@ function deriveNodeStatus(
   if (!attempt) {
     return "queued";
   }
-  // While scrubbing, the selected step's node reads as the active position.
   if (!atLatestStep && visibleSteps.at(-1)?.nodeId === nodeId) {
-    return "active";
+    return "replay_focus";
   }
   switch (attempt.outcome) {
     case "ok":
       return "completed";
+    case "timed_out":
+      return "timed_out";
     case "cancelled":
       return "cancelled";
     default:
@@ -124,9 +156,49 @@ function deriveNodeStatus(
   }
 }
 
+function nodeBranchLabels(view: GraphView, nodeId: string): string[] {
+  return (
+    view.snapshot?.edges.flatMap((edge) =>
+      edge.from === nodeId && "switch" in edge ? Object.keys(edge.switch.cases) : [],
+    ) ?? []
+  ).map(sanitizeText);
+}
+
+function cardMetrics(view: GraphView): CardMetrics {
+  const snapshot = view.snapshot;
+  if (!snapshot) {
+    return { width: CARD_MIN_CONTENT_WIDTH + 4, height: 7, contentWidth: 24, branchRows: 0 };
+  }
+  let contentWidth = CARD_MIN_CONTENT_WIDTH;
+  let branchRows = 0;
+  const measure = (text: string) => {
+    contentWidth = Math.max(contentWidth, text.length);
+  };
+  measure(CARD_DYNAMIC_RESERVE);
+  for (const status of Object.values(STATUS_LABELS)) {
+    measure(`${status} [checkpoint]`);
+  }
+  for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
+    measure(sanitizeText(nodeId));
+    measure(`[${node.nodeType}]`);
+    if (node.statusDetail) measure(sanitizeText(node.statusDetail));
+    if (node.summary) measure(sanitizeText(node.summary));
+    const labels = nodeBranchLabels(view, nodeId);
+    branchRows = Math.max(branchRows, labels.length);
+    for (const label of labels) measure(`↳ ${label}`);
+  }
+  return {
+    width: contentWidth + 4,
+    height: 7 + branchRows,
+    contentWidth,
+    branchRows,
+  };
+}
+
 type RenderedCell = {
   cell: GraphCell;
   text: string;
+  lines: string[];
   status: NodeStatus | null;
   width: number;
 };
@@ -138,16 +210,19 @@ function renderCellText(
   atLatestStep: boolean,
   now: Date,
   nodeStyle: GraphNodeStyle,
+  metrics: CardMetrics,
 ): RenderedCell {
   if (cell.kind === "virtual") {
-    return { cell, text: "", status: null, width: 1 };
+    return { cell, text: "", lines: [], status: null, width: 1 };
   }
   const state = view.state;
   const nodeId = cell.nodeId;
   const status = deriveNodeStatus(view, nodeId, visibleSteps, atLatestStep);
-  const nodeType = view.snapshot?.nodes[nodeId]?.nodeType ?? "?";
+  const node = view.snapshot?.nodes[nodeId];
+  const nodeType = node?.nodeType ?? "?";
   const attempt = latestVisibleAttempt(visibleSteps, nodeId);
   const attempts = visibleSteps.filter((step) => step.nodeId === nodeId).length;
+  const labels = nodeBranchLabels(view, nodeId);
   const outgoing =
     view.snapshot?.edges
       .filter((edge) => edge.from === nodeId)
@@ -155,31 +230,50 @@ function renderCellText(
         (count, edge) => count + ("to" in edge ? 1 : Object.keys(edge.switch.cases).length),
         0,
       ) ?? 0;
-  const parts = [`${nodeId} [${nodeType}]`];
+  const markers: string[] = [];
+  if (view.snapshot?.startAt === nodeId) markers.push("▶ start");
+  if (outgoing > 1) markers.push(`◇${outgoing} branch`);
+  if (outgoing === 0) markers.push("■ end");
+  let timing = "not visited";
   if (atLatestStep && state.currentNode === nodeId) {
     const startedAt = state.currentNodeStartedAt
       ? Date.parse(state.currentNodeStartedAt)
       : now.getTime();
-    parts.push(`running ${formatDuration(now.getTime() - startedAt)}`);
-    if (state.statusDetail) {
-      // statusDetail can be set by workflow authors; keep terminal-safe.
-      parts.push(`· ${sanitizeText(state.statusDetail)}`);
-    }
+    const count = Math.max(attempts, 1);
+    timing = `${count} attempt${count === 1 ? "" : "s"} · running ${formatDuration(now.getTime() - startedAt)}`;
   } else if (attempt) {
     const durationMs = Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
-    parts.push(formatDuration(durationMs));
+    timing = `${attempts} attempt${attempts === 1 ? "" : "s"} · ${formatDuration(durationMs)}`;
   }
-  if (attempts > 1) {
-    parts.push(`×${attempts}`);
-  }
-  if (view.snapshot?.startAt === nodeId) parts.push("▶");
-  if (outgoing > 1) parts.push(`◇${outgoing}`);
-  if (outgoing === 0) parts.push("■");
-  const text = parts.join(" ");
-  // Width includes the status glyph and the space after it; boxes add a
-  // border and one padding column on each side.
-  const contentWidth = text.length + 2;
-  return { cell, text, status, width: nodeStyle === "box" ? contentWidth + 4 : contentWidth };
+  const detail =
+    atLatestStep && state.currentNode === nodeId && state.statusDetail
+      ? sanitizeText(state.statusDetail)
+      : node?.statusDetail
+        ? sanitizeText(node.statusDetail)
+        : node?.summary
+          ? sanitizeText(node.summary)
+          : status === "queued"
+            ? ""
+            : STATUS_LABELS[status];
+  const branchLines = Array.from({ length: metrics.branchRows }, (_, index) =>
+    labels[index] ? `↳ ${labels[index]}` : "",
+  );
+  const lines = [
+    `${STATUS_LABELS[status]} [${nodeType}]`,
+    sanitizeText(nodeId),
+    markers.join("  "),
+    ...branchLines,
+    timing,
+    detail,
+  ];
+  const text = `${nodeId} [${nodeType}] ${timing} ${markers.join(" ")}`.trim();
+  return {
+    cell,
+    text,
+    lines,
+    status,
+    width: nodeStyle === "box" ? metrics.width : text.length + 2,
+  };
 }
 
 type RankGeometry = {
@@ -231,6 +325,7 @@ export function renderGraphLines(
     return [];
   }
   const nodeStyle = options.nodeStyle ?? "line";
+  const metrics = cardMetrics(view);
   const layout = layoutGraph(snapshot);
   const steps = view.state.steps;
   const boundedIndex = Math.min(Math.max(selectedStepIndex, -1), steps.length - 1);
@@ -240,7 +335,9 @@ export function renderGraphLines(
   const activePair = derivePairInFlight(view, visibleSteps, atLatestStep);
 
   const rendered = layout.ranks.map((rank) =>
-    rank.map((cell) => renderCellText(view, cell, visibleSteps, atLatestStep, now, nodeStyle)),
+    rank.map((cell) =>
+      renderCellText(view, cell, visibleSteps, atLatestStep, now, nodeStyle, metrics),
+    ),
   );
 
   // Column positions: pack cells left to right per rank, then center every
@@ -278,14 +375,14 @@ export function renderGraphLines(
   for (const [rankIndex, rank] of geometry.entries()) {
     placed.push({ ...rank, y });
     y +=
-      cellHeight(nodeStyle) +
+      cellHeight(nodeStyle, metrics.height) +
       lanes.below(rankIndex).length +
       gapRows(strips[rankIndex] as StripGeometry, rankIndex, layout.ranks.length) +
       lanes.above(rankIndex + 1).length;
   }
 
   const canvas = new CharCanvas();
-  drawNodes(canvas, placed, layout, transitions, nodeStyle);
+  drawNodes(canvas, placed, layout, transitions, nodeStyle, metrics.height);
   const labels = drawSegments(
     canvas,
     placed,
@@ -295,9 +392,10 @@ export function renderGraphLines(
     activePair,
     graphWidth,
     nodeStyle,
+    metrics.height,
     lanes,
   );
-  drawBackEdges(canvas, placed, layout, transitions, graphWidth, nodeStyle, lanes);
+  drawBackEdges(canvas, placed, layout, transitions, graphWidth, nodeStyle, metrics.height, lanes);
   // Labels go on last, once every line is on the canvas: placement can then
   // guarantee no later stroke crosses through a label.
   for (const label of labels) {
@@ -483,6 +581,7 @@ function drawNodes(
   layout: GraphLayout,
   transitions: Set<string>,
   nodeStyle: GraphNodeStyle,
+  boxHeight: number,
 ): void {
   for (const rank of placed) {
     for (const [index, rendered] of rank.cells.entries()) {
@@ -493,7 +592,12 @@ function drawNodes(
         const taken = edge ? transitions.has(`${edge.from}->${edge.to}`) : false;
         // Pass-through cells span the full cell height so the edge stays
         // visually continuous across the rank row(s).
-        canvas.vline(center, rank.y, rank.y + cellHeight(nodeStyle) - 1, taken ? "taken" : "dim");
+        canvas.vline(
+          center,
+          rank.y,
+          rank.y + cellHeight(nodeStyle, boxHeight) - 1,
+          taken ? "taken" : "dim",
+        );
         continue;
       }
       const status = rendered.status ?? "queued";
@@ -523,12 +627,20 @@ function drawNodeBox(
   const chars = status === "active" ? BOX_CHARS.heavy : BOX_CHARS.light;
   const style = STATUS_STYLES[status];
   const innerWidth = rendered.width - 2;
+  const height = rendered.lines.length + 2;
   canvas.text(startX, y, `${chars.tl}${chars.h.repeat(innerWidth)}${chars.tr}`, style);
-  canvas.text(startX, y + 1, chars.v, style);
-  canvas.put(startX + 2, y + 1, STATUS_GLYPHS[status], style);
-  canvas.text(startX + 4, y + 1, rendered.text, status === "queued" ? "dim" : "plain");
-  canvas.text(startX + rendered.width - 1, y + 1, chars.v, style);
-  canvas.text(startX, y + 2, `${chars.bl}${chars.h.repeat(innerWidth)}${chars.br}`, style);
+  for (const [index, line] of rendered.lines.entries()) {
+    const row = y + 1 + index;
+    canvas.text(startX, row, chars.v, style);
+    if (index === 0) {
+      canvas.put(startX + 2, row, STATUS_GLYPHS[status], style);
+      canvas.text(startX + 4, row, line, status === "queued" ? "dim" : "plain");
+    } else {
+      canvas.text(startX + 2, row, line, status === "queued" ? "dim" : "plain");
+    }
+    canvas.text(startX + rendered.width - 1, row, chars.v, style);
+  }
+  canvas.text(startX, y + height - 1, `${chars.bl}${chars.h.repeat(innerWidth)}${chars.br}`, style);
 }
 
 function edgeStyle(
@@ -554,6 +666,7 @@ function drawSegments(
   activePair: string | null,
   graphWidth: number,
   nodeStyle: GraphNodeStyle,
+  boxHeight: number,
   lanes: BackEdgeLanes,
 ): PendingLabel[] {
   const labels: PendingLabel[] = [];
@@ -567,7 +680,7 @@ function drawSegments(
     // Forward lines start right below the source cell, cross any back-edge
     // lane rows (as ┼ crossings), run their strip tracks, then cross the
     // entry lanes to the arrow row directly above the target cell.
-    const stubTop = top.y + cellHeight(nodeStyle);
+    const stubTop = top.y + cellHeight(nodeStyle, boxHeight);
     const stripTop = stubTop + lanes.below(rank).length;
     const arrowY = bottom.y - 1;
     const stripBottom = arrowY - 1 - lanes.above(rank + 1).length;
@@ -675,6 +788,7 @@ function drawBackEdges(
   transitions: Set<string>,
   graphWidth: number,
   nodeStyle: GraphNodeStyle,
+  boxHeight: number,
   lanes: BackEdgeLanes,
 ): void {
   let gutterX = graphWidth + GUTTER_GAP;
@@ -692,14 +806,14 @@ function drawBackEdges(
       continue;
     }
     const style: CanvasStyle = transitions.has(`${edge.from}->${edge.to}`) ? "taken" : "back";
-    const exitLaneY = from.y + cellHeight(nodeStyle) + exit.lane;
+    const exitLaneY = from.y + cellHeight(nodeStyle, boxHeight) + exit.lane;
     const aboveCount = lanes.above(toRank).length;
     const arrowY = to.y - 1;
     const entryLaneY = arrowY - aboveCount + entry.lane;
 
     // Downward stub out of the source cell, then right along the exit lane.
-    if (exitLaneY > from.y + cellHeight(nodeStyle)) {
-      canvas.vline(exit.x, from.y + cellHeight(nodeStyle), exitLaneY - 1, style);
+    if (exitLaneY > from.y + cellHeight(nodeStyle, boxHeight)) {
+      canvas.vline(exit.x, from.y + cellHeight(nodeStyle, boxHeight), exitLaneY - 1, style);
     }
     canvas.put(exit.x, exitLaneY, "└", style);
     canvas.hline(exitLaneY, exit.x + 1, gutterX - 1, style);
