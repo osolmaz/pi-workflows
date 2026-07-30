@@ -71,6 +71,19 @@ impl NodeStatus {
         }
     }
 
+    fn border_style(self) -> CanvasStyle {
+        match self {
+            NodeStatus::Completed => CanvasStyle::NodeBorderOk,
+            NodeStatus::Failed => CanvasStyle::NodeBorderFail,
+            NodeStatus::TimedOut => CanvasStyle::NodeBorderTimedOut,
+            NodeStatus::Active => CanvasStyle::NodeBorderActive,
+            NodeStatus::ReplayFocus => CanvasStyle::NodeBorderReplay,
+            NodeStatus::Waiting => CanvasStyle::NodeBorderWarn,
+            NodeStatus::Cancelled => CanvasStyle::NodeBorderCancelled,
+            NodeStatus::Queued => CanvasStyle::NodeBorderDim,
+        }
+    }
+
     fn is_focused(self) -> bool {
         matches!(self, NodeStatus::Active | NodeStatus::ReplayFocus)
     }
@@ -92,13 +105,18 @@ fn node_type_glyph(node_type: &str) -> char {
     }
 }
 
-fn node_type_style(node_type: &str) -> CanvasStyle {
-    match node_type {
-        "agent" => CanvasStyle::Agent,
-        "compute" => CanvasStyle::Compute,
-        "action" => CanvasStyle::Action,
-        "checkpoint" => CanvasStyle::Checkpoint,
-        _ => CanvasStyle::NodeDim,
+fn node_type_style(node_type: &str, focused: bool) -> CanvasStyle {
+    match (node_type, focused) {
+        ("agent", false) => CanvasStyle::Agent,
+        ("agent", true) => CanvasStyle::AgentFocus,
+        ("compute", false) => CanvasStyle::Compute,
+        ("compute", true) => CanvasStyle::ComputeFocus,
+        ("action", false) => CanvasStyle::Action,
+        ("action", true) => CanvasStyle::ActionFocus,
+        ("checkpoint", false) => CanvasStyle::Checkpoint,
+        ("checkpoint", true) => CanvasStyle::CheckpointFocus,
+        (_, false) => CanvasStyle::NodeDim,
+        (_, true) => CanvasStyle::NodeFocusText,
     }
 }
 
@@ -941,14 +959,9 @@ fn draw_nodes(
                         draw_node_box(canvas, start_x, rank.y, rendered, status);
                     } else {
                         if rendered.is_start {
-                            canvas.put(
-                                start_x - 2,
-                                rank.y,
-                                '▶',
-                                node_type_style(&rendered.node_type),
-                            );
+                            canvas.put(start_x - 2, rank.y, '▶', status.border_style());
                         }
-                        canvas.put(start_x, rank.y, status.glyph(), status.style());
+                        canvas.put(start_x, rank.y, status.glyph(), status.border_style());
                         canvas.text(
                             start_x + 2,
                             rank.y,
@@ -964,7 +977,7 @@ fn draw_nodes(
                                 start_x + rendered.width + 1,
                                 rank.y,
                                 '■',
-                                node_type_style(&rendered.node_type),
+                                status.border_style(),
                             );
                         }
                     }
@@ -987,8 +1000,14 @@ fn draw_node_box(
     } else {
         &BOX_LIGHT
     };
-    let border_style = status.style();
-    let type_style = node_type_style(&rendered.node_type);
+    let border_style = status.border_style();
+    let status_style = status.style();
+    let type_style = node_type_style(&rendered.node_type, status.is_focused());
+    let branch_style = if status.is_focused() {
+        CanvasStyle::BranchFocus
+    } else {
+        CanvasStyle::Branch
+    };
     let content_style = if status.is_focused() {
         CanvasStyle::NodeFocusText
     } else if status == NodeStatus::Queued {
@@ -999,7 +1018,20 @@ fn draw_node_box(
     let height = 7 + rendered.branch_lines.len() as i64;
     let inner_width = (rendered.width - 2) as usize;
     let right_x = start_x + rendered.width - 1;
-    canvas.fill_rect(start_x, y, rendered.width, height, content_style);
+    canvas.fill_rect(
+        start_x + 1,
+        y + 1,
+        rendered.width - 2,
+        1,
+        CanvasStyle::NodeHeader,
+    );
+    canvas.fill_rect(
+        start_x + 1,
+        y + 3,
+        rendered.width - 2,
+        height - 4,
+        content_style,
+    );
     let horizontal: String = std::iter::repeat_n(chars.h, inner_width).collect();
 
     canvas.text(
@@ -1014,13 +1046,13 @@ fn draw_node_box(
         start_x + 1,
         y + 1,
         &centered_text(&rendered.node_id, inner_width),
-        content_style,
+        CanvasStyle::NodeHeader,
     );
     canvas.text(
         start_x,
         y + 2,
         &format!("{}{horizontal}{}", chars.ml, chars.mr),
-        type_style,
+        border_style,
     );
 
     let type_badge = fit_text(&node_type_badge(&rendered.node_type), inner_width - 2);
@@ -1035,7 +1067,7 @@ fn draw_node_box(
         right_x - 1 - status_badge.chars().count() as i64,
         y + 3,
         &status_badge,
-        border_style,
+        status_style,
     );
 
     let attempts = format!("↻ {}", rendered.attempts);
@@ -1058,7 +1090,7 @@ fn draw_node_box(
             start_x + 2,
             row,
             &fit_text(branch, inner_width - 2),
-            CanvasStyle::Branch,
+            branch_style,
         );
     }
     let detail_row = y + 5 + rendered.branch_lines.len() as i64;
@@ -1079,10 +1111,10 @@ fn draw_node_box(
         border_style,
     );
     if rendered.is_start {
-        canvas.put(start_x - 2, y + 1, '▶', type_style);
+        canvas.put(start_x - 2, y + 1, '▶', border_style);
     }
     if rendered.is_end {
-        canvas.put(start_x + rendered.width + 1, y + 1, '■', type_style);
+        canvas.put(start_x + rendered.width + 1, y + 1, '■', border_style);
     }
 }
 

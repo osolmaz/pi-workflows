@@ -87,7 +87,7 @@ pub fn render(
     render_track(frame, top[1], &view, palette);
     render_position(frame, top[2], &view, palette);
 
-    let specs = [
+    let mut specs = vec![
         (
             TimelineAction::Start,
             controls::button_label("⌂", "Home"),
@@ -111,11 +111,15 @@ pub fn render(
             controls::button_label("→", "Next"),
             false,
         ),
-        (
+    ];
+    if view.status == RunStatus::Running {
+        specs.push((
             TimelineAction::Live,
             controls::button_label("●", "Live"),
             view.at_latest,
-        ),
+        ));
+    }
+    specs.extend([
         (
             TimelineAction::Slower,
             controls::button_label("−", "Slow"),
@@ -126,7 +130,7 @@ pub fn render(
             controls::button_label("+", "Fast"),
             false,
         ),
-    ];
+    ]);
     let button_count = specs.len();
     let mut constraints: Vec<Constraint> = specs
         .iter()
@@ -409,5 +413,47 @@ mod tests {
         for pair in geometry.hits.windows(2) {
             assert_eq!(pair[1].rect.x, pair[0].rect.right() + 1);
         }
+    }
+
+    #[test]
+    fn finished_runs_do_not_render_a_live_action() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut geometry = TimelineGeometry::default();
+        terminal
+            .draw(|frame| {
+                geometry = render(
+                    frame,
+                    frame.area(),
+                    Some(TimelineView {
+                        status: RunStatus::Completed,
+                        paused: false,
+                        elapsed: "1s",
+                        steps: 8,
+                        position: 3,
+                        temporal: true,
+                        at_latest: false,
+                        live: false,
+                        playing: false,
+                        speed: 1,
+                        diagnostic: None,
+                    }),
+                    &Palette::catppuccin(),
+                );
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!rendered.contains("[● Live]"));
+        assert_eq!(geometry.hits.len(), 6);
+        assert!(geometry
+            .hits
+            .iter()
+            .all(|hit| hit.action != TimelineAction::Live));
     }
 }

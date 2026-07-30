@@ -13,6 +13,15 @@ pub enum CanvasStyle {
     NodeText,
     NodeDim,
     NodeFocusText,
+    NodeHeader,
+    NodeBorderDim,
+    NodeBorderActive,
+    NodeBorderReplay,
+    NodeBorderOk,
+    NodeBorderFail,
+    NodeBorderTimedOut,
+    NodeBorderWarn,
+    NodeBorderCancelled,
     Active,
     Replay,
     Ok,
@@ -21,10 +30,15 @@ pub enum CanvasStyle {
     Warn,
     Cancelled,
     Branch,
+    BranchFocus,
     Agent,
+    AgentFocus,
     Compute,
+    ComputeFocus,
     Action,
+    ActionFocus,
     Checkpoint,
+    CheckpointFocus,
 }
 
 impl CanvasStyle {
@@ -36,15 +50,32 @@ impl CanvasStyle {
             CanvasStyle::Back => 2,
             CanvasStyle::Taken => 3,
             CanvasStyle::ActiveEdge => 4,
-            CanvasStyle::NodeText | CanvasStyle::NodeDim | CanvasStyle::NodeFocusText => 5,
-            CanvasStyle::Warn | CanvasStyle::Cancelled => 6,
+            CanvasStyle::NodeText
+            | CanvasStyle::NodeDim
+            | CanvasStyle::NodeFocusText
+            | CanvasStyle::NodeHeader => 5,
+            CanvasStyle::NodeBorderDim
+            | CanvasStyle::NodeBorderActive
+            | CanvasStyle::NodeBorderReplay
+            | CanvasStyle::NodeBorderOk
+            | CanvasStyle::NodeBorderFail
+            | CanvasStyle::NodeBorderTimedOut
+            | CanvasStyle::NodeBorderWarn
+            | CanvasStyle::NodeBorderCancelled
+            | CanvasStyle::Warn
+            | CanvasStyle::Cancelled => 6,
             CanvasStyle::Ok => 7,
             CanvasStyle::Fail | CanvasStyle::TimedOut => 8,
             CanvasStyle::Branch
+            | CanvasStyle::BranchFocus
             | CanvasStyle::Agent
+            | CanvasStyle::AgentFocus
             | CanvasStyle::Compute
+            | CanvasStyle::ComputeFocus
             | CanvasStyle::Action
-            | CanvasStyle::Checkpoint => 9,
+            | CanvasStyle::ActionFocus
+            | CanvasStyle::Checkpoint
+            | CanvasStyle::CheckpointFocus => 9,
             CanvasStyle::Replay => 10,
             CanvasStyle::Active => 11,
         }

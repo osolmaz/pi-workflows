@@ -671,11 +671,11 @@ function drawNodes(
       if (nodeStyle === "box") {
         drawNodeBox(canvas, startX, rank.y, rendered, status);
       } else {
-        if (rendered.isStart) canvas.put(startX - 2, rank.y, "▶", nodeTypeStyle(rendered.nodeType));
+        if (rendered.isStart) canvas.put(startX - 2, rank.y, "▶", STATUS_STYLES[status]);
         canvas.put(startX, rank.y, STATUS_GLYPHS[status], STATUS_STYLES[status]);
         canvas.text(startX + 2, rank.y, rendered.text, status === "queued" ? "dim" : "plain");
         if (rendered.isEnd) {
-          canvas.put(startX + rendered.width + 1, rank.y, "■", nodeTypeStyle(rendered.nodeType));
+          canvas.put(startX + rendered.width + 1, rank.y, "■", STATUS_STYLES[status]);
         }
       }
     }
@@ -723,7 +723,7 @@ function drawNodeBox(
   canvas.text(startX, y, `${chars.tl}${horizontal}${chars.tr}`, borderStyle);
   rowBorder(y + 1);
   canvas.text(startX + 1, y + 1, centeredText(rendered.nodeId, innerWidth), contentStyle);
-  canvas.text(startX, y + 2, `${chars.ml}${horizontal}${chars.mr}`, typeStyle);
+  canvas.text(startX, y + 2, `${chars.ml}${horizontal}${chars.mr}`, borderStyle);
   pairedRow(
     y + 3,
     nodeTypeBadge(rendered.nodeType),
@@ -748,8 +748,8 @@ function drawNodeBox(
     );
   }
   canvas.text(startX, y + height - 1, `${chars.bl}${horizontal}${chars.br}`, borderStyle);
-  if (rendered.isStart) canvas.put(startX - 2, y + 1, "▶", typeStyle);
-  if (rendered.isEnd) canvas.put(startX + rendered.width + 1, y + 1, "■", typeStyle);
+  if (rendered.isStart) canvas.put(startX - 2, y + 1, "▶", borderStyle);
+  if (rendered.isEnd) canvas.put(startX + rendered.width + 1, y + 1, "■", borderStyle);
 }
 
 function edgeStyle(

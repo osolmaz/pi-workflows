@@ -18,6 +18,28 @@ pub fn style_for(style: CanvasStyle, palette: &Palette) -> Style {
         CanvasStyle::NodeText => Style::default().fg(palette.text).bg(palette.node_bg),
         CanvasStyle::NodeDim => Style::default().fg(palette.muted).bg(palette.node_bg),
         CanvasStyle::NodeFocusText => Style::default().fg(palette.text).bg(palette.node_focus_bg),
+        CanvasStyle::NodeHeader => Style::default()
+            .fg(palette.text)
+            .bg(palette.panel_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::NodeBorderDim => Style::default().fg(palette.muted).bg(palette.canvas_bg),
+        CanvasStyle::NodeBorderActive => Style::default()
+            .fg(palette.running)
+            .bg(palette.canvas_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::NodeBorderReplay => Style::default()
+            .fg(palette.replay_focus)
+            .bg(palette.canvas_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::NodeBorderOk => Style::default().fg(palette.success).bg(palette.canvas_bg),
+        CanvasStyle::NodeBorderFail => Style::default().fg(palette.error).bg(palette.canvas_bg),
+        CanvasStyle::NodeBorderTimedOut => {
+            Style::default().fg(palette.timed_out).bg(palette.canvas_bg)
+        }
+        CanvasStyle::NodeBorderWarn => Style::default().fg(palette.warning).bg(palette.canvas_bg),
+        CanvasStyle::NodeBorderCancelled => {
+            Style::default().fg(palette.cancelled).bg(palette.canvas_bg)
+        }
         CanvasStyle::Active => Style::default()
             .fg(palette.running)
             .bg(palette.node_focus_bg)
@@ -32,21 +54,40 @@ pub fn style_for(style: CanvasStyle, palette: &Palette) -> Style {
         CanvasStyle::Warn => Style::default().fg(palette.warning).bg(palette.node_bg),
         CanvasStyle::Cancelled => Style::default().fg(palette.cancelled).bg(palette.node_bg),
         CanvasStyle::Branch => Style::default().fg(palette.branch).bg(palette.node_bg),
+        CanvasStyle::BranchFocus => Style::default()
+            .fg(palette.branch)
+            .bg(palette.node_focus_bg),
         CanvasStyle::Agent => Style::default()
             .fg(palette.assistant)
             .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::AgentFocus => Style::default()
+            .fg(palette.assistant)
+            .bg(palette.node_focus_bg)
             .add_modifier(Modifier::BOLD),
         CanvasStyle::Compute => Style::default()
             .fg(palette.accent)
             .bg(palette.node_bg)
             .add_modifier(Modifier::BOLD),
+        CanvasStyle::ComputeFocus => Style::default()
+            .fg(palette.accent)
+            .bg(palette.node_focus_bg)
+            .add_modifier(Modifier::BOLD),
         CanvasStyle::Action => Style::default()
             .fg(palette.tool)
             .bg(palette.node_bg)
             .add_modifier(Modifier::BOLD),
+        CanvasStyle::ActionFocus => Style::default()
+            .fg(palette.tool)
+            .bg(palette.node_focus_bg)
+            .add_modifier(Modifier::BOLD),
         CanvasStyle::Checkpoint => Style::default()
             .fg(palette.replay_focus)
             .bg(palette.node_bg)
+            .add_modifier(Modifier::BOLD),
+        CanvasStyle::CheckpointFocus => Style::default()
+            .fg(palette.replay_focus)
+            .bg(palette.node_focus_bg)
             .add_modifier(Modifier::BOLD),
     }
 }
@@ -119,6 +160,20 @@ mod tests {
             style_for(CanvasStyle::NodeFocusText, &palette).bg,
             Some(palette.node_focus_bg)
         );
+        assert_eq!(
+            style_for(CanvasStyle::NodeHeader, &palette).bg,
+            Some(palette.panel_bg)
+        );
+        assert_eq!(
+            style_for(CanvasStyle::NodeBorderActive, &palette).bg,
+            Some(palette.canvas_bg)
+        );
+        assert_eq!(
+            style_for(CanvasStyle::AgentFocus, &palette).bg,
+            Some(palette.node_focus_bg)
+        );
+        assert_ne!(palette.panel_bg, palette.node_bg);
+        assert_ne!(palette.panel_bg, palette.node_focus_bg);
     }
 
     #[test]

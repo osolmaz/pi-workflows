@@ -40,8 +40,11 @@ the browser.
   pair a type badge with status (`●` agent, `ƒ` compute, `⚙` action, `◆`
   checkpoint), then attempts (`↻`) with elapsed time (`◷`). Branch labels use
   `◇`; the final reserved row carries a short detail while unbounded content
-  stays in the inspector. Type badges and header dividers have distinct
-  semantic colors. Updates fill reserved rows without moving nodes or edges.
+  stays in the inspector. The outer border and header divider share the node's
+  state color on the graph background. The body background starts inside that
+  border, while the header interior uses a separate panel surface. Type badges
+  keep their semantic colors. Updates fill reserved rows without moving nodes
+  or edges.
   Narrow terminals pan over the fixed graph. Compact line nodes remain
   available with `z`. Start `▶` and terminal `■` markers sit outside the card.
   Branch labels remain on edges and loops use a right-hand gutter.
@@ -144,9 +147,10 @@ events retain step-based replay.
 
 Playback uses event timestamps at 1x, 2x, 5x, or 10x and breaks timestamp ties
 by event sequence. Step-only runs use the 700 ms base interval. Seeking
-backward detaches from live; selecting Live or pressing `G`, `L`, or End
-rejoins it and enables graph follow. A viewer already at latest follows newly
-appended events. A detached viewer stays at its chosen position. Rewinding
+backward detaches from live. Active runs show a Live button that rejoins the
+latest event and enables graph follow. Finished runs omit that button; End
+jumps to their latest event. A viewer already at latest follows newly appended
+events. A detached viewer stays at its chosen position. Rewinding
 never changes graph geometry because card size and layout depend only on the
 persisted definition snapshot.
 
@@ -154,14 +158,14 @@ Graph follow is on by default and is shown as `FOLLOW` in the graph title. It
 centers the running node, the waiting checkpoint, or the selected replay step,
 including nodes at the graph edges and graphs smaller than the viewport. `f`
 toggles follow. Keyboard or mouse panning turns it off; `f`, `0`, or returning
-to Live turns it back on.
+to the latest position turns it back on.
 
 The conversation folds `session/events.ndjson` through the temporal cursor.
 Unsealed messages stay visible as partial output. A settled `message_finished`
 with `entryId` switches that message to the matching verbatim record from
 `session/entries.ndjson`. Capture failures, sequence gaps, count mismatches,
-and reconciliation diagnostics remain visible. Live auto-follow stays at the
-bottom until the user moves to an older message and returns with End.
+and reconciliation diagnostics remain visible. Conversation auto-follow stays
+at the bottom until the user moves to an older message and returns with End.
 
 ## Remote behavior
 
@@ -176,8 +180,9 @@ symlink, and 4 MiB limits.
 
 ## Interaction
 
-- Replay: `[`/`]` previous/next, Space play/pause, Home or `g` to start, End,
-  `G`, or `L` to live, and `{`/`}` to change speed.
+- Replay: `[`/`]` previous/next, Space play/pause, Home or `g` to start, End
+  to jump to latest, and `{`/`}` to change speed. Active runs also show Live;
+  `G` and `L` are its keyboard shortcuts.
 - Focus: Tab cycles Runs → Graph → Inspector. Click the full `[symbol Tab]`
   buttons, or use `t` or `1`–`4`, to change inspector tabs.
 - Graph: arrows or `hjkl` pan, `0` resets, `f` toggles centered follow, and

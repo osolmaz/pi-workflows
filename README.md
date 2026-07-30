@@ -106,8 +106,10 @@ pi-workflows view --once   # print a snapshot and exit (good for scripts)
 
 The run detail view draws the workflow as a boxed graph, like the acpx replay
 viewer. Every card has a centered step-name header and a divider above its
-structured metadata. Node type, status, attempts, and timing use compact symbol
-rows; start and terminal markers sit outside the card. Node types have distinct
+structured metadata. Border characters keep the graph background, the body
+surface begins inside the border, and the header interior uses a separate
+surface. Node type, status, attempts, and timing use compact symbol rows; start
+and terminal markers sit outside the card. Node types have distinct
 semantic colors, active cards use a heavy border, branches carry their case
 labels, the taken path is highlighted, and loops route through a gutter on the
 right back into their target from above. `←/→` scrubs
