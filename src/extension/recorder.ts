@@ -187,12 +187,16 @@ export class SessionRecorder {
       return;
     }
     const message = this.ownerForMessage(event.message);
-    await this.synchronize(ctx);
-    this.enqueue(
-      turn,
-      "turn_finished",
-      turnFinishedPayload(event, message?.messageId, this.turnToolCallIds.get(turn.turnId) ?? []),
-    );
+    try {
+      await this.synchronize(ctx);
+      this.enqueue(
+        turn,
+        "turn_finished",
+        turnFinishedPayload(event, message?.messageId, this.turnToolCallIds.get(turn.turnId) ?? []),
+      );
+    } catch (error) {
+      this.failCapture("entry_write_failed", failureMessage(error));
+    }
     this.currentTurn = null;
     this.currentMessage = null;
     this.lastFinishedAttempt = { nodeId: turn.nodeId, attemptId: turn.attemptId };

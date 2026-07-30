@@ -31,6 +31,12 @@ function makeCtx(branch: FakeEntry[]): ExtensionContext {
 async function makeRun(): Promise<{ store: WorkflowRunStore; runDir: string; runId: string }> {
   const outputRoot = await makeTempDir("pi-workflows-recorder");
   const store = new WorkflowRunStore(outputRoot);
+  return await makeRunWithStore(store);
+}
+
+async function makeRunWithStore(
+  store: WorkflowRunStore,
+): Promise<{ store: WorkflowRunStore; runDir: string; runId: string }> {
   const workflow = defineWorkflow({
     name: "demo",
     startAt: "one",
@@ -316,6 +322,39 @@ describe("SessionRecorder", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("does not delay finalization after entry synchronization fails", async () => {
+    class FailingEntryStore extends WorkflowRunStore {
+      override async appendSessionEntry(): Promise<number> {
+        throw new Error("injected entry failure");
+      }
+    }
+    const outputRoot = await makeTempDir("pi-workflows-recorder-entry-failure");
+    const store = new FailingEntryStore(outputRoot);
+    const { runDir, runId } = await makeRunWithStore(store);
+    const recorder = new SessionRecorder(store, runDir, runId);
+    const branch: FakeEntry[] = [];
+    const ctx = makeCtx(branch);
+    await recorder.bind(ctx);
+    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    const assistant = { role: "assistant", content: [], timestamp: 1 };
+    recorder.handleTurnStart({ turnIndex: 0 });
+    await recorder.handleMessageStart({ message: assistant }, ctx);
+    recorder.handleMessageEnd({ message: assistant });
+    branch.push({ id: "entry-1", type: "message", message: assistant });
+
+    await expect(
+      recorder.handleTurnEnd({ turnIndex: 0, message: assistant }, ctx),
+    ).resolves.toBeUndefined();
+    await recorder.finish();
+    const capture = JSON.parse(
+      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(capture).toMatchObject({
+      status: "failed",
+      failure: { code: "entry_write_failed", message: "injected entry failure" },
+    });
   });
 
   it("externalizes large tool payloads before enforcing the event limit", async () => {

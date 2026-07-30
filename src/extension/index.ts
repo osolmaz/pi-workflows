@@ -535,6 +535,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       // dispatch, which precedes tool execution (docs/extensions.md, "Tool
       // Events"). The tool result of this call itself lands after the range
       // by design: it is the submission receipt, not the submission.
+      await activeRun.recorder?.record(ctx).catch(() => undefined);
       await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
       const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
       if (!result.accepted) {

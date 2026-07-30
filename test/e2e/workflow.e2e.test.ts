@@ -320,6 +320,16 @@ describe.sequential("pi-workflows end to end", () => {
         .split("\n")
         .map((line) => (JSON.parse(line) as { entry: { id: string } }).entry.id),
     );
+    const agentSteps = state.steps.filter((step) => step.nodeType === "agent");
+    expect(agentSteps.every((step) => step.conversation !== undefined)).toBe(true);
+    expect(
+      agentSteps.every(
+        (step) =>
+          entryIds.has(step.conversation?.firstEntryId ?? "") &&
+          entryIds.has(step.conversation?.lastEntryId ?? ""),
+      ),
+    ).toBe(true);
+
     const finishedMessages = sessionEvents.filter((event) => event.type === "message_finished");
     expect(finishedMessages.every((event) => event.payload.settled === true)).toBe(true);
     const linkedEntryIds = finishedMessages.flatMap((event) => {

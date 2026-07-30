@@ -11,7 +11,7 @@ mod timeline;
 use crate::bundle::reader::with_artifact_placeholders;
 use crate::bundle::types::{
     DefinitionSnapshot, NodeOutcome, RunState, RunStatus, SessionCapture, SessionEntryRecord,
-    SessionEventRecord, StepRecord,
+    SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
 };
 use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
@@ -77,6 +77,13 @@ pub enum Provider {
         last_refresh: Instant,
     },
     Remote(RemoteRuns),
+}
+
+fn valid_session_binding(binding: Option<&Value>) -> bool {
+    binding
+        .and_then(|value| value.get("schema"))
+        .and_then(Value::as_str)
+        == Some(SESSION_BINDING_SCHEMA)
 }
 
 impl Provider {
@@ -151,7 +158,7 @@ impl Provider {
                     state: &entry.state,
                     snapshot: entry.snapshot.as_ref(),
                     events: &entry.events,
-                    session_bound: entry.session_binding.is_some(),
+                    session_bound: valid_session_binding(entry.session_binding.as_ref()),
                     session_entries: &entry.session_entries,
                     session_events: &entry.session_events,
                     session_capture: entry.session_capture.as_ref(),
@@ -168,7 +175,7 @@ impl Provider {
                     state: &view.state,
                     snapshot: view.snapshot.as_ref(),
                     events: &view.events,
-                    session_bound: view.session_binding.is_some(),
+                    session_bound: valid_session_binding(view.session_binding.as_ref()),
                     session_entries: &view.session_entries,
                     session_events: &view.session_events,
                     session_capture: view.session_capture.as_ref(),
@@ -2457,8 +2464,8 @@ mod tests {
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at,
         graph_position_label, inspector_height_for_drag, resolve_remote_artifacts,
         resolved_inspector_height, sidebar_width_for_drag, temporal_through_seq,
-        trace_events_for_scope, GraphNodeStyle, NodeBounds, Rect, StepRecord, TraceScope,
-        DEFAULT_NODE_STYLE,
+        trace_events_for_scope, valid_session_binding, GraphNodeStyle, NodeBounds, Rect,
+        StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2466,6 +2473,16 @@ mod tests {
     #[test]
     fn bordered_nodes_are_the_default() {
         assert_eq!(DEFAULT_NODE_STYLE, GraphNodeStyle::Box);
+    }
+
+    #[test]
+    fn session_binding_requires_the_supported_schema() {
+        assert!(valid_session_binding(Some(&json!({
+            "schema": "pi-workflows.session-binding.v1"
+        }))));
+        assert!(!valid_session_binding(Some(&json!({ "schema": "future" }))));
+        assert!(!valid_session_binding(Some(&json!("binding"))));
+        assert!(!valid_session_binding(None));
     }
 
     #[test]
