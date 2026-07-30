@@ -279,6 +279,79 @@ describe("WorkflowRunStore", () => {
     });
   });
 
+  it("accepts unknown future event types without invented correlation requirements", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-unknown-event");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await fs.writeFile(
+      path.join(runDir, "session/events.ndjson"),
+      `${JSON.stringify({
+        seq: 1,
+        at: new Date().toISOString(),
+        nodeId: "one",
+        attemptId: "a1",
+        type: "future_event",
+        payload: {},
+      })}\n`,
+    );
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "complete",
+      eventCount: 1,
+      entryCount: 0,
+      lastEventSeq: 1,
+    });
+    expect((await readRunBundle(runDir))?.sessionIntegrity).toEqual({
+      status: "complete",
+      diagnostics: [],
+    });
+  });
+
+  it("rejects known events with missing starts or correlation ids", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store-invalid-event");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: state.runId,
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await fs.writeFile(
+      path.join(runDir, "session/events.ndjson"),
+      `${JSON.stringify({
+        seq: 1,
+        at: new Date().toISOString(),
+        nodeId: "one",
+        attemptId: "a1",
+        type: "message_finished",
+        payload: { settled: false },
+      })}\n`,
+    );
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "complete",
+      eventCount: 1,
+      entryCount: 0,
+      lastEventSeq: 1,
+    });
+    const integrity = (await readRunBundle(runDir))?.sessionIntegrity;
+    expect(integrity?.status).toBe("invalid");
+    expect(integrity?.diagnostics).toContain("message_finished requires turnId");
+  });
+
   it("rejects sequence gaps and stops later temporal appends", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store-event-gaps");
     const store = new WorkflowRunStore(outputRoot);

@@ -625,14 +625,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
     activeRun?.recorder?.handleToolEnd(event);
   });
 
-  pi.on("agent_settled", (_event, ctx) => {
-    if (!activeRun) {
+  pi.on("agent_settled", async (_event, ctx) => {
+    const run = activeRun;
+    if (!run) {
       presentationPending = null;
       return;
     }
-    void activeRun.recorder?.record(ctx).catch(() => undefined);
-    activeRun.executor.setStreaming(false);
-    activeRun.executor.handleAgentSettled();
+    await run.recorder?.synchronize(ctx).catch(() => undefined);
+    run.executor.setStreaming(false);
+    run.executor.handleAgentSettled();
   });
 
   pi.on("session_shutdown", () => {

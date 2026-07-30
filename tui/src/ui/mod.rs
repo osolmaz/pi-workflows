@@ -510,24 +510,13 @@ impl App {
             let Some(event) = data.session_events.get(position as usize) else {
                 return;
             };
-            let attempt_id = event.get("attemptId").and_then(Value::as_str);
-            let event_at = event
+            event
                 .get("at")
                 .and_then(Value::as_str)
-                .and_then(parse_timestamp_ms);
-            data.state
-                .steps
-                .iter()
-                .enumerate()
-                .rfind(|(_, step)| {
-                    attempt_id == Some(step.attempt_id.as_str())
-                        || event_at.is_some_and(|at| {
-                            parse_timestamp_ms(&step.finished_at)
-                                .is_some_and(|finished| finished <= at)
-                        })
+                .and_then(parse_timestamp_ms)
+                .map_or(-1, |event_at| {
+                    completed_step_at(&data.state.steps, event_at)
                 })
-                .map(|(index, _)| index as i64)
-                .unwrap_or(-1)
         };
         self.replay = Some(selected);
     }
@@ -730,8 +719,12 @@ impl App {
                 })
         };
         if let Some((index, temporal)) = selected {
-            self.replay = Some(index);
             self.temporal_replay = temporal;
+            if temporal.is_some() {
+                self.sync_step_to_temporal();
+            } else {
+                self.replay = Some(index);
+            }
             self.playing = false;
             self.follow = true;
         }
@@ -1431,13 +1424,8 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let selected_index = replay.unwrap_or(steps.len() as i64 - 1);
     let bounded_index = selected_index.max(-1).min(steps.len() as i64 - 1);
     let at_latest = replay.is_none() && temporal_replay.is_none();
-    let through_event_seq = temporal_replay.and_then(|position| {
-        usize::try_from(position)
-            .ok()
-            .and_then(|index| data.session_events.get(index))
-            .and_then(|event| event.get("seq"))
-            .and_then(Value::as_u64)
-    });
+    let through_event_seq =
+        temporal_replay.map(|position| temporal_through_seq(data.session_events, position));
     let visible_steps = &steps[0..(bounded_index + 1).max(0) as usize];
     let selected_step = if bounded_index >= 0 {
         steps.get(bounded_index as usize)
@@ -1455,6 +1443,13 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     } else {
         bounded_index
     };
+    let temporal_node_id = temporal_replay.and_then(|position| {
+        usize::try_from(position)
+            .ok()
+            .and_then(|index| data.session_events.get(index))
+            .and_then(|event| event.get("nodeId"))
+            .and_then(Value::as_str)
+    });
     let followed_node_id = if at_latest {
         data.state
             .current_node
@@ -1462,7 +1457,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             .or(data.state.waiting_on.as_deref())
             .or_else(|| selected_step.map(|step| step.node_id.as_str()))
     } else {
-        selected_step.map(|step| step.node_id.as_str())
+        temporal_node_id.or_else(|| selected_step.map(|step| step.node_id.as_str()))
     };
     let rendered_graph = render_graph(&view, render_index, at_latest, now_ms(), node_style);
     let rows_runs = rendered_graph
@@ -1651,6 +1646,26 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     if let Some(picker) = &app.theme_picker {
         theme_picker::render(frame, area, picker, &palette);
     }
+}
+
+fn temporal_through_seq(events: &[Value], position: i64) -> u64 {
+    usize::try_from(position)
+        .ok()
+        .and_then(|index| events.get(index))
+        .and_then(|event| event.get("seq"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn completed_step_at(steps: &[StepRecord], event_at: i64) -> i64 {
+    steps
+        .iter()
+        .enumerate()
+        .rfind(|(_, step)| {
+            parse_timestamp_ms(&step.finished_at).is_some_and(|finished| finished <= event_at)
+        })
+        .map(|(index, _)| index as i64)
+        .unwrap_or(-1)
 }
 
 fn graph_position_label(at_latest: bool, live: bool) -> &'static str {
@@ -2439,10 +2454,11 @@ fn draw_transport(
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_camera, clamp_camera_axis, collect_artifact_paths, graph_position_label,
-        inspector_height_for_drag, resolve_remote_artifacts, resolved_inspector_height,
-        sidebar_width_for_drag, trace_events_for_scope, GraphNodeStyle, NodeBounds, Rect,
-        StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at,
+        graph_position_label, inspector_height_for_drag, resolve_remote_artifacts,
+        resolved_inspector_height, sidebar_width_for_drag, temporal_through_seq,
+        trace_events_for_scope, GraphNodeStyle, NodeBounds, Rect, StepRecord, TraceScope,
+        DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2450,6 +2466,32 @@ mod tests {
     #[test]
     fn bordered_nodes_are_the_default() {
         assert_eq!(DEFAULT_NODE_STYLE, GraphNodeStyle::Box);
+    }
+
+    #[test]
+    fn pre_capture_temporal_position_maps_to_sequence_zero() {
+        let events = vec![serde_json::json!({ "seq": 1 })];
+        assert_eq!(temporal_through_seq(&events, -1), 0);
+        assert_eq!(temporal_through_seq(&events, 0), 1);
+    }
+
+    #[test]
+    fn temporal_replay_hides_attempts_until_their_finish_time() {
+        let steps = vec![StepRecord {
+            attempt_id: "a1".into(),
+            node_id: "agent".into(),
+            node_type: "agent".into(),
+            outcome: crate::bundle::types::NodeOutcome::Ok,
+            started_at: "2026-01-01T00:00:01.000Z".into(),
+            finished_at: "2026-01-01T00:00:05.000Z".into(),
+            prompt: serde_json::Value::Null,
+            output: serde_json::Value::Null,
+            error: None,
+            conversation: None,
+            action: None,
+        }];
+        assert_eq!(completed_step_at(&steps, 1_767_225_603_000), -1);
+        assert_eq!(completed_step_at(&steps, 1_767_225_605_000), 0);
     }
 
     #[test]

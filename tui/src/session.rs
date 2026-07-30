@@ -63,6 +63,151 @@ pub struct CaptureIntegrity {
     pub diagnostics: Vec<String>,
 }
 
+fn event_integrity_diagnostics(
+    entries: &[SessionEntryRecord],
+    events: &[SessionEventRecord],
+) -> Vec<String> {
+    let entry_ids: HashSet<&str> = entries
+        .iter()
+        .filter_map(|record| record.entry.get("id")?.as_str())
+        .collect();
+    let mut turns: HashSet<&str> = HashSet::new();
+    let mut messages: HashSet<&str> = HashSet::new();
+    let mut tools: HashSet<&str> = HashSet::new();
+    let mut diagnostics = Vec::new();
+    for event in events {
+        if event.at.is_empty()
+            || event.node_id.is_empty()
+            || event.attempt_id.is_empty()
+            || event.event_type.is_empty()
+            || !event.payload.is_object()
+        {
+            diagnostics.push(format!(
+                "session event {} has an invalid envelope",
+                event.seq
+            ));
+            continue;
+        }
+        let known = matches!(
+            event.event_type.as_str(),
+            "turn_started"
+                | "turn_finished"
+                | "message_started"
+                | "assistant_event"
+                | "message_finished"
+                | "tool_execution_started"
+                | "tool_execution_updated"
+                | "tool_execution_finished"
+        );
+        if !known {
+            continue;
+        }
+        let Some(turn_id) = event.turn_id.as_deref().filter(|id| !id.is_empty()) else {
+            diagnostics.push(format!(
+                "{} {} requires turnId",
+                event.event_type, event.seq
+            ));
+            continue;
+        };
+        match event.event_type.as_str() {
+            "turn_started" => {
+                turns.insert(turn_id);
+            }
+            "turn_finished" => {
+                if !turns.contains(turn_id) {
+                    diagnostics.push(format!("turn_finished {} precedes turn_started", event.seq));
+                }
+            }
+            event_type => {
+                let Some(message_id) = event.message_id.as_deref().filter(|id| !id.is_empty())
+                else {
+                    diagnostics.push(format!("{event_type} {} requires messageId", event.seq));
+                    continue;
+                };
+                match event_type {
+                    "message_started" => {
+                        if !turns.contains(turn_id) {
+                            diagnostics.push(format!(
+                                "message_started {} precedes turn_started",
+                                event.seq
+                            ));
+                        }
+                        messages.insert(message_id);
+                    }
+                    "assistant_event" => {
+                        if !messages.contains(message_id) {
+                            diagnostics.push(format!(
+                                "assistant_event {} precedes message_started",
+                                event.seq
+                            ));
+                        }
+                    }
+                    "message_finished" => {
+                        if !messages.contains(message_id) {
+                            diagnostics.push(format!(
+                                "message_finished {} precedes message_started",
+                                event.seq
+                            ));
+                        }
+                        let settled = event
+                            .payload
+                            .get("settled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let entry_id = event.payload.get("entryId").and_then(Value::as_str);
+                        if settled && entry_id.is_none_or(|id| !entry_ids.contains(id)) {
+                            diagnostics.push(format!(
+                                "message_finished {} references a missing entry",
+                                event.seq
+                            ));
+                        } else if !settled && entry_id.is_some() {
+                            diagnostics.push(format!(
+                                "message_finished {} has entryId while unsettled",
+                                event.seq
+                            ));
+                        }
+                    }
+                    "tool_execution_started" => {
+                        if !messages.contains(message_id) {
+                            diagnostics.push(format!(
+                                "tool_execution_started {} precedes message_started",
+                                event.seq
+                            ));
+                        }
+                        if let Some(tool_id) =
+                            event.tool_call_id.as_deref().filter(|id| !id.is_empty())
+                        {
+                            tools.insert(tool_id);
+                        } else {
+                            diagnostics.push(format!(
+                                "tool_execution_started {} requires toolCallId",
+                                event.seq
+                            ));
+                        }
+                    }
+                    "tool_execution_updated" | "tool_execution_finished" => {
+                        let Some(tool_id) =
+                            event.tool_call_id.as_deref().filter(|id| !id.is_empty())
+                        else {
+                            diagnostics
+                                .push(format!("{event_type} {} requires toolCallId", event.seq));
+                            continue;
+                        };
+                        if !tools.contains(tool_id) {
+                            diagnostics.push(format!(
+                                "{event_type} {} precedes tool_execution_started",
+                                event.seq
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    diagnostics
+}
+
 pub fn assess_capture(
     session_bound: bool,
     entries: &[SessionEntryRecord],
@@ -92,6 +237,7 @@ pub fn assess_capture(
             break;
         }
     }
+    diagnostics.extend(event_integrity_diagnostics(entries, events));
     if capture.status != SessionCaptureStatus::Recording {
         let last_seq = events.last().map_or(0, |event| event.seq);
         if capture.event_count != events.len() as u64
@@ -490,5 +636,54 @@ impl<'a> SessionReplayIndex<'a> {
             .checked_sub(1)
             .and_then(|index| self.timestamps.get(index))
             .map_or(0, |(_, seq)| *seq)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn capture() -> SessionCapture {
+        SessionCapture {
+            schema: SESSION_CAPTURE_SCHEMA.into(),
+            event_schema: SESSION_EVENT_SCHEMA.into(),
+            status: SessionCaptureStatus::Complete,
+            event_count: 1,
+            entry_count: 0,
+            last_event_seq: 1,
+            failure: None,
+        }
+    }
+
+    fn event(event_type: &str) -> SessionEventRecord {
+        SessionEventRecord {
+            seq: 1,
+            at: "2026-01-01T00:00:00.000Z".into(),
+            node_id: "node".into(),
+            attempt_id: "attempt".into(),
+            turn_id: None,
+            message_id: None,
+            tool_call_id: None,
+            event_type: event_type.into(),
+            payload: json!({}),
+        }
+    }
+
+    #[test]
+    fn capture_accepts_unknown_events_but_rejects_invalid_known_events() {
+        let unknown = event("future_event");
+        assert_eq!(
+            assess_capture(true, &[], &[unknown], Some(&capture()), true).status,
+            "complete"
+        );
+
+        let invalid = event("message_finished");
+        let integrity = assess_capture(true, &[], &[invalid], Some(&capture()), true);
+        assert_eq!(integrity.status, "invalid");
+        assert!(integrity
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("requires turnId")));
     }
 }

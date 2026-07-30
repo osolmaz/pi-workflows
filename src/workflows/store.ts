@@ -345,24 +345,102 @@ function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
     !isNonEmptyString(record.at) ||
     !isNonEmptyString(record.nodeId) ||
     !isNonEmptyString(record.attemptId) ||
+    !isNonEmptyString(record.type) ||
     typeof record.payload !== "object" ||
     record.payload === null ||
     Array.isArray(record.payload)
   ) {
     throw new Error("Session event is missing required envelope fields");
   }
-  const needsTurn = true;
-  const needsMessage = !["turn_started", "turn_finished"].includes(record.type);
-  const needsTool = record.type.startsWith("tool_execution_");
-  if (needsTurn && !isNonEmptyString(record.turnId)) {
+  const knownType = [
+    "turn_started",
+    "turn_finished",
+    "message_started",
+    "assistant_event",
+    "message_finished",
+    "tool_execution_started",
+    "tool_execution_updated",
+    "tool_execution_finished",
+  ].includes(record.type);
+  if (!knownType) {
+    return;
+  }
+  if (!isNonEmptyString(record.turnId)) {
     throw new Error(`${record.type} requires turnId`);
   }
-  if (needsMessage && !isNonEmptyString(record.messageId)) {
+  if (
+    !["turn_started", "turn_finished"].includes(record.type) &&
+    !isNonEmptyString(record.messageId)
+  ) {
     throw new Error(`${record.type} requires messageId`);
   }
-  if (needsTool && !isNonEmptyString(record.toolCallId)) {
+  if (record.type.startsWith("tool_execution_") && !isNonEmptyString(record.toolCallId)) {
     throw new Error(`${record.type} requires toolCallId`);
   }
+}
+
+function sessionRelationshipDiagnostics(
+  entries: WorkflowSessionEntryRecord[],
+  events: WorkflowSessionEventRecord[],
+): string[] {
+  const entryIds = new Set(
+    entries.flatMap((record) => (isNonEmptyString(record.entry.id) ? [record.entry.id] : [])),
+  );
+  const turns = new Set<string>();
+  const messages = new Set<string>();
+  const tools = new Set<string>();
+  const diagnostics: string[] = [];
+  for (const event of events) {
+    switch (event.type) {
+      case "turn_started":
+        if (event.turnId) turns.add(event.turnId);
+        break;
+      case "turn_finished":
+        if (!event.turnId || !turns.has(event.turnId)) {
+          diagnostics.push(`turn_finished ${event.seq} precedes turn_started`);
+        }
+        break;
+      case "message_started":
+        if (!event.turnId || !turns.has(event.turnId)) {
+          diagnostics.push(`message_started ${event.seq} precedes turn_started`);
+        }
+        if (event.messageId) messages.add(event.messageId);
+        break;
+      case "assistant_event":
+        if (!event.messageId || !messages.has(event.messageId)) {
+          diagnostics.push(`assistant_event ${event.seq} precedes message_started`);
+        }
+        break;
+      case "message_finished": {
+        if (!event.messageId || !messages.has(event.messageId)) {
+          diagnostics.push(`message_finished ${event.seq} precedes message_started`);
+        }
+        const settled = event.payload.settled;
+        const entryId = event.payload.entryId;
+        if (settled === true && (!isNonEmptyString(entryId) || !entryIds.has(entryId))) {
+          diagnostics.push(`message_finished ${event.seq} references a missing entry`);
+        } else if (settled !== true && entryId !== undefined) {
+          diagnostics.push(`message_finished ${event.seq} has entryId while unsettled`);
+        }
+        break;
+      }
+      case "tool_execution_started":
+        if (!event.messageId || !messages.has(event.messageId)) {
+          diagnostics.push(`tool_execution_started ${event.seq} precedes message_started`);
+        }
+        if (event.toolCallId) tools.add(event.toolCallId);
+        break;
+      case "tool_execution_updated":
+      case "tool_execution_finished":
+        if (!event.toolCallId || !tools.has(event.toolCallId)) {
+          diagnostics.push(`${event.type} ${event.seq} precedes tool_execution_started`);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return diagnostics;
 }
 
 function validateSessionCapture(capture: WorkflowSessionCapture): void {
@@ -656,6 +734,7 @@ function assessSessionIntegrity(input: {
     }
     expected += 1;
   }
+  diagnostics.push(...sessionRelationshipDiagnostics(input.entries.records, input.events.records));
   if (input.capture.status !== "recording") {
     const lastEventSeq = input.events.records.at(-1)?.seq ?? 0;
     if (
