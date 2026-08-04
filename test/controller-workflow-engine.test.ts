@@ -36,6 +36,57 @@ const failingWorkflow = defineWorkflow({
 });
 
 describe("WorkflowEngineScheduler", () => {
+  it("preserves and replaces an incomplete reserved run directory", async () => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const runId = "incomplete-run";
+    const incompleteDir = path.join(outputRoot, runId);
+    await fs.mkdir(incompleteDir, { recursive: true });
+    await fs.writeFile(path.join(incompleteDir, "workflow.json"), "{}", "utf8");
+    const store = new WorkflowRunStore(outputRoot);
+    const scheduler = new WorkflowEngineScheduler({
+      store,
+      resolveWorkflow: async () => ({ workflow }),
+      createEngine: () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
+    });
+
+    const started = await scheduler.ensure(
+      { requestId: "incomplete", attempt: 1, workflow: "child", input: {}, runId },
+      new AbortController().signal,
+      () => {},
+    );
+    await scheduler.waitForIdle();
+
+    expect(started).toEqual({ state: "running", runId });
+    await expect(
+      (await import("../src/workflows/store.js")).readRunBundle(incompleteDir),
+    ).resolves.not.toBe(null);
+    const entries = await fs.readdir(outputRoot);
+    const quarantine = entries.find((entry) => entry.startsWith(`.${runId}.incomplete-`));
+    if (quarantine === undefined) {
+      throw new Error("Expected the incomplete run directory to be preserved");
+    }
+    expect(await fs.readFile(path.join(outputRoot, quarantine, "workflow.json"), "utf8")).toBe(
+      "{}",
+    );
+  });
+
+  it("refuses to reuse unsafe or unreadable reserved run paths", async () => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    await expect(store.quarantineIncompleteRun("../escape")).rejects.toThrow(/Invalid/);
+
+    const fileRun = path.join(outputRoot, "file-run");
+    await fs.writeFile(fileRun, "not a directory", "utf8");
+    await expect(store.quarantineIncompleteRun("file-run")).rejects.toThrow(/not a directory/);
+
+    const unreadableRun = path.join(outputRoot, "unreadable-run");
+    await fs.mkdir(unreadableRun);
+    await fs.writeFile(path.join(unreadableRun, "manifest.json"), "{}", "utf8");
+    await expect(store.quarantineIncompleteRun("unreadable-run")).rejects.toThrow(
+      /unreadable manifest/,
+    );
+  });
+
   it("starts one immutable workflow attempt and reports completion", async () => {
     const outputRoot = await makeTempDir("pi-controller-child-runs");
     const store = new WorkflowRunStore(outputRoot);

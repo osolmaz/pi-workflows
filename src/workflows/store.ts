@@ -97,6 +97,40 @@ export class WorkflowRunStore {
     return path.join(this.outputRoot, runId);
   }
 
+  async quarantineIncompleteRun(runId: string): Promise<string | undefined> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
+      throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
+    }
+    const runDir = this.runDirFor(runId);
+    let runStat;
+    try {
+      runStat = await fs.lstat(runDir);
+    } catch (error) {
+      if (isMissingPath(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (!runStat.isDirectory() || runStat.isSymbolicLink()) {
+      throw new Error(`Reserved workflow run path is not a directory: ${runDir}`);
+    }
+    try {
+      await fs.lstat(path.join(runDir, MANIFEST_PATH));
+      throw new Error(`Reserved workflow run has an unreadable manifest: ${runId}`);
+    } catch (error) {
+      if (!isMissingPath(error)) {
+        throw error;
+      }
+    }
+    const quarantineDir = path.join(
+      this.outputRoot,
+      `.${runId}.incomplete-${randomUUID().slice(0, 8)}`,
+    );
+    await fs.rename(runDir, quarantineDir);
+    this.contexts.delete(runDir);
+    return quarantineDir;
+  }
+
   private contextFor(runDir: string): RunBundleContext {
     let context = this.contexts.get(runDir);
     if (!context) {
@@ -432,6 +466,10 @@ function terminalStatusForEvent(type: string): WorkflowRunState["status"] | unde
     default:
       return undefined;
   }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 async function appendLine(filePath: string, value: unknown): Promise<void> {

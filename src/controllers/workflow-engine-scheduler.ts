@@ -62,6 +62,7 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       return { state: "pending" };
     }
 
+    await this.options.store.quarantineIncompleteRun(request.runId);
     const resolved = await this.options.resolveWorkflow(request.workflow);
     const runId = request.runId;
     const engine = this.options.createEngine(request);

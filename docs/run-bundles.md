@@ -181,7 +181,9 @@ The full run projection (`WorkflowRunState` in
   with a final `run_interrupted` trace event. Before doing that, recovery checks
   the trace tail and repairs a stale projection when the terminal event was
   already appended. The controller store can then retry a genuinely abandoned
-  child attempt without changing this schema.
+  child attempt without changing this schema. If startup stopped before a
+  manifest existed, the scheduler preserves that incomplete directory as a
+  hidden sibling before creating the reserved run.
 - While a node is executing, `currentNode` and `currentAttemptId` identify it.
   `currentNodeStartedAt` and `statusDetail` add timing and display context.
   These fields disappear when the node finishes. The executing node's type comes from the definition

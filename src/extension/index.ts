@@ -497,6 +497,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (controllerContext === null) {
       return { state: "pending" };
     }
+    await store.quarantineIncompleteRun(request.runId);
     const runId = await startRun(controllerContext, request.workflow, request.input, {
       runId: request.runId,
       childKey,
