@@ -1,7 +1,7 @@
 import {
   ControllerManager,
   SqliteControllerStore,
-  controllerStorePath,
+  projectControllerStorePath,
   loadDiscoveredControllers,
   type AnyControllerDefinition,
   type ControllerResource,
@@ -86,7 +86,7 @@ export class PiControllerHost {
     if (definitions.length === 0) {
       return undefined;
     }
-    const store = new SqliteControllerStore(controllerStorePath());
+    const store = new SqliteControllerStore(projectControllerStorePath(options.cwd));
     const manager = new ControllerManager({
       store,
       controllers: definitions,

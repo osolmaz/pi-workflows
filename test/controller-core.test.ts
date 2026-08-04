@@ -22,7 +22,44 @@ import {
   loadControllerFile,
 } from "../src/controllers/loader.js";
 import { requeue, requeueAfter, settled } from "../src/controllers/results.js";
+import { controllerProjectScope, projectControllerStoreBaseDir } from "../src/controllers/store.js";
 import { makeTempDir } from "./helpers.js";
+
+describe("controller store scope", () => {
+  it("derives a stable and isolated project directory", async () => {
+    const first = await makeTempDir("pi-controller-project");
+    const second = await makeTempDir("pi-controller-project");
+    const home = await makeTempDir("pi-controller-home");
+    expect(controllerProjectScope(first)).toHaveLength(24);
+    expect(controllerProjectScope(first)).not.toBe(controllerProjectScope(second));
+    expect(projectControllerStoreBaseDir(first, home)).toBe(
+      path.join(
+        home,
+        ".pi",
+        "agent",
+        "workflows",
+        "controllers",
+        "projects",
+        controllerProjectScope(first),
+      ),
+    );
+  });
+
+  it("uses the configured controller root without sharing project state", async () => {
+    const first = await makeTempDir("pi-controller-project");
+    const second = await makeTempDir("pi-controller-project");
+    const root = await makeTempDir("pi-controller-root");
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", root);
+    try {
+      expect(projectControllerStoreBaseDir(first)).toBe(
+        path.join(root, "projects", controllerProjectScope(first)),
+      );
+      expect(projectControllerStoreBaseDir(second)).not.toBe(projectControllerStoreBaseDir(first));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe("controller definitions", () => {
   it("brands and validates controller definitions", () => {

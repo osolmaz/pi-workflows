@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -137,4 +139,22 @@ export function controllerStoreBaseDir(homeDir: string = os.homedir()): string {
 
 export function controllerStorePath(homeDir: string = os.homedir()): string {
   return path.join(controllerStoreBaseDir(homeDir), "controller.sqlite");
+}
+
+export function controllerProjectScope(cwd: string): string {
+  let canonicalCwd: string;
+  try {
+    canonicalCwd = fs.realpathSync.native(cwd);
+  } catch {
+    canonicalCwd = path.resolve(cwd);
+  }
+  return createHash("sha256").update(canonicalCwd).digest("hex").slice(0, 24);
+}
+
+export function projectControllerStoreBaseDir(cwd: string, homeDir: string = os.homedir()): string {
+  return path.join(controllerStoreBaseDir(homeDir), "projects", controllerProjectScope(cwd));
+}
+
+export function projectControllerStorePath(cwd: string, homeDir: string = os.homedir()): string {
+  return path.join(projectControllerStoreBaseDir(cwd, homeDir), "controller.sqlite");
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
+import { controllerProjectScope } from "../../src/controllers/store.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
 import type {
   WorkflowRunState,
@@ -222,6 +223,7 @@ describe.sequential("pi-workflows end to end", () => {
   let projectDir: string;
   let agentDir: string;
   let controllerDir: string;
+  let controllerFile: string;
 
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
@@ -281,6 +283,12 @@ describe.sequential("pi-workflows end to end", () => {
     runsDir = await makeTempDir("pi-workflows-e2e-runs");
     agentDir = await makeTempDir("pi-workflows-e2e-agent");
     controllerDir = await makeTempDir("pi-workflows-e2e-controllers");
+    controllerFile = path.join(
+      controllerDir,
+      "projects",
+      controllerProjectScope(projectDir),
+      "controller.sqlite",
+    );
 
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
     await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
@@ -621,9 +629,7 @@ describe.sequential("pi-workflows end to end", () => {
     await waitForCondition(
       async () => {
         try {
-          const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
-            readOnly: true,
-          });
+          const store = new SqliteControllerStore(controllerFile, { readOnly: true });
           try {
             return (
               store.getResource<unknown, { phase: string }>({
@@ -642,9 +648,7 @@ describe.sequential("pi-workflows end to end", () => {
       20_000,
     );
 
-    const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
-      readOnly: true,
-    });
+    const store = new SqliteControllerStore(controllerFile, { readOnly: true });
     try {
       const resource = store.getResource({ controller: "e2e-controller", key: "item-1" });
       expect(resource?.status).toMatchObject({

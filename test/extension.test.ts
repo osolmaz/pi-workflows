@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
+import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -763,6 +764,7 @@ export default defineWorkflow({
     const controllerDir = await makeTempDir("pi-workflows-controller-state");
     vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
     vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    const controllerFile = projectControllerStorePath(cwd);
     try {
       await writeControllerWithChild(cwd);
       const harness = makeHarness({ cwd, respond: () => {} });
@@ -771,9 +773,7 @@ export default defineWorkflow({
       expect(command).toBeDefined();
       await command?.handler('apply demo item-1 {"value":"hello"}', harness.ctx);
       await waitFor(() => {
-        const reader = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
-          readOnly: true,
-        });
+        const reader = new SqliteControllerStore(controllerFile, { readOnly: true });
         try {
           return (
             reader.getResource<unknown, { phase: string }>({
@@ -800,9 +800,7 @@ export default defineWorkflow({
       await command?.handler("delete demo item-1", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("Requested deletion");
       await waitFor(() => {
-        const reader = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
-          readOnly: true,
-        });
+        const reader = new SqliteControllerStore(controllerFile, { readOnly: true });
         try {
           return reader.getResource({ controller: "demo", key: "item-1" }) === undefined;
         } finally {
@@ -812,6 +810,65 @@ export default defineWorkflow({
       expect(harness.statuses.some((status) => status?.includes("controller resource"))).toBe(true);
       expect(await fs.readdir(runsDir)).toHaveLength(1);
       await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("isolates same-named controllers by project", async () => {
+    const controllerRoot = await makeTempDir("pi-workflows-controller-state");
+    const firstCwd = await makeTempDir("pi-workflows-controller-project");
+    const secondCwd = await makeTempDir("pi-workflows-controller-project");
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerRoot);
+    try {
+      for (const [cwd, marker] of [
+        [firstCwd, "first"],
+        [secondCwd, "second"],
+      ] as const) {
+        const controllerDir = path.join(cwd, ".pi", "controllers");
+        await fs.mkdir(controllerDir, { recursive: true });
+        await fs.writeFile(
+          path.join(controllerDir, "shared.controller.ts"),
+          `import { defineController } from ${JSON.stringify(
+            path.join(process.cwd(), "src", "controllers", "index.ts"),
+          )};
+export default defineController({
+  name: "shared",
+  initialStatus: () => ({ marker: "new" }),
+  reconcile: (ctx) => ctx.settled({ controllerStatus: { marker: ${JSON.stringify(marker)} } }),
+});
+`,
+          "utf8",
+        );
+      }
+
+      const firstHarness = makeHarness({ cwd: firstCwd, respond: () => {} });
+      await firstHarness.emitAsync("session_start");
+      await firstHarness.commands
+        .get("controller")
+        ?.handler("apply shared item {}", firstHarness.ctx);
+      const firstFile = projectControllerStorePath(firstCwd);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(firstFile, { readOnly: true });
+        try {
+          return (
+            reader.getResource<unknown, { marker: string }>({
+              controller: "shared",
+              key: "item",
+            })?.status.controllerStatus.marker === "first"
+          );
+        } finally {
+          reader.close();
+        }
+      });
+      await firstHarness.emitAsync("session_shutdown");
+
+      const secondHarness = makeHarness({ cwd: secondCwd, respond: () => {} });
+      await secondHarness.emitAsync("session_start");
+      await secondHarness.commands.get("controller")?.handler("list", secondHarness.ctx);
+      expect(secondHarness.notifications.at(-1)).toContain("No resources");
+      expect(projectControllerStorePath(secondCwd)).not.toBe(firstFile);
+      await secondHarness.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
     }

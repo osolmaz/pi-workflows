@@ -3,7 +3,7 @@ import fs, { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SqliteControllerStore } from "../controllers/sqlite.js";
-import { controllerStoreBaseDir } from "../controllers/store.js";
+import { projectControllerStoreBaseDir } from "../controllers/store.js";
 import { sanitizeText } from "../render/ansi.js";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
 import {
@@ -31,7 +31,7 @@ Commands:
 
 Options:
   --dir <runsDir>          Runs directory (default: ~/.pi/agent/workflows/runs)
-  --controller-dir <dir>  Controller directory (default: ~/.pi/agent/workflows/controllers)
+  --controller-dir <dir>  Controller directory (default: project-scoped local store)
   --once                   Render once without the interactive TUI
 `;
 
@@ -49,7 +49,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   const args = [...argv];
   const command = args[0] && !args[0].startsWith("-") ? (args.shift() as string) : "view";
   let dir = workflowRunsBaseDir();
-  let controllerDir = controllerStoreBaseDir();
+  let controllerDir = projectControllerStoreBaseDir(process.cwd());
   let once = false;
   const positionals: string[] = [];
 
