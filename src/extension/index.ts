@@ -67,6 +67,7 @@ type StartRunOptions = {
   onFinish?: (result: WorkflowSchedulerResult) => void;
   presentation?: boolean;
   quiet?: boolean;
+  signal?: AbortSignal;
 };
 
 export type ParsedWorkflowArgs =
@@ -364,6 +365,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     input: unknown,
     options: StartRunOptions = {},
   ): Promise<string | undefined> => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new Error("Workflow startup aborted");
+    }
     if (activeRun) {
       if (!options.quiet) {
         notify(
@@ -387,6 +391,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const generation = runGeneration;
     const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
     const workflow = await loadWorkflowFile(resolved.path);
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new Error("Workflow startup aborted");
+    }
     const snapshot = createDefinitionSnapshot(workflow);
     const runId = options.runId ?? createRunId(workflow.name);
 
@@ -507,6 +514,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       onFinish: onComplete,
       presentation: false,
       quiet: true,
+      signal,
     });
     return runId === undefined ? { state: "pending" } : { state: "running", runId };
   };

@@ -219,6 +219,49 @@ describe("WorkflowEngineScheduler", () => {
     ).rejects.toThrow("cancelled");
   });
 
+  it("does not launch after cancellation during workflow resolution", async () => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    let announceStarted: (() => void) | undefined;
+    let releaseResolution: (() => void) | undefined;
+    const resolving = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseResolution = resolve;
+    });
+    const createEngine = vi.fn(
+      () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
+    );
+    const scheduler = new WorkflowEngineScheduler({
+      store,
+      resolveWorkflow: async () => {
+        announceStarted?.();
+        await gate;
+        return { workflow };
+      },
+      createEngine,
+    });
+    const abort = new AbortController();
+    const scheduled = scheduler.ensure(
+      {
+        requestId: "cancel-during-resolve",
+        attempt: 1,
+        workflow: "child",
+        input: {},
+        runId: "cancel-during-resolve",
+      },
+      abort.signal,
+      () => {},
+    );
+    await resolving;
+    abort.abort(new Error("host stopped"));
+    releaseResolution?.();
+
+    await expect(scheduled).rejects.toThrow("host stopped");
+    expect(createEngine).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["run_waiting", "waiting", { status: "waiting", waitingOn: "approval" }],
     ["run_failed", "failed", { status: "failed", error: "broken" }],

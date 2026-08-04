@@ -64,6 +64,9 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
 
     await this.options.store.quarantineIncompleteRun(request.runId);
     const resolved = await this.options.resolveWorkflow(request.workflow);
+    if (signal.aborted) {
+      throw signal.reason ?? new Error("Workflow scheduling aborted");
+    }
     const runId = request.runId;
     const engine = this.options.createEngine(request);
     const promise = engine
