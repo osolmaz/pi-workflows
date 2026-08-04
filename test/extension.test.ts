@@ -815,6 +815,92 @@ export default defineWorkflow({
     }
   });
 
+  it("retries a child workflow interrupted by stopping controller workers", async () => {
+    const cwd = await makeTempDir("pi-workflows-controller-ext");
+    const runsDir = await makeTempDir("pi-workflows-controller-runs");
+    const controllerRoot = await makeTempDir("pi-workflows-controller-state");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerRoot);
+    try {
+      await writeControllerWithChild(cwd);
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "child.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "child",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ input, signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(input), 250);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("controller");
+      await command?.handler('apply demo item-1 {"value":"hello"}', harness.ctx);
+      const controllerFile = projectControllerStorePath(cwd);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(controllerFile, { readOnly: true });
+        try {
+          return (
+            reader.listWorkflows(reader.listResources()[0]?.metadata.uid ?? "")[0]?.state ===
+            "running"
+          );
+        } finally {
+          reader.close();
+        }
+      });
+
+      await command?.handler("stop", harness.ctx);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(controllerFile, { readOnly: true });
+        try {
+          const resource = reader.listResources()[0];
+          return (
+            resource !== undefined &&
+            reader.listWorkflows(resource.metadata.uid)[0]?.state === "interrupted"
+          );
+        } finally {
+          reader.close();
+        }
+      });
+
+      await command?.handler("start", harness.ctx);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(controllerFile, { readOnly: true });
+        try {
+          const resource = reader.getResource<unknown, { phase: string }>({
+            controller: "demo",
+            key: "item-1",
+          });
+          const child =
+            resource === undefined ? undefined : reader.listWorkflows(resource.metadata.uid)[0];
+          return (
+            resource?.status.controllerStatus.phase === "done" &&
+            child?.state === "succeeded" &&
+            child.attempt === 2
+          );
+        } finally {
+          reader.close();
+        }
+      });
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("isolates same-named controllers by project", async () => {
     const controllerRoot = await makeTempDir("pi-workflows-controller-state");
     const firstCwd = await makeTempDir("pi-workflows-controller-project");

@@ -204,7 +204,7 @@ The controller API is exported from `@osolmaz/pi-workflows/controllers`. Control
 
 The implementation uses documented Pi extension APIs only. Commands and tools use `registerCommand` and `registerTool`. Session lifecycle uses `session_start` and `session_shutdown`. Workflow prompts use `sendUserMessage`, while status uses `setWidget` and `setStatus`.
 
-The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Project stores live under `~/.pi/agent/workflows/controllers/projects/<scope>/controller.sqlite`. The scope is a hash of the canonical project directory. `PI_WORKFLOWS_CONTROLLER_DIR` overrides the controller root while preserving project scopes.
+The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Stopping workers records an active child as interrupted, so starting workers again can create another attempt. Project stores live under `~/.pi/agent/workflows/controllers/projects/<scope>/controller.sqlite`. The scope is a hash of the canonical project directory. `PI_WORKFLOWS_CONTROLLER_DIR` overrides the controller root while preserving project scopes.
 
 Normal workflow prompts, tool calls, and replies remain part of the Pi session. Controller resources, queue rows, and effects live in the controller store. No Pi internal type, private API, or persistent Pi schema changes.
 

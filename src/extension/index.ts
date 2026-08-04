@@ -58,6 +58,7 @@ type ActiveRun = {
   childKey?: string;
   onFinish?: (result: WorkflowSchedulerResult) => void;
   completion?: Promise<void>;
+  interruptionRequested?: boolean;
 };
 
 type StartRunOptions = {
@@ -341,7 +342,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
     try {
       const childResult =
-        run.childKey !== undefined && sessionClosed && state.status === "cancelled"
+        run.childKey !== undefined &&
+        (sessionClosed || run.interruptionRequested === true) &&
+        state.status === "cancelled"
           ? {
               state: "interrupted" as const,
               runId: state.runId,
@@ -687,6 +690,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
             break;
           case "stop":
             if (activeRun?.childKey !== undefined) {
+              activeRun.interruptionRequested = true;
               activeRun.engine.cancel();
             }
             await host.stop();

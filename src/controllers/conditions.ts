@@ -39,7 +39,10 @@ export function applyStatusPatch<TStatus>(
   return {
     observedGeneration: generation,
     conditions: mergeConditions(current.conditions, patch?.conditions ?? [], generation, now),
-    controllerStatus: patch?.controllerStatus ?? current.controllerStatus,
+    controllerStatus:
+      patch !== undefined && Object.hasOwn(patch, "controllerStatus")
+        ? (patch.controllerStatus as TStatus)
+        : current.controllerStatus,
     ...(patch?.workflowRun === null
       ? {}
       : patch?.workflowRun !== undefined

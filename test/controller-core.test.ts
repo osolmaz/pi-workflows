@@ -149,6 +149,13 @@ describe("controller conditions", () => {
       conditions: [],
       controllerStatus: { phase: "done" },
     });
+    const nullable = applyStatusPatch<{ phase: string } | null>(
+      current,
+      { controllerStatus: null },
+      2,
+      "2026-08-04T00:00:00.000Z",
+    );
+    expect(nullable.controllerStatus).toBeNull();
     expect(() =>
       mergeConditions(
         [],
