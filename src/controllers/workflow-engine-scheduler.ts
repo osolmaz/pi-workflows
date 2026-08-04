@@ -1,5 +1,10 @@
 import { WorkflowEngine } from "../workflows/engine.js";
-import { createRunId, readRunBundle, type WorkflowRunStore } from "../workflows/store.js";
+import {
+  createRunId,
+  readLastTraceEvent,
+  readRunBundle,
+  type WorkflowRunStore,
+} from "../workflows/store.js";
 import type {
   WorkflowDefinition,
   WorkflowRunResult,
@@ -48,7 +53,13 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
           await this.options.store.markRunInterrupted(request.runId);
           return { state: "interrupted", runId: request.runId };
         }
-        return resultFromStatus(bundle.state.status, request.runId, bundle.state.error);
+        const lastTraceEvent = await readLastTraceEvent(bundle.runDir, bundle.manifest.paths.trace);
+        return resultFromStatus(
+          bundle.state.status,
+          request.runId,
+          bundle.state.error,
+          lastTraceEvent?.type === "run_interrupted",
+        );
       }
     }
 
@@ -105,7 +116,11 @@ function resultFromStatus(
   status: WorkflowRunStatus,
   runId: string,
   error?: string,
+  interrupted = false,
 ): WorkflowSchedulerResult {
+  if (interrupted) {
+    return { state: "interrupted", runId, ...(error !== undefined ? { error } : {}) };
+  }
   switch (status) {
     case "running":
       return { state: "running", runId };
@@ -113,8 +128,6 @@ function resultFromStatus(
       return { state: "waiting", runId };
     case "completed":
       return { state: "succeeded", runId };
-    case "interrupted":
-      return { state: "interrupted", runId, ...(error !== undefined ? { error } : {}) };
     case "failed":
     case "timed_out":
     case "cancelled":

@@ -22,7 +22,6 @@ pub enum RunStatus {
     Failed,
     TimedOut,
     Cancelled,
-    Interrupted,
 }
 
 impl RunStatus {
@@ -38,7 +37,6 @@ impl RunStatus {
             RunStatus::Failed => "failed",
             RunStatus::TimedOut => "timed_out",
             RunStatus::Cancelled => "cancelled",
-            RunStatus::Interrupted => "interrupted",
         }
     }
 }

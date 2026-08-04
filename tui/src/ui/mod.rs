@@ -1338,7 +1338,7 @@ fn status_style(status: RunStatus, palette: &Palette) -> Style {
         RunStatus::Completed => palette.success,
         RunStatus::Failed => palette.error,
         RunStatus::TimedOut => palette.timed_out,
-        RunStatus::Cancelled | RunStatus::Interrupted => palette.cancelled,
+        RunStatus::Cancelled => palette.cancelled,
     };
     Style::default().fg(color)
 }
@@ -1351,7 +1351,6 @@ fn status_glyph(status: RunStatus) -> &'static str {
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",
         RunStatus::Cancelled => "~",
-        RunStatus::Interrupted => "!",
     }
 }
 

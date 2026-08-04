@@ -35,7 +35,6 @@ const STATUS_COLORS: Record<WorkflowRunStatus, (text: string) => string> = {
   failed: ansi.red,
   timed_out: ansi.red,
   cancelled: ansi.yellow,
-  interrupted: ansi.yellow,
 };
 
 export function statusLabel(status: WorkflowRunStatus): string {

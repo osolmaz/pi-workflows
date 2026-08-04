@@ -14,7 +14,6 @@ const STATUS_GLYPHS: Record<WorkflowRunStatus, string> = {
   failed: "✗",
   timed_out: "✗",
   cancelled: "✗",
-  interrupted: "✗",
 };
 
 /**

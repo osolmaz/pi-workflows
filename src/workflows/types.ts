@@ -228,8 +228,7 @@ export type WorkflowRunStatus =
   | "completed"
   | "failed"
   | "timed_out"
-  | "cancelled"
-  | "interrupted";
+  | "cancelled";
 
 export type WorkflowRunState = {
   schema: "pi-workflows.run-state.v1";

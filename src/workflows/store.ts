@@ -158,7 +158,7 @@ export class WorkflowRunStore {
     });
   }
 
-  /** Mark a nonterminal bundle left by another process as interrupted. */
+  /** Mark a nonterminal bundle failed and append an interruption event. */
   async markRunInterrupted(
     runId: string,
     reason = "Workflow host stopped before the run finished",
@@ -196,7 +196,7 @@ export class WorkflowRunStore {
       });
     }
     const state = bundle.state;
-    state.status = "interrupted";
+    state.status = "failed";
     state.finishedAt = new Date().toISOString();
     state.error = reason;
     delete state.currentNode;
@@ -611,6 +611,17 @@ export type LoadedRunBundle = {
   sessionCapture: WorkflowSessionCapture | null;
   sessionIntegrity: SessionCaptureIntegrity;
 };
+
+/** Read the final trace record without loading the rest of a run bundle. */
+export async function readLastTraceEvent(
+  runDir: string,
+  tracePath?: string,
+): Promise<WorkflowTraceEvent | null> {
+  const events = await readNdjsonFile<WorkflowTraceEvent>(
+    resolveBundlePath(runDir, tracePath, TRACE_PATH),
+  );
+  return events.records.at(-1) ?? null;
+}
 
 /** Read a run bundle from disk. Returns null when the bundle is unreadable. */
 export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | null> {

@@ -10,6 +10,7 @@ import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
 import {
   createRunId,
+  readLastTraceEvent,
   readRunBundle,
   WorkflowRunStore,
   createDefinitionSnapshot,
@@ -487,7 +488,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
           await store.markRunInterrupted(request.runId);
           return { state: "interrupted", runId: request.runId };
         }
-        return workflowSchedulerResult(bundle.state);
+        const lastTraceEvent = await readLastTraceEvent(bundle.runDir, bundle.manifest.paths.trace);
+        return workflowSchedulerResult(bundle.state, lastTraceEvent?.type === "run_interrupted");
       }
     }
     if (controllerContext === null) {
@@ -853,7 +855,17 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 }
 
-function workflowSchedulerResult(state: WorkflowRunState): WorkflowSchedulerResult {
+function workflowSchedulerResult(
+  state: WorkflowRunState,
+  interrupted = false,
+): WorkflowSchedulerResult {
+  if (interrupted) {
+    return {
+      state: "interrupted",
+      runId: state.runId,
+      ...(state.error !== undefined ? { error: state.error } : {}),
+    };
+  }
   switch (state.status) {
     case "running":
       return { state: "running", runId: state.runId };
@@ -861,12 +873,6 @@ function workflowSchedulerResult(state: WorkflowRunState): WorkflowSchedulerResu
       return { state: "waiting", runId: state.runId };
     case "completed":
       return { state: "succeeded", runId: state.runId };
-    case "interrupted":
-      return {
-        state: "interrupted",
-        runId: state.runId,
-        ...(state.error !== undefined ? { error: state.error } : {}),
-      };
     case "failed":
     case "timed_out":
     case "cancelled":

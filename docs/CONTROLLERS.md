@@ -161,9 +161,9 @@ Mutation policy stays in deterministic effect drivers. Agent workflows return fi
 
 `ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key.
 
-A child run is one immutable attempt. Its existing run bundle remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can mark an abandoned run as interrupted and create another attempt for the same stable request.
+A child run is one immutable attempt. Its existing run bundle remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can record an abandoned attempt and create another attempt for the same stable request.
 
-The workflow scheduler marks an abandoned running bundle as `interrupted`. The child request then starts another immutable attempt on its next reconciliation. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
+The workflow scheduler records an abandoned running bundle as `failed` with a final `run_interrupted` trace event. The controller store treats that child attempt as `interrupted`, so the next reconciliation starts another immutable attempt. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
 
 ## Deletion and cleanup
 

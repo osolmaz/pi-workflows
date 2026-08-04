@@ -149,7 +149,7 @@ describe("WorkflowEngineScheduler", () => {
     ).rejects.toThrow("cancelled");
   });
 
-  it("marks an abandoned run bundle as interrupted", async () => {
+  it("marks an abandoned bundle failed and recovers its interrupted attempt", async () => {
     const outputRoot = await makeTempDir("pi-controller-child-runs");
     const store = new WorkflowRunStore(outputRoot);
     const state = runningState("abandoned-run");
@@ -181,12 +181,25 @@ describe("WorkflowEngineScheduler", () => {
     expect((await import("../src/workflows/store.js")).readRunBundle).toBeDefined();
     const bundle = await (await import("../src/workflows/store.js")).readRunBundle(runDir);
     expect(bundle?.state).toMatchObject({
-      status: "interrupted",
+      status: "failed",
       error: "Workflow host stopped before the run finished",
     });
     expect(await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8")).toContain(
       '"type":"run_interrupted"',
     );
+
+    const recovered = await scheduler.ensure(
+      {
+        requestId: "request-1",
+        attempt: 1,
+        workflow: "child",
+        input: {},
+        runId: "abandoned-run",
+      },
+      new AbortController().signal,
+      () => {},
+    );
+    expect(recovered).toMatchObject({ state: "interrupted", runId: "abandoned-run" });
   });
 
   it("rejects unsafe and duplicate run ids", async () => {

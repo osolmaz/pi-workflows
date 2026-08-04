@@ -313,7 +313,7 @@ if (run.state !== "succeeded") {
 }
 ```
 
-Child workflow completion queues the parent resource again. A running child left by a stopped host is marked `interrupted`, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
+Child workflow completion queues the parent resource again. A running child left by a stopped host is recorded as a failed run bundle with a `run_interrupted` event. The controller treats that child attempt as interrupted, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
 
 See [CONTROLLERS.md](CONTROLLERS.md) for controller definitions and the full recovery contract.
 
