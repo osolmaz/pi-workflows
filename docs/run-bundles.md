@@ -178,8 +178,10 @@ The full run projection (`WorkflowRunState` in
 
 - `status` is one of `running`, `waiting`, `completed`, `failed`, `timed_out`,
   or `cancelled`. A controller host records an abandoned bundle as `failed`
-  with a final `run_interrupted` trace event. The controller store can then
-  retry it as an interrupted child attempt without changing this schema.
+  with a final `run_interrupted` trace event. Before doing that, recovery checks
+  the trace tail and repairs a stale projection when the terminal event was
+  already appended. The controller store can then retry a genuinely abandoned
+  child attempt without changing this schema.
 - While a node is executing, `currentNode` and `currentAttemptId` identify it.
   `currentNodeStartedAt` and `statusDetail` add timing and display context.
   These fields disappear when the node finishes. The executing node's type comes from the definition

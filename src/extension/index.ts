@@ -484,12 +484,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const store = new WorkflowRunStore();
       const bundle = await readRunBundle(store.runDirFor(request.runId));
       if (bundle !== null) {
-        if (bundle.state.status === "running") {
-          await store.markRunInterrupted(request.runId);
-          return { state: "interrupted", runId: request.runId };
+        const recovered =
+          bundle.state.status === "running"
+            ? await store.markRunInterrupted(request.runId)
+            : bundle;
+        if (recovered !== null) {
+          const lastTraceEvent = await readLastTraceEvent(
+            recovered.runDir,
+            recovered.manifest.paths.trace,
+          );
+          return workflowSchedulerResult(
+            recovered.state,
+            lastTraceEvent?.type === "run_interrupted",
+          );
         }
-        const lastTraceEvent = await readLastTraceEvent(bundle.runDir, bundle.manifest.paths.trace);
-        return workflowSchedulerResult(bundle.state, lastTraceEvent?.type === "run_interrupted");
+        return { state: "pending" };
       }
     }
     if (controllerContext === null) {

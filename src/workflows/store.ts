@@ -168,12 +168,13 @@ export class WorkflowRunStore {
     if (bundle === null || bundle.state.status !== "running") {
       return bundle;
     }
+    const lastTraceEvent = await readLastTraceEvent(runDir, bundle.manifest.paths.trace);
     const counts = await this.sessionCounts(runDir);
     const sessionBound = bundle.manifest.paths.session !== undefined;
     const captureFinished =
       bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
     this.contexts.set(runDir, {
-      traceSeq: bundle.state.traceSeq,
+      traceSeq: Math.max(bundle.state.traceSeq, lastTraceEvent?.seq ?? 0),
       sessionSeq: counts.entryCount,
       sessionEventSeq: counts.lastEventSeq,
       sessionBound,
@@ -182,6 +183,11 @@ export class WorkflowRunStore {
       lock: Promise.resolve(),
       sessionEventLock: Promise.resolve(),
     });
+    const state = bundle.state;
+    if (lastTraceEvent !== null && recoverTerminalProjection(state, lastTraceEvent)) {
+      await this.writeLoadedProjections(runDir, state);
+      return await readRunBundle(runDir);
+    }
     if (sessionBound && !captureFinished) {
       await this.writeSessionCapture(runDir, {
         schema: SESSION_CAPTURE_SCHEMA,
@@ -195,7 +201,6 @@ export class WorkflowRunStore {
         },
       });
     }
-    const state = bundle.state;
     state.status = "failed";
     state.finishedAt = new Date().toISOString();
     state.error = reason;
@@ -204,10 +209,15 @@ export class WorkflowRunStore {
     delete state.currentNodeStartedAt;
     delete state.statusDetail;
     delete state.paused;
-    await this.writeSnapshot(runDir, state, {
-      scope: "run",
-      type: "run_interrupted",
-      payload: { error: reason },
+    await this.withRunLock(runDir, async () => {
+      const traceEvent = await this.appendTraceEvent(runDir, state.runId, {
+        scope: "run",
+        type: "run_interrupted",
+        payload: { error: reason },
+      });
+      state.traceSeq = traceEvent.seq;
+      state.updatedAt = traceEvent.at;
+      await this.writeLoadedProjections(runDir, state);
     });
     return await readRunBundle(runDir);
   }
@@ -370,6 +380,57 @@ export class WorkflowRunStore {
         session: context.sessionBound,
       }),
     );
+  }
+
+  private async writeLoadedProjections(runDir: string, state: WorkflowRunState): Promise<void> {
+    const context = this.contextFor(runDir);
+    await writeJsonAtomic(path.join(runDir, STATE_PATH), state);
+    await writeJsonAtomic(
+      path.join(runDir, MANIFEST_PATH),
+      createManifest(state, { session: context.sessionBound }),
+    );
+  }
+}
+
+function recoverTerminalProjection(state: WorkflowRunState, event: WorkflowTraceEvent): boolean {
+  const status = terminalStatusForEvent(event.type);
+  if (status === undefined) {
+    return false;
+  }
+  state.traceSeq = event.seq;
+  state.status = status;
+  state.updatedAt = event.at;
+  state.finishedAt = event.at;
+  if (typeof event.payload.error === "string") {
+    state.error = event.payload.error;
+  }
+  if (typeof event.payload.waitingOn === "string") {
+    state.waitingOn = event.payload.waitingOn;
+  }
+  if (Object.hasOwn(event.payload, "finalOutput")) {
+    state.finalOutput = event.payload.finalOutput;
+  }
+  delete state.currentNode;
+  delete state.currentAttemptId;
+  delete state.currentNodeStartedAt;
+  return true;
+}
+
+function terminalStatusForEvent(type: string): WorkflowRunState["status"] | undefined {
+  switch (type) {
+    case "run_waiting":
+      return "waiting";
+    case "run_completed":
+      return "completed";
+    case "run_failed":
+    case "run_interrupted":
+      return "failed";
+    case "run_timed_out":
+      return "timed_out";
+    case "run_cancelled":
+      return "cancelled";
+    default:
+      return undefined;
   }
 }
 

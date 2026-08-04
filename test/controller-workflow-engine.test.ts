@@ -149,6 +149,97 @@ describe("WorkflowEngineScheduler", () => {
     ).rejects.toThrow("cancelled");
   });
 
+  it.each([
+    ["run_waiting", "waiting", { status: "waiting", waitingOn: "approval" }],
+    ["run_failed", "failed", { status: "failed", error: "broken" }],
+    ["run_timed_out", "timed_out", { status: "timed_out", error: "late" }],
+    ["run_cancelled", "cancelled", { status: "cancelled" }],
+    ["run_interrupted", "failed", { error: "host stopped" }],
+  ] as const)("recovers a stale %s projection", async (type, expectedStatus, payload) => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = runningState(`stale-${expectedStatus}`);
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, {
+      scope: "run",
+      type: "run_started",
+      payload: { workflowName: workflow.name, input: {} },
+    });
+    await fs.appendFile(
+      path.join(runDir, "trace.ndjson"),
+      `${JSON.stringify({
+        seq: 2,
+        at: "2026-08-04T00:00:01.000Z",
+        scope: "run",
+        type,
+        runId: state.runId,
+        payload,
+      })}\n`,
+      "utf8",
+    );
+
+    const recovered = await store.markRunInterrupted(state.runId);
+
+    expect(recovered?.state.status).toBe(expectedStatus);
+    expect(recovered?.state.traceSeq).toBe(2);
+    const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    expect(trace.trim().split("\n")).toHaveLength(2);
+  });
+
+  it("recovers a terminal trace event when its state projection is stale", async () => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = runningState("completed-before-projection");
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, {
+      scope: "run",
+      type: "run_started",
+      payload: { workflowName: workflow.name, input: {} },
+    });
+    const completedAt = "2026-08-04T00:00:01.000Z";
+    await fs.appendFile(
+      path.join(runDir, "trace.ndjson"),
+      `${JSON.stringify({
+        seq: 2,
+        at: completedAt,
+        scope: "run",
+        type: "run_completed",
+        runId: state.runId,
+        payload: { status: "completed", finalOutput: { ok: true } },
+      })}\n`,
+      "utf8",
+    );
+    const scheduler = new WorkflowEngineScheduler({
+      store,
+      resolveWorkflow: async () => ({ workflow }),
+      createEngine: () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
+    });
+
+    const result = await scheduler.ensure(
+      {
+        requestId: "request-completed",
+        attempt: 1,
+        workflow: "child",
+        input: {},
+        runId: state.runId,
+      },
+      new AbortController().signal,
+      () => {},
+    );
+
+    expect(result).toMatchObject({ state: "succeeded", runId: state.runId });
+    const bundle = await (await import("../src/workflows/store.js")).readRunBundle(runDir);
+    expect(bundle?.state).toMatchObject({
+      status: "completed",
+      traceSeq: 2,
+      finishedAt: completedAt,
+      finalOutput: { ok: true },
+    });
+    const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    expect(trace).not.toContain('"type":"run_interrupted"');
+    expect(trace.trim().split("\n")).toHaveLength(2);
+  });
+
   it("marks an abandoned bundle failed and recovers its interrupted attempt", async () => {
     const outputRoot = await makeTempDir("pi-controller-child-runs");
     const store = new WorkflowRunStore(outputRoot);
@@ -159,6 +250,18 @@ describe("WorkflowEngineScheduler", () => {
       type: "run_started",
       payload: { workflowName: workflow.name, input: {} },
     });
+    await fs.appendFile(
+      path.join(runDir, "trace.ndjson"),
+      `${JSON.stringify({
+        seq: 2,
+        at: "2026-08-04T00:00:00.500Z",
+        scope: "run",
+        type: "run_paused",
+        runId: state.runId,
+        payload: {},
+      })}\n`,
+      "utf8",
+    );
     const scheduler = new WorkflowEngineScheduler({
       store,
       resolveWorkflow: async () => ({ workflow }),
@@ -182,11 +285,17 @@ describe("WorkflowEngineScheduler", () => {
     const bundle = await (await import("../src/workflows/store.js")).readRunBundle(runDir);
     expect(bundle?.state).toMatchObject({
       status: "failed",
+      traceSeq: 3,
       error: "Workflow host stopped before the run finished",
     });
-    expect(await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8")).toContain(
-      '"type":"run_interrupted"',
-    );
+    const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    expect(trace).toContain('"type":"run_interrupted"');
+    expect(
+      trace
+        .trim()
+        .split("\n")
+        .map((line) => (JSON.parse(line) as { seq: number }).seq),
+    ).toEqual([1, 2, 3]);
 
     const recovered = await scheduler.ensure(
       {

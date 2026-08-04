@@ -49,17 +49,23 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
     if (request.runId !== undefined) {
       const bundle = await readRunBundle(this.options.store.runDirFor(request.runId));
       if (bundle !== null) {
-        if (bundle.state.status === "running") {
-          await this.options.store.markRunInterrupted(request.runId);
-          return { state: "interrupted", runId: request.runId };
+        const recovered =
+          bundle.state.status === "running"
+            ? await this.options.store.markRunInterrupted(request.runId)
+            : bundle;
+        if (recovered !== null) {
+          const lastTraceEvent = await readLastTraceEvent(
+            recovered.runDir,
+            recovered.manifest.paths.trace,
+          );
+          return resultFromStatus(
+            recovered.state.status,
+            request.runId,
+            recovered.state.error,
+            lastTraceEvent?.type === "run_interrupted",
+          );
         }
-        const lastTraceEvent = await readLastTraceEvent(bundle.runDir, bundle.manifest.paths.trace);
-        return resultFromStatus(
-          bundle.state.status,
-          request.runId,
-          bundle.state.error,
-          lastTraceEvent?.type === "run_interrupted",
-        );
+        return { state: "pending" };
       }
     }
 

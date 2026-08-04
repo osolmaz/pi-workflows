@@ -24,6 +24,7 @@ const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_BASE_BACKOFF_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 60_000;
 const DEFAULT_JITTER_RATIO = 0.2;
+const MIN_LEASE_MS = 300;
 
 export type ControllerManagerOptions = {
   store: ControllerStore;
@@ -88,6 +89,9 @@ export class ControllerManager {
       "defaultTimeoutMs",
     );
     this.leaseMs = positiveInteger(options.leaseMs ?? DEFAULT_LEASE_MS, "leaseMs");
+    if (this.leaseMs < MIN_LEASE_MS) {
+      throw new Error(`leaseMs must be at least ${MIN_LEASE_MS}`);
+    }
     this.pollIntervalMs = positiveInteger(
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
       "pollIntervalMs",
@@ -484,15 +488,19 @@ async function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return;
   }
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-    signal.addEventListener(
-      "abort",
-      () => {
+    let timer: NodeJS.Timeout | undefined;
+    const finish = () => {
+      if (timer !== undefined) {
         clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+      }
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    timer.unref?.();
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) {
+      finish();
+    }
   });
 }

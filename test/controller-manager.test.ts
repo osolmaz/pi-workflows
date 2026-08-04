@@ -56,6 +56,9 @@ describe("ControllerManager", () => {
     expect(
       () => new ControllerManager({ store, controllers: [controller], jitterRatio: 2 }),
     ).toThrow(/between/);
+    expect(() => new ControllerManager({ store, controllers: [controller], leaseMs: 299 })).toThrow(
+      /at least 300/,
+    );
     const other = defineController<{}, {}>({
       name: "other",
       initialStatus: () => ({}),
