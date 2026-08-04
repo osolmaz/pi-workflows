@@ -1,10 +1,5 @@
 import { WorkflowEngine } from "../workflows/engine.js";
-import {
-  createRunId,
-  readLastTraceEvent,
-  readRunBundle,
-  type WorkflowRunStore,
-} from "../workflows/store.js";
+import { readLastTraceEvent, readRunBundle, type WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowDefinition,
   WorkflowRunResult,
@@ -46,31 +41,29 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       return { state: "running", runId: active.runId };
     }
 
-    if (request.runId !== undefined) {
-      const bundle = await readRunBundle(this.options.store.runDirFor(request.runId));
-      if (bundle !== null) {
-        const recovered =
-          bundle.state.status === "running"
-            ? await this.options.store.markRunInterrupted(request.runId)
-            : bundle;
-        if (recovered !== null) {
-          const lastTraceEvent = await readLastTraceEvent(
-            recovered.runDir,
-            recovered.manifest.paths.trace,
-          );
-          return resultFromStatus(
-            recovered.state.status,
-            request.runId,
-            recovered.state.error,
-            lastTraceEvent?.type === "run_interrupted",
-          );
-        }
-        return { state: "pending" };
+    const bundle = await readRunBundle(this.options.store.runDirFor(request.runId));
+    if (bundle !== null) {
+      const recovered =
+        bundle.state.status === "running"
+          ? await this.options.store.markRunInterrupted(request.runId)
+          : bundle;
+      if (recovered !== null) {
+        const lastTraceEvent = await readLastTraceEvent(
+          recovered.runDir,
+          recovered.manifest.paths.trace,
+        );
+        return resultFromStatus(
+          recovered.state.status,
+          request.runId,
+          recovered.state.error,
+          lastTraceEvent?.type === "run_interrupted",
+        );
       }
+      return { state: "pending" };
     }
 
     const resolved = await this.options.resolveWorkflow(request.workflow);
-    const runId = request.runId ?? createRunId(resolved.workflow.name);
+    const runId = request.runId;
     const engine = this.options.createEngine(request);
     const promise = engine
       .run(resolved.workflow, request.input, {

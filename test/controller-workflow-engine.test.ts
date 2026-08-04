@@ -50,6 +50,7 @@ describe("WorkflowEngineScheduler", () => {
       attempt: 1,
       workflow: "child",
       input: {},
+      runId: "child-run",
     };
     const first = await scheduler.ensure(request, new AbortController().signal, complete);
     const second = await scheduler.ensure(
@@ -99,7 +100,13 @@ describe("WorkflowEngineScheduler", () => {
       (result) => completed.push(result),
     );
     await scheduler.ensure(
-      { requestId: "failed", attempt: 1, workflow: "failing-child", input: {} },
+      {
+        requestId: "failed",
+        attempt: 1,
+        workflow: "failing-child",
+        input: {},
+        runId: "failed-run",
+      },
       new AbortController().signal,
       (result) => completed.push(result),
     );
@@ -121,7 +128,13 @@ describe("WorkflowEngineScheduler", () => {
       createEngine: () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
     });
     await scheduler.ensure(
-      { requestId: "callback", attempt: 1, workflow: "child", input: {} },
+      {
+        requestId: "callback",
+        attempt: 1,
+        workflow: "child",
+        input: {},
+        runId: "callback-run",
+      },
       new AbortController().signal,
       () => {
         throw new Error("store closed");
@@ -142,7 +155,13 @@ describe("WorkflowEngineScheduler", () => {
     abort.abort(new Error("cancelled"));
     await expect(
       scheduler.ensure(
-        { requestId: "cancelled", attempt: 1, workflow: "child", input: {} },
+        {
+          requestId: "cancelled",
+          attempt: 1,
+          workflow: "child",
+          input: {},
+          runId: "cancelled-run",
+        },
         abort.signal,
         () => {},
       ),

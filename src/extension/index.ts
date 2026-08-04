@@ -480,32 +480,25 @@ export default function piWorkflows(pi: ExtensionAPI) {
         ? { state: "running", runId: activeRun.runId }
         : workflowSchedulerResult(activeRun.lastState);
     }
-    if (request.runId !== undefined) {
-      const store = new WorkflowRunStore();
-      const bundle = await readRunBundle(store.runDirFor(request.runId));
-      if (bundle !== null) {
-        const recovered =
-          bundle.state.status === "running"
-            ? await store.markRunInterrupted(request.runId)
-            : bundle;
-        if (recovered !== null) {
-          const lastTraceEvent = await readLastTraceEvent(
-            recovered.runDir,
-            recovered.manifest.paths.trace,
-          );
-          return workflowSchedulerResult(
-            recovered.state,
-            lastTraceEvent?.type === "run_interrupted",
-          );
-        }
-        return { state: "pending" };
+    const store = new WorkflowRunStore();
+    const bundle = await readRunBundle(store.runDirFor(request.runId));
+    if (bundle !== null) {
+      const recovered =
+        bundle.state.status === "running" ? await store.markRunInterrupted(request.runId) : bundle;
+      if (recovered !== null) {
+        const lastTraceEvent = await readLastTraceEvent(
+          recovered.runDir,
+          recovered.manifest.paths.trace,
+        );
+        return workflowSchedulerResult(recovered.state, lastTraceEvent?.type === "run_interrupted");
       }
+      return { state: "pending" };
     }
     if (controllerContext === null) {
       return { state: "pending" };
     }
     const runId = await startRun(controllerContext, request.workflow, request.input, {
-      ...(request.runId !== undefined ? { runId: request.runId } : {}),
+      runId: request.runId,
       childKey,
       onFinish: onComplete,
       presentation: false,

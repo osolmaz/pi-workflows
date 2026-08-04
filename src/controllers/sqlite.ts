@@ -380,13 +380,15 @@ export class SqliteControllerStore implements ControllerStore {
 
   renewClaim(claim: ControllerQueueClaim, leaseMs: number, now?: string): boolean {
     validateDuration(leaseMs, "leaseMs");
-    const expiresAt = epoch(validTimestamp(now)) + leaseMs;
+    const nowMs = epoch(validTimestamp(now));
+    const expiresAt = nowMs + leaseMs;
     const result = this.database
       .prepare(
         `UPDATE queue SET claim_expires_at = ?
-         WHERE controller = ? AND resource_key = ? AND claim_token = ?`,
+         WHERE controller = ? AND resource_key = ? AND claim_token = ?
+           AND claim_expires_at > ?`,
       )
-      .run(expiresAt, claim.controller, claim.key, claim.token);
+      .run(expiresAt, claim.controller, claim.key, claim.token, nowMs);
     return result.changes === 1;
   }
 

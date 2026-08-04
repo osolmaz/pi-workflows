@@ -206,10 +206,13 @@ describe("ControllerWorkflowCoordinator", () => {
   it("keeps a stable child request and reports completion to the parent", async () => {
     const { store, resource } = await fixture();
     const scheduler: ControllerWorkflowScheduler = {
-      ensure: vi.fn(async (request) => ({
-        state: "running" as const,
-        runId: request.runId ?? `run-${request.attempt}`,
-      })),
+      ensure: vi.fn(async (request) => {
+        expect(store.getWorkflowByRequestId(request.requestId)).toMatchObject({
+          attempt: request.attempt,
+          runId: request.runId,
+        });
+        return { state: "running" as const, runId: request.runId };
+      }),
     };
     const coordinator = new ControllerWorkflowCoordinator(store, scheduler);
     const workflows = coordinator.forResource(resource, new AbortController().signal);
@@ -224,20 +227,56 @@ describe("ControllerWorkflowCoordinator", () => {
       input: { head: "a" },
     });
 
-    expect(first).toMatchObject({ state: "running", runId: "run-1", attempt: 1 });
+    expect(first).toMatchObject({
+      state: "running",
+      runId: expect.any(String),
+      attempt: 1,
+    });
     expect(second.requestId).toBe(first.requestId);
     const completed = coordinator.complete(first.requestId, {
       state: "succeeded",
-      runId: "run-1",
+      ...(first.runId !== undefined ? { runId: first.runId } : {}),
     });
     expect(completed.state).toBe("succeeded");
     expect(store.listQueue()).toHaveLength(1);
   });
 
+  it("persists a run ID before scheduler startup and reuses it after failure", async () => {
+    const { store, resource } = await fixture();
+    let reservedRunId: string | undefined;
+    const firstCoordinator = new ControllerWorkflowCoordinator(store, {
+      ensure: async (request) => {
+        reservedRunId = request.runId;
+        expect(store.getWorkflowByRequestId(request.requestId)?.runId).toBe(request.runId);
+        throw new Error("host stopped after startup");
+      },
+    });
+    const childRequest = { requestKey: "repair:a", workflow: "repair", input: {} };
+    await expect(
+      firstCoordinator.forResource(resource, new AbortController().signal).ensure(childRequest),
+    ).rejects.toThrow(/host stopped/);
+    expect(reservedRunId).toEqual(expect.any(String));
+
+    const secondCoordinator = new ControllerWorkflowCoordinator(store, {
+      ensure: async (request) => {
+        expect(request.runId).toBe(reservedRunId);
+        return { state: "interrupted", runId: request.runId };
+      },
+    });
+    const recovered = await secondCoordinator
+      .forResource(resource, new AbortController().signal)
+      .ensure(childRequest);
+    expect(recovered).toMatchObject({
+      state: "interrupted",
+      attempt: 1,
+      runId: reservedRunId,
+    });
+  });
+
   it("starts another attempt after interruption", async () => {
     const { store, resource } = await fixture();
     const scheduler: ControllerWorkflowScheduler = {
-      ensure: async (request) => ({ state: "running", runId: `run-${request.attempt}` }),
+      ensure: async (request) => ({ state: "running", runId: request.runId }),
     };
     const coordinator = new ControllerWorkflowCoordinator(store, scheduler);
     const workflows = coordinator.forResource(resource, new AbortController().signal);
@@ -255,7 +294,12 @@ describe("ControllerWorkflowCoordinator", () => {
       workflow: "repair",
       input: {},
     });
-    expect(second).toMatchObject({ attempt: 2, runId: "run-2", state: "running" });
+    expect(second).toMatchObject({
+      attempt: 2,
+      runId: expect.any(String),
+      state: "running",
+    });
+    expect(second.runId).not.toBe(first.runId);
   });
 
   it("returns terminal requests and rejects unknown completion IDs", async () => {

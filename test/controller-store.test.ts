@@ -236,6 +236,7 @@ describe("SqliteControllerStore queue", () => {
     expect(
       store.claimNext({ controllers: ["pull-request"], leaseMs: 500, now: T1 }),
     ).toBeUndefined();
+    expect(store.renewClaim(first as NonNullable<typeof first>, 2_000, T2)).toBe(false);
     const recovered = store.claimNext({ controllers: ["pull-request"], leaseMs: 500, now: T2 });
     expect(recovered).toBeDefined();
     store.requeueClaim(

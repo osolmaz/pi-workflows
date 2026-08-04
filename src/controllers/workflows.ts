@@ -1,3 +1,4 @@
+import { createRunId } from "../workflows/store.js";
 import { jsonFingerprint } from "./json.js";
 import type { ControllerStore } from "./store.js";
 import type {
@@ -13,7 +14,7 @@ export type WorkflowSchedulerRequest = {
   attempt: number;
   workflow: string;
   input: unknown;
-  runId?: string;
+  runId: string;
 };
 
 export type WorkflowSchedulerResult = {
@@ -80,9 +81,18 @@ export class ControllerWorkflowCoordinator {
       record = this.store.updateWorkflow(record.requestId, {
         state: "pending",
         attempt: record.attempt + 1,
-        runId: null,
+        runId: createRunId(record.workflow),
         error: null,
       });
+    } else if (record.runId === undefined) {
+      record = this.store.updateWorkflow(record.requestId, {
+        state: "pending",
+        runId: createRunId(record.workflow),
+        error: null,
+      });
+    }
+    if (record.runId === undefined) {
+      throw new Error(`Workflow request has no reserved run ID: ${record.requestId}`);
     }
     const result = await this.scheduler.ensure(
       {
@@ -90,7 +100,7 @@ export class ControllerWorkflowCoordinator {
         attempt: record.attempt,
         workflow: record.workflow,
         input: request.input,
-        ...(record.runId !== undefined ? { runId: record.runId } : {}),
+        runId: record.runId,
       },
       signal,
       (completed) => {
