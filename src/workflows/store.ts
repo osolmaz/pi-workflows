@@ -94,13 +94,11 @@ export class WorkflowRunStore {
   }
 
   runDirFor(runId: string): string {
+    assertValidRunId(runId);
     return path.join(this.outputRoot, runId);
   }
 
   async quarantineIncompleteRun(runId: string): Promise<string | undefined> {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
-      throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
-    }
     const runDir = this.runDirFor(runId);
     let runStat;
     try {
@@ -178,7 +176,6 @@ export class WorkflowRunStore {
     state: WorkflowRunState,
   ): Promise<string> {
     const runDir = this.runDirFor(state.runId);
-    this.contexts.delete(runDir);
     return await this.withRunLock(runDir, async () => {
       await fs.mkdir(this.outputRoot, { recursive: true, mode: 0o700 });
       await fs.mkdir(runDir, { recursive: false, mode: 0o700 });
@@ -465,6 +462,12 @@ function terminalStatusForEvent(type: string): WorkflowRunState["status"] | unde
       return "cancelled";
     default:
       return undefined;
+  }
+}
+
+function assertValidRunId(runId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
+    throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
   }
 }
 

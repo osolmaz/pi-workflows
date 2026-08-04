@@ -386,6 +386,29 @@ describe("WorkflowEngineScheduler", () => {
     const store = new WorkflowRunStore(outputRoot);
     const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
     await expect(engine.run(workflow, {}, { runId: "../escape" })).rejects.toThrow(/Invalid/);
+    await expect(store.markRunInterrupted("../escape")).rejects.toThrow(/Invalid/);
+
+    const activeState = runningState("active-duplicate");
+    const activeDir = await store.initializeRunBundle(workflow, activeState);
+    await store.writeSnapshot(activeDir, activeState, {
+      scope: "run",
+      type: "run_started",
+      payload: {},
+    });
+    await expect(
+      store.initializeRunBundle(workflow, runningState("active-duplicate")),
+    ).rejects.toThrow();
+    await store.writeSnapshot(activeDir, activeState, {
+      scope: "run",
+      type: "run_paused",
+      payload: {},
+    });
+    const activeTrace = (await fs.readFile(path.join(activeDir, "trace.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { seq: number }).seq);
+    expect(activeTrace).toEqual([1, 2]);
+
     await engine.run(workflow, {}, { runId: "fixed-run" });
     await expect(engine.run(workflow, {}, { runId: "fixed-run" })).rejects.toThrow();
     expect(path.basename(store.runDirFor("fixed-run"))).toBe("fixed-run");
