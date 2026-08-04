@@ -71,9 +71,9 @@ Then, from any pi conversation:
 ```
 
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
-lets the current step finish and then holds the run before the next node —
-useful when you want to interject in the conversation mid-workflow —
-and `/workflow resume` continues it. Pressing escape to interrupt a turn
+lets the current step finish and then holds the run before the next node. This
+is useful when you want to interject in the conversation mid-workflow.
+`/workflow resume` continues it. Pressing escape to interrupt a turn
 pauses the workflow automatically, so the run never nudges the model while
 you have taken the conversation back; `/workflow resume` re-delivers the
 pending step prompt. `/workflow cancel` stops the active run; if the last run
@@ -168,6 +168,36 @@ the model to pick from a fixed set of choices and validates the answer, and
 See [docs/workflows.md](docs/workflows.md) for the full authoring reference
 and [docs/run-bundles.md](docs/run-bundles.md) for the on-disk run format.
 
+## Controllers
+
+Controllers keep long-running automation aligned with current external state. They store desired state in `spec`, report observed state through conditions and `status`, and reconcile a deduplicated resource key whenever an event or retry makes it ready.
+
+Put `*.controller.ts` files in `.pi/controllers/` or `~/.pi/agent/controllers/`. Import the API from `@osolmaz/pi-workflows/controllers`:
+
+```typescript
+import { conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
+
+export default defineController({
+  name: "example",
+  initialStatus: () => ({ phase: "new" }),
+  reconcile: (ctx, resource) =>
+    ctx.settled({
+      controllerStatus: { phase: "done" },
+      conditions: [conditionTrue("Ready", "Complete")],
+    }),
+});
+```
+
+Apply and inspect resources from Pi:
+
+```text
+/controller apply example item-1 {"enabled":true}
+/controller get example item-1
+/controller reconcile example item-1
+```
+
+The standalone CLI provides read-only views with `pi-workflows controllers` and `pi-workflows controller <controller> <key>`. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md) for reconciliation, queue, effect, and child workflow semantics.
+
 ## Examples
 
 The [examples/workflows/](examples/workflows/) directory mirrors the acpx
@@ -191,6 +221,10 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   journals every result; an assess decision keeps looping until a kept
   result plateaus or a diverse generation all fails, then conclusions are
   written before the winner is promoted out of the loop directory.
+
+The controller example at `examples/controllers/pull-request.controller.ts`
+shows child repair work and check polling. It also uses expected-head guards
+and recoverable merge effects.
 
 ## License
 

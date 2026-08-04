@@ -118,17 +118,25 @@ export class WorkflowEngine {
   async run(
     workflow: WorkflowDefinition,
     input: unknown,
-    options: { workflowPath?: string } = {},
+    options: { workflowPath?: string; runId?: string } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
     // Fail before any bundle exists so bad input cannot leave a partial run
     // on disk or silently change shape when state.json round-trips.
     const normalizedInput = input === undefined ? null : input;
     assertJsonSerializable(normalizedInput, "Workflow run input");
+    if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
+      throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
+    }
     this.cancelled = false;
     this.paused = false;
 
-    const state = await this.createRunState(workflow, normalizedInput, options.workflowPath);
+    const state = await this.createRunState(
+      workflow,
+      normalizedInput,
+      options.workflowPath,
+      options.runId,
+    );
     const runDir = await this.store.initializeRunBundle(workflow, state);
     await this.persist(runDir, state, {
       scope: "run",
@@ -186,12 +194,13 @@ export class WorkflowEngine {
     workflow: WorkflowDefinition,
     input: unknown,
     workflowPath: string | undefined,
+    runId: string | undefined,
   ): Promise<WorkflowRunState> {
     const now = new Date().toISOString();
     return {
       schema: RUN_STATE_SCHEMA,
       traceSeq: 0,
-      runId: createRunId(workflow.name),
+      runId: runId ?? createRunId(workflow.name),
       workflowName: workflow.name,
       ...(await this.resolveTitleBounded(workflow, input)),
       ...(workflowPath !== undefined ? { workflowPath } : {}),

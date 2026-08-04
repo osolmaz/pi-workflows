@@ -331,6 +331,7 @@ fn status_glyph(status: RunStatus) -> &'static str {
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",
         RunStatus::Cancelled => "~",
+        RunStatus::Interrupted => "!",
     }
 }
 
@@ -341,7 +342,7 @@ fn status_color(status: RunStatus, palette: &Palette) -> ratatui::style::Color {
         RunStatus::Completed => palette.success,
         RunStatus::Failed => palette.error,
         RunStatus::TimedOut => palette.timed_out,
-        RunStatus::Cancelled => palette.cancelled,
+        RunStatus::Cancelled | RunStatus::Interrupted => palette.cancelled,
     }
 }
 

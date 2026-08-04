@@ -2,13 +2,27 @@
 title: Add a durable controller runtime
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-04
+updated: 2026-08-04
+status: implemented
 ---
 
 # Controller runtime plan
 
 Pi Workflows needs a controller mode for automation that spans repeated events, external state changes, and process restarts. The design in [CONTROLLERS.md](../CONTROLLERS.md) follows the Kubernetes controller pattern. Durable resources hold desired and observed state, events enqueue resource keys, and each reconciliation reads current facts before acting.
 
-The implementation should keep the graph engine focused on finite jobs. Controllers will start and observe workflows through a child-run interface. Workflow graphs will keep their finite execution model.
+The implementation keeps the graph engine focused on finite jobs. Controllers start and observe workflows through a child-run interface. Workflow graphs keep their finite execution model.
+
+## Shipped design
+
+The implementation follows [CONTROLLERS.md](../CONTROLLERS.md) with these resolved choices:
+
+- The local store uses `better-sqlite3` because the Node 22 SQLite module still emits an experimental warning.
+- Controllers are discovered from `.pi/controllers/` and `~/.pi/agent/controllers/`.
+- The existing `pi-workflows` executable provides read-only `controllers` and `controller` commands. Headless workers use the public `ControllerManager` API.
+- The TypeScript CLI lists and inspects resources. The Rust viewer understands interrupted workflow runs. Resource views stay in the CLI for this release.
+- Per-controller concurrency limits are manager configuration, while controller definitions contain reconciliation behavior and timeout only.
+
+The persisted model was reviewed with Schemator before implementation. The review removed generic timestamps from public resources, kept provider details opaque, moved concurrency policy to the manager, and tightened event payloads to recursive JSON values. The run failed aggregate validation on two proposed structural moves, so those moves received a manual review instead of automatic application.
 
 ## Requirements
 
@@ -29,7 +43,7 @@ The default controller store will use SQLite and local filesystem permissions th
 
 The first release will support several workers in one process. Queue claims will survive process failure, but cross-host leader election will wait for a real remote deployment.
 
-Existing workflow definitions and run bundles remain valid. Controller resources use a separate schema and store. Child workflow attempts continue to produce the current run-bundle format, with additive operation-link fields where needed.
+Existing workflow definitions and run bundles remain valid. Controller resources use a separate schema and store. Child workflow attempts use the current run-bundle format; their parent links live in the controller store.
 
 ## Open questions
 
@@ -111,7 +125,7 @@ Add a resource list and detail view to the TypeScript viewer first. Extend the R
 
 Build a local pull request controller against a fake GitHub-compatible server. Its spec names a repository, pull request, expected head, requested workflow, and approved mutations. Its status reports the observed head and child run together with check results and readiness conditions.
 
-The controller must re-read the pull request before each effect. A changed head blocks the mutation. Duplicate webhooks and scheduled polls must converge on the same resource and child workflow request. The agent executor receives no write credential.
+The controller must re-read the pull request before each effect. A changed head blocks the mutation. Duplicate webhooks and scheduled polls must converge on the same resource and child workflow request. No credential belongs in the child request. Strict credential isolation requires a separate authenticated effect broker because the Pi host and agent tools share a process environment.
 
 Keep this controller as an example or integration package. GitHub-specific policy must stay outside the controller core.
 
@@ -126,7 +140,7 @@ The work is ready when all of the following hold:
 - Delayed work and expired claims recover after a fresh process opens the store.
 - Each tested process stop around an external effect converges without an unobserved retry.
 - A changed pull request head prevents the acceptance controller from applying its effect.
-- Agent workflow output cannot bypass deterministic authorization and precondition checks.
+- The acceptance controller applies agent output only after deterministic authorization and precondition checks.
 - Pi reload and shutdown leave no in-memory state required for later recovery.
 - Current workflow and viewer tests keep passing, along with run-bundle tests.
 

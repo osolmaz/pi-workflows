@@ -6,16 +6,19 @@ authoring workflows, see [workflows.md](workflows.md).
 ## Layout and boundaries
 
 ```
-src/workflows/   engine core: definitions, graph, engine, store, loader
-src/extension/   pi integration: /workflow command, workflow tool, widget
-src/viewer/      standalone TypeScript TUI viewer over run bundles
+src/workflows/   finite graph engine: definitions, execution, bundles, loader
+src/controllers/ durable resources, queue, reconciliation, effects, child runs
+src/extension/   pi integration: commands, workflow tool, controller host, widget
+src/viewer/      standalone read-only views over runs and controller resources
 tui/             Rust piw viewer and live replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
-imports nothing outside itself and never imports pi. `src/extension` and
-`src/viewer` may import `src/workflows` and never each other. The viewer
-observes runs purely through the bundle files, so it works from any process.
+imports nothing outside itself and never imports Pi. `src/controllers` may
+import the public workflow engine for child-run scheduling. `src/extension`
+and `src/viewer` may import both layers and never each other. The viewer reads
+run bundles and opens the controller SQLite database read-only, so it works
+from any process.
 
 Within `src/render`, `graph.ts` computes a pure layered layout (ported from
 the acpx replay viewer: labelled switch expansion, DFS back-edge detection,
@@ -61,9 +64,8 @@ the extension side of that seam.
 
 Temporal session capture follows the same boundary. `src/extension` listens to
 Pi's documented `turn_*`, `message_*`, and `tool_execution_*` hooks and
-normalizes them before passing records to `WorkflowRunStore`. The workflows
-layer owns persisted shapes, ordered append chains, schemas, and validation but
-never imports Pi types. High-rate hooks only stamp and enqueue bounded records;
+normalizes them before passing records to `WorkflowRunStore`. The workflows layer owns persisted shapes and schema validation. It also owns
+ordered append chains but never imports Pi types. High-rate hooks only stamp and enqueue bounded records;
 disk writes run on a separate chain. Capture failures are explicit in
 `session/capture.json` and never fail workflow execution.
 

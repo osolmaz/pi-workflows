@@ -4,16 +4,27 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
-import { WorkflowRunStore, createDefinitionSnapshot } from "../workflows/store.js";
+import {
+  createRunId,
+  readRunBundle,
+  WorkflowRunStore,
+  createDefinitionSnapshot,
+} from "../workflows/store.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowRunResult,
   WorkflowRunState,
 } from "../workflows/types.js";
+import {
+  PiControllerHost,
+  parseControllerArgs,
+  type PiChildWorkflowStarter,
+} from "./controller-host.js";
 import { ConversationStepExecutor } from "./executor.js";
 import { SessionRecorder } from "./recorder.js";
 import { buildWidgetView } from "./widget.js";
@@ -34,7 +45,7 @@ type PresentationPromptBuilder = Exclude<
 >;
 
 type ActiveRun = {
-  runId: string | null;
+  runId: string;
   workflowName: string;
   engine: WorkflowEngine;
   executor: ConversationStepExecutor;
@@ -43,6 +54,17 @@ type ActiveRun = {
   presentationPrompt: WorkflowDefinition["presentationPrompt"];
   generation: number;
   lastState: WorkflowRunState | null;
+  childKey?: string;
+  onFinish?: (result: WorkflowSchedulerResult) => void;
+  completion?: Promise<void>;
+};
+
+type StartRunOptions = {
+  runId?: string;
+  childKey?: string;
+  onFinish?: (result: WorkflowSchedulerResult) => void;
+  presentation?: boolean;
+  quiet?: boolean;
 };
 
 export type ParsedWorkflowArgs =
@@ -97,6 +119,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let runGeneration = 0;
   let presentationAbort: AbortController | null = null;
   let presentationPending: number | null = null;
+  let controllerHost: PiControllerHost | undefined;
+  let controllerContext: ExtensionContext | null = null;
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -314,27 +338,53 @@ export default function piWorkflows(pi: ExtensionAPI) {
         ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — run ended, awaiting your decision (run ${state.runId})`
         : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
+    try {
+      const childResult =
+        run.childKey !== undefined && sessionClosed && state.status === "cancelled"
+          ? {
+              state: "interrupted" as const,
+              runId: state.runId,
+              ...(state.error !== undefined ? { error: state.error } : {}),
+            }
+          : workflowSchedulerResult(state);
+      run.onFinish?.(childResult);
+    } catch (error) {
+      notify(ctx, `Could not record child workflow completion: ${errorMessage(error)}`, "warning");
+    }
     void presentRun(ctx, run, state);
   };
 
-  const startRun = async (ctx: ExtensionCommandContext, ref: string, input: unknown) => {
+  const startRun = async (
+    ctx: ExtensionContext,
+    ref: string,
+    input: unknown,
+    options: StartRunOptions = {},
+  ): Promise<string | undefined> => {
     if (activeRun) {
-      notify(
-        ctx,
-        `A workflow is already running: ${activeRun.workflowName}. Use /workflow cancel first.`,
-        "error",
-      );
-      return;
+      if (!options.quiet) {
+        notify(
+          ctx,
+          `A workflow is already running: ${activeRun.workflowName}. Use /workflow cancel first.`,
+          "error",
+        );
+      }
+      return undefined;
     }
     if (presentationPending !== null) {
-      notify(ctx, "The previous workflow result is still being presented. Wait for it to finish.");
-      return;
+      if (!options.quiet) {
+        notify(
+          ctx,
+          "The previous workflow result is still being presented. Wait for it to finish.",
+        );
+      }
+      return undefined;
     }
     supersedePresentation();
     const generation = runGeneration;
     const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
     const workflow = await loadWorkflowFile(resolved.path);
     const snapshot = createDefinitionSnapshot(workflow);
+    const runId = options.runId ?? createRunId(workflow.name);
 
     const executor = new ConversationStepExecutor({
       sendPrompt: ({ prompt, streaming }) => {
@@ -371,31 +421,32 @@ export default function piWorkflows(pi: ExtensionAPI) {
         await run.recorder?.finish();
       },
       onEvent: (_event, state: WorkflowRunState) => {
-        if (run.runId === null) {
-          run.runId = state.runId;
-        }
         run.lastState = state;
         updateWidget(ctx, state, snapshot);
       },
     });
     const run: ActiveRun = {
-      runId: null,
+      runId,
       workflowName: workflow.name,
       engine,
       executor,
       recorder: null,
       snapshot,
-      presentationPrompt: workflow.presentationPrompt,
+      presentationPrompt: options.presentation === false ? undefined : workflow.presentationPrompt,
       generation,
       lastState: null,
+      ...(options.childKey !== undefined ? { childKey: options.childKey } : {}),
+      ...(options.onFinish !== undefined ? { onFinish: options.onFinish } : {}),
     };
     activeRun = run;
     clearWidgetTimer();
     startWidgetTicker(ctx, run);
-    notify(ctx, `Workflow ${workflow.name} started. Follow it live with: pi-workflows view`);
+    if (!options.quiet) {
+      notify(ctx, `Workflow ${workflow.name} started. Follow it live with: pi-workflows view`);
+    }
 
-    engine
-      .run(workflow, input, { workflowPath: resolved.path })
+    run.completion = engine
+      .run(workflow, input, { workflowPath: resolved.path, runId })
       .then((result) => finishRun(ctx, run, result))
       .catch((error: unknown) => {
         if (activeRun === run) {
@@ -404,8 +455,74 @@ export default function piWorkflows(pi: ExtensionAPI) {
         void run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
-        notify(ctx, `Workflow ${workflow.name} crashed: ${errorMessage(error)}`, "error");
+        const message = errorMessage(error);
+        try {
+          run.onFinish?.({ state: "failed", runId, error: message });
+        } catch {
+          // The original workflow failure remains the primary error.
+        }
+        notify(ctx, `Workflow ${workflow.name} crashed: ${message}`, "error");
       });
+    return runId;
+  };
+
+  const startChild: PiChildWorkflowStarter = async (request, signal, onComplete) => {
+    if (signal.aborted) {
+      throw signal.reason ?? new Error("Child workflow scheduling aborted");
+    }
+    const childKey = `${request.requestId}:${request.attempt}`;
+    if (activeRun !== null) {
+      if (activeRun.childKey !== childKey) {
+        return { state: "pending" };
+      }
+      return activeRun.lastState === null
+        ? { state: "running", runId: activeRun.runId }
+        : workflowSchedulerResult(activeRun.lastState);
+    }
+    if (request.runId !== undefined) {
+      const store = new WorkflowRunStore();
+      const bundle = await readRunBundle(store.runDirFor(request.runId));
+      if (bundle !== null) {
+        if (bundle.state.status === "running") {
+          await store.markRunInterrupted(request.runId);
+          return { state: "interrupted", runId: request.runId };
+        }
+        return workflowSchedulerResult(bundle.state);
+      }
+    }
+    if (controllerContext === null) {
+      return { state: "pending" };
+    }
+    const runId = await startRun(controllerContext, request.workflow, request.input, {
+      ...(request.runId !== undefined ? { runId: request.runId } : {}),
+      childKey,
+      onFinish: onComplete,
+      presentation: false,
+      quiet: true,
+    });
+    return runId === undefined ? { state: "pending" } : { state: "running", runId };
+  };
+
+  const updateControllerStatus = (ctx: ExtensionContext) => {
+    if (controllerHost === undefined) {
+      ctx.ui.setStatus("pi-controllers", undefined);
+      return;
+    }
+    const count = controllerHost.store.listResources().length;
+    ctx.ui.setStatus("pi-controllers", `${count} controller resource${count === 1 ? "" : "s"}`);
+  };
+
+  const ensureControllerHost = async (
+    ctx: ExtensionContext,
+  ): Promise<PiControllerHost | undefined> => {
+    controllerContext = ctx;
+    if (controllerHost !== undefined) {
+      return controllerHost;
+    }
+    controllerHost = await PiControllerHost.create({ cwd: ctx.cwd, startChild });
+    controllerHost?.start();
+    updateControllerStatus(ctx);
+    return controllerHost;
   };
 
   const listWorkflows = async (ctx: ExtensionCommandContext) => {
@@ -509,6 +626,74 @@ export default function piWorkflows(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("controller", {
+    description: "Manage durable controllers: list, get, apply, reconcile, delete, start, or stop",
+    getArgumentCompletions: async (prefix: string) => {
+      const items = ["list", "get", "apply", "reconcile", "delete", "start", "stop"]
+        .filter((value) => value.startsWith(prefix))
+        .map((value) => ({ value, label: value }));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      let parsed;
+      try {
+        parsed = parseControllerArgs(args);
+      } catch (error) {
+        notify(ctx, errorMessage(error), "error");
+        return;
+      }
+      const host = await ensureControllerHost(ctx);
+      if (host === undefined) {
+        notify(
+          ctx,
+          "No controllers found. Put *.controller.ts files in .pi/controllers/ or ~/.pi/agent/controllers/.",
+          "warning",
+        );
+        return;
+      }
+      try {
+        switch (parsed.kind) {
+          case "list":
+            notify(ctx, host.list());
+            break;
+          case "get":
+            notify(ctx, host.get(parsed.controller, parsed.key));
+            break;
+          case "apply": {
+            const resource = host.apply(parsed.controller, parsed.key, parsed.spec);
+            updateControllerStatus(ctx);
+            notify(
+              ctx,
+              `Applied ${resource.metadata.controller}/${resource.metadata.key} generation ${resource.metadata.generation}.`,
+            );
+            break;
+          }
+          case "reconcile":
+            host.reconcile(parsed.controller, parsed.key);
+            notify(ctx, `Queued ${parsed.controller}/${parsed.key}.`);
+            break;
+          case "delete":
+            host.delete(parsed.controller, parsed.key);
+            notify(ctx, `Requested deletion of ${parsed.controller}/${parsed.key}.`);
+            break;
+          case "start":
+            host.start();
+            notify(ctx, "Controller workers started.");
+            break;
+          case "stop":
+            if (activeRun?.childKey !== undefined) {
+              activeRun.engine.cancel();
+            }
+            await host.stop();
+            notify(ctx, "Controller workers stopped.");
+            break;
+        }
+      } catch (error) {
+        notify(ctx, `Controller command failed: ${errorMessage(error)}`, "error");
+      }
+    },
+  });
+
   pi.registerTool({
     name: "workflow",
     label: "Workflow",
@@ -556,6 +741,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
   pi.registerShortcut("shift+down", {
     description: "Scroll the workflow widget down",
     handler: (ctx) => scrollWidget(ctx, WIDGET_SCROLL_STEP),
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    sessionClosed = false;
+    controllerContext = ctx;
+    try {
+      await ensureControllerHost(ctx);
+    } catch (error) {
+      notify(ctx, `Could not start controller workers: ${errorMessage(error)}`, "warning");
+    }
   });
 
   pi.on("agent_start", () => {
@@ -639,19 +834,48 @@ export default function piWorkflows(pi: ExtensionAPI) {
     run.executor.handleAgentSettled();
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     sessionClosed = true;
     supersedePresentation();
     const run = activeRun;
     run?.engine.cancel();
-    void run?.recorder?.stop();
+    await run?.recorder?.stop().catch(() => undefined);
+    await run?.completion?.catch(() => undefined);
     activeRun = null;
+    await controllerHost?.close().catch(() => undefined);
+    controllerHost = undefined;
+    controllerContext = null;
     presentationPending = null;
     clearWidgetTimer();
     stopWidgetTicker();
     widgetSource = null;
     widgetScroll = null;
   });
+}
+
+function workflowSchedulerResult(state: WorkflowRunState): WorkflowSchedulerResult {
+  switch (state.status) {
+    case "running":
+      return { state: "running", runId: state.runId };
+    case "waiting":
+      return { state: "waiting", runId: state.runId };
+    case "completed":
+      return { state: "succeeded", runId: state.runId };
+    case "interrupted":
+      return {
+        state: "interrupted",
+        runId: state.runId,
+        ...(state.error !== undefined ? { error: state.error } : {}),
+      };
+    case "failed":
+    case "timed_out":
+    case "cancelled":
+      return {
+        state: "failed",
+        runId: state.runId,
+        ...(state.error !== undefined ? { error: state.error } : {}),
+      };
+  }
 }
 
 async function resolvePresentationPrompt(

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { main, parseCliArgs } from "../src/viewer/cli.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -47,24 +48,45 @@ describe("parseCliArgs", () => {
 
   it("parses command, run id, dir, and once", () => {
     const args = parseCliArgs(["view", "run-123", "--dir", "/tmp/runs", "--once"]);
-    expect(args).toEqual({ command: "view", runId: "run-123", dir: "/tmp/runs", once: true });
+    expect(args).toMatchObject({
+      command: "view",
+      runId: "run-123",
+      dir: "/tmp/runs",
+      once: true,
+    });
   });
 
-  it("parses runs command and help", () => {
+  it("parses runs, controller, and help commands", () => {
     expect(parseCliArgs(["runs"]).command).toBe("runs");
+    expect(
+      parseCliArgs([
+        "controller",
+        "pull-request",
+        "repo#1",
+        "--controller-dir",
+        "/tmp/controllers",
+      ]),
+    ).toMatchObject({
+      command: "controller",
+      controllerName: "pull-request",
+      resourceKey: "repo#1",
+      controllerDir: "/tmp/controllers",
+    });
     expect(parseCliArgs(["--help"]).command).toBe("help");
   });
 
-  it("rejects unknown flags and missing --dir values", () => {
+  it("rejects unknown flags, extra values, and missing option values", () => {
     expect(() => parseCliArgs(["view", "--nope"])).toThrow(/Unknown argument/);
     expect(() => parseCliArgs(["view", "--dir"])).toThrow(/--dir requires/);
+    expect(() => parseCliArgs(["controllers", "--controller-dir"])).toThrow(/requires/);
+    expect(() => parseCliArgs(["runs", "one", "two"])).toThrow(/Unexpected/);
   });
 });
 
 describe("pi-workflows CLI", () => {
   it("prints usage for help", async () => {
     expect(await main(["--help"])).toBe(0);
-    expect(stdout).toContain("pi-workflows — live terminal viewer");
+    expect(stdout).toContain("pi-workflows — workflow runs and controller resources");
   });
 
   it("lists runs", async () => {
@@ -98,6 +120,66 @@ describe("pi-workflows CLI", () => {
     expect(stdout).toContain("pi-workflows — runs");
   });
 
+  it("lists and inspects controller resources without modifying the store", async () => {
+    const controllerDir = await makeTempDir("pi-workflows-cli-controllers");
+    const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"));
+    const resource = store.putResource({
+      controller: "pull-request",
+      key: "repo#1",
+      spec: { head: "abc" },
+      initialStatus: { phase: "new" },
+    });
+    store.updateStatus({
+      ref: { controller: "pull-request", key: "repo#1" },
+      expectedResourceVersion: resource.metadata.resourceVersion,
+      status: {
+        observedGeneration: 1,
+        controllerStatus: { phase: "ready" },
+        conditions: [
+          {
+            type: "Ready",
+            status: true,
+            reason: "Complete",
+            observedGeneration: 1,
+            lastTransitionTime: "2026-08-04T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    store.recordEvent({
+      controller: "pull-request",
+      key: "repo#1",
+      type: "created",
+      payload: { uid: resource.metadata.uid },
+    });
+    store.putResource({ controller: "other", key: "item", spec: {}, initialStatus: {} });
+    store.close();
+
+    expect(await main(["controllers", "--controller-dir", controllerDir])).toBe(0);
+    expect(stdout).toContain("pull-request  repo#1  generation=1  ready=true:Complete");
+    stdout = "";
+    expect(
+      await main(["controller", "pull-request", "repo#1", "--controller-dir", controllerDir]),
+    ).toBe(0);
+    expect(stdout).toContain('"resource"');
+    expect(stdout).toContain('"type": "created"');
+  });
+
+  it("reports missing and empty controller stores", async () => {
+    const controllerDir = await makeTempDir("pi-workflows-cli-controllers");
+    expect(await main(["controllers", "--controller-dir", controllerDir])).toBe(0);
+    expect(stdout).toContain("No controller resources found");
+    stderr = "";
+    expect(await main(["controller", "demo", "one", "--controller-dir", controllerDir])).toBe(1);
+    expect(stderr).toContain("Controller store not found");
+
+    const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"));
+    store.close();
+    stdout = "";
+    expect(await main(["controllers", "--controller-dir", controllerDir])).toBe(0);
+    expect(stdout).toContain("No controller resources found");
+  });
+
   it("fails cleanly for unknown runs, bad args, and unknown commands", async () => {
     const outputRoot = await makeTempDir("pi-workflows-cli");
     expect(await main(["view", "nope", "--dir", outputRoot, "--once"])).toBe(1);
@@ -106,6 +188,10 @@ describe("pi-workflows CLI", () => {
     expect(await main(["view", "--bogus"])).toBe(2);
     expect(stderr).toContain("Unknown argument");
 
+    expect(await main(["controller", "missing"])).toBe(2);
+    expect(stderr).toContain("requires <controller> and <key>");
+
+    stderr = "";
     expect(await main(["frobnicate"])).toBe(2);
     expect(stderr).toContain("Unknown command");
   });

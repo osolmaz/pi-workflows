@@ -77,9 +77,9 @@ Consequences for readers:
 
 Large payloads are stored once, content-addressed, under `artifacts/` and
 referenced from the documents that use them. This applies uniformly to every
-**persisted value position**: `input`, `outputs.*`, `results.*.output`,
-`steps[*].prompt`, `steps[*].output`, `finalOutput`, and trace event payload
-values.
+**persisted value position**. These positions include `input`, `outputs.*`,
+`results.*.output`, `steps[*].prompt`, `steps[*].output`, and `finalOutput`.
+Trace event payload values follow the same rule.
 
 Encoding rule, applied recursively to a persisted value:
 
@@ -109,9 +109,9 @@ Artifact rules:
 - Artifacts are immutable once written and deduplicate by content hash.
 - Readers must tolerate unknown `mediaType` values.
 
-Because the same output can legitimately appear in `outputs`, `results`,
-`steps`, and the trace, externalization makes that duplication cheap: each
-copy is the same small reference.
+The same output can legitimately appear in several places. Externalization
+keeps each copy in `outputs`, `results`, `steps`, or the trace as the same small
+reference.
 
 ## manifest.json
 
@@ -177,10 +177,12 @@ The full run projection (`WorkflowRunState` in
 ```
 
 - `status` is one of `running`, `waiting`, `completed`, `failed`, `timed_out`,
-  or `cancelled`.
-- While a node is executing, `currentNode`, `currentAttemptId`,
-  `currentNodeStartedAt`, and `statusDetail` describe it; they disappear when
-  the node finishes. The executing node's type comes from the definition
+  `cancelled`, or `interrupted`. A controller host uses `interrupted` when it
+  recovers a bundle whose process stopped before the run reached a terminal
+  event.
+- While a node is executing, `currentNode` and `currentAttemptId` identify it.
+  `currentNodeStartedAt` and `statusDetail` add timing and display context.
+  These fields disappear when the node finishes. The executing node's type comes from the definition
   snapshot, not from the state.
 - While a pause request holds the run at a step boundary, `paused` is `true`
   (with matching `run_paused`/`run_resumed` trace events); it disappears when
@@ -218,10 +220,9 @@ The full run projection (`WorkflowRunState` in
   produced by this attempt, from prompt delivery through accepted submission.
   Viewers must use this explicit linkage and never infer it heuristically.
 - Action steps carry an `action` receipt with `actionType`
-  (`shell`/`function`) and, for shell actions, `command`, `args`, `cwd`,
-  `exitCode`, `signal`, and `durationMs`. Shell stdout/stderr live in the
-  step output (the parsed or raw shell result) and are externalized when
-  large.
+  (`shell`/`function`). Shell actions also record `command`, `args`, `cwd`,
+  `exitCode`, `signal`, and `durationMs`. Shell stdout/stderr live in the step
+  output (the parsed or raw shell result) and are externalized when large.
 - When a run pauses at a checkpoint, `waitingOn` names the checkpoint node.
   Terminal runs carry `finalOutput` on success and `error` on failure.
 
@@ -248,8 +249,8 @@ One event per line, monotonically sequenced per run, schema
 ignore unknown event types and unknown payload fields so new ones can be added
 within the same schema version.
 
-The trace alone is sufficient to reconstruct the run: outputs and receipts are
-part of the terminal node events, not only of `state.json`.
+The trace alone is sufficient to reconstruct the run because terminal node
+events carry outputs and receipts.
 
 Event catalog and payload contracts:
 
@@ -268,6 +269,7 @@ Event catalog and payload contracts:
 | `run_failed`        | run     | `status`, `error`                                                   |
 | `run_timed_out`     | run     | `status`, `error`                                                   |
 | `run_cancelled`     | run     | `status`, `error?`                                                  |
+| `run_interrupted`   | run     | `error`                                                             |
 
 Invariants:
 
@@ -325,22 +327,23 @@ while the run was active, schema `pi-workflows.session-entry.v1`:
 - `entry` is the verbatim Pi session entry (Pi's own versioned format),
   including user messages, assistant messages, tool results, model changes,
   and compaction entries. Nothing is normalized or rewritten.
-- Entries include everything that happened in the conversation during the run:
-  workflow prompts, nudges, and user interruptions are all part of the record.
+- Entries include everything that happened in the conversation during the run.
+  This includes workflow prompts and nudges together with user interruptions.
 - `conversation` ranges in step records and `node_finished` events address
   entries by Pi entry id (`entry.id`).
 
 ### events.ndjson
 
-The temporal journal records documented Pi `turn_*`, `message_*`, and
+The temporal journal records documented Pi `turn_*` and `message_*` hooks plus
 `tool_execution_*` hooks with schema `pi-workflows.session-event.v1`. Each
-record has a per-file `seq`, timestamp, `nodeId`, `attemptId`, optional
-`turnId`, `messageId`, and `toolCallId`, a normalized `type`, and `payload`.
+record has a per-file `seq`, timestamp, `nodeId`, and `attemptId`. Optional
+turn, message, and tool call IDs link related records. A normalized `type` and
+`payload` carry the event data.
 The full contract and event catalog are in
 [session-event-journal.md](session-event-journal.md).
 
-Events preserve semantic deltas. Assistant `partial`, terminal `message`, and
-terminal `error` snapshots are never stored. Tool update records omit Pi's
+Events preserve semantic deltas. Assistant `partial` snapshots are never
+stored, and neither are terminal `message` or `error` snapshots. Tool update records omit Pi's
 cumulative `partialResult`. Final `message_finished` records link to settled
 Pi entries with `entryId`; after that linkage, `entries.ndjson` is the
 verbatim content authority.
@@ -364,10 +367,10 @@ complete lines, sequence gaps, and terminal torn tails are integrity failures.
 }
 ```
 
-`status` is `recording`, `complete`, or `failed`. Failed capture adds
-`failure` with `failedAt`, `code`, and `message`. Capture failure is visible to
-readers but does not fail the workflow. Terminal readers verify the counts,
-last sequence, schemas, and contiguous event sequence. Missing temporal files
+`status` starts as `recording` and ends as `complete` or `failed`. Failed
+capture adds `failure` with `failedAt` plus a code and message. Capture failure
+is visible to readers but does not fail the workflow. Terminal readers verify
+the counts and last sequence, then check schemas and contiguous event order. Missing temporal files
 in a session-bound bundle are invalid, not an older supported layout.
 
 ## Versioning

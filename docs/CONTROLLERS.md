@@ -39,19 +39,22 @@ A resource is the durable record of one requested outcome. The controller owns `
 export type ControllerResource<TSpec, TStatus> = {
   metadata: {
     uid: string;
+    controller: string;
     key: string;
     resourceVersion: number;
     generation: number;
     deletionTimestamp?: string;
-    finalizers?: string[];
+    finalizers: string[];
   };
   spec: TSpec;
   status: {
     observedGeneration: number;
     conditions: ControllerCondition[];
     workflowRun?: {
-      runId: string;
-      inputFingerprint: string;
+      requestId: string;
+      runId?: string;
+      state: "pending" | "running" | "waiting" | "succeeded" | "failed" | "interrupted";
+      attempt: number;
     };
     controllerStatus: TStatus;
   };
@@ -76,45 +79,44 @@ export type ControllerCondition = {
 A controller receives the latest resource, a cancellation signal, and runtime services. It returns after one bounded reconciliation pass.
 
 ```ts
+import { conditionFalse, conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
+
 export default defineController<PullRequestSpec, PullRequestStatus>({
   name: "pull-request",
+  initialStatus: () => ({ phase: "observing" }),
 
   async reconcile(ctx, resource) {
-    const pullRequest = await ctx.github.getPullRequest(resource.spec);
+    const pullRequest = await github.getPullRequest(resource.spec, ctx.signal);
 
     if (pullRequest.merged) {
       return ctx.settled({
-        conditions: [ctx.condition.true("Ready", "Merged")],
+        controllerStatus: { phase: "merged" },
+        conditions: [conditionTrue("Ready", "Merged")],
       });
     }
-
     if (pullRequest.headSha !== resource.spec.expectedHeadSha) {
       return ctx.settled({
-        conditions: [ctx.condition.false("Ready", "HeadChanged")],
+        controllerStatus: { phase: "blocked" },
+        conditions: [conditionFalse("Ready", "HeadChanged")],
       });
     }
 
     const run = await ctx.workflows.ensure({
-      key: `repair:${resource.uid}:${resource.generation}:${pullRequest.headSha}`,
+      requestKey: `repair:${resource.metadata.generation}:${pullRequest.headSha}`,
       workflow: "repair-pull-request",
       input: { repository: resource.spec.repository, number: pullRequest.number },
     });
-
     if (run.state !== "succeeded") {
       return ctx.requeueAfter(30_000);
     }
 
     await ctx.effects.ensure({
-      key: `merge:${resource.uid}:${resource.generation}:${pullRequest.headSha}`,
-      request: {
-        repository: resource.spec.repository,
-        number: pullRequest.number,
-        expectedHeadSha: pullRequest.headSha,
-      },
-      observe: () => ctx.github.observeMerge(resource.spec),
-      apply: () => ctx.github.merge(resource.spec, pullRequest.headSha),
+      key: `merge:${resource.metadata.generation}:${pullRequest.headSha}`,
+      kind: "github-merge",
+      request: { number: pullRequest.number, expectedHeadSha: pullRequest.headSha },
+      observe: (signal) => github.observeMerge(resource.spec, signal),
+      apply: (signal) => github.merge(resource.spec, pullRequest.headSha, signal),
     });
-
     return ctx.requeue();
   },
 });
@@ -130,9 +132,9 @@ The queue contains one row for each controller and resource key. Repeated enqueu
 
 A claim that expires returns to the queue. A successful settled result removes the queue row. A requested delay updates its available time. Consecutive errors increase an internal retry counter used for backoff.
 
-The first implementation uses SQLite in WAL mode. Transactions cover resource compare-and-swap writes, queue claims, and effect claims. `ControllerStore` and `ControllerQueue` remain interfaces so another host can supply a remote implementation.
+The local implementation uses `better-sqlite3` in WAL mode. Transactions cover resource compare-and-swap writes, queue claims, and effect claims. `ControllerStore` remains an interface so another host can supply a remote implementation. The store limits each resource spec and status value to 1 MiB. Event payloads are limited to 64 KiB.
 
-The resource store is the source of truth. Queue rows only describe delivery. The queue can be rebuilt from resources and pending wake times when repair is needed.
+The resource store is the source of truth. Queue rows only describe delivery. A repair can rebuild the queue by enqueuing every resource; each reconciler then computes any needed delay again.
 
 ## External effects
 
@@ -151,11 +153,9 @@ export type EffectRecord = {
 };
 ```
 
-The key names one intended effect. Reusing the key with another request fingerprint is an error. A pending effect becomes indeterminate when its worker disappears before recording a result.
+The key names one intended effect. Reusing the key with another request fingerprint is an error. The next reconciliation observes the external system before retrying an existing pending or indeterminate effect. The effect can be treated as effectively once when the provider offers an idempotency token, a conditional request, or a reliable way to observe the requested result. The runtime does not promise generic exactly-once execution.
 
-The next reconciliation observes the external system before retrying an indeterminate effect. The effect can be treated as effectively once when the provider offers an idempotency token, a conditional request, or a reliable way to observe the requested result. The runtime does not promise generic exactly-once execution.
-
-Credentials and mutation policy stay in deterministic effect drivers. Agent workflows receive only the access they need to inspect and edit their work area. They return findings or artifacts for deterministic code to check and apply.
+Mutation policy stays in deterministic effect drivers. Agent workflows return findings or artifacts for deterministic code to check and apply. The in-process Pi host shares its process environment with agent tools, so it does not provide credential isolation. Deployments that require that boundary should put authenticated effects behind a separate broker or controller host.
 
 ## Child workflows
 
@@ -163,7 +163,7 @@ Credentials and mutation policy stay in deterministic effect drivers. Agent work
 
 A child run is one immutable attempt. Its existing run bundle remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can mark an abandoned run as interrupted and create another attempt for the same stable request.
 
-Recovery rules depend on node type. Compute nodes can run again. External actions must use the effect API. An interrupted agent node returns an explicit interrupted outcome so the workflow can inspect its work area and continue safely.
+The workflow scheduler marks an abandoned running bundle as `interrupted`. The child request then starts another immutable attempt on its next reconciliation. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
 
 ## Deletion and cleanup
 
@@ -177,13 +177,13 @@ A source maps an external event to one or more resource keys. Sources include fi
 
 `ControllerManager` sets global and per-controller worker limits. The local store supports expiring claims from the start, while the first release can run one process. Leader election belongs in a remote store implementation if several hosts later share the same resources.
 
-The Pi extension starts local sources during `session_start` and closes them during `session_shutdown`. It can reconcile only while Pi is running. A temporary CLI or CI process can run the manager independently; the package does not install a service.
+The Pi extension starts local workers during `session_start` and closes them during `session_shutdown`. It can reconcile only while Pi is running. Another program can host `ControllerManager` through the public engine API. The package does not install a service.
 
 ## Observability
 
 Every reconciliation emits structured records with the controller name, resource key, generation, reconcile ID, outcome and duration, plus the requeue reason. Effect state changes and child workflow links are also recorded. Logs and viewer projections remain secondary to the resource and effect stores.
 
-The viewer should list resources by condition and show the active child run. Existing run views continue to read immutable bundles.
+`pi-workflows controllers` lists resources and their current readiness condition. `pi-workflows controller <controller> <key>` prints one resource together with its effects, child workflows, and recent events. Existing run views continue to read immutable bundles.
 
 ## Safety rules
 
@@ -200,9 +200,11 @@ A production controller must follow these rules:
 
 ## Package and Pi integration
 
-The controller API should use a subpath export such as `@osolmaz/pi-workflows/controllers`. Controller definitions can use a `.controller.ts` suffix and project or global discovery directories that mirror workflow discovery.
+The controller API is exported from `@osolmaz/pi-workflows/controllers`. Controller definitions use a `.controller.ts` suffix. Project definitions live under `.pi/controllers/`; global definitions live under `~/.pi/agent/controllers/`.
 
 The implementation uses documented Pi extension APIs only. Commands and tools use `registerCommand` and `registerTool`. Session lifecycle uses `session_start` and `session_shutdown`. Workflow prompts use `sendUserMessage`, while status uses `setWidget` and `setStatus`.
+
+The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. The default store is `~/.pi/agent/workflows/controllers/controller.sqlite`; `PI_WORKFLOWS_CONTROLLER_DIR` overrides its directory.
 
 Normal workflow prompts, tool calls, and replies remain part of the Pi session. Controller resources, queue rows, and effects live in the controller store. No Pi internal type, private API, or persistent Pi schema changes.
 

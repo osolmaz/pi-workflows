@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import piWorkflows from "../src/extension/index.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -46,9 +47,12 @@ function makeHarness(options: {
   const widgets: (string[] | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
-  const listeners = new Map<string, ((event?: unknown, ctx?: FakeContext) => void)[]>();
+  const listeners = new Map<
+    string,
+    ((event?: unknown, ctx?: FakeContext) => void | Promise<void>)[]
+  >();
   const shortcuts = new Map<string, (ctx: FakeContext) => void>();
-  let command: RegisteredCommand | null = null;
+  const commands = new Map<string, RegisteredCommand>();
   let tool: RegisteredTool | null = null;
 
   const ctx: FakeContext = {
@@ -62,8 +66,8 @@ function makeHarness(options: {
   };
 
   const pi = {
-    registerCommand: (_name: string, spec: RegisteredCommand) => {
-      command = spec;
+    registerCommand: (name: string, spec: RegisteredCommand) => {
+      commands.set(name, spec);
     },
     registerTool: (spec: RegisteredTool) => {
       tool = spec;
@@ -71,7 +75,7 @@ function makeHarness(options: {
     registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
       shortcuts.set(key, spec.handler);
     },
-    on: (event: string, listener: (event?: unknown, ctx?: FakeContext) => void) => {
+    on: (event: string, listener: (event?: unknown, ctx?: FakeContext) => void | Promise<void>) => {
       const queue = listeners.get(event) ?? [];
       queue.push(listener);
       listeners.set(event, queue);
@@ -86,8 +90,9 @@ function makeHarness(options: {
   };
 
   piWorkflows(pi as never);
-  if (!command || !tool) {
-    throw new Error("extension did not register command and tool");
+  const workflowCommand = commands.get("workflow");
+  if (!workflowCommand || !tool) {
+    throw new Error("extension did not register workflow command and tool");
   }
   return {
     ctx,
@@ -95,13 +100,19 @@ function makeHarness(options: {
     widgets,
     statuses,
     sentMessages,
-    command: command as RegisteredCommand,
+    command: workflowCommand,
+    commands,
     tool: tool as RegisteredTool,
     shortcuts,
     emit: (event: string, payload?: unknown) => {
       for (const listener of listeners.get(event) ?? []) {
-        listener(payload, ctx);
+        void listener(payload, ctx);
       }
+    },
+    emitAsync: async (event: string, payload?: unknown) => {
+      await Promise.all(
+        (listeners.get(event) ?? []).map(async (listener) => await listener(payload, ctx)),
+      );
     },
   };
 }
@@ -126,6 +137,61 @@ export default defineWorkflow({
 });
 `,
     "utf8",
+  );
+}
+
+async function writeControllerWithChild(cwd: string): Promise<void> {
+  const controllerDir = path.join(cwd, ".pi", "controllers");
+  const workflowDir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(controllerDir, { recursive: true });
+  await fs.mkdir(workflowDir, { recursive: true });
+  await fs.writeFile(
+    path.join(controllerDir, "demo.controller.ts"),
+    `import {
+  conditionTrue,
+  defineController,
+} from "@osolmaz/pi-workflows/controllers";
+
+export default defineController({
+  name: "demo",
+  initialStatus: () => ({ phase: "new" }),
+  async reconcile(ctx, resource) {
+    const child = await ctx.workflows.ensure({
+      requestKey: \`child:\${resource.metadata.generation}\`,
+      workflow: "child",
+      input: { value: resource.spec.value },
+    });
+    const workflowRun = {
+      requestId: child.requestId,
+      ...(child.runId ? { runId: child.runId } : {}),
+      state: child.state,
+      attempt: child.attempt,
+    };
+    if (child.state === "succeeded") {
+      return ctx.settled({
+        controllerStatus: { phase: "done" },
+        conditions: [conditionTrue("Ready", "Complete")],
+        workflowRun,
+      });
+    }
+    return ctx.requeueAfter(10, {
+      controllerStatus: { phase: "running" },
+      workflowRun,
+    });
+  },
+});
+`,
+  );
+  await fs.writeFile(
+    path.join(workflowDir, "child.workflow.ts"),
+    `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "child",
+  startAt: "work",
+  nodes: { work: compute({ run: ({ input }) => input }) },
+  edges: [],
+});
+`,
   );
 }
 
@@ -689,5 +755,74 @@ export default defineWorkflow({
     } finally {
       process.chdir(originalCwd);
     }
+  });
+
+  it("reconciles a controller through a child workflow", async () => {
+    const cwd = await makeTempDir("pi-workflows-controller-ext");
+    const runsDir = await makeTempDir("pi-workflows-controller-runs");
+    const controllerDir = await makeTempDir("pi-workflows-controller-state");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      await writeControllerWithChild(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("controller");
+      expect(command).toBeDefined();
+      await command?.handler('apply demo item-1 {"value":"hello"}', harness.ctx);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
+          readOnly: true,
+        });
+        try {
+          return (
+            reader.getResource<unknown, { phase: string }>({
+              controller: "demo",
+              key: "item-1",
+            })?.status.controllerStatus.phase === "done"
+          );
+        } finally {
+          reader.close();
+        }
+      });
+      await command?.handler("get demo item-1", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain('"phase": "done"');
+      await command?.handler("list", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("demo/item-1 generation=1");
+      await command?.handler("get demo missing", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Controller command failed");
+      await command?.handler("stop", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("workers stopped");
+      await command?.handler("reconcile demo item-1", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Queued demo/item-1");
+      await command?.handler("start", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("workers started");
+      await command?.handler("delete demo item-1", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Requested deletion");
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
+          readOnly: true,
+        });
+        try {
+          return reader.getResource({ controller: "demo", key: "item-1" }) === undefined;
+        } finally {
+          reader.close();
+        }
+      });
+      expect(harness.statuses.some((status) => status?.includes("controller resource"))).toBe(true);
+      expect(await fs.readdir(runsDir)).toHaveLength(1);
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports when no controller definitions are installed", async () => {
+    const cwd = await makeTempDir("pi-workflows-controller-ext");
+    const harness = makeHarness({ cwd, respond: () => {} });
+    await harness.emitAsync("session_start");
+    await harness.commands.get("controller")?.handler("list", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No controllers found");
+    await harness.emitAsync("session_shutdown");
   });
 });

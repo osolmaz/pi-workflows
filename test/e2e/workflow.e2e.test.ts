@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
 import type {
   WorkflowRunState,
@@ -16,6 +17,50 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
+
+const E2E_CONTROLLER = `import {
+  conditionTrue,
+  defineController,
+} from "@osolmaz/pi-workflows/controllers";
+
+export default defineController({
+  name: "e2e-controller",
+  initialStatus: () => ({ phase: "new" }),
+  async reconcile(ctx, resource) {
+    const child = await ctx.workflows.ensure({
+      requestKey: \`child:\${resource.metadata.generation}\`,
+      workflow: "controller-child",
+      input: resource.spec,
+    });
+    const workflowRun = {
+      requestId: child.requestId,
+      ...(child.runId ? { runId: child.runId } : {}),
+      state: child.state,
+      attempt: child.attempt,
+    };
+    return child.state === "succeeded"
+      ? ctx.settled({
+          controllerStatus: { phase: "done" },
+          conditions: [conditionTrue("Ready", "Complete")],
+          workflowRun,
+        })
+      : ctx.requeueAfter(10, {
+          controllerStatus: { phase: "running" },
+          workflowRun,
+        });
+  },
+});
+`;
+
+const E2E_CONTROLLER_CHILD = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "controller-child",
+  startAt: "work",
+  nodes: { work: compute({ run: ({ input }) => input }) },
+  edges: [],
+});
+`;
 
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
@@ -176,6 +221,7 @@ describe.sequential("pi-workflows end to end", () => {
   let runsDir: string;
   let projectDir: string;
   let agentDir: string;
+  let controllerDir: string;
 
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
@@ -234,11 +280,23 @@ describe.sequential("pi-workflows end to end", () => {
     projectDir = await makeTempDir("pi-workflows-e2e-project");
     runsDir = await makeTempDir("pi-workflows-e2e-runs");
     agentDir = await makeTempDir("pi-workflows-e2e-agent");
+    controllerDir = await makeTempDir("pi-workflows-e2e-controllers");
 
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
+    await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "e2e.workflow.ts"),
       E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "controller-child.workflow.ts"),
+      E2E_CONTROLLER_CHILD,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "controllers", "e2e-controller.controller.ts"),
+      E2E_CONTROLLER,
       "utf8",
     );
     await fs.writeFile(
@@ -267,6 +325,7 @@ describe.sequential("pi-workflows end to end", () => {
       env: {
         PI_CODING_AGENT_DIR: agentDir,
         PI_WORKFLOWS_RUNS_DIR: runsDir,
+        PI_WORKFLOWS_CONTROLLER_DIR: controllerDir,
       },
     });
   }, 60_000);
@@ -552,8 +611,56 @@ describe.sequential("pi-workflows end to end", () => {
     ).resolves.toEqual(terminalContents);
   }, 120_000);
 
+  it("reconciles a durable controller through the real pi extension", async () => {
+    pi.send({
+      id: "controller-1",
+      type: "prompt",
+      message: '/controller apply e2e-controller item-1 {"value":"hello"}',
+    });
+
+    await waitForCondition(
+      async () => {
+        try {
+          const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
+            readOnly: true,
+          });
+          try {
+            return (
+              store.getResource<unknown, { phase: string }>({
+                controller: "e2e-controller",
+                key: "item-1",
+              })?.status.controllerStatus.phase === "done"
+            );
+          } finally {
+            store.close();
+          }
+        } catch {
+          return false;
+        }
+      },
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+      20_000,
+    );
+
+    const store = new SqliteControllerStore(path.join(controllerDir, "controller.sqlite"), {
+      readOnly: true,
+    });
+    try {
+      const resource = store.getResource({ controller: "e2e-controller", key: "item-1" });
+      expect(resource?.status).toMatchObject({
+        observedGeneration: 1,
+        controllerStatus: { phase: "done" },
+        conditions: [{ type: "Ready", status: true, reason: "Complete" }],
+      });
+      expect(store.listWorkflows(resource?.metadata.uid as string)).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
   it("keeps a real workflow successful when temporal capture fails", async () => {
     const failedRunsDir = await makeTempDir("pi-workflows-e2e-capture-failure");
+    const failedControllerDir = await makeTempDir("pi-workflows-e2e-controller-failure");
     const wrapperPath = path.join(projectDir, "capture-failure-extension.ts");
     await fs.writeFile(
       wrapperPath,
@@ -575,6 +682,7 @@ export default function captureFailureExtension(pi: unknown) {
       env: {
         PI_CODING_AGENT_DIR: agentDir,
         PI_WORKFLOWS_RUNS_DIR: failedRunsDir,
+        PI_WORKFLOWS_CONTROLLER_DIR: failedControllerDir,
       },
     });
     try {
@@ -604,8 +712,8 @@ export default function captureFailureExtension(pi: unknown) {
   it("renders the finished run in the viewer CLI", async () => {
     const { state } = await waitForRunState(
       runsDir,
-      (candidate) => candidate.status === "completed",
-      () => "expected the previous test to have completed a run",
+      (candidate) => candidate.status === "completed" && candidate.workflowName === "e2e",
+      () => "expected the previous test to have completed an e2e run",
       5_000,
     );
     const { stdout } = await execFileAsync(

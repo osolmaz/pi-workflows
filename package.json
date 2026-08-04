@@ -1,7 +1,7 @@
 {
   "name": "@osolmaz/pi-workflows",
   "version": "0.2.0",
-  "description": "Workflow engine, JSON control-flow tool, and live terminal viewer for the pi coding agent",
+  "description": "Workflow and controller runtime with a live terminal viewer for the pi coding agent",
   "keywords": [
     "pi-package"
   ],
@@ -34,6 +34,10 @@
     "./extension": {
       "types": "./dist/extension/index.d.ts",
       "default": "./dist/extension/index.js"
+    },
+    "./controllers": {
+      "types": "./dist/controllers/index.d.ts",
+      "default": "./dist/controllers/index.js"
     }
   },
   "publishConfig": {
@@ -53,10 +57,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.2",
     "jiti": "^2.7.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
     "@vitest/coverage-istanbul": "^4.1.10",
     "oxfmt": "^0.59.0",

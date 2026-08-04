@@ -146,7 +146,8 @@ export class WorkflowRunStore {
     const runDir = this.runDirFor(state.runId);
     this.contexts.delete(runDir);
     return await this.withRunLock(runDir, async () => {
-      await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
+      await fs.mkdir(this.outputRoot, { recursive: true, mode: 0o700 });
+      await fs.mkdir(runDir, { recursive: false, mode: 0o700 });
       await writeJsonAtomic(
         path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
         createDefinitionSnapshot(workflow),
@@ -155,6 +156,60 @@ export class WorkflowRunStore {
       await this.writeProjections(runDir, state);
       return runDir;
     });
+  }
+
+  /** Mark a nonterminal bundle left by another process as interrupted. */
+  async markRunInterrupted(
+    runId: string,
+    reason = "Workflow host stopped before the run finished",
+  ): Promise<LoadedRunBundle | null> {
+    const runDir = this.runDirFor(runId);
+    const bundle = await readRunBundle(runDir);
+    if (bundle === null || bundle.state.status !== "running") {
+      return bundle;
+    }
+    const counts = await this.sessionCounts(runDir);
+    const sessionBound = bundle.manifest.paths.session !== undefined;
+    const captureFinished =
+      bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
+    this.contexts.set(runDir, {
+      traceSeq: bundle.state.traceSeq,
+      sessionSeq: counts.entryCount,
+      sessionEventSeq: counts.lastEventSeq,
+      sessionBound,
+      sessionEventsStopped: captureFinished,
+      artifacts: new ArtifactWriter(runDir),
+      lock: Promise.resolve(),
+      sessionEventLock: Promise.resolve(),
+    });
+    if (sessionBound && !captureFinished) {
+      await this.writeSessionCapture(runDir, {
+        schema: SESSION_CAPTURE_SCHEMA,
+        eventSchema: SESSION_EVENT_SCHEMA,
+        status: "failed",
+        ...counts,
+        failure: {
+          failedAt: new Date().toISOString(),
+          code: "host_interrupted",
+          message: reason,
+        },
+      });
+    }
+    const state = bundle.state;
+    state.status = "interrupted";
+    state.finishedAt = new Date().toISOString();
+    state.error = reason;
+    delete state.currentNode;
+    delete state.currentAttemptId;
+    delete state.currentNodeStartedAt;
+    delete state.statusDetail;
+    delete state.paused;
+    await this.writeSnapshot(runDir, state, {
+      scope: "run",
+      type: "run_interrupted",
+      payload: { error: reason },
+    });
+    return await readRunBundle(runDir);
   }
 
   /**

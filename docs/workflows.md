@@ -290,6 +290,33 @@ possible. Defaults worth knowing:
 - Agent nudges: if the model ends its turn without submitting the pending
   step, it gets a reminder, twice by default, then the step fails.
 
+## Workflows started by controllers
+
+A controller can start a workflow as a finite child job with `ctx.workflows.ensure()`. The request key is stable across reconciliation passes, and the input fingerprint prevents one key from being reused for different work.
+
+```typescript
+const run = await ctx.workflows.ensure({
+  requestKey: `repair:${resource.metadata.generation}`,
+  workflow: "repair-pull-request",
+  input: { repository: resource.spec.repository, number: resource.spec.number },
+});
+
+if (run.state !== "succeeded") {
+  return ctx.requeueAfter(5_000, {
+    workflowRun: {
+      requestId: run.requestId,
+      ...(run.runId ? { runId: run.runId } : {}),
+      state: run.state,
+      attempt: run.attempt,
+    },
+  });
+}
+```
+
+Child workflow completion queues the parent resource again. A running child left by a stopped host is marked `interrupted`, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
+
+See [CONTROLLERS.md](CONTROLLERS.md) for controller definitions and the full recovery contract.
+
 ## Using the engine outside pi
 
 The engine is pi-agnostic. `WorkflowEngine` takes any `AgentStepExecutor`, so

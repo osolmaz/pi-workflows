@@ -18,6 +18,10 @@ typescript:
     # workflows is the core engine; it must stay pi-agnostic and standalone.
     - from: src/workflows
       allow: []
+    # Durable reconciliation may launch finite child workflows, never the reverse.
+    - from: src/controllers
+      allow:
+        - src/workflows
     # Shared presentation: graph layout and terminal rendering, pi-agnostic.
     - from: src/render
       allow:
@@ -26,9 +30,11 @@ typescript:
     - from: src/extension
       allow:
         - src/workflows
+        - src/controllers
         - src/render
     # The viewer only reads run bundles; it must never import the extension.
     - from: src/viewer
       allow:
         - src/workflows
+        - src/controllers
         - src/render
