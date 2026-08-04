@@ -309,7 +309,10 @@ export class ControllerManager {
     });
 
     try {
-      const result = await this.callReconciler(definition, resource, abort.signal);
+      const result = await raceWithAbort(
+        this.callReconciler(definition, resource, abort.signal),
+        abort.signal,
+      );
       if (abort.signal.aborted) {
         throw abort.signal.reason ?? new Error("Reconciliation aborted");
       }
@@ -450,6 +453,30 @@ export class ControllerManager {
       now: this.now().toISOString(),
     });
   }
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let finished = false;
+    const settle = (callback: () => void) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () =>
+      settle(() => reject(signal.reason ?? new Error("Reconciliation aborted")));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => settle(() => reject(error)),
+    );
+    if (signal.aborted) {
+      onAbort();
+    }
+  });
 }
 
 function validateResult(result: ReconcileResult<unknown>): void {

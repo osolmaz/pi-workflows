@@ -175,7 +175,7 @@ Controllers should add finalizers only when they own something that needs cleanu
 
 A source maps an external event to one or more resource keys. Sources include filesystem watches, webhooks, scheduled polling, and child workflow completion. They share the same enqueue API.
 
-`ControllerManager` sets global and per-controller worker limits. The local store supports expiring claims from the start, while the first release can run one process. Leader election belongs in a remote store implementation if several hosts later share the same resources.
+`ControllerManager` sets global and per-controller worker limits. A reconciliation deadline stops lease renewal and requeues the key even when controller code ignores its abort signal. JavaScript cannot stop that non-cooperative promise, so reconciler code must pass the signal to provider calls and keep consequential writes inside guarded effect drivers. The local store supports expiring claims from the start, while the first release can run one process. Leader election belongs in a remote store implementation if several hosts later share the same resources.
 
 The Pi extension starts local workers during `session_start` and closes them during `session_shutdown`. It can reconcile only while Pi is running. Another program can host `ControllerManager` through the public engine API. The package does not install a service.
 

@@ -285,6 +285,46 @@ describe("ControllerManager", () => {
     expect(store.listQueue()[0]?.consecutiveErrors).toBe(1);
   });
 
+  it("releases a timed-out reconciler that ignores cancellation", async () => {
+    const store = await makeStore();
+    const controller = defineController<{}, {}>({
+      name: "hung",
+      timeoutMs: 10,
+      initialStatus: () => ({}),
+      reconcile: async () => await new Promise(() => {}),
+    });
+    const manager = new ControllerManager({
+      store,
+      controllers: [controller],
+      baseBackoffMs: 100,
+      jitterRatio: 0,
+    });
+    manager.putResource(controller, "one", {});
+
+    let timer: NodeJS.Timeout | undefined;
+    let completed: boolean;
+    try {
+      completed = await Promise.race([
+        manager.runOne(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("runOne stayed blocked")), 500);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+
+    expect(completed).toBe(true);
+    expect(store.listQueue()[0]).toMatchObject({ consecutiveErrors: 1 });
+    expect(
+      store
+        .listEvents({ controller: "hung", key: "one" })
+        .some((event) => event.type === "reconcile_failed"),
+    ).toBe(true);
+  });
+
   it("deletes a resource after its finalizer is removed", async () => {
     const store = await makeStore();
     const controller = defineController<{}, {}>({
