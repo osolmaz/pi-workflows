@@ -22,17 +22,20 @@ Usage:
   pi-workflows runs [--dir <runsDir>]
   pi-workflows controllers [--controller-dir <dir>]
   pi-workflows controller <controller> <key> [--controller-dir <dir>]
+  pi-workflows host [--project <dir>] [-- <extra pi args>]
 
 Commands:
   view          Open the live workflow TUI. With --once, print a snapshot.
   runs          List recent workflow runs.
   controllers   List durable controller resources.
   controller    Show one resource, its effects, child workflows, and events.
+  host          Run the always-on workflow host in the foreground.
 
 Options:
   --dir <runsDir>          Runs directory (default: ~/.pi/agent/workflows/runs)
   --controller-dir <dir>  Controller directory (default: project-scoped local store)
   --once                   Render once without the interactive TUI
+  --project <dir>          Project directory for the host (default: cwd)
 `;
 
 export type CliArgs = {
@@ -43,6 +46,8 @@ export type CliArgs = {
   dir: string;
   controllerDir: string;
   once: boolean;
+  project?: string | undefined;
+  piArgs?: string[] | undefined;
 };
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -52,6 +57,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
   let controllerDir = projectControllerStoreBaseDir(process.cwd());
   let once = false;
   const positionals: string[] = [];
+  let project: string | undefined;
+  const piArgs: string[] = [];
 
   while (args.length > 0) {
     const arg = args.shift() as string;
@@ -59,15 +66,23 @@ export function parseCliArgs(argv: string[]): CliArgs {
       dir = requiredValue(args, "--dir");
     } else if (arg === "--controller-dir") {
       controllerDir = requiredValue(args, "--controller-dir");
+    } else if (arg === "--project") {
+      project = requiredValue(args, "--project");
     } else if (arg === "--once") {
       once = true;
     } else if (arg === "--help" || arg === "-h") {
       return { command: "help", dir, controllerDir, once };
+    } else if (arg === "--") {
+      piArgs.push(...args.splice(0));
     } else if (arg.startsWith("-")) {
       throw new Error(`Unknown argument: ${arg}`);
     } else {
       positionals.push(arg);
     }
+  }
+
+  if (command === "host") {
+    return { command, dir, controllerDir, once, project, piArgs };
   }
 
   if (command === "controller") {
@@ -211,6 +226,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       );
       return 0;
     }
+    if (args.command === "host") {
+      return await runHost(args.project ?? process.cwd(), args.piArgs);
+    }
     if (args.command === "view") {
       if (args.once || !process.stdout.isTTY) {
         await printOnce(args.dir, args.runId);
@@ -225,6 +243,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
+}
+
+async function runHost(project: string, piArgs: string[] | undefined): Promise<number> {
+  const { WorkflowHost } = await import("../host/runner.js");
+  const host = new WorkflowHost({
+    cwd: project,
+    piArgs: piArgs ?? [],
+    onLog: (message) => process.stdout.write(`[host] ${message}\n`),
+  });
+  await host.start();
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      void host.stop().then(() => resolve());
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+  });
+  return 0;
 }
 
 function openControllerStore(controllerDir: string): SqliteControllerStore | undefined {
