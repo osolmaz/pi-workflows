@@ -96,6 +96,35 @@ describe("renderRunListLines", () => {
   });
 });
 
+describe("renderRunListLines edges", () => {
+  const size = { width: 60, height: 10 };
+
+  it("renders titles, waiting, failed, and elapsed fallbacks", () => {
+    const bundles = [
+      makeBundle({
+        runId: "run-titled",
+        status: "waiting",
+        waitingOn: "review",
+        runTitle: "needs a decision",
+        finishedAt: undefined,
+      }),
+      makeBundle({ runId: "run-failed", status: "failed", error: "boom" }),
+    ];
+    const lines = renderRunListLines(bundles, 0, size, NOW).map(stripAnsi).join("\n");
+    expect(lines).toContain("needs a decision");
+    expect(lines).toContain("waiting");
+    expect(lines).toContain("failed");
+  });
+
+  it("clamps selection and scrolls long lists", () => {
+    const bundles = Array.from({ length: 30 }, (_, index) =>
+      makeBundle({ runId: `run-${index}`, status: "completed" }),
+    );
+    const lines = renderRunListLines(bundles, 25, size, NOW).map(stripAnsi).join("\n");
+    expect(lines).toContain("run-25");
+  });
+});
+
 describe("renderRunDetailLines", () => {
   const size = { width: 100, height: 50 };
 

@@ -3,7 +3,12 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { readLastTraceEvent, readRunBundle, WorkflowRunStore } from "../src/workflows/store.js";
+import {
+  listRunBundles,
+  readLastTraceEvent,
+  readRunBundle,
+  WorkflowRunStore,
+} from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { ScriptedExecutor, makeTempDir } from "./helpers.js";
 
@@ -189,6 +194,97 @@ describe("bundle reading and resume-prepare edge cases", () => {
     expect(prepared.state.runId).toBe("clean-1");
     expect(await store.hasSessionBinding(runDir)).toBe(false);
     expect(await store.listSessionSegments(runDir)).toEqual([]);
+  });
+});
+
+describe("session stream edge cases", () => {
+  it("ignores a duplicate binding and reads missing traces as null", async () => {
+    const outputRoot = await makeTempDir("pi-edge-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "edge",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
+    const { runDir } = await engine.run(workflow, {}, { runId: "edge-bind" });
+    const binding = {
+      schema: "pi-workflows.session-binding.v1" as const,
+      runId: "edge-bind",
+      piSessionId: "session-1",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    };
+    await store.writeSessionBinding(runDir, binding);
+    // A second bind for the same stream is a no-op, not a duplicate event.
+    await store.writeSessionBinding(runDir, { ...binding, piSessionId: "session-2" });
+    const bundle = await readRunBundle(runDir);
+    expect(bundle?.sessionBinding?.piSessionId).toBe("session-1");
+
+    expect(await readLastTraceEvent(path.join(outputRoot, "does-not-exist"))).toBeNull();
+    // A runs root with junk entries lists only real bundles.
+    await fs.mkdir(path.join(outputRoot, "junk-entry"), { recursive: true });
+    await fs.writeFile(path.join(outputRoot, "junk-entry", "manifest.json"), "nope", "utf8");
+    const bundles = await listRunBundles(outputRoot);
+    expect(bundles.map((entry: { state: { runId: string } }) => entry.state.runId)).toEqual([
+      "edge-bind",
+    ]);
+  });
+
+  it("encodes tool execution session events through artifacts", async () => {
+    const outputRoot = await makeTempDir("pi-edge-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "edge",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
+    const { runDir } = await engine.run(workflow, {}, { runId: "edge-events" });
+    await store.appendSessionEventBatch(runDir, [
+      {
+        seq: 1,
+        at: new Date().toISOString(),
+        nodeId: "work",
+        attemptId: "a1",
+        turnId: "t1",
+        messageId: "m1",
+        toolCallId: "tc1",
+        type: "tool_execution_started",
+        payload: { toolName: "bash", args: { command: "x".repeat(10_000) } },
+      } as never,
+    ]);
+    const counts = await store.sessionCounts(runDir);
+    expect(counts.eventCount).toBe(1);
+    // A batch that breaks the sequence stops capture and throws.
+    await expect(
+      store.appendSessionEventBatch(runDir, [
+        {
+          seq: 5,
+          at: new Date().toISOString(),
+          nodeId: "work",
+          attemptId: "a1",
+          turnId: "t1",
+          type: "turn_started",
+          payload: { turnIndex: 0 },
+        },
+      ]),
+    ).rejects.toThrow(/seq/);
+    await expect(
+      store.appendSessionEventBatch(runDir, [
+        {
+          seq: 2,
+          at: new Date().toISOString(),
+          nodeId: "work",
+          attemptId: "a1",
+          turnId: "t1",
+          type: "turn_started",
+          payload: { turnIndex: 0 },
+        },
+      ]),
+    ).rejects.toThrow(/stopped/);
   });
 });
 
