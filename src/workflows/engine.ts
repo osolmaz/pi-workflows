@@ -214,7 +214,7 @@ export class WorkflowEngine {
     this.paused = false;
     this.parked = false;
 
-    const point = this.resumePointFor(workflow, state);
+    const point = this.resumePointFor(workflow, state, "wait");
     // A resumed run starts unpaused; the operator can pause again. The
     // interrupted node's stale in-flight markers go away before the resume
     // event so the projection matches what the engine is about to do.
@@ -236,8 +236,14 @@ export class WorkflowEngine {
 
     if (point.nodeId === null) {
       // The last recorded transition already finished the graph; the crash
-      // happened before the terminal event was written.
-      if (point.failedResult === undefined) {
+      // happened before the terminal event was written. A finished
+      // checkpoint restores its waiting gate rather than completing.
+      if (point.waitingOn !== undefined) {
+        await this.finishRun(runDir, state, "waiting", {
+          waitingOn: point.waitingOn,
+          finalOutput: point.lastOutput,
+        });
+      } else if (point.failedResult === undefined) {
         await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
       } else {
         const timedOut = point.failedResult.outcome === "timed_out";
@@ -343,7 +349,7 @@ export class WorkflowEngine {
     });
     await this.onRunStarted?.(runDir, state);
 
-    const point = this.resumePointFor(workflow, state);
+    const point = this.resumePointFor(workflow, state, "continue");
     if (point.nodeId === null) {
       // The checkpoint was the final node; the answer completes the chain.
       await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
@@ -376,7 +382,13 @@ export class WorkflowEngine {
   private resumePointFor(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-  ): { nodeId: string | null; lastOutput?: unknown; failedResult?: WorkflowNodeResult } {
+    checkpointBehavior: "wait" | "continue",
+  ): {
+    nodeId: string | null;
+    lastOutput?: unknown;
+    failedResult?: WorkflowNodeResult;
+    waitingOn?: string;
+  } {
     if (state.currentNode !== undefined) {
       if (workflow.nodes[state.currentNode] === undefined) {
         throw new Error(`Resume node is missing from the workflow: ${state.currentNode}`);
@@ -392,6 +404,15 @@ export class WorkflowEngine {
       return { nodeId: lastStep.nodeId };
     }
     if (result.outcome === "ok") {
+      // A recorded checkpoint means the run should be waiting; a crash
+      // before the run_waiting persist restores the gate instead of
+      // routing past it. Continuations deliberately route onward.
+      if (
+        checkpointBehavior === "wait" &&
+        workflow.nodes[lastStep.nodeId]?.nodeType === "checkpoint"
+      ) {
+        return { nodeId: null, waitingOn: lastStep.nodeId, lastOutput: result.output };
+      }
       const next = resolveNext(workflow.edges, lastStep.nodeId, result.output, result);
       return next === null
         ? { nodeId: null, lastOutput: result.output }

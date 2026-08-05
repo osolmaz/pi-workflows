@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
 import {
@@ -231,6 +231,64 @@ describe("WorkflowEngine.resumeRun", () => {
     expect(resumed?.type).toBe("run_completed");
     const types = await traceTypes(runDir);
     expect(types).toContain("run_resumed");
+  });
+
+  it("restores the waiting gate when a crash hit after a checkpoint", async () => {
+    const outputRoot = await makeTempDir("pi-resume-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const downstream = vi.fn(() => "should not run");
+    const workflow = defineWorkflow({
+      name: "gate-flow",
+      startAt: "approval",
+      nodes: {
+        approval: checkpoint({ summary: "approve" }),
+        apply: compute({ run: downstream }),
+      },
+      edges: [{ from: "approval", to: "apply" }],
+    });
+
+    // Crash window: the checkpoint's node_finished persisted, but the
+    // terminal run_waiting event did not.
+    const state = runningState("resume-checkpoint", workflow);
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+    state.results.approval = {
+      attemptId: "a1",
+      nodeId: "approval",
+      nodeType: "checkpoint",
+      outcome: "ok",
+      output: { summary: "approve" },
+      startedAt: state.startedAt,
+      finishedAt: state.startedAt,
+      durationMs: 1,
+    };
+    state.outputs.approval = { summary: "approve" };
+    state.steps.push({
+      attemptId: "a1",
+      nodeId: "approval",
+      nodeType: "checkpoint",
+      outcome: "ok",
+      startedAt: state.startedAt,
+      finishedAt: state.startedAt,
+      prompt: null,
+      output: { summary: "approve" },
+    });
+    await store.writeSnapshot(runDir, state, {
+      scope: "node",
+      type: "node_finished",
+      nodeId: "approval",
+      attemptId: "a1",
+      payload: { outcome: "ok", output: { summary: "approve" }, durationMs: 1 },
+    });
+
+    const engine = makeEngine(store);
+    const result = await engine.resumeRun(workflow, "resume-checkpoint");
+
+    // The human gate is restored; nothing downstream executes.
+    expect(result.state.status).toBe("waiting");
+    expect(result.state.waitingOn).toBe("approval");
+    expect(downstream).not.toHaveBeenCalled();
+    void runDir;
   });
 
   it("refuses to resume terminal or waiting runs", async () => {

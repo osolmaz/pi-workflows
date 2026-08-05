@@ -205,6 +205,15 @@ export class WorkflowHost {
       await this.failUnresumable(record, claimToken, errorMessage(error));
       return;
     }
+    if (this.stopping) {
+      // The drain started during setup: park before anything executes.
+      try {
+        this.store.parkWorkflowRun({ runId, claimToken });
+      } catch {
+        // Best-effort.
+      }
+      return;
+    }
 
     const store = this.store;
     const fence = () => {
