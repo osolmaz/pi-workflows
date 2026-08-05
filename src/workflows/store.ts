@@ -1085,7 +1085,11 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
     });
   }
   // The headline integrity is the flat stream's when present; otherwise the
-  // latest capture segment speaks for the run.
+  // chronologically latest capture segment speaks for the run (segment ids
+  // are random, so directory order says nothing about time).
+  sessionSegments.sort((a, b) =>
+    (a.binding?.boundAt ?? "").localeCompare(b.binding?.boundAt ?? ""),
+  );
   const sessionIntegrity =
     flatIntegrity.status !== "unavailable" || sessionSegments.length === 0
       ? flatIntegrity

@@ -1117,6 +1117,14 @@ export class SqliteControllerStore implements ControllerStore {
     }));
   }
 
+  /** The highest run event seq in the feed; 0 when empty. */
+  latestRunEventSeq(): number {
+    const row = this.database.prepare("SELECT MAX(seq) AS latest FROM run_events").get() as {
+      latest: number | null;
+    };
+    return row.latest ?? 0;
+  }
+
   /** The last run event this session was told about; 0 before any sync. */
   getSessionWatermark(sessionId: string): number {
     validateKey(sessionId, "session id");

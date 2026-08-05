@@ -1060,42 +1060,121 @@ export default defineWorkflow({
     }
   });
 
-  it("syncs a reopened session with runs another session drove", { timeout: 20_000 }, async () => {
+  it("never replays old events but picks up new ones live", { timeout: 25_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-sync");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
     try {
       await writeEchoWorkflow(cwd);
+      const respond = (prompt: string, tool: RegisteredTool) => {
+        const contract = stepFromPrompt(prompt);
+        if (contract) {
+          void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+        }
+      };
       // Session A drives a run to completion.
-      const first = makeHarness({
-        cwd,
-        sessionId: "session-a",
-        respond: (prompt, tool) => {
-          const contract = stepFromPrompt(prompt);
-          if (contract) {
-            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
-          }
-        },
-      });
+      const first = makeHarness({ cwd, sessionId: "session-a", respond });
       await first.emitAsync("session_start");
       await first.command.handler("mini say hi", first.ctx);
       await waitFor(() => first.notifications.some((note) => note.includes("completed")));
       await first.emitAsync("session_shutdown");
 
-      // Session B opens later: catch-up mentions the completed run exactly
-      // through the shared event feed.
+      // Session B opens later: no replay of the completed run.
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      expect(second.notifications.some((note) => note.includes("completed"))).toBe(false);
+
+      // A new run by session C appears in B's live feed within a poll cycle.
+      const third = makeHarness({ cwd, sessionId: "session-c", respond });
+      await third.emitAsync("session_start");
+      await third.command.handler("mini again", third.ctx);
+      await waitFor(() => third.notifications.some((note) => note.includes("completed")));
+      await waitFor(
+        () =>
+          second.notifications.some((note) => note.includes("mini") && note.includes("completed")),
+        10_000,
+      );
+      await second.emitAsync("session_shutdown");
+      await third.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("catches up a reopened session with a state snapshot", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-snapshot");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: {
+    approval: checkpoint({ summary: "approve" }),
+    apply: compute({ run: () => 1 }),
+  },
+  edges: [{ from: "approval", to: "apply" }],
+});
+`,
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 400);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      // Session A: one run waits at a checkpoint; another parks mid-flight.
+      const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await first.emitAsync("session_start");
+      await first.command.handler("gate", first.ctx);
+      await waitFor(() =>
+        first.notifications.some((note) => note.includes("parked at checkpoint approval")),
+      );
+      await first.command.handler("slow", first.ctx);
+      await waitFor(async () => {
+        const runDirs = await fs.readdir(runsDir);
+        for (const dir of runDirs) {
+          const bundle = await readRunBundle(path.join(runsDir, dir));
+          if (bundle?.state.workflowName === "slow" && bundle.state.currentNode === "work") {
+            return true;
+          }
+        }
+        return false;
+      });
+      await first.emitAsync("session_shutdown");
+
+      // Session B opens: the snapshot names both, without event replay.
       const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
       await second.emitAsync("session_start");
       await waitFor(() =>
-        second.notifications.some((note) => note.includes("mini") && note.includes("completed")),
+        second.notifications.some((note) => note.includes("waits at checkpoint approval")),
       );
-      expect(second.sentMessages.some((entry) => entry.message.content.includes("completed"))).toBe(
-        true,
+      const snapshot = second.notifications.find((note) =>
+        note.includes("waits at checkpoint approval"),
       );
-      // Session B's own progress does not re-notify on the next pass.
-      const notificationCount = second.notifications.length;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(second.notifications.length).toBe(notificationCount);
+      expect(snapshot).toContain("waits at checkpoint approval");
+      expect(snapshot).toContain("is parked and will resume");
       await second.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();

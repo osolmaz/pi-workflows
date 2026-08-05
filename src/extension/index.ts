@@ -183,7 +183,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   // Session sync: a per-session watermark over the run event feed keeps this
   // session's context current with runs other runners drove.
-  let syncSessionId: string | null = null;
+  // The sync watermark is project-scoped: a reopened session catches up
+  // where the last one stopped, and two open sessions share one pointer.
+  const SYNC_WATERMARK_KEY = "project";
+  let syncArmed = false;
   let runSyncTimer: ReturnType<typeof setInterval> | null = null;
 
   const recordRunEvent = (event: {
@@ -218,12 +221,24 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const runSyncPass = (ctx: ExtensionContext) => {
-    if (runQueueStore === null || syncSessionId === null) {
+  const runSyncPass = async (ctx: ExtensionContext): Promise<void> => {
+    if (runQueueStore === null || !syncArmed) {
       return;
     }
     try {
-      const watermark = runQueueStore.getSessionWatermark(syncSessionId);
+      const watermark = runQueueStore.getSessionWatermark(SYNC_WATERMARK_KEY);
+      if (watermark === 0) {
+        // First sync ever for this project: never replay the feed (stale
+        // "waits at checkpoint" lines included). Fast-forward, then catch
+        // up from current state instead — what is parked, resuming, or
+        // waiting for an answer right now.
+        const latest = runQueueStore.latestRunEventSeq();
+        if (latest > 0) {
+          runQueueStore.setSessionWatermark(SYNC_WATERMARK_KEY, latest);
+        }
+        await sendStateSnapshot(ctx);
+        return;
+      }
       const events = runQueueStore.listRunEventsAfter(watermark, { limit: 20 });
       if (events.length === 0) {
         return;
@@ -231,7 +246,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       // Persist the watermark first. A crash after this point skips the
       // message, but snapshots recompute from the store, so no information
       // stays lost; a duplicated state line is the worst outcome.
-      runQueueStore.setSessionWatermark(syncSessionId, events[events.length - 1]?.seq ?? 0);
+      runQueueStore.setSessionWatermark(SYNC_WATERMARK_KEY, events[events.length - 1]?.seq ?? 0);
       const noteworthy = events.filter(
         (event) =>
           event.runnerId !== runnerId &&
@@ -253,13 +268,52 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  // The first-use catch-up: a snapshot of runs that need attention now.
+  const sendStateSnapshot = async (ctx: ExtensionContext) => {
+    if (runQueueStore === null) {
+      return;
+    }
+    const lines: string[] = [];
+    const rows = runQueueStore.listWorkflowRuns();
+    for (const row of rows) {
+      if (row.status === "parked") {
+        lines.push(`${row.workflowRef} run ${row.runId} is parked and will resume`);
+      }
+    }
+    const known = new Set(rows.map((row) => row.runId));
+    const continued = new Set(
+      rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
+    );
+    const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+    for (const bundle of bundles) {
+      if (
+        bundle.state.status === "waiting" &&
+        known.has(bundle.state.runId) &&
+        !continued.has(bundle.state.runId)
+      ) {
+        lines.push(
+          `${bundle.state.workflowName} run ${bundle.state.runId} waits at checkpoint ${bundle.state.waitingOn ?? "?"} — answer with /workflow answer`,
+        );
+      }
+    }
+    if (lines.length === 0) {
+      return;
+    }
+    const content = `Workflow runs needing attention:\n${lines.join("\n")}`;
+    pi.sendMessage(
+      { customType: "pi-workflows-run-sync", content, display: false },
+      { deliverAs: "steer", triggerTurn: false },
+    );
+    notify(ctx, lines.join("; "));
+  };
+
   const startRunSync = (ctx: ExtensionContext) => {
     if (runSyncTimer !== null) {
       return;
     }
     ensureRunQueueStore(ctx.cwd);
-    runSyncPass(ctx);
-    runSyncTimer = setInterval(() => runSyncPass(ctx), RUN_SYNC_POLL_MS);
+    void runSyncPass(ctx);
+    runSyncTimer = setInterval(() => void runSyncPass(ctx), RUN_SYNC_POLL_MS);
     runSyncTimer.unref?.();
   };
   let activeRun: ActiveRun | null = null;
@@ -768,14 +822,17 @@ export default function piWorkflows(pi: ExtensionAPI) {
         // source) must not strand the run: park it so it stays claimable
         // once the cause is fixed, and say so in the feed.
         let resumeFailed = run.resume === true && !isClaimLostError(error);
+        let terminalStatus: string | undefined;
         // Re-parking only makes sense while the bundle is still resumable.
         // A terminal or waiting bundle closes the queue row instead, or
-        // every session start would retry it forever.
+        // every session start would retry it forever — and the feed reports
+        // the bundle's real state, not a bogus failure.
         if (resumeFailed) {
           try {
             const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
             if (bundle === null || bundle.state.status !== "running") {
               resumeFailed = false;
+              terminalStatus = bundle?.state.status;
             }
           } catch {
             // Unreadable bundles close the row too.
@@ -825,6 +882,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
             `Could not resume workflow ${workflow.name}: ${message}. The run is parked again.`,
             "warning",
           );
+          return;
+        }
+        if (terminalStatus !== undefined) {
+          recordRunEvent({ runId, workflowRef: workflow.name, type: terminalStatus, payload: {} });
+          notify(ctx, `Workflow ${workflow.name} ${terminalStatus} (run ${runId}).`);
           return;
         }
         recordRunEvent({
@@ -1226,7 +1288,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     sessionClosed = false;
     controllerContext = ctx;
     try {
-      syncSessionId = ctx.sessionManager.getSessionId();
+      syncArmed = true;
       startRunSync(ctx);
     } catch {
       // Session sync is best-effort; runs themselves never depend on it.
@@ -1343,7 +1405,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       clearInterval(runSyncTimer);
       runSyncTimer = null;
     }
-    syncSessionId = null;
+    syncArmed = false;
     await controllerHost?.close().catch(() => undefined);
     controllerHost = undefined;
     controllerContext = null;
