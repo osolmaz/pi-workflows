@@ -9,7 +9,12 @@ import { projectControllerStorePath, SqliteControllerStore } from "../controller
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import { ClaimLostError, errorMessage, isClaimLostError } from "../workflows/errors.js";
-import { discoverWorkflows, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
+import {
+  discoverWorkflows,
+  hashWorkflowSource,
+  loadWorkflowFile,
+  resolveWorkflowRef,
+} from "../workflows/loader.js";
 import {
   createRunId,
   readLastTraceEvent,
@@ -428,6 +433,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       throw options.signal.reason ?? new Error("Workflow startup aborted");
     }
     const snapshot = createDefinitionSnapshot(workflow);
+    const workflowHash = await hashWorkflowSource(resolved.path);
     const runId = options.runId ?? createRunId(workflow.name);
 
     // Interactive runs are queued and claimed atomically, so this session
@@ -544,7 +550,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
 
     run.completion = engine
-      .run(workflow, input, { workflowPath: resolved.path, runId })
+      .run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
       .then((result) => finishRun(ctx, run, result))
       .catch((error: unknown) => {
         if (activeRun === run) {

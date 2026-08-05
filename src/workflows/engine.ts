@@ -6,6 +6,7 @@ import {
   isAbortLikeError,
   isClaimLostError,
   TimeoutError,
+  WorkflowSourceChangedError,
 } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
@@ -124,7 +125,7 @@ export class WorkflowEngine {
   async run(
     workflow: WorkflowDefinition,
     input: unknown,
-    options: { workflowPath?: string; runId?: string } = {},
+    options: { workflowPath?: string; workflowHash?: string; runId?: string } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
     // Fail before any bundle exists so bad input cannot leave a partial run
@@ -141,6 +142,7 @@ export class WorkflowEngine {
       workflow,
       normalizedInput,
       options.workflowPath,
+      options.workflowHash,
       options.runId,
     );
     const runDir = await this.store.initializeRunBundle(workflow, state);
@@ -161,22 +163,138 @@ export class WorkflowEngine {
     try {
       await this.executeGraph(workflow, state, runDir);
     } catch (error) {
-      const cancelled = this.cancelled || isAbortLikeError(error);
-      try {
-        await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
-          error: errorMessage(error),
-        });
-      } catch (finishError) {
-        // A fenced-out runner must not touch the bundle, including terminal
-        // projections. Propagate the claim loss instead of the node error.
-        if (isClaimLostError(finishError)) {
-          throw finishError;
-        }
-        throw error;
-      }
+      await this.finishAfterError(runDir, state, error);
       return { runDir, state };
     }
     return { runDir, state };
+  }
+
+  /**
+   * Resume an interrupted run at the node it stopped on. The caller must
+   * hold the run's queue claim. Completed nodes replay from the recorded
+   * state; only the interrupted node and everything downstream rerun.
+   */
+  async resumeRun(
+    workflow: WorkflowDefinition,
+    runId: string,
+    options: { workflowHash?: string; force?: boolean } = {},
+  ): Promise<WorkflowRunResult> {
+    validateWorkflowDefinition(workflow);
+    const bundle = await this.store.prepareRunResume(runId);
+    const { runDir } = bundle;
+    const state = bundle.state;
+    const hashMismatch =
+      state.workflowHash !== undefined &&
+      options.workflowHash !== undefined &&
+      state.workflowHash !== options.workflowHash;
+    if (hashMismatch && options.force !== true) {
+      throw new WorkflowSourceChangedError(runId);
+    }
+
+    this.cancelled = false;
+    this.paused = false;
+
+    const point = this.resumePointFor(workflow, state);
+    // A resumed run starts unpaused; the operator can pause again. The
+    // interrupted node's stale in-flight markers go away before the resume
+    // event so the projection matches what the engine is about to do.
+    delete state.paused;
+    delete state.currentNode;
+    delete state.currentAttemptId;
+    delete state.currentNodeStartedAt;
+    delete state.statusDetail;
+    await this.persist(runDir, state, {
+      scope: "run",
+      type: "run_resumed",
+      payload: {
+        ...(point.nodeId !== null ? { resumeAt: point.nodeId } : {}),
+        replayedSteps: state.steps.length,
+        ...(hashMismatch ? { workflowHashMismatch: true, forced: true } : {}),
+      },
+    });
+    await this.onRunStarted?.(runDir, state);
+
+    if (point.nodeId === null) {
+      // The last recorded transition already finished the graph; the crash
+      // happened before the terminal event was written.
+      if (point.failedResult === undefined) {
+        await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
+      } else {
+        const timedOut = point.failedResult.outcome === "timed_out";
+        await this.finishRun(runDir, state, timedOut ? "timed_out" : "failed", {
+          error: point.failedResult.error ?? `Workflow node failed: ${point.failedResult.nodeId}`,
+        });
+      }
+      return { runDir, state };
+    }
+
+    try {
+      await this.executeGraph(
+        workflow,
+        state,
+        runDir,
+        point.nodeId,
+        state.steps.length,
+        point.lastOutput,
+      );
+    } catch (error) {
+      await this.finishAfterError(runDir, state, error);
+      return { runDir, state };
+    }
+    return { runDir, state };
+  }
+
+  /**
+   * Find where a resumed run continues. An in-flight node reruns; otherwise
+   * routing continues from the last recorded step. A null nodeId means the
+   * graph was already done when the crash hit.
+   */
+  private resumePointFor(
+    workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+  ): { nodeId: string | null; lastOutput?: unknown; failedResult?: WorkflowNodeResult } {
+    if (state.currentNode !== undefined) {
+      if (workflow.nodes[state.currentNode] === undefined) {
+        throw new Error(`Resume node is missing from the workflow: ${state.currentNode}`);
+      }
+      return { nodeId: state.currentNode };
+    }
+    const lastStep = state.steps.at(-1);
+    if (lastStep === undefined) {
+      return { nodeId: workflow.startAt };
+    }
+    const result = state.results[lastStep.nodeId];
+    if (result === undefined) {
+      return { nodeId: lastStep.nodeId };
+    }
+    if (result.outcome === "ok") {
+      const next = resolveNext(workflow.edges, lastStep.nodeId, result.output, result);
+      return next === null
+        ? { nodeId: null, lastOutput: result.output }
+        : { nodeId: next, lastOutput: result.output };
+    }
+    const next = resolveNextForOutcome(workflow.edges, lastStep.nodeId, result);
+    return next === null ? { nodeId: null, failedResult: result } : { nodeId: next };
+  }
+
+  private async finishAfterError(
+    runDir: string,
+    state: WorkflowRunState,
+    error: unknown,
+  ): Promise<void> {
+    const cancelled = this.cancelled || isAbortLikeError(error);
+    try {
+      await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
+        error: errorMessage(error),
+      });
+    } catch (finishError) {
+      // A fenced-out runner must not touch the bundle, including terminal
+      // projections. Propagate the claim loss instead of the node error.
+      if (isClaimLostError(finishError)) {
+        throw finishError;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -209,6 +327,7 @@ export class WorkflowEngine {
     workflow: WorkflowDefinition,
     input: unknown,
     workflowPath: string | undefined,
+    workflowHash: string | undefined,
     runId: string | undefined,
   ): Promise<WorkflowRunState> {
     const now = new Date().toISOString();
@@ -219,6 +338,7 @@ export class WorkflowEngine {
       workflowName: workflow.name,
       ...(await this.resolveTitleBounded(workflow, input)),
       ...(workflowPath !== undefined ? { workflowPath } : {}),
+      ...(workflowHash !== undefined ? { workflowHash } : {}),
       startedAt: now,
       updatedAt: now,
       status: "running",
@@ -233,11 +353,14 @@ export class WorkflowEngine {
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
     runDir: string,
+    startNodeId: string | null = workflow.startAt,
+    executedStepsBase = 0,
+    initialLastOutput?: unknown,
   ): Promise<void> {
     const maxSteps = workflow.maxSteps ?? this.maxSteps;
-    let currentNodeId: string | null = workflow.startAt;
-    let executedSteps = 0;
-    let lastOutput: unknown;
+    let currentNodeId: string | null = startNodeId;
+    let executedSteps = executedStepsBase;
+    let lastOutput: unknown = initialLastOutput;
 
     while (currentNodeId !== null) {
       await this.holdWhilePaused(state, runDir);

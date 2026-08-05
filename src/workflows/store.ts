@@ -208,6 +208,45 @@ export class WorkflowRunStore {
     });
   }
 
+  /**
+   * Prepare an interrupted bundle for resume. Repairs a torn trace tail,
+   * drops trace events the state projection never recorded, and seeds the
+   * in-process context so new events continue the sequence. The caller must
+   * hold the run's queue claim; the fence is verified before any write.
+   */
+  async prepareRunResume(runId: string): Promise<LoadedRunBundle> {
+    const runDir = this.runDirFor(runId);
+    this.fenceProvider?.(runDir)?.();
+    const bundle = await readRunBundle(runDir);
+    if (bundle === null) {
+      throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
+    }
+    if (bundle.state.status !== "running") {
+      throw new Error(`Cannot resume workflow run ${runId} with status ${bundle.state.status}`);
+    }
+    const tracePath = resolveBundlePath(runDir, bundle.manifest.paths.trace, TRACE_PATH);
+    await repairTraceFile(tracePath, bundle.state.traceSeq);
+
+    const counts = await this.sessionCounts(runDir);
+    const captureFinished =
+      bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
+    this.contexts.set(runDir, {
+      traceSeq: bundle.state.traceSeq,
+      sessionSeq: counts.entryCount,
+      sessionEventSeq: counts.lastEventSeq,
+      sessionBound: bundle.manifest.paths.session !== undefined,
+      sessionEventsStopped: captureFinished,
+      artifacts: new ArtifactWriter(runDir),
+      lock: Promise.resolve(),
+      sessionEventLock: Promise.resolve(),
+    });
+    const prepared = await readRunBundle(runDir);
+    if (prepared === null) {
+      throw new Error(`Workflow run ${runId} became unreadable during resume preparation`);
+    }
+    return prepared;
+  }
+
   /** Mark a nonterminal bundle failed and append an interruption event. */
   async markRunInterrupted(
     runId: string,
@@ -440,6 +479,54 @@ export class WorkflowRunStore {
       createManifest(state, { session: context.sessionBound }),
     );
   }
+}
+
+/**
+ * Truncate a trace file to the longest contiguous valid prefix, then to the
+ * event count the state projection recorded. A crash can leave a partial
+ * final line or one event appended before its projection write; the repair
+ * keeps state and trace consistent so resume can continue the sequence. The
+ * rewrite is atomic: a stale writer appending to the old inode cannot
+ * interleave with the repaired file.
+ */
+async function repairTraceFile(tracePath: string, keepSeq: number): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(tracePath, "utf8");
+  } catch {
+    return;
+  }
+  const lines = raw.split("\n");
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+  const good: string[] = [];
+  let expectedSeq = 1;
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      break;
+    }
+    try {
+      const event = JSON.parse(line) as { seq?: unknown };
+      if (event.seq !== expectedSeq) {
+        break;
+      }
+      good.push(line);
+      expectedSeq += 1;
+    } catch {
+      break;
+    }
+  }
+  const kept = good.slice(0, keepSeq);
+  if (kept.length === lines.length) {
+    return;
+  }
+  const tempPath = `${tracePath}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(tempPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await fs.rename(tempPath, tracePath);
 }
 
 function recoverTerminalProjection(state: WorkflowRunState, event: WorkflowTraceEvent): boolean {

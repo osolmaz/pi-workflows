@@ -30,6 +30,17 @@ export class ClaimLostError extends Error {
   }
 }
 
+/** The workflow source changed after the run started; resume needs force. */
+export class WorkflowSourceChangedError extends Error {
+  readonly runId: string;
+
+  constructor(runId: string) {
+    super(`Workflow source changed since run ${runId} started; pass force to resume anyway`);
+    this.name = "WorkflowSourceChangedError";
+    this.runId = runId;
+  }
+}
+
 export function isClaimLostError(error: unknown): error is ClaimLostError {
   return error instanceof ClaimLostError;
 }

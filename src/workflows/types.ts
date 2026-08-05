@@ -242,6 +242,8 @@ export type WorkflowRunState = {
   workflowName: string;
   runTitle?: string;
   workflowPath?: string;
+  /** SHA-256 of the workflow source at run start; resume refuses mismatches. */
+  workflowHash?: string;
   startedAt: string;
   finishedAt?: string;
   updatedAt: string;
