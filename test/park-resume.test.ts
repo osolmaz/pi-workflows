@@ -118,6 +118,80 @@ describe("park during resume preparation", () => {
   });
 });
 
+describe("bundle reading and resume-prepare edge cases", () => {
+  it("treats malformed and escaped bundles as unreadable", async () => {
+    const outputRoot = await makeTempDir("pi-edge-runs");
+    const runDir = path.join(outputRoot, "edge-1");
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, "manifest.json"), "not json", "utf8");
+    expect(await readRunBundle(runDir)).toBeNull();
+
+    // A manifest whose paths escape the bundle falls back safely.
+    await fs.writeFile(
+      path.join(runDir, "manifest.json"),
+      JSON.stringify({
+        schema: "pi-workflows.run-bundle.v1",
+        runId: "edge-1",
+        workflowName: "demo",
+        startedAt: "2026-08-04T00:00:00.000Z",
+        status: "running",
+        traceSchema: "pi-workflows.trace-event.v1",
+        paths: { state: "../../../etc/passwd", workflow: 42 },
+      }),
+      "utf8",
+    );
+    expect(await readRunBundle(runDir)).toBeNull();
+  });
+
+  it("rejects resume preparation for unreadable and non-running bundles", async () => {
+    const outputRoot = await makeTempDir("pi-edge-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    await expect(store.prepareRunResume("missing")).rejects.toThrow(/unreadable/);
+    const workflow = defineWorkflow({
+      name: "edge",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
+    await engine.run(workflow, {}, { runId: "done-run" });
+    await expect(store.prepareRunResume("done-run")).rejects.toThrow(/status completed/);
+  });
+
+  it("prepares a clean bundle without rewriting the trace", async () => {
+    const outputRoot = await makeTempDir("pi-edge-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "edge",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const state = {
+      schema: "pi-workflows.run-state.v1" as const,
+      traceSeq: 0,
+      runId: "clean-1",
+      workflowName: workflow.name,
+      startedAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+      status: "running" as const,
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+    const before = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    const prepared = await store.prepareRunResume("clean-1");
+    const after = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    expect(after).toBe(before);
+    expect(prepared.state.runId).toBe("clean-1");
+    expect(await store.hasSessionBinding(runDir)).toBe(false);
+    expect(await store.listSessionSegments(runDir)).toEqual([]);
+  });
+});
+
 describe("capture segments", () => {
   it("keeps the first capture flat and writes later captures as segments", async () => {
     const outputRoot = await makeTempDir("pi-segment-runs");

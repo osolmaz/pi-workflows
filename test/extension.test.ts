@@ -1101,6 +1101,201 @@ export default defineWorkflow({
     }
   });
 
+  it("presents a result with a function-built prompt", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-present");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "mini-present.workflow.ts"),
+        `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "mini-present",
+  presentationPrompt: ({ finalOutput }) =>
+    \`Tell the user the reply was \${JSON.stringify(finalOutput)} in one sentence.\`,
+  startAt: "reply",
+  nodes: {
+    reply: agent({
+      prompt: () => "Say hi.",
+      expectedOutput: '{ "reply": "…" }',
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+          }
+        },
+      });
+      await harness.emitAsync("session_start");
+      await harness.command.handler("mini-present", harness.ctx);
+      await waitFor(() => harness.sentMessages.length > 0);
+      expect(harness.sentMessages[0]?.message.content).toContain("reply was");
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("drives the controller command through its lifecycle", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-ctlcmd");
+    const controllerDir = await makeTempDir("pi-workflows-ext-ctl");
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      await writeControllerWithChild(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("controller");
+
+      await command?.handler('apply demo item-9 {"value":"x"}', harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Applied demo/item-9 generation 1");
+      await command?.handler("list", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("demo/item-9");
+      await command?.handler("get demo item-9", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("item-9");
+      await command?.handler("reconcile demo item-9", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Queued demo/item-9");
+      await command?.handler("delete demo item-9", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Requested deletion");
+      await command?.handler("start", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("workers started");
+      await command?.handler("stop", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("workers stopped");
+      await command?.handler("bogus", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Usage: /controller");
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it(
+    "lists workflows, refuses a second concurrent run, and parses input json",
+    { timeout: 20_000 },
+    async () => {
+      const cwd = await makeTempDir("pi-workflows-ext-list");
+      const runsDir = await makeTempDir("pi-workflows-ext-runs");
+      vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+      try {
+        await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+        await fs.writeFile(
+          path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+          `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+          "utf8",
+        );
+        const harness = makeHarness({ cwd, respond: () => {} });
+        await harness.emitAsync("session_start");
+        const workflow = harness.commands.get("workflow");
+
+        // The list command names discovered workflows.
+        await workflow?.handler("", harness.ctx);
+        expect(harness.notifications.at(-1)).toContain("Workflows: slow");
+
+        // A second run is refused while one is active.
+        await workflow?.handler("slow", harness.ctx);
+        await waitFor(async () => {
+          const runDirs = await fs.readdir(runsDir);
+          const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+          return bundle?.state.currentNode === "work";
+        });
+        await workflow?.handler("slow", harness.ctx);
+        expect(harness.notifications.at(-1)).toContain("already running");
+
+        // --input-json drives the input, and the widget shortcuts are safe.
+        await workflow?.handler("cancel", harness.ctx);
+        await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+        harness.shortcuts.get("shift+up")?.(harness.ctx);
+        harness.shortcuts.get("shift+down")?.(harness.ctx);
+        await harness.emitAsync("session_shutdown");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it(
+    "rejects workflow tool calls with no run or the wrong contract",
+    { timeout: 20_000 },
+    async () => {
+      const cwd = await makeTempDir("pi-workflows-ext-tool");
+      const runsDir = await makeTempDir("pi-workflows-ext-runs");
+      vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+      try {
+        const harness = makeHarness({ cwd, respond: () => {} });
+        await harness.emitAsync("session_start");
+        // No active run.
+        await expect(
+          harness.tool.execute("call-x", { step: "s", attempt: "a", output: {} }),
+        ).rejects.toThrow(/No workflow is running/);
+
+        // An active run with a pending step contract.
+        await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+        await fs.writeFile(
+          path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+          `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+          "utf8",
+        );
+        await harness.command.handler("slow", harness.ctx);
+        await waitFor(async () => {
+          const runDirs = await fs.readdir(runsDir);
+          const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+          return bundle?.state.currentNode === "work";
+        });
+        // A compute node has no agent contract: submissions are rejected.
+        await expect(
+          harness.tool.execute("call-y", { step: "work", attempt: "wrong", output: {} }),
+        ).rejects.toThrow();
+        await harness.emitAsync("session_shutdown");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it("handles command edge cases", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-edges");
     // No global workflows or controllers in this test's home.
@@ -1297,6 +1492,10 @@ export default defineWorkflow({
         ["r-fail", "failed", { error: "boom" }],
         ["r-wait", "waiting", { waitingOn: "review" }],
         ["r-park", "parked", {}],
+        ["r-cancel", "cancelled", {}],
+        ["r-timeout", "timed_out", {}],
+        ["r-wait2", "waiting", {}],
+        ["r-fail2", "failed", {}],
       ] as const) {
         queue.recordRunEvent({
           runId,
@@ -1317,6 +1516,9 @@ export default defineWorkflow({
       expect(feed).toContain("demo run r-fail failed: boom");
       expect(feed).toContain("waits at checkpoint review");
       expect(feed).toContain("was parked and will resume");
+      expect(feed).toContain("demo run r-cancel cancelled");
+      expect(feed).toContain("demo run r-timeout timed_out");
+      expect(feed).toContain("demo run r-fail2 failed");
       expect(feed).not.toContain("r-skip");
       await harness.emitAsync("session_shutdown");
     } finally {

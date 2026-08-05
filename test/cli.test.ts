@@ -75,6 +75,19 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["--help"]).command).toBe("help");
   });
 
+  it("parses the host command with project and passthrough args", () => {
+    expect(parseCliArgs(["host"])).toMatchObject({ command: "host" });
+    expect(parseCliArgs(["host", "--project", "/repo"])).toMatchObject({
+      command: "host",
+      project: "/repo",
+    });
+    expect(parseCliArgs(["host", "--", "--provider", "mock"])).toMatchObject({
+      command: "host",
+      piArgs: ["--provider", "mock"],
+    });
+    expect(() => parseCliArgs(["host", "--project"])).toThrow(/--project requires/);
+  });
+
   it("rejects unknown flags, extra values, and missing option values", () => {
     expect(() => parseCliArgs(["view", "--nope"])).toThrow(/Unknown argument/);
     expect(() => parseCliArgs(["view", "--dir"])).toThrow(/--dir requires/);

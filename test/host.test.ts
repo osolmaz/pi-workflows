@@ -374,6 +374,48 @@ export default defineController({
     },
   );
 
+  it("records a failed event for an unreadable bundle", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "corrupt-row",
+        workflowRef: "demo",
+        workflowPath: "/missing.workflow.ts",
+        input: {},
+        runnerId: "runner-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      // A bundle directory with a garbage manifest: unreadable.
+      await fs.mkdir(path.join(runsDir, "corrupt-row"), { recursive: true });
+      await fs.writeFile(path.join(runsDir, "corrupt-row", "manifest.json"), "junk", "utf8");
+
+      const host = new WorkflowHost({ cwd, claimPollMs: 50 });
+      const record = queue.getWorkflowRun("corrupt-row");
+      if (record === undefined) {
+        throw new Error("missing row");
+      }
+      await (
+        host as unknown as {
+          failUnresumable: (
+            record: import("../src/controllers/index.js").WorkflowRunQueueRecord,
+            claimToken: string,
+            message: string,
+          ) => Promise<void>;
+        }
+      ).failUnresumable(record, "token-a", "Cannot resume workflow run corrupt-row");
+      expect(queue.listRunEventsAfter(0).at(-1)?.type).toBe("failed");
+      queue.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reports a waiting bundle truthfully instead of a bogus failure", async () => {
     const cwd = await makeTempDir("pi-host-project");
     const runsDir = await makeTempDir("pi-host-runs");

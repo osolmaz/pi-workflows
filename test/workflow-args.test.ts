@@ -31,4 +31,18 @@ describe("parseWorkflowArgs answer", () => {
   it("requires a value", () => {
     expect(() => parseWorkflowArgs("answer")).toThrow(/requires/);
   });
+
+  it("parses --input-json for runs", () => {
+    expect(parseWorkflowArgs('mini --input-json {"task":"hi"}')).toEqual({
+      kind: "run",
+      ref: "mini",
+      input: { task: "hi" },
+    });
+    expect(() => parseWorkflowArgs("mini --input-json")).toThrow(/requires a JSON value/);
+    expect(parseWorkflowArgs("mini --input-jsonschema help")).toEqual({
+      kind: "run",
+      ref: "mini",
+      input: { task: "--input-jsonschema help" },
+    });
+  });
 });

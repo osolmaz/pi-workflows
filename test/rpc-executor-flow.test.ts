@@ -78,6 +78,27 @@ describe("RpcStepExecutor submissions", () => {
     void stdinLog;
   });
 
+  it("returns a submission that arrived before the prompt was sent", async () => {
+    const { fakePi } = await makeFakePi(
+      `printf '${submissionLine("work", "a1", { early: true })}' >&2
+sleep 2
+`,
+    );
+    const executor = new RpcStepExecutor({
+      cwd: "/tmp",
+      registry: new HostProcessRegistry("/tmp"),
+      piBin: fakePi,
+    });
+    // The marker is already waiting when the step starts; the executor
+    // resolves without waiting for more.
+    const submission = await executor.runAgentStep(
+      requestFor("work", "a1"),
+      new AbortController().signal,
+    );
+    expect(submission.output).toBeNull();
+    await executor.close();
+  });
+
   it("ignores malformed markers and submissions for other attempts", async () => {
     const { fakePi } = await makeFakePi(
       `sleep 0.2\nprintf 'PI_WORKFLOWS_STEP_SUBMISSION {broken\\n' >&2\nprintf '${submissionLine("work", "other", 1)}' >&2\nsleep 0.2\nprintf '${submissionLine("work", "a1", "mine")}' >&2\nsleep 2\n`,

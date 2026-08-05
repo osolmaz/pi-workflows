@@ -250,6 +250,81 @@ describe("workflow run queue", () => {
     ).toBeUndefined();
   });
 
+  it("rejects invalid ids on every claim operation", async () => {
+    const store = await makeStore();
+    expect(() => store.getWorkflowRun("../bad")).toThrow(/Invalid workflow run id/);
+    expect(() =>
+      store.renewWorkflowRunClaim({ runId: "../bad", claimToken: "t", leaseMs: 10 }),
+    ).toThrow(/Invalid workflow run id/);
+    expect(() => store.verifyWorkflowRunClaim({ runId: "../bad", claimToken: "t" })).toThrow(
+      /Invalid workflow run id/,
+    );
+    expect(() => store.parkWorkflowRun({ runId: "../bad", claimToken: "t" })).toThrow(
+      /Invalid workflow run id/,
+    );
+    expect(() => store.completeWorkflowRun({ runId: "../bad", claimToken: "t" })).toThrow(
+      /Invalid workflow run id/,
+    );
+    expect(() => store.deleteWorkflowRun({ runId: "../bad", claimToken: "t" })).toThrow(
+      /Invalid workflow run id/,
+    );
+    expect(() => store.listRunEventsAfter(-1)).toThrow(/Invalid run event watermark/);
+    expect(() => store.setSessionWatermark("s", -1)).toThrow(/Invalid run event watermark/);
+    expect(() =>
+      store.claimNextWorkflowRun({
+        runnerId: "r",
+        claimToken: "t",
+        leaseMs: 10,
+        excludeRunIds: ["../bad"],
+      }),
+    ).toThrow(/Invalid workflow run id/);
+  });
+
+  it("validates run queue inputs and reports missing rows", async () => {
+    const store = await makeStore();
+    expect(() =>
+      store.enqueueWorkflowRun({
+        runId: "bad-ref",
+        workflowRef: "",
+        workflowPath: "/x.ts",
+        input: null,
+        runnerId: "r",
+        claimToken: "t",
+        leaseMs: 10,
+      }),
+    ).toThrow();
+    expect(() =>
+      store.enqueueWorkflowRun({
+        runId: "big-input",
+        workflowRef: "x",
+        workflowPath: "/x.ts",
+        input: { blob: "x".repeat(2 * 1024 * 1024) },
+        runnerId: "r",
+        claimToken: "t",
+        leaseMs: 10,
+      }),
+    ).toThrow(/exceeds/);
+    expect(() =>
+      store.enqueueWorkflowRun({
+        runId: "cyclic",
+        workflowRef: "x",
+        workflowPath: "/x.ts",
+        input: (() => {
+          const value: { self?: unknown } = {};
+          value.self = value;
+          return value;
+        })(),
+        runnerId: "r",
+        claimToken: "t",
+        leaseMs: 10,
+      }),
+    ).toThrow();
+    // A fresh database reports missing runs and empty feeds.
+    expect(store.getWorkflowRun("never-existed")).toBeUndefined();
+    expect(store.listRunEventsAfter(0)).toEqual([]);
+    expect(store.latestRunEventSeq()).toBe(0);
+  });
+
   it("deletes a claimed row by token", async () => {
     const store = await makeStore();
     store.enqueueWorkflowRun({
