@@ -106,7 +106,6 @@ describe("renderRunListLines edges", () => {
         status: "waiting",
         waitingOn: "review",
         runTitle: "needs a decision",
-        finishedAt: undefined,
       }),
       makeBundle({ runId: "run-failed", status: "failed", error: "boom" }),
     ];
