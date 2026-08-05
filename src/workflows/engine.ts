@@ -333,6 +333,7 @@ export class WorkflowEngine {
       parent.state.steps,
       parent.runDir,
     )) as WorkflowRunState["steps"];
+    state.carriedStepCount = state.steps.length;
 
     const runDir = await this.store.initializeRunBundle(workflow, state);
     await this.persist(runDir, state, {
@@ -406,13 +407,13 @@ export class WorkflowEngine {
     if (result.outcome === "ok") {
       // A recorded checkpoint means the run should be waiting; a crash
       // before the run_waiting persist restores the gate instead of
-      // routing past it. The gate belongs to this run only: a continuation
-      // run's carried steps end with the parent's already-answered
-      // checkpoint, and routing must continue from it. Continuations
-      // themselves deliberately route onward.
+      // routing past it. The gate applies to this run's own checkpoint
+      // only: a continuation's carried steps end with the parent's
+      // already-answered checkpoint, and routing must continue from it.
+      const isCarriedStep = state.steps.length <= (state.carriedStepCount ?? 0);
       if (
         checkpointBehavior === "wait" &&
-        state.parentRunId === undefined &&
+        !isCarriedStep &&
         workflow.nodes[lastStep.nodeId]?.nodeType === "checkpoint"
       ) {
         return { nodeId: null, waitingOn: lastStep.nodeId, lastOutput: result.output };

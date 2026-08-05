@@ -767,7 +767,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
         // A resume that fails before executing (for example edited workflow
         // source) must not strand the run: park it so it stays claimable
         // once the cause is fixed, and say so in the feed.
-        const resumeFailed = run.resume === true && !isClaimLostError(error);
+        let resumeFailed = run.resume === true && !isClaimLostError(error);
+        // Re-parking only makes sense while the bundle is still resumable.
+        // A terminal or waiting bundle closes the queue row instead, or
+        // every session start would retry it forever.
+        if (resumeFailed) {
+          try {
+            const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+            if (bundle === null || bundle.state.status !== "running") {
+              resumeFailed = false;
+            }
+          } catch {
+            // Unreadable bundles close the row too.
+            resumeFailed = false;
+          }
+        }
         // A continuation that failed before its bundle exists frees the
         // parent's continuation slot instead of consuming it forever.
         let continuationSlotFreed = false;

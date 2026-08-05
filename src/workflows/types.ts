@@ -242,6 +242,12 @@ export type WorkflowRunState = {
   workflowName: string;
   /** Set on continuation runs: the checkpointed run this one carries forward. */
   parentRunId?: string;
+  /**
+   * Steps carried from the parent at continuation start. Steps beyond this
+   * count were recorded by this run itself; resume uses it to tell a
+   * carried checkpoint from this run's own.
+   */
+  carriedStepCount?: number;
   runTitle?: string;
   workflowPath?: string;
   /** SHA-256 of the workflow source at run start; resume refuses mismatches. */

@@ -309,6 +309,7 @@ describe("WorkflowEngine.resumeRun", () => {
     const state = {
       ...runningState("continuation-parked", workflow),
       parentRunId: "parent-run",
+      carriedStepCount: 1,
     };
     state.results.approval = {
       attemptId: "a1",
@@ -339,6 +340,75 @@ describe("WorkflowEngine.resumeRun", () => {
     // It routes past the answered checkpoint instead of regressing to waiting.
     expect(resumed.state.status).toBe("completed");
     expect(resumed.state.finalOutput).toBe("deployed");
+    void runDir;
+  });
+
+  it("restores the gate for a continuation's own checkpoint after a crash", async () => {
+    const outputRoot = await makeTempDir("pi-resume-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "two-gates",
+      startAt: "approval",
+      nodes: {
+        approval: checkpoint({ summary: "first" }),
+        review: checkpoint({ summary: "second" }),
+        apply: compute({ run: () => "deployed" }),
+      },
+      edges: [
+        { from: "approval", to: "review" },
+        { from: "review", to: "apply" },
+      ],
+    });
+
+    // The continuation answered "approval", recorded its own checkpoint
+    // "review", and crashed before run_waiting persisted.
+    const state = {
+      ...runningState("continuation-own-gate", workflow),
+      parentRunId: "parent-run",
+      carriedStepCount: 1,
+    };
+    const carried = {
+      attemptId: "a1",
+      nodeType: "checkpoint" as const,
+      outcome: "ok" as const,
+      startedAt: state.startedAt,
+      finishedAt: state.startedAt,
+      durationMs: 1,
+    };
+    state.results.approval = { ...carried, nodeId: "approval", output: { summary: "first" } };
+    state.results.review = {
+      ...carried,
+      attemptId: "a2",
+      nodeId: "review",
+      output: { summary: "second" },
+    };
+    state.outputs.approval = { summary: "first" };
+    state.outputs.review = { summary: "second" };
+    state.steps.push(
+      { ...carried, nodeId: "approval", prompt: null, output: { summary: "first" } },
+      {
+        ...carried,
+        attemptId: "a2",
+        nodeId: "review",
+        prompt: null,
+        output: { summary: "second" },
+      },
+    );
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+    await store.writeSnapshot(runDir, state, {
+      scope: "node",
+      type: "node_finished",
+      nodeId: "review",
+      attemptId: "a2",
+      payload: { outcome: "ok", output: { summary: "second" }, durationMs: 1 },
+    });
+
+    const engine = makeEngine(store);
+    const result = await engine.resumeRun(workflow, "continuation-own-gate");
+    // The run's own checkpoint gate is restored, not routed past.
+    expect(result.state.status).toBe("waiting");
+    expect(result.state.waitingOn).toBe("review");
     void runDir;
   });
 

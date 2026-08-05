@@ -300,11 +300,15 @@ export class WorkflowHost {
     claimToken: string,
     message: string,
   ): Promise<void> {
+    let actualStatus: string | undefined;
+    let heldClaim = false;
     try {
       // The interruption write obeys the same fencing rule as every other
       // bundle write: without a live claim, the current owner decides.
-      if (this.store.verifyWorkflowRunClaim({ runId: record.runId, claimToken })) {
-        await this.childRunStore.markRunInterrupted(record.runId, message);
+      heldClaim = this.store.verifyWorkflowRunClaim({ runId: record.runId, claimToken });
+      if (heldClaim) {
+        const bundle = await this.childRunStore.markRunInterrupted(record.runId, message);
+        actualStatus = bundle?.state.status;
       }
     } catch {
       // The bundle may be unreadable; the queue row still needs closure.
@@ -314,7 +318,19 @@ export class WorkflowHost {
     } catch {
       // Best-effort.
     }
-    this.recordEvent(record.runId, record.workflowRef, "failed", { error: message });
+    if (!heldClaim) {
+      // Another runner owns the run; its owner reports from here.
+      this.log(`run ${record.runId} continues under another runner`);
+      return;
+    }
+    // Report the bundle's real terminal state when the interruption was a
+    // no-op (the bundle was already waiting or completed), so the feed
+    // stays truthful for sessions syncing from it.
+    if (actualStatus !== undefined && actualStatus !== "failed") {
+      this.recordEvent(record.runId, record.workflowRef, actualStatus, {});
+    } else {
+      this.recordEvent(record.runId, record.workflowRef, "failed", { error: message });
+    }
     this.log(`run ${record.runId} cannot resume: ${message}`);
   }
 

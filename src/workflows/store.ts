@@ -278,6 +278,11 @@ export class WorkflowRunStore {
     const tracePath = resolveBundlePath(runDir, bundle.manifest.paths.trace, TRACE_PATH);
     await repairTraceFile(tracePath, bundle.state.traceSeq);
 
+    // A crashed session never finalizes its capture, and resuming recorders
+    // always write new segments — so dangling "recording" captures end here
+    // instead of reporting the run capture-corrupt forever.
+    await this.finalizeRecordingCaptures(runDir, "Workflow host stopped before the run finished");
+
     const counts = await this.sessionCounts(runDir);
     const captureFinished =
       bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
@@ -297,6 +302,60 @@ export class WorkflowRunStore {
       throw new Error(`Workflow run ${runId} became unreadable during resume preparation`);
     }
     return prepared;
+  }
+
+  /**
+   * Finalize captures left "recording" by a session that is gone, so they
+   * report failed with the reason instead of dangling forever.
+   */
+  private async finalizeRecordingCaptures(
+    runDir: string,
+    reason: string,
+    options: { skipFlat?: boolean } = {},
+  ): Promise<void> {
+    if (options.skipFlat !== true) {
+      const flatCapture = await readJsonFile<WorkflowSessionCapture>(
+        path.join(runDir, SESSION_CAPTURE_PATH),
+      );
+      if (flatCapture?.status === "recording") {
+        const counts = await this.sessionCounts(runDir);
+        await this.writeSessionCapture(runDir, {
+          schema: SESSION_CAPTURE_SCHEMA,
+          eventSchema: SESSION_EVENT_SCHEMA,
+          status: "failed",
+          ...counts,
+          failure: {
+            failedAt: new Date().toISOString(),
+            code: "host_interrupted",
+            message: reason,
+          },
+        });
+      }
+    }
+    for (const segmentId of await this.listSessionSegments(runDir)) {
+      const segmentCapture = await readJsonFile<WorkflowSessionCapture>(
+        path.join(runDir, sessionStreamPaths(segmentId).capture),
+      );
+      if (segmentCapture?.status !== "recording") {
+        continue;
+      }
+      const segmentCounts = await this.sessionCounts(runDir, segmentId);
+      await this.writeSessionCapture(
+        runDir,
+        {
+          schema: SESSION_CAPTURE_SCHEMA,
+          eventSchema: SESSION_EVENT_SCHEMA,
+          status: "failed",
+          ...segmentCounts,
+          failure: {
+            failedAt: new Date().toISOString(),
+            code: "host_interrupted",
+            message: reason,
+          },
+        },
+        segmentId,
+      );
+    }
   }
 
   /** Mark a nonterminal bundle failed and append an interruption event. */
@@ -343,32 +402,7 @@ export class WorkflowRunStore {
         },
       });
     }
-    // Recording capture segments end the same way: the session that owned
-    // them is gone, so they finalize as failed instead of dangling.
-    for (const segmentId of await this.listSessionSegments(runDir)) {
-      const segmentCapture = await readJsonFile<WorkflowSessionCapture>(
-        path.join(runDir, sessionStreamPaths(segmentId).capture),
-      );
-      if (segmentCapture?.status !== "recording") {
-        continue;
-      }
-      const segmentCounts = await this.sessionCounts(runDir, segmentId);
-      await this.writeSessionCapture(
-        runDir,
-        {
-          schema: SESSION_CAPTURE_SCHEMA,
-          eventSchema: SESSION_EVENT_SCHEMA,
-          status: "failed",
-          ...segmentCounts,
-          failure: {
-            failedAt: new Date().toISOString(),
-            code: "host_interrupted",
-            message: reason,
-          },
-        },
-        segmentId,
-      );
-    }
+    await this.finalizeRecordingCaptures(runDir, reason, { skipFlat: true });
     state.status = "failed";
     state.finishedAt = new Date().toISOString();
     state.error = reason;

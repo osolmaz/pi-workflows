@@ -144,6 +144,53 @@ describe("capture segments", () => {
     expect(bundle?.sessionIntegrity.status).toBe("complete");
   });
 
+  it("finalizes a dangling recording capture when preparing a resume", async () => {
+    const outputRoot = await makeTempDir("pi-segment-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "seg-resume",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const state = {
+      schema: "pi-workflows.run-state.v1" as const,
+      traceSeq: 0,
+      runId: "seg-dangle",
+      workflowName: workflow.name,
+      startedAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+      status: "running" as const,
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: "seg-dangle",
+      piSessionId: "crashed-session",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    // The crashed session never finalized its capture.
+    await store.writeSessionCapture(runDir, {
+      schema: "pi-workflows.session-capture.v1",
+      eventSchema: "pi-workflows.session-event.v1",
+      status: "recording",
+      eventCount: 0,
+      entryCount: 0,
+      lastEventSeq: 0,
+    });
+
+    await store.prepareRunResume("seg-dangle");
+    const bundle = await readRunBundle(runDir);
+    expect(bundle?.sessionCapture?.status).toBe("failed");
+    expect(bundle?.sessionCapture?.failure?.code).toBe("host_interrupted");
+  });
+
   it("finalizes recording segments when a run is interrupted", async () => {
     const outputRoot = await makeTempDir("pi-segment-runs");
     const store = new WorkflowRunStore(outputRoot);

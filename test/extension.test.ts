@@ -1337,6 +1337,72 @@ export default defineWorkflow({
     }
   });
 
+  it(
+    "closes the queue row when a claimed run's bundle is already waiting",
+    { timeout: 20_000 },
+    async () => {
+      const cwd = await makeTempDir("pi-workflows-ext-terminal-row");
+      const runsDir = await makeTempDir("pi-workflows-ext-runs");
+      vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+      try {
+        await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+        const workflowFile = path.join(cwd, ".pi", "workflows", "gate.workflow.ts");
+        await fs.writeFile(
+          workflowFile,
+          `import { checkpoint, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: { approval: checkpoint({ summary: "approve" }) },
+  edges: [],
+});
+`,
+          "utf8",
+        );
+        // A run reaches the checkpoint in session A.
+        const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+        await first.emitAsync("session_start");
+        await first.command.handler("gate", first.ctx);
+        await waitFor(() =>
+          first.notifications.some((note) => note.includes("parked at checkpoint approval")),
+        );
+        // Simulate the crash window: the bundle is waiting (terminal) but
+        // the queue row was never released — flip it back to claimed with an
+        // expired lease, as a killed session would have left it.
+        const queueFile = projectControllerStorePath(cwd);
+        const queue = new SqliteControllerStore(queueFile);
+        const [row] = queue.listWorkflowRuns();
+        const runId = row?.runId as string;
+        queue.close();
+        const { default: Database } = await import("better-sqlite3");
+        const raw = new Database(queueFile);
+        raw
+          .prepare(
+            "UPDATE workflow_run_queue SET status = 'claimed', runner_id = 'dead-runner', claim_token = 'stale-token', claim_expires_at = 1 WHERE run_id = ?",
+          )
+          .run(runId);
+        raw.close();
+        await first.emitAsync("session_shutdown");
+
+        // Session B claims it, fails to resume a terminal bundle, and closes
+        // the row as done instead of re-parking forever.
+        const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+        await second.emitAsync("session_start");
+        await waitFor(() => {
+          const reader = new SqliteControllerStore(queueFile, { readOnly: true });
+          try {
+            return reader.getWorkflowRun(runId)?.status === "done";
+          } finally {
+            reader.close();
+          }
+        });
+        await second.emitAsync("session_shutdown");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it("resumes a parked run when a new session opens", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-reopen");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
