@@ -114,6 +114,27 @@ export type WorkflowRunQueueRecord = {
   updatedAt: string;
 };
 
+type RunEventRow = {
+  seq: number;
+  recorded_at: string;
+  run_id: string;
+  workflow_ref: string;
+  type: string;
+  runner_id: string | null;
+  payload_json: string;
+};
+
+/** One run lifecycle transition in the cross-session event feed. */
+export type RunEventRecord = {
+  seq: number;
+  recordedAt: string;
+  runId: string;
+  workflowRef: string;
+  type: string;
+  runnerId: string | null;
+  payload: JsonObject;
+};
+
 type EventRow = {
   seq: number;
   recorded_at: string;
@@ -1021,6 +1042,80 @@ export class SqliteControllerStore implements ControllerStore {
     return result.changes === 1;
   }
 
+  /** Append a run lifecycle transition to the event feed. */
+  recordRunEvent(options: {
+    runId: string;
+    workflowRef: string;
+    type: string;
+    runnerId?: string;
+    payload?: JsonObject;
+    now?: string;
+  }): number {
+    validateRunId(options.runId);
+    validateKey(options.type, "run event type");
+    const payloadJson = canonicalJson(options.payload ?? {}, "run event payload");
+    validateJsonSize(payloadJson, "Run event payload", MAX_EVENT_BYTES);
+    const result = this.database
+      .prepare(
+        `INSERT INTO run_events (recorded_at, run_id, workflow_ref, type, runner_id, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        validTimestamp(options.now),
+        options.runId,
+        options.workflowRef,
+        options.type,
+        options.runnerId ?? null,
+        payloadJson,
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** List run events after a watermark, oldest first. */
+  listRunEventsAfter(seq: number, options: { limit?: number } = {}): RunEventRecord[] {
+    const limit = options.limit ?? 50;
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`Invalid run event watermark: ${seq}`);
+    }
+    const rows = this.database
+      .prepare("SELECT * FROM run_events WHERE seq > ? ORDER BY seq ASC LIMIT ?")
+      .all(seq, limit) as RunEventRow[];
+    return rows.map((row) => ({
+      seq: row.seq,
+      recordedAt: row.recorded_at,
+      runId: row.run_id,
+      workflowRef: row.workflow_ref,
+      type: row.type,
+      runnerId: row.runner_id,
+      payload: parseStoredJson<JsonObject>(row.payload_json, "run event payload"),
+    }));
+  }
+
+  /** The last run event this session was told about; 0 before any sync. */
+  getSessionWatermark(sessionId: string): number {
+    validateKey(sessionId, "session id");
+    const row = this.database
+      .prepare("SELECT last_event_seq FROM session_watermarks WHERE session_id = ?")
+      .get(sessionId) as { last_event_seq: number } | undefined;
+    return row?.last_event_seq ?? 0;
+  }
+
+  setSessionWatermark(sessionId: string, seq: number, now?: string): void {
+    validateKey(sessionId, "session id");
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`Invalid run event watermark: ${seq}`);
+    }
+    this.database
+      .prepare(
+        `INSERT INTO session_watermarks (session_id, last_event_seq, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_event_seq = MAX(session_watermarks.last_event_seq, excluded.last_event_seq),
+           updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, seq, validTimestamp(now));
+  }
+
   private requireWorkflowRun(runId: string): WorkflowRunQueueRecord {
     const record = this.getWorkflowRun(runId);
     if (record === undefined) {
@@ -1088,6 +1183,23 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS workflow_run_queue_claimable
     ON workflow_run_queue(status, claim_expires_at);
+
+  CREATE TABLE IF NOT EXISTS run_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    workflow_ref TEXT NOT NULL,
+    type TEXT NOT NULL,
+    runner_id TEXT,
+    payload_json TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id);
+
+  CREATE TABLE IF NOT EXISTS session_watermarks (
+    session_id TEXT PRIMARY KEY,
+    last_event_seq INTEGER NOT NULL CHECK (last_event_seq >= 0),
+    updated_at TEXT NOT NULL
+  );
 
   CREATE TABLE IF NOT EXISTS effects (
     effect_key TEXT NOT NULL,

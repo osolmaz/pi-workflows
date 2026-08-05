@@ -29,6 +29,11 @@ type SentMessage = {
 type FakeContext = {
   cwd: string;
   hasUI: boolean;
+  sessionManager: {
+    getSessionId: () => string;
+    getLeafId: () => string | null;
+    getSessionFile: () => string | undefined;
+  };
   ui: {
     notify: (message: string, type?: string) => void;
     setWidget: (key: string, lines: string[] | undefined) => void;
@@ -44,6 +49,7 @@ type FakeContext = {
 function makeHarness(options: {
   cwd: string;
   respond: (prompt: string, tool: RegisteredTool) => void;
+  sessionId?: string;
 }) {
   const notifications: string[] = [];
   const widgets: (string[] | undefined)[] = [];
@@ -60,6 +66,11 @@ function makeHarness(options: {
   const ctx: FakeContext = {
     cwd: options.cwd,
     hasUI: true,
+    sessionManager: {
+      getSessionId: () => options.sessionId ?? "test-session",
+      getLeafId: () => null,
+      getSessionFile: () => undefined,
+    },
     ui: {
       notify: (message) => notifications.push(message),
       setWidget: (_key, lines) => widgets.push(lines),
@@ -1042,6 +1053,112 @@ export default defineWorkflow({
       } finally {
         queue.close();
       }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("syncs a reopened session with runs another session drove", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-sync");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      // Session A drives a run to completion.
+      const first = makeHarness({
+        cwd,
+        sessionId: "session-a",
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+          }
+        },
+      });
+      await first.emitAsync("session_start");
+      await first.command.handler("mini say hi", first.ctx);
+      await waitFor(() => first.notifications.some((note) => note.includes("completed")));
+      await first.emitAsync("session_shutdown");
+
+      // Session B opens later: catch-up mentions the completed run exactly
+      // through the shared event feed.
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      await waitFor(() =>
+        second.notifications.some((note) => note.includes("mini") && note.includes("completed")),
+      );
+      expect(second.sentMessages.some((entry) => entry.message.content.includes("completed"))).toBe(
+        true,
+      );
+      // Session B's own progress does not re-notify on the next pass.
+      const notificationCount = second.notifications.length;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(second.notifications.length).toBe(notificationCount);
+      await second.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("resumes a parked run when a new session opens", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-reopen");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 400);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      // Session A starts the run and closes mid-flight: the run parks.
+      const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await first.emitAsync("session_start");
+      await first.command.handler("slow", first.ctx);
+      await waitFor(async () => {
+        const runDirs = await fs.readdir(runsDir);
+        const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+        return bundle?.state.currentNode === "work";
+      });
+      await first.emitAsync("session_shutdown");
+
+      // Session B opens: it claims the parked run, resumes the node, and
+      // drives it to completion.
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      await waitFor(() => second.notifications.some((note) => note.includes("Resumed workflow")));
+      await waitFor(() => second.notifications.some((note) => note.includes("completed")));
+
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        expect(queue.listWorkflowRuns().map((row) => row.status)).toEqual(["done"]);
+      } finally {
+        queue.close();
+      }
+      const [runId] = await fs.readdir(runsDir);
+      const bundle = await readRunBundle(path.join(runsDir, runId ?? ""));
+      expect(bundle?.state.status).toBe("completed");
+      expect(bundle?.state.finalOutput).toBe("done");
+      await second.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
     }

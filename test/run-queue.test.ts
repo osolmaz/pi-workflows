@@ -189,3 +189,58 @@ describe("workflow run queue", () => {
     expect(store.listWorkflowRuns({ status: "done" }).map((run) => run.runId)).toEqual(["run-1"]);
   });
 });
+
+describe("run event feed and session watermarks", () => {
+  it("records events, pages after a watermark, and tracks sessions independently", async () => {
+    const store = await makeStore();
+    const first = store.recordRunEvent({
+      runId: "run-1",
+      workflowRef: "summarize",
+      type: "queued",
+      runnerId: "runner-a",
+      now: T0,
+    });
+    const second = store.recordRunEvent({
+      runId: "run-1",
+      workflowRef: "summarize",
+      type: "completed",
+      runnerId: "runner-a",
+      payload: { finalOutput: "done" },
+      now: T1,
+    });
+    expect(second).toBeGreaterThan(first);
+
+    expect(store.listRunEventsAfter(0)).toHaveLength(2);
+    const after = store.listRunEventsAfter(first);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({
+      seq: second,
+      type: "completed",
+      payload: { finalOutput: "done" },
+    });
+
+    expect(store.getSessionWatermark("session-a")).toBe(0);
+    store.setSessionWatermark("session-a", first, T1);
+    store.setSessionWatermark("session-b", second, T2);
+    expect(store.getSessionWatermark("session-a")).toBe(first);
+    expect(store.getSessionWatermark("session-b")).toBe(second);
+    // Watermarks never move backwards.
+    store.setSessionWatermark("session-b", first, T3);
+    expect(store.getSessionWatermark("session-b")).toBe(second);
+  });
+
+  it("rejects unsafe event fields", async () => {
+    const store = await makeStore();
+    expect(() =>
+      store.recordRunEvent({ runId: "../escape", workflowRef: "x", type: "queued" }),
+    ).toThrow(/Invalid workflow run id/);
+    expect(() =>
+      store.recordRunEvent({
+        runId: "run-1",
+        workflowRef: "x",
+        type: "queued",
+        payload: { blob: "x".repeat(70 * 1024) },
+      }),
+    ).toThrow(/exceeds/);
+  });
+});

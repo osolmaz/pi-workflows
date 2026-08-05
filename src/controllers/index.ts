@@ -20,7 +20,11 @@ export { ControllerEffectService } from "./effects.js";
 export { canonicalJson, jsonFingerprint } from "./json.js";
 export { ControllerManager, type ControllerManagerOptions } from "./manager.js";
 export { createResultHelpers, requeue, requeueAfter, settled } from "./results.js";
-export { SqliteControllerStore, type WorkflowRunQueueRecord } from "./sqlite.js";
+export {
+  SqliteControllerStore,
+  type RunEventRecord,
+  type WorkflowRunQueueRecord,
+} from "./sqlite.js";
 export {
   CONTROLLER_STORE_SCHEMA,
   controllerProjectScope,

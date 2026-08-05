@@ -5,7 +5,12 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
+import {
+  projectControllerStorePath,
+  type RunEventRecord,
+  SqliteControllerStore,
+} from "../controllers/index.js";
+import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import { ClaimLostError, errorMessage, isClaimLostError } from "../workflows/errors.js";
@@ -39,6 +44,7 @@ import { buildWidgetView } from "./widget.js";
 
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
+const RUN_SYNC_POLL_MS = 3_000;
 const WIDGET_KEY = "pi-workflows";
 const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
 const FINAL_WIDGET_TTL_MS = 60_000;
@@ -81,6 +87,10 @@ type StartRunOptions = {
   signal?: AbortSignal;
   /** Continue a checkpointed run: input becomes the answer payload. */
   parentRunId?: string;
+  /** Resume a parked run at its stopped node instead of starting fresh. */
+  resume?: boolean;
+  /** An existing queue claim token, when the caller already claimed the run. */
+  claimToken?: string;
 };
 
 export type ParsedWorkflowArgs =
@@ -141,6 +151,88 @@ export default function piWorkflows(pi: ExtensionAPI) {
   const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
     runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
     return runQueueStore;
+  };
+
+  // Session sync: a per-session watermark over the run event feed keeps this
+  // session's context current with runs other runners drove.
+  let syncSessionId: string | null = null;
+  let runSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  const recordRunEvent = (event: {
+    runId: string;
+    workflowRef: string;
+    type: string;
+    payload?: JsonObject;
+  }) => {
+    try {
+      runQueueStore?.recordRunEvent({ ...event, runnerId });
+    } catch {
+      // The event feed is best-effort; never fail a run for it.
+    }
+  };
+
+  const describeRunEvent = (event: RunEventRecord): string => {
+    const label = `${event.workflowRef} run ${event.runId}`;
+    switch (event.type) {
+      case "waiting": {
+        const waitingOn =
+          typeof event.payload.waitingOn === "string" ? event.payload.waitingOn : "a checkpoint";
+        return `${label} waits at checkpoint ${waitingOn} — answer with /workflow answer`;
+      }
+      case "parked":
+        return `${label} was parked and will resume when a runner is available`;
+      case "failed": {
+        const detail = typeof event.payload.error === "string" ? `: ${event.payload.error}` : "";
+        return `${label} failed${detail}`;
+      }
+      default:
+        return `${label} ${event.type}`;
+    }
+  };
+
+  const runSyncPass = (ctx: ExtensionContext) => {
+    if (runQueueStore === null || syncSessionId === null) {
+      return;
+    }
+    try {
+      const watermark = runQueueStore.getSessionWatermark(syncSessionId);
+      const events = runQueueStore.listRunEventsAfter(watermark, { limit: 20 });
+      if (events.length === 0) {
+        return;
+      }
+      // Persist the watermark first. A crash after this point skips the
+      // message, but snapshots recompute from the store, so no information
+      // stays lost; a duplicated state line is the worst outcome.
+      runQueueStore.setSessionWatermark(syncSessionId, events[events.length - 1]?.seq ?? 0);
+      const noteworthy = events.filter(
+        (event) =>
+          event.runnerId !== runnerId &&
+          ["completed", "failed", "timed_out", "cancelled", "waiting", "parked"].includes(
+            event.type,
+          ),
+      );
+      if (noteworthy.length === 0) {
+        return;
+      }
+      const content = `Workflow run update:\n${noteworthy.map(describeRunEvent).join("\n")}`;
+      pi.sendMessage(
+        { customType: "pi-workflows-run-sync", content, display: false },
+        { deliverAs: "steer", triggerTurn: false },
+      );
+      notify(ctx, noteworthy.map(describeRunEvent).join("; "));
+    } catch {
+      // Sync is observational.
+    }
+  };
+
+  const startRunSync = (ctx: ExtensionContext) => {
+    if (runSyncTimer !== null) {
+      return;
+    }
+    ensureRunQueueStore(ctx.cwd);
+    runSyncPass(ctx);
+    runSyncTimer = setInterval(() => runSyncPass(ctx), RUN_SYNC_POLL_MS);
+    runSyncTimer.unref?.();
   };
   let activeRun: ActiveRun | null = null;
   // The interactive run currently parked at a checkpoint, if any.
@@ -387,12 +479,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
       // The run was parked for another runner; its bundle stays resumable
       // and its queue row becomes claimable. Nothing else to present.
       releaseClaim(run, "park");
+      recordRunEvent({ runId: run.runId, workflowRef: run.workflowName, type: "parked" });
       void run.recorder?.stop();
       stopWidgetTicker();
       clearWidget(ctx);
       return;
     }
     releaseClaim(run, "done");
+    recordRunEvent({
+      runId: run.runId,
+      workflowRef: run.workflowName,
+      type: result.state.status,
+      payload: {
+        ...(result.state.error !== undefined ? { error: result.state.error } : {}),
+        ...(result.state.waitingOn !== undefined ? { waitingOn: result.state.waitingOn } : {}),
+      },
+    });
     // Normally already stopped via onRunFinishing; this covers observers of
     // runs that ended without reaching that hook.
     void run.recorder?.stop();
@@ -473,23 +575,32 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
     // Interactive runs are queued and claimed atomically, so this session
     // owns the run from birth (origin affinity). Controller child runs keep
-    // their own scheduling and stay out of the run queue.
-    let claimToken: string | undefined;
+    // their own scheduling and stay out of the run queue. A resume caller
+    // arrives with its claim already taken.
+    let claimToken = options.claimToken;
     let queueStore: SqliteControllerStore | null = null;
     if (options.childKey === undefined) {
       queueStore = ensureRunQueueStore(ctx.cwd);
-      const token = randomUUID();
-      queueStore.enqueueWorkflowRun({
-        runId,
-        workflowRef: ref,
-        workflowPath: resolved.path,
-        input,
-        runnerId,
-        claimToken: token,
-        leaseMs: RUN_CLAIM_LEASE_MS,
-        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
-      });
-      claimToken = token;
+      if (claimToken === undefined) {
+        const token = randomUUID();
+        queueStore.enqueueWorkflowRun({
+          runId,
+          workflowRef: ref,
+          workflowPath: resolved.path,
+          input,
+          runnerId,
+          claimToken: token,
+          leaseMs: RUN_CLAIM_LEASE_MS,
+          ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+        });
+        claimToken = token;
+        recordRunEvent({
+          runId,
+          workflowRef: ref,
+          type: "queued",
+          payload: options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {},
+        });
+      }
     }
     let fence: (() => void) | undefined;
     if (queueStore !== null && claimToken !== undefined) {
@@ -586,13 +697,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
 
     run.completion = (
-      options.parentRunId === undefined
-        ? engine.run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
-        : engine.continueRun(workflow, options.parentRunId, input, {
-            workflowPath: resolved.path,
-            workflowHash,
-            runId,
-          })
+      options.resume === true
+        ? engine.resumeRun(workflow, runId, { workflowHash })
+        : options.parentRunId === undefined
+          ? engine.run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
+          : engine.continueRun(workflow, options.parentRunId, input, {
+              workflowPath: resolved.path,
+              workflowHash,
+              runId,
+            })
     )
       .then((result) => finishRun(ctx, run, result))
       .catch((error: unknown) => {
@@ -607,6 +720,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
           notify(ctx, `Workflow ${workflow.name} continues under another runner (run ${runId}).`);
           return;
         }
+        recordRunEvent({
+          runId,
+          workflowRef: workflow.name,
+          type: "failed",
+          payload: { error: errorMessage(error) },
+        });
         const message = errorMessage(error);
         try {
           run.onFinish?.({ state: "failed", runId, error: message });
@@ -616,6 +735,41 @@ export default function piWorkflows(pi: ExtensionAPI) {
         notify(ctx, `Workflow ${workflow.name} crashed: ${message}`, "error");
       });
     return runId;
+  };
+
+  // Reclaim and resume a parked run when this session opens without an
+  // active run. The claim comes first; the engine resumes at the stopped
+  // node only after the queue proves ownership.
+  const resumeParkedRun = async (ctx: ExtensionContext): Promise<void> => {
+    if (activeRun !== null) {
+      return;
+    }
+    const queueStore = ensureRunQueueStore(ctx.cwd);
+    const claimToken = randomUUID();
+    const claimed = queueStore.claimNextWorkflowRun({
+      runnerId,
+      claimToken,
+      leaseMs: RUN_CLAIM_LEASE_MS,
+    });
+    if (claimed === undefined) {
+      return;
+    }
+    let started: string | undefined;
+    try {
+      started = await startRun(ctx, claimed.workflowPath, claimed.input, {
+        resume: true,
+        runId: claimed.runId,
+        claimToken,
+      });
+    } catch (error) {
+      queueStore.parkWorkflowRun({ runId: claimed.runId, claimToken });
+      throw error;
+    }
+    if (started !== undefined) {
+      notify(ctx, `Resumed workflow run ${claimed.runId} (${claimed.workflowRef}).`);
+    } else {
+      queueStore.parkWorkflowRun({ runId: claimed.runId, claimToken });
+    }
   };
 
   const startChild: PiChildWorkflowStarter = async (request, signal, onComplete) => {
@@ -934,6 +1088,17 @@ export default function piWorkflows(pi: ExtensionAPI) {
     sessionClosed = false;
     controllerContext = ctx;
     try {
+      syncSessionId = ctx.sessionManager.getSessionId();
+      startRunSync(ctx);
+    } catch {
+      // Session sync is best-effort; runs themselves never depend on it.
+    }
+    try {
+      await resumeParkedRun(ctx);
+    } catch (error) {
+      notify(ctx, `Could not resume a parked workflow: ${errorMessage(error)}`, "warning");
+    }
+    try {
       await ensureControllerHost(ctx);
     } catch (error) {
       notify(ctx, `Could not start controller workers: ${errorMessage(error)}`, "warning");
@@ -1036,6 +1201,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await run?.completion?.catch(() => undefined);
     activeRun = null;
     lastWaitingRunId = null;
+    if (runSyncTimer !== null) {
+      clearInterval(runSyncTimer);
+      runSyncTimer = null;
+    }
+    syncSessionId = null;
     await controllerHost?.close().catch(() => undefined);
     controllerHost = undefined;
     controllerContext = null;
