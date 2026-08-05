@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
@@ -212,6 +212,12 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 describe("pi-workflows extension", () => {
+  beforeEach(async () => {
+    // Interactive runs are tracked in the project run queue; keep that
+    // store inside a temp dir so tests never touch the real home state.
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", await makeTempDir("pi-workflows-ext-controllers"));
+  });
+
   it("runs a workflow end to end through the command and tool", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
@@ -242,6 +248,23 @@ describe("pi-workflows extension", () => {
 
       const runDirs = await fs.readdir(runsDir);
       expect(runDirs).toHaveLength(1);
+
+      // The run went through the durable queue and was released as done.
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        const runs = queue.listWorkflowRuns();
+        expect(runs).toHaveLength(1);
+        expect(runs[0]).toMatchObject({
+          workflowRef: "mini",
+          status: "done",
+          runnerId: null,
+          claimToken: null,
+        });
+      } finally {
+        queue.close();
+      }
     } finally {
       vi.unstubAllEnvs();
     }

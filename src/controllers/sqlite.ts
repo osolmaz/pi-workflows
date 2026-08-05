@@ -83,6 +83,37 @@ type WorkflowRow = {
   error: string | null;
 };
 
+type WorkflowRunQueueRow = {
+  run_id: string;
+  workflow_ref: string;
+  workflow_path: string;
+  input_json: string;
+  status: "claimed" | "parked" | "done";
+  runner_id: string | null;
+  claim_token: string | null;
+  claim_expires_at: number | null;
+  affinity_runner_id: string | null;
+  parent_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** A user-started workflow run tracked by the durable run queue. */
+export type WorkflowRunQueueRecord = {
+  runId: string;
+  workflowRef: string;
+  workflowPath: string;
+  input: unknown;
+  status: "claimed" | "parked" | "done";
+  runnerId: string | null;
+  claimToken: string | null;
+  claimExpiresAt: string | null;
+  affinityRunnerId: string | null;
+  parentRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type EventRow = {
   seq: number;
   recorded_at: string;
@@ -808,6 +839,196 @@ export class SqliteControllerStore implements ControllerStore {
     return workflow;
   }
 
+  /**
+   * Insert a user-started run and claim it in one statement, so the
+   * originating runner owns the run from birth (origin affinity).
+   */
+  enqueueWorkflowRun(options: {
+    runId: string;
+    workflowRef: string;
+    workflowPath: string;
+    input: unknown;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    affinityRunnerId?: string;
+    parentRunId?: string;
+    now?: string;
+  }): WorkflowRunQueueRecord {
+    validateRunId(options.runId);
+    validateKey(options.workflowRef, "workflow ref");
+    validateKey(options.workflowPath, "workflow path");
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.claimToken, "claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const inputJson = canonicalJson(options.input ?? null, "workflow run input");
+    validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
+    const now = validTimestamp(options.now);
+    const expiresAt = epoch(now) + options.leaseMs;
+    this.database
+      .prepare(
+        `INSERT INTO workflow_run_queue (
+          run_id, workflow_ref, workflow_path, input_json, status,
+          runner_id, claim_token, claim_expires_at, affinity_runner_id,
+          parent_run_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        options.runId,
+        options.workflowRef,
+        options.workflowPath,
+        inputJson,
+        options.runnerId,
+        options.claimToken,
+        expiresAt,
+        options.affinityRunnerId ?? options.runnerId,
+        options.parentRunId ?? null,
+        now,
+        now,
+      );
+    return this.requireWorkflowRun(options.runId);
+  }
+
+  getWorkflowRun(runId: string): WorkflowRunQueueRecord | undefined {
+    validateRunId(runId);
+    const row = this.database
+      .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
+      .get(runId) as WorkflowRunQueueRow | undefined;
+    return row === undefined ? undefined : workflowRunFromRow(row);
+  }
+
+  listWorkflowRuns(
+    options: { status?: WorkflowRunQueueRecord["status"] } = {},
+  ): WorkflowRunQueueRecord[] {
+    const rows =
+      options.status === undefined
+        ? (this.database
+            .prepare("SELECT * FROM workflow_run_queue ORDER BY created_at")
+            .all() as WorkflowRunQueueRow[])
+        : (this.database
+            .prepare("SELECT * FROM workflow_run_queue WHERE status = ? ORDER BY created_at")
+            .all(options.status) as WorkflowRunQueueRow[]);
+    return rows.map(workflowRunFromRow);
+  }
+
+  /**
+   * Claim the oldest parked run whose claim has expired, preferring runs
+   * with affinity to this runner. Returns undefined when nothing is
+   * claimable.
+   */
+  claimNextWorkflowRun(options: {
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): WorkflowRunQueueRecord | undefined {
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.claimToken, "claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    const expiresAt = nowMs + options.leaseMs;
+    return this.transaction(() => {
+      const candidate = this.database
+        .prepare(
+          `SELECT run_id FROM workflow_run_queue
+           WHERE status = 'parked'
+             AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
+           ORDER BY
+             CASE WHEN affinity_runner_id = ? THEN 0 ELSE 1 END,
+             created_at ASC
+           LIMIT 1`,
+        )
+        .get(nowMs, options.runnerId) as { run_id: string } | undefined;
+      if (candidate === undefined) {
+        return undefined;
+      }
+      const result = this.database
+        .prepare(
+          `UPDATE workflow_run_queue
+           SET status = 'claimed', runner_id = ?, claim_token = ?,
+               claim_expires_at = ?, updated_at = ?
+           WHERE run_id = ? AND status = 'parked'
+             AND (claim_expires_at IS NULL OR claim_expires_at <= ?)`,
+        )
+        .run(options.runnerId, options.claimToken, expiresAt, now, candidate.run_id, nowMs);
+      return result.changes === 1 ? this.requireWorkflowRun(candidate.run_id) : undefined;
+    });
+  }
+
+  /** Extend a live claim. Rejects expired or foreign claims. */
+  renewWorkflowRunClaim(options: {
+    runId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): boolean {
+    validateRunId(options.runId);
+    validateDuration(options.leaseMs, "leaseMs");
+    const nowMs = epoch(validTimestamp(options.now));
+    const expiresAt = nowMs + options.leaseMs;
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue SET claim_expires_at = ?
+         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'
+           AND claim_expires_at > ?`,
+      )
+      .run(expiresAt, options.runId, options.claimToken, nowMs);
+    return result.changes === 1;
+  }
+
+  /** The fence check: true only while this exact claim is live. */
+  verifyWorkflowRunClaim(options: { runId: string; claimToken: string; now?: string }): boolean {
+    validateRunId(options.runId);
+    const nowMs = epoch(validTimestamp(options.now));
+    const row = this.database
+      .prepare(
+        `SELECT 1 AS live FROM workflow_run_queue
+         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'
+           AND claim_expires_at > ?`,
+      )
+      .get(options.runId, options.claimToken, nowMs);
+    return row !== undefined;
+  }
+
+  /** Release a claim and park the run so another runner can resume it. */
+  parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
+    validateRunId(options.runId);
+    const now = validTimestamp(options.now);
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue
+         SET status = 'parked', runner_id = NULL, claim_token = NULL,
+             claim_expires_at = NULL, updated_at = ?
+         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'`,
+      )
+      .run(now, options.runId, options.claimToken);
+    return result.changes === 1;
+  }
+
+  /** Release a claim and mark the run terminal in the queue. */
+  completeWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
+    validateRunId(options.runId);
+    const now = validTimestamp(options.now);
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue
+         SET status = 'done', runner_id = NULL, claim_token = NULL,
+             claim_expires_at = NULL, updated_at = ?
+         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'`,
+      )
+      .run(now, options.runId, options.claimToken);
+    return result.changes === 1;
+  }
+
+  private requireWorkflowRun(runId: string): WorkflowRunQueueRecord {
+    const record = this.getWorkflowRun(runId);
+    if (record === undefined) {
+      throw new Error(`Workflow run queue record not found: ${runId}`);
+    }
+    return record;
+  }
+
   private requireEvent(seq: number): ControllerEvent {
     const row = this.database.prepare("SELECT * FROM events WHERE seq = ?").get(seq) as
       | EventRow
@@ -850,6 +1071,23 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS queue_ready
     ON queue(available_at, controller, resource_key);
+
+  CREATE TABLE IF NOT EXISTS workflow_run_queue (
+    run_id TEXT PRIMARY KEY,
+    workflow_ref TEXT NOT NULL,
+    workflow_path TEXT NOT NULL,
+    input_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('claimed', 'parked', 'done')),
+    runner_id TEXT,
+    claim_token TEXT,
+    claim_expires_at INTEGER,
+    affinity_runner_id TEXT,
+    parent_run_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS workflow_run_queue_claimable
+    ON workflow_run_queue(status, claim_expires_at);
 
   CREATE TABLE IF NOT EXISTS effects (
     effect_key TEXT NOT NULL,
@@ -939,6 +1177,29 @@ function workflowFromRow(row: WorkflowRow): ChildWorkflowRecord {
     ...(row.run_id === null ? {} : { runId: row.run_id }),
     ...(row.error === null ? {} : { error: row.error }),
   };
+}
+
+function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
+  return {
+    runId: row.run_id,
+    workflowRef: row.workflow_ref,
+    workflowPath: row.workflow_path,
+    input: parseStoredJson(row.input_json, "workflow run input"),
+    status: row.status,
+    runnerId: row.runner_id,
+    claimToken: row.claim_token,
+    claimExpiresAt: row.claim_expires_at === null ? null : iso(row.claim_expires_at),
+    affinityRunnerId: row.affinity_runner_id,
+    parentRunId: row.parent_run_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function validateRunId(runId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
+    throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
+  }
 }
 
 function eventFromRow(row: EventRow): ControllerEvent {

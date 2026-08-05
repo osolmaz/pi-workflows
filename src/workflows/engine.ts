@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { CancelledError, errorMessage, isAbortLikeError, TimeoutError } from "./errors.js";
+import {
+  CancelledError,
+  errorMessage,
+  isAbortLikeError,
+  isClaimLostError,
+  TimeoutError,
+} from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
@@ -156,9 +162,18 @@ export class WorkflowEngine {
       await this.executeGraph(workflow, state, runDir);
     } catch (error) {
       const cancelled = this.cancelled || isAbortLikeError(error);
-      await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
-        error: errorMessage(error),
-      });
+      try {
+        await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
+          error: errorMessage(error),
+        });
+      } catch (finishError) {
+        // A fenced-out runner must not touch the bundle, including terminal
+        // projections. Propagate the claim loss instead of the node error.
+        if (isClaimLostError(finishError)) {
+          throw finishError;
+        }
+        throw error;
+      }
       return { runDir, state };
     }
     return { runDir, state };

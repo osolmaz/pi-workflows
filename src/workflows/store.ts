@@ -85,12 +85,25 @@ type RunBundleContext = {
  * into content-addressed `artifacts/`. Bundles are private: directories are
  * 0700 and files 0600.
  */
+/**
+ * A fence proves the writer still owns the run. It is checked before every
+ * locked write; it throws (ClaimLostError) when the queue claim was lost, so
+ * a stalled runner can never interleave writes with the new claim holder.
+ */
+export type RunFence = () => void;
+
+export type WorkflowRunStoreOptions = {
+  fenceProvider?: (runDir: string) => RunFence | undefined;
+};
+
 export class WorkflowRunStore {
   readonly outputRoot: string;
+  private readonly fenceProvider: ((runDir: string) => RunFence | undefined) | undefined;
   private readonly contexts = new Map<string, RunBundleContext>();
 
-  constructor(outputRoot: string = workflowRunsBaseDir()) {
+  constructor(outputRoot: string = workflowRunsBaseDir(), options: WorkflowRunStoreOptions = {}) {
     this.outputRoot = outputRoot;
+    this.fenceProvider = options.fenceProvider;
   }
 
   runDirFor(runId: string): string {
@@ -153,7 +166,10 @@ export class WorkflowRunStore {
    */
   private withRunLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
     const context = this.contextFor(runDir);
-    const result = context.lock.then(task);
+    const result = context.lock.then(async () => {
+      this.fenceProvider?.(runDir)?.();
+      return await task();
+    });
     context.lock = result.then(
       () => undefined,
       () => undefined,
@@ -163,7 +179,10 @@ export class WorkflowRunStore {
 
   private withSessionEventLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
     const context = this.contextFor(runDir);
-    const result = context.sessionEventLock.then(task);
+    const result = context.sessionEventLock.then(async () => {
+      this.fenceProvider?.(runDir)?.();
+      return await task();
+    });
     context.sessionEventLock = result.then(
       () => undefined,
       () => undefined,

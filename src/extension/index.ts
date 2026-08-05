@@ -1,12 +1,14 @@
+import { randomUUID } from "node:crypto";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
-import { errorMessage } from "../workflows/errors.js";
+import { ClaimLostError, errorMessage, isClaimLostError } from "../workflows/errors.js";
 import { discoverWorkflows, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
 import {
   createRunId,
@@ -30,6 +32,8 @@ import { ConversationStepExecutor } from "./executor.js";
 import { SessionRecorder } from "./recorder.js";
 import { buildWidgetView } from "./widget.js";
 
+const RUN_CLAIM_LEASE_MS = 30_000;
+const RUN_CLAIM_RENEW_MS = 10_000;
 const WIDGET_KEY = "pi-workflows";
 const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
 const FINAL_WIDGET_TTL_MS = 60_000;
@@ -59,6 +63,8 @@ type ActiveRun = {
   onFinish?: (result: WorkflowSchedulerResult) => void;
   completion?: Promise<void>;
   interruptionRequested?: boolean;
+  claimToken?: string | undefined;
+  renewTimer?: ReturnType<typeof setInterval> | undefined;
 };
 
 type StartRunOptions = {
@@ -108,6 +114,13 @@ type WidgetSource = {
 };
 
 export default function piWorkflows(pi: ExtensionAPI) {
+  // One runner identity per session; it names this session in run claims.
+  const runnerId = randomUUID();
+  let runQueueStore: SqliteControllerStore | null = null;
+  const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
+    runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
+    return runQueueStore;
+  };
   let activeRun: ActiveRun | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
   let widgetTicker: NodeJS.Timeout | null = null;
@@ -319,10 +332,30 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  // Release the queue claim exactly once. "done" marks the queue row
+  // terminal; "lost" leaves it for the new claim holder.
+  const releaseClaim = (run: ActiveRun, outcome: "done" | "lost") => {
+    if (run.renewTimer !== undefined) {
+      clearInterval(run.renewTimer);
+      run.renewTimer = undefined;
+    }
+    if (run.claimToken === undefined || runQueueStore === null || outcome === "lost") {
+      return;
+    }
+    try {
+      runQueueStore.completeWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
+    } catch {
+      // Queue bookkeeping is best-effort next to the durable bundle.
+    } finally {
+      run.claimToken = undefined;
+    }
+  };
+
   const finishRun = (ctx: ExtensionContext, run: ActiveRun, result: WorkflowRunResult) => {
     if (activeRun === run) {
       activeRun = null;
     }
+    releaseClaim(run, "done");
     // Normally already stopped via onRunFinishing; this covers observers of
     // runs that ended without reaching that hook.
     void run.recorder?.stop();
@@ -397,6 +430,36 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const snapshot = createDefinitionSnapshot(workflow);
     const runId = options.runId ?? createRunId(workflow.name);
 
+    // Interactive runs are queued and claimed atomically, so this session
+    // owns the run from birth (origin affinity). Controller child runs keep
+    // their own scheduling and stay out of the run queue.
+    let claimToken: string | undefined;
+    let queueStore: SqliteControllerStore | null = null;
+    if (options.childKey === undefined) {
+      queueStore = ensureRunQueueStore(ctx.cwd);
+      const token = randomUUID();
+      queueStore.enqueueWorkflowRun({
+        runId,
+        workflowRef: ref,
+        workflowPath: resolved.path,
+        input,
+        runnerId,
+        claimToken: token,
+        leaseMs: RUN_CLAIM_LEASE_MS,
+      });
+      claimToken = token;
+    }
+    let fence: (() => void) | undefined;
+    if (queueStore !== null && claimToken !== undefined) {
+      const claimedStore = queueStore;
+      const token = claimToken;
+      fence = () => {
+        if (!claimedStore.verifyWorkflowRunClaim({ runId, claimToken: token })) {
+          throw new ClaimLostError(runId);
+        }
+      };
+    }
+
     const executor = new ConversationStepExecutor({
       sendPrompt: ({ prompt, streaming }) => {
         pi.sendUserMessage(prompt, streaming ? { deliverAs: "steer" } : undefined);
@@ -408,8 +471,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
       },
     });
     // The store is shared between the engine and the session recorder so the
-    // trace sequence stays single-writer (see docs/run-bundles.md).
-    const store = new WorkflowRunStore();
+    // trace sequence stays single-writer (see docs/run-bundles.md). Queued
+    // runs are fenced: every write proves the claim is still ours first.
+    const store = new WorkflowRunStore(
+      undefined,
+      fence === undefined ? {} : { fenceProvider: () => fence },
+    );
     const engine = new WorkflowEngine({
       executor,
       store,
@@ -448,8 +515,28 @@ export default function piWorkflows(pi: ExtensionAPI) {
       lastState: null,
       ...(options.childKey !== undefined ? { childKey: options.childKey } : {}),
       ...(options.onFinish !== undefined ? { onFinish: options.onFinish } : {}),
+      ...(claimToken !== undefined ? { claimToken } : {}),
     };
     activeRun = run;
+    if (queueStore !== null && claimToken !== undefined) {
+      const store = queueStore;
+      const token = claimToken;
+      // Renew the claim while the run executes. If renewal says the claim is
+      // gone, cancel so the fence trips on the next write instead of letting
+      // this runner interleave with the new claim holder.
+      run.renewTimer = setInterval(() => {
+        try {
+          if (
+            !store.renewWorkflowRunClaim({ runId, claimToken: token, leaseMs: RUN_CLAIM_LEASE_MS })
+          ) {
+            run.engine.cancel();
+          }
+        } catch {
+          // Transient store errors leave fencing to decide ownership.
+        }
+      }, RUN_CLAIM_RENEW_MS);
+      run.renewTimer.unref?.();
+    }
     clearWidgetTimer();
     startWidgetTicker(ctx, run);
     if (!options.quiet) {
@@ -463,9 +550,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (activeRun === run) {
           activeRun = null;
         }
+        releaseClaim(run, isClaimLostError(error) ? "lost" : "done");
         void run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
+        if (isClaimLostError(error)) {
+          notify(ctx, `Workflow ${workflow.name} continues under another runner (run ${runId}).`);
+          return;
+        }
         const message = errorMessage(error);
         try {
           run.onFinish?.({ state: "failed", runId, error: message });
@@ -862,6 +954,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await controllerHost?.close().catch(() => undefined);
     controllerHost = undefined;
     controllerContext = null;
+    runQueueStore?.close();
+    runQueueStore = null;
     presentationPending = null;
     clearWidgetTimer();
     stopWidgetTicker();
