@@ -127,7 +127,18 @@ export class RpcStepExecutor implements AgentStepExecutor {
     const piBin = this.options.piBin ?? "pi";
     const child = spawn(
       piBin,
-      ["--mode", "rpc", "--no-session", "-e", BRIDGE_PATH, ...(this.options.piArgs ?? [])],
+      [
+        "--mode",
+        "rpc",
+        "--no-session",
+        // Isolation is required: an installed pi-workflows extension would
+        // otherwise load beside the bridge, register a competing workflow
+        // tool, and start its own resume and controller workers.
+        "--no-extensions",
+        "-e",
+        BRIDGE_PATH,
+        ...(this.options.piArgs ?? []),
+      ],
       {
         cwd: this.options.cwd,
         env: { ...process.env, ...this.options.env },
@@ -147,6 +158,16 @@ export class RpcStepExecutor implements AgentStepExecutor {
         this.options.registry.unregister(child.pid);
       }
       this.wakeSubmissionWaiters();
+    });
+    // A failed spawn (missing binary, EACCES) emits error instead of exit;
+    // without a listener it would crash the host as an uncaught exception.
+    child.on("error", (error) => {
+      this.childExited = { code: null, signal: error.message };
+      this.wakeSubmissionWaiters();
+    });
+    child.stdin?.on("error", () => {
+      // Writes racing child exit surface asynchronously as EPIPE; the step
+      // fails through the exit path instead of an uncaught stream error.
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       this.stderrBuffer += chunk.toString("utf8");

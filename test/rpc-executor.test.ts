@@ -5,6 +5,74 @@ import { HostProcessRegistry } from "../src/host/processes.js";
 import { RpcStepExecutor } from "../src/host/rpc-executor.js";
 import { makeTempDir } from "./helpers.js";
 
+describe("RpcStepExecutor spawn", () => {
+  it("spawns children with extension isolation", async () => {
+    const dir = await makeTempDir("pi-rpc-args");
+    const argsFile = path.join(dir, "argv.txt");
+    const fakePi = path.join(dir, "fake-pi.sh");
+    await fs.writeFile(
+      fakePi,
+      `#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+sleep 60
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    const registry = new HostProcessRegistry(dir);
+    const executor = new RpcStepExecutor({ cwd: dir, registry, piBin: fakePi });
+    const abort = new AbortController();
+    const stepPromise = executor
+      .runAgentStep(
+        {
+          contract: { runId: "r", workflowName: "w", nodeId: "n", attemptId: "a" },
+          prompt: "hi",
+          accept: async () => ({ ok: true as const, value: null }),
+        },
+        abort.signal,
+      )
+      .catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await executor.close();
+    abort.abort(new Error("done"));
+    await stepPromise;
+
+    const args = await fs.readFile(argsFile, "utf8");
+    expect(args).toContain("--no-extensions");
+    expect(args).toContain("rpc-bridge");
+    // The bridge is the only extension the child loads.
+    const noExtensionsIndex = args.indexOf("--no-extensions");
+    const bridgeIndex = args.indexOf("-e\n");
+    expect(noExtensionsIndex).toBeGreaterThanOrEqual(0);
+    expect(bridgeIndex).toBeGreaterThan(noExtensionsIndex);
+  });
+
+  it("fails the step instead of crashing when pi is missing", async () => {
+    const dir = await makeTempDir("pi-rpc-missing");
+    const registry = new HostProcessRegistry(dir);
+    const executor = new RpcStepExecutor({
+      cwd: dir,
+      registry,
+      piBin: path.join(dir, "definitely-not-a-real-pi-binary"),
+    });
+    const abort = new AbortController();
+    const result = await executor
+      .runAgentStep(
+        {
+          contract: { runId: "r", workflowName: "w", nodeId: "n", attemptId: "a" },
+          prompt: "hi",
+          accept: async () => ({ ok: true as const, value: null }),
+        },
+        abort.signal,
+      )
+      .then(
+        () => "resolved" as const,
+        (error: unknown) => error,
+      );
+    expect(result).not.toBe("resolved");
+    await executor.close();
+  });
+});
+
 describe("RpcStepExecutor.close", () => {
   it("kills the whole process group, including grandchildren", async () => {
     const dir = await makeTempDir("pi-rpc-close");
