@@ -22,6 +22,7 @@ import {
 } from "../workflows/loader.js";
 import {
   createRunId,
+  listRunBundles,
   readLastTraceEvent,
   readRunBundle,
   WorkflowRunStore,
@@ -76,6 +77,8 @@ type ActiveRun = {
   interruptionRequested?: boolean;
   claimToken?: string | undefined;
   renewTimer?: ReturnType<typeof setInterval> | undefined;
+  /** True for runs this session resumed from the queue. */
+  resume?: boolean | undefined;
 };
 
 type StartRunOptions = {
@@ -98,7 +101,7 @@ export type ParsedWorkflowArgs =
   | { kind: "cancel" }
   | { kind: "pause" }
   | { kind: "resume" }
-  | { kind: "answer"; input: unknown }
+  | { kind: "answer"; input: unknown; runId?: string | undefined }
   | { kind: "run"; ref: string; input: unknown };
 
 /** Parse `/workflow` arguments. Exported for tests. */
@@ -111,15 +114,38 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
     return { kind: trimmed };
   }
   if (trimmed === "answer" || trimmed.startsWith("answer ")) {
-    const rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
+    let rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
     if (rest.length === 0) {
       throw new Error(
         'answer requires a JSON value or text, e.g. /workflow answer {"approved":true}',
       );
     }
+    // `/workflow answer <run-id> <json>` targets a specific waiting run,
+    // for example after a restart or for host-driven runs.
+    let runId: string | undefined;
+    const firstSpace = rest.search(/\s/);
+    if (firstSpace > 0) {
+      const candidate = rest.slice(0, firstSpace);
+      const remainder = rest.slice(firstSpace).trim();
+      if (
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(candidate) &&
+        remainder.length > 0 &&
+        (remainder.startsWith("{") || remainder.startsWith("["))
+      ) {
+        runId = candidate;
+        rest = remainder;
+      }
+    }
     try {
-      return { kind: "answer", input: JSON.parse(rest) as unknown };
+      return {
+        kind: "answer",
+        input: JSON.parse(rest) as unknown,
+        ...(runId !== undefined ? { runId } : {}),
+      };
     } catch {
+      if (runId !== undefined) {
+        throw new Error("answer with a run id requires a JSON value");
+      }
       return { kind: "answer", input: { answer: rest } };
     }
   }
@@ -669,6 +695,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ...(options.childKey !== undefined ? { childKey: options.childKey } : {}),
       ...(options.onFinish !== undefined ? { onFinish: options.onFinish } : {}),
       ...(claimToken !== undefined ? { claimToken } : {}),
+      ...(options.resume === true ? { resume: true } : {}),
     };
     activeRun = run;
     if (queueStore !== null && claimToken !== undefined) {
@@ -712,7 +739,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
         if (activeRun === run) {
           activeRun = null;
         }
-        releaseClaim(run, isClaimLostError(error) ? "lost" : "done");
+        const message = errorMessage(error);
+        // A resume that fails before executing (for example edited workflow
+        // source) must not strand the run: park it so it stays claimable
+        // once the cause is fixed, and say so in the feed.
+        const resumeFailed = run.resume === true && !isClaimLostError(error);
+        releaseClaim(run, isClaimLostError(error) ? "lost" : resumeFailed ? "park" : "done");
         void run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
@@ -720,13 +752,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
           notify(ctx, `Workflow ${workflow.name} continues under another runner (run ${runId}).`);
           return;
         }
+        if (resumeFailed) {
+          recordRunEvent({ runId, workflowRef: workflow.name, type: "parked", payload: {} });
+          notify(
+            ctx,
+            `Could not resume workflow ${workflow.name}: ${message}. The run is parked again.`,
+            "warning",
+          );
+          return;
+        }
         recordRunEvent({
           runId,
           workflowRef: workflow.name,
           type: "failed",
-          payload: { error: errorMessage(error) },
+          payload: { error: message },
         });
-        const message = errorMessage(error);
         try {
           run.onFinish?.({ state: "failed", runId, error: message });
         } catch {
@@ -931,11 +971,19 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (parsed.kind === "answer") {
-        if (lastWaitingRunId === null) {
+        // Resolve the waiting run durably: this session's own checkpoint if
+        // there is one, an explicit run id, or the most recent waiting bundle
+        // on disk (restart- and host-safe).
+        let parentRunId = parsed.runId ?? lastWaitingRunId;
+        if (parentRunId === null) {
+          const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+          parentRunId =
+            bundles.find((bundle) => bundle.state.status === "waiting")?.state.runId ?? null;
+        }
+        if (parentRunId === null) {
           notify(ctx, "No workflow is waiting for an answer.", "warning");
           return;
         }
-        const parentRunId = lastWaitingRunId;
         const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
         if (
           parent === null ||
@@ -943,7 +991,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
           parent.state.workflowPath === undefined
         ) {
           notify(ctx, `Workflow run ${parentRunId} is no longer waiting.`, "warning");
-          lastWaitingRunId = null;
+          if (parentRunId === lastWaitingRunId) {
+            lastWaitingRunId = null;
+          }
           return;
         }
         try {

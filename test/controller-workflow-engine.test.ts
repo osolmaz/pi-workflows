@@ -262,6 +262,32 @@ describe("WorkflowEngineScheduler", () => {
     expect(createEngine).not.toHaveBeenCalled();
   });
 
+  it("disposes the engine after its run settles", async () => {
+    const outputRoot = await makeTempDir("pi-controller-child-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const disposeEngine = vi.fn(async () => {});
+    const scheduler = new WorkflowEngineScheduler({
+      store,
+      resolveWorkflow: async () => ({ workflow }),
+      createEngine: () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
+      disposeEngine,
+    });
+    const started = await scheduler.ensure(
+      {
+        requestId: "dispose-1",
+        attempt: 1,
+        workflow: "child",
+        input: {},
+        runId: "dispose-1",
+      },
+      new AbortController().signal,
+      () => {},
+    );
+    expect(started.state).toBe("running");
+    await scheduler.waitForIdle();
+    expect(disposeEngine).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["run_waiting", "waiting", { status: "waiting", waitingOn: "approval" }],
     ["run_failed", "failed", { status: "failed", error: "broken" }],

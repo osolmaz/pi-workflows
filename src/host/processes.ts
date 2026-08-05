@@ -49,11 +49,21 @@ export class HostProcessRegistry {
   reapOrphans(): number[] {
     const recorded = this.readFile();
     const reaped: number[] = [];
+    const stillAlive: number[] = [];
     for (const pid of recorded) {
       if (isAlive(pid)) {
         killProcessGroup(pid, "SIGKILL");
         reaped.push(pid);
+        if (isAlive(pid)) {
+          // A group kill that left the leader alive stays registered so a
+          // later start tries again instead of forgetting it.
+          stillAlive.push(pid);
+        }
       }
+    }
+    this.pids.clear();
+    for (const pid of stillAlive) {
+      this.pids.add(pid);
     }
     this.persist();
     return reaped;
@@ -74,14 +84,13 @@ export class HostProcessRegistry {
   private persist(): void {
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(
-        this.filePath,
-        `${JSON.stringify([...this.pids, ...this.readFile().filter((pid) => !this.pids.has(pid))])}\n`,
-        {
-          encoding: "utf8",
-          mode: 0o600,
-        },
-      );
+      // Write exactly the live set. Unioning with the previous file would
+      // resurrect exited pids, and a later host reaping them could kill an
+      // unrelated process group that reused one.
+      fs.writeFileSync(this.filePath, `${JSON.stringify([...this.pids])}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
     } catch {
       // Registry bookkeeping is best-effort; orphan reaping is the backstop.
     }

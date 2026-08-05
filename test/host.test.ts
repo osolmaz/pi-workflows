@@ -155,6 +155,21 @@ export default defineWorkflow({
 });
 
 describe("HostProcessRegistry", () => {
+  it("shrinks the file on unregister and never resurrects exited pids", async () => {
+    const dir = await makeTempDir("pi-host-registry");
+    const fsModule = await import("node:fs/promises");
+    const registry = new HostProcessRegistry(dir);
+    registry.register(424_242);
+    registry.register(424_243);
+    registry.unregister(424_242);
+    const file = path.join(dir, "host.children.json");
+    expect(JSON.parse(await fsModule.readFile(file, "utf8"))).toEqual([424_243]);
+    registry.unregister(424_243);
+    expect(JSON.parse(await fsModule.readFile(file, "utf8"))).toEqual([]);
+    // A new registry over the same file finds nothing to reap.
+    expect(new HostProcessRegistry(dir).reapOrphans()).toEqual([]);
+  });
+
   it("reaps orphaned child process groups from a dead host", async () => {
     const dir = await makeTempDir("pi-host-registry");
     const child = spawn("sleep", ["60"], { detached: true });

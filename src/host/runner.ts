@@ -54,6 +54,7 @@ export class WorkflowHost {
   private manager: ControllerManager | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly activeRuns = new Map<string, Promise<void>>();
+  private readonly schedulerExecutors = new Map<WorkflowEngine, RpcStepExecutor>();
   private stopping = false;
 
   private readonly stateDir: string;
@@ -92,16 +93,24 @@ export class WorkflowHost {
           const workflow = await loadWorkflowFile(resolved.path);
           return { workflow };
         },
-        createEngine: () =>
-          new WorkflowEngine({
-            executor: new RpcStepExecutor({
-              cwd: this.options.cwd,
-              registry: this.registry,
-              ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
-              ...(this.options.env !== undefined ? { env: this.options.env } : {}),
-            }),
-            store: this.childRunStore,
-          }),
+        createEngine: () => {
+          const executor = new RpcStepExecutor({
+            cwd: this.options.cwd,
+            registry: this.registry,
+            ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
+            ...(this.options.env !== undefined ? { env: this.options.env } : {}),
+          });
+          const engine = new WorkflowEngine({ executor, store: this.childRunStore });
+          this.schedulerExecutors.set(engine, executor);
+          return engine;
+        },
+        disposeEngine: async (engine) => {
+          const executor = this.schedulerExecutors.get(engine);
+          if (executor !== undefined) {
+            this.schedulerExecutors.delete(engine);
+            await executor.close();
+          }
+        },
       });
       this.manager = new ControllerManager({
         store: this.store,
@@ -136,6 +145,10 @@ export class WorkflowHost {
     }
     await Promise.allSettled(pending);
     await this.manager?.stop().catch(() => undefined);
+    for (const executor of this.schedulerExecutors.values()) {
+      await executor.close().catch(() => undefined);
+    }
+    this.schedulerExecutors.clear();
     this.registry.killAll();
     releaseHostLock(this.stateDir, this.runnerId);
     this.store.close();

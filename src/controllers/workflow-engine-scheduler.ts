@@ -20,6 +20,11 @@ export type WorkflowEngineSchedulerOptions = {
   store: WorkflowRunStore;
   resolveWorkflow: (name: string) => Promise<ResolvedChildWorkflow>;
   createEngine: (request: WorkflowSchedulerRequest) => WorkflowEngine;
+  /**
+   * Release resources the engine held after its run settles, for example a
+   * headless child process. Called once per finished run.
+   */
+  disposeEngine?: (engine: WorkflowEngine) => Promise<void>;
 };
 
 export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
@@ -86,6 +91,7 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       })
       .finally(() => {
         this.active.delete(activeKey);
+        void this.options.disposeEngine?.(engine).catch(() => undefined);
       });
     this.active.set(activeKey, { runId, promise });
     return { state: "running", runId };

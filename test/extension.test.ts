@@ -1100,6 +1100,117 @@ export default defineWorkflow({
     }
   });
 
+  it("answers a checkpoint after a session restart", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-answer-restart");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: {
+    approval: checkpoint({ summary: "approve" }),
+    apply: compute({ run: () => ({ deployed: true }) }),
+  },
+  edges: [{ from: "approval", to: "apply" }],
+});
+`,
+        "utf8",
+      );
+      // Session A runs to the checkpoint and closes.
+      const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await first.emitAsync("session_start");
+      await first.command.handler("gate", first.ctx);
+      await waitFor(() =>
+        first.notifications.some((note) => note.includes("parked at checkpoint approval")),
+      );
+      await first.emitAsync("session_shutdown");
+
+      // Session B has no in-memory waiting run; discovery comes from disk.
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      await second.command.handler('answer {"approved":true}', second.ctx);
+      await waitFor(() => second.notifications.some((note) => note.includes("completed")));
+
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        expect(queue.listWorkflowRuns().map((row) => row.status)).toEqual(["done", "done"]);
+      } finally {
+        queue.close();
+      }
+      await second.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("parks a run again when resume fails on changed source", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-resume-fail");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      const workflowFile = path.join(cwd, ".pi", "workflows", "slow.workflow.ts");
+      await fs.writeFile(
+        workflowFile,
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 400);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await first.emitAsync("session_start");
+      await first.command.handler("slow", first.ctx);
+      await waitFor(async () => {
+        const runDirs = await fs.readdir(runsDir);
+        const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+        return bundle?.state.currentNode === "work";
+      });
+      await first.emitAsync("session_shutdown");
+
+      // The workflow file changes while the run is parked.
+      await fs.appendFile(workflowFile, "\n// edited while parked\n", "utf8");
+
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      await waitFor(() => second.notifications.some((note) => note.includes("parked again")));
+
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        // The run stays claimable instead of being stranded as done.
+        expect(queue.listWorkflowRuns().map((row) => row.status)).toEqual(["parked"]);
+      } finally {
+        queue.close();
+      }
+      await second.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("resumes a parked run when a new session opens", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-reopen");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
