@@ -102,6 +102,7 @@ function makeBundle(
     sessionEvents: [],
     sessionCapture: null,
     sessionIntegrity: { status: "unavailable", diagnostics: [] },
+    sessionSegments: [],
   };
 }
 

@@ -30,6 +30,21 @@ export class ClaimLostError extends Error {
   }
 }
 
+/**
+ * Internal stop signal for close-to-park: the engine halts without writing
+ * a terminal event, leaving a resumable bundle for the next claim holder.
+ */
+export class RunParkedError extends Error {
+  constructor() {
+    super("Workflow run was parked");
+    this.name = "RunParkedError";
+  }
+}
+
+export function isRunParkedError(error: unknown): error is RunParkedError {
+  return error instanceof RunParkedError;
+}
+
 /** The workflow source changed after the run started; resume needs force. */
 export class WorkflowSourceChangedError extends Error {
   readonly runId: string;

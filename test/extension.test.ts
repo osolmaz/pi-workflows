@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
+import { readRunBundle } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
 
 type RegisteredTool = {
@@ -201,9 +202,12 @@ function stepFromPrompt(prompt: string): { step: string; attempt: string } | nul
   return match ? { step: match[1] as string, attempt: match[2] as string } : null;
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) {
       throw new Error("Timed out waiting for condition");
     }
@@ -919,6 +923,74 @@ export default defineWorkflow({
         }
       });
       await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("parks a queued run on shutdown and leaves it resumable", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-park");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("workflow");
+      await command?.handler("slow", harness.ctx);
+
+      // Wait for the run to be claimed and the node to be in flight.
+      const queueFile = projectControllerStorePath(cwd);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(queueFile, { readOnly: true });
+        try {
+          return reader.listWorkflowRuns()[0]?.status === "claimed";
+        } finally {
+          reader.close();
+        }
+      });
+      await waitFor(async () => {
+        const runDirs = await fs.readdir(runsDir);
+        const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+        return bundle?.state.currentNode === "work";
+      });
+
+      await harness.emitAsync("session_shutdown");
+
+      const queue = new SqliteControllerStore(queueFile, { readOnly: true });
+      try {
+        const rows = queue.listWorkflowRuns();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ status: "parked", runnerId: null, claimToken: null });
+        // The bundle stayed resumable: no terminal event, node still in flight.
+        const bundle = await readRunBundle(path.join(runsDir, rows[0]?.runId ?? ""));
+        expect(bundle?.state.status).toBe("running");
+        expect(bundle?.state.currentNode).toBe("work");
+      } finally {
+        queue.close();
+      }
     } finally {
       vi.unstubAllEnvs();
     }

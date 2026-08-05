@@ -338,8 +338,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
   };
 
   // Release the queue claim exactly once. "done" marks the queue row
-  // terminal; "lost" leaves it for the new claim holder.
-  const releaseClaim = (run: ActiveRun, outcome: "done" | "lost") => {
+  // terminal, "park" leaves it claimable for another runner, and "lost"
+  // leaves it for the new claim holder.
+  const releaseClaim = (run: ActiveRun, outcome: "done" | "lost" | "park") => {
     if (run.renewTimer !== undefined) {
       clearInterval(run.renewTimer);
       run.renewTimer = undefined;
@@ -348,7 +349,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
       return;
     }
     try {
-      runQueueStore.completeWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
+      if (outcome === "park") {
+        runQueueStore.parkWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
+      } else {
+        runQueueStore.completeWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
+      }
     } catch {
       // Queue bookkeeping is best-effort next to the durable bundle.
     } finally {
@@ -359,6 +364,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
   const finishRun = (ctx: ExtensionContext, run: ActiveRun, result: WorkflowRunResult) => {
     if (activeRun === run) {
       activeRun = null;
+    }
+    if (result.state.status === "running") {
+      // The run was parked for another runner; its bundle stays resumable
+      // and its queue row becomes claimable. Nothing else to present.
+      releaseClaim(run, "park");
+      void run.recorder?.stop();
+      stopWidgetTicker();
+      clearWidget(ctx);
+      return;
     }
     releaseClaim(run, "done");
     // Normally already stopped via onRunFinishing; this covers observers of
@@ -953,7 +967,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     sessionClosed = true;
     supersedePresentation();
     const run = activeRun;
-    run?.engine.cancel();
+    if (run !== null && run.claimToken !== undefined) {
+      // Queued interactive runs park: no terminal event, no recorded partial
+      // attempt, and the claim releases so another runner can resume.
+      run.engine.park();
+    } else {
+      run?.engine.cancel();
+    }
     await run?.recorder?.stop().catch(() => undefined);
     await run?.completion?.catch(() => undefined);
     activeRun = null;

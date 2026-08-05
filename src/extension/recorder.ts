@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   SESSION_BINDING_SCHEMA,
@@ -83,6 +84,12 @@ export class SessionRecorder {
   private readonly store: WorkflowRunStore;
   private readonly runDir: string;
   private readonly runId: string;
+  /**
+   * Capture segment for this recorder. Undefined writes the legacy flat
+   * stream; a second recorder attaching to the same bundle (resume or
+   * handoff) writes a segment instead so the first capture stays intact.
+   */
+  private segmentId: string | undefined;
   private cursor: string | null = null;
   private readonly recorded: string[] = [];
   private readonly unclaimedEntries: RecordedEntry[] = [];
@@ -128,22 +135,35 @@ export class SessionRecorder {
     this.bound = true;
     this.cursor = ctx.sessionManager.getLeafId();
     const sessionFile = ctx.sessionManager.getSessionFile();
-    await this.store.writeSessionBinding(this.runDir, {
-      schema: SESSION_BINDING_SCHEMA,
-      runId: this.runId,
-      piSessionId: ctx.sessionManager.getSessionId(),
-      ...(sessionFile !== undefined ? { piSessionFile: sessionFile } : {}),
-      cwd: ctx.cwd,
-      boundAt: new Date().toISOString(),
-    });
-    await this.store.writeSessionCapture(this.runDir, {
-      schema: SESSION_CAPTURE_SCHEMA,
-      eventSchema: SESSION_EVENT_SCHEMA,
-      status: "recording",
-      eventCount: 0,
-      entryCount: 0,
-      lastEventSeq: 0,
-    });
+    // A bundle that already has a binding belongs to an earlier capture
+    // attempt; this recorder writes its own segment under session/segments.
+    if (await this.store.hasSessionBinding(this.runDir)) {
+      this.segmentId = randomUUID();
+    }
+    await this.store.writeSessionBinding(
+      this.runDir,
+      {
+        schema: SESSION_BINDING_SCHEMA,
+        runId: this.runId,
+        piSessionId: ctx.sessionManager.getSessionId(),
+        ...(sessionFile !== undefined ? { piSessionFile: sessionFile } : {}),
+        cwd: ctx.cwd,
+        boundAt: new Date().toISOString(),
+      },
+      this.segmentId,
+    );
+    await this.store.writeSessionCapture(
+      this.runDir,
+      {
+        schema: SESSION_CAPTURE_SCHEMA,
+        eventSchema: SESSION_EVENT_SCHEMA,
+        status: "recording",
+        eventCount: 0,
+        entryCount: 0,
+        lastEventSeq: 0,
+      },
+      this.segmentId,
+    );
   }
 
   /** Fix the owner before the executor delivers an agent-step prompt. */
@@ -324,7 +344,7 @@ export class SessionRecorder {
       }
       const appended: RecordedEntry[] = [];
       for (const entry of branch.slice(startIndex)) {
-        await this.store.appendSessionEntry(this.runDir, entry);
+        await this.store.appendSessionEntry(this.runDir, entry, this.segmentId);
         const recorded = { id: entry.id, entry, claimed: false };
         appended.push(recorded);
         this.unclaimedEntries.push(recorded);
@@ -406,31 +426,39 @@ export class SessionRecorder {
       try {
         await this.flushAllEvents();
         await this.entryChain;
-        const counts = await this.store.sessionCounts(this.runDir);
-        await this.store.writeSessionCapture(this.runDir, {
-          schema: SESSION_CAPTURE_SCHEMA,
-          eventSchema: SESSION_EVENT_SCHEMA,
-          status: this.captureFailure ? "failed" : "complete",
-          ...counts,
-          ...(this.captureFailure ? { failure: this.captureFailure } : {}),
-        });
+        const counts = await this.store.sessionCounts(this.runDir, this.segmentId);
+        await this.store.writeSessionCapture(
+          this.runDir,
+          {
+            schema: SESSION_CAPTURE_SCHEMA,
+            eventSchema: SESSION_EVENT_SCHEMA,
+            status: this.captureFailure ? "failed" : "complete",
+            ...counts,
+            ...(this.captureFailure ? { failure: this.captureFailure } : {}),
+          },
+          this.segmentId,
+        );
       } catch (error) {
         // Capture is observational. A finalization failure must never reject
         // the workflow's terminal persistence hook.
         this.failCapture("capture_finalize_failed", failureMessage(error));
         try {
-          const counts = await this.store.sessionCounts(this.runDir);
-          await this.store.writeSessionCapture(this.runDir, {
-            schema: SESSION_CAPTURE_SCHEMA,
-            eventSchema: SESSION_EVENT_SCHEMA,
-            status: "failed",
-            ...counts,
-            failure: this.captureFailure ?? {
-              failedAt: new Date().toISOString(),
-              code: "capture_finalize_failed",
-              message: failureMessage(error),
+          const counts = await this.store.sessionCounts(this.runDir, this.segmentId);
+          await this.store.writeSessionCapture(
+            this.runDir,
+            {
+              schema: SESSION_CAPTURE_SCHEMA,
+              eventSchema: SESSION_EVENT_SCHEMA,
+              status: "failed",
+              ...counts,
+              failure: this.captureFailure ?? {
+                failedAt: new Date().toISOString(),
+                code: "capture_finalize_failed",
+                message: failureMessage(error),
+              },
             },
-          });
+            this.segmentId,
+          );
         } catch {
           // The viewer will report the missing/invalid capture file.
         }
@@ -576,6 +604,7 @@ export class SessionRecorder {
       .appendSessionEventBatch(
         this.runDir,
         batch.map((queued) => queued.record),
+        this.segmentId,
       )
       .catch((error: unknown) => {
         const message = failureMessage(error);

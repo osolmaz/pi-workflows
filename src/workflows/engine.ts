@@ -5,6 +5,8 @@ import {
   errorMessage,
   isAbortLikeError,
   isClaimLostError,
+  isRunParkedError,
+  RunParkedError,
   TimeoutError,
   WorkflowSourceChangedError,
 } from "./errors.js";
@@ -77,6 +79,7 @@ export class WorkflowEngine {
   private readonly onRunFinishing?: WorkflowEngineOptions["onRunFinishing"];
   private activeAbort: AbortController | null = null;
   private cancelled = false;
+  private parked = false;
   private paused = false;
   private wakePause: (() => void) | null = null;
 
@@ -100,6 +103,17 @@ export class WorkflowEngine {
     this.activeAbort?.abort(new CancelledError());
     // A run held at a pause boundary has no active node to abort; wake it so
     // it can observe the cancellation.
+    this.wakePause?.();
+  }
+
+  /**
+   * Stop without a terminal event so another runner can claim and resume
+   * the run. The active node aborts; its partial attempt is never recorded,
+   * so resume reruns that node from its last persisted boundary.
+   */
+  park(): void {
+    this.parked = true;
+    this.activeAbort?.abort(new CancelledError());
     this.wakePause?.();
   }
 
@@ -137,6 +151,7 @@ export class WorkflowEngine {
     }
     this.cancelled = false;
     this.paused = false;
+    this.parked = false;
 
     const state = await this.createRunState(
       workflow,
@@ -163,6 +178,9 @@ export class WorkflowEngine {
     try {
       await this.executeGraph(workflow, state, runDir);
     } catch (error) {
+      if (isRunParkedError(error) || this.parked) {
+        return { runDir, state };
+      }
       await this.finishAfterError(runDir, state, error);
       return { runDir, state };
     }
@@ -193,6 +211,7 @@ export class WorkflowEngine {
 
     this.cancelled = false;
     this.paused = false;
+    this.parked = false;
 
     const point = this.resumePointFor(workflow, state);
     // A resumed run starts unpaused; the operator can pause again. The
@@ -238,6 +257,9 @@ export class WorkflowEngine {
         point.lastOutput,
       );
     } catch (error) {
+      if (isRunParkedError(error) || this.parked) {
+        return { runDir, state };
+      }
       await this.finishAfterError(runDir, state, error);
       return { runDir, state };
     }
@@ -377,6 +399,11 @@ export class WorkflowEngine {
       }
 
       const attempt = await this.executeNode(workflow, state, runDir, currentNodeId, node);
+      if (this.parked) {
+        // Do not record the aborted attempt: the projection keeps the node
+        // as in-flight, and resume reruns it with a fresh attempt.
+        throw new RunParkedError();
+      }
       this.recordAttempt(state, attempt);
       // The terminal node event carries the output, receipt, and conversation
       // linkage so the trace alone is sufficient to reconstruct the run.
@@ -426,6 +453,9 @@ export class WorkflowEngine {
    * never interrupts a node mid-flight; it only delays the next dispatch.
    */
   private async holdWhilePaused(state: WorkflowRunState, runDir: string): Promise<void> {
+    if (this.parked) {
+      throw new RunParkedError();
+    }
     if (this.cancelled) {
       throw new CancelledError();
     }
@@ -434,12 +464,15 @@ export class WorkflowEngine {
     }
     state.paused = true;
     await this.persist(runDir, state, { scope: "run", type: "run_paused", payload: {} });
-    while (this.paused && !this.cancelled) {
+    while (this.paused && !this.cancelled && !this.parked) {
       await new Promise<void>((resolve) => {
         this.wakePause = resolve;
       });
     }
     this.wakePause = null;
+    if (this.parked) {
+      throw new RunParkedError();
+    }
     delete state.paused;
     if (this.cancelled) {
       throw new CancelledError();

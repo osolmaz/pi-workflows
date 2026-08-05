@@ -703,6 +703,7 @@ describe("terminal output sanitization", () => {
         sessionEvents: [],
         sessionCapture: null,
         sessionIntegrity: { status: "unavailable", diagnostics: [] },
+        sessionSegments: [],
       },
       { width: 120, height: 100 },
     );

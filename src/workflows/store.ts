@@ -36,6 +36,35 @@ const SESSION_BINDING_PATH = `${SESSION_DIR}/binding.json`;
 const SESSION_ENTRIES_PATH = `${SESSION_DIR}/entries.ndjson`;
 const SESSION_EVENTS_PATH = `${SESSION_DIR}/events.ndjson`;
 const SESSION_CAPTURE_PATH = `${SESSION_DIR}/capture.json`;
+const SESSION_SEGMENTS_DIR = `${SESSION_DIR}/segments`;
+
+/** Capture file layout for one recorder attempt; "" is the legacy flat stream. */
+function sessionStreamPaths(attemptId?: string): {
+  dir: string;
+  binding: string;
+  entries: string;
+  events: string;
+  capture: string;
+} {
+  if (attemptId === undefined) {
+    return {
+      dir: SESSION_DIR,
+      binding: SESSION_BINDING_PATH,
+      entries: SESSION_ENTRIES_PATH,
+      events: SESSION_EVENTS_PATH,
+      capture: SESSION_CAPTURE_PATH,
+    };
+  }
+  assertValidRunId(attemptId);
+  const dir = `${SESSION_SEGMENTS_DIR}/${attemptId}`;
+  return {
+    dir,
+    binding: `${dir}/binding.json`,
+    entries: `${dir}/entries.ndjson`,
+    events: `${dir}/events.ndjson`,
+    capture: `${dir}/capture.json`,
+  };
+}
 
 /** Runs directory: `$PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`. */
 export function workflowRunsBaseDir(homeDir: string = os.homedir()): string {
@@ -59,12 +88,19 @@ export function createRunId(workflowName: string, now: Date = new Date()): strin
   return `${stamp}-${slug || "workflow"}-${randomUUID().slice(0, 8)}`;
 }
 
-type RunBundleContext = {
-  traceSeq: number;
+/** Per-attempt capture stream state; the "" key is the legacy flat stream. */
+type SessionStreamState = {
   sessionSeq: number;
   sessionEventSeq: number;
   sessionBound: boolean;
   sessionEventsStopped: boolean;
+  /** Session events have a separate append chain so token traffic cannot
+   * queue ahead of workflow transitions. */
+  lock: Promise<unknown>;
+};
+
+type RunBundleContext = {
+  traceSeq: number;
   artifacts: ArtifactWriter;
   /**
    * Serializes complete transitions (encode, trace append, projections) so
@@ -72,9 +108,7 @@ type RunBundleContext = {
    * append order.
    */
   lock: Promise<unknown>;
-  /** Session events have a separate append chain so token traffic cannot
-   * queue ahead of workflow transitions. */
-  sessionEventLock: Promise<unknown>;
+  streams: Map<string, SessionStreamState>;
 };
 
 /**
@@ -147,17 +181,30 @@ export class WorkflowRunStore {
     if (!context) {
       context = {
         traceSeq: 0,
-        sessionSeq: 0,
-        sessionEventSeq: 0,
-        sessionBound: false,
-        sessionEventsStopped: false,
         artifacts: new ArtifactWriter(runDir),
         lock: Promise.resolve(),
-        sessionEventLock: Promise.resolve(),
+        streams: new Map(),
       };
       this.contexts.set(runDir, context);
     }
     return context;
+  }
+
+  private streamFor(runDir: string, attemptId?: string): SessionStreamState {
+    const context = this.contextFor(runDir);
+    const key = attemptId ?? "";
+    let stream = context.streams.get(key);
+    if (!stream) {
+      stream = {
+        sessionSeq: 0,
+        sessionEventSeq: 0,
+        sessionBound: false,
+        sessionEventsStopped: false,
+        lock: Promise.resolve(),
+      };
+      context.streams.set(key, stream);
+    }
+    return stream;
   }
 
   /**
@@ -177,13 +224,17 @@ export class WorkflowRunStore {
     return result;
   }
 
-  private withSessionEventLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
-    const context = this.contextFor(runDir);
-    const result = context.sessionEventLock.then(async () => {
+  private withSessionEventLock<T>(
+    runDir: string,
+    attemptId: string | undefined,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const stream = this.streamFor(runDir, attemptId);
+    const result = stream.lock.then(async () => {
       this.fenceProvider?.(runDir)?.();
       return await task();
     });
-    context.sessionEventLock = result.then(
+    stream.lock = result.then(
       () => undefined,
       () => undefined,
     );
@@ -232,13 +283,14 @@ export class WorkflowRunStore {
       bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
     this.contexts.set(runDir, {
       traceSeq: bundle.state.traceSeq,
-      sessionSeq: counts.entryCount,
-      sessionEventSeq: counts.lastEventSeq,
-      sessionBound: bundle.manifest.paths.session !== undefined,
-      sessionEventsStopped: captureFinished,
       artifacts: new ArtifactWriter(runDir),
       lock: Promise.resolve(),
-      sessionEventLock: Promise.resolve(),
+      streams: seededStreams({
+        sessionSeq: counts.entryCount,
+        sessionEventSeq: counts.lastEventSeq,
+        sessionBound: bundle.manifest.paths.session !== undefined,
+        sessionEventsStopped: captureFinished,
+      }),
     });
     const prepared = await readRunBundle(runDir);
     if (prepared === null) {
@@ -264,13 +316,14 @@ export class WorkflowRunStore {
       bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
     this.contexts.set(runDir, {
       traceSeq: Math.max(bundle.state.traceSeq, lastTraceEvent?.seq ?? 0),
-      sessionSeq: counts.entryCount,
-      sessionEventSeq: counts.lastEventSeq,
-      sessionBound,
-      sessionEventsStopped: captureFinished,
       artifacts: new ArtifactWriter(runDir),
       lock: Promise.resolve(),
-      sessionEventLock: Promise.resolve(),
+      streams: seededStreams({
+        sessionSeq: counts.entryCount,
+        sessionEventSeq: counts.lastEventSeq,
+        sessionBound,
+        sessionEventsStopped: captureFinished,
+      }),
     });
     const state = bundle.state;
     if (lastTraceEvent !== null && recoverTerminalProjection(state, lastTraceEvent)) {
@@ -289,6 +342,32 @@ export class WorkflowRunStore {
           message: reason,
         },
       });
+    }
+    // Recording capture segments end the same way: the session that owned
+    // them is gone, so they finalize as failed instead of dangling.
+    for (const segmentId of await this.listSessionSegments(runDir)) {
+      const segmentCapture = await readJsonFile<WorkflowSessionCapture>(
+        path.join(runDir, sessionStreamPaths(segmentId).capture),
+      );
+      if (segmentCapture?.status !== "recording") {
+        continue;
+      }
+      const segmentCounts = await this.sessionCounts(runDir, segmentId);
+      await this.writeSessionCapture(
+        runDir,
+        {
+          schema: SESSION_CAPTURE_SCHEMA,
+          eventSchema: SESSION_EVENT_SCHEMA,
+          status: "failed",
+          ...segmentCounts,
+          failure: {
+            failedAt: new Date().toISOString(),
+            code: "host_interrupted",
+            message: reason,
+          },
+        },
+        segmentId,
+      );
     }
     state.status = "failed";
     state.finishedAt = new Date().toISOString();
@@ -334,34 +413,71 @@ export class WorkflowRunStore {
    * append a `session_bound` trace event. Projections catch up on the next
    * snapshot.
    */
-  async writeSessionBinding(runDir: string, binding: WorkflowSessionBinding): Promise<void> {
+  /** True when a session binding already exists for this bundle. */
+  async hasSessionBinding(runDir: string): Promise<boolean> {
+    try {
+      await fs.lstat(path.join(runDir, SESSION_BINDING_PATH));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** List capture segment attempt ids under `session/segments/`. */
+  async listSessionSegments(runDir: string): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(path.join(runDir, SESSION_SEGMENTS_DIR), {
+        withFileTypes: true,
+      });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  async writeSessionBinding(
+    runDir: string,
+    binding: WorkflowSessionBinding,
+    attemptId?: string,
+  ): Promise<void> {
     await this.withRunLock(runDir, async () => {
-      const context = this.contextFor(runDir);
-      if (context.sessionBound) {
+      const stream = this.streamFor(runDir, attemptId);
+      if (stream.sessionBound) {
         return;
       }
-      context.sessionBound = true;
-      await fs.mkdir(path.join(runDir, SESSION_DIR), { recursive: true, mode: 0o700 });
-      await writeJsonAtomic(path.join(runDir, SESSION_BINDING_PATH), binding);
+      stream.sessionBound = true;
+      const paths = sessionStreamPaths(attemptId);
+      await fs.mkdir(path.join(runDir, paths.dir), { recursive: true, mode: 0o700 });
+      await writeJsonAtomic(path.join(runDir, paths.binding), binding);
       await this.appendTraceEvent(runDir, binding.runId, {
         scope: "session",
         type: "session_bound",
-        payload: { piSessionId: binding.piSessionId },
+        payload: {
+          piSessionId: binding.piSessionId,
+          ...(attemptId !== undefined ? { captureAttemptId: attemptId } : {}),
+        },
       });
     });
   }
 
   /** Append one verbatim Pi session entry to `session/entries.ndjson`. */
-  async appendSessionEntry(runDir: string, entry: Record<string, unknown>): Promise<number> {
+  async appendSessionEntry(
+    runDir: string,
+    entry: Record<string, unknown>,
+    attemptId?: string,
+  ): Promise<number> {
     return await this.withRunLock(runDir, async () => {
-      const context = this.contextFor(runDir);
-      context.sessionSeq += 1;
+      const stream = this.streamFor(runDir, attemptId);
+      stream.sessionSeq += 1;
       const record: WorkflowSessionEntryRecord = {
-        seq: context.sessionSeq,
+        seq: stream.sessionSeq,
         at: new Date().toISOString(),
         entry,
       };
-      await appendLine(path.join(runDir, SESSION_ENTRIES_PATH), record);
+      await appendLine(path.join(runDir, sessionStreamPaths(attemptId).entries), record);
       return record.seq;
     });
   }
@@ -370,17 +486,18 @@ export class WorkflowRunStore {
   async appendSessionEventBatch(
     runDir: string,
     records: WorkflowSessionEventRecord[],
+    attemptId?: string,
   ): Promise<void> {
     if (records.length === 0) {
       return;
     }
-    await this.withSessionEventLock(runDir, async () => {
-      const context = this.contextFor(runDir);
-      if (context.sessionEventsStopped) {
+    await this.withSessionEventLock(runDir, attemptId, async () => {
+      const stream = this.streamFor(runDir, attemptId);
+      if (stream.sessionEventsStopped) {
         throw new Error("Session event capture has stopped");
       }
       try {
-        let expected = context.sessionEventSeq + 1;
+        let expected = stream.sessionEventSeq + 1;
         for (const record of records) {
           validateSessionEventRecord(record);
           if (record.seq !== expected) {
@@ -395,7 +512,7 @@ export class WorkflowRunStore {
               record.type === "tool_execution_started" ||
               record.type === "tool_execution_finished" ||
               (record.type === "assistant_event" && record.payload.type === "toolcall_end")
-                ? ((await encodeValue(record.payload, context.artifacts)) as Record<
+                ? ((await encodeValue(record.payload, this.contextFor(runDir).artifacts)) as Record<
                     string,
                     unknown
                   >)
@@ -407,33 +524,39 @@ export class WorkflowRunStore {
             throw new Error(`session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`);
           }
         }
-        await appendLines(path.join(runDir, SESSION_EVENTS_PATH), encoded);
-        context.sessionEventSeq = records.at(-1)?.seq ?? context.sessionEventSeq;
+        await appendLines(path.join(runDir, sessionStreamPaths(attemptId).events), encoded);
+        stream.sessionEventSeq = records.at(-1)?.seq ?? stream.sessionEventSeq;
       } catch (error) {
-        context.sessionEventsStopped = true;
+        stream.sessionEventsStopped = true;
         throw error;
       }
     });
   }
 
   /** Atomically replace the temporal capture integrity projection. */
-  async writeSessionCapture(runDir: string, capture: WorkflowSessionCapture): Promise<void> {
+  async writeSessionCapture(
+    runDir: string,
+    capture: WorkflowSessionCapture,
+    attemptId?: string,
+  ): Promise<void> {
     validateSessionCapture(capture);
-    await this.withSessionEventLock(runDir, async () => {
-      const context = this.contextFor(runDir);
+    await this.withSessionEventLock(runDir, attemptId, async () => {
+      const stream = this.streamFor(runDir, attemptId);
       if (capture.status !== "recording") {
-        context.sessionEventsStopped = true;
+        stream.sessionEventsStopped = true;
       }
-      await writeJsonAtomic(path.join(runDir, SESSION_CAPTURE_PATH), capture);
+      await writeJsonAtomic(path.join(runDir, sessionStreamPaths(attemptId).capture), capture);
     });
   }
 
   /** Count complete durable session records after both writers have drained. */
   async sessionCounts(
     runDir: string,
+    attemptId?: string,
   ): Promise<{ eventCount: number; entryCount: number; lastEventSeq: number }> {
-    const events = await readCompleteNdjson(path.join(runDir, SESSION_EVENTS_PATH));
-    const entries = await readCompleteNdjson(path.join(runDir, SESSION_ENTRIES_PATH));
+    const paths = sessionStreamPaths(attemptId);
+    const events = await readCompleteNdjson(path.join(runDir, paths.events));
+    const entries = await readCompleteNdjson(path.join(runDir, paths.entries));
     return {
       eventCount: events.length,
       entryCount: entries.length,
@@ -466,7 +589,7 @@ export class WorkflowRunStore {
     await writeJsonAtomic(
       path.join(runDir, MANIFEST_PATH),
       createManifest(state, {
-        session: context.sessionBound,
+        session: [...context.streams.values()].some((stream) => stream.sessionBound),
       }),
     );
   }
@@ -476,7 +599,9 @@ export class WorkflowRunStore {
     await writeJsonAtomic(path.join(runDir, STATE_PATH), state);
     await writeJsonAtomic(
       path.join(runDir, MANIFEST_PATH),
-      createManifest(state, { session: context.sessionBound }),
+      createManifest(state, {
+        session: [...context.streams.values()].some((stream) => stream.sessionBound),
+      }),
     );
   }
 }
@@ -527,6 +652,10 @@ async function repairTraceFile(tracePath: string, keepSeq: number): Promise<void
     mode: 0o600,
   });
   await fs.rename(tempPath, tracePath);
+}
+
+function seededStreams(flat: Omit<SessionStreamState, "lock">): Map<string, SessionStreamState> {
+  return new Map([["", { ...flat, lock: Promise.resolve() }]]);
 }
 
 function recoverTerminalProjection(state: WorkflowRunState, event: WorkflowTraceEvent): boolean {
@@ -808,6 +937,16 @@ export type SessionCaptureIntegrity = {
   diagnostics: string[];
 };
 
+/** One capture attempt: the session data a single recorder wrote. */
+export type SessionCaptureSegment = {
+  attemptId: string;
+  binding: WorkflowSessionBinding | null;
+  entries: WorkflowSessionEntryRecord[];
+  events: WorkflowSessionEventRecord[];
+  capture: WorkflowSessionCapture | null;
+  integrity: SessionCaptureIntegrity;
+};
+
 export type LoadedRunBundle = {
   runDir: string;
   manifest: WorkflowRunManifest;
@@ -818,6 +957,8 @@ export type LoadedRunBundle = {
   sessionEvents: WorkflowSessionEventRecord[];
   sessionCapture: WorkflowSessionCapture | null;
   sessionIntegrity: SessionCaptureIntegrity;
+  /** Per-attempt captures written after a handoff or resume. */
+  sessionSegments: SessionCaptureSegment[];
 };
 
 /** Read the final trace record without loading the rest of a run bundle. */
@@ -863,13 +1004,58 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
   const sessionCapture = await readJsonFile<WorkflowSessionCapture>(
     path.join(sessionDir, "capture.json"),
   );
-  const sessionIntegrity = assessSessionIntegrity({
+  const flatIntegrity = assessSessionIntegrity({
     binding: sessionBinding,
     entries,
     events,
     capture: sessionCapture,
     runTerminal: state.status !== "running",
   });
+  const sessionSegments: SessionCaptureSegment[] = [];
+  let segmentIds: string[] = [];
+  try {
+    segmentIds = (await fs.readdir(path.join(sessionDir, "segments"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    // No segments directory means only the flat stream can exist.
+  }
+  for (const attemptId of segmentIds) {
+    const segmentDir = path.join(sessionDir, "segments", attemptId);
+    const binding = await readJsonFile<WorkflowSessionBinding>(
+      path.join(segmentDir, "binding.json"),
+    );
+    const segmentEntries = await readNdjsonFile<WorkflowSessionEntryRecord>(
+      path.join(segmentDir, "entries.ndjson"),
+    );
+    const segmentEvents = await readNdjsonFile<WorkflowSessionEventRecord>(
+      path.join(segmentDir, "events.ndjson"),
+    );
+    const capture = await readJsonFile<WorkflowSessionCapture>(
+      path.join(segmentDir, "capture.json"),
+    );
+    sessionSegments.push({
+      attemptId,
+      binding,
+      entries: segmentEntries.records,
+      events: segmentEvents.records,
+      capture,
+      integrity: assessSessionIntegrity({
+        binding,
+        entries: segmentEntries,
+        events: segmentEvents,
+        capture,
+        runTerminal: state.status !== "running",
+      }),
+    });
+  }
+  // The headline integrity is the flat stream's when present; otherwise the
+  // latest capture segment speaks for the run.
+  const sessionIntegrity =
+    flatIntegrity.status !== "unavailable" || sessionSegments.length === 0
+      ? flatIntegrity
+      : (sessionSegments.at(-1)?.integrity ?? flatIntegrity);
   return {
     runDir,
     manifest,
@@ -880,6 +1066,7 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
     sessionEvents: events.records,
     sessionCapture,
     sessionIntegrity,
+    sessionSegments,
   };
 }
 

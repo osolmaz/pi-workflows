@@ -57,6 +57,7 @@ function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedRunBundle 
     sessionEvents: [],
     sessionCapture: null,
     sessionIntegrity: { status: "unavailable", diagnostics: [] },
+    sessionSegments: [],
   };
 }
 
