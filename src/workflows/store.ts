@@ -276,7 +276,12 @@ export class WorkflowRunStore {
       throw new Error(`Cannot resume workflow run ${runId} with status ${bundle.state.status}`);
     }
     const tracePath = resolveBundlePath(runDir, bundle.manifest.paths.trace, TRACE_PATH);
-    await repairTraceFile(tracePath, bundle.state.traceSeq);
+    await repairTraceFile(tracePath, bundle.state.traceSeq, () => {
+      // The repair rewrites the trace; re-verify ownership immediately
+      // before the rename so a stalled runner cannot truncate a new claim
+      // holder's appended events.
+      this.fenceProvider?.(runDir)?.();
+    });
 
     // A crashed session never finalizes its capture, and resuming recorders
     // always write new segments — so dangling "recording" captures end here
@@ -648,7 +653,11 @@ export class WorkflowRunStore {
  * rewrite is atomic: a stale writer appending to the old inode cannot
  * interleave with the repaired file.
  */
-async function repairTraceFile(tracePath: string, keepSeq: number): Promise<void> {
+async function repairTraceFile(
+  tracePath: string,
+  keepSeq: number,
+  beforeWrite?: () => void,
+): Promise<void> {
   let raw: string;
   try {
     raw = await fs.readFile(tracePath, "utf8");
@@ -680,6 +689,7 @@ async function repairTraceFile(tracePath: string, keepSeq: number): Promise<void
   if (kept.length === lines.length) {
     return;
   }
+  beforeWrite?.();
   const tempPath = `${tracePath}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tempPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, {
     encoding: "utf8",

@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -66,6 +68,53 @@ describe("engine park", () => {
     expect(resumed.state.status).toBe("completed");
     expect(resumed.state.finalOutput).toBe("second");
     expect(resumed.state.steps).toHaveLength(2);
+  });
+});
+
+describe("park during resume preparation", () => {
+  it("keeps a park that lands while the bundle is being prepared", async () => {
+    const outputRoot = await makeTempDir("pi-park-prepare-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const work = vi.fn(() => "should not run");
+    const workflow = defineWorkflow({
+      name: "park-prepare",
+      startAt: "work",
+      nodes: { work: compute({ run: work }) },
+      edges: [],
+    });
+    const state = {
+      schema: "pi-workflows.run-state.v1" as const,
+      traceSeq: 0,
+      runId: "prepare-park",
+      workflowName: workflow.name,
+      startedAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+      status: "running" as const,
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+
+    // Make preparation slow so the park lands mid-await.
+    const resumer = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
+    const original = store.prepareRunResume.bind(store);
+    const spy = vi.spyOn(store, "prepareRunResume").mockImplementation(async (runId: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return await original(runId);
+    });
+    const resumePromise = resumer.resumeRun(workflow, "prepare-park");
+    resumer.park();
+    const result = await resumePromise;
+    spy.mockRestore();
+
+    // The park survived preparation: nothing executed and the bundle stays
+    // resumable instead of running to completion.
+    expect(result.state.status).toBe("running");
+    expect(work).not.toHaveBeenCalled();
+    void runDir;
   });
 });
 
@@ -142,6 +191,49 @@ describe("capture segments", () => {
     expect(bundle?.sessionSegments[0]?.entries).toHaveLength(1);
     // The flat stream is intact and still speaks for headline integrity.
     expect(bundle?.sessionIntegrity.status).toBe("complete");
+  });
+
+  it("re-verifies the fence before repairing a torn trace", async () => {
+    const outputRoot = await makeTempDir("pi-fence-repair-runs");
+    const plain = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "repair-fence",
+      startAt: "work",
+      nodes: { work: compute({ run: () => 1 }) },
+      edges: [],
+    });
+    const state = {
+      schema: "pi-workflows.run-state.v1" as const,
+      traceSeq: 0,
+      runId: "repair-1",
+      workflowName: workflow.name,
+      startedAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+      status: "running" as const,
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+    };
+    const runDir = await plain.initializeRunBundle(workflow, state);
+    await plain.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+    // A torn tail that requires repair.
+    await fs.appendFile(path.join(runDir, "trace.ndjson"), '{"seq": 99, "typ');
+
+    let fenceCalls = 0;
+    const fenced = new WorkflowRunStore(outputRoot, {
+      fenceProvider: () => () => {
+        fenceCalls += 1;
+        if (fenceCalls > 1) {
+          throw new Error("claim lost mid-repair");
+        }
+      },
+    });
+    await expect(fenced.prepareRunResume("repair-1")).rejects.toThrow(/claim lost/);
+    expect(fenceCalls).toBe(2);
+    // The trace was left untouched by the refused repair.
+    const raw = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
+    expect(raw).toContain('"seq": 99');
   });
 
   it("finalizes a dangling recording capture when preparing a resume", async () => {

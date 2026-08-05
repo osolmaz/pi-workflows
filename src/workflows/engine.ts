@@ -199,6 +199,11 @@ export class WorkflowEngine {
     options: { workflowHash?: string; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
+    // Reset before any await: a park or cancel landing during preparation
+    // must survive, or a host drain would hang while the run executes.
+    this.cancelled = false;
+    this.paused = false;
+    this.parked = false;
     const bundle = await this.store.prepareRunResume(runId);
     const { runDir } = bundle;
     const state = bundle.state;
@@ -209,10 +214,6 @@ export class WorkflowEngine {
     if (hashMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
     }
-
-    this.cancelled = false;
-    this.paused = false;
-    this.parked = false;
 
     const point = this.resumePointFor(workflow, state, "wait");
     // A resumed run starts unpaused; the operator can pause again. The
@@ -285,6 +286,9 @@ export class WorkflowEngine {
     options: { workflowPath?: string; workflowHash?: string; runId?: string; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
+    this.cancelled = false;
+    this.paused = false;
+    this.parked = false;
     const parent = await readRunBundle(this.store.runDirFor(parentRunId));
     if (parent === null) {
       throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
@@ -307,9 +311,6 @@ export class WorkflowEngine {
     if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
       throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
     }
-    this.cancelled = false;
-    this.paused = false;
-    this.parked = false;
 
     const state = await this.createRunState(
       workflow,
