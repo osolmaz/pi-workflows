@@ -131,6 +131,73 @@ export default defineWorkflow({
     },
   );
 
+  it("gates fail-unresumable interruption on the claim", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "fenced-fail",
+        workflowRef: "demo",
+        workflowPath: "/missing.workflow.ts",
+        input: {},
+        runnerId: "runner-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      const runStore = new WorkflowRunStore(runsDir);
+      const workflow = defineWorkflow({
+        name: "demo",
+        startAt: "work",
+        nodes: { work: compute({ run: () => 1 }) },
+        edges: [],
+      });
+      const state = runningState("fenced-fail");
+      const runDir = await runStore.initializeRunBundle(workflow, state);
+      await runStore.writeSnapshot(runDir, state, {
+        scope: "run",
+        type: "run_started",
+        payload: {},
+      });
+
+      // The host lost the claim (a new holder took over) before it failed.
+      queue.parkWorkflowRun({ runId: "fenced-fail", claimToken: "token-a" });
+      queue.claimNextWorkflowRun({ runnerId: "runner-b", claimToken: "token-b", leaseMs: 60_000 });
+
+      const host = new WorkflowHost({ cwd, claimPollMs: 50 });
+      const record = queue.getWorkflowRun("fenced-fail");
+      if (record === undefined) {
+        throw new Error("missing queue row");
+      }
+      await (
+        host as unknown as {
+          failUnresumable: (
+            record: import("../src/controllers/index.js").WorkflowRunQueueRecord,
+            claimToken: string,
+            message: string,
+          ) => Promise<void>;
+        }
+      ).failUnresumable(
+        { ...record, runnerId: "runner-a", claimToken: "token-a" },
+        "token-a",
+        "load failed",
+      );
+      // The bundle belongs to the new claim holder: no interruption write.
+      const last = await import("../src/workflows/store.js").then((module) =>
+        module.readLastTraceEvent(runDir),
+      );
+      expect(last?.type).toBe("run_started");
+      const bundle = await readRunBundle(runDir);
+      expect(bundle?.state.status).toBe("running");
+      queue.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("re-parks and skips a run whose workflow source changed", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-host-project");
     const runsDir = await makeTempDir("pi-host-runs");
@@ -193,6 +260,36 @@ export default defineWorkflow({
         queue.close();
       }
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not reap the live host's children when a second host fails to start", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    const child = spawn("sleep", ["60"], { detached: true });
+    const pid = child.pid as number;
+    try {
+      const first = new WorkflowHost({ cwd, claimPollMs: 50 });
+      await first.start();
+      // A live child registered as if the first host spawned it.
+      const registry = new HostProcessRegistry(path.dirname(projectControllerStorePath(cwd)));
+      registry.register(pid);
+      try {
+        const second = new WorkflowHost({ cwd, claimPollMs: 50 });
+        await expect(second.start()).rejects.toThrow(/already running/);
+        // The failed second host must not have touched the child.
+        expect(() => process.kill(pid, 0)).not.toThrow();
+      } finally {
+        await first.stop();
+      }
+    } finally {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
       vi.unstubAllEnvs();
     }
   });

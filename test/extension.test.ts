@@ -1150,6 +1150,74 @@ export default defineWorkflow({
     }
   });
 
+  it("skips already-answered checkpoints in the answer fallback", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-answer-skip");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: {
+    approval: checkpoint({ summary: "approve" }),
+    apply: compute({ run: () => ({ deployed: true }) }),
+  },
+  edges: [{ from: "approval", to: "apply" }],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("workflow");
+
+      // First checkpoint: answered through its continuation.
+      await command?.handler("gate", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("parked at checkpoint approval")),
+      );
+      await command?.handler('answer {"round":1}', harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+
+      // Second checkpoint of the same workflow: left waiting across a restart.
+      await command?.handler("gate", harness.ctx);
+      await waitFor(
+        () =>
+          harness.notifications.filter((note) => note.includes("parked at checkpoint approval"))
+            .length === 2,
+      );
+      await harness.emitAsync("session_shutdown");
+
+      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await second.emitAsync("session_start");
+      await second.command.handler('answer {"round":2}', second.ctx);
+      await waitFor(() => second.notifications.some((note) => note.includes("completed")));
+
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        const rows = queue.listWorkflowRuns();
+        expect(rows).toHaveLength(4);
+        const continuations = rows.filter((row) => row.parentRunId !== null);
+        expect(continuations).toHaveLength(2);
+        // The fallback continued the second (unanswered) parent.
+        const parents = rows.filter((row) => row.parentRunId === null);
+        expect(continuations[1]?.parentRunId).toBe(parents[1]?.runId);
+        expect(continuations[1]?.input).toEqual({ round: 2 });
+      } finally {
+        queue.close();
+      }
+      await second.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("parks a run again when resume fails on changed source", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-resume-fail");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");

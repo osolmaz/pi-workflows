@@ -83,13 +83,16 @@ export class WorkflowHost {
     this.options.onLog?.(message);
   }
 
-  /** Reap orphans, take the advisory lock, and start claiming. */
+  /** Take the advisory lock, reap orphans, and start claiming. */
   async start(): Promise<void> {
+    // The lock comes first: a second host must refuse before touching the
+    // children registry, or it would kill the live host's child processes
+    // as supposed orphans.
+    acquireHostLock(this.stateDir, this.runnerId, this.options.cwd);
     const reaped = this.registry.reapOrphans();
     if (reaped.length > 0) {
       this.log(`reaped ${reaped.length} orphaned headless session(s): ${reaped.join(", ")}`);
     }
-    acquireHostLock(this.stateDir, this.runnerId, this.options.cwd);
 
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });
     if (definitions.length > 0) {
@@ -289,7 +292,11 @@ export class WorkflowHost {
     message: string,
   ): Promise<void> {
     try {
-      await this.childRunStore.markRunInterrupted(record.runId, message);
+      // The interruption write obeys the same fencing rule as every other
+      // bundle write: without a live claim, the current owner decides.
+      if (this.store.verifyWorkflowRunClaim({ runId: record.runId, claimToken })) {
+        await this.childRunStore.markRunInterrupted(record.runId, message);
+      }
     } catch {
       // The bundle may be unreadable; the queue row still needs closure.
     }

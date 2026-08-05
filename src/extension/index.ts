@@ -976,9 +976,24 @@ export default function piWorkflows(pi: ExtensionAPI) {
         // on disk (restart- and host-safe).
         let parentRunId = parsed.runId ?? lastWaitingRunId;
         if (parentRunId === null) {
+          // Discover from durable state, scoped to this project's queue: a
+          // bare answer targets the newest waiting run this project started
+          // that has not already been continued.
+          const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
+          const known = new Set(rows.map((row) => row.runId));
+          const continued = new Set(
+            rows
+              .map((row) => row.parentRunId)
+              .filter((parent): parent is string => parent !== null),
+          );
           const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
           parentRunId =
-            bundles.find((bundle) => bundle.state.status === "waiting")?.state.runId ?? null;
+            bundles.find(
+              (bundle) =>
+                bundle.state.status === "waiting" &&
+                known.has(bundle.state.runId) &&
+                !continued.has(bundle.state.runId),
+            )?.state.runId ?? null;
         }
         if (parentRunId === null) {
           notify(ctx, "No workflow is waiting for an answer.", "warning");
