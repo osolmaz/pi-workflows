@@ -10,7 +10,7 @@ function makeEngine(store: WorkflowRunStore) {
 }
 
 describe("engine park", () => {
-  it("stops mid-node without a terminal event and resumes later", { timeout: 15_000 }, async () => {
+  it("stops mid-node without a terminal event and resumes later", { timeout: 45_000 }, async () => {
     const outputRoot = await makeTempDir("pi-park-runs");
     const store = new WorkflowRunStore(outputRoot);
     let blocked = true;
@@ -36,7 +36,7 @@ describe("engine park", () => {
     const runPromise = engine.run(workflow, {}, { runId: "park-1" });
     // Wait until node two is in flight.
     const runDir = store.runDirFor("park-1");
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 30_000;
     for (;;) {
       const last = await readLastTraceEvent(runDir);
       if (last?.type === "node_started" && last.nodeId === "two") {

@@ -206,6 +206,8 @@ The implementation uses documented Pi extension APIs only. Commands and tools us
 
 The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Stopping workers records an active child as interrupted, so starting workers again can create another attempt. Project stores live under `~/.pi/agent/workflows/controllers/projects/<scope>/controller.sqlite`. The scope is a hash of the canonical project directory. `PI_WORKFLOWS_CONTROLLER_DIR` overrides the controller root while preserving project scopes.
 
+The same store also backs the standalone host (`pi-workflows host`). The host reconciles controllers without a Pi session and claims parked interactive runs from the `workflow_run_queue` table. Conversation children execute in headless `pi --mode rpc` sessions. A Pi session and the host can share one store safely because claims and compare-and-swap writes arbitrate, but run only one set of controller workers at a time to avoid competing work. The host takes an advisory lock against other hosts; the embedded runner in Pi does not take it.
+
 Normal workflow prompts, tool calls, and replies remain part of the Pi session. Controller resources, queue rows, and effects live in the controller store. No Pi internal type, private API, or persistent Pi schema changes.
 
 ## Exclusions

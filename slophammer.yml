@@ -32,9 +32,16 @@ typescript:
         - src/workflows
         - src/controllers
         - src/render
-    # The viewer only reads run bundles; it must never import the extension.
+    # The host runs headlessly; it spawns pi but never embeds it.
+    - from: src/host
+      allow:
+        - src/workflows
+        - src/controllers
+    # The viewer only reads run bundles and dispatches the host command; it
+    # must never import the extension.
     - from: src/viewer
       allow:
         - src/workflows
         - src/controllers
         - src/render
+        - src/host

@@ -198,6 +198,18 @@ Apply and inspect resources from Pi:
 
 The standalone CLI provides read-only views with `pi-workflows controllers` and `pi-workflows controller <controller> <key>`. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md) for reconciliation, queue, effect, and child workflow semantics.
 
+## Always-on workflows
+
+Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it, and any runner can **resume** it later at the node it stopped on. Reopening Pi resumes parked runs itself and catches the session up through the shared event feed; a checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
+
+For runs that must continue while Pi is closed, keep the standalone host running:
+
+```bash
+pi-workflows host --project /path/to/project
+```
+
+The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. It is a foreground process — stop it with Ctrl-C; a crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/run-bundles.md](docs/run-bundles.md) for the on-disk rules.
+
 ## Examples
 
 The [examples/workflows/](examples/workflows/) directory mirrors the acpx

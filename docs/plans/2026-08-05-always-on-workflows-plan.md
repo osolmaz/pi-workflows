@@ -3,7 +3,7 @@ title: Add always-on workflow execution
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-05
 updated: 2026-08-05
-status: planned
+status: implemented
 ---
 
 # Always-on workflows plan
@@ -81,6 +81,26 @@ These points were open in the first draft. External review showed each one is lo
 
 - Which events deserve a chat message and which belong only in the widget. The default should be quiet.
 - The exact host command shape, for example `pi-workflows run --project <dir>` versus a subcommand under `controllers`.
+
+## Departures from the decisions
+
+The implementation matches the decisions above with these refinements:
+
+- Graph validation now allows outgoing edges from checkpoint nodes. The old
+  rejection encoded terminal-forever checkpoints; continuations make those
+  edges live. This is a deliberate contract change for workflow authors.
+- The host command is `pi-workflows host`, chosen over `run` because the
+  viewer CLI's vocabulary already uses runs for bundles.
+- The first capture stays flat at `session/`; only binds from the second
+  recorder onward write segments under `session/segments/`. This keeps the
+  layout of every existing single-session bundle and the viewer unchanged.
+- Resume always starts unpaused; the operator can pause again.
+- Headless conversation children keep the exact tool contract: a bridge
+  extension loaded with `-e` registers the `workflow` tool and reports
+  submissions to the host over stderr, so no engine prompt changes were
+  needed.
+- The host accepts explicit `storeFile` and `runsDir` options. Its defaults
+  resolve from the project and environment like every other entry point.
 
 ## Acceptance criteria
 

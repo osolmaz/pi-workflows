@@ -154,6 +154,29 @@ validators are not serialized. Each node keeps only its metadata (`nodeType`,
 and edges are copied verbatim. The snapshot is what lets viewers draw all
 nodes, including ones that have not run yet. It is immutable after run start.
 
+## Resume and repair
+
+An interrupted run (status `running` with no terminal trace event) can resume
+instead of failing. Resume is a named operation with strict rules:
+
+1. The caller must hold the run's queue claim. Only the current claim holder
+   may resume or interrupt a bundle, and every bundle write verifies the
+   claim token first (write fencing).
+2. A torn trace tail (a crash mid-append) is truncated to the last complete
+   line. Trace events the state projection never recorded are dropped, so
+   `state.traceSeq` and the trace agree again before any new event.
+3. Completed nodes replay from the projection. The in-flight node reruns with
+   a fresh attempt; a `run_resumed` trace event marks the boundary.
+4. `state.workflowHash` pins the workflow source from run start. Resume
+   refuses a hash mismatch unless forced, and a forced resume records the
+   mismatch in the `run_resumed` payload.
+
+Continuation runs (answering a checkpoint) are new bundles, not resumed ones.
+They link back through `state.parentRunId`, carry the parent's outputs,
+results, and step records forward, and note `continuedFrom` in their
+`run_started` payload. Bundles stay append-only; a continuation is the only
+way work follows a terminal `waiting` state.
+
 ## state.json
 
 The full run projection (`WorkflowRunState` in
@@ -288,6 +311,15 @@ Invariants:
 Present when the run executed inside a Pi conversation. The extension records
 the conversation into the bundle so replay never depends on Pi's global
 session store.
+
+A run that outlives its first session (parked, then resumed by another
+session or the host) gains a second capture under
+`session/segments/<attemptId>/` with the same file layout (`binding.json`,
+`entries.ndjson`, `events.ndjson`, `capture.json`). The first capture stays
+flat at `session/`; only captures from the second bind onward become
+segments, so readers that predate segments keep working on single-session
+bundles. An interrupted run finalizes any segment still `recording` as
+`failed` with the interruption reason.
 
 ### binding.json
 

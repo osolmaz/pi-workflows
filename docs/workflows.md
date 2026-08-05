@@ -79,6 +79,38 @@ Long-running compute, action, and checkpoint callbacks should observe
 steps). When the node times out or the run is cancelled, the engine stops
 waiting immediately, but only cooperative callbacks stop doing work.
 
+## Durable runs, parking, and resume
+
+Every interactive `/workflow` run is tracked in the project run queue (see
+[CONTROLLERS.md](CONTROLLERS.md) for the store). The session that starts a run
+claims it and owns it while it executes; every bundle write proves the claim
+first (write fencing).
+
+Closing the Pi session mid-run no longer cancels the run. The engine **parks**:
+it stops without a terminal event, releases the claim, and leaves the bundle
+resumable. When a runner is available again (a reopened Pi session or the
+standalone host), the run **resumes** at the node it stopped on. Completed
+nodes replay from the recorded state; only the interrupted node and everything
+downstream rerun. Resume repairs a torn trace tail, drops trace events the
+state projection never recorded, and refuses to continue if the workflow
+source changed since the run started (a forced resume records the mismatch).
+
+The standalone host runs without any Pi session:
+
+```bash
+pi-workflows host --project /path/to/project
+```
+
+The host claims parked runs, resumes them, and reconciles durable controllers.
+Conversation nodes execute in headless `pi --mode rpc` children that load a
+small bridge extension; the model sees the same `workflow` tool contract as an
+in-session run. The host is a foreground process: start it in a terminal and
+stop it with Ctrl-C. A second host for the same project refuses to start, and
+a host that dies has its orphaned children reaped by the next one. While the
+host works, any open Pi session stays current: a per-session watermark over
+the shared run event feed produces catch-up summaries and quiet context
+updates.
+
 ## Node types
 
 ### agent
@@ -147,10 +179,15 @@ command fails.
 
 ### checkpoint
 
-Ends the run in a `waiting` state for human review. Runs after a checkpoint do
-not resume automatically; the checkpoint output is the run's final output.
-Because nothing resumes past a checkpoint, graph validation rejects outgoing
-edges from checkpoint nodes.
+Ends the run in a `waiting` state for human review. The checkpoint bundle is
+terminal, so no process keeps running while the run waits. The human answers
+with `/workflow answer <json>` (or plain text), which starts a **continuation
+run**: a new run with its own bundle and trace, linked to the checkpointed run
+through `parentRunId`. The continuation receives the answer as its input,
+carries forward every output the parent produced (including the checkpoint's),
+and continues routing along the checkpoint's outgoing edge. Outgoing edges
+from checkpoint nodes are allowed exactly so continuations have somewhere to
+go; step accounting carries over, so `maxSteps` bounds the whole chain.
 
 ```typescript
 checkpoint({
