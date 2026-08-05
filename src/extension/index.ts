@@ -79,6 +79,8 @@ type ActiveRun = {
   renewTimer?: ReturnType<typeof setInterval> | undefined;
   /** True for runs this session resumed from the queue. */
   resume?: boolean | undefined;
+  /** Set on continuation runs: the checkpointed parent run id. */
+  parentRunId?: string | undefined;
 };
 
 type StartRunOptions = {
@@ -497,16 +499,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const finishRun = (ctx: ExtensionContext, run: ActiveRun, result: WorkflowRunResult) => {
+  const finishRun = async (
+    ctx: ExtensionContext,
+    run: ActiveRun,
+    result: WorkflowRunResult,
+  ): Promise<void> => {
     if (activeRun === run) {
       activeRun = null;
     }
     if (result.state.status === "running") {
       // The run was parked for another runner; its bundle stays resumable
-      // and its queue row becomes claimable. Nothing else to present.
+      // and its queue row becomes claimable. The recorder drains first: its
+      // finalization writes share the fenced store, so the claim must stay
+      // valid until capture is complete. Nothing else to present.
+      await run.recorder?.stop().catch(() => undefined);
       releaseClaim(run, "park");
       recordRunEvent({ runId: run.runId, workflowRef: run.workflowName, type: "parked" });
-      void run.recorder?.stop();
       stopWidgetTicker();
       clearWidget(ctx);
       return;
@@ -598,6 +606,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const snapshot = createDefinitionSnapshot(workflow);
     const workflowHash = await hashWorkflowSource(resolved.path);
     const runId = options.runId ?? createRunId(workflow.name);
+
+    // Continuations validate the parent before touching the queue: a
+    // refused continuation (edited source, missing parent) must not consume
+    // the parent's one-continuation slot.
+    if (options.parentRunId !== undefined) {
+      const parent = await readRunBundle(new WorkflowRunStore().runDirFor(options.parentRunId));
+      if (parent === null || parent.state.status !== "waiting") {
+        throw new Error(`Workflow run ${options.parentRunId} is not waiting at a checkpoint`);
+      }
+      if (parent.state.workflowHash !== undefined && parent.state.workflowHash !== workflowHash) {
+        throw new Error(
+          `Workflow source changed since run ${options.parentRunId} started; revert the edit to answer its checkpoint`,
+        );
+      }
+    }
 
     // Interactive runs are queued and claimed atomically, so this session
     // owns the run from birth (origin affinity). Controller child runs keep
@@ -696,6 +719,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ...(options.onFinish !== undefined ? { onFinish: options.onFinish } : {}),
       ...(claimToken !== undefined ? { claimToken } : {}),
       ...(options.resume === true ? { resume: true } : {}),
+      ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
     };
     activeRun = run;
     if (queueStore !== null && claimToken !== undefined) {
@@ -735,7 +759,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
             })
     )
       .then((result) => finishRun(ctx, run, result))
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (activeRun === run) {
           activeRun = null;
         }
@@ -744,7 +768,35 @@ export default function piWorkflows(pi: ExtensionAPI) {
         // source) must not strand the run: park it so it stays claimable
         // once the cause is fixed, and say so in the feed.
         const resumeFailed = run.resume === true && !isClaimLostError(error);
-        releaseClaim(run, isClaimLostError(error) ? "lost" : resumeFailed ? "park" : "done");
+        // A continuation that failed before its bundle exists frees the
+        // parent's continuation slot instead of consuming it forever.
+        let continuationSlotFreed = false;
+        if (
+          run.parentRunId !== undefined &&
+          run.claimToken !== undefined &&
+          !isClaimLostError(error)
+        ) {
+          try {
+            const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+            if (bundle === null) {
+              continuationSlotFreed =
+                runQueueStore?.deleteWorkflowRun({ runId, claimToken: run.claimToken }) === true;
+              if (continuationSlotFreed) {
+                run.claimToken = undefined;
+              }
+            }
+          } catch {
+            // The row may remain; a later cleanup pass can remove it.
+          }
+        }
+        releaseClaim(
+          run,
+          isClaimLostError(error) || continuationSlotFreed
+            ? "lost"
+            : resumeFailed
+              ? "park"
+              : "done",
+        );
         void run.recorder?.stop();
         stopWidgetTicker();
         clearWidget(ctx);
@@ -1022,7 +1074,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           const message = errorMessage(error);
           notify(
             ctx,
-            /parent_run_id/.test(message)
+            /workflow_run_queue_parent/.test(message)
               ? `Checkpoint ${parentRunId} was already answered; see its continuation run.`
               : `Could not continue workflow: ${message}`,
             "error",

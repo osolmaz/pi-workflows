@@ -997,6 +997,8 @@ export default defineWorkflow({
         const bundle = await readRunBundle(path.join(runsDir, rows[0]?.runId ?? ""));
         expect(bundle?.state.status).toBe("running");
         expect(bundle?.state.currentNode).toBe("work");
+        // The recorder drained before the claim released, so capture closed.
+        expect(bundle?.sessionCapture?.status).toBe("complete");
       } finally {
         queue.close();
       }
@@ -1149,6 +1151,62 @@ export default defineWorkflow({
       vi.unstubAllEnvs();
     }
   });
+
+  it(
+    "keeps the checkpoint answerable after a refused continuation",
+    { timeout: 20_000 },
+    async () => {
+      const cwd = await makeTempDir("pi-workflows-ext-answer-refused");
+      const runsDir = await makeTempDir("pi-workflows-ext-runs");
+      vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+      try {
+        await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+        const workflowFile = path.join(cwd, ".pi", "workflows", "gate.workflow.ts");
+        await fs.writeFile(
+          workflowFile,
+          `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: {
+    approval: checkpoint({ summary: "approve" }),
+    apply: compute({ run: () => ({ deployed: true }) }),
+  },
+  edges: [{ from: "approval", to: "apply" }],
+});
+`,
+          "utf8",
+        );
+        const harness = makeHarness({ cwd, respond: () => {} });
+        await harness.emitAsync("session_start");
+        const command = harness.commands.get("workflow");
+        await command?.handler("gate", harness.ctx);
+        await waitFor(() =>
+          harness.notifications.some((note) => note.includes("parked at checkpoint approval")),
+        );
+
+        // The workflow file changes while the run waits; the answer is refused.
+        await fs.appendFile(workflowFile, "\n// edited while waiting\n", "utf8");
+        await command?.handler('answer {"approved":true}', harness.ctx);
+        expect(harness.notifications.at(-1)).toContain("source changed");
+
+        // No continuation row was consumed: the parent is alone in the queue.
+        const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+          readOnly: true,
+        });
+        try {
+          const rows = queue.listWorkflowRuns();
+          expect(rows).toHaveLength(1);
+          expect(rows[0]?.parentRunId).toBeNull();
+        } finally {
+          queue.close();
+        }
+        await harness.emitAsync("session_shutdown");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it("skips already-answered checkpoints in the answer fallback", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-answer-skip");

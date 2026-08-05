@@ -1040,6 +1040,19 @@ export class SqliteControllerStore implements ControllerStore {
     return result.changes === 1;
   }
 
+  /**
+   * Delete a claimed row. Used when a continuation fails before its bundle
+   * exists, so the parent's one-continuation slot is not consumed by a run
+   * that never happened.
+   */
+  deleteWorkflowRun(options: { runId: string; claimToken: string }): boolean {
+    validateRunId(options.runId);
+    const result = this.database
+      .prepare("DELETE FROM workflow_run_queue WHERE run_id = ? AND claim_token = ?")
+      .run(options.runId, options.claimToken);
+    return result.changes === 1;
+  }
+
   /** Release a claim and mark the run terminal in the queue. */
   completeWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
     validateRunId(options.runId);

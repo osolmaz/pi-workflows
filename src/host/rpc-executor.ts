@@ -72,27 +72,38 @@ export class RpcStepExecutor implements AgentStepExecutor {
     }
   }
 
-  /** Stop the child process group. */
+  /** Stop the child's whole process group, then unregister it. */
   async close(): Promise<void> {
     const child = this.child;
     this.child = null;
     if (child === null) {
       return;
     }
+    const pid = child.pid;
     if (this.childExited === null) {
       try {
         child.stdin?.end();
       } catch {
         // The pipe may already be closed.
       }
-      child.kill("SIGTERM");
+      // The child spawns in its own group; tool calls can leave
+      // grandchildren that leader-only signals would orphan forever.
+      if (pid !== undefined) {
+        killGroup(pid, "SIGTERM");
+      } else {
+        child.kill("SIGTERM");
+      }
       const exited = await waitForExit(child, ABORT_GRACE_MS);
       if (!exited) {
-        child.kill("SIGKILL");
+        if (pid !== undefined) {
+          killGroup(pid, "SIGKILL");
+        } else {
+          child.kill("SIGKILL");
+        }
       }
     }
-    if (child.pid !== undefined) {
-      this.options.registry.unregister(child.pid);
+    if (pid !== undefined) {
+      this.options.registry.unregister(pid);
     }
   }
 
@@ -225,6 +236,14 @@ export class RpcStepExecutor implements AgentStepExecutor {
     for (const waiter of waiters) {
       waiter();
     }
+  }
+}
+
+function killGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group is gone; the leader may still need the signal.
   }
 }
 

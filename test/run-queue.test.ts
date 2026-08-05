@@ -250,6 +250,37 @@ describe("workflow run queue", () => {
     ).toBeUndefined();
   });
 
+  it("deletes a claimed row by token", async () => {
+    const store = await makeStore();
+    store.enqueueWorkflowRun({
+      runId: "child-1",
+      workflowRef: "gate",
+      workflowPath: "/gate.ts",
+      input: {},
+      runnerId: "runner-a",
+      claimToken: "token-c1",
+      leaseMs: 1_000,
+      parentRunId: "parent-1",
+      now: T0,
+    });
+    expect(store.deleteWorkflowRun({ runId: "child-1", claimToken: "wrong" })).toBe(false);
+    expect(store.deleteWorkflowRun({ runId: "child-1", claimToken: "token-c1" })).toBe(true);
+    expect(store.getWorkflowRun("child-1")).toBeUndefined();
+    // The freed parent slot admits a fresh continuation.
+    store.enqueueWorkflowRun({
+      runId: "child-2",
+      workflowRef: "gate",
+      workflowPath: "/gate.ts",
+      input: {},
+      runnerId: "runner-a",
+      claimToken: "token-c2",
+      leaseMs: 1_000,
+      parentRunId: "parent-1",
+      now: T1,
+    });
+    expect(store.getWorkflowRun("child-2")).toBeDefined();
+  });
+
   it("completes a run terminally and excludes it from claiming", async () => {
     const store = await makeStore();
     enqueue(store);
