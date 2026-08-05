@@ -240,6 +240,8 @@ export type WorkflowRunState = {
   traceSeq: number;
   runId: string;
   workflowName: string;
+  /** Set on continuation runs: the checkpointed run this one carries forward. */
+  parentRunId?: string;
   runTitle?: string;
   workflowPath?: string;
   /** SHA-256 of the workflow source at run start; resume refuses mismatches. */

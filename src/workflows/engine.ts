@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { resolveArtifacts } from "./artifacts.js";
 import {
   CancelledError,
   errorMessage,
@@ -13,7 +14,7 @@ import {
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
-import { RUN_STATE_SCHEMA, WorkflowRunStore, createRunId } from "./store.js";
+import { RUN_STATE_SCHEMA, WorkflowRunStore, createRunId, readRunBundle } from "./store.js";
 import type {
   AgentNodeDefinition,
   AgentStepExecutor,
@@ -247,6 +248,107 @@ export class WorkflowEngine {
       return { runDir, state };
     }
 
+    try {
+      await this.executeGraph(
+        workflow,
+        state,
+        runDir,
+        point.nodeId,
+        state.steps.length,
+        point.lastOutput,
+      );
+    } catch (error) {
+      if (isRunParkedError(error) || this.parked) {
+        return { runDir, state };
+      }
+      await this.finishAfterError(runDir, state, error);
+      return { runDir, state };
+    }
+    return { runDir, state };
+  }
+
+  /**
+   * Start a continuation run from a checkpointed parent. The new run gets a
+   * fresh bundle and trace, carries forward the parent's outputs, results,
+   * and step accounting, and continues routing after the checkpoint.
+   */
+  async continueRun(
+    workflow: WorkflowDefinition,
+    parentRunId: string,
+    input: unknown,
+    options: { workflowPath?: string; workflowHash?: string; runId?: string; force?: boolean } = {},
+  ): Promise<WorkflowRunResult> {
+    validateWorkflowDefinition(workflow);
+    const parent = await readRunBundle(this.store.runDirFor(parentRunId));
+    if (parent === null) {
+      throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
+    }
+    if (parent.state.status !== "waiting" || parent.state.waitingOn === undefined) {
+      throw new Error(
+        `Cannot continue workflow run ${parentRunId} with status ${parent.state.status}`,
+      );
+    }
+    const hashMismatch =
+      parent.state.workflowHash !== undefined &&
+      options.workflowHash !== undefined &&
+      parent.state.workflowHash !== options.workflowHash;
+    if (hashMismatch && options.force !== true) {
+      throw new WorkflowSourceChangedError(parentRunId);
+    }
+
+    const normalizedInput = input === undefined ? null : input;
+    assertJsonSerializable(normalizedInput, "Workflow run input");
+    if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
+      throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
+    }
+    this.cancelled = false;
+    this.paused = false;
+    this.parked = false;
+
+    const state = await this.createRunState(
+      workflow,
+      normalizedInput,
+      options.workflowPath,
+      options.workflowHash,
+      options.runId,
+    );
+    state.parentRunId = parentRunId;
+    // Artifact references point into the parent's bundle, so carried values
+    // are fully resolved here and re-externalized into the new bundle.
+    state.outputs = (await resolveArtifacts(
+      parent.state.outputs,
+      parent.runDir,
+    )) as WorkflowRunState["outputs"];
+    state.results = (await resolveArtifacts(
+      parent.state.results,
+      parent.runDir,
+    )) as WorkflowRunState["results"];
+    state.steps = (await resolveArtifacts(
+      parent.state.steps,
+      parent.runDir,
+    )) as WorkflowRunState["steps"];
+
+    const runDir = await this.store.initializeRunBundle(workflow, state);
+    await this.persist(runDir, state, {
+      scope: "run",
+      type: "run_started",
+      payload: {
+        workflowName: workflow.name,
+        ...(state.runTitle ? { runTitle: state.runTitle } : {}),
+        input: state.input,
+        continuedFrom: parentRunId,
+        checkpoint: parent.state.waitingOn,
+        carriedSteps: state.steps.length,
+      },
+    });
+    await this.onRunStarted?.(runDir, state);
+
+    const point = this.resumePointFor(workflow, state);
+    if (point.nodeId === null) {
+      // The checkpoint was the final node; the answer completes the chain.
+      await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
+      return { runDir, state };
+    }
     try {
       await this.executeGraph(
         workflow,

@@ -364,7 +364,7 @@ describe("hung validation after the step is cleared", () => {
 });
 
 describe("checkpoint edges", () => {
-  it("rejects outgoing edges from checkpoint nodes", async () => {
+  it("allows outgoing edges from checkpoint nodes for continuation runs", async () => {
     const { checkpoint } = await import("../src/workflows/definition.js");
     const workflow = defineWorkflow({
       name: "checkpoint-edge",
@@ -372,9 +372,8 @@ describe("checkpoint edges", () => {
       nodes: { pause: checkpoint({}), after: compute({ run: () => 1 }) },
       edges: [{ from: "pause", to: "after" }],
     });
-    expect(() => validateWorkflowDefinition(workflow)).toThrow(
-      /checkpoint node must not declare an outgoing edge/,
-    );
+    // Continuation runs route after the checkpoint, so the edge is live.
+    expect(() => validateWorkflowDefinition(workflow)).not.toThrow();
   });
 });
 

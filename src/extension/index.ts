@@ -79,6 +79,8 @@ type StartRunOptions = {
   presentation?: boolean;
   quiet?: boolean;
   signal?: AbortSignal;
+  /** Continue a checkpointed run: input becomes the answer payload. */
+  parentRunId?: string;
 };
 
 export type ParsedWorkflowArgs =
@@ -86,6 +88,7 @@ export type ParsedWorkflowArgs =
   | { kind: "cancel" }
   | { kind: "pause" }
   | { kind: "resume" }
+  | { kind: "answer"; input: unknown }
   | { kind: "run"; ref: string; input: unknown };
 
 /** Parse `/workflow` arguments. Exported for tests. */
@@ -96,6 +99,19 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   }
   if (trimmed === "cancel" || trimmed === "pause" || trimmed === "resume") {
     return { kind: trimmed };
+  }
+  if (trimmed === "answer" || trimmed.startsWith("answer ")) {
+    const rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
+    if (rest.length === 0) {
+      throw new Error(
+        'answer requires a JSON value or text, e.g. /workflow answer {"approved":true}',
+      );
+    }
+    try {
+      return { kind: "answer", input: JSON.parse(rest) as unknown };
+    } catch {
+      return { kind: "answer", input: { answer: rest } };
+    }
   }
   const spaceIndex = trimmed.search(/\s/);
   const ref = spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex);
@@ -127,6 +143,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     return runQueueStore;
   };
   let activeRun: ActiveRun | null = null;
+  // The interactive run currently parked at a checkpoint, if any.
+  let lastWaitingRunId: string | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
   let widgetTicker: NodeJS.Timeout | null = null;
   // Manual widget scroll: null follows the active node; a number is the
@@ -388,9 +406,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
       widgetTimer = setTimeout(() => clearWidget(ctx), FINAL_WIDGET_TTL_MS);
       widgetTimer.unref?.();
     }
+    if (state.status === "waiting" && run.childKey === undefined) {
+      lastWaitingRunId = run.runId;
+    }
     const summary =
       state.status === "waiting" && state.waitingOn
-        ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — run ended, awaiting your decision (run ${state.runId})`
+        ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — answer with /workflow answer <json> (run ${state.runId})`
         : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
     try {
@@ -466,6 +487,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runnerId,
         claimToken: token,
         leaseMs: RUN_CLAIM_LEASE_MS,
+        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
       });
       claimToken = token;
     }
@@ -563,8 +585,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
       notify(ctx, `Workflow ${workflow.name} started. Follow it live with: pi-workflows view`);
     }
 
-    run.completion = engine
-      .run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
+    run.completion = (
+      options.parentRunId === undefined
+        ? engine.run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
+        : engine.continueRun(workflow, options.parentRunId, input, {
+            workflowPath: resolved.path,
+            workflowHash,
+            runId,
+          })
+    )
       .then((result) => finishRun(ctx, run, result))
       .catch((error: unknown) => {
         if (activeRun === run) {
@@ -669,7 +698,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.registerCommand("workflow", {
     description:
-      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: pause, resume, cancel",
+      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: pause, resume, cancel, answer",
     getArgumentCompletions: async (prefix: string) => {
       const discovered = await discoverWorkflows({ cwd: process.cwd() });
       const items = [
@@ -677,6 +706,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         { value: "pause", label: "pause" },
         { value: "resume", label: "resume" },
         { value: "cancel", label: "cancel" },
+        { value: "answer", label: "answer" },
       ].filter((item) => item.value.startsWith(prefix));
       return items.length > 0 ? items : null;
     },
@@ -744,6 +774,34 @@ export default function piWorkflows(pi: ExtensionAPI) {
         activeRun.executor.release();
         renderWidget(ctx);
         notify(ctx, `Workflow ${activeRun.workflowName} resumed.`);
+        return;
+      }
+      if (parsed.kind === "answer") {
+        if (lastWaitingRunId === null) {
+          notify(ctx, "No workflow is waiting for an answer.", "warning");
+          return;
+        }
+        const parentRunId = lastWaitingRunId;
+        const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
+        if (
+          parent === null ||
+          parent.state.status !== "waiting" ||
+          parent.state.workflowPath === undefined
+        ) {
+          notify(ctx, `Workflow run ${parentRunId} is no longer waiting.`, "warning");
+          lastWaitingRunId = null;
+          return;
+        }
+        try {
+          const continued = await startRun(ctx, parent.state.workflowPath, parsed.input, {
+            parentRunId,
+          });
+          if (continued !== undefined) {
+            lastWaitingRunId = null;
+          }
+        } catch (error) {
+          notify(ctx, `Could not continue workflow: ${errorMessage(error)}`, "error");
+        }
         return;
       }
       try {
@@ -977,6 +1035,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await run?.recorder?.stop().catch(() => undefined);
     await run?.completion?.catch(() => undefined);
     activeRun = null;
+    lastWaitingRunId = null;
     await controllerHost?.close().catch(() => undefined);
     controllerHost = undefined;
     controllerContext = null;

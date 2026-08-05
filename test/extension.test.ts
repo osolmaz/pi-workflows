@@ -606,11 +606,9 @@ export default defineWorkflow({
       const harness = makeHarness({ cwd, respond: () => {} });
 
       await harness.command.handler("parked", harness.ctx);
-      await waitFor(() =>
-        harness.notifications.some((note) => note.includes("awaiting your decision")),
-      );
+      await waitFor(() => harness.notifications.some((note) => note.includes("/workflow answer")));
       expect(harness.notifications.at(-1)).toContain(
-        "parked at checkpoint review — run ended, awaiting your decision",
+        "parked at checkpoint review — answer with /workflow answer <json>",
       );
 
       // The final widget update must still be present, not cleared, and show
@@ -988,6 +986,59 @@ export default defineWorkflow({
         const bundle = await readRunBundle(path.join(runsDir, rows[0]?.runId ?? ""));
         expect(bundle?.state.status).toBe("running");
         expect(bundle?.state.currentNode).toBe("work");
+      } finally {
+        queue.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("continues a checkpointed run through /workflow answer", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-answer");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "gate",
+  startAt: "approval",
+  nodes: {
+    approval: checkpoint({ summary: "approve the deploy" }),
+    apply: compute({ run: ({ outputs }) => ({ deployed: true, saw: outputs.approval ?? null }) }),
+  },
+  edges: [{ from: "approval", to: "apply" }],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("workflow");
+
+      await command?.handler("gate", harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("parked at checkpoint approval")),
+      );
+
+      await command?.handler('answer {"approved":true}', harness.ctx);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("completed") && note.includes("gate")),
+      );
+
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        const rows = queue.listWorkflowRuns();
+        expect(rows).toHaveLength(2);
+        expect(rows.every((row) => row.status === "done")).toBe(true);
+        const [parent, child] = rows;
+        expect(child?.parentRunId).toBe(parent?.runId);
+        expect(child?.input).toEqual({ approved: true });
       } finally {
         queue.close();
       }
