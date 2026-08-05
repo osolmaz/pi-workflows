@@ -63,6 +63,21 @@ export default defineWorkflow({
 });
 `;
 
+const HOST_E2E_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "host-e2e",
+  startAt: "work",
+  nodes: {
+    work: agent({
+      prompt: () => "Finish the parked run.",
+      expectedOutput: '{ "finished": "string" }',
+    }),
+  },
+  edges: [],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -269,6 +284,20 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const hostStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: host-e2e, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (hostStepMatch?.[1] === "work") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              step: "work",
+              attempt: hostStepMatch[2] ?? "",
+              output: { finished: "host did it" },
+            },
+          };
+        }
         return { kind: "text", text: "Nothing to do." };
       },
       {
@@ -300,6 +329,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "controller-child.workflow.ts"),
       E2E_CONTROLLER_CHILD,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "host-e2e.workflow.ts"),
+      HOST_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -741,4 +775,129 @@ export default function captureFailureExtension(pi: unknown) {
     expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("implement");
   }, 30_000);
+
+  it("resumes a parked run through the standalone host", async () => {
+    // An isolated project keeps this test away from the controller workers
+    // the shared project's live pi session runs.
+    const hostProjectDir = await makeTempDir("pi-workflows-host-e2e-project");
+    const hostControllerDir = await makeTempDir("pi-workflows-host-e2e-controllers");
+    await fs.mkdir(path.join(hostProjectDir, ".pi", "workflows"), { recursive: true });
+    const workflowPath = path.join(hostProjectDir, ".pi", "workflows", "host-e2e.workflow.ts");
+    await fs.writeFile(workflowPath, HOST_E2E_WORKFLOW, "utf8");
+    const hostControllerFile = path.join(
+      hostControllerDir,
+      "projects",
+      controllerProjectScope(hostProjectDir),
+      "controller.sqlite",
+    );
+    const hostRunsDir = await makeTempDir("pi-workflows-host-e2e-runs");
+    const hostAgentDir = await makeTempDir("pi-workflows-host-e2e-agent");
+    await fs.cp(agentDir, hostAgentDir, { recursive: true });
+
+    // Build the parked state directly: a claimed-then-parked queue row and a
+    // bundle stopped mid-agent-node, as if the driving session had closed.
+    const queue = new SqliteControllerStore(hostControllerFile);
+    queue.enqueueWorkflowRun({
+      runId: "host-e2e-run",
+      workflowRef: "host-e2e",
+      workflowPath,
+      input: {},
+      runnerId: "session-a",
+      claimToken: "token-a",
+      leaseMs: 60_000,
+    });
+    queue.parkWorkflowRun({ runId: "host-e2e-run", claimToken: "token-a" });
+    queue.close();
+
+    const { WorkflowRunStore, RUN_STATE_SCHEMA } = await import(
+      path.join(REPO_ROOT, "src", "workflows", "store.js")
+    );
+    const runStore = new WorkflowRunStore(hostRunsDir);
+    const { agent, defineWorkflow } = await import(
+      path.join(REPO_ROOT, "src", "workflows", "definition.js")
+    );
+    const workflow = defineWorkflow({
+      name: "host-e2e",
+      startAt: "work",
+      nodes: {
+        work: agent({
+          prompt: () => "Finish the parked run.",
+          expectedOutput: '{ "finished": "string" }',
+        }),
+      },
+      edges: [],
+    });
+    const now = new Date().toISOString();
+    const state = {
+      schema: RUN_STATE_SCHEMA,
+      traceSeq: 0,
+      runId: "host-e2e-run",
+      workflowName: "host-e2e",
+      workflowPath,
+      startedAt: now,
+      updatedAt: now,
+      status: "running" as const,
+      input: {},
+      outputs: {},
+      results: {},
+      steps: [],
+      currentNode: "work",
+    };
+    const runDir = await runStore.initializeRunBundle(workflow, state);
+    await runStore.writeSnapshot(runDir, state, {
+      scope: "run",
+      type: "run_started",
+      payload: {},
+    });
+    await runStore.writeSnapshot(runDir, state, {
+      scope: "node",
+      type: "node_started",
+      nodeId: "work",
+      attemptId: "a1",
+      payload: { nodeType: "agent" },
+    });
+
+    const { WorkflowHost } = await import(path.join(REPO_ROOT, "src", "host", "runner.js"));
+    const logs: string[] = [];
+    const host = new WorkflowHost({
+      cwd: hostProjectDir,
+      storeFile: hostControllerFile,
+      runsDir: hostRunsDir,
+      claimPollMs: 50,
+      piArgs: ["--provider", "mock", "--model", "mock-model"],
+      env: {
+        PI_CODING_AGENT_DIR: hostAgentDir,
+        PI_WORKFLOWS_RUNS_DIR: hostRunsDir,
+        PI_WORKFLOWS_CONTROLLER_DIR: hostControllerDir,
+      },
+      onLog: (line: string) => logs.push(line),
+    });
+    await host.start();
+    try {
+      await waitForCondition(
+        () => {
+          const reader = new SqliteControllerStore(hostControllerFile, { readOnly: true });
+          try {
+            return reader.getWorkflowRun("host-e2e-run")?.status === "done";
+          } finally {
+            reader.close();
+          }
+        },
+        () => `expected the host to complete the parked run.\nhost logs:\n${logs.join("\n")}`,
+        60_000,
+      );
+    } finally {
+      await host.stop();
+    }
+
+    const { state: finished } = await waitForRunState(
+      hostRunsDir,
+      (candidate) => candidate.runId === "host-e2e-run" && candidate.status !== "running",
+      () => "expected the host-resumed run to finish",
+      10_000,
+    );
+    expect(finished.status).toBe("completed");
+    expect(finished.finalOutput).toEqual({ finished: "host did it" });
+    void runDir;
+  }, 90_000);
 });

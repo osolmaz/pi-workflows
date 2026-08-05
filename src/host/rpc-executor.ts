@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { RPC_SUBMISSION_PREFIX } from "../extension/rpc-bridge.js";
 import type {
@@ -8,7 +9,11 @@ import type {
 } from "../workflows/types.js";
 import type { HostProcessRegistry } from "./processes.js";
 
-const BRIDGE_PATH = fileURLToPath(new URL("../extension/rpc-bridge.js", import.meta.url));
+// Production resolves the compiled .js; tests and dev checkouts load the .ts
+// source, which pi compiles itself when loading extensions.
+const BRIDGE_PATH = ["../extension/rpc-bridge.js", "../extension/rpc-bridge.ts"]
+  .map((candidate) => fileURLToPath(new URL(candidate, import.meta.url)))
+  .find((candidate) => fs.existsSync(candidate));
 const ABORT_GRACE_MS = 3_000;
 
 type StepSubmission = {
@@ -104,6 +109,9 @@ export class RpcStepExecutor implements AgentStepExecutor {
         );
       }
       return;
+    }
+    if (BRIDGE_PATH === undefined) {
+      throw new Error("The pi-workflows rpc-bridge extension is missing from this installation");
     }
     const piBin = this.options.piBin ?? "pi";
     const child = spawn(

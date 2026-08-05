@@ -95,6 +95,10 @@ pub struct RunState {
     pub run_title: Option<String>,
     #[serde(rename = "workflowPath", skip_serializing_if = "Option::is_none")]
     pub workflow_path: Option<String>,
+    #[serde(rename = "workflowHash", skip_serializing_if = "Option::is_none")]
+    pub workflow_hash: Option<String>,
+    #[serde(rename = "parentRunId", skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
     #[serde(rename = "startedAt")]
     pub started_at: String,
     #[serde(rename = "finishedAt", skip_serializing_if = "Option::is_none")]

@@ -25,8 +25,14 @@ const RUN_CLAIM_RENEW_MS = 10_000;
 export type WorkflowHostOptions = {
   cwd: string;
   runnerId?: string;
+  /** Explicit store path; defaults to the project-scoped controller store. */
+  storeFile?: string;
+  /** Explicit run-bundle root; defaults to the shared runs directory. */
+  runsDir?: string;
   registry?: HostProcessRegistry;
   piArgs?: string[];
+  /** Extra environment for headless children (for example a test provider). */
+  env?: Record<string, string>;
   /** Poll interval for the claim loop; tests use a faster cadence. */
   claimPollMs?: number;
   onLog?: (message: string) => void;
@@ -44,17 +50,25 @@ export class WorkflowHost {
   private readonly runnerId: string;
   private readonly registry: HostProcessRegistry;
   private readonly store: SqliteControllerStore;
-  private readonly childRunStore = new WorkflowRunStore();
+  private readonly childRunStore: WorkflowRunStore;
   private manager: ControllerManager | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly activeRuns = new Map<string, Promise<void>>();
   private stopping = false;
 
+  private readonly stateDir: string;
+
   constructor(options: WorkflowHostOptions) {
     this.options = options;
     this.runnerId = options.runnerId ?? `host-${randomUUID().slice(0, 8)}`;
-    this.registry = options.registry ?? new HostProcessRegistry(storeDirFor(options.cwd));
-    this.store = new SqliteControllerStore(projectControllerStorePath(options.cwd));
+    this.store = new SqliteControllerStore(
+      options.storeFile ?? projectControllerStorePath(options.cwd),
+    );
+    this.stateDir = path.dirname(this.store.filePath);
+    this.registry = options.registry ?? new HostProcessRegistry(this.stateDir);
+    this.childRunStore = new WorkflowRunStore(
+      options.runsDir ?? process.env.PI_WORKFLOWS_RUNS_DIR ?? undefined,
+    );
   }
 
   private log(message: string): void {
@@ -67,7 +81,7 @@ export class WorkflowHost {
     if (reaped.length > 0) {
       this.log(`reaped ${reaped.length} orphaned headless session(s): ${reaped.join(", ")}`);
     }
-    acquireHostLock(this.options.cwd, this.runnerId);
+    acquireHostLock(this.stateDir, this.runnerId, this.options.cwd);
 
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });
     if (definitions.length > 0) {
@@ -84,6 +98,7 @@ export class WorkflowHost {
               cwd: this.options.cwd,
               registry: this.registry,
               ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
+              ...(this.options.env !== undefined ? { env: this.options.env } : {}),
             }),
             store: this.childRunStore,
           }),
@@ -122,7 +137,7 @@ export class WorkflowHost {
     await Promise.allSettled(pending);
     await this.manager?.stop().catch(() => undefined);
     this.registry.killAll();
-    releaseHostLock(this.options.cwd, this.runnerId);
+    releaseHostLock(this.stateDir, this.runnerId);
     this.store.close();
   }
 
@@ -173,11 +188,14 @@ export class WorkflowHost {
         throw new ClaimLostError(runId);
       }
     };
-    const fencedStore = new WorkflowRunStore(undefined, { fenceProvider: () => fence });
+    const fencedStore = new WorkflowRunStore(this.childRunStore.outputRoot, {
+      fenceProvider: () => fence,
+    });
     const executor = new RpcStepExecutor({
       cwd: this.options.cwd,
       registry: this.registry,
       ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
+      ...(this.options.env !== undefined ? { env: this.options.env } : {}),
     });
     const engine = new WorkflowEngine({ executor, store: fencedStore });
     const parkEngine = () => engine.park();
@@ -255,12 +273,8 @@ export class WorkflowHost {
   }
 }
 
-function storeDirFor(cwd: string): string {
-  return path.dirname(projectControllerStorePath(cwd));
-}
-
-function hostLockPath(cwd: string): string {
-  return path.join(storeDirFor(cwd), "host.lock");
+function hostLockPath(stateDir: string): string {
+  return path.join(stateDir, "host.lock");
 }
 
 /**
@@ -268,8 +282,8 @@ function hostLockPath(cwd: string): string {
  * Pi session does not take it. A second host refuses to start while the
  * recorded PID is alive.
  */
-function acquireHostLock(cwd: string, runnerId: string): void {
-  const lockPath = hostLockPath(cwd);
+function acquireHostLock(stateDir: string, runnerId: string, cwd: string): void {
+  const lockPath = hostLockPath(stateDir);
   const existing = readLock(lockPath);
   if (existing !== null && existing.runnerId !== runnerId && isAlive(existing.pid)) {
     throw new Error(
@@ -284,8 +298,8 @@ function acquireHostLock(cwd: string, runnerId: string): void {
   );
 }
 
-function releaseHostLock(cwd: string, runnerId: string): void {
-  const lockPath = hostLockPath(cwd);
+function releaseHostLock(stateDir: string, runnerId: string): void {
+  const lockPath = hostLockPath(stateDir);
   const existing = readLock(lockPath);
   if (existing?.runnerId !== runnerId) {
     return;
