@@ -1101,6 +1101,229 @@ export default defineWorkflow({
     }
   });
 
+  it("handles command edge cases", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-edges");
+    // No global workflows or controllers in this test's home.
+    vi.stubEnv("HOME", await makeTempDir("pi-workflows-ext-home"));
+    const harness = makeHarness({ cwd, respond: () => {} });
+    await harness.emitAsync("session_start");
+    const workflow = harness.commands.get("workflow");
+    const controller = harness.commands.get("controller");
+
+    // No workflows or controllers exist in this project.
+    await workflow?.handler("", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No workflows found");
+    await workflow?.handler("pause", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No workflow is running");
+    await workflow?.handler("resume", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No workflow is running");
+    await workflow?.handler("cancel", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No workflow is running");
+    await workflow?.handler('answer {"x":1}', harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No workflow is waiting for an answer");
+    await workflow?.handler('answer missing-run {"x":1}', harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("no longer waiting");
+    await controller?.handler("list", harness.ctx);
+    expect(harness.notifications.at(-1)).toContain("No controllers found");
+    await harness.emitAsync("session_shutdown");
+  });
+
+  it("pauses, resumes, and cancels an active run", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-controls");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 600);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const workflow = harness.commands.get("workflow");
+      await workflow?.handler("slow", harness.ctx);
+      await waitFor(async () => {
+        const runDirs = await fs.readdir(runsDir);
+        const bundle = await readRunBundle(path.join(runsDir, runDirs[0] ?? ""));
+        return bundle?.state.currentNode === "work";
+      });
+
+      await workflow?.handler("pause", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("Pausing workflow slow");
+      await workflow?.handler("pause", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("already pausing or paused");
+      await workflow?.handler("resume", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("resumed");
+      await workflow?.handler("resume", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("is not paused");
+      await workflow?.handler("cancel", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports a run that continues under another runner", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-claimlost");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "slow",
+  startAt: "work",
+  nodes: {
+    work: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("done"), 600);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      await harness.command.handler("slow", harness.ctx);
+      const queueFile = projectControllerStorePath(cwd);
+      await waitFor(() => {
+        const reader = new SqliteControllerStore(queueFile, { readOnly: true });
+        try {
+          return reader.listWorkflowRuns()[0]?.status === "claimed";
+        } finally {
+          reader.close();
+        }
+      });
+
+      // Another runner takes over: expire and reclaim the row directly.
+      const { default: Database } = await import("better-sqlite3");
+      const raw = new Database(queueFile);
+      raw
+        .prepare("UPDATE workflow_run_queue SET claim_expires_at = 1 WHERE status = 'claimed'")
+        .run();
+      raw
+        .prepare(
+          "UPDATE workflow_run_queue SET runner_id = 'other', claim_token = 'other-token', claim_expires_at = 9999999999999 WHERE status = 'claimed'",
+        )
+        .run();
+      raw.close();
+
+      await waitFor(
+        () => harness.notifications.some((note) => note.includes("continues under another runner")),
+        15_000,
+      );
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("describes resumed events and survives store errors", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-feed2");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const queueFile = projectControllerStorePath(cwd);
+      const queue = new SqliteControllerStore(queueFile);
+      const first = queue.recordRunEvent({
+        runId: "r-skip",
+        workflowRef: "old",
+        type: "queued",
+        runnerId: "other-runner",
+      });
+      queue.recordRunEvent({
+        runId: "r-resume",
+        workflowRef: "demo",
+        type: "resumed",
+        runnerId: "other-runner",
+      });
+      queue.setSessionWatermark("project", first);
+      queue.close();
+
+      const harness = makeHarness({ cwd, sessionId: "session-y", respond: () => {} });
+      await harness.emitAsync("session_start");
+      // "resumed" is not a noteworthy type: no notification, no crash.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(harness.notifications.some((note) => note.includes("r-resume"))).toBe(false);
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("describes each noteworthy event kind in the live feed", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-feed");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const queueFile = projectControllerStorePath(cwd);
+      const queue = new SqliteControllerStore(queueFile);
+      const first = queue.recordRunEvent({
+        runId: "r-skip",
+        workflowRef: "old",
+        type: "queued",
+        runnerId: "other-runner",
+      });
+      for (const [runId, type, payload] of [
+        ["r-done", "completed", {}],
+        ["r-fail", "failed", { error: "boom" }],
+        ["r-wait", "waiting", { waitingOn: "review" }],
+        ["r-park", "parked", {}],
+      ] as const) {
+        queue.recordRunEvent({
+          runId,
+          workflowRef: "demo",
+          type,
+          runnerId: "other-runner",
+          payload,
+        });
+      }
+      queue.setSessionWatermark("project", first);
+      queue.close();
+
+      const harness = makeHarness({ cwd, sessionId: "session-x", respond: () => {} });
+      await harness.emitAsync("session_start");
+      await waitFor(() => harness.notifications.some((note) => note.includes("boom")));
+      const feed = harness.notifications.find((note) => note.includes("boom")) as string;
+      expect(feed).toContain("demo run r-done completed");
+      expect(feed).toContain("demo run r-fail failed: boom");
+      expect(feed).toContain("waits at checkpoint review");
+      expect(feed).toContain("was parked and will resume");
+      expect(feed).not.toContain("r-skip");
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("catches up a reopened session with a state snapshot", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-snapshot");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");

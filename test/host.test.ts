@@ -294,6 +294,170 @@ export default defineWorkflow({
     }
   });
 
+  it(
+    "runs controller workers headlessly and disposes their engines",
+    { timeout: 20_000 },
+    async () => {
+      const cwd = await makeTempDir("pi-host-project");
+      const runsDir = await makeTempDir("pi-host-runs");
+      const controllerDir = await makeTempDir("pi-host-controllers");
+      vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+      vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+      try {
+        await fs.mkdir(path.join(cwd, ".pi", "controllers"), { recursive: true });
+        await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+        await fs.writeFile(
+          path.join(cwd, ".pi", "workflows", "child.workflow.ts"),
+          `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "child",
+  startAt: "work",
+  nodes: { work: compute({ run: ({ input }) => input }) },
+  edges: [],
+});
+`,
+          "utf8",
+        );
+        await fs.writeFile(
+          path.join(cwd, ".pi", "controllers", "demo.controller.ts"),
+          `import { conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
+export default defineController({
+  name: "demo",
+  initialStatus: () => ({ phase: "new" }),
+  async reconcile(ctx, resource) {
+    const child = await ctx.workflows.ensure({
+      requestKey: \`child:\${resource.metadata.generation}\`,
+      workflow: "child",
+      input: { value: resource.spec.value },
+    });
+    if (child.state === "succeeded") {
+      return ctx.settled({
+        controllerStatus: { phase: "done" },
+        conditions: [conditionTrue("Ready", "Complete")],
+      });
+    }
+    return ctx.requeueAfter(10, { controllerStatus: { phase: "running" } });
+  },
+});
+`,
+          "utf8",
+        );
+        const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+        queue.putResource({
+          controller: "demo",
+          key: "item-1",
+          spec: { value: 41 },
+          initialStatus: { phase: "new" },
+        });
+
+        const logs: string[] = [];
+        const host = new WorkflowHost({ cwd, claimPollMs: 25, onLog: (line) => logs.push(line) });
+        await host.start();
+        try {
+          await waitFor(
+            () =>
+              (
+                queue.getResource({ controller: "demo", key: "item-1" })?.status
+                  .controllerStatus as { phase?: string } | undefined
+              )?.phase === "done",
+          );
+          expect(logs.some((line) => line.includes("controller workers started"))).toBe(true);
+        } finally {
+          await host.stop();
+          queue.close();
+        }
+        // Scheduler engines were disposed: no registry entries linger.
+        expect(logs.some((line) => line.includes("claim failed"))).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it("reports a waiting bundle truthfully instead of a bogus failure", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "waiting-row",
+        workflowRef: "gate",
+        workflowPath: path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        input: {},
+        runnerId: "runner-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      // The bundle is already waiting at a checkpoint (terminal).
+      const runStore = new WorkflowRunStore(runsDir);
+      const { checkpoint, defineWorkflow } = await import("../src/workflows/definition.js");
+      const { WorkflowEngine } = await import("../src/workflows/engine.js");
+      const workflow = defineWorkflow({
+        name: "gate",
+        startAt: "approval",
+        nodes: { approval: checkpoint({ summary: "approve" }) },
+        edges: [],
+      });
+      const engine = new WorkflowEngine({
+        executor: new (await import("./helpers.js")).ScriptedExecutor(),
+        store: runStore,
+      });
+      await engine.run(workflow, {}, { runId: "waiting-row" });
+
+      const host = new WorkflowHost({ cwd, claimPollMs: 50 });
+      const record = queue.getWorkflowRun("waiting-row");
+      if (record === undefined) {
+        throw new Error("missing row");
+      }
+      await (
+        host as unknown as {
+          failUnresumable: (
+            record: import("../src/controllers/index.js").WorkflowRunQueueRecord,
+            claimToken: string,
+            message: string,
+          ) => Promise<void>;
+        }
+      ).failUnresumable(
+        record,
+        "token-a",
+        "Cannot resume workflow run waiting-row with status waiting",
+      );
+
+      const events = queue.listRunEventsAfter(0);
+      expect(events.at(-1)?.type).toBe("waiting");
+      expect(events.some((event) => event.type === "failed")).toBe(false);
+      queue.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("survives store errors in the claim loop", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const logs: string[] = [];
+      const host = new WorkflowHost({ cwd, claimPollMs: 25, onLog: (line) => logs.push(line) });
+      await host.start();
+      const store = (host as unknown as { store: SqliteControllerStore }).store;
+      const spy = vi.spyOn(store, "claimNextWorkflowRun").mockImplementation(() => {
+        throw new Error("SQLITE_BUSY");
+      });
+      try {
+        await waitFor(() => logs.some((line) => line.includes("claim failed, retrying shortly")));
+      } finally {
+        spy.mockRestore();
+        await host.stop();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("refuses a second host for the same project", async () => {
     const cwd = await makeTempDir("pi-host-project");
     const controllerDir = await makeTempDir("pi-host-controllers");
@@ -310,6 +474,8 @@ export default defineWorkflow({
       // The lock is released; another host may start now.
       const third = new WorkflowHost({ cwd, claimPollMs: 50 });
       await third.start();
+      await third.stop();
+      // Stopping is idempotent.
       await third.stop();
     } finally {
       vi.unstubAllEnvs();

@@ -21,7 +21,12 @@ export default defineConfig({
       // jiti-compiled copies of workflow modules don't pollute the report.
       provider: "istanbul",
       include: ["src/**"],
-      exclude: ["src/viewer/tui.ts"],
+      exclude: [
+        "src/viewer/tui.ts",
+        // Loaded only by spawned headless pi children; subprocess execution
+        // (covered by the e2e suite) never registers in this report.
+        "src/host/rpc-bridge.ts",
+      ],
       thresholds: {
         lines: 85,
         functions: 85,
