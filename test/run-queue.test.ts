@@ -58,7 +58,7 @@ describe("workflow run queue", () => {
         runnerId: "runner-b",
         claimToken: "token-b",
         leaseMs: 1_000,
-        now: T1,
+        now: T0,
       }),
     ).toBeUndefined();
   });
@@ -152,7 +152,7 @@ describe("workflow run queue", () => {
     const claimed = store.claimNextWorkflowRun({
       runnerId: "runner-b",
       claimToken: "token-b",
-      leaseMs: 1_000,
+      leaseMs: 10_000,
       now: T2,
     });
     expect(claimed?.runId).toBe("run-2");
@@ -164,6 +164,90 @@ describe("workflow run queue", () => {
       now: T3,
     });
     expect(next?.runId).toBe("run-1");
+  });
+
+  it("reclaims a claimed row once its lease expires", async () => {
+    const store = await makeStore();
+    enqueue(store); // claimed by runner-a at T0 with a 1s lease
+    // While the lease is live, nobody can take the run.
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "runner-b",
+        claimToken: "token-b",
+        leaseMs: 1_000,
+        now: "2026-08-04T00:00:00.500Z",
+      }),
+    ).toBeUndefined();
+    // The runner dies without releasing; at T2 the lease has expired and
+    // another runner takes over. The stale token is now fenced out.
+    const claimed = store.claimNextWorkflowRun({
+      runnerId: "runner-b",
+      claimToken: "token-b",
+      leaseMs: 5_000,
+      now: T2,
+    });
+    expect(claimed).toMatchObject({
+      runId: "run-1",
+      status: "claimed",
+      runnerId: "runner-b",
+      claimToken: "token-b",
+    });
+    expect(store.verifyWorkflowRunClaim({ runId: "run-1", claimToken: "token-a", now: T2 })).toBe(
+      false,
+    );
+    expect(store.verifyWorkflowRunClaim({ runId: "run-1", claimToken: "token-b", now: T2 })).toBe(
+      true,
+    );
+  });
+
+  it("admits exactly one continuation row per parent", async () => {
+    const store = await makeStore();
+    enqueue(store, "parent-1");
+    const continuation = {
+      workflowRef: "gate",
+      workflowPath: "/gate.ts",
+      input: { approved: true },
+      runnerId: "runner-a",
+      leaseMs: 1_000,
+      now: T0,
+    };
+    store.enqueueWorkflowRun({
+      ...continuation,
+      runId: "child-1",
+      claimToken: "token-c1",
+      parentRunId: "parent-1",
+    });
+    expect(() =>
+      store.enqueueWorkflowRun({
+        ...continuation,
+        runId: "child-2",
+        claimToken: "token-c2",
+        parentRunId: "parent-1",
+      }),
+    ).toThrow(/UNIQUE/);
+    // Exclusion filters keep skipped runs out of the next claim.
+    store.completeWorkflowRun({ runId: "parent-1", claimToken: "token-a", now: T1 });
+    store.completeWorkflowRun({ runId: "child-1", claimToken: "token-c1", now: T1 });
+    store.enqueueWorkflowRun({
+      runId: "run-x",
+      workflowRef: "x",
+      workflowPath: "/x.ts",
+      input: null,
+      runnerId: "runner-a",
+      claimToken: "token-x",
+      leaseMs: 10_000,
+      now: T1,
+    });
+    store.parkWorkflowRun({ runId: "run-x", claimToken: "token-x", now: T1 });
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "runner-b",
+        claimToken: "token-b",
+        leaseMs: 1_000,
+        excludeRunIds: ["run-x"],
+        now: T2,
+      }),
+    ).toBeUndefined();
   });
 
   it("completes a run terminally and excludes it from claiming", async () => {

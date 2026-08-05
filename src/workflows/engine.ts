@@ -734,6 +734,11 @@ export class WorkflowEngine {
     const timeoutMs = node.timeoutMs ?? this.defaultNodeTimeoutMs;
     const abort = new AbortController();
     this.activeAbort = abort;
+    if (this.parked) {
+      // A park that landed during the node_started persist must not let the
+      // node dispatch: its discarded side effects would rerun on resume.
+      throw new RunParkedError();
+    }
     if (this.cancelled) {
       throw new CancelledError();
     }

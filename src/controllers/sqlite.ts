@@ -933,14 +933,16 @@ export class SqliteControllerStore implements ControllerStore {
   }
 
   /**
-   * Claim the oldest parked run whose claim has expired, preferring runs
-   * with affinity to this runner. Returns undefined when nothing is
-   * claimable.
+   * Claim the oldest claimable run, preferring runs with affinity to this
+   * runner. Parked rows are claimable immediately; claimed rows become
+   * claimable once their lease expires, so a dead or stalled runner never
+   * strands a run. Returns undefined when nothing is claimable.
    */
   claimNextWorkflowRun(options: {
     runnerId: string;
     claimToken: string;
     leaseMs: number;
+    excludeRunIds?: string[];
     now?: string;
   }): WorkflowRunQueueRecord | undefined {
     validateKey(options.runnerId, "runner id");
@@ -949,18 +951,27 @@ export class SqliteControllerStore implements ControllerStore {
     const now = validTimestamp(options.now);
     const nowMs = epoch(now);
     const expiresAt = nowMs + options.leaseMs;
+    const excluded = options.excludeRunIds ?? [];
+    for (const runId of excluded) {
+      validateRunId(runId);
+    }
+    const exclusion =
+      excluded.length === 0 ? "" : `AND run_id NOT IN (${excluded.map(() => "?").join(", ")})`;
+    const claimable = `(
+      status = 'parked'
+      OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+    )`;
     return this.transaction(() => {
       const candidate = this.database
         .prepare(
           `SELECT run_id FROM workflow_run_queue
-           WHERE status = 'parked'
-             AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
+           WHERE ${claimable} ${exclusion}
            ORDER BY
              CASE WHEN affinity_runner_id = ? THEN 0 ELSE 1 END,
              created_at ASC
            LIMIT 1`,
         )
-        .get(nowMs, options.runnerId) as { run_id: string } | undefined;
+        .get(nowMs, ...excluded, options.runnerId) as { run_id: string } | undefined;
       if (candidate === undefined) {
         return undefined;
       }
@@ -969,8 +980,10 @@ export class SqliteControllerStore implements ControllerStore {
           `UPDATE workflow_run_queue
            SET status = 'claimed', runner_id = ?, claim_token = ?,
                claim_expires_at = ?, updated_at = ?
-           WHERE run_id = ? AND status = 'parked'
-             AND (claim_expires_at IS NULL OR claim_expires_at <= ?)`,
+           WHERE run_id = ? AND (
+             status = 'parked'
+             OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+           )`,
         )
         .run(options.runnerId, options.claimToken, expiresAt, now, candidate.run_id, nowMs);
       return result.changes === 1 ? this.requireWorkflowRun(candidate.run_id) : undefined;
@@ -1183,6 +1196,10 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS workflow_run_queue_claimable
     ON workflow_run_queue(status, claim_expires_at);
+  -- A checkpointed parent admits exactly one continuation run, across
+  -- sessions and processes.
+  CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_queue_parent
+    ON workflow_run_queue(parent_run_id) WHERE parent_run_id IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS run_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,

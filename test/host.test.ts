@@ -131,6 +131,72 @@ export default defineWorkflow({
     },
   );
 
+  it("re-parks and skips a run whose workflow source changed", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
+      const workflowPath = path.join(cwd, ".pi", "workflows", "parked-demo.workflow.ts");
+      await fs.writeFile(
+        workflowPath,
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "parked-demo",
+  startAt: "work",
+  nodes: { work: compute({ run: () => "done" }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "edited-run",
+        workflowRef: "parked-demo",
+        workflowPath,
+        input: {},
+        runnerId: "session-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      queue.parkWorkflowRun({ runId: "edited-run", claimToken: "token-a" });
+      const runStore = new WorkflowRunStore(runsDir);
+      const workflow = defineWorkflow({
+        name: "parked-demo",
+        startAt: "work",
+        nodes: { work: compute({ run: () => "ignored" }) },
+        edges: [],
+      });
+      const state = { ...runningState("edited-run"), workflowHash: "/dev/null" };
+      const runDir = await runStore.initializeRunBundle(workflow, state);
+      state.currentNode = "work";
+      await runStore.writeSnapshot(runDir, state, {
+        scope: "run",
+        type: "run_started",
+        payload: {},
+      });
+
+      const host = new WorkflowHost({ cwd, claimPollMs: 25 });
+      await host.start();
+      try {
+        await waitFor(() => queue.getWorkflowRun("edited-run")?.status === "parked");
+        // It stays parked (not done, not failed) and is not retried in a loop.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(queue.getWorkflowRun("edited-run")?.status).toBe("parked");
+        const bundle = await readRunBundle(runDir);
+        expect(bundle?.state.status).toBe("running");
+      } finally {
+        await host.stop();
+        queue.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("refuses a second host for the same project", async () => {
     const cwd = await makeTempDir("pi-host-project");
     const controllerDir = await makeTempDir("pi-host-controllers");

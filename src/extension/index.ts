@@ -1004,7 +1004,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
             lastWaitingRunId = null;
           }
         } catch (error) {
-          notify(ctx, `Could not continue workflow: ${errorMessage(error)}`, "error");
+          const message = errorMessage(error);
+          notify(
+            ctx,
+            /parent_run_id/.test(message)
+              ? `Checkpoint ${parentRunId} was already answered; see its continuation run.`
+              : `Could not continue workflow: ${message}`,
+            "error",
+          );
         }
         return;
       }

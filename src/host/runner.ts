@@ -11,7 +11,12 @@ import {
 } from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
 import { WorkflowEngine } from "../workflows/engine.js";
-import { ClaimLostError, errorMessage, isClaimLostError } from "../workflows/errors.js";
+import {
+  ClaimLostError,
+  errorMessage,
+  isClaimLostError,
+  WorkflowSourceChangedError,
+} from "../workflows/errors.js";
 import { hashWorkflowSource, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
 import { WorkflowRunStore } from "../workflows/store.js";
 import type { WorkflowDefinition } from "../workflows/types.js";
@@ -55,6 +60,8 @@ export class WorkflowHost {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly activeRuns = new Map<string, Promise<void>>();
   private readonly schedulerExecutors = new Map<WorkflowEngine, RpcStepExecutor>();
+  /** Runs whose resume refused (edited source); skipped until a host restart. */
+  private readonly skippedRuns = new Set<string>();
   private stopping = false;
 
   private readonly stateDir: string;
@@ -166,6 +173,7 @@ export class WorkflowHost {
         runnerId: this.runnerId,
         claimToken: randomUUID(),
         leaseMs: RUN_CLAIM_LEASE_MS,
+        excludeRunIds: [...this.skippedRuns],
       });
     } catch (error) {
       // Store contention or corruption must not kill the host's loop.
@@ -246,6 +254,23 @@ export class WorkflowHost {
       clearInterval(renewTimer);
       if (isClaimLostError(error)) {
         this.log(`run ${runId} continues under another runner`);
+        return;
+      }
+      if (error instanceof WorkflowSourceChangedError) {
+        // Edited source is a refusal, not a failure: keep the run claimable
+        // for a later fix, and stop spinning on it for this host's lifetime.
+        try {
+          this.store.parkWorkflowRun({ runId, claimToken });
+        } catch {
+          // Best-effort.
+        }
+        this.skippedRuns.add(runId);
+        this.recordEvent(runId, record.workflowRef, "parked", {
+          reason: "workflow source changed",
+        });
+        this.log(
+          `run ${runId} skipped: workflow source changed; revert or force-resume it, then restart the host`,
+        );
         return;
       }
       await this.failUnresumable(record, claimToken, errorMessage(error));
