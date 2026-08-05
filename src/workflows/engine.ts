@@ -406,9 +406,13 @@ export class WorkflowEngine {
     if (result.outcome === "ok") {
       // A recorded checkpoint means the run should be waiting; a crash
       // before the run_waiting persist restores the gate instead of
-      // routing past it. Continuations deliberately route onward.
+      // routing past it. The gate belongs to this run only: a continuation
+      // run's carried steps end with the parent's already-answered
+      // checkpoint, and routing must continue from it. Continuations
+      // themselves deliberately route onward.
       if (
         checkpointBehavior === "wait" &&
+        state.parentRunId === undefined &&
         workflow.nodes[lastStep.nodeId]?.nodeType === "checkpoint"
       ) {
         return { nodeId: null, waitingOn: lastStep.nodeId, lastOutput: result.output };

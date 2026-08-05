@@ -291,6 +291,57 @@ describe("WorkflowEngine.resumeRun", () => {
     void runDir;
   });
 
+  it("resumes a parked continuation past the answered checkpoint", async () => {
+    const outputRoot = await makeTempDir("pi-resume-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "gate-flow",
+      startAt: "approval",
+      nodes: {
+        approval: checkpoint({ summary: "approve" }),
+        apply: compute({ run: () => "deployed" }),
+      },
+      edges: [{ from: "approval", to: "apply" }],
+    });
+
+    // A parked continuation bundle: the parent's carried checkpoint is the
+    // last recorded step, parentRunId is set, and nothing new has run yet.
+    const state = {
+      ...runningState("continuation-parked", workflow),
+      parentRunId: "parent-run",
+    };
+    state.results.approval = {
+      attemptId: "a1",
+      nodeId: "approval",
+      nodeType: "checkpoint",
+      outcome: "ok",
+      output: { summary: "approve" },
+      startedAt: state.startedAt,
+      finishedAt: state.startedAt,
+      durationMs: 1,
+    };
+    state.outputs.approval = { summary: "approve" };
+    state.steps.push({
+      attemptId: "a1",
+      nodeId: "approval",
+      nodeType: "checkpoint",
+      outcome: "ok",
+      startedAt: state.startedAt,
+      finishedAt: state.startedAt,
+      prompt: null,
+      output: { summary: "approve" },
+    });
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+
+    const resumer = makeEngine(store);
+    const resumed = await resumer.resumeRun(workflow, "continuation-parked");
+    // It routes past the answered checkpoint instead of regressing to waiting.
+    expect(resumed.state.status).toBe("completed");
+    expect(resumed.state.finalOutput).toBe("deployed");
+    void runDir;
+  });
+
   it("refuses to resume terminal or waiting runs", async () => {
     const outputRoot = await makeTempDir("pi-resume-runs");
     const store = new WorkflowRunStore(outputRoot);

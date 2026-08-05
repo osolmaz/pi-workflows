@@ -263,8 +263,14 @@ export class RpcStepExecutor implements AgentStepExecutor {
 function killGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
+    return;
   } catch {
-    // The group is gone; the leader may still need the signal.
+    // Group signals are unsupported here; the leader still needs it.
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already gone.
   }
 }
 
