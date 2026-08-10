@@ -223,7 +223,10 @@ describe("built-in monitor workflow", () => {
 
     const execution = await sleep.exec(context);
 
-    expect(execution).toMatchObject({ command: "sleep", args: ["1800"] });
+    expect(execution).toMatchObject({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, Number(process.argv[1]))", "1800000"],
+    });
     expect(execution.timeoutMs).toBeGreaterThan(30 * 60_000);
     expect(sleep.timeoutMs).toBeGreaterThan(30 * 60_000);
   });

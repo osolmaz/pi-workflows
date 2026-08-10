@@ -229,8 +229,8 @@ export default defineWorkflow({
         const config = configFrom(outputs);
         const sleepMs = config.everyMinutes * 60_000;
         return {
-          command: "sleep",
-          args: [String(config.everyMinutes * 60)],
+          command: process.execPath,
+          args: ["-e", "setTimeout(() => {}, Number(process.argv[1]))", String(sleepMs)],
           timeoutMs: sleepMs + SLEEP_TIMEOUT_MARGIN_MS,
           maxOutputChars: 1_024,
         };

@@ -361,6 +361,37 @@ describe("pi-workflows extension", () => {
     }
   });
 
+  it("bounds failed-run errors returned by workflow status", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-status-error");
+    const runsDir = await makeTempDir("pi-workflows-tool-status-error-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "fail.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "fail",
+  startAt: "fail",
+  nodes: { fail: compute({ run: () => { throw new Error("x".repeat(10000)); } }) },
+  edges: [],
+});
+`,
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("fail", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("failed")));
+      const status = await harness.tool.execute("status-error", { action: "status" });
+
+      expect(status.details.error).toEqual(expect.stringContaining("[error truncated]"));
+      expect(String(status.details.error).length).toBeLessThan(4_100);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("queues an opted-in result presentation after completion", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");

@@ -14,7 +14,7 @@ A monitor is one Pi Workflows graph. It checks the target, reports a meaningful 
 
 ## Shipped design
 
-The implementation follows this plan. The built-in monitor defaults to 1,000 checks, caps the interval at 24 hours, and uses a 5,010-step engine limit as a second guard. The normal Pi extension exposes all workflow tool actions. The headless RPC bridge exposes only `submit`. A real-Pi end-to-end test proves that a normal model turn can start the built-in monitor and complete its first check. The automated test inspects the exact 30-minute `sleep 1800` command and both timeout margins instead of making the test suite wait for 30 minutes.
+The implementation follows this plan. The built-in monitor defaults to 1,000 checks, caps the interval at 24 hours, and uses a 5,010-step engine limit as a second guard. The normal Pi extension exposes all workflow tool actions. The headless RPC bridge exposes only `submit`. A real-Pi end-to-end test proves that a normal model turn can start the built-in monitor and complete its first check. The automated test inspects the exact 30-minute Node timer command and both timeout margins instead of making the test suite wait for 30 minutes. The Node timer keeps the shell action portable across Pi's supported platforms.
 
 ## User experience
 
@@ -116,7 +116,7 @@ prepare -> guard -> check
 
 The report nodes write a normal assistant message and then submit an acknowledgement. Keeping reporting after accepted check output prevents the agent from showing a report before the structured result passes validation. The final presentation reports why the monitor stopped without repeating a report that the user already saw.
 
-The sleep node uses the existing Pi Workflows shell action and the system `sleep` command. Set the node timeout above the largest supported interval because the engine default is 15 minutes. Set the shell execution timeout above the requested sleep by a small fixed margin. Cancellation aborts the sleep immediately.
+The sleep node uses the existing Pi Workflows shell action to launch the current Node executable with a timer. Set the node timeout above the largest supported interval because the engine default is 15 minutes. Set the shell execution timeout above the requested wait by a small fixed margin. Cancellation aborts the timer process immediately.
 
 If the Pi TUI or standalone workflow host stops during sleep, Pi Workflows parks the run and kills the shell child. Resuming the run starts that sleep node again from the beginning. This is existing workflow behavior and is acceptable for this feature. No special timer persistence is added.
 

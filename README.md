@@ -107,7 +107,7 @@ limit. Its input supports `task`, `everyMinutes`, `reportWhen`, `stopWhen`, and
 by using the same file name.
 
 A monitor occupies the session's one active workflow slot. If its Pi runner
-stops during the shell sleep, the run parks and repeats that sleep node when a
+stops during the shell wait, the run parks and repeats that wait node when a
 runner resumes it.
 
 Because the workflow runs in your current conversation, you can have a long

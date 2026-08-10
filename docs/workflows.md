@@ -289,11 +289,12 @@ Intervals must be whole minutes from 1 through 1,440. `maxChecks` defaults to
 1,000 and cannot exceed 1,000. The workflow also has a finite step limit and
 bounded observation and report sizes.
 
-The interval uses the existing shell action with `sleep`. The node and command
-timeouts are higher than the maximum interval. Cancelling the workflow aborts
-the sleep immediately. If the owning Pi process or standalone host stops during
-the sleep, normal parking rules abort the shell node and resume later by running
-that sleep again from the beginning.
+The interval uses the existing shell action to launch the current Node
+executable with a timer. This works on every platform supported by Pi. The node
+and command timeouts are higher than the maximum interval. Cancelling the
+workflow aborts the timer process immediately. If the owning Pi process or
+standalone host stops during the wait, normal parking rules abort the shell node
+and resume later by running that wait again from the beginning.
 
 A monitor uses the session's single active workflow slot. It does not provide
 cron syntax, calendar scheduling, OS notifications, or a background service.

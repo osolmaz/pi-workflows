@@ -47,6 +47,7 @@ const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
 const FINAL_WIDGET_TTL_MS = 60_000;
 const WIDGET_SCROLL_STEP = 3;
 const MAX_PRESENTATION_RESULT_CHARS = 50_000;
+const MAX_STATUS_ERROR_CHARS = 4_000;
 const PRESENTATION_TIMEOUT_MS = 30_000;
 
 class PresentationSupersededError extends Error {}
@@ -175,6 +176,12 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
 }
 
 function workflowStateSummary(state: WorkflowRunState): JsonObject {
+  const error =
+    state.error === undefined
+      ? undefined
+      : state.error.length <= MAX_STATUS_ERROR_CHARS
+        ? state.error
+        : `${state.error.slice(0, MAX_STATUS_ERROR_CHARS)}\n… [error truncated]`;
   return {
     active: state.status === "running",
     runId: state.runId,
@@ -185,7 +192,7 @@ function workflowStateSummary(state: WorkflowRunState): JsonObject {
     ...(state.waitingOn !== undefined ? { waitingOn: state.waitingOn } : {}),
     ...(state.startedAt !== undefined ? { startedAt: state.startedAt } : {}),
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
-    ...(state.error !== undefined ? { error: state.error } : {}),
+    ...(error !== undefined ? { error } : {}),
   };
 }
 
