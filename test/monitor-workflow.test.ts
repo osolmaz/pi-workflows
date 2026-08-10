@@ -3,7 +3,9 @@ import monitor from "../src/builtins/monitor.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type {
+  AgentNodeDefinition,
   AgentStepExecutor,
+  ComputeNodeDefinition,
   ShellActionNodeDefinition,
   WorkflowNodeContext,
 } from "../src/workflows/types.js";
@@ -122,11 +124,19 @@ describe("built-in monitor workflow", () => {
 
   it.each([
     [null, "monitor input must be an object"],
+    [[], "monitor input must be an object"],
     [{ task: 1, everyMinutes: 30 }, "task must be a string"],
     [{ task: " ", everyMinutes: 30 }, "task must not be empty"],
     [{ task: "x".repeat(8_001), everyMinutes: 30 }, "task must be at most 8000"],
+    [{ task: "check", everyMinutes: "30" }, "everyMinutes must be an integer"],
     [{ task: "check", everyMinutes: 1.5 }, "everyMinutes must be an integer"],
+    [{ task: "check", everyMinutes: 0 }, "everyMinutes must be an integer"],
+    [{ task: "check", everyMinutes: 1_441 }, "everyMinutes must be an integer"],
+    [{ task: "check", everyMinutes: 30, maxChecks: 1.5 }, "maxChecks must be an integer"],
     [{ task: "check", everyMinutes: 30, maxChecks: 0 }, "maxChecks must be an integer"],
+    [{ task: "check", everyMinutes: 30, maxChecks: 1_001 }, "maxChecks must be an integer"],
+    [{ task: "check", everyMinutes: 30, reportWhen: false }, "reportWhen must be a string"],
+    [{ task: "check", everyMinutes: 30, stopWhen: " " }, "stopWhen must not be empty"],
   ])("rejects invalid monitor input %#", async (input, expectedError) => {
     const outputRoot = await makeTempDir("pi-workflows-monitor-input");
     const engine = new WorkflowEngine({
@@ -197,6 +207,78 @@ describe("built-in monitor workflow", () => {
     expect(badCheck.state.error).toContain("route must be one of");
     expect(noReport.state.error).toContain("requires a report");
     expect(badAck.state.error).toContain("reported to true");
+  });
+
+  it("formats monitor prompts, guards, and fallback output", async () => {
+    const engine = new WorkflowEngine({
+      executor: scriptedExecutor([
+        {
+          route: "stop_quiet",
+          observation: "Initial state",
+          reason: "Test complete",
+        },
+      ]),
+      store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-callbacks")),
+    });
+    const result = await engine.run(monitor, monitorInput());
+    const context: WorkflowNodeContext = {
+      input: result.state.input,
+      outputs: result.state.outputs,
+      results: result.state.results,
+      state: result.state,
+      signal: new AbortController().signal,
+    };
+
+    if (typeof monitor.title !== "function" || typeof monitor.presentationPrompt !== "function") {
+      throw new Error("Monitor title and presentation prompt must be functions");
+    }
+    expect(await monitor.title({ input: monitorInput(), workflowName: "monitor" })).toContain(
+      "monitor: Check pull request 123",
+    );
+    expect(await monitor.title({ input: null, workflowName: "monitor" })).toBe("monitor");
+    expect(
+      await monitor.presentationPrompt({
+        state: result.state,
+        finalOutput: { reported: true },
+        signal: context.signal,
+      }),
+    ).toBeUndefined();
+    expect(
+      await monitor.presentationPrompt({
+        state: result.state,
+        finalOutput: {},
+        signal: context.signal,
+      }),
+    ).toContain("monitor ended");
+
+    const check = monitor.nodes.check as AgentNodeDefinition;
+    expect(await check.prompt(context)).toContain("Previous accepted observation: Initial state");
+    const report = monitor.nodes.report_stop as AgentNodeDefinition;
+    expect(
+      await report.prompt({
+        ...context,
+        outputs: { check: { observation: "Fallback observation" } },
+      }),
+    ).toContain("Fallback observation");
+
+    const guard = monitor.nodes.guard as ComputeNodeDefinition;
+    expect(
+      await guard.run({
+        ...context,
+        outputs: {
+          ...context.outputs,
+          prepare: { ...monitorInput(), maxChecks: 1 },
+        },
+      }),
+    ).toMatchObject({ route: "stop", checks: 1, reason: "Reached the 1-check limit." });
+    const continueGuard = monitor.nodes.continue_guard as ComputeNodeDefinition;
+    expect(await continueGuard.run(context)).toMatchObject({ route: "sleep", checks: 1 });
+    const finish = monitor.nodes.finish as ComputeNodeDefinition;
+    expect(await finish.run({ ...context, outputs: {} })).toEqual({
+      reason: "Monitor finished.",
+      observation: null,
+      reported: false,
+    });
   });
 
   it("configures a 30-minute shell sleep above both timeout limits", async () => {

@@ -356,6 +356,9 @@ describe("pi-workflows extension", () => {
 
       const status = await harness.tool.execute("status-1", { action: "status" });
       expect(status.details).toMatchObject({ workflowName: "mini", status: "completed" });
+      await expect(
+        harness.tool.execute("status-missing", { action: "status", runId: "missing-run" }),
+      ).rejects.toThrow(/Workflow run not found/);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -384,6 +387,16 @@ describe("pi-workflows extension", () => {
       expect(second.details).toMatchObject({ total: 61, offset: 50, omitted: 0 });
       expect(second.details.workflows).toHaveLength(11);
       expect(second.details).not.toHaveProperty("nextOffset");
+
+      await expect(
+        harness.tool.execute("list-fraction", { action: "list", offset: 1.5 }),
+      ).rejects.toThrow(/offset must be an integer/);
+      await expect(
+        harness.tool.execute("list-negative", { action: "list", offset: -1 }),
+      ).rejects.toThrow(/offset must be an integer/);
+      await expect(
+        harness.tool.execute("list-too-large", { action: "list", offset: 62 }),
+      ).rejects.toThrow(/offset must be an integer/);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -415,6 +428,13 @@ describe("pi-workflows extension", () => {
 
     const cancelled = await harness.tool.execute("cancel-pending", { action: "cancel" });
     expect(cancelled.details).toMatchObject({ action: "cancel", workflow: "mini", queued: false });
+
+    const validating = harness.tool.execute("start-cancelled", {
+      action: "start",
+      workflow: "mini",
+    });
+    await harness.tool.execute("cancel-validating", { action: "cancel" });
+    await expect(validating).rejects.toThrow(/cancelled before validation finished/);
   });
 
   it("bounds failed-run errors returned by workflow status", async () => {
