@@ -361,6 +361,62 @@ describe("pi-workflows extension", () => {
     }
   });
 
+  it("bounds and paginates workflow lists returned to the model", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-list");
+    vi.stubEnv("HOME", await makeTempDir("pi-workflows-tool-list-home"));
+    try {
+      const workflowDir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(workflowDir, { recursive: true });
+      await Promise.all(
+        Array.from({ length: 60 }, async (_, index) => {
+          const name = `item-${String(index).padStart(3, "0")}.workflow.ts`;
+          await fs.writeFile(path.join(workflowDir, name), "", "utf8");
+        }),
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      const first = await harness.tool.execute("list-first", { action: "list" });
+      expect(first.details).toMatchObject({ total: 61, offset: 0, omitted: 11, nextOffset: 50 });
+      expect(first.details.workflows).toHaveLength(50);
+      expect(first.content[0]?.text).toContain("11 more omitted; list again with offset 50");
+
+      const second = await harness.tool.execute("list-second", { action: "list", offset: 50 });
+      expect(second.details).toMatchObject({ total: 61, offset: 50, omitted: 0 });
+      expect(second.details.workflows).toHaveLength(11);
+      expect(second.details).not.toHaveProperty("nextOffset");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reserves one model-started workflow while it validates", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-start-reservation");
+    await writeEchoWorkflow(cwd);
+    const harness = makeHarness({ cwd, respond: () => {} });
+
+    await expect(
+      harness.tool.execute("start-missing", {
+        action: "start",
+        workflow: "missing",
+      }),
+    ).rejects.toThrow(/Unknown workflow/);
+
+    const starts = await Promise.allSettled([
+      harness.tool.execute("start-first", { action: "start", workflow: "mini" }),
+      harness.tool.execute("start-second", { action: "start", workflow: "mini" }),
+    ]);
+    expect(starts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(starts.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(starts.find((result) => result.status === "rejected")).toMatchObject({
+      reason: expect.objectContaining({
+        message: expect.stringMatching(/launch is already waiting/),
+      }),
+    });
+
+    const cancelled = await harness.tool.execute("cancel-pending", { action: "cancel" });
+    expect(cancelled.details).toMatchObject({ action: "cancel", workflow: "mini", queued: false });
+  });
+
   it("bounds failed-run errors returned by workflow status", async () => {
     const cwd = await makeTempDir("pi-workflows-tool-status-error");
     const runsDir = await makeTempDir("pi-workflows-tool-status-error-runs");

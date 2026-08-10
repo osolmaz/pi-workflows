@@ -48,6 +48,8 @@ const FINAL_WIDGET_TTL_MS = 60_000;
 const WIDGET_SCROLL_STEP = 3;
 const MAX_PRESENTATION_RESULT_CHARS = 50_000;
 const MAX_STATUS_ERROR_CHARS = 4_000;
+const MAX_WORKFLOW_LIST_ITEMS = 50;
+const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const PRESENTATION_TIMEOUT_MS = 30_000;
 
 class PresentationSupersededError extends Error {}
@@ -1045,21 +1047,50 @@ export default function piWorkflows(pi: ExtensionAPI) {
     level?: "info" | "warning" | "error";
   };
 
-  const listWorkflowControl = async (ctx: ExtensionContext): Promise<WorkflowControlResult> => {
+  const listWorkflowControl = async (
+    ctx: ExtensionContext,
+    offset = 0,
+  ): Promise<WorkflowControlResult> => {
     const discovered = await discoverWorkflows({ cwd: ctx.cwd });
     if (discovered.length === 0) {
       return {
         message:
           "No workflows found. Put *.workflow.ts files in .pi/workflows/ or ~/.pi/agent/workflows/, or pass a path.",
-        details: { workflows: [] },
+        details: { workflows: [], total: 0, offset: 0 },
         level: "warning",
       };
     }
-    const names = discovered.map((workflow) => `${workflow.name} (${workflow.source})`).join(", ");
+    if (!Number.isInteger(offset) || offset < 0 || offset > discovered.length) {
+      throw new Error(
+        `Workflow list offset must be an integer from 0 through ${discovered.length}.`,
+      );
+    }
+    const page = [];
+    let nameChars = 0;
+    for (const workflow of discovered.slice(offset)) {
+      const renderedName = `${workflow.name} (${workflow.source})`;
+      if (
+        page.length >= MAX_WORKFLOW_LIST_ITEMS ||
+        nameChars + renderedName.length > MAX_WORKFLOW_LIST_NAME_CHARS
+      ) {
+        break;
+      }
+      page.push(workflow);
+      nameChars += renderedName.length;
+    }
+    const names = page.map((workflow) => `${workflow.name} (${workflow.source})`).join(", ");
+    const nextOffset = offset + page.length;
+    const omitted = discovered.length - nextOffset;
     return {
-      message: `Workflows: ${names}. Run one with /workflow <name> [task].`,
+      message: [
+        `Workflows: ${names}.`,
+        omitted > 0 ? `${omitted} more omitted; list again with offset ${nextOffset}.` : "",
+        "Run one with /workflow <name> [task].",
+      ]
+        .filter(Boolean)
+        .join(" "),
       details: {
-        workflows: discovered.map((workflow) => ({
+        workflows: page.map((workflow) => ({
           name: workflow.name,
           source: workflow.source,
           ...(workflow.name === "monitor"
@@ -1069,6 +1100,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
               }
             : {}),
         })),
+        total: discovered.length,
+        offset,
+        omitted,
+        ...(omitted > 0 ? { nextOffset } : {}),
       },
     };
   };
@@ -1318,18 +1353,29 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (presentationPending !== null) {
       throw new Error("The previous workflow result is still being presented.");
     }
-    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
-    const workflow = await loadWorkflowFile(resolved.path);
-    pendingToolLaunch = { ctx, ref, input, options };
-    return {
-      message: `Workflow ${workflow.name} will start after this turn finishes.`,
-      details: {
-        action: "start",
-        workflow: workflow.name,
-        source: resolved.source,
-        queued: true,
-      },
-    };
+    const reservation = { ctx, ref, input, options };
+    pendingToolLaunch = reservation;
+    try {
+      const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
+      const workflow = await loadWorkflowFile(resolved.path);
+      if (pendingToolLaunch !== reservation) {
+        throw new Error("The queued workflow launch was cancelled before validation finished.");
+      }
+      return {
+        message: `Workflow ${workflow.name} will start after this turn finishes.`,
+        details: {
+          action: "start",
+          workflow: workflow.name,
+          source: resolved.source,
+          queued: true,
+        },
+      };
+    } catch (error) {
+      if (pendingToolLaunch === reservation) {
+        pendingToolLaunch = null;
+      }
+      throw error;
+    }
   };
 
   pi.registerCommand("workflow", {
@@ -1491,7 +1537,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       let control: WorkflowControlResult;
       switch (params.action) {
         case "list":
-          control = await listWorkflowControl(ctx);
+          control = await listWorkflowControl(ctx, params.offset);
           break;
         case "start":
           control = await queueToolLaunch(ctx, params.workflow, params.input ?? {});

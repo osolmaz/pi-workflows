@@ -4,7 +4,13 @@ import { Type, type TSchema } from "typebox";
 const noExtraProperties = { additionalProperties: false } as const;
 
 export const WorkflowToolParameters: TSchema = Type.Union([
-  Type.Object({ action: StringEnum(["list"] as const) }, noExtraProperties),
+  Type.Object(
+    {
+      action: StringEnum(["list"] as const),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "Workflow list offset" })),
+    },
+    noExtraProperties,
+  ),
   Type.Object(
     {
       action: StringEnum(["start"] as const),
@@ -43,7 +49,7 @@ export const WorkflowToolParameters: TSchema = Type.Union([
 ]);
 
 export type WorkflowToolInput =
-  | { action: "list" }
+  | { action: "list"; offset?: number }
   | { action: "start"; workflow: string; input?: unknown }
   | { action: "status"; runId?: string }
   | { action: "pause" }
