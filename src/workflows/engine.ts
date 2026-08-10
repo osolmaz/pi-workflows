@@ -1117,7 +1117,7 @@ export function appendStepContract(
     `Workflow step contract (workflow: ${workflowName}, step: ${nodeId}, attempt: ${attemptId})`,
     "",
     "Complete this step by calling the `workflow` tool exactly once with:",
-    `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
+    `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
     `Expected output: ${expectedOutput ?? "a JSON object with your result"}`,
     "The step is complete only after the workflow tool accepts the output.",
     "If the tool reports a validation error, correct the output and call it again.",

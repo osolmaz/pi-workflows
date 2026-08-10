@@ -188,7 +188,9 @@ describe("WorkflowEngine", () => {
     const attemptId = request?.contract.attemptId ?? "";
     expect(prompt).toContain("Base prompt");
     expect(prompt).toContain("Workflow step contract");
-    expect(prompt).toContain(`{"step": "ask", "attempt": "${attemptId}", "output": <your result>}`);
+    expect(prompt).toContain(
+      `{"action": "submit", "step": "ask", "attempt": "${attemptId}", "output": <your result>}`,
+    );
     expect(prompt).toContain(`Expected output: { "x": 1 }`);
     expect(prompt).toBe(
       appendStepContract("Base prompt", "contract", "ask", attemptId, `{ "x": 1 }`),

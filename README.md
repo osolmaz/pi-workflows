@@ -79,8 +79,8 @@ you have taken the conversation back; `/workflow resume` re-delivers the
 pending step prompt. `/workflow cancel` stops the active run; if the last run
 already ended (for example parked at a checkpoint), it clears the leftover
 widget instead. Trailing text becomes `{ task: "..." }`; pass arbitrary input
-with `--input-json {"key": "value"}`. The names `cancel`, `list`, `pause`,
-and `resume` are reserved and rejected as workflow names.
+with `--input-json {"key": "value"}`. The names `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are
+reserved and rejected as workflow names.
 
 While a run is on screen, the footer status bar shows a compact
 `wf <name> [status] <node>` indicator alongside the widget.
@@ -89,6 +89,26 @@ While a run is on screen, the footer status bar shows a compact
 structured run ends to request one normal, human-readable assistant response.
 Workflows without it remain silent after their final structured output, which
 keeps shell-only and machine-consumed workflows model-free.
+
+## Agent-managed workflows
+
+The model can use the same `workflow` tool to list, start, inspect, pause,
+resume, cancel, and answer workflows. Step contracts use the tool's `submit`
+action. Slash commands and model actions share one lifecycle implementation.
+
+Pi Workflows includes a `monitor` workflow for plain-language requests such as:
+
+> Monitor PR 123 every 30 minutes. Report failed checks. Stop when it is merged or closed.
+
+The monitor checks immediately, reports only the states requested by the user,
+waits with a normal shell action, and loops until its stop condition or check
+limit. Its input supports `task`, `everyMinutes`, `reportWhen`, `stopWhen`, and
+`maxChecks`. Project and global workflows can replace the built-in `monitor`
+by using the same file name.
+
+A monitor occupies the session's one active workflow slot. If its Pi runner
+stops during the shell sleep, the run parks and repeats that sleep node when a
+runner resumes it.
 
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The

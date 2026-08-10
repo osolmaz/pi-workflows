@@ -42,7 +42,7 @@ describe("defineWorkflow validation", () => {
   });
 
   it("rejects reserved workflow names claimed by /workflow subcommands", () => {
-    for (const name of ["cancel", "list", "pause", "resume"]) {
+    for (const name of ["answer", "cancel", "list", "pause", "resume", "status"]) {
       expect(() => define({ name })).toThrow(/reserved for \/workflow subcommands/);
     }
   });

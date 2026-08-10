@@ -30,7 +30,7 @@ async function makeFakePi(
 }
 
 function submissionLine(step: string, attempt: string, output: unknown): string {
-  return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({ step, attempt, output })}\\n`;
+  return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({ action: "submit", step, attempt, output })}\\n`;
 }
 
 describe("RpcStepExecutor submissions", () => {

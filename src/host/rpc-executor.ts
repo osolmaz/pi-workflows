@@ -17,6 +17,7 @@ const BRIDGE_PATH = ["./rpc-bridge.js", "./rpc-bridge.ts"]
 const ABORT_GRACE_MS = 3_000;
 
 type StepSubmission = {
+  action: "submit";
   step: string;
   attempt: string;
   output: unknown;
@@ -179,7 +180,11 @@ export class RpcStepExecutor implements AgentStepExecutor {
         }
         try {
           const parsed = JSON.parse(line.slice(RPC_SUBMISSION_PREFIX.length)) as StepSubmission;
-          if (typeof parsed.step === "string" && typeof parsed.attempt === "string") {
+          if (
+            parsed.action === "submit" &&
+            typeof parsed.step === "string" &&
+            typeof parsed.attempt === "string"
+          ) {
             this.submissions.push(parsed);
           }
         } catch {

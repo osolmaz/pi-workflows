@@ -32,6 +32,12 @@ describe("parseWorkflowArgs answer", () => {
     expect(() => parseWorkflowArgs("answer")).toThrow(/requires/);
   });
 
+  it("parses status with an optional run id", () => {
+    expect(parseWorkflowArgs("status")).toEqual({ kind: "status" });
+    expect(parseWorkflowArgs("status run-123")).toEqual({ kind: "status", runId: "run-123" });
+    expect(() => parseWorkflowArgs("status bad id")).toThrow(/valid run id/);
+  });
+
   it("parses --input-json for runs", () => {
     expect(parseWorkflowArgs('mini --input-json {"task":"hi"}')).toEqual({
       kind: "run",

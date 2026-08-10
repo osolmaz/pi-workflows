@@ -1,3 +1,4 @@
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -14,15 +15,19 @@ export default function piWorkflowsRpcBridge(pi: ExtensionAPI) {
     name: "workflow",
     label: "Workflow",
     description: [
-      "Submit the output for the pending workflow step.",
+      "Submit the output for the pending workflow step with action submit.",
       "Only call this tool when a workflow step contract in the conversation asks you to.",
       "Pass the exact step id from the contract and your result as the output.",
     ].join(" "),
-    parameters: Type.Object({
-      step: Type.String({ description: "The step id from the workflow step contract" }),
-      attempt: Type.String({ description: "The attempt id from the workflow step contract" }),
-      output: Type.Unknown({ description: "The step output, matching the expected output shape" }),
-    }),
+    parameters: Type.Object(
+      {
+        action: StringEnum(["submit"] as const),
+        step: Type.String({ description: "Step id from the workflow step contract" }),
+        attempt: Type.String({ description: "Attempt id from the workflow step contract" }),
+        output: Type.Unknown({ description: "Step output matching the expected shape" }),
+      },
+      { additionalProperties: false },
+    ),
     async execute(_toolCallId, params) {
       process.stderr.write(`${RPC_SUBMISSION_PREFIX}${JSON.stringify(params)}\n`);
       return {

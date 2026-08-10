@@ -49,6 +49,7 @@ describe("discoverWorkflows", () => {
     expect(discovered.map((w) => [w.name, w.source])).toEqual([
       ["local", "project"],
       ["global", "global"],
+      ["monitor", "builtin"],
     ]);
   });
 
@@ -59,14 +60,28 @@ describe("discoverWorkflows", () => {
 
     const discovered = await discoverWorkflows({ cwd, homeDir });
 
-    expect(discovered).toHaveLength(1);
+    expect(discovered).toHaveLength(2);
     expect(discovered[0]?.source).toBe("project");
+    expect(discovered[1]).toMatchObject({ name: "monitor", source: "builtin" });
   });
 
-  it("returns empty for missing directories", async () => {
+  it("returns the built-in monitor for missing user directories", async () => {
     const cwd = await makeTempDir("pi-workflows-empty");
     const homeDir = await makeTempDir("pi-workflows-empty-home");
-    expect(await discoverWorkflows({ cwd, homeDir })).toEqual([]);
+    expect(await discoverWorkflows({ cwd, homeDir })).toEqual([
+      expect.objectContaining({ name: "monitor", source: "builtin" }),
+    ]);
+  });
+
+  it("lets a project workflow override the built-in monitor", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const target = await copyExample(path.join(cwd, ".pi", "workflows"), "monitor.workflow.ts");
+
+    const discovered = await discoverWorkflows({ cwd, homeDir });
+
+    expect(discovered.filter((workflow) => workflow.name === "monitor")).toEqual([
+      { name: "monitor", path: target, source: "project" },
+    ]);
   });
 });
 
@@ -93,6 +108,15 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("mine", { cwd, homeDir });
 
     expect(resolved).toEqual({ path: target, source: "project" });
+  });
+
+  it("resolves and loads the built-in monitor", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir });
+    const workflow = await loadWorkflowFile(resolved.path);
+
+    expect(resolved.source).toBe("builtin");
+    expect(workflow.name).toBe("monitor");
   });
 
   it("resolves direct paths", async () => {

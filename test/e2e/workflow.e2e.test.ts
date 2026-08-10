@@ -248,6 +248,23 @@ describe.sequential("pi-workflows end to end", () => {
         if (lastUserText.includes("Presentation instructions:")) {
           return { kind: "text", text: "Implemented the boring, proven design." };
         }
+        if (lastRole === "user" && lastUserText === "Start the built-in monitor now.") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "start",
+              workflow: "monitor",
+              input: {
+                task: "Check the fixture once",
+                everyMinutes: 30,
+                reportWhen: "The fixture fails",
+                stopWhen: "The first check is complete",
+                maxChecks: 1,
+              },
+            },
+          };
+        }
         if (lastRole === "tool") {
           return {
             kind: "text",
@@ -266,6 +283,7 @@ describe.sequential("pi-workflows end to end", () => {
             thinking: "Build and submit the proposed workflow output.",
             toolName: "workflow",
             args: {
+              action: "submit",
               step: "propose",
               attempt,
               output: { proposal: "Ship the boring, proven design." },
@@ -278,9 +296,29 @@ describe.sequential("pi-workflows end to end", () => {
             thinking: "Choose the accepted workflow route.",
             toolName: "workflow",
             args: {
+              action: "submit",
               step: "confirm",
               attempt,
               output: { route: "y", reason: "proposal matches the holy grail" },
+            },
+          };
+        }
+        const monitorStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: monitor, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (monitorStepMatch?.[1] === "check") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "check",
+              attempt: monitorStepMatch[2] ?? "",
+              output: {
+                route: "stop_quiet",
+                observation: "The fixture check completed.",
+                reason: "The requested first check is complete.",
+              },
             },
           };
         }
@@ -292,6 +330,7 @@ describe.sequential("pi-workflows end to end", () => {
             kind: "tool",
             toolName: "workflow",
             args: {
+              action: "submit",
               step: "work",
               attempt: hostStepMatch[2] ?? "",
               output: { finished: "host did it" },
@@ -652,6 +691,26 @@ describe.sequential("pi-workflows end to end", () => {
       Promise.all(terminalFiles.map((file) => fs.readFile(path.join(runDir, file), "utf8"))),
     ).resolves.toEqual(terminalContents);
   }, 120_000);
+
+  it("starts the built-in monitor from the model-facing workflow tool", async () => {
+    pi.send({ id: "monitor-1", type: "prompt", message: "Start the built-in monitor now." });
+
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "monitor" &&
+        (candidate.status === "completed" || candidate.status === "failed"),
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+    );
+
+    expect(state.status).toBe("completed");
+    expect(state.workflowName).toBe("monitor");
+    expect(state.finalOutput).toMatchObject({
+      observation: "The fixture check completed.",
+      reason: "The requested first check is complete.",
+    });
+    expect(state.steps.some((step) => step.nodeId === "sleep")).toBe(false);
+  });
 
   it("reconciles a durable controller through the real pi extension", async () => {
     pi.send({

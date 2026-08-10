@@ -7,6 +7,7 @@ authoring workflows, see [workflows.md](workflows.md).
 
 ```
 src/workflows/   finite graph engine: definitions, execution, bundles, loader
+src/builtins/    default workflows shipped at lowest discovery precedence
 src/controllers/ durable resources, queue, reconciliation, effects, child runs
 src/extension/   pi integration: commands, workflow tool, controller host, widget
 src/viewer/      standalone read-only views over runs and controller resources

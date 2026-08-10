@@ -5,15 +5,29 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
+import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
 import { readRunBundle } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
 
+type ToolResult = {
+  content: { type: string; text: string }[];
+  details: Record<string, unknown>;
+};
+
 type RegisteredTool = {
+  name: string;
+  execute: (toolCallId: string, params: WorkflowToolInput) => Promise<ToolResult>;
+};
+
+type RegisteredToolSpec = {
   name: string;
   execute: (
     toolCallId: string,
-    params: { step: string; attempt: string; output: unknown },
-  ) => Promise<unknown>;
+    params: WorkflowToolInput,
+    signal: AbortSignal,
+    onUpdate: (update: unknown) => void,
+    ctx: FakeContext,
+  ) => Promise<ToolResult>;
 };
 
 type RegisteredCommand = {
@@ -82,8 +96,18 @@ function makeHarness(options: {
     registerCommand: (name: string, spec: RegisteredCommand) => {
       commands.set(name, spec);
     },
-    registerTool: (spec: RegisteredTool) => {
-      tool = spec;
+    registerTool: (spec: RegisteredToolSpec) => {
+      tool = {
+        name: spec.name,
+        execute: async (toolCallId, params) =>
+          await spec.execute(
+            toolCallId,
+            params,
+            new AbortController().signal,
+            () => undefined,
+            ctx,
+          ),
+      };
     },
     registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
       shortcuts.set(key, spec.handler);
@@ -244,7 +268,11 @@ describe("pi-workflows extension", () => {
         respond: (prompt, tool) => {
           const contract = stepFromPrompt(prompt);
           if (contract) {
-            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+            void tool.execute("call-1", {
+              action: "submit",
+              ...contract,
+              output: { reply: "hi" },
+            });
           }
         },
       });
@@ -285,6 +313,54 @@ describe("pi-workflows extension", () => {
     }
   });
 
+  it("lets the model list, start, and inspect workflows through one tool", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-control");
+    const runsDir = await makeTempDir("pi-workflows-tool-control-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("submit-1", {
+              action: "submit",
+              ...contract,
+              output: { reply: "hi" },
+            });
+          }
+        },
+      });
+
+      const listed = await harness.tool.execute("list-1", { action: "list" });
+      expect(listed.details.workflows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "mini", source: "project" }),
+          expect.objectContaining({ name: "monitor", source: "builtin" }),
+        ]),
+      );
+
+      const queued = await harness.tool.execute("start-1", {
+        action: "start",
+        workflow: "mini",
+        input: { task: "say hi" },
+      });
+      expect(queued.details).toMatchObject({ action: "start", workflow: "mini", queued: true });
+      expect(harness.notifications.some((note) => note.includes("Workflow mini started"))).toBe(
+        false,
+      );
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+
+      const status = await harness.tool.execute("status-1", { action: "status" });
+      expect(status.details).toMatchObject({ workflowName: "mini", status: "completed" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("queues an opted-in result presentation after completion", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
@@ -313,7 +389,11 @@ export default defineWorkflow({
         respond: (prompt, tool) => {
           const contract = stepFromPrompt(prompt);
           if (contract) {
-            void tool.execute("call-1", { ...contract, output: { answer: "forty-two" } });
+            void tool.execute("call-1", {
+              action: "submit",
+              ...contract,
+              output: { answer: "forty-two" },
+            });
           }
         },
       });
@@ -578,7 +658,7 @@ export default defineWorkflow({
     expect(harness.notifications.at(-1)).toContain("Could not start workflow");
   });
 
-  it("warns when no workflows are discoverable", async () => {
+  it("lists the built-in monitor when no user workflows are discoverable", async () => {
     const cwd = await makeTempDir("pi-workflows-ext-empty");
     // The real home directory may have global workflows installed; point
     // discovery at an empty home so this test stays hermetic.
@@ -586,7 +666,7 @@ export default defineWorkflow({
     try {
       const harness = makeHarness({ cwd, respond: () => {} });
       await harness.command.handler("", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("No workflows found");
+      expect(harness.notifications.at(-1)).toContain("monitor (builtin)");
     } finally {
       homedirSpy.mockRestore();
     }
@@ -644,7 +724,7 @@ export default defineWorkflow({
     }
   });
 
-  it("pauses and resumes a live run via subcommands", async () => {
+  it("shares pause, resume, and cancel behavior between commands and the tool", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
@@ -659,17 +739,18 @@ export default defineWorkflow({
       await harness.command.handler("mini", harness.ctx);
       await waitFor(() => harness.notifications.some((note) => note.includes("started")));
 
-      await harness.command.handler("pause", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("Pausing workflow mini");
-      await harness.command.handler("pause", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("already pausing or paused");
+      const paused = await harness.tool.execute("pause-1", { action: "pause" });
+      expect(paused.content[0]?.text).toContain("Pausing workflow mini");
+      const pausedAgain = await harness.tool.execute("pause-2", { action: "pause" });
+      expect(pausedAgain.content[0]?.text).toContain("already pausing or paused");
 
-      await harness.command.handler("resume", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("Workflow mini resumed");
-      await harness.command.handler("resume", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("is not paused");
+      const resumed = await harness.tool.execute("resume-1", { action: "resume" });
+      expect(resumed.content[0]?.text).toContain("Workflow mini resumed");
+      const resumedAgain = await harness.tool.execute("resume-2", { action: "resume" });
+      expect(resumedAgain.content[0]?.text).toContain("is not paused");
 
-      await harness.command.handler("cancel", harness.ctx);
+      const cancelled = await harness.tool.execute("cancel-1", { action: "cancel" });
+      expect(cancelled.content[0]?.text).toContain("Cancelling workflow mini");
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
     } finally {
       vi.unstubAllEnvs();
@@ -748,12 +829,17 @@ export default defineWorkflow({
     expect(harness.widgets).toHaveLength(0);
   });
 
-  it("rejects tool calls outside a workflow", async () => {
+  it("rejects submissions outside a workflow", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const harness = makeHarness({ cwd, respond: () => {} });
     await expect(
-      harness.tool.execute("call-1", { step: "reply", attempt: "a1", output: {} }),
-    ).rejects.toThrow(/No workflow is running/);
+      harness.tool.execute("call-1", {
+        action: "submit",
+        step: "reply",
+        attempt: "a1",
+        output: {},
+      }),
+    ).rejects.toThrow(/No workflow step is waiting/);
   });
 
   it("cancels a running workflow", async () => {
@@ -1069,7 +1155,11 @@ export default defineWorkflow({
       const respond = (prompt: string, tool: RegisteredTool) => {
         const contract = stepFromPrompt(prompt);
         if (contract) {
-          void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+          void tool.execute("call-1", {
+            action: "submit",
+            ...contract,
+            output: { reply: "hi" },
+          });
         }
       };
       // Session A drives a run to completion.
@@ -1133,7 +1223,11 @@ export default defineWorkflow({
         respond: (prompt, tool) => {
           const contract = stepFromPrompt(prompt);
           if (contract) {
-            void tool.execute("call-1", { ...contract, output: { reply: "hi" } });
+            void tool.execute("call-1", {
+              action: "submit",
+              ...contract,
+              output: { reply: "hi" },
+            });
           }
         },
       });
@@ -1252,8 +1346,13 @@ export default defineWorkflow({
         await harness.emitAsync("session_start");
         // No active run.
         await expect(
-          harness.tool.execute("call-x", { step: "s", attempt: "a", output: {} }),
-        ).rejects.toThrow(/No workflow is running/);
+          harness.tool.execute("call-x", {
+            action: "submit",
+            step: "s",
+            attempt: "a",
+            output: {},
+          }),
+        ).rejects.toThrow(/No workflow step is waiting/);
 
         // An active run with a pending step contract.
         await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
@@ -1287,7 +1386,12 @@ export default defineWorkflow({
         });
         // A compute node has no agent contract: submissions are rejected.
         await expect(
-          harness.tool.execute("call-y", { step: "work", attempt: "wrong", output: {} }),
+          harness.tool.execute("call-y", {
+            action: "submit",
+            step: "work",
+            attempt: "wrong",
+            output: {},
+          }),
         ).rejects.toThrow();
         await harness.emitAsync("session_shutdown");
       } finally {
@@ -1305,9 +1409,9 @@ export default defineWorkflow({
     const workflow = harness.commands.get("workflow");
     const controller = harness.commands.get("controller");
 
-    // No workflows or controllers exist in this project.
+    // The built-in monitor exists even when the project has no local workflows or controllers.
     await workflow?.handler("", harness.ctx);
-    expect(harness.notifications.at(-1)).toContain("No workflows found");
+    expect(harness.notifications.at(-1)).toContain("monitor (builtin)");
     await workflow?.handler("pause", harness.ctx);
     expect(harness.notifications.at(-1)).toContain("No workflow is running");
     await workflow?.handler("resume", harness.ctx);
@@ -1636,10 +1740,16 @@ export default defineWorkflow({
       );
       await first.emitAsync("session_shutdown");
 
-      // Session B has no in-memory waiting run; discovery comes from disk.
+      // Session B has no in-memory waiting run; the tool discovers it from disk
+      // and starts the continuation after the answering turn settles.
       const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
       await second.emitAsync("session_start");
-      await second.command.handler('answer {"approved":true}', second.ctx);
+      const queued = await second.tool.execute("answer-1", {
+        action: "answer",
+        input: { approved: true },
+      });
+      expect(queued.details).toMatchObject({ action: "start", queued: true });
+      await second.emitAsync("agent_settled");
       await waitFor(() => second.notifications.some((note) => note.includes("completed")));
 
       const queue = new SqliteControllerStore(projectControllerStorePath(cwd), {

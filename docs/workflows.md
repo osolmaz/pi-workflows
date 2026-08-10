@@ -9,10 +9,14 @@ model sees, and how runs behave at runtime. For the on-disk run format, see
 
 A workflow is a TypeScript module whose default export is `defineWorkflow(...)`.
 Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
-`.workflow.mjs`) from two directories, in precedence order:
+`.workflow.mjs`) from these sources, in precedence order:
 
 1. `.pi/workflows/` in the project (highest precedence on name collisions)
 2. `~/.pi/agent/workflows/` globally
+3. Workflows built into Pi Workflows
+
+Pi Workflows includes a built-in `monitor` workflow. A project or global file
+named `monitor.workflow.ts` replaces it.
 
 The workflow's command name is the file stem, so `.pi/workflows/triage.workflow.ts`
 runs as `/workflow triage`. A direct path also works: `/workflow ./somewhere/x.workflow.ts`.
@@ -44,7 +48,7 @@ Top-level fields:
 
 | Field                | Type                   | Notes                                                                                                                                                                                                              |
 | -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`               | `string`               | Required. Used in run ids and the step contract. `cancel`, `list`, `pause`, and `resume` are reserved for `/workflow` subcommands.                                                                                 |
+| `name`               | `string`               | Required. Used in run ids and the step contract. `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are reserved for `/workflow` subcommands.                                                             |
 | `title`              | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                                      |
 | `presentationPrompt` | `string` or function   | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput, signal }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
 | `startAt`            | `string`               | Required. Id of the first node.                                                                                                                                                                                    |
@@ -244,6 +248,56 @@ A missing case for the resolved value fails the run with a routing error. A
 node with no outgoing edge (or no matching failure route) ends the run:
 `completed` on success, `failed`/`timed_out`/`cancelled` otherwise.
 
+## Model workflow control
+
+The model sees one `workflow` tool. Its `action` field supports:
+
+- `list` for discovered workflow names and sources.
+- `start` with a workflow name or path and structured input.
+- `status` for the active run or a supplied run ID.
+- `pause`, `resume`, and `cancel` for the active run.
+- `answer` with checkpoint input and an optional run ID.
+- `submit` for the current workflow step contract.
+
+A model-started run is queued until the model's current turn settles. The first
+workflow prompt then starts a new turn. This keeps the requesting turn outside
+the workflow's first attempt and prevents an early missing-submission reminder.
+The normal extension offers all actions. The headless RPC bridge offers only
+`submit`, so a workflow child cannot recursively control other runs.
+
+### Built-in monitor
+
+The built-in `monitor` workflow turns a plain request for repeated checks into
+one looping workflow run. Its input is:
+
+```json
+{
+  "task": "Check pull request 123",
+  "everyMinutes": 30,
+  "reportWhen": "Checks fail or the state changes materially",
+  "stopWhen": "The pull request is merged or closed",
+  "maxChecks": 1000
+}
+```
+
+The first check runs immediately. Each accepted check records a bounded current
+observation and chooses whether to continue, report, or stop. A report uses a
+separate agent node so its structured check result is validated before the user
+sees the message. The next check can read the previous accepted observation.
+
+Intervals must be whole minutes from 1 through 1,440. `maxChecks` defaults to
+1,000 and cannot exceed 1,000. The workflow also has a finite step limit and
+bounded observation and report sizes.
+
+The interval uses the existing shell action with `sleep`. The node and command
+timeouts are higher than the maximum interval. Cancelling the workflow aborts
+the sleep immediately. If the owning Pi process or standalone host stops during
+the sleep, normal parking rules abort the shell node and resume later by running
+that sleep again from the beginning.
+
+A monitor uses the session's single active workflow slot. It does not provide
+cron syntax, calendar scheduling, OS notifications, or a background service.
+
 ## The step contract
 
 Every `agent` prompt ends with a step contract block naming the workflow, the
@@ -254,16 +308,17 @@ step id, the attempt id, and the expected output shape:
 Workflow step contract (workflow: autoimplement, step: review, attempt: 6f9d…)
 
 Complete this step by calling the `workflow` tool exactly once with:
-{"step": "review", "attempt": "6f9d…", "output": <your result>}
+{"action": "submit", "step": "review", "attempt": "6f9d…", "output": <your result>}
 Expected output: { "route": "clean" | "issues_found", "reason": "short justification" }
 The step is complete only after the workflow tool accepts the output.
 If the tool reports a validation error, correct the output and call it again.
 ```
 
-The `workflow` tool takes `{ step, attempt, output }`. Submissions are
-rejected (with a reason the model sees) when no step is pending, the step id
-is wrong, the attempt id belongs to an earlier attempt of the same node (loops
-revisit node ids, so each attempt gets a fresh id), or `validate` throws.
+The `workflow` tool uses `{ action: "submit", step, attempt, output }` for step
+results. Submissions are rejected (with a reason the model sees) when no step
+is pending, the step id is wrong, the attempt id belongs to an earlier attempt
+of the same node (loops revisit node ids, so each attempt gets a fresh id), or
+`validate` throws.
 Acceptance resolves the step and the engine advances; the next agent prompt
 arrives as a new user message in the same conversation.
 

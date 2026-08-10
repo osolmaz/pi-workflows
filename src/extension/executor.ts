@@ -255,7 +255,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         prompt: [
           `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
           "Complete it by calling the `workflow` tool with:",
-          `{"step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
+          `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
           `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
         ].join("\n"),
         streaming: this.streaming,

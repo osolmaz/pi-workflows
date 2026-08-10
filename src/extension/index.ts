@@ -1,10 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   projectControllerStorePath,
   type RunEventRecord,
@@ -42,6 +37,7 @@ import {
 import { ConversationStepExecutor } from "./executor.js";
 import { SessionRecorder } from "./recorder.js";
 import { buildWidgetView } from "./widget.js";
+import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.js";
 
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
@@ -103,6 +99,7 @@ export type ParsedWorkflowArgs =
   | { kind: "cancel" }
   | { kind: "pause" }
   | { kind: "resume" }
+  | { kind: "status"; runId?: string }
   | { kind: "answer"; input: unknown; runId?: string | undefined }
   | { kind: "run"; ref: string; input: unknown };
 
@@ -114,6 +111,16 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   }
   if (trimmed === "cancel" || trimmed === "pause" || trimmed === "resume") {
     return { kind: trimmed };
+  }
+  if (trimmed === "status") {
+    return { kind: "status" };
+  }
+  if (trimmed.startsWith("status ")) {
+    const runId = trimmed.slice("status".length).trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
+      throw new Error("status requires one valid run id");
+    }
+    return { kind: "status", runId };
   }
   if (trimmed === "answer" || trimmed.startsWith("answer ")) {
     let rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
@@ -165,6 +172,21 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
     return { kind: "run", ref, input: JSON.parse(json) as unknown };
   }
   return { kind: "run", ref, input: rest.length > 0 ? { task: rest } : {} };
+}
+
+function workflowStateSummary(state: WorkflowRunState): JsonObject {
+  return {
+    active: state.status === "running",
+    runId: state.runId,
+    workflowName: state.workflowName,
+    status: state.status,
+    steps: state.steps.length,
+    ...(state.currentNode !== undefined ? { currentNode: state.currentNode } : {}),
+    ...(state.waitingOn !== undefined ? { waitingOn: state.waitingOn } : {}),
+    ...(state.startedAt !== undefined ? { startedAt: state.startedAt } : {}),
+    ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
+    ...(state.error !== undefined ? { error: state.error } : {}),
+  };
 }
 
 type WidgetSource = {
@@ -317,6 +339,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     runSyncTimer.unref?.();
   };
   let activeRun: ActiveRun | null = null;
+  let pendingToolLaunch: {
+    ctx: ExtensionContext;
+    ref: string;
+    input: unknown;
+    options?: StartRunOptions;
+  } | null = null;
   // The interactive run currently parked at a checkpoint, if any.
   let lastWaitingRunId: string | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
@@ -1004,27 +1032,307 @@ export default function piWorkflows(pi: ExtensionAPI) {
     return controllerHost;
   };
 
-  const listWorkflows = async (ctx: ExtensionCommandContext) => {
+  type WorkflowControlResult = {
+    message: string;
+    details: JsonObject;
+    level?: "info" | "warning" | "error";
+  };
+
+  const listWorkflowControl = async (ctx: ExtensionContext): Promise<WorkflowControlResult> => {
     const discovered = await discoverWorkflows({ cwd: ctx.cwd });
     if (discovered.length === 0) {
-      notify(
-        ctx,
-        "No workflows found. Put *.workflow.ts files in .pi/workflows/ or ~/.pi/agent/workflows/, or pass a path.",
-        "warning",
-      );
-      return;
+      return {
+        message:
+          "No workflows found. Put *.workflow.ts files in .pi/workflows/ or ~/.pi/agent/workflows/, or pass a path.",
+        details: { workflows: [] },
+        level: "warning",
+      };
     }
     const names = discovered.map((workflow) => `${workflow.name} (${workflow.source})`).join(", ");
-    notify(ctx, `Workflows: ${names}. Run one with /workflow <name> [task].`);
+    return {
+      message: `Workflows: ${names}. Run one with /workflow <name> [task].`,
+      details: {
+        workflows: discovered.map((workflow) => ({
+          name: workflow.name,
+          source: workflow.source,
+          ...(workflow.name === "monitor"
+            ? {
+                description:
+                  "Repeatedly check a target, report requested changes, and stop on a condition.",
+              }
+            : {}),
+        })),
+      },
+    };
+  };
+
+  const listWorkflows = async (ctx: ExtensionContext) => {
+    const result = await listWorkflowControl(ctx);
+    notify(ctx, result.message, result.level);
+  };
+
+  const cancelWorkflowControl = (ctx: ExtensionContext): WorkflowControlResult => {
+    if (activeRun) {
+      const workflowName = activeRun.workflowName;
+      const runId = activeRun.runId;
+      activeRun.engine.cancel();
+      return {
+        message: `Cancelling workflow ${workflowName}…`,
+        details: { action: "cancel", workflowName, runId },
+      };
+    }
+    if (pendingToolLaunch !== null) {
+      const ref = pendingToolLaunch.ref;
+      pendingToolLaunch = null;
+      return {
+        message: `Cancelled the queued workflow launch for ${ref}.`,
+        details: { action: "cancel", workflow: ref, queued: false },
+      };
+    }
+    if (widgetSource) {
+      const { state } = widgetSource;
+      clearWidgetTimer();
+      clearWidget(ctx);
+      const detail =
+        state.status === "waiting" && state.waitingOn
+          ? `already ended at checkpoint ${state.waitingOn}`
+          : `already ${state.status}`;
+      return {
+        message: `Workflow ${state.workflowName} ${detail}; cleared its widget.`,
+        details: { action: "clear", workflowName: state.workflowName, runId: state.runId },
+      };
+    }
+    return {
+      message: "No workflow is running.",
+      details: { action: "cancel", active: false },
+      level: "warning",
+    };
+  };
+
+  const pauseWorkflowControl = (ctx: ExtensionContext): WorkflowControlResult => {
+    if (!activeRun) {
+      return {
+        message: "No workflow is running.",
+        details: { action: "pause", active: false },
+        level: "warning",
+      };
+    }
+    if (runHeld()) {
+      return {
+        message: `Workflow ${activeRun.workflowName} is already pausing or paused.`,
+        details: {
+          action: "pause",
+          workflowName: activeRun.workflowName,
+          runId: activeRun.runId,
+          paused: true,
+        },
+      };
+    }
+    activeRun.engine.pause();
+    renderWidget(ctx);
+    return {
+      message: `Pausing workflow ${activeRun.workflowName}; the current step will finish before the run holds.`,
+      details: {
+        action: "pause",
+        workflowName: activeRun.workflowName,
+        runId: activeRun.runId,
+        paused: true,
+      },
+    };
+  };
+
+  const resumeWorkflowControl = (ctx: ExtensionContext): WorkflowControlResult => {
+    if (!activeRun) {
+      return {
+        message: "No workflow is running.",
+        details: { action: "resume", active: false },
+        level: "warning",
+      };
+    }
+    if (!runHeld()) {
+      return {
+        message: `Workflow ${activeRun.workflowName} is not paused.`,
+        details: {
+          action: "resume",
+          workflowName: activeRun.workflowName,
+          runId: activeRun.runId,
+          paused: false,
+        },
+        level: "warning",
+      };
+    }
+    activeRun.engine.resume();
+    activeRun.executor.release();
+    renderWidget(ctx);
+    return {
+      message: `Workflow ${activeRun.workflowName} resumed.`,
+      details: {
+        action: "resume",
+        workflowName: activeRun.workflowName,
+        runId: activeRun.runId,
+        paused: false,
+      },
+    };
+  };
+
+  const statusWorkflowControl = async (
+    ctx: ExtensionContext,
+    runId?: string,
+  ): Promise<WorkflowControlResult> => {
+    if (runId !== undefined) {
+      const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+      if (bundle === null) {
+        throw new Error(`Workflow run not found: ${runId}`);
+      }
+      const { state } = bundle;
+      return {
+        message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
+        details: workflowStateSummary(state),
+      };
+    }
+    const state = activeRun?.lastState ?? widgetSource?.state;
+    if ((state === undefined || state === null) && pendingToolLaunch !== null) {
+      return {
+        message: `Workflow ${pendingToolLaunch.ref} is queued until the current turn finishes.`,
+        details: { active: false, queued: true, workflow: pendingToolLaunch.ref },
+      };
+    }
+    if (state === undefined || state === null) {
+      return {
+        message: "No workflow run is active or displayed.",
+        details: { active: false },
+        level: "warning",
+      };
+    }
+    return {
+      message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
+      details: workflowStateSummary(state),
+    };
+  };
+
+  const resolveWaitingWorkflow = async (
+    ctx: ExtensionContext,
+    requestedRunId?: string,
+  ): Promise<{ parentRunId: string; workflowPath: string }> => {
+    let parentRunId = requestedRunId ?? lastWaitingRunId;
+    if (parentRunId === null) {
+      const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
+      const known = new Set(rows.map((row) => row.runId));
+      const continued = new Set(
+        rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
+      );
+      const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+      parentRunId =
+        bundles.find(
+          (bundle) =>
+            bundle.state.status === "waiting" &&
+            known.has(bundle.state.runId) &&
+            !continued.has(bundle.state.runId),
+        )?.state.runId ?? null;
+    }
+    if (parentRunId === null) {
+      throw new Error("No workflow is waiting for an answer.");
+    }
+    const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
+    if (
+      parent === null ||
+      parent.state.status !== "waiting" ||
+      parent.state.workflowPath === undefined
+    ) {
+      if (parentRunId === lastWaitingRunId) {
+        lastWaitingRunId = null;
+      }
+      throw new Error(`Workflow run ${parentRunId} is no longer waiting.`);
+    }
+    return { parentRunId, workflowPath: parent.state.workflowPath };
+  };
+
+  const answerWorkflowControl = async (
+    ctx: ExtensionContext,
+    input: unknown,
+    requestedRunId?: string,
+  ): Promise<WorkflowControlResult> => {
+    const waiting = await resolveWaitingWorkflow(ctx, requestedRunId);
+    const continued = await startRun(ctx, waiting.workflowPath, input, {
+      parentRunId: waiting.parentRunId,
+    });
+    if (continued === undefined) {
+      throw new Error("Could not start the checkpoint continuation.");
+    }
+    lastWaitingRunId = null;
+    return {
+      message: `Answered checkpoint ${waiting.parentRunId}; continuation ${continued} started.`,
+      details: {
+        action: "answer",
+        parentRunId: waiting.parentRunId,
+        runId: continued,
+      },
+    };
+  };
+
+  const startWorkflowControl = async (
+    ctx: ExtensionContext,
+    ref: string,
+    input: unknown,
+  ): Promise<WorkflowControlResult> => {
+    if (activeRun !== null) {
+      throw new Error(`A workflow is already running: ${activeRun.workflowName}.`);
+    }
+    if (pendingToolLaunch !== null) {
+      throw new Error("A workflow launch is already waiting for the current turn to finish.");
+    }
+    if (presentationPending !== null) {
+      throw new Error("The previous workflow result is still being presented.");
+    }
+    const runId = await startRun(ctx, ref, input);
+    if (runId === undefined) {
+      throw new Error("The workflow could not start.");
+    }
+    return {
+      message: `Workflow ${ref} started (run ${runId}).`,
+      details: { action: "start", workflow: ref, runId },
+    };
+  };
+
+  const queueToolLaunch = async (
+    ctx: ExtensionContext,
+    ref: string,
+    input: unknown,
+    options: StartRunOptions = {},
+  ): Promise<WorkflowControlResult> => {
+    if (activeRun !== null) {
+      throw new Error(
+        `A workflow is already running: ${activeRun.workflowName}. Cancel it before starting another.`,
+      );
+    }
+    if (pendingToolLaunch !== null) {
+      throw new Error("A workflow launch is already waiting for the current turn to finish.");
+    }
+    if (presentationPending !== null) {
+      throw new Error("The previous workflow result is still being presented.");
+    }
+    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
+    const workflow = await loadWorkflowFile(resolved.path);
+    pendingToolLaunch = { ctx, ref, input, options };
+    return {
+      message: `Workflow ${workflow.name} will start after this turn finishes.`,
+      details: {
+        action: "start",
+        workflow: workflow.name,
+        source: resolved.source,
+        queued: true,
+      },
+    };
   };
 
   pi.registerCommand("workflow", {
     description:
-      "Run a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: pause, resume, cancel, answer",
+      "Run or manage a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, answer",
     getArgumentCompletions: async (prefix: string) => {
       const discovered = await discoverWorkflows({ cwd: process.cwd() });
       const items = [
         ...discovered.map((workflow) => ({ value: workflow.name, label: workflow.name })),
+        { value: "status", label: "status" },
         { value: "pause", label: "pause" },
         { value: "resume", label: "resume" },
         { value: "cancel", label: "cancel" },
@@ -1045,113 +1353,39 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (parsed.kind === "cancel") {
-        if (activeRun) {
-          activeRun.engine.cancel();
-          notify(ctx, `Cancelling workflow ${activeRun.workflowName}…`);
-          return;
-        }
-        // No live run, but a parked (waiting) or recently finished run may
-        // still occupy the widget; cancel clears it.
-        if (widgetSource) {
-          const { state } = widgetSource;
-          clearWidgetTimer();
-          clearWidget(ctx);
-          const detail =
-            state.status === "waiting" && state.waitingOn
-              ? `already ended at checkpoint ${state.waitingOn}`
-              : `already ${state.status}`;
-          notify(ctx, `Workflow ${state.workflowName} ${detail}; cleared its widget.`);
-          return;
-        }
-        notify(ctx, "No workflow is running.", "warning");
+        const result = cancelWorkflowControl(ctx);
+        notify(ctx, result.message, result.level);
         return;
       }
       if (parsed.kind === "pause") {
-        if (!activeRun) {
-          notify(ctx, "No workflow is running.", "warning");
-          return;
-        }
-        if (runHeld()) {
-          notify(ctx, `Workflow ${activeRun.workflowName} is already pausing or paused.`);
-          return;
-        }
-        activeRun.engine.pause();
-        renderWidget(ctx);
-        notify(
-          ctx,
-          `Pausing workflow ${activeRun.workflowName} — the current step finishes, then the run holds. /workflow resume to continue.`,
-        );
+        const result = pauseWorkflowControl(ctx);
+        notify(ctx, result.message, result.level);
         return;
       }
       if (parsed.kind === "resume") {
-        if (!activeRun) {
-          notify(ctx, "No workflow is running.", "warning");
-          return;
+        const result = resumeWorkflowControl(ctx);
+        notify(ctx, result.message, result.level);
+        return;
+      }
+      if (parsed.kind === "status") {
+        try {
+          const result = await statusWorkflowControl(ctx, parsed.runId);
+          notify(ctx, result.message, result.level);
+        } catch (error) {
+          notify(ctx, errorMessage(error), "error");
         }
-        if (!runHeld()) {
-          notify(ctx, `Workflow ${activeRun.workflowName} is not paused.`);
-          return;
-        }
-        activeRun.engine.resume();
-        activeRun.executor.release();
-        renderWidget(ctx);
-        notify(ctx, `Workflow ${activeRun.workflowName} resumed.`);
         return;
       }
       if (parsed.kind === "answer") {
-        // Resolve the waiting run durably: this session's own checkpoint if
-        // there is one, an explicit run id, or the most recent waiting bundle
-        // on disk (restart- and host-safe).
-        let parentRunId = parsed.runId ?? lastWaitingRunId;
-        if (parentRunId === null) {
-          // Discover from durable state, scoped to this project's queue: a
-          // bare answer targets the newest waiting run this project started
-          // that has not already been continued.
-          const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
-          const known = new Set(rows.map((row) => row.runId));
-          const continued = new Set(
-            rows
-              .map((row) => row.parentRunId)
-              .filter((parent): parent is string => parent !== null),
-          );
-          const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
-          parentRunId =
-            bundles.find(
-              (bundle) =>
-                bundle.state.status === "waiting" &&
-                known.has(bundle.state.runId) &&
-                !continued.has(bundle.state.runId),
-            )?.state.runId ?? null;
-        }
-        if (parentRunId === null) {
-          notify(ctx, "No workflow is waiting for an answer.", "warning");
-          return;
-        }
-        const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
-        if (
-          parent === null ||
-          parent.state.status !== "waiting" ||
-          parent.state.workflowPath === undefined
-        ) {
-          notify(ctx, `Workflow run ${parentRunId} is no longer waiting.`, "warning");
-          if (parentRunId === lastWaitingRunId) {
-            lastWaitingRunId = null;
-          }
-          return;
-        }
         try {
-          const continued = await startRun(ctx, parent.state.workflowPath, parsed.input, {
-            parentRunId,
-          });
-          if (continued !== undefined) {
-            lastWaitingRunId = null;
-          }
+          const result = await answerWorkflowControl(ctx, parsed.input, parsed.runId);
+          notify(ctx, result.message, result.level);
         } catch (error) {
           const message = errorMessage(error);
           notify(
             ctx,
             /workflow_run_queue_parent/.test(message)
-              ? `Checkpoint ${parentRunId} was already answered; see its continuation run.`
+              ? "That checkpoint was already answered; see its continuation run."
               : `Could not continue workflow: ${message}`,
             "error",
           );
@@ -1159,7 +1393,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       try {
-        await startRun(ctx, parsed.ref, parsed.input);
+        const result = await startWorkflowControl(ctx, parsed.ref, parsed.input);
+        notify(ctx, result.message, result.level);
       } catch (error) {
         notify(ctx, `Could not start workflow: ${errorMessage(error)}`, "error");
       }
@@ -1239,37 +1474,65 @@ export default function piWorkflows(pi: ExtensionAPI) {
     name: "workflow",
     label: "Workflow",
     description: [
-      "Submit the output for the pending workflow step.",
-      "Only call this tool when a workflow step contract in the conversation asks you to.",
-      "Pass the exact step id from the contract and your result as the output.",
+      "List, start, inspect, pause, resume, cancel, answer, or complete Pi Workflows runs.",
+      "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, everyMinutes, reportWhen, stopWhen, and optional maxChecks.",
+      "Use submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
+      "Do not start repeated work without the user's request, and keep monitoring observation-only unless the user authorizes mutations.",
     ].join(" "),
-    parameters: Type.Object({
-      step: Type.String({ description: "The step id from the workflow step contract" }),
-      attempt: Type.String({ description: "The attempt id from the workflow step contract" }),
-      output: Type.Unknown({ description: "The step output, matching the expected output shape" }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!activeRun) {
-        throw new Error(
-          "No workflow is running. Do not call the workflow tool outside a workflow.",
-        );
-      }
-      // Flush the conversation into the bundle before accepting, so the
-      // attempt's recorded range includes the assistant message that carries
-      // this submission. Pi guarantees ctx.sessionManager is synchronized
-      // through the current assistant tool-calling message before tool_call
-      // dispatch, which precedes tool execution (docs/extensions.md, "Tool
-      // Events"). The tool result of this call itself lands after the range
-      // by design: it is the submission receipt, not the submission.
-      await activeRun.recorder?.record(ctx).catch(() => undefined);
-      await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
-      const result = await activeRun.executor.submit(params.step, params.attempt, params.output);
-      if (!result.accepted) {
-        throw new Error(result.message);
+    parameters: WorkflowToolParameters,
+    async execute(_toolCallId, params: WorkflowToolInput, _signal, _onUpdate, ctx) {
+      let control: WorkflowControlResult;
+      switch (params.action) {
+        case "list":
+          control = await listWorkflowControl(ctx);
+          break;
+        case "start":
+          control = await queueToolLaunch(ctx, params.workflow, params.input ?? {});
+          break;
+        case "status":
+          control = await statusWorkflowControl(ctx, params.runId);
+          break;
+        case "pause":
+          control = pauseWorkflowControl(ctx);
+          break;
+        case "resume":
+          control = resumeWorkflowControl(ctx);
+          break;
+        case "cancel":
+          control = cancelWorkflowControl(ctx);
+          break;
+        case "answer": {
+          const waiting = await resolveWaitingWorkflow(ctx, params.runId);
+          control = await queueToolLaunch(ctx, waiting.workflowPath, params.input, {
+            parentRunId: waiting.parentRunId,
+          });
+          break;
+        }
+        case "submit": {
+          if (!activeRun) {
+            throw new Error("No workflow step is waiting for output.");
+          }
+          // Flush the conversation into the bundle before accepting, so the
+          // attempt range includes the assistant message carrying this call.
+          await activeRun.recorder?.record(ctx).catch(() => undefined);
+          await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
+          const result = await activeRun.executor.submit(
+            params.step,
+            params.attempt,
+            params.output,
+          );
+          if (!result.accepted) {
+            throw new Error(result.message);
+          }
+          return {
+            content: [{ type: "text", text: result.message }],
+            details: { action: "submit", step: params.step, accepted: true },
+          };
+        }
       }
       return {
-        content: [{ type: "text", text: result.message }],
-        details: { step: params.step, accepted: true },
+        content: [{ type: "text", text: control.message }],
+        details: control.details,
       };
     },
   });
@@ -1375,6 +1638,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    if (activeRun === null && pendingToolLaunch !== null) {
+      const launch = pendingToolLaunch;
+      pendingToolLaunch = null;
+      try {
+        const runId = await startRun(launch.ctx, launch.ref, launch.input, launch.options);
+        if (runId === undefined) {
+          notify(launch.ctx, "The queued workflow could not start.", "error");
+        } else if (launch.options?.parentRunId !== undefined) {
+          lastWaitingRunId = null;
+        }
+      } catch (error) {
+        notify(launch.ctx, `Could not start queued workflow: ${errorMessage(error)}`, "error");
+      }
+      return;
+    }
     const run = activeRun;
     if (!run) {
       presentationPending = null;
@@ -1400,6 +1678,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await run?.recorder?.stop().catch(() => undefined);
     await run?.completion?.catch(() => undefined);
     activeRun = null;
+    pendingToolLaunch = null;
     lastWaitingRunId = null;
     if (runSyncTimer !== null) {
       clearInterval(runSyncTimer);

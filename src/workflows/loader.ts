@@ -12,7 +12,7 @@ const WORKFLOW_FILE_SUFFIXES = [".workflow.ts", ".workflow.js", ".workflow.mts",
 export type DiscoveredWorkflow = {
   name: string;
   path: string;
-  source: "project" | "global" | "path";
+  source: "project" | "global" | "builtin" | "path";
 };
 
 export type WorkflowSearchPaths = {
@@ -20,14 +20,16 @@ export type WorkflowSearchPaths = {
   homeDir?: string;
 };
 
-/** Directories scanned for `*.workflow.ts` files, in precedence order. */
+/** Directories scanned for workflow files, in precedence order. */
 export function workflowSearchDirs(
   options: WorkflowSearchPaths,
-): { dir: string; source: "project" | "global" }[] {
+): { dir: string; source: "project" | "global" | "builtin" }[] {
   const homeDir = options.homeDir ?? os.homedir();
+  const builtinDir = fileURLToPath(new URL("../builtins/", import.meta.url));
   return [
     { dir: path.join(options.cwd, ".pi", "workflows"), source: "project" },
     { dir: path.join(homeDir, ".pi", "agent", "workflows"), source: "global" },
+    { dir: builtinDir, source: "builtin" },
   ];
 }
 
