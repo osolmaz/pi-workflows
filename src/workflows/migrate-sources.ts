@@ -92,10 +92,8 @@ export async function migrateLegacyWorkflowSources(options: {
         workflowHash: state.workflowHash,
       });
       if (legacy === undefined) {
-        result.blocked.push({
-          runId: state.runId,
-          reason: `legacy built-in ${pathEntry.id} has an unknown source revision`,
-        });
+        const reason = `legacy built-in ${pathEntry.id} has an unknown source revision`;
+        result.blocked.push({ runId: state.runId, reason });
         continue;
       }
       workflowSource = {

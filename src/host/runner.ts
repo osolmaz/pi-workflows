@@ -61,6 +61,7 @@ export class WorkflowHost {
   private manager: ControllerManager | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly activeRuns = new Map<string, Promise<void>>();
+  private readonly migrationBlockedRuns = new Set<string>();
   private readonly schedulerExecutors = new Map<WorkflowEngine, RpcStepExecutor>();
   /** Runs whose resume refused (edited source); skipped until a host restart. */
   private readonly skippedRuns = new Set<string>();
@@ -101,8 +102,9 @@ export class WorkflowHost {
       store: this.childRunStore,
       queue: this.store,
     });
-    if (migration.blocked.length > 0) {
-      this.log(`legacy workflow source migration blocked for ${migration.blocked.length} run(s)`);
+    for (const blocked of migration.blocked) {
+      this.migrationBlockedRuns.add(blocked.runId);
+      this.log(`run ${blocked.runId} parked: ${blocked.reason}`);
     }
 
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });
@@ -190,7 +192,7 @@ export class WorkflowHost {
         runnerId: this.runnerId,
         claimToken: randomUUID(),
         leaseMs: RUN_CLAIM_LEASE_MS,
-        excludeRunIds: [...this.skippedRuns],
+        excludeRunIds: [...this.skippedRuns, ...this.migrationBlockedRuns],
       });
     } catch (error) {
       // Store contention or corruption must not kill the host's loop.

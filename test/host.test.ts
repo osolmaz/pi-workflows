@@ -275,6 +275,55 @@ export default defineWorkflow({
     }
   });
 
+  it("keeps an unproven legacy built-in parked", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "unknown-built-in",
+        workflowName: "monitor",
+        workflowSourceRef: "/package/dist/workflows/monitor.workflow.js",
+        input: {},
+        runnerId: "session-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      queue.parkWorkflowRun({ runId: "unknown-built-in", claimToken: "token-a" });
+      const runStore = new WorkflowRunStore(runsDir);
+      const workflow = defineWorkflow({
+        name: "monitor",
+        startAt: "work",
+        nodes: { work: compute({ run: () => "ignored" }) },
+        edges: [],
+      });
+      const state = {
+        ...runningState("unknown-built-in"),
+        workflowName: "monitor",
+        workflowPath: "/package/dist/workflows/monitor.workflow.js",
+        workflowHash: "unknown-hash",
+      };
+      const runDir = await runStore.initializeRunBundle(workflow, state);
+      const logs: string[] = [];
+      const host = new WorkflowHost({ cwd, claimPollMs: 25, onLog: (line) => logs.push(line) });
+      await host.start();
+      try {
+        await waitFor(() => logs.some((line) => line.includes("unknown source revision")));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(queue.getWorkflowRun("unknown-built-in")?.status).toBe("parked");
+        expect((await readRunBundle(runDir))?.state.status).toBe("running");
+      } finally {
+        await host.stop();
+        queue.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("does not reap the live host's children when a second host fails to start", async () => {
     const cwd = await makeTempDir("pi-host-project");
     const controllerDir = await makeTempDir("pi-host-controllers");
