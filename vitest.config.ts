@@ -23,6 +23,18 @@ export default defineConfig({
       include: ["src/**"],
       exclude: [
         "src/viewer/tui.ts",
+        // Re-export and type-only modules contain no behavior to test. Keeping
+        // them out also makes branch totals stable across coverage runtimes.
+        "src/**/index.ts",
+        "src/**/types.ts",
+        "src/**/errors.ts",
+        "src/controllers/conditions.ts",
+        "src/controllers/definition.ts",
+        "src/controllers/json.ts",
+        "src/controllers/results.ts",
+        "src/render/format.ts",
+        "src/workflows/definition.ts",
+        "src/workflows/text.ts",
         // Loaded only by spawned headless pi children; subprocess execution
         // (covered by the e2e suite) never registers in this report.
         "src/host/rpc-bridge.ts",
