@@ -986,7 +986,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     let started: string | undefined;
     try {
-      started = await startRun(ctx, claimed.workflowSourceRef, claimed.input, {
+      const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(claimed.runId));
+      const sourceRef =
+        bundle?.state.workflowSource === undefined
+          ? claimed.workflowSourceRef
+          : bundle.state.workflowSource.kind === "builtin"
+            ? `builtin:${bundle.state.workflowSource.id}`
+            : bundle.state.workflowSource.path;
+      started = await startRun(ctx, sourceRef, claimed.input, {
         resume: true,
         runId: claimed.runId,
         claimToken,
