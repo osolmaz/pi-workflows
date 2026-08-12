@@ -165,6 +165,40 @@ describe("migrateLegacyWorkflowSources", () => {
     expect((await readRunBundle(terminalDir))?.state.workflowPath).toBeDefined();
   });
 
+  it("repairs the queue when the bundle migration already committed", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-repair");
+    const store = new WorkflowRunStore(root);
+    const state = legacyState("repair-run");
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const queue = new SqliteControllerStore(path.join(root, "repair.sqlite"));
+    queue.enqueueWorkflowRun({
+      runId: "repair-run",
+      workflowName: "fixture",
+      workflowSourceRef: state.workflowPath as string,
+      input: null,
+      runnerId: "old-runner",
+      claimToken: "old-claim",
+      leaseMs: 1,
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    const canonical = {
+      ...state,
+      workflowSource: { kind: "builtin" as const, id: "fixture", revision: "r1" },
+    };
+    delete canonical.workflowPath;
+    delete canonical.workflowHash;
+    await fs.writeFile(path.join(runDir, "state.json"), `${JSON.stringify(canonical)}\n`);
+
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
+
+    expect(result.blocked).toEqual([]);
+    expect(queue.getWorkflowRun("repair-run")).toMatchObject({
+      workflowSourceRef: "builtin:fixture",
+      status: "parked",
+    });
+    queue.close();
+  });
+
   it("does not rewrite the bundle when its queue row cannot migrate", async () => {
     const root = await makeTempDir("pi-workflows-migrate-sources-blocked");
     const store = new WorkflowRunStore(root);
@@ -175,6 +209,7 @@ describe("migrateLegacyWorkflowSources", () => {
       catalog: catalog(),
       store,
       queue: {
+        repairCanonicalWorkflowSourceRun: () => false,
         claimLegacyWorkflowSourceRun: () => false,
         parkWorkflowRun: () => false,
       },

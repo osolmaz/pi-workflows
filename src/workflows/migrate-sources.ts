@@ -6,6 +6,13 @@ import { WorkflowRunStore, listRunBundles } from "./store.js";
 import type { WorkflowRunState, WorkflowSource } from "./types.js";
 
 export type LegacySourceMigrationQueue = {
+  repairCanonicalWorkflowSourceRun(options: {
+    runId: string;
+    workflowSourceRef: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+  }): "unchanged" | "claimed" | false;
   claimLegacyWorkflowSourceRun(options: {
     runId: string;
     oldWorkflowPath: string;
@@ -35,7 +42,32 @@ export async function migrateLegacyWorkflowSources(options: {
   for (const bundle of await listRunBundles(store.outputRoot)) {
     const state = bundle.state;
     if (state.status !== "running" && state.status !== "waiting") continue;
-    if (state.workflowSource !== undefined) continue;
+    if (state.workflowSource !== undefined) {
+      if (options.queue === undefined) continue;
+      const claimToken = randomUUID();
+      const repaired = options.queue.repairCanonicalWorkflowSourceRun({
+        runId: state.runId,
+        workflowSourceRef: sourceRef(state.workflowSource),
+        runnerId: `source-migration-${process.pid}`,
+        claimToken,
+        leaseMs: MIGRATION_LEASE_MS,
+      });
+      if (repaired === false) {
+        result.blocked.push({
+          runId: state.runId,
+          reason: "canonical bundle has an active, terminal, or unavailable queue row",
+        });
+      } else if (
+        repaired === "claimed" &&
+        !options.queue.parkWorkflowRun({ runId: state.runId, claimToken })
+      ) {
+        result.blocked.push({
+          runId: state.runId,
+          reason: "canonical queue repair could not release its claim",
+        });
+      }
+      continue;
+    }
     if (state.workflowPath === undefined || state.workflowHash === undefined) {
       result.blocked.push({ runId: state.runId, reason: "legacy workflow identity is incomplete" });
       continue;
@@ -118,6 +150,10 @@ export async function migrateLegacyWorkflowSources(options: {
     result.migratedRunIds.push(state.runId);
   }
   return result;
+}
+
+function sourceRef(source: WorkflowSource): string {
+  return source.kind === "builtin" ? `builtin:${source.id}` : source.path;
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {

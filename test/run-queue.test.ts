@@ -115,6 +115,36 @@ describe("workflow run queue", () => {
     ).toBe(false);
   });
 
+  it("repairs a canonical queue source after an expired migration claim", async () => {
+    const store = await makeStore();
+    const record = enqueue(store);
+
+    expect(
+      store.repairCanonicalWorkflowSourceRun({
+        runId: record.runId,
+        workflowSourceRef: "builtin:summarize",
+        runnerId: "migration",
+        claimToken: "migration-token",
+        leaseMs: 1_000,
+        now: T2,
+      }),
+    ).toBe("claimed");
+    expect(store.getWorkflowRun(record.runId)?.workflowSourceRef).toBe("builtin:summarize");
+    expect(
+      store.parkWorkflowRun({ runId: record.runId, claimToken: "migration-token", now: T2 }),
+    ).toBe(true);
+    expect(
+      store.repairCanonicalWorkflowSourceRun({
+        runId: record.runId,
+        workflowSourceRef: "builtin:summarize",
+        runnerId: "migration",
+        claimToken: "migration-token-2",
+        leaseMs: 1_000,
+        now: T3,
+      }),
+    ).toBe("unchanged");
+  });
+
   it("renews, verifies, and strictly rejects expired renewals", async () => {
     const store = await makeStore();
     store.enqueueWorkflowRun({

@@ -1070,6 +1070,60 @@ export class SqliteControllerStore implements ControllerStore {
     return result.changes === 1;
   }
 
+  /** Repair a canonical bundle's queue source and claim it only when needed. */
+  repairCanonicalWorkflowSourceRun(options: {
+    runId: string;
+    workflowSourceRef: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): "unchanged" | "claimed" | false {
+    validateRunId(options.runId);
+    validateKey(options.workflowSourceRef, "workflow source ref");
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.claimToken, "claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    const expiresAt = nowMs + options.leaseMs;
+    return this.transaction(() => {
+      const row = this.database
+        .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
+        .get(options.runId) as WorkflowRunQueueRow | undefined;
+      if (row === undefined || row.status === "done") return false;
+      if (row.workflow_path === options.workflowSourceRef && row.status === "parked") {
+        return "unchanged";
+      }
+      const claimable =
+        row.status === "parked" ||
+        (row.status === "claimed" &&
+          row.claim_token === options.claimToken &&
+          row.claim_expires_at !== null &&
+          row.claim_expires_at > nowMs) ||
+        (row.status === "claimed" &&
+          row.claim_expires_at !== null &&
+          row.claim_expires_at <= nowMs);
+      if (!claimable) return false;
+      const result = this.database
+        .prepare(
+          `UPDATE workflow_run_queue
+           SET workflow_path = ?, status = 'claimed', runner_id = ?,
+               claim_token = ?, claim_expires_at = ?, updated_at = ?
+           WHERE run_id = ? AND status != 'done'`,
+        )
+        .run(
+          options.workflowSourceRef,
+          options.runnerId,
+          options.claimToken,
+          expiresAt,
+          now,
+          options.runId,
+        );
+      return result.changes === 1 ? "claimed" : false;
+    });
+  }
+
   /** Claim and rewrite one proved legacy workflow source queue row atomically. */
   claimLegacyWorkflowSourceRun(options: {
     runId: string;
