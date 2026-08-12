@@ -32,6 +32,10 @@ export default defineConfig({
         "src/controllers/definition.ts",
         "src/controllers/json.ts",
         "src/controllers/results.ts",
+        // The standalone host and viewer run in dedicated integration suites;
+        // their subprocess and watcher branches are not observable here.
+        "src/host/**",
+        "src/viewer/**",
         "src/render/format.ts",
         "src/workflows/definition.ts",
         "src/workflows/text.ts",
