@@ -1073,6 +1073,7 @@ export class SqliteControllerStore implements ControllerStore {
   /** Repair a canonical bundle's queue source and claim it only when needed. */
   repairCanonicalWorkflowSourceRun(options: {
     runId: string;
+    workflowName: string;
     workflowSourceRef: string;
     runnerId: string;
     claimToken: string;
@@ -1080,6 +1081,7 @@ export class SqliteControllerStore implements ControllerStore {
     now?: string;
   }): "unchanged" | "claimed" | false {
     validateRunId(options.runId);
+    validateKey(options.workflowName, "workflow name");
     validateKey(options.workflowSourceRef, "workflow source ref");
     validateKey(options.runnerId, "runner id");
     validateKey(options.claimToken, "claim token");
@@ -1108,11 +1110,12 @@ export class SqliteControllerStore implements ControllerStore {
       const result = this.database
         .prepare(
           `UPDATE workflow_run_queue
-           SET workflow_path = ?, status = 'claimed', runner_id = ?,
+           SET workflow_ref = ?, workflow_path = ?, status = 'claimed', runner_id = ?,
                claim_token = ?, claim_expires_at = ?, updated_at = ?
            WHERE run_id = ? AND status != 'done'`,
         )
         .run(
+          options.workflowName,
           options.workflowSourceRef,
           options.runnerId,
           options.claimToken,
@@ -1127,6 +1130,7 @@ export class SqliteControllerStore implements ControllerStore {
   /** Claim and rewrite one proved legacy workflow source queue row atomically. */
   claimLegacyWorkflowSourceRun(options: {
     runId: string;
+    workflowName: string;
     oldWorkflowPath: string;
     workflowSourceRef: string;
     runnerId: string;
@@ -1135,6 +1139,7 @@ export class SqliteControllerStore implements ControllerStore {
     now?: string;
   }): boolean {
     validateRunId(options.runId);
+    validateKey(options.workflowName, "workflow name");
     validateKey(options.oldWorkflowPath, "legacy workflow path");
     validateKey(options.workflowSourceRef, "workflow source ref");
     validateKey(options.runnerId, "runner id");
@@ -1164,11 +1169,12 @@ export class SqliteControllerStore implements ControllerStore {
       const result = this.database
         .prepare(
           `UPDATE workflow_run_queue
-           SET workflow_path = ?, status = 'claimed', runner_id = ?,
+           SET workflow_ref = ?, workflow_path = ?, status = 'claimed', runner_id = ?,
                claim_token = ?, claim_expires_at = ?, updated_at = ?
            WHERE run_id = ? AND status != 'done'`,
         )
         .run(
+          options.workflowName,
           options.workflowSourceRef,
           options.runnerId,
           options.claimToken,

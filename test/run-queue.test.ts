@@ -88,6 +88,7 @@ describe("workflow run queue", () => {
     expect(
       store.claimLegacyWorkflowSourceRun({
         runId: record.runId,
+        workflowName: "summarize",
         oldWorkflowPath: record.workflowSourceRef,
         workflowSourceRef: "builtin:summarize",
         runnerId: "migration",
@@ -105,6 +106,7 @@ describe("workflow run queue", () => {
     expect(
       store.claimLegacyWorkflowSourceRun({
         runId: record.runId,
+        workflowName: "summarize",
         oldWorkflowPath: record.workflowSourceRef,
         workflowSourceRef: "builtin:summarize",
         runnerId: "other",
@@ -122,6 +124,7 @@ describe("workflow run queue", () => {
     expect(
       store.repairCanonicalWorkflowSourceRun({
         runId: record.runId,
+        workflowName: "summarize",
         workflowSourceRef: "builtin:summarize",
         runnerId: "migration",
         claimToken: "migration-token",
@@ -136,6 +139,7 @@ describe("workflow run queue", () => {
     expect(
       store.repairCanonicalWorkflowSourceRun({
         runId: record.runId,
+        workflowName: "summarize",
         workflowSourceRef: "builtin:summarize",
         runnerId: "migration",
         claimToken: "migration-token-2",

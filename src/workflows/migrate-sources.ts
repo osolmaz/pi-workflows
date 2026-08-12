@@ -8,6 +8,7 @@ import type { WorkflowRunState, WorkflowSource } from "./types.js";
 export type LegacySourceMigrationQueue = {
   repairCanonicalWorkflowSourceRun(options: {
     runId: string;
+    workflowName: string;
     workflowSourceRef: string;
     runnerId: string;
     claimToken: string;
@@ -15,6 +16,7 @@ export type LegacySourceMigrationQueue = {
   }): "unchanged" | "claimed" | false;
   claimLegacyWorkflowSourceRun(options: {
     runId: string;
+    workflowName: string;
     oldWorkflowPath: string;
     workflowSourceRef: string;
     runnerId: string;
@@ -48,6 +50,7 @@ export async function migrateLegacyWorkflowSources(options: {
       const claimToken = randomUUID();
       const repaired = options.queue.repairCanonicalWorkflowSourceRun({
         runId: state.runId,
+        workflowName: state.workflowName,
         workflowSourceRef: sourceRef(state.workflowSource),
         runnerId: `source-migration-${process.pid}`,
         claimToken,
@@ -109,6 +112,7 @@ export async function migrateLegacyWorkflowSources(options: {
       !queueIsDone &&
       !options.queue.claimLegacyWorkflowSourceRun({
         runId: state.runId,
+        workflowName: state.workflowName,
         oldWorkflowPath: state.workflowPath,
         workflowSourceRef,
         runnerId: `source-migration-${process.pid}`,
