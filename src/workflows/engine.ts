@@ -208,10 +208,7 @@ export class WorkflowEngine {
     const bundle = await this.store.prepareRunResume(runId);
     const { runDir } = bundle;
     const state = bundle.state;
-    const sourceMismatch =
-      state.workflowSource !== undefined &&
-      options.workflowSource !== undefined &&
-      !isDeepStrictEqual(state.workflowSource, options.workflowSource);
+    const sourceMismatch = workflowSourceMismatch(state, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
     }
@@ -299,10 +296,7 @@ export class WorkflowEngine {
         `Cannot continue workflow run ${parentRunId} with status ${parent.state.status}`,
       );
     }
-    const sourceMismatch =
-      parent.state.workflowSource !== undefined &&
-      options.workflowSource !== undefined &&
-      !isDeepStrictEqual(parent.state.workflowSource, options.workflowSource);
+    const sourceMismatch = workflowSourceMismatch(parent.state, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(parentRunId);
     }
@@ -1108,6 +1102,22 @@ function abortRejection(signal: AbortSignal): Promise<never> {
  * Failing here turns a bad callback return value into a normal node failure
  * instead of corrupting the run state.
  */
+function workflowSourceMismatch(
+  state: WorkflowRunState,
+  source: WorkflowSource | undefined,
+): boolean {
+  if (source === undefined) return false;
+  if (state.workflowSource !== undefined) {
+    return !isDeepStrictEqual(state.workflowSource, source);
+  }
+  // Bounded compatibility check for pre-catalog file runs. Legacy built-ins
+  // are converted before resume by migrateLegacyBuiltinRuns.
+  return (
+    state.workflowHash !== undefined &&
+    (source.kind !== "file" || state.workflowHash !== source.hash)
+  );
+}
+
 function assertJsonSerializable(value: unknown, what: string): void {
   let encoded: string | undefined;
   try {

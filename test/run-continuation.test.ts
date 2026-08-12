@@ -125,6 +125,33 @@ describe("WorkflowEngine.continueRun", () => {
     expect(forced.state.status).toBe("completed");
   });
 
+  it("refuses a changed legacy parent file hash", async () => {
+    const outputRoot = await makeTempDir("pi-continuation-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const parent = await makeEngine(store).run(waitWorkflow, {}, { runId: "legacy-parent" });
+    const bundle = await readRunBundle(parent.runDir);
+    if (bundle === null) throw new Error("missing parent bundle");
+    bundle.state.workflowHash = "old-hash";
+    const { promises: fs } = await import("node:fs");
+    const path = await import("node:path");
+    await fs.writeFile(
+      path.join(parent.runDir, "state.json"),
+      `${JSON.stringify(bundle.state, null, 2)}\n`,
+      "utf8",
+    );
+
+    await expect(
+      makeEngine(store).continueRun(
+        waitWorkflow,
+        "legacy-parent",
+        {},
+        {
+          workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+        },
+      ),
+    ).rejects.toThrow(WorkflowSourceChangedError);
+  });
+
   it("counts carried steps against maxSteps", async () => {
     const outputRoot = await makeTempDir("pi-continuation-runs");
     const store = new WorkflowRunStore(outputRoot);

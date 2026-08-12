@@ -66,5 +66,12 @@ describe("BuiltinWorkflowCatalog", () => {
         workflowPath: "/package/dist/builtins/fixture.workflow.js",
       })?.id,
     ).toBe("fixture");
+    expect(
+      catalog.matchLegacy({
+        workflowName: "fixture",
+        workflowPath: "/package/dist/builtins/fixture.workflow.js",
+        workflowHash: "changed",
+      }),
+    ).toBeUndefined();
   });
 });

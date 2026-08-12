@@ -238,6 +238,26 @@ describe("WorkflowEngine.resumeRun", () => {
     expect(types).toContain("run_resumed");
   });
 
+  it("refuses a changed legacy file hash", async () => {
+    const outputRoot = await makeTempDir("pi-resume-runs");
+    const store = new WorkflowRunStore(outputRoot);
+    const workflow = defineWorkflow({
+      name: "demo",
+      startAt: "work",
+      nodes: { work: compute({ run: () => "done" }) },
+      edges: [],
+    });
+    const state = { ...runningState("legacy-hash", workflow), workflowHash: "old-hash" };
+    const runDir = await store.initializeRunBundle(workflow, state);
+    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
+
+    await expect(
+      makeEngine(store).resumeRun(workflow, "legacy-hash", {
+        workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+      }),
+    ).rejects.toThrow(WorkflowSourceChangedError);
+  });
+
   it("restores the waiting gate when a crash hit after a checkpoint", async () => {
     const outputRoot = await makeTempDir("pi-resume-runs");
     const store = new WorkflowRunStore(outputRoot);

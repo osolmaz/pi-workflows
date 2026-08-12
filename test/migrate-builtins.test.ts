@@ -23,7 +23,10 @@ function catalog() {
       revision: "r1",
       definition: workflow,
       legacySources: [
-        { workflowHash: "old-hash", pathSuffixes: ["/builtins/fixture.workflow.js"] },
+        {
+          workflowHash: "old-hash",
+          pathSuffixes: ["/builtins/fixture.workflow.js", "/workflows/fixture.workflow.js"],
+        },
       ],
     },
   ]);
@@ -86,6 +89,23 @@ describe("migrateLegacyBuiltinRuns", () => {
       revision: "r1",
     });
     expect("workflowPath" in (bundle?.manifest ?? {})).toBe(false);
+  });
+
+  it("matches the old workflow directory used before the catalog", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-old-dir");
+    const store = new WorkflowRunStore(root);
+    const state = legacyState("old-dir-run");
+    state.workflowPath = "/package/dist/workflows/fixture.workflow.js";
+    const runDir = await store.initializeRunBundle(workflow, state);
+
+    const result = await migrateLegacyBuiltinRuns({ catalog: catalog(), store });
+
+    expect(result.migratedRunIds).toEqual(["old-dir-run"]);
+    expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
+      kind: "builtin",
+      id: "fixture",
+      revision: "r1",
+    });
   });
 
   it("does not migrate an unknown hash or a terminal run", async () => {
