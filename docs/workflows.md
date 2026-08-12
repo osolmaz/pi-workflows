@@ -16,7 +16,10 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 3. Workflows built into Pi Workflows
 
 Pi Workflows includes a built-in `monitor` workflow. A project or global file
-named `monitor.workflow.ts` replaces it.
+named `monitor.workflow.ts` replaces it. Built-ins are loaded with the engine
+when a Pi process starts. Updating the package on disk cannot mix a new
+built-in with that process's old engine; reload or restart Pi to use the new
+built-in. Project and global workflow files still reload on each run.
 
 The workflow's command name is the file stem, so `.pi/workflows/triage.workflow.ts`
 runs as `/workflow triage`. A direct path also works: `/workflow ./somewhere/x.workflow.ts`.

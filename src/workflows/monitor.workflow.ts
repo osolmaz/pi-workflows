@@ -1,4 +1,4 @@
-import { agent, compute, defineWorkflow, shell } from "../workflows/index.js";
+import { agent, compute, defineWorkflow, shell } from "../workflows/definition.js";
 import type { WorkflowNodeContext } from "../workflows/types.js";
 
 const MIN_INTERVAL_MINUTES = 1;

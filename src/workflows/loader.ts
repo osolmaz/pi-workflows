@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 import { isWorkflowDefinition } from "./definition.js";
+import monitorWorkflow from "./monitor.workflow.js";
 import type { WorkflowDefinition } from "./types.js";
 
 const WORKFLOW_FILE_SUFFIXES = [".workflow.ts", ".workflow.js", ".workflow.mts", ".workflow.mjs"];
@@ -20,23 +22,66 @@ export type WorkflowSearchPaths = {
   homeDir?: string;
 };
 
+const BUILTIN_DIR = fileURLToPath(new URL("./", import.meta.url));
+
+type BuiltinWorkflow = {
+  definition: WorkflowDefinition;
+  path: string;
+  sourceHash: string;
+};
+
+function builtinWorkflow(name: string, definition: WorkflowDefinition): BuiltinWorkflow {
+  const modulePath = WORKFLOW_FILE_SUFFIXES.map((suffix) =>
+    path.join(BUILTIN_DIR, `${name}${suffix}`),
+  )
+    .map((candidate) => {
+      try {
+        return { candidate, source: readFileSync(candidate) };
+      } catch {
+        return undefined;
+      }
+    })
+    .find((candidate) => candidate !== undefined);
+  if (modulePath === undefined) {
+    throw new Error(`Built-in workflow module is missing: ${name}`);
+  }
+  return {
+    definition,
+    path: modulePath.candidate,
+    sourceHash: createHash("sha256").update(modulePath.source).digest("hex"),
+  };
+}
+
+// Capture each built-in definition and source hash when this module loads.
+// Later package updates cannot mix new files with this process's old engine.
+const BUILTIN_WORKFLOWS = new Map<string, BuiltinWorkflow>([
+  ["monitor", builtinWorkflow("monitor", monitorWorkflow)],
+]);
+const BUILTIN_WORKFLOWS_BY_PATH = new Map(
+  [...BUILTIN_WORKFLOWS.values()].map((workflow) => [workflow.path, workflow]),
+);
+
 /** Directories scanned for workflow files, in precedence order. */
 export function workflowSearchDirs(
   options: WorkflowSearchPaths,
 ): { dir: string; source: "project" | "global" | "builtin" }[] {
   const homeDir = options.homeDir ?? os.homedir();
-  const builtinDir = fileURLToPath(new URL("../builtins/", import.meta.url));
   return [
     { dir: path.join(options.cwd, ".pi", "workflows"), source: "project" },
     { dir: path.join(homeDir, ".pi", "agent", "workflows"), source: "global" },
-    { dir: builtinDir, source: "builtin" },
+    { dir: BUILTIN_DIR, source: "builtin" },
   ];
 }
 
 /** SHA-256 of a workflow source file, recorded in run state for resume pinning. */
 export async function hashWorkflowSource(filePath: string): Promise<string> {
+  const absolutePath = path.resolve(filePath);
+  const builtin = BUILTIN_WORKFLOWS_BY_PATH.get(absolutePath);
+  if (builtin !== undefined) {
+    return builtin.sourceHash;
+  }
   return createHash("sha256")
-    .update(await fs.readFile(filePath))
+    .update(await fs.readFile(absolutePath))
     .digest("hex");
 }
 
@@ -55,9 +100,17 @@ export function workflowFileStem(filePath: string): string {
 // (tests, tsx) or from the built dist inside the installed package.
 const SELF_ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
 
-/** Load a workflow module from disk. The default export must be `defineWorkflow(...)`. */
+/**
+ * Load a workflow definition. Built-ins come from this process's module graph,
+ * so a package update on disk cannot mix a new built-in with old engine code.
+ * User workflow files are reloaded from disk for normal edit-and-run behavior.
+ */
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowDefinition> {
   const absolutePath = path.resolve(filePath);
+  const builtin = BUILTIN_WORKFLOWS_BY_PATH.get(absolutePath);
+  if (builtin !== undefined) {
+    return builtin.definition;
+  }
   const jiti = createJiti(pathToFileURL(absolutePath).href, {
     interopDefault: true,
     moduleCache: false,
@@ -77,7 +130,11 @@ export async function discoverWorkflows(
   const discovered: DiscoveredWorkflow[] = [];
   const seenNames = new Set<string>();
   for (const { dir, source } of workflowSearchDirs(options)) {
-    for (const filePath of await listWorkflowFiles(dir)) {
+    const filePaths =
+      source === "builtin"
+        ? [...BUILTIN_WORKFLOWS.values()].map((workflow) => workflow.path)
+        : await listWorkflowFiles(dir);
+    for (const filePath of filePaths) {
       const name = workflowFileStem(filePath);
       if (seenNames.has(name)) {
         continue;
