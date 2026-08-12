@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { agent, compute, defineWorkflow } from "../src/workflows/definition.js";
 import {
   WorkflowRunStore,
   createDefinitionSnapshot,
@@ -54,6 +54,19 @@ describe("workflowRunsBaseDir", () => {
 });
 
 describe("WorkflowRunStore", () => {
+  it("omits computed timeouts from the portable definition snapshot", () => {
+    const snapshot = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "computed-timeout",
+        startAt: "one",
+        nodes: { one: agent({ prompt: () => "?", timeoutMs: () => 60_000 }) },
+        edges: [],
+      }),
+    );
+
+    expect(snapshot.nodes.one?.timeoutMs).toBeUndefined();
+  });
+
   it("initializes and updates a run bundle", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store");
     const store = new WorkflowRunStore(outputRoot);

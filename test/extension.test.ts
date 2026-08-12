@@ -43,6 +43,8 @@ type SentMessage = {
 type FakeContext = {
   cwd: string;
   hasUI: boolean;
+  isIdle: () => boolean;
+  abort: () => void;
   sessionManager: {
     getSessionId: () => string;
     getLeafId: () => string | null;
@@ -76,10 +78,17 @@ function makeHarness(options: {
   const shortcuts = new Map<string, (ctx: FakeContext) => void>();
   const commands = new Map<string, RegisteredCommand>();
   let tool: RegisteredTool | null = null;
+  let idle = true;
+  let abortCalls = 0;
 
   const ctx: FakeContext = {
     cwd: options.cwd,
     hasUI: true,
+    isIdle: () => idle,
+    abort: () => {
+      abortCalls += 1;
+      idle = true;
+    },
     sessionManager: {
       getSessionId: () => options.sessionId ?? "test-session",
       getLeafId: () => null,
@@ -119,6 +128,7 @@ function makeHarness(options: {
     },
     sendUserMessage: (prompt: string) => {
       // Deliver asynchronously like the real runtime would.
+      idle = false;
       queueMicrotask(() => options.respond(prompt, tool as RegisteredTool));
     },
     sendMessage: (message: SentMessage["message"], messageOptions: SentMessage["options"]) => {
@@ -137,6 +147,12 @@ function makeHarness(options: {
     widgets,
     statuses,
     sentMessages,
+    get abortCalls() {
+      return abortCalls;
+    },
+    setIdle: (value: boolean) => {
+      idle = value;
+    },
     command: workflowCommand,
     commands,
     tool: tool as RegisteredTool,
@@ -170,6 +186,25 @@ export default defineWorkflow({
       expectedOutput: '{ "reply": "…" }',
     }),
   },
+  edges: [],
+});
+`,
+    "utf8",
+  );
+}
+
+async function writeTimeoutWorkflow(cwd: string): Promise<void> {
+  const dir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "timeout.workflow.ts"),
+    `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "timeout",
+  presentationPrompt: () => { throw new Error("must not present failed run"); },
+  startAt: "wait",
+  nodes: { wait: agent({ prompt: () => "Wait.", timeoutMs: 30 }) },
   edges: [],
 });
 `,
@@ -707,6 +742,52 @@ export default defineWorkflow({
 
       expect(harness.notifications.some((note) => note.includes("completed"))).toBe(true);
       expect(harness.sentMessages).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("aborts a timed-out Pi turn without treating it as a user interruption", async () => {
+    const cwd = await makeTempDir("pi-workflows-timeout");
+    const runsDir = await makeTempDir("pi-workflows-timeout-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeTimeoutWorkflow(cwd);
+      let contract: { step: string; attempt: string } | null = null;
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt) => {
+          contract = stepFromPrompt(prompt);
+        },
+      });
+
+      await harness.command.handler("timeout", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("timed_out")));
+      expect(harness.abortCalls).toBe(1);
+      expect(contract).not.toBeNull();
+
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      expect(harness.notifications.some((note) => note.includes("paused (turn interrupted)"))).toBe(
+        false,
+      );
+      expect(harness.notifications.some((note) => note.includes("must not present"))).toBe(false);
+      expect(harness.sentMessages).toHaveLength(0);
+
+      const capturedContract = contract as unknown as {
+        step: string;
+        attempt: string;
+      } | null;
+      if (capturedContract === null) {
+        throw new Error("workflow contract was not captured");
+      }
+      await expect(
+        harness.tool.execute("late-submit", {
+          action: "submit",
+          step: capturedContract.step,
+          attempt: capturedContract.attempt,
+          output: { too: "late" },
+        }),
+      ).rejects.toThrow(/timed out; its output is no longer accepted/);
     } finally {
       vi.unstubAllEnvs();
     }

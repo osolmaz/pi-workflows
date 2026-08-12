@@ -127,7 +127,10 @@ agent({
   prompt: ({ outputs }) => `Review this: ${JSON.stringify(outputs.implement)}`,
   expectedOutput: `{ "verdict": "clean" | "issues_found" }`,
   validate: (output) => output, // optional; throw to reject the submission
-  timeoutMs: 30 * 60_000, // optional; default 15 minutes
+  timeoutMs: ({ input }) =>
+    (input as { timeoutMinutes?: number }).timeoutMinutes
+      ? (input as { timeoutMinutes: number }).timeoutMinutes * 60_000
+      : 30 * 60_000, // optional number or context callback; default 15 minutes
   statusDetail: "reviewing", // optional; shown in widget and viewer
 });
 ```
@@ -137,7 +140,15 @@ calls the tool, the output passes through normalization (a JSON string is
 parsed tolerantly) and then `validate`. If `validate` throws, the tool call
 returns an error and the model can retry within the same step. If the agent
 ends its turn without submitting, the extension nudges it, twice by default,
-then fails the step.
+then fails the step. If an agent node times out or the workflow is cancelled,
+the extension also aborts its active Pi turn. The model cannot continue to use
+tools after the engine has closed that attempt.
+
+`timeoutMs` can be a finite positive number or a function of the normal node
+context. A timeout function can use prepared outputs to select a deadline for
+this run. It has 30 seconds to return a value. Computed timeout functions are
+runtime code, so definition snapshots omit them; fixed numeric timeouts remain
+in the snapshot.
 
 ### compute
 
@@ -276,7 +287,8 @@ one looping workflow run. Its input is:
   "everyMinutes": 30,
   "reportWhen": "Checks fail or the state changes materially",
   "stopWhen": "The pull request is merged or closed",
-  "maxChecks": 1000
+  "maxChecks": 1000,
+  "checkTimeoutMinutes": 60
 }
 ```
 
@@ -286,8 +298,10 @@ separate agent node so its structured check result is validated before the user
 sees the message. The next check can read the previous accepted observation.
 
 Intervals must be whole minutes from 1 through 1,440. `maxChecks` defaults to
-1,000 and cannot exceed 1,000. The workflow also has a finite step limit and
-bounded observation and report sizes.
+1,000 and cannot exceed 1,000. `checkTimeoutMinutes` is optional and applies to
+check and report agent nodes. It must be from 5 through 1,440 minutes. Its
+default is the larger of 60 minutes and `everyMinutes`. The workflow also has
+a finite step limit and bounded observation and report sizes.
 
 The interval uses the existing shell action to launch the current Node
 executable with a timer. This works on every platform supported by Pi. The node
@@ -344,8 +358,9 @@ After the final run state has been persisted, the Pi extension sends the
 presentation instructions and bounded final result to the model as a hidden
 follow-up message. The next visible message is a normal assistant response.
 Returning `undefined`, returning an empty string, or omitting
-`presentationPrompt` produces no follow-up. Cancelled runs are never
-presented. Async prompt builders have 30 seconds to finish and receive an
+`presentationPrompt` produces no follow-up. Failed, timed-out, and cancelled
+runs are never presented; the extension reports their persisted status and
+error directly. Async prompt builders have 30 seconds to finish and receive an
 `AbortSignal` that fires on timeout, session shutdown, or when a new workflow
 or normal user turn starts; stale presentations are discarded. Once a presentation message has
 been queued, another workflow cannot start until that assistant response
@@ -364,8 +379,10 @@ Runs execute one node at a time. Every transition is persisted to the run
 bundle before the engine moves on, which is what makes the live viewer
 possible. Defaults worth knowing:
 
-- Node timeout is 15 minutes unless the node sets `timeoutMs`. A timed-out
-  node has outcome `timed_out` and can be routed with `$result.outcome`.
+- Node timeout is 15 minutes unless the node sets `timeoutMs` to a positive
+  number or context callback. A timed-out node has outcome `timed_out` and can
+  be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
+  turn, and late output for that attempt is rejected.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` requests a pause: the current step finishes normally,

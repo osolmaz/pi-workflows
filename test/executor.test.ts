@@ -137,6 +137,24 @@ describe("ConversationStepExecutor", () => {
     expect(executor.pendingStepId).toBeNull();
   });
 
+  it("reports an engine abort exactly once", async () => {
+    const aborted: { attemptId: string; reason: unknown }[] = [];
+    const abort = new AbortController();
+    const executor = new ConversationStepExecutor({
+      sendPrompt: () => undefined,
+      onAbort: (contract, reason) => aborted.push({ attemptId: contract.attemptId, reason }),
+    });
+    const stepPromise = executor.runAgentStep(makeRequest(), abort.signal);
+
+    abort.abort(new Error("timed out"));
+    abort.abort(new Error("again"));
+
+    await expect(stepPromise).rejects.toThrow(/timed out/);
+    expect(aborted).toHaveLength(1);
+    expect(aborted[0]?.attemptId).toBe("a1");
+    expect(aborted[0]?.reason).toEqual(new Error("timed out"));
+  });
+
   it("rejects immediately when the signal is already aborted", async () => {
     const { executor, sent } = makeExecutor();
     const abort = new AbortController();

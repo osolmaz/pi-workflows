@@ -3,6 +3,9 @@ import type { WorkflowNodeContext } from "../workflows/types.js";
 
 const MIN_INTERVAL_MINUTES = 1;
 const MAX_INTERVAL_MINUTES = 24 * 60;
+const MIN_CHECK_TIMEOUT_MINUTES = 5;
+const MAX_CHECK_TIMEOUT_MINUTES = 24 * 60;
+const DEFAULT_MIN_CHECK_TIMEOUT_MINUTES = 60;
 const DEFAULT_MAX_CHECKS = 1_000;
 const MAX_CHECKS = 1_000;
 const MAX_OBSERVATION_CHARS = 8_000;
@@ -17,6 +20,7 @@ type MonitorInput = {
   reportWhen?: string;
   stopWhen?: string;
   maxChecks?: number;
+  checkTimeoutMinutes?: number;
 };
 
 type MonitorConfig = {
@@ -25,6 +29,7 @@ type MonitorConfig = {
   reportWhen: string;
   stopWhen: string;
   maxChecks: number;
+  checkTimeoutMinutes: number;
 };
 
 type MonitorRoute = "continue_quiet" | "continue_report" | "stop_quiet" | "stop_report";
@@ -81,6 +86,17 @@ function prepareInput(input: unknown): MonitorConfig {
   if (!Number.isInteger(maxChecks) || maxChecks <= 0 || maxChecks > MAX_CHECKS) {
     throw new Error(`maxChecks must be an integer from 1 through ${MAX_CHECKS}`);
   }
+  const checkTimeoutMinutes =
+    value.checkTimeoutMinutes ?? Math.max(DEFAULT_MIN_CHECK_TIMEOUT_MINUTES, value.everyMinutes);
+  if (
+    !Number.isInteger(checkTimeoutMinutes) ||
+    checkTimeoutMinutes < MIN_CHECK_TIMEOUT_MINUTES ||
+    checkTimeoutMinutes > MAX_CHECK_TIMEOUT_MINUTES
+  ) {
+    throw new Error(
+      `checkTimeoutMinutes must be an integer from ${MIN_CHECK_TIMEOUT_MINUTES} through ${MAX_CHECK_TIMEOUT_MINUTES}`,
+    );
+  }
   return {
     task,
     everyMinutes: value.everyMinutes,
@@ -93,11 +109,16 @@ function prepareInput(input: unknown): MonitorConfig {
         ? "The user cancels the monitor or it reaches its maximum check count."
         : requireBoundedString(value.stopWhen, "stopWhen", 4_000),
     maxChecks,
+    checkTimeoutMinutes,
   };
 }
 
 function configFrom(outputs: Record<string, unknown>): MonitorConfig {
   return outputs.prepare as MonitorConfig;
+}
+
+function agentTimeoutMs({ outputs }: WorkflowNodeContext): number {
+  return configFrom(outputs).checkTimeoutMinutes * 60_000;
 }
 
 function completedChecks(context: WorkflowNodeContext): number {
@@ -190,6 +211,7 @@ export default defineWorkflow({
     }),
     check: agent({
       statusDetail: "checking monitored target",
+      timeoutMs: agentTimeoutMs,
       prompt: (context) => {
         const config = configFrom(context.outputs);
         const previous = context.outputs.check as MonitorCheck | undefined;
@@ -212,12 +234,14 @@ export default defineWorkflow({
     }),
     report_continue: agent({
       statusDetail: "reporting monitor update",
+      timeoutMs: agentTimeoutMs,
       prompt: ({ outputs }) => reportPrompt(outputs),
       expectedOutput: '{ "reported": true }',
       validate: (output) => validateReportAck(output),
     }),
     report_stop: agent({
       statusDetail: "reporting final monitor update",
+      timeoutMs: agentTimeoutMs,
       prompt: ({ outputs }) => reportPrompt(outputs),
       expectedOutput: '{ "reported": true }',
       validate: (output) => validateReportAck(output),

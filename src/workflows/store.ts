@@ -1317,7 +1317,7 @@ export function createDefinitionSnapshot(workflow: WorkflowDefinition): Workflow
 function snapshotNode(node: WorkflowNodeDefinition): WorkflowNodeSnapshot {
   const common: WorkflowNodeSnapshot = {
     nodeType: node.nodeType,
-    ...(node.timeoutMs !== undefined ? { timeoutMs: node.timeoutMs } : {}),
+    ...(typeof node.timeoutMs === "number" ? { timeoutMs: node.timeoutMs } : {}),
     ...(node.statusDetail !== undefined ? { statusDetail: node.statusDetail } : {}),
   };
   if (node.nodeType === "agent" && node.expectedOutput !== undefined) {

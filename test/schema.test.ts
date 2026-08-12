@@ -100,6 +100,7 @@ describe("node constructors", () => {
     );
     expect(() => agent({ prompt: () => "p", validate: "x" as never })).toThrow(/validate/);
     expect(() => agent({ prompt: () => "p", timeoutMs: -1 })).toThrow(/timeoutMs/);
+    expect(agent({ prompt: () => "p", timeoutMs: () => 1 }).timeoutMs).toBeTypeOf("function");
     expect(() => agent({ prompt: () => "p", statusDetail: 1 as never })).toThrow(/statusDetail/);
     expect(agent({ prompt: () => "p" }).nodeType).toBe("agent");
   });

@@ -33,6 +33,8 @@ export type ConversationStepExecutorOptions = {
   maxNudges?: number;
   /** Conversation linkage hooks, wired to the session recorder. */
   conversation?: ConversationHooks;
+  /** Called when the engine aborts a pending agent step. */
+  onAbort?: (contract: AgentStepRequest["contract"], reason: unknown) => void;
 };
 
 type PendingStep = {
@@ -61,6 +63,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   private readonly sendPrompt: (delivery: PromptDelivery) => void;
   private readonly maxNudges: number;
   private readonly conversation: ConversationHooks | undefined;
+  private readonly onAbort: ConversationStepExecutorOptions["onAbort"];
   private pending: PendingStep | null = null;
   private streaming = false;
   private heldByUser = false;
@@ -69,6 +72,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     this.sendPrompt = options.sendPrompt;
     this.maxNudges = options.maxNudges ?? DEFAULT_MAX_NUDGES;
     this.conversation = options.conversation;
+    this.onAbort = options.onAbort;
   }
 
   /** Track agent streaming state (wire to agent_start / agent_settled). */
@@ -121,8 +125,15 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     return await new Promise<AgentStepSubmission>((resolve, reject) => {
       const onAbort = () => {
         const reason: unknown = signal.reason ?? new Error("Workflow step aborted");
+        if (this.pending?.request !== request) {
+          return;
+        }
         this.clearPending();
-        reject(reason);
+        try {
+          this.onAbort?.(request.contract, reason);
+        } finally {
+          reject(reason);
+        }
       };
       signal.addEventListener("abort", onAbort, { once: true });
       let markCleared!: () => void;

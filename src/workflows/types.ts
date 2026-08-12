@@ -20,8 +20,11 @@ export type WorkflowNodeContext<TInput = unknown> = {
 };
 
 export type WorkflowNodeCommon = {
-  /** Per-node timeout. Falls back to the engine default (15 minutes). */
-  timeoutMs?: number;
+  /**
+   * Per-node timeout or a callback that derives it from the run context.
+   * Falls back to the engine default (15 minutes).
+   */
+  timeoutMs?: number | ((context: WorkflowNodeContext) => MaybePromise<number>);
   /** Short human-readable label shown in the viewer while the node runs. */
   statusDetail?: string;
 };

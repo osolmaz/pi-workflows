@@ -8,7 +8,12 @@ import {
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
-import { ClaimLostError, errorMessage, isClaimLostError } from "../workflows/errors.js";
+import {
+  ClaimLostError,
+  errorMessage,
+  isClaimLostError,
+  TimeoutError,
+} from "../workflows/errors.js";
 import {
   discoverWorkflows,
   hashWorkflowSource,
@@ -24,6 +29,7 @@ import {
   createDefinitionSnapshot,
 } from "../workflows/store.js";
 import type {
+  AgentStepContract,
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowRunResult,
@@ -348,6 +354,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     runSyncTimer.unref?.();
   };
   let activeRun: ActiveRun | null = null;
+  let systemTurnAbort: AgentStepContract | null = null;
+  let lastExpiredAttempt: { contract: AgentStepContract; reason: string } | null = null;
   let pendingToolLaunch: {
     ctx: ExtensionContext;
     ref: string;
@@ -506,7 +514,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (
       sessionClosed ||
       run.generation !== runGeneration ||
-      state.status === "cancelled" ||
+      (state.status !== "completed" && state.status !== "waiting") ||
       run.presentationPrompt === undefined
     ) {
       return;
@@ -639,7 +647,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const summary =
       state.status === "waiting" && state.waitingOn
         ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — answer with /workflow answer <json> (run ${state.runId})`
-        : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})`;
+        : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})${
+            state.error !== undefined ? `: ${state.error.slice(0, MAX_STATUS_ERROR_CHARS)}` : ""
+          }`;
     notify(ctx, summary, state.status === "completed" ? "info" : "warning");
     try {
       const childResult =
@@ -756,6 +766,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const executor = new ConversationStepExecutor({
       sendPrompt: ({ prompt, streaming }) => {
         pi.sendUserMessage(prompt, streaming ? { deliverAs: "steer" } : undefined);
+      },
+      onAbort: (contract, reason) => {
+        lastExpiredAttempt = {
+          contract,
+          reason: reason instanceof TimeoutError ? "timed out" : `ended: ${errorMessage(reason)}`,
+        };
+        if (!ctx.isIdle()) {
+          systemTurnAbort = contract;
+          ctx.abort();
+        }
       },
       conversation: {
         beginAttempt: (contract) => run.recorder?.beginAttempt(contract),
@@ -1563,6 +1583,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
         }
         case "submit": {
           if (!activeRun) {
+            if (
+              lastExpiredAttempt?.contract.attemptId === params.attempt &&
+              lastExpiredAttempt.contract.nodeId === params.step
+            ) {
+              throw new Error(
+                `Workflow step ${JSON.stringify(params.step)} attempt ${JSON.stringify(params.attempt)} ${lastExpiredAttempt.reason}; its output is no longer accepted.`,
+              );
+            }
             throw new Error("No workflow step is waiting for output.");
           }
           // Flush the conversation into the bundle before accepting, so the
@@ -1632,13 +1660,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (event, ctx) => {
-    const run = activeRun;
-    if (!run) {
-      return;
-    }
-    // An aborted turn means the user hit escape to take the conversation
-    // back. Nudging or dispatching the next step would immediately steal it
-    // again, so hold the run until an explicit /workflow resume.
     const aborted = event.messages.some(
       (message) =>
         typeof message === "object" &&
@@ -1646,6 +1667,17 @@ export default function piWorkflows(pi: ExtensionAPI) {
         "stopReason" in message &&
         (message as { stopReason?: string }).stopReason === "aborted",
     );
+    if (aborted && systemTurnAbort !== null) {
+      systemTurnAbort = null;
+      return;
+    }
+    const run = activeRun;
+    if (!run) {
+      return;
+    }
+    // An aborted turn means the user hit escape to take the conversation
+    // back. Nudging or dispatching the next step would immediately steal it
+    // again, so hold the run until an explicit /workflow resume.
     if (!aborted || runHeld()) {
       return;
     }
@@ -1719,6 +1751,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     sessionClosed = true;
+    systemTurnAbort = null;
     supersedePresentation();
     const run = activeRun;
     if (run !== null && run.claimToken !== undefined) {

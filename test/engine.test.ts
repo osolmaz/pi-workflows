@@ -316,6 +316,44 @@ describe("WorkflowEngine", () => {
     expect(state.results.ask?.outcome).toBe("timed_out");
   });
 
+  it("resolves a node timeout from run context", async () => {
+    const workflow = defineWorkflow({
+      name: "derived-timeout",
+      startAt: "ask",
+      nodes: {
+        ask: agent({
+          prompt: () => "?",
+          timeoutMs: ({ input }) => (input as { timeoutMs: number }).timeoutMs,
+        }),
+      },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("ask", { hang: true });
+    const { engine } = await makeEngine(executor);
+
+    const { state } = await engine.run(workflow, { timeoutMs: 25 });
+
+    expect(state.status).toBe("timed_out");
+    expect(state.results.ask?.durationMs).toBeGreaterThanOrEqual(20);
+  });
+
+  it("fails before dispatch when a derived timeout is invalid", async () => {
+    const workflow = defineWorkflow({
+      name: "bad-derived-timeout",
+      startAt: "ask",
+      nodes: { ask: agent({ prompt: () => "?", timeoutMs: () => 0 }) },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("ask", { output: {} });
+    const { engine } = await makeEngine(executor);
+
+    const { state } = await engine.run(workflow, {});
+
+    expect(state.status).toBe("failed");
+    expect(state.error).toMatch(/timeoutMs must resolve to a finite positive number/);
+    expect(executor.requests).toHaveLength(0);
+  });
+
   it("supports cancel() while an agent step is pending", async () => {
     const workflow = defineWorkflow({
       name: "cancellable",

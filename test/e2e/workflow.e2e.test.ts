@@ -78,6 +78,21 @@ export default defineWorkflow({
 });
 `;
 
+const TIMEOUT_E2E_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "timeout-e2e",
+  startAt: "work",
+  nodes: {
+    work: agent({
+      prompt: () => "Try to write the timeout marker.",
+      timeoutMs: 50,
+    }),
+  },
+  edges: [],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -239,6 +254,7 @@ describe.sequential("pi-workflows end to end", () => {
   let agentDir: string;
   let controllerDir: string;
   let controllerFile: string;
+  let timeoutMarker: string;
 
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
@@ -322,6 +338,19 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const timeoutStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: timeout-e2e, step: work, attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (timeoutStepMatch) {
+          return {
+            kind: "tool",
+            toolName: "write",
+            args: {
+              path: timeoutMarker,
+              content: "This tool call must not finish after the workflow timeout.",
+            },
+          };
+        }
         const hostStepMatch = lastUserText.match(
           /workflow step contract \(workflow: host-e2e, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
         );
@@ -357,12 +386,18 @@ describe.sequential("pi-workflows end to end", () => {
       controllerProjectScope(projectDir),
       "controller.sqlite",
     );
+    timeoutMarker = path.join(projectDir, "timeout-marker.txt");
 
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
     await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "e2e.workflow.ts"),
       E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "timeout-e2e.workflow.ts"),
+      TIMEOUT_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -691,6 +726,20 @@ describe.sequential("pi-workflows end to end", () => {
       Promise.all(terminalFiles.map((file) => fs.readFile(path.join(runDir, file), "utf8"))),
     ).resolves.toEqual(terminalContents);
   }, 120_000);
+
+  it("stops the real Pi turn when an agent node times out", async () => {
+    pi.send({ id: "timeout-1", type: "prompt", message: "/workflow timeout-e2e" });
+
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) => candidate.workflowName === "timeout-e2e" && candidate.status === "timed_out",
+      () => `${pi.stderr()}\n${pi.stdoutLines.join("\n")}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(state.results.work?.outcome).toBe("timed_out");
+    await expect(fs.stat(timeoutMarker)).rejects.toThrow();
+  }, 90_000);
 
   it("starts the built-in monitor from the model-facing workflow tool", async () => {
     pi.send({ id: "monitor-1", type: "prompt", message: "Start the built-in monitor now." });

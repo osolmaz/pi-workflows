@@ -102,8 +102,9 @@ Pi Workflows includes a `monitor` workflow for plain-language requests such as:
 
 The monitor checks immediately, reports only the states requested by the user,
 waits with a normal shell action, and loops until its stop condition or check
-limit. Its input supports `task`, `everyMinutes`, `reportWhen`, `stopWhen`, and
-`maxChecks`. Project and global workflows can replace the built-in `monitor`
+limit. Its input supports `task`, `everyMinutes`, `reportWhen`, `stopWhen`,
+`maxChecks`, and an optional `checkTimeoutMinutes`. Project and global
+workflows can replace the built-in `monitor`
 by using the same file name.
 
 A monitor occupies the session's one active workflow slot. If its Pi runner

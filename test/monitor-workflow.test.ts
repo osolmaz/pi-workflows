@@ -281,6 +281,56 @@ describe("built-in monitor workflow", () => {
     });
   });
 
+  it("derives agent timeouts from the prepared monitor configuration", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-monitor-timeout");
+    const engine = new WorkflowEngine({
+      executor: scriptedExecutor([
+        {
+          route: "stop_quiet",
+          observation: "Initial state",
+          reason: "Test complete",
+        },
+      ]),
+      store: new WorkflowRunStore(outputRoot),
+    });
+    const result = await engine.run(monitor, monitorInput({ checkTimeoutMinutes: 90 }));
+    const context: WorkflowNodeContext = {
+      input: result.state.input,
+      outputs: result.state.outputs,
+      results: result.state.results,
+      state: result.state,
+      signal: new AbortController().signal,
+    };
+
+    for (const nodeId of ["check", "report_continue", "report_stop"] as const) {
+      const node = monitor.nodes[nodeId] as AgentNodeDefinition;
+      expect(node.timeoutMs).toBeTypeOf("function");
+      expect(await (node.timeoutMs as (context: WorkflowNodeContext) => number)(context)).toBe(
+        90 * 60_000,
+      );
+    }
+    expect(result.state.outputs.prepare).toMatchObject({ checkTimeoutMinutes: 90 });
+  });
+
+  it("defaults the agent timeout to at least 60 minutes", async () => {
+    const prepare = monitor.nodes.prepare as ComputeNodeDefinition;
+    const state = {
+      steps: [],
+    } as never;
+    const context = {
+      input: monitorInput({ everyMinutes: 30 }),
+      outputs: {},
+      results: {},
+      state,
+      signal: new AbortController().signal,
+    } satisfies WorkflowNodeContext;
+
+    expect(await prepare.run(context)).toMatchObject({ checkTimeoutMinutes: 60 });
+    expect(() =>
+      prepare.run({ ...context, input: monitorInput({ checkTimeoutMinutes: 4 }) }),
+    ).toThrow(/checkTimeoutMinutes/);
+  });
+
   it("configures a 30-minute shell sleep above both timeout limits", async () => {
     const outputRoot = await makeTempDir("pi-workflows-monitor-sleep");
     const engine = new WorkflowEngine({

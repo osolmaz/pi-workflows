@@ -39,6 +39,7 @@ import type {
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
 const TITLE_TIMEOUT_MS = 30_000;
+const TIMEOUT_RESOLUTION_TIMEOUT_MS = 30_000;
 // Covers the shell SIGTERM → SIGKILL escalation (1s) plus stdio close.
 const ABORT_CLEANUP_GRACE_MS = 2_000;
 
@@ -758,36 +759,43 @@ export class WorkflowEngine {
     node: WorkflowNodeDefinition,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
-    const timeoutMs = node.timeoutMs ?? this.defaultNodeTimeoutMs;
     const abort = new AbortController();
+    const context = this.createNodeContext(state, abort.signal);
+    let timer: NodeJS.Timeout | undefined;
+    let dispatchSettled: Promise<void> | undefined;
     this.activeAbort = abort;
-    if (this.parked) {
-      // A park that landed during the node_started persist must not let the
-      // node dispatch: its discarded side effects would rerun on resume.
-      throw new RunParkedError();
-    }
-    if (this.cancelled) {
-      throw new CancelledError();
-    }
-
-    const timer = setTimeout(() => {
-      abort.abort(new TimeoutError(timeoutMs));
-    }, timeoutMs);
-    const dispatched = this.dispatchNode(
-      workflow,
-      state,
-      runDir,
-      nodeId,
-      attemptId,
-      node,
-      abort.signal,
-      meta,
-    );
-    const dispatchSettled = dispatched.then(
-      () => undefined,
-      () => undefined,
-    );
     try {
+      if (this.parked) {
+        // A park that landed during the node_started persist must not let the
+        // node dispatch: its discarded side effects would rerun on resume.
+        throw new RunParkedError();
+      }
+      if (this.cancelled) {
+        throw new CancelledError();
+      }
+
+      const timeoutMs = await this.resolveNodeTimeout(node, context, abort);
+      if (abort.signal.aborted) {
+        throw abortError(abort.signal);
+      }
+      timer = setTimeout(() => {
+        abort.abort(new TimeoutError(timeoutMs));
+      }, timeoutMs);
+      const dispatched = this.dispatchNode(
+        workflow,
+        state,
+        runDir,
+        nodeId,
+        attemptId,
+        node,
+        context,
+        abort.signal,
+        meta,
+      );
+      dispatchSettled = dispatched.then(
+        () => undefined,
+        () => undefined,
+      );
       // Race the dispatch against the abort signal so timeouts and cancel
       // take effect even for node callbacks that never observe the signal.
       const execution = await Promise.race([dispatched, abortRejection(abort.signal)]);
@@ -799,7 +807,7 @@ export class WorkflowEngine {
       assertJsonSerializable(execution.output, `Node ${nodeId} output`);
       return execution;
     } catch (error) {
-      if (node.nodeType === "action" && "exec" in node) {
+      if (node.nodeType === "action" && "exec" in node && dispatchSettled !== undefined) {
         // Give the killed shell command a short grace period to close so its
         // action receipt lands in `meta` before the failed attempt persists.
         await Promise.race([
@@ -810,8 +818,36 @@ export class WorkflowEngine {
       const reason: unknown = abort.signal.aborted ? abort.signal.reason : undefined;
       throw reason instanceof TimeoutError || reason instanceof CancelledError ? reason : error;
     } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (this.activeAbort === abort) {
+        this.activeAbort = null;
+      }
+    }
+  }
+
+  private async resolveNodeTimeout(
+    node: WorkflowNodeDefinition,
+    context: WorkflowNodeContext,
+    abort: AbortController,
+  ): Promise<number> {
+    const configured = node.timeoutMs;
+    if (typeof configured !== "function") {
+      return assertValidTimeout(configured ?? this.defaultNodeTimeoutMs);
+    }
+    const timer = setTimeout(
+      () => abort.abort(new TimeoutError(TIMEOUT_RESOLUTION_TIMEOUT_MS)),
+      TIMEOUT_RESOLUTION_TIMEOUT_MS,
+    );
+    try {
+      const resolved = await Promise.race([
+        Promise.resolve(configured(context)),
+        abortRejection(abort.signal),
+      ]);
+      return assertValidTimeout(resolved);
+    } finally {
       clearTimeout(timer);
-      this.activeAbort = null;
     }
   }
 
@@ -822,10 +858,10 @@ export class WorkflowEngine {
     nodeId: string,
     attemptId: string,
     node: WorkflowNodeDefinition,
+    context: WorkflowNodeContext,
     signal: AbortSignal,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
-    const context = this.createNodeContext(state, signal);
     switch (node.nodeType) {
       case "agent":
         return await this.runAgentNode(
@@ -1044,7 +1080,13 @@ async function runShellActionNode(
   return { output, promptText: null, action: shellReceipt(result) };
 }
 
-/** Rejects with the abort reason once the signal fires; never resolves. */
+function assertValidTimeout(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("Node timeoutMs must resolve to a finite positive number");
+  }
+  return value;
+}
+
 /** The error carried by an aborted signal, normalized to an Error. */
 function abortError(signal: AbortSignal): Error {
   const reason: unknown = signal.reason ?? new CancelledError();
