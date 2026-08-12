@@ -144,6 +144,37 @@ describe("migrateLegacyWorkflowSources", () => {
     });
   });
 
+  it("migrates a waiting bundle whose queue row is done", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-waiting");
+    const store = new WorkflowRunStore(root);
+    const state = legacyState("waiting-run");
+    state.status = "waiting";
+    state.waitingOn = "done";
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const queue = new SqliteControllerStore(path.join(root, "waiting.sqlite"));
+    queue.enqueueWorkflowRun({
+      runId: "waiting-run",
+      workflowName: "fixture",
+      workflowSourceRef: state.workflowPath as string,
+      input: null,
+      runnerId: "old-runner",
+      claimToken: "old-claim",
+      leaseMs: 30_000,
+    });
+    queue.completeWorkflowRun({ runId: "waiting-run", claimToken: "old-claim" });
+
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
+
+    expect(result).toEqual({ migratedRunIds: ["waiting-run"], blocked: [] });
+    expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
+      kind: "builtin",
+      id: "fixture",
+      revision: "r1",
+    });
+    expect(queue.getWorkflowRun("waiting-run")?.status).toBe("done");
+    queue.close();
+  });
+
   it("does not migrate an unknown built-in hash or a terminal run", async () => {
     const root = await makeTempDir("pi-workflows-migrate-sources-skip");
     const store = new WorkflowRunStore(root);
@@ -212,6 +243,7 @@ describe("migrateLegacyWorkflowSources", () => {
         repairCanonicalWorkflowSourceRun: () => false,
         claimLegacyWorkflowSourceRun: () => false,
         parkWorkflowRun: () => false,
+        getWorkflowRun: () => undefined,
       },
     });
 

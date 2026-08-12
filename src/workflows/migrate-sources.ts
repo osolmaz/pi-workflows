@@ -22,6 +22,7 @@ export type LegacySourceMigrationQueue = {
     leaseMs: number;
   }): boolean;
   parkWorkflowRun(options: { runId: string; claimToken: string }): boolean;
+  getWorkflowRun(runId: string): { status: "claimed" | "parked" | "done" } | undefined;
 };
 
 const MIGRATION_LEASE_MS = 30_000;
@@ -104,8 +105,10 @@ export async function migrateLegacyWorkflowSources(options: {
       workflowSourceRef = legacy.entry.ref;
     }
     const claimToken = randomUUID();
+    const queueIsDone = options.queue?.getWorkflowRun(state.runId)?.status === "done";
     if (
       options.queue !== undefined &&
+      !queueIsDone &&
       !options.queue.claimLegacyWorkflowSourceRun({
         runId: state.runId,
         oldWorkflowPath: state.workflowPath,
@@ -117,7 +120,7 @@ export async function migrateLegacyWorkflowSources(options: {
     ) {
       result.blocked.push({
         runId: state.runId,
-        reason: "matching queue row is active, terminal, or unavailable",
+        reason: "matching queue row is active or unavailable",
       });
       continue;
     }
@@ -138,6 +141,7 @@ export async function migrateLegacyWorkflowSources(options: {
     await writeJsonAtomic(path.join(bundle.runDir, "state.json"), migrated);
     if (
       options.queue !== undefined &&
+      !queueIsDone &&
       !options.queue.parkWorkflowRun({ runId: state.runId, claimToken })
     ) {
       result.blocked.push({
