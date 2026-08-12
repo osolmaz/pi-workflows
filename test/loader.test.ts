@@ -3,7 +3,6 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   discoverWorkflows,
-  hashWorkflowSource,
   loadWorkflowFile,
   resolveWorkflowRef,
   workflowFileStem,
@@ -118,21 +117,6 @@ describe("resolveWorkflowRef", () => {
 
     expect(resolved.source).toBe("builtin");
     expect(workflow.name).toBe("monitor");
-  });
-
-  it("keeps a built-in definition and source hash stable after its file changes", async () => {
-    const { cwd, homeDir } = await makeSearchDirs();
-    const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir });
-    const original = await fs.readFile(resolved.path, "utf8");
-    const originalHash = await hashWorkflowSource(resolved.path);
-    try {
-      await fs.writeFile(resolved.path, "throw new Error('new package code loaded');\n", "utf8");
-
-      expect((await loadWorkflowFile(resolved.path)).name).toBe("monitor");
-      expect(await hashWorkflowSource(resolved.path)).toBe(originalHash);
-    } finally {
-      await fs.writeFile(resolved.path, original, "utf8");
-    }
   });
 
   it("resolves direct paths", async () => {

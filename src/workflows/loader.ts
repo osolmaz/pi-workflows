@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
+import { captureBuiltinWorkflows } from "./builtin-registry.js";
 import { isWorkflowDefinition } from "./definition.js";
 import monitorWorkflow from "./monitor.workflow.js";
 import type { WorkflowDefinition } from "./types.js";
@@ -24,42 +24,17 @@ export type WorkflowSearchPaths = {
 
 const BUILTIN_DIR = fileURLToPath(new URL("./", import.meta.url));
 
-type BuiltinWorkflow = {
-  definition: WorkflowDefinition;
-  path: string;
-  sourceHash: string;
-};
-
-function builtinWorkflow(name: string, definition: WorkflowDefinition): BuiltinWorkflow {
-  const modulePath = WORKFLOW_FILE_SUFFIXES.map((suffix) =>
-    path.join(BUILTIN_DIR, `${name}${suffix}`),
-  )
-    .map((candidate) => {
-      try {
-        return { candidate, source: readFileSync(candidate) };
-      } catch {
-        return undefined;
-      }
-    })
-    .find((candidate) => candidate !== undefined);
-  if (modulePath === undefined) {
-    throw new Error(`Built-in workflow module is missing: ${name}`);
-  }
-  return {
-    definition,
-    path: modulePath.candidate,
-    sourceHash: createHash("sha256").update(modulePath.source).digest("hex"),
-  };
-}
-
 // Capture each built-in definition and source hash when this module loads.
 // Later package updates cannot mix new files with this process's old engine.
-const BUILTIN_WORKFLOWS = new Map<string, BuiltinWorkflow>([
-  ["monitor", builtinWorkflow("monitor", monitorWorkflow)],
+const { byName: BUILTIN_WORKFLOWS, byPath: BUILTIN_WORKFLOWS_BY_PATH } = captureBuiltinWorkflows([
+  {
+    name: "monitor",
+    definition: monitorWorkflow,
+    candidatePaths: WORKFLOW_FILE_SUFFIXES.map((suffix) =>
+      path.join(BUILTIN_DIR, `monitor${suffix}`),
+    ),
+  },
 ]);
-const BUILTIN_WORKFLOWS_BY_PATH = new Map(
-  [...BUILTIN_WORKFLOWS.values()].map((workflow) => [workflow.path, workflow]),
-);
 
 /** Directories scanned for workflow files, in precedence order. */
 export function workflowSearchDirs(
