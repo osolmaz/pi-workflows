@@ -93,7 +93,7 @@ describe("WorkflowEngine.continueRun", () => {
     if (state === undefined) {
       throw new Error("missing state");
     }
-    state.workflowHash = "old-hash";
+    state.workflowSource = { kind: "file", path: "/demo.ts", hash: "old-hash" };
     const { promises: fs } = await import("node:fs");
     const path = await import("node:path");
     await fs.writeFile(
@@ -104,14 +104,21 @@ describe("WorkflowEngine.continueRun", () => {
 
     const second = makeEngine(store);
     await expect(
-      second.continueRun(waitWorkflow, "parent-3", {}, { workflowHash: "new-hash" }),
+      second.continueRun(
+        waitWorkflow,
+        "parent-3",
+        {},
+        {
+          workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+        },
+      ),
     ).rejects.toThrow(WorkflowSourceChangedError);
     const forced = await second.continueRun(
       waitWorkflow,
       "parent-3",
       {},
       {
-        workflowHash: "new-hash",
+        workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
         force: true,
       },
     );

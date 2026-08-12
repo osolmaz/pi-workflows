@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import monitor from "../src/builtins/monitor.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import monitor from "../src/workflows/monitor.workflow.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type {
   AgentNodeDefinition,

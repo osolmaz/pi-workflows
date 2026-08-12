@@ -15,9 +15,11 @@ tui/             Rust piw viewer and live replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
-imports nothing outside itself and never imports Pi. `src/controllers` may
-import the public workflow engine for child-run scheduling. `src/extension`
-and `src/viewer` may import both layers and never each other. The viewer reads
+imports nothing outside itself and never imports Pi. `src/builtins` contains
+package-owned definitions and imports only the public workflow engine.
+`src/controllers` may import the public workflow engine for child-run
+scheduling. `src/extension` and `src/host` may also import the built-in catalog.
+The extension and viewer never import each other. The viewer reads
 run bundles and opens the controller SQLite database read-only, so it works
 from any process.
 

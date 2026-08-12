@@ -6,6 +6,7 @@ import { projectControllerStorePath, SqliteControllerStore } from "../src/contro
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { hashWorkflowSource } from "../src/workflows/loader.js";
 import { RUN_STATE_SCHEMA, readRunBundle, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
@@ -70,8 +71,8 @@ export default defineWorkflow({
         const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
         queue.enqueueWorkflowRun({
           runId: "host-run-1",
-          workflowRef: "parked-demo",
-          workflowPath,
+          workflowName: "parked-demo",
+          workflowSourceRef: workflowPath,
           input: {},
           runnerId: "session-a",
           claimToken: "token-a",
@@ -85,7 +86,14 @@ export default defineWorkflow({
           nodes: { work: compute({ run: () => "ignored" }) },
           edges: [],
         });
-        const state = runningState("host-run-1");
+        const state = {
+          ...runningState("host-run-1"),
+          workflowSource: {
+            kind: "file" as const,
+            path: workflowPath,
+            hash: await hashWorkflowSource(workflowPath),
+          },
+        };
         const runDir = await runStore.initializeRunBundle(workflow, state);
         state.currentNode = "work";
         await runStore.writeSnapshot(runDir, state, {
@@ -141,8 +149,8 @@ export default defineWorkflow({
       const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
       queue.enqueueWorkflowRun({
         runId: "fenced-fail",
-        workflowRef: "demo",
-        workflowPath: "/missing.workflow.ts",
+        workflowName: "demo",
+        workflowSourceRef: "/missing.workflow.ts",
         input: {},
         runnerId: "runner-a",
         claimToken: "token-a",
@@ -222,8 +230,8 @@ export default defineWorkflow({
       const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
       queue.enqueueWorkflowRun({
         runId: "edited-run",
-        workflowRef: "parked-demo",
-        workflowPath,
+        workflowName: "parked-demo",
+        workflowSourceRef: workflowPath,
         input: {},
         runnerId: "session-a",
         claimToken: "token-a",
@@ -237,7 +245,10 @@ export default defineWorkflow({
         nodes: { work: compute({ run: () => "ignored" }) },
         edges: [],
       });
-      const state = { ...runningState("edited-run"), workflowHash: "/dev/null" };
+      const state = {
+        ...runningState("edited-run"),
+        workflowSource: { kind: "file" as const, path: workflowPath, hash: "wrong-hash" },
+      };
       const runDir = await runStore.initializeRunBundle(workflow, state);
       state.currentNode = "work";
       await runStore.writeSnapshot(runDir, state, {
@@ -384,8 +395,8 @@ export default defineController({
       const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
       queue.enqueueWorkflowRun({
         runId: "corrupt-row",
-        workflowRef: "demo",
-        workflowPath: "/missing.workflow.ts",
+        workflowName: "demo",
+        workflowSourceRef: "/missing.workflow.ts",
         input: {},
         runnerId: "runner-a",
         claimToken: "token-a",
@@ -426,8 +437,8 @@ export default defineController({
       const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
       queue.enqueueWorkflowRun({
         runId: "waiting-row",
-        workflowRef: "gate",
-        workflowPath: path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
+        workflowName: "gate",
+        workflowSourceRef: path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
         input: {},
         runnerId: "runner-a",
         claimToken: "token-a",

@@ -16,10 +16,14 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 3. Workflows built into Pi Workflows
 
 Pi Workflows includes a built-in `monitor` workflow. A project or global file
-named `monitor.workflow.ts` replaces it. Built-ins are loaded with the engine
-when a Pi process starts. Updating the package on disk cannot mix a new
-built-in with that process's old engine; reload or restart Pi to use the new
-built-in. Project and global workflow files still reload on each run.
+named `monitor.workflow.ts` replaces it. The package registers each built-in in
+a process-local catalog with a stable reference such as `builtin:monitor` and
+an explicit revision. Built-ins are imported with the engine when a Pi process
+starts. They are not read from the package directory when a run starts or
+resumes. Updating the package on disk cannot mix a new built-in with that
+process's old engine; reload or restart Pi to use the new built-in. A revision
+mismatch refuses resume. Project and global workflow files still reload on
+each run and use their path and SHA-256 hash as their source identity.
 
 The workflow's command name is the file stem, so `.pi/workflows/triage.workflow.ts`
 runs as `/workflow triage`. A direct path also works: `/workflow ./somewhere/x.workflow.ts`.

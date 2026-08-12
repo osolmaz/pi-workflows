@@ -4,6 +4,7 @@ import type {
   WorkflowDefinition,
   WorkflowRunResult,
   WorkflowRunStatus,
+  WorkflowSource,
 } from "../workflows/types.js";
 import type {
   ControllerWorkflowScheduler,
@@ -13,7 +14,7 @@ import type {
 
 export type ResolvedChildWorkflow = {
   workflow: WorkflowDefinition;
-  workflowPath?: string;
+  workflowSource?: WorkflowSource;
 };
 
 export type WorkflowEngineSchedulerOptions = {
@@ -77,7 +78,9 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
     const promise = engine
       .run(resolved.workflow, request.input, {
         runId,
-        ...(resolved.workflowPath !== undefined ? { workflowPath: resolved.workflowPath } : {}),
+        ...(resolved.workflowSource !== undefined
+          ? { workflowSource: resolved.workflowSource }
+          : {}),
       })
       .then((result) => {
         callCompletion(onComplete, resultFromRun(result));

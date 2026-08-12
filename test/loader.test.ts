@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import {
   discoverWorkflows,
   loadWorkflowFile,
@@ -44,7 +45,7 @@ describe("discoverWorkflows", () => {
     await copyExample(path.join(cwd, ".pi", "workflows"), "local.workflow.ts");
     await copyExample(path.join(homeDir, ".pi", "agent", "workflows"), "global.workflow.ts");
 
-    const discovered = await discoverWorkflows({ cwd, homeDir });
+    const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(discovered.map((w) => [w.name, w.source])).toEqual([
       ["local", "project"],
@@ -58,7 +59,7 @@ describe("discoverWorkflows", () => {
     await copyExample(path.join(cwd, ".pi", "workflows"), "same.workflow.ts");
     await copyExample(path.join(homeDir, ".pi", "agent", "workflows"), "same.workflow.ts");
 
-    const discovered = await discoverWorkflows({ cwd, homeDir });
+    const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(discovered).toHaveLength(2);
     expect(discovered[0]?.source).toBe("project");
@@ -68,7 +69,7 @@ describe("discoverWorkflows", () => {
   it("returns the built-in monitor for missing user directories", async () => {
     const cwd = await makeTempDir("pi-workflows-empty");
     const homeDir = await makeTempDir("pi-workflows-empty-home");
-    expect(await discoverWorkflows({ cwd, homeDir })).toEqual([
+    expect(await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).toEqual([
       expect.objectContaining({ name: "monitor", source: "builtin" }),
     ]);
   });
@@ -77,10 +78,10 @@ describe("discoverWorkflows", () => {
     const { cwd, homeDir } = await makeSearchDirs();
     const target = await copyExample(path.join(cwd, ".pi", "workflows"), "monitor.workflow.ts");
 
-    const discovered = await discoverWorkflows({ cwd, homeDir });
+    const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(discovered.filter((workflow) => workflow.name === "monitor")).toEqual([
-      { name: "monitor", path: target, source: "project" },
+      { name: "monitor", ref: target, source: "project" },
     ]);
   });
 });
@@ -105,29 +106,38 @@ describe("resolveWorkflowRef", () => {
     const { cwd, homeDir } = await makeSearchDirs();
     const target = await copyExample(path.join(cwd, ".pi", "workflows"), "mine.workflow.ts");
 
-    const resolved = await resolveWorkflowRef("mine", { cwd, homeDir });
+    const resolved = await resolveWorkflowRef("mine", { cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(resolved).toEqual({ path: target, source: "project" });
+    expect(resolved.sourceKind).toBe("project");
+    expect(resolved.source).toMatchObject({ kind: "file", path: target });
+    expect(resolved.definition.name).toBe("echo");
   });
 
   it("resolves and loads the built-in monitor", async () => {
     const { cwd, homeDir } = await makeSearchDirs();
-    const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir });
-    const workflow = await loadWorkflowFile(resolved.path);
+    const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(resolved.source).toBe("builtin");
-    expect(workflow.name).toBe("monitor");
+    expect(resolved.sourceKind).toBe("builtin");
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "1" });
+    expect(resolved.definition.name).toBe("monitor");
   });
 
   it("resolves direct paths", async () => {
     const { cwd, homeDir } = await makeSearchDirs();
-    const resolved = await resolveWorkflowRef(ECHO_EXAMPLE, { cwd, homeDir });
-    expect(resolved).toEqual({ path: ECHO_EXAMPLE, source: "path" });
+    const resolved = await resolveWorkflowRef(
+      ECHO_EXAMPLE,
+      { cwd, homeDir },
+      builtinWorkflowCatalog,
+    );
+    expect(resolved.sourceKind).toBe("path");
+    expect(resolved.source).toMatchObject({ kind: "file", path: ECHO_EXAMPLE });
   });
 
   it("lists available names for unknown refs", async () => {
     const { cwd, homeDir } = await makeSearchDirs();
     await copyExample(path.join(cwd, ".pi", "workflows"), "known.workflow.ts");
-    await expect(resolveWorkflowRef("unknown", { cwd, homeDir })).rejects.toThrow(/known/);
+    await expect(
+      resolveWorkflowRef("unknown", { cwd, homeDir }, builtinWorkflowCatalog),
+    ).rejects.toThrow(/known/);
   });
 });

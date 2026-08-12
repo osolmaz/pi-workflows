@@ -754,6 +754,9 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status).toBe("completed");
     expect(state.workflowName).toBe("monitor");
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "1" });
+    expect(state.workflowPath).toBeUndefined();
+    expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({
       observation: "The fixture check completed.",
       reason: "The requested first check is complete.",
@@ -907,8 +910,8 @@ export default function captureFailureExtension(pi: unknown) {
     const queue = new SqliteControllerStore(hostControllerFile);
     queue.enqueueWorkflowRun({
       runId: "host-e2e-run",
-      workflowRef: "host-e2e",
-      workflowPath,
+      workflowName: "host-e2e",
+      workflowSourceRef: workflowPath,
       input: {},
       runnerId: "session-a",
       claimToken: "token-a",
@@ -935,13 +938,20 @@ export default function captureFailureExtension(pi: unknown) {
       },
       edges: [],
     });
+    const { hashWorkflowSource } = await import(
+      path.join(REPO_ROOT, "src", "workflows", "loader.js")
+    );
     const now = new Date().toISOString();
     const state = {
       schema: RUN_STATE_SCHEMA,
       traceSeq: 0,
       runId: "host-e2e-run",
       workflowName: "host-e2e",
-      workflowPath,
+      workflowSource: {
+        kind: "file" as const,
+        path: workflowPath,
+        hash: await hashWorkflowSource(workflowPath),
+      },
       startedAt: now,
       updatedAt: now,
       status: "running" as const,

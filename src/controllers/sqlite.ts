@@ -101,8 +101,10 @@ type WorkflowRunQueueRow = {
 /** A user-started workflow run tracked by the durable run queue. */
 export type WorkflowRunQueueRecord = {
   runId: string;
-  workflowRef: string;
-  workflowPath: string;
+  /** Human-readable workflow name used in status and event output. */
+  workflowName: string;
+  /** Canonical source reference used to reopen the run. */
+  workflowSourceRef: string;
   input: unknown;
   status: "claimed" | "parked" | "done";
   runnerId: string | null;
@@ -866,8 +868,8 @@ export class SqliteControllerStore implements ControllerStore {
    */
   enqueueWorkflowRun(options: {
     runId: string;
-    workflowRef: string;
-    workflowPath: string;
+    workflowName: string;
+    workflowSourceRef: string;
     input: unknown;
     runnerId: string;
     claimToken: string;
@@ -877,8 +879,8 @@ export class SqliteControllerStore implements ControllerStore {
     now?: string;
   }): WorkflowRunQueueRecord {
     validateRunId(options.runId);
-    validateKey(options.workflowRef, "workflow ref");
-    validateKey(options.workflowPath, "workflow path");
+    validateKey(options.workflowName, "workflow name");
+    validateKey(options.workflowSourceRef, "workflow source ref");
     validateKey(options.runnerId, "runner id");
     validateKey(options.claimToken, "claim token");
     validateDuration(options.leaseMs, "leaseMs");
@@ -896,8 +898,8 @@ export class SqliteControllerStore implements ControllerStore {
       )
       .run(
         options.runId,
-        options.workflowRef,
-        options.workflowPath,
+        options.workflowName,
+        options.workflowSourceRef,
         inputJson,
         options.runnerId,
         options.claimToken,
@@ -1066,6 +1068,62 @@ export class SqliteControllerStore implements ControllerStore {
       )
       .run(now, options.runId, options.claimToken);
     return result.changes === 1;
+  }
+
+  /** Claim and rewrite one proved legacy built-in queue row atomically. */
+  claimLegacyBuiltinWorkflowRun(options: {
+    runId: string;
+    oldWorkflowPath: string;
+    workflowSourceRef: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): boolean {
+    validateRunId(options.runId);
+    validateKey(options.oldWorkflowPath, "legacy workflow path");
+    validateKey(options.workflowSourceRef, "workflow source ref");
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.claimToken, "claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    const expiresAt = nowMs + options.leaseMs;
+    return this.transaction(() => {
+      const row = this.database
+        .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
+        .get(options.runId) as WorkflowRunQueueRow | undefined;
+      if (row === undefined || row.status === "done") return false;
+      const sourceMatches =
+        row.workflow_path === options.oldWorkflowPath ||
+        row.workflow_path === options.workflowSourceRef;
+      const claimable =
+        row.status === "parked" ||
+        (row.status === "claimed" &&
+          row.claim_token === options.claimToken &&
+          row.claim_expires_at !== null &&
+          row.claim_expires_at > nowMs) ||
+        (row.status === "claimed" &&
+          row.claim_expires_at !== null &&
+          row.claim_expires_at <= nowMs);
+      if (!sourceMatches || !claimable) return false;
+      const result = this.database
+        .prepare(
+          `UPDATE workflow_run_queue
+           SET workflow_path = ?, status = 'claimed', runner_id = ?,
+               claim_token = ?, claim_expires_at = ?, updated_at = ?
+           WHERE run_id = ? AND status != 'done'`,
+        )
+        .run(
+          options.workflowSourceRef,
+          options.runnerId,
+          options.claimToken,
+          expiresAt,
+          now,
+          options.runId,
+        );
+      return result.changes === 1;
+    });
   }
 
   /** Append a run lifecycle transition to the event feed. */
@@ -1332,8 +1390,8 @@ function workflowFromRow(row: WorkflowRow): ChildWorkflowRecord {
 function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
   return {
     runId: row.run_id,
-    workflowRef: row.workflow_ref,
-    workflowPath: row.workflow_path,
+    workflowName: row.workflow_ref,
+    workflowSourceRef: row.workflow_path,
     input: parseStoredJson(row.input_json, "workflow run input"),
     status: row.status,
     runnerId: row.runner_id,

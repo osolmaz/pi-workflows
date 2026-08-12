@@ -28,8 +28,8 @@ describe("run bundle fencing", () => {
     const outputRoot = await makeTempDir("pi-run-fence-runs");
     queue.enqueueWorkflowRun({
       runId: "fenced-run",
-      workflowRef: "demo",
-      workflowPath: "/demo.ts",
+      workflowName: "demo",
+      workflowSourceRef: "/demo.ts",
       input: {},
       runnerId: "runner-a",
       claimToken: "token-a",

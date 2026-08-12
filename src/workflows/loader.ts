@@ -4,16 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
-import { captureBuiltinWorkflows } from "./builtin-registry.js";
+import type { BuiltinWorkflowCatalog } from "./catalog.js";
 import { isWorkflowDefinition } from "./definition.js";
-import monitorWorkflow from "./monitor.workflow.js";
-import type { WorkflowDefinition } from "./types.js";
+import { WorkflowSourceChangedError } from "./errors.js";
+import type { WorkflowDefinition, WorkflowSource } from "./types.js";
 
 const WORKFLOW_FILE_SUFFIXES = [".workflow.ts", ".workflow.js", ".workflow.mts", ".workflow.mjs"];
 
 export type DiscoveredWorkflow = {
   name: string;
-  path: string;
+  ref: string;
   source: "project" | "global" | "builtin" | "path";
 };
 
@@ -22,46 +22,27 @@ export type WorkflowSearchPaths = {
   homeDir?: string;
 };
 
-const BUILTIN_DIR = fileURLToPath(new URL("./", import.meta.url));
-const PACKAGE_ROOT = path.resolve(BUILTIN_DIR, "..", "..");
+export type ResolvedWorkflow = {
+  definition: WorkflowDefinition;
+  source: WorkflowSource;
+  sourceKind: DiscoveredWorkflow["source"];
+};
 
-function builtinCandidatePaths(name: string): string[] {
-  return ["src/workflows", "dist/workflows"].flatMap((dir) =>
-    WORKFLOW_FILE_SUFFIXES.map((suffix) => path.join(PACKAGE_ROOT, dir, `${name}${suffix}`)),
-  );
-}
-
-// Capture each built-in definition and source hash when this module loads.
-// Later package updates cannot mix new files with this process's old engine.
-const { byName: BUILTIN_WORKFLOWS, byPath: BUILTIN_WORKFLOWS_BY_PATH } = captureBuiltinWorkflows([
-  {
-    name: "monitor",
-    definition: monitorWorkflow,
-    candidatePaths: builtinCandidatePaths("monitor"),
-  },
-]);
-
-/** Directories scanned for workflow files, in precedence order. */
+/** Directories scanned for user workflow files, in precedence order. */
 export function workflowSearchDirs(
   options: WorkflowSearchPaths,
-): { dir: string; source: "project" | "global" | "builtin" }[] {
+): { dir: string; source: "project" | "global" }[] {
   const homeDir = options.homeDir ?? os.homedir();
   return [
     { dir: path.join(options.cwd, ".pi", "workflows"), source: "project" },
     { dir: path.join(homeDir, ".pi", "agent", "workflows"), source: "global" },
-    { dir: BUILTIN_DIR, source: "builtin" },
   ];
 }
 
-/** SHA-256 of a workflow source file, recorded in run state for resume pinning. */
+/** SHA-256 of a user workflow source file. */
 export async function hashWorkflowSource(filePath: string): Promise<string> {
-  const absolutePath = path.resolve(filePath);
-  const builtin = BUILTIN_WORKFLOWS_BY_PATH.get(absolutePath);
-  if (builtin !== undefined) {
-    return builtin.sourceHash;
-  }
   return createHash("sha256")
-    .update(await fs.readFile(absolutePath))
+    .update(await fs.readFile(path.resolve(filePath)))
     .digest("hex");
 }
 
@@ -75,22 +56,13 @@ export function workflowFileStem(filePath: string): string {
   return suffix ? base.slice(0, -suffix.length) : base;
 }
 
-// Alias the package name to this module's own entry so workflow files can
-// `import { agent } from "@osolmaz/pi-workflows"` whether the engine runs from src
-// (tests, tsx) or from the built dist inside the installed package.
+// Alias package imports to this process's workflow API. User files can reload,
+// but their node constructors and validators remain from one engine version.
 const SELF_ENTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
 
-/**
- * Load a workflow definition. Built-ins come from this process's module graph,
- * so a package update on disk cannot mix a new built-in with old engine code.
- * User workflow files are reloaded from disk for normal edit-and-run behavior.
- */
+/** Load a user workflow module from disk. */
 export async function loadWorkflowFile(filePath: string): Promise<WorkflowDefinition> {
   const absolutePath = path.resolve(filePath);
-  const builtin = BUILTIN_WORKFLOWS_BY_PATH.get(absolutePath);
-  if (builtin !== undefined) {
-    return builtin.definition;
-  }
   const jiti = createJiti(pathToFileURL(absolutePath).href, {
     interopDefault: true,
     moduleCache: false,
@@ -103,25 +75,25 @@ export async function loadWorkflowFile(filePath: string): Promise<WorkflowDefini
   return loaded;
 }
 
-/** Discover named workflows in the project and global workflow directories. */
+/** Discover user workflows first, then unshadowed catalog built-ins. */
 export async function discoverWorkflows(
   options: WorkflowSearchPaths,
+  catalog?: BuiltinWorkflowCatalog,
 ): Promise<DiscoveredWorkflow[]> {
   const discovered: DiscoveredWorkflow[] = [];
   const seenNames = new Set<string>();
   for (const { dir, source } of workflowSearchDirs(options)) {
-    const filePaths =
-      source === "builtin"
-        ? [...BUILTIN_WORKFLOWS.values()].map((workflow) => workflow.path)
-        : await listWorkflowFiles(dir);
-    for (const filePath of filePaths) {
+    for (const filePath of await listWorkflowFiles(dir)) {
       const name = workflowFileStem(filePath);
-      if (seenNames.has(name)) {
-        continue;
-      }
+      if (seenNames.has(name)) continue;
       seenNames.add(name);
-      discovered.push({ name, path: filePath, source });
+      discovered.push({ name, ref: filePath, source });
     }
+  }
+  for (const builtin of catalog?.list() ?? []) {
+    if (seenNames.has(builtin.definition.name)) continue;
+    seenNames.add(builtin.definition.name);
+    discovered.push({ name: builtin.definition.name, ref: builtin.ref, source: "builtin" });
   }
   return discovered;
 }
@@ -139,26 +111,61 @@ async function listWorkflowFiles(dir: string): Promise<string[]> {
     .sort();
 }
 
-/**
- * Resolve a `/workflow` argument to a workflow file. Accepts a discovered
- * workflow name or a direct path to a `*.workflow.ts` file.
- */
+/** Resolve a workflow name, stable built-in ref, or direct user file path. */
 export async function resolveWorkflowRef(
   ref: string,
   options: WorkflowSearchPaths,
-): Promise<{ path: string; source: DiscoveredWorkflow["source"] }> {
+  catalog?: BuiltinWorkflowCatalog,
+): Promise<ResolvedWorkflow> {
+  if (ref.startsWith("builtin:")) {
+    const id = ref.slice("builtin:".length);
+    const builtin = catalog?.get(id);
+    if (builtin === undefined) throw new Error(`Unknown built-in workflow ${JSON.stringify(ref)}`);
+    return {
+      definition: builtin.definition,
+      source: { kind: "builtin", id: builtin.id, revision: builtin.revision },
+      sourceKind: "builtin",
+    };
+  }
   if (looksLikePath(ref)) {
     const absolutePath = path.resolve(options.cwd, ref);
     await fs.access(absolutePath);
-    return { path: absolutePath, source: "path" };
+    return {
+      definition: await loadWorkflowFile(absolutePath),
+      source: { kind: "file", path: absolutePath, hash: await hashWorkflowSource(absolutePath) },
+      sourceKind: "path",
+    };
   }
-  const discovered = await discoverWorkflows(options);
+  const discovered = await discoverWorkflows(options, catalog);
   const match = discovered.find((workflow) => workflow.name === ref);
-  if (!match) {
+  if (match === undefined) {
     const available = discovered.map((workflow) => workflow.name).join(", ") || "(none)";
     throw new Error(`Unknown workflow ${JSON.stringify(ref)}. Available workflows: ${available}`);
   }
-  return { path: match.path, source: match.source };
+  if (match.source === "builtin") return await resolveWorkflowRef(match.ref, options, catalog);
+  const absolutePath = path.resolve(match.ref);
+  return {
+    definition: await loadWorkflowFile(absolutePath),
+    source: { kind: "file", path: absolutePath, hash: await hashWorkflowSource(absolutePath) },
+    sourceKind: match.source,
+  };
+}
+
+/** Resolve an already persisted canonical source. */
+export async function resolveWorkflowSource(
+  source: WorkflowSource,
+  catalog?: BuiltinWorkflowCatalog,
+  runId = source.kind === "builtin" ? `builtin:${source.id}` : source.path,
+): Promise<WorkflowDefinition> {
+  if (source.kind === "builtin") {
+    if (catalog === undefined) throw new Error(`No built-in workflow catalog for ${source.id}`);
+    return catalog.resolve(source, runId);
+  }
+  const actualHash = await hashWorkflowSource(source.path);
+  if (actualHash !== source.hash) {
+    throw new WorkflowSourceChangedError(runId);
+  }
+  return await loadWorkflowFile(source.path);
 }
 
 function looksLikePath(ref: string): boolean {

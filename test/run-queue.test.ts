@@ -26,8 +26,8 @@ async function makeStore(): Promise<SqliteControllerStore> {
 function enqueue(store: SqliteControllerStore, runId = "run-1") {
   return store.enqueueWorkflowRun({
     runId,
-    workflowRef: "summarize",
-    workflowPath: "/project/.pi/workflows/summarize.workflow.ts",
+    workflowName: "summarize",
+    workflowSourceRef: "/project/.pi/workflows/summarize.workflow.ts",
     input: { task: "hello" },
     runnerId: "runner-a",
     claimToken: "token-a",
@@ -42,7 +42,7 @@ describe("workflow run queue", () => {
     const record = enqueue(store);
     expect(record).toMatchObject({
       runId: "run-1",
-      workflowRef: "summarize",
+      workflowName: "summarize",
       input: { task: "hello" },
       status: "claimed",
       runnerId: "runner-a",
@@ -70,8 +70,8 @@ describe("workflow run queue", () => {
     expect(() =>
       store.enqueueWorkflowRun({
         runId: "../escape",
-        workflowRef: "x",
-        workflowPath: "/x",
+        workflowName: "x",
+        workflowSourceRef: "/x",
         input: {},
         runnerId: "runner-a",
         claimToken: "token-a",
@@ -80,12 +80,47 @@ describe("workflow run queue", () => {
     ).toThrow(/Invalid workflow run id/);
   });
 
+  it("claims and rewrites a legacy built-in source ref", async () => {
+    const store = await makeStore();
+    const record = enqueue(store);
+    store.parkWorkflowRun({ runId: record.runId, claimToken: "token-a", now: T1 });
+
+    expect(
+      store.claimLegacyBuiltinWorkflowRun({
+        runId: record.runId,
+        oldWorkflowPath: record.workflowSourceRef,
+        workflowSourceRef: "builtin:summarize",
+        runnerId: "migration",
+        claimToken: "migration-token",
+        leaseMs: 1_000,
+        now: T1,
+      }),
+    ).toBe(true);
+    expect(store.getWorkflowRun(record.runId)).toMatchObject({
+      workflowSourceRef: "builtin:summarize",
+      status: "claimed",
+      runnerId: "migration",
+      claimToken: "migration-token",
+    });
+    expect(
+      store.claimLegacyBuiltinWorkflowRun({
+        runId: record.runId,
+        oldWorkflowPath: record.workflowSourceRef,
+        workflowSourceRef: "builtin:summarize",
+        runnerId: "other",
+        claimToken: "other-token",
+        leaseMs: 1_000,
+        now: T1,
+      }),
+    ).toBe(false);
+  });
+
   it("renews, verifies, and strictly rejects expired renewals", async () => {
     const store = await makeStore();
     store.enqueueWorkflowRun({
       runId: "run-1",
-      workflowRef: "summarize",
-      workflowPath: "/project/.pi/workflows/summarize.workflow.ts",
+      workflowName: "summarize",
+      workflowSourceRef: "/project/.pi/workflows/summarize.workflow.ts",
       input: null,
       runnerId: "runner-a",
       claimToken: "token-a",
@@ -132,8 +167,8 @@ describe("workflow run queue", () => {
     enqueue(store, "run-1");
     store.enqueueWorkflowRun({
       runId: "run-2",
-      workflowRef: "other",
-      workflowPath: "/other.ts",
+      workflowName: "other",
+      workflowSourceRef: "/other.ts",
       input: null,
       runnerId: "runner-c",
       claimToken: "token-c",
@@ -204,8 +239,8 @@ describe("workflow run queue", () => {
     const store = await makeStore();
     enqueue(store, "parent-1");
     const continuation = {
-      workflowRef: "gate",
-      workflowPath: "/gate.ts",
+      workflowName: "gate",
+      workflowSourceRef: "/gate.ts",
       input: { approved: true },
       runnerId: "runner-a",
       leaseMs: 1_000,
@@ -230,8 +265,8 @@ describe("workflow run queue", () => {
     store.completeWorkflowRun({ runId: "child-1", claimToken: "token-c1", now: T1 });
     store.enqueueWorkflowRun({
       runId: "run-x",
-      workflowRef: "x",
-      workflowPath: "/x.ts",
+      workflowName: "x",
+      workflowSourceRef: "/x.ts",
       input: null,
       runnerId: "runner-a",
       claimToken: "token-x",
@@ -285,8 +320,8 @@ describe("workflow run queue", () => {
     expect(() =>
       store.enqueueWorkflowRun({
         runId: "bad-ref",
-        workflowRef: "",
-        workflowPath: "/x.ts",
+        workflowName: "",
+        workflowSourceRef: "/x.ts",
         input: null,
         runnerId: "r",
         claimToken: "t",
@@ -296,8 +331,8 @@ describe("workflow run queue", () => {
     expect(() =>
       store.enqueueWorkflowRun({
         runId: "big-input",
-        workflowRef: "x",
-        workflowPath: "/x.ts",
+        workflowName: "x",
+        workflowSourceRef: "/x.ts",
         input: { blob: "x".repeat(2 * 1024 * 1024) },
         runnerId: "r",
         claimToken: "t",
@@ -307,8 +342,8 @@ describe("workflow run queue", () => {
     expect(() =>
       store.enqueueWorkflowRun({
         runId: "cyclic",
-        workflowRef: "x",
-        workflowPath: "/x.ts",
+        workflowName: "x",
+        workflowSourceRef: "/x.ts",
         input: (() => {
           const value: { self?: unknown } = {};
           value.self = value;
@@ -329,8 +364,8 @@ describe("workflow run queue", () => {
     const store = await makeStore();
     store.enqueueWorkflowRun({
       runId: "child-1",
-      workflowRef: "gate",
-      workflowPath: "/gate.ts",
+      workflowName: "gate",
+      workflowSourceRef: "/gate.ts",
       input: {},
       runnerId: "runner-a",
       claimToken: "token-c1",
@@ -344,8 +379,8 @@ describe("workflow run queue", () => {
     // The freed parent slot admits a fresh continuation.
     store.enqueueWorkflowRun({
       runId: "child-2",
-      workflowRef: "gate",
-      workflowPath: "/gate.ts",
+      workflowName: "gate",
+      workflowSourceRef: "/gate.ts",
       input: {},
       runnerId: "runner-a",
       claimToken: "token-c2",

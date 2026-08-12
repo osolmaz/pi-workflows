@@ -26,16 +26,22 @@ typescript:
     - from: src/render
       allow:
         - src/workflows
+    # Built-ins compose package-owned definitions from the public engine.
+    - from: src/builtins
+      allow:
+        - src/workflows
     # The extension embeds the engine in pi and draws the widget graph.
     - from: src/extension
       allow:
         - src/workflows
+        - src/builtins
         - src/controllers
         - src/render
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
         - src/workflows
+        - src/builtins
         - src/controllers
     # The viewer only reads run bundles and dispatches the host command; it
     # must never import the extension.

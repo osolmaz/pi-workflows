@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { builtinWorkflowCatalog } from "../builtins/catalog.js";
 import {
   projectControllerStorePath,
   type RunEventRecord,
@@ -14,12 +16,8 @@ import {
   isClaimLostError,
   TimeoutError,
 } from "../workflows/errors.js";
-import {
-  discoverWorkflows,
-  hashWorkflowSource,
-  loadWorkflowFile,
-  resolveWorkflowRef,
-} from "../workflows/loader.js";
+import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
+import { migrateLegacyBuiltinRuns } from "../workflows/migrate-builtins.js";
 import {
   createRunId,
   listRunBundles,
@@ -314,7 +312,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const rows = runQueueStore.listWorkflowRuns();
     for (const row of rows) {
       if (row.status === "parked") {
-        lines.push(`${row.workflowRef} run ${row.runId} is parked and will resume`);
+        lines.push(`${row.workflowName} run ${row.runId} is parked and will resume`);
       }
     }
     const known = new Set(rows.map((row) => row.runId));
@@ -699,13 +697,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     supersedePresentation();
     const generation = runGeneration;
-    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
-    const workflow = await loadWorkflowFile(resolved.path);
+    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
+    const workflow = resolved.definition;
     if (options.signal?.aborted) {
       throw options.signal.reason ?? new Error("Workflow startup aborted");
     }
     const snapshot = createDefinitionSnapshot(workflow);
-    const workflowHash = await hashWorkflowSource(resolved.path);
+    const workflowSource = resolved.source;
     const runId = options.runId ?? createRunId(workflow.name);
 
     // Continuations validate the parent before touching the queue: a
@@ -716,7 +714,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
       if (parent === null || parent.state.status !== "waiting") {
         throw new Error(`Workflow run ${options.parentRunId} is not waiting at a checkpoint`);
       }
-      if (parent.state.workflowHash !== undefined && parent.state.workflowHash !== workflowHash) {
+      if (
+        parent.state.workflowSource !== undefined &&
+        !isDeepStrictEqual(parent.state.workflowSource, workflowSource)
+      ) {
         throw new Error(
           `Workflow source changed since run ${options.parentRunId} started; revert the edit to answer its checkpoint`,
         );
@@ -735,8 +736,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
         const token = randomUUID();
         queueStore.enqueueWorkflowRun({
           runId,
-          workflowRef: ref,
-          workflowPath: resolved.path,
+          workflowName: workflow.name,
+          workflowSourceRef:
+            workflowSource.kind === "builtin"
+              ? `builtin:${workflowSource.id}`
+              : workflowSource.path,
           input,
           runnerId,
           claimToken: token,
@@ -860,12 +864,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
     run.completion = (
       options.resume === true
-        ? engine.resumeRun(workflow, runId, { workflowHash })
+        ? engine.resumeRun(workflow, runId, { workflowSource })
         : options.parentRunId === undefined
-          ? engine.run(workflow, input, { workflowPath: resolved.path, workflowHash, runId })
+          ? engine.run(workflow, input, { workflowSource, runId })
           : engine.continueRun(workflow, options.parentRunId, input, {
-              workflowPath: resolved.path,
-              workflowHash,
+              workflowSource,
               runId,
             })
     )
@@ -981,7 +984,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     let started: string | undefined;
     try {
-      started = await startRun(ctx, claimed.workflowPath, claimed.input, {
+      started = await startRun(ctx, claimed.workflowSourceRef, claimed.input, {
         resume: true,
         runId: claimed.runId,
         claimToken,
@@ -991,7 +994,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       throw error;
     }
     if (started !== undefined) {
-      notify(ctx, `Resumed workflow run ${claimed.runId} (${claimed.workflowRef}).`);
+      notify(ctx, `Resumed workflow run ${claimed.runId} (${claimed.workflowName}).`);
     } else {
       queueStore.parkWorkflowRun({ runId: claimed.runId, claimToken });
     }
@@ -1071,7 +1074,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     offset = 0,
   ): Promise<WorkflowControlResult> => {
-    const discovered = await discoverWorkflows({ cwd: ctx.cwd });
+    const discovered = await discoverWorkflows({ cwd: ctx.cwd }, builtinWorkflowCatalog);
     if (discovered.length === 0) {
       return {
         message:
@@ -1275,7 +1278,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   const resolveWaitingWorkflow = async (
     ctx: ExtensionContext,
     requestedRunId?: string,
-  ): Promise<{ parentRunId: string; workflowPath: string }> => {
+  ): Promise<{ parentRunId: string; workflowRef: string }> => {
     let parentRunId = requestedRunId ?? lastWaitingRunId;
     if (parentRunId === null) {
       const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
@@ -1299,14 +1302,20 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (
       parent === null ||
       parent.state.status !== "waiting" ||
-      parent.state.workflowPath === undefined
+      parent.state.workflowSource === undefined
     ) {
       if (parentRunId === lastWaitingRunId) {
         lastWaitingRunId = null;
       }
       throw new Error(`Workflow run ${parentRunId} is no longer waiting.`);
     }
-    return { parentRunId, workflowPath: parent.state.workflowPath };
+    return {
+      parentRunId,
+      workflowRef:
+        parent.state.workflowSource.kind === "builtin"
+          ? `builtin:${parent.state.workflowSource.id}`
+          : parent.state.workflowSource.path,
+    };
   };
 
   const answerWorkflowControl = async (
@@ -1315,7 +1324,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     requestedRunId?: string,
   ): Promise<WorkflowControlResult> => {
     const waiting = await resolveWaitingWorkflow(ctx, requestedRunId);
-    const continued = await startRun(ctx, waiting.workflowPath, input, {
+    const continued = await startRun(ctx, waiting.workflowRef, input, {
       parentRunId: waiting.parentRunId,
     });
     if (continued === undefined) {
@@ -1376,8 +1385,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const reservation = { ctx, ref, input, options };
     pendingToolLaunch = reservation;
     try {
-      const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd });
-      const workflow = await loadWorkflowFile(resolved.path);
+      const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
+      const workflow = resolved.definition;
       if (pendingToolLaunch !== reservation) {
         throw new Error("The queued workflow launch was cancelled before validation finished.");
       }
@@ -1402,7 +1411,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     description:
       "Run or manage a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, answer",
     getArgumentCompletions: async (prefix: string) => {
-      const discovered = await discoverWorkflows({ cwd: process.cwd() });
+      const discovered = await discoverWorkflows({ cwd: process.cwd() }, builtinWorkflowCatalog);
       const items = [
         ...discovered.map((workflow) => ({ value: workflow.name, label: workflow.name })),
         { value: "status", label: "status" },
@@ -1576,7 +1585,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           break;
         case "answer": {
           const waiting = await resolveWaitingWorkflow(ctx, params.runId);
-          control = await queueToolLaunch(ctx, waiting.workflowPath, params.input, {
+          control = await queueToolLaunch(ctx, waiting.workflowRef, params.input, {
             parentRunId: waiting.parentRunId,
           });
           break;
@@ -1631,6 +1640,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionClosed = false;
     controllerContext = ctx;
+    try {
+      const queue = ensureRunQueueStore(ctx.cwd);
+      const migration = await migrateLegacyBuiltinRuns({
+        catalog: builtinWorkflowCatalog,
+        queue,
+      });
+      if (migration.blocked.length > 0) {
+        notify(
+          ctx,
+          `Could not migrate ${migration.blocked.length} legacy built-in workflow run(s).`,
+          "warning",
+        );
+      }
+    } catch (error) {
+      notify(ctx, `Could not migrate legacy built-in workflows: ${errorMessage(error)}`, "warning");
+    }
     try {
       syncArmed = true;
       startRunSync(ctx);

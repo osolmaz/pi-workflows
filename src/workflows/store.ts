@@ -1284,7 +1284,7 @@ function createManifest(
     runId: state.runId,
     workflowName: state.workflowName,
     ...(state.runTitle !== undefined ? { runTitle: state.runTitle } : {}),
-    ...(state.workflowPath !== undefined ? { workflowPath: state.workflowPath } : {}),
+    ...(state.workflowSource !== undefined ? { workflowSource: state.workflowSource } : {}),
     startedAt: state.startedAt,
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
     status: state.status,

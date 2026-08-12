@@ -32,6 +32,7 @@ import type {
   WorkflowNodeResult,
   WorkflowRunResult,
   WorkflowRunState,
+  WorkflowSource,
   WorkflowStepRecord,
   WorkflowTraceEventDraft,
 } from "./types.js";
@@ -141,7 +142,7 @@ export class WorkflowEngine {
   async run(
     workflow: WorkflowDefinition,
     input: unknown,
-    options: { workflowPath?: string; workflowHash?: string; runId?: string } = {},
+    options: { workflowSource?: WorkflowSource; runId?: string } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
     // Fail before any bundle exists so bad input cannot leave a partial run
@@ -158,8 +159,7 @@ export class WorkflowEngine {
     const state = await this.createRunState(
       workflow,
       normalizedInput,
-      options.workflowPath,
-      options.workflowHash,
+      options.workflowSource,
       options.runId,
     );
     const runDir = await this.store.initializeRunBundle(workflow, state);
@@ -197,7 +197,7 @@ export class WorkflowEngine {
   async resumeRun(
     workflow: WorkflowDefinition,
     runId: string,
-    options: { workflowHash?: string; force?: boolean } = {},
+    options: { workflowSource?: WorkflowSource; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
     // Reset before any await: a park or cancel landing during preparation
@@ -208,11 +208,11 @@ export class WorkflowEngine {
     const bundle = await this.store.prepareRunResume(runId);
     const { runDir } = bundle;
     const state = bundle.state;
-    const hashMismatch =
-      state.workflowHash !== undefined &&
-      options.workflowHash !== undefined &&
-      state.workflowHash !== options.workflowHash;
-    if (hashMismatch && options.force !== true) {
+    const sourceMismatch =
+      state.workflowSource !== undefined &&
+      options.workflowSource !== undefined &&
+      !isDeepStrictEqual(state.workflowSource, options.workflowSource);
+    if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
     }
 
@@ -231,7 +231,7 @@ export class WorkflowEngine {
       payload: {
         ...(point.nodeId !== null ? { resumeAt: point.nodeId } : {}),
         replayedSteps: state.steps.length,
-        ...(hashMismatch ? { workflowHashMismatch: true, forced: true } : {}),
+        ...(sourceMismatch ? { workflowSourceMismatch: true, forced: true } : {}),
       },
     });
     await this.onRunStarted?.(runDir, state);
@@ -284,7 +284,7 @@ export class WorkflowEngine {
     workflow: WorkflowDefinition,
     parentRunId: string,
     input: unknown,
-    options: { workflowPath?: string; workflowHash?: string; runId?: string; force?: boolean } = {},
+    options: { workflowSource?: WorkflowSource; runId?: string; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
     validateWorkflowDefinition(workflow);
     this.cancelled = false;
@@ -299,11 +299,11 @@ export class WorkflowEngine {
         `Cannot continue workflow run ${parentRunId} with status ${parent.state.status}`,
       );
     }
-    const hashMismatch =
-      parent.state.workflowHash !== undefined &&
-      options.workflowHash !== undefined &&
-      parent.state.workflowHash !== options.workflowHash;
-    if (hashMismatch && options.force !== true) {
+    const sourceMismatch =
+      parent.state.workflowSource !== undefined &&
+      options.workflowSource !== undefined &&
+      !isDeepStrictEqual(parent.state.workflowSource, options.workflowSource);
+    if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(parentRunId);
     }
 
@@ -316,8 +316,7 @@ export class WorkflowEngine {
     const state = await this.createRunState(
       workflow,
       normalizedInput,
-      options.workflowPath,
-      options.workflowHash,
+      options.workflowSource,
       options.runId,
     );
     state.parentRunId = parentRunId;
@@ -478,8 +477,7 @@ export class WorkflowEngine {
   private async createRunState(
     workflow: WorkflowDefinition,
     input: unknown,
-    workflowPath: string | undefined,
-    workflowHash: string | undefined,
+    workflowSource: WorkflowSource | undefined,
     runId: string | undefined,
   ): Promise<WorkflowRunState> {
     const now = new Date().toISOString();
@@ -489,8 +487,7 @@ export class WorkflowEngine {
       runId: runId ?? createRunId(workflow.name),
       workflowName: workflow.name,
       ...(await this.resolveTitleBounded(workflow, input)),
-      ...(workflowPath !== undefined ? { workflowPath } : {}),
-      ...(workflowHash !== undefined ? { workflowHash } : {}),
+      ...(workflowSource !== undefined ? { workflowSource } : {}),
       startedAt: now,
       updatedAt: now,
       status: "running",

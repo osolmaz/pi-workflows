@@ -213,17 +213,22 @@ describe("WorkflowEngine.resumeRun", () => {
       nodes: { work: compute({ run: () => "done" }) },
       edges: [],
     });
-    const state = { ...runningState("resume-hash", workflow), workflowHash: "old-hash" };
+    const state = {
+      ...runningState("resume-hash", workflow),
+      workflowSource: { kind: "file" as const, path: "/demo.ts", hash: "old-hash" },
+    };
     const runDir = await store.initializeRunBundle(workflow, state);
     await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
 
     const engine = makeEngine(store);
     await expect(
-      engine.resumeRun(workflow, "resume-hash", { workflowHash: "new-hash" }),
+      engine.resumeRun(workflow, "resume-hash", {
+        workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+      }),
     ).rejects.toThrow(WorkflowSourceChangedError);
 
     const forced = await engine.resumeRun(workflow, "resume-hash", {
-      workflowHash: "new-hash",
+      workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
       force: true,
     });
     expect(forced.state.status).toBe("completed");

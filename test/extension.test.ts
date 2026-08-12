@@ -335,7 +335,7 @@ describe("pi-workflows extension", () => {
         const runs = queue.listWorkflowRuns();
         expect(runs).toHaveLength(1);
         expect(runs[0]).toMatchObject({
-          workflowRef: "mini",
+          workflowName: "mini",
           status: "done",
           runnerId: null,
           claimToken: null,

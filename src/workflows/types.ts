@@ -233,6 +233,10 @@ export type WorkflowRunStatus =
   | "timed_out"
   | "cancelled";
 
+export type WorkflowSource =
+  | { kind: "builtin"; id: string; revision: string }
+  | { kind: "file"; path: string; hash: string };
+
 export type WorkflowRunState = {
   schema: "pi-workflows.run-state.v1";
   /**
@@ -252,8 +256,10 @@ export type WorkflowRunState = {
    */
   carriedStepCount?: number;
   runTitle?: string;
+  /** Stable built-in identity or immutable file source used by this run. */
+  workflowSource?: WorkflowSource;
+  /** Legacy fields accepted only by the bounded built-in migration. */
   workflowPath?: string;
-  /** SHA-256 of the workflow source at run start; resume refuses mismatches. */
   workflowHash?: string;
   startedAt: string;
   finishedAt?: string;
@@ -380,7 +386,7 @@ export type WorkflowRunManifest = {
   runId: string;
   workflowName: string;
   runTitle?: string;
-  workflowPath?: string;
+  workflowSource?: WorkflowSource;
   startedAt: string;
   finishedAt?: string;
   status: WorkflowRunStatus;

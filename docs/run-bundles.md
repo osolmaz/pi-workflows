@@ -123,7 +123,11 @@ Identity and pointers, kept in sync with the state on every snapshot:
   "runId": "20260729T023912Z-autoimplement-3f2a9c1b",
   "workflowName": "autoimplement",
   "runTitle": "autoimplement: fix the flaky test",
-  "workflowPath": "/repo/.pi/workflows/autoimplement.workflow.ts",
+  "workflowSource": {
+    "kind": "file",
+    "path": "/repo/.pi/workflows/autoimplement.workflow.ts",
+    "hash": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+  },
   "startedAt": "2026-07-29T02:39:12.412Z",
   "finishedAt": "2026-07-29T02:41:03.977Z",
   "status": "completed",
@@ -137,6 +141,11 @@ Identity and pointers, kept in sync with the state on every snapshot:
   }
 }
 ```
+
+`workflowSource` identifies the definition used by the run. User workflow
+files use an absolute path and SHA-256 hash. Package-provided workflows use a
+stable identity such as `{ "kind": "builtin", "id": "monitor", "revision": "1" }`.
+A built-in identity does not contain an installation path.
 
 `paths.artifacts` is declared from bundle creation so a live session-event
 patch can safely reference a newly written artifact before the next workflow
@@ -167,9 +176,10 @@ instead of failing. Resume is a named operation with strict rules:
    `state.traceSeq` and the trace agree again before any new event.
 3. Completed nodes replay from the projection. The in-flight node reruns with
    a fresh attempt; a `run_resumed` trace event marks the boundary.
-4. `state.workflowHash` pins the workflow source from run start. Resume
-   refuses a hash mismatch unless forced, and a forced resume records the
-   mismatch in the `run_resumed` payload.
+4. `state.workflowSource` pins the workflow source from run start. File
+   sources require the same hash. Built-in sources require the same catalog
+   id and revision. Resume refuses a mismatch unless forced, and a forced
+   resume records the mismatch in the `run_resumed` payload.
 
 Continuation runs (answering a checkpoint) are new bundles, not resumed ones.
 They link back through `state.parentRunId`, carry the parent's outputs,
@@ -189,6 +199,11 @@ The full run projection (`WorkflowRunState` in
   "traceSeq": 17,
   "runId": "20260729T023912Z-autoimplement-3f2a9c1b",
   "workflowName": "autoimplement",
+  "workflowSource": {
+    "kind": "file",
+    "path": "/repo/.pi/workflows/autoimplement.workflow.ts",
+    "hash": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+  },
   "startedAt": "…",
   "updatedAt": "…",
   "status": "running",
@@ -199,6 +214,9 @@ The full run projection (`WorkflowRunState` in
 }
 ```
 
+- `workflowSource` is the canonical source identity. Resuming a file requires
+  the same hash. Resuming a built-in requires the same catalog revision. A
+  mismatch refuses the resume instead of loading another definition.
 - `status` is one of `running`, `waiting`, `completed`, `failed`, `timed_out`,
   or `cancelled`. A controller host records an abandoned bundle as `failed`
   with a final `run_interrupted` trace event. Before doing that, recovery checks

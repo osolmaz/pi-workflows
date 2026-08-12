@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { builtinWorkflowCatalog } from "../builtins/catalog.js";
 import {
   ControllerManager,
   loadDiscoveredControllers,
@@ -17,8 +18,9 @@ import {
   isClaimLostError,
   WorkflowSourceChangedError,
 } from "../workflows/errors.js";
-import { hashWorkflowSource, loadWorkflowFile, resolveWorkflowRef } from "../workflows/loader.js";
-import { WorkflowRunStore } from "../workflows/store.js";
+import { resolveWorkflowRef, resolveWorkflowSource } from "../workflows/loader.js";
+import { migrateLegacyBuiltinRuns } from "../workflows/migrate-builtins.js";
+import { WorkflowRunStore, readRunBundle } from "../workflows/store.js";
 import type { WorkflowDefinition } from "../workflows/types.js";
 import { HostProcessRegistry } from "./processes.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
@@ -94,14 +96,26 @@ export class WorkflowHost {
       this.log(`reaped ${reaped.length} orphaned headless session(s): ${reaped.join(", ")}`);
     }
 
+    const migration = await migrateLegacyBuiltinRuns({
+      catalog: builtinWorkflowCatalog,
+      store: this.childRunStore,
+      queue: this.store,
+    });
+    if (migration.blocked.length > 0) {
+      this.log(`legacy built-in migration blocked for ${migration.blocked.length} run(s)`);
+    }
+
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });
     if (definitions.length > 0) {
       const scheduler = new WorkflowEngineScheduler({
         store: this.childRunStore,
         resolveWorkflow: async (name) => {
-          const resolved = await resolveWorkflowRef(name, { cwd: this.options.cwd });
-          const workflow = await loadWorkflowFile(resolved.path);
-          return { workflow };
+          const resolved = await resolveWorkflowRef(
+            name,
+            { cwd: this.options.cwd },
+            builtinWorkflowCatalog,
+          );
+          return { workflow: resolved.definition, workflowSource: resolved.source };
         },
         createEngine: () => {
           const executor = new RpcStepExecutor({
@@ -195,13 +209,36 @@ export class WorkflowHost {
   private async runClaimed(record: WorkflowRunQueueRecord): Promise<void> {
     const claimToken = record.claimToken as string;
     const runId = record.runId;
-    this.log(`resuming ${record.workflowRef} run ${runId}`);
+    this.log(`resuming ${record.workflowName} run ${runId}`);
     let workflow: WorkflowDefinition;
-    let workflowHash: string;
+    let workflowSource: import("../workflows/types.js").WorkflowSource;
     try {
-      workflow = await loadWorkflowFile(record.workflowPath);
-      workflowHash = await hashWorkflowSource(record.workflowPath);
+      const bundle = await readRunBundle(this.childRunStore.runDirFor(runId));
+      if (bundle?.state.workflowSource === undefined) {
+        throw new Error(`Workflow run ${runId} has no canonical workflow source`);
+      }
+      workflow = await resolveWorkflowSource(
+        bundle.state.workflowSource,
+        builtinWorkflowCatalog,
+        runId,
+      );
+      workflowSource = bundle.state.workflowSource;
     } catch (error) {
+      if (error instanceof WorkflowSourceChangedError) {
+        try {
+          this.store.parkWorkflowRun({ runId, claimToken });
+        } catch {
+          // Best-effort.
+        }
+        this.skippedRuns.add(runId);
+        this.recordEvent(runId, record.workflowName, "parked", {
+          reason: "workflow source changed",
+        });
+        this.log(
+          `run ${runId} skipped: workflow source changed; install the matching package revision, then restart the host`,
+        );
+        return;
+      }
       await this.failUnresumable(record, claimToken, errorMessage(error));
       return;
     }
@@ -245,23 +282,23 @@ export class WorkflowHost {
     }, RUN_CLAIM_RENEW_MS);
     renewTimer.unref?.();
 
-    this.recordEvent(runId, record.workflowRef, "resumed", { runnerId: this.runnerId });
+    this.recordEvent(runId, record.workflowName, "resumed", { runnerId: this.runnerId });
     try {
-      const result = await engine.resumeRun(workflow, runId, { workflowHash });
+      const result = await engine.resumeRun(workflow, runId, { workflowSource });
       clearInterval(renewTimer);
       if (result.state.status === "running") {
         // Parked again mid-drain: leave it claimable for the next runner.
         this.store.parkWorkflowRun({ runId, claimToken });
-        this.recordEvent(runId, record.workflowRef, "parked", {});
-        this.log(`parked ${record.workflowRef} run ${runId}`);
+        this.recordEvent(runId, record.workflowName, "parked", {});
+        this.log(`parked ${record.workflowName} run ${runId}`);
         return;
       }
       this.store.completeWorkflowRun({ runId, claimToken });
-      this.recordEvent(runId, record.workflowRef, result.state.status, {
+      this.recordEvent(runId, record.workflowName, result.state.status, {
         ...(result.state.error !== undefined ? { error: result.state.error } : {}),
         ...(result.state.waitingOn !== undefined ? { waitingOn: result.state.waitingOn } : {}),
       });
-      this.log(`${record.workflowRef} run ${runId} ${result.state.status}`);
+      this.log(`${record.workflowName} run ${runId} ${result.state.status}`);
     } catch (error) {
       clearInterval(renewTimer);
       if (isClaimLostError(error)) {
@@ -277,7 +314,7 @@ export class WorkflowHost {
           // Best-effort.
         }
         this.skippedRuns.add(runId);
-        this.recordEvent(runId, record.workflowRef, "parked", {
+        this.recordEvent(runId, record.workflowName, "parked", {
           reason: "workflow source changed",
         });
         this.log(
@@ -327,9 +364,9 @@ export class WorkflowHost {
     // no-op (the bundle was already waiting or completed), so the feed
     // stays truthful for sessions syncing from it.
     if (actualStatus !== undefined && actualStatus !== "failed") {
-      this.recordEvent(record.runId, record.workflowRef, actualStatus, {});
+      this.recordEvent(record.runId, record.workflowName, actualStatus, {});
     } else {
-      this.recordEvent(record.runId, record.workflowRef, "failed", { error: message });
+      this.recordEvent(record.runId, record.workflowName, "failed", { error: message });
     }
     this.log(`run ${record.runId} cannot resume: ${message}`);
   }

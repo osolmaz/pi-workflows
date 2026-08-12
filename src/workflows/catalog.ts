@@ -1,0 +1,126 @@
+import { isWorkflowDefinition } from "./definition.js";
+import { WorkflowSourceChangedError } from "./errors.js";
+import type { WorkflowDefinition, WorkflowSource } from "./types.js";
+
+const BUILTIN_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export type LegacyBuiltinSource = {
+  workflowHash: string;
+  pathSuffixes: readonly string[];
+};
+
+export type BuiltinWorkflowRegistration = {
+  id: string;
+  revision: string;
+  definition: WorkflowDefinition;
+  legacySources?: LegacyBuiltinSource[];
+};
+
+export type BuiltinWorkflowEntry = Readonly<{
+  id: string;
+  ref: string;
+  revision: string;
+  definition: WorkflowDefinition;
+  legacySources: readonly LegacyBuiltinSource[];
+}>;
+
+/** Process-local catalog of package-provided workflow definitions. */
+export class BuiltinWorkflowCatalog {
+  private readonly byId = new Map<string, BuiltinWorkflowEntry>();
+  private readonly byName = new Map<string, BuiltinWorkflowEntry>();
+
+  constructor(registrations: BuiltinWorkflowRegistration[]) {
+    for (const registration of registrations) {
+      if (!BUILTIN_ID_PATTERN.test(registration.id)) {
+        throw new Error(`Invalid built-in workflow id: ${JSON.stringify(registration.id)}`);
+      }
+      if (!REVISION_PATTERN.test(registration.revision)) {
+        throw new Error(
+          `Invalid built-in workflow revision: ${JSON.stringify(registration.revision)}`,
+        );
+      }
+      if (!isWorkflowDefinition(registration.definition)) {
+        throw new Error(`Built-in workflow ${registration.id} is not defined with defineWorkflow`);
+      }
+      if (this.byId.has(registration.id)) {
+        throw new Error(`Duplicate built-in workflow id: ${registration.id}`);
+      }
+      if (this.byName.has(registration.definition.name)) {
+        throw new Error(`Duplicate built-in workflow name: ${registration.definition.name}`);
+      }
+      const entry: BuiltinWorkflowEntry = Object.freeze({
+        id: registration.id,
+        ref: `builtin:${registration.id}`,
+        revision: registration.revision,
+        definition: registration.definition,
+        legacySources: Object.freeze(
+          (registration.legacySources ?? []).map((legacy) =>
+            Object.freeze({ ...legacy, pathSuffixes: Object.freeze([...legacy.pathSuffixes]) }),
+          ),
+        ),
+      });
+      this.byId.set(entry.id, entry);
+      this.byName.set(entry.definition.name, entry);
+    }
+  }
+
+  list(): BuiltinWorkflowEntry[] {
+    return [...this.byId.values()];
+  }
+
+  get(id: string): BuiltinWorkflowEntry | undefined {
+    return this.byId.get(id);
+  }
+
+  getByName(name: string): BuiltinWorkflowEntry | undefined {
+    return this.byName.get(name);
+  }
+
+  resolve(
+    source: WorkflowSource,
+    runId = `builtin:${source.kind === "builtin" ? source.id : "unknown"}`,
+  ): WorkflowDefinition {
+    if (source.kind !== "builtin") {
+      throw new Error("A file workflow source cannot be resolved by the built-in catalog");
+    }
+    const entry = this.byId.get(source.id);
+    if (entry === undefined) {
+      throw new Error(`Unknown built-in workflow: ${source.id}`);
+    }
+    if (entry.revision !== source.revision) {
+      throw new WorkflowSourceChangedError(runId);
+    }
+    return entry.definition;
+  }
+
+  matchLegacy(options: {
+    workflowName: string;
+    workflowPath: string;
+    workflowHash: string;
+  }): BuiltinWorkflowEntry | undefined {
+    const entry = this.legacyPathEntry(options);
+    if (entry === undefined) return undefined;
+    return entry.legacySources.some(
+      (legacy) =>
+        legacy.workflowHash === options.workflowHash &&
+        legacy.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
+    )
+      ? entry
+      : undefined;
+  }
+
+  /** Identify a registered old built-in path without accepting its revision. */
+  legacyPathEntry(options: {
+    workflowName: string;
+    workflowPath: string;
+  }): BuiltinWorkflowEntry | undefined {
+    const entry = this.byName.get(options.workflowName);
+    if (entry === undefined) return undefined;
+    return entry.legacySources.some((legacy) =>
+      legacy.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
+    )
+      ? entry
+      : undefined;
+  }
+}
