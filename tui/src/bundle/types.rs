@@ -50,6 +50,40 @@ pub enum NodeOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowSource {
+    Builtin { id: String, revision: String },
+    File { path: String, hash: String },
+}
+
+impl WorkflowSource {
+    pub fn display(&self) -> String {
+        match self {
+            WorkflowSource::Builtin { id, revision } => format!("builtin:{id}@{revision}"),
+            WorkflowSource::File { path, .. } => path.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod workflow_source_tests {
+    use super::WorkflowSource;
+
+    #[test]
+    fn parses_and_displays_each_source_kind() {
+        let builtin: WorkflowSource =
+            serde_json::from_str(r#"{"kind":"builtin","id":"monitor","revision":"1"}"#)
+                .expect("built-in source should parse");
+        let file: WorkflowSource =
+            serde_json::from_str(r#"{"kind":"file","path":"/tmp/demo.workflow.ts","hash":"abc"}"#)
+                .expect("file source should parse");
+
+        assert_eq!(builtin.display(), "builtin:monitor@1");
+        assert_eq!(file.display(), "/tmp/demo.workflow.ts");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub schema: String,
@@ -59,8 +93,8 @@ pub struct Manifest {
     pub workflow_name: String,
     #[serde(rename = "runTitle", skip_serializing_if = "Option::is_none")]
     pub run_title: Option<String>,
-    #[serde(rename = "workflowPath", skip_serializing_if = "Option::is_none")]
-    pub workflow_path: Option<String>,
+    #[serde(rename = "workflowSource", skip_serializing_if = "Option::is_none")]
+    pub workflow_source: Option<WorkflowSource>,
     #[serde(rename = "startedAt")]
     pub started_at: String,
     #[serde(rename = "finishedAt", skip_serializing_if = "Option::is_none")]
@@ -93,10 +127,8 @@ pub struct RunState {
     pub workflow_name: String,
     #[serde(rename = "runTitle", skip_serializing_if = "Option::is_none")]
     pub run_title: Option<String>,
-    #[serde(rename = "workflowPath", skip_serializing_if = "Option::is_none")]
-    pub workflow_path: Option<String>,
-    #[serde(rename = "workflowHash", skip_serializing_if = "Option::is_none")]
-    pub workflow_hash: Option<String>,
+    #[serde(rename = "workflowSource", skip_serializing_if = "Option::is_none")]
+    pub workflow_source: Option<WorkflowSource>,
     #[serde(rename = "parentRunId", skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
     #[serde(rename = "startedAt")]

@@ -107,10 +107,13 @@ export class BuiltinWorkflowCatalog {
   }): LegacyBuiltinMatch | undefined {
     const entry = this.legacyPathEntry(options);
     if (entry === undefined) return undefined;
+    const workflowPath = options.workflowPath.replaceAll("\\", "/");
     const legacy = entry.legacySources.find(
       (candidate) =>
         candidate.workflowHash === options.workflowHash &&
-        candidate.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
+        candidate.pathSuffixes.some((suffix) =>
+          workflowPath.endsWith(suffix.replaceAll("\\", "/")),
+        ),
     );
     return legacy === undefined ? undefined : { entry, revision: legacy.revision };
   }
@@ -122,8 +125,9 @@ export class BuiltinWorkflowCatalog {
   }): BuiltinWorkflowEntry | undefined {
     const entry = this.byName.get(options.workflowName);
     if (entry === undefined) return undefined;
+    const workflowPath = options.workflowPath.replaceAll("\\", "/");
     return entry.legacySources.some((legacy) =>
-      legacy.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
+      legacy.pathSuffixes.some((suffix) => workflowPath.endsWith(suffix.replaceAll("\\", "/"))),
     )
       ? entry
       : undefined;

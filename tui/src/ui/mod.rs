@@ -2434,10 +2434,10 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
             Span::raw(sanitize_text(finished)),
         ]));
     }
-    if let Some(path) = &state.workflow_path {
+    if let Some(source) = &state.workflow_source {
         lines.push(Line::from(vec![
             label("source"),
-            Span::raw(sanitize_text(path)),
+            Span::raw(sanitize_text(&source.display())),
         ]));
     }
     if let Some(detail) = &state.status_detail {
