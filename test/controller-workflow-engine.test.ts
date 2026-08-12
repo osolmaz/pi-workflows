@@ -92,7 +92,10 @@ describe("WorkflowEngineScheduler", () => {
     const store = new WorkflowRunStore(outputRoot);
     const scheduler = new WorkflowEngineScheduler({
       store,
-      resolveWorkflow: async () => ({ workflow, workflowPath: "/tmp/child.workflow.ts" }),
+      resolveWorkflow: async () => ({
+        workflow,
+        workflowSource: { kind: "file", path: "/tmp/child.workflow.ts", hash: "fixture" },
+      }),
       createEngine: () => new WorkflowEngine({ executor: new ScriptedExecutor(), store }),
     });
     const complete = vi.fn();

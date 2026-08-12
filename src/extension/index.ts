@@ -17,7 +17,7 @@ import {
   TimeoutError,
 } from "../workflows/errors.js";
 import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
-import { migrateLegacyBuiltinRuns } from "../workflows/migrate-builtins.js";
+import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
 import {
   createRunId,
   listRunBundles,
@@ -1642,19 +1642,19 @@ export default function piWorkflows(pi: ExtensionAPI) {
     controllerContext = ctx;
     try {
       const queue = ensureRunQueueStore(ctx.cwd);
-      const migration = await migrateLegacyBuiltinRuns({
+      const migration = await migrateLegacyWorkflowSources({
         catalog: builtinWorkflowCatalog,
         queue,
       });
       if (migration.blocked.length > 0) {
         notify(
           ctx,
-          `Could not migrate ${migration.blocked.length} legacy built-in workflow run(s).`,
+          `Could not migrate ${migration.blocked.length} legacy workflow source(s).`,
           "warning",
         );
       }
     } catch (error) {
-      notify(ctx, `Could not migrate legacy built-in workflows: ${errorMessage(error)}`, "warning");
+      notify(ctx, `Could not migrate legacy workflow sources: ${errorMessage(error)}`, "warning");
     }
     try {
       syncArmed = true;

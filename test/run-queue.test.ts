@@ -86,7 +86,7 @@ describe("workflow run queue", () => {
     store.parkWorkflowRun({ runId: record.runId, claimToken: "token-a", now: T1 });
 
     expect(
-      store.claimLegacyBuiltinWorkflowRun({
+      store.claimLegacyWorkflowSourceRun({
         runId: record.runId,
         oldWorkflowPath: record.workflowSourceRef,
         workflowSourceRef: "builtin:summarize",
@@ -103,7 +103,7 @@ describe("workflow run queue", () => {
       claimToken: "migration-token",
     });
     expect(
-      store.claimLegacyBuiltinWorkflowRun({
+      store.claimLegacyWorkflowSourceRun({
         runId: record.runId,
         oldWorkflowPath: record.workflowSourceRef,
         workflowSourceRef: "builtin:summarize",

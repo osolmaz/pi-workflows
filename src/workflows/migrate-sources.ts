@@ -3,10 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { BuiltinWorkflowCatalog } from "./catalog.js";
 import { WorkflowRunStore, listRunBundles } from "./store.js";
-import type { WorkflowRunState } from "./types.js";
+import type { WorkflowRunState, WorkflowSource } from "./types.js";
 
-export type BuiltinMigrationQueue = {
-  claimLegacyBuiltinWorkflowRun(options: {
+export type LegacySourceMigrationQueue = {
+  claimLegacyWorkflowSourceRun(options: {
     runId: string;
     oldWorkflowPath: string;
     workflowSourceRef: string;
@@ -19,19 +19,19 @@ export type BuiltinMigrationQueue = {
 
 const MIGRATION_LEASE_MS = 30_000;
 
-export type BuiltinMigrationResult = {
+export type LegacySourceMigrationResult = {
   migratedRunIds: string[];
   blocked: { runId: string; reason: string }[];
 };
 
-/** One bounded migration for nonterminal runs created before stable built-in refs. */
-export async function migrateLegacyBuiltinRuns(options: {
+/** One bounded migration for nonterminal runs created before canonical sources. */
+export async function migrateLegacyWorkflowSources(options: {
   catalog: BuiltinWorkflowCatalog;
   store?: WorkflowRunStore;
-  queue?: BuiltinMigrationQueue;
-}): Promise<BuiltinMigrationResult> {
+  queue?: LegacySourceMigrationQueue;
+}): Promise<LegacySourceMigrationResult> {
   const store = options.store ?? new WorkflowRunStore();
-  const result: BuiltinMigrationResult = { migratedRunIds: [], blocked: [] };
+  const result: LegacySourceMigrationResult = { migratedRunIds: [], blocked: [] };
   for (const bundle of await listRunBundles(store.outputRoot)) {
     const state = bundle.state;
     if (state.status !== "running" && state.status !== "waiting") continue;
@@ -45,27 +45,42 @@ export async function migrateLegacyBuiltinRuns(options: {
       workflowPath: state.workflowPath,
     };
     const pathEntry = options.catalog.legacyPathEntry(legacyPath);
-    if (pathEntry === undefined) continue;
-    const legacy = options.catalog.matchLegacy({
-      ...legacyPath,
-      workflowHash: state.workflowHash,
-    });
-    if (legacy === undefined) {
-      result.blocked.push({
-        runId: state.runId,
-        reason: `legacy built-in ${pathEntry.id} has an unknown source revision`,
+    let workflowSource: WorkflowSource;
+    let workflowSourceRef: string;
+    if (pathEntry === undefined) {
+      workflowSource = {
+        kind: "file",
+        path: path.resolve(state.workflowPath),
+        hash: state.workflowHash,
+      };
+      workflowSourceRef = workflowSource.path;
+    } else {
+      const legacy = options.catalog.matchLegacy({
+        ...legacyPath,
+        workflowHash: state.workflowHash,
       });
-      continue;
+      if (legacy === undefined) {
+        result.blocked.push({
+          runId: state.runId,
+          reason: `legacy built-in ${pathEntry.id} has an unknown source revision`,
+        });
+        continue;
+      }
+      workflowSource = {
+        kind: "builtin",
+        id: legacy.entry.id,
+        revision: legacy.revision,
+      };
+      workflowSourceRef = legacy.entry.ref;
     }
-    const builtin = legacy.entry;
     const claimToken = randomUUID();
     if (
       options.queue !== undefined &&
-      !options.queue.claimLegacyBuiltinWorkflowRun({
+      !options.queue.claimLegacyWorkflowSourceRun({
         runId: state.runId,
         oldWorkflowPath: state.workflowPath,
-        workflowSourceRef: builtin.ref,
-        runnerId: `builtin-migration-${process.pid}`,
+        workflowSourceRef,
+        runnerId: `source-migration-${process.pid}`,
         claimToken,
         leaseMs: MIGRATION_LEASE_MS,
       })
@@ -78,7 +93,7 @@ export async function migrateLegacyBuiltinRuns(options: {
     }
     const migrated: WorkflowRunState = {
       ...state,
-      workflowSource: { kind: "builtin", id: builtin.id, revision: legacy.revision },
+      workflowSource,
     };
     delete migrated.workflowPath;
     delete migrated.workflowHash;
@@ -106,7 +121,7 @@ export async function migrateLegacyBuiltinRuns(options: {
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.builtin-migration.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.source-migration.tmp`;
   await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(tempPath, filePath);
 }

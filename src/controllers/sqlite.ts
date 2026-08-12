@@ -1070,8 +1070,8 @@ export class SqliteControllerStore implements ControllerStore {
     return result.changes === 1;
   }
 
-  /** Claim and rewrite one proved legacy built-in queue row atomically. */
-  claimLegacyBuiltinWorkflowRun(options: {
+  /** Claim and rewrite one proved legacy workflow source queue row atomically. */
+  claimLegacyWorkflowSourceRun(options: {
     runId: string;
     oldWorkflowPath: string;
     workflowSourceRef: string;

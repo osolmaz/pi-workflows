@@ -19,7 +19,7 @@ import {
   WorkflowSourceChangedError,
 } from "../workflows/errors.js";
 import { resolveWorkflowRef, resolveWorkflowSource } from "../workflows/loader.js";
-import { migrateLegacyBuiltinRuns } from "../workflows/migrate-builtins.js";
+import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
 import { WorkflowRunStore, readRunBundle } from "../workflows/store.js";
 import type { WorkflowDefinition } from "../workflows/types.js";
 import { HostProcessRegistry } from "./processes.js";
@@ -96,13 +96,13 @@ export class WorkflowHost {
       this.log(`reaped ${reaped.length} orphaned headless session(s): ${reaped.join(", ")}`);
     }
 
-    const migration = await migrateLegacyBuiltinRuns({
+    const migration = await migrateLegacyWorkflowSources({
       catalog: builtinWorkflowCatalog,
       store: this.childRunStore,
       queue: this.store,
     });
     if (migration.blocked.length > 0) {
-      this.log(`legacy built-in migration blocked for ${migration.blocked.length} run(s)`);
+      this.log(`legacy workflow source migration blocked for ${migration.blocked.length} run(s)`);
     }
 
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });

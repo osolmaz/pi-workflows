@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { BuiltinWorkflowCatalog } from "../src/workflows/catalog.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
-import { migrateLegacyBuiltinRuns } from "../src/workflows/migrate-builtins.js";
+import { migrateLegacyWorkflowSources } from "../src/workflows/migrate-sources.js";
 import { WorkflowRunStore, readRunBundle } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
@@ -52,9 +52,9 @@ function legacyState(runId: string): WorkflowRunState {
   };
 }
 
-describe("migrateLegacyBuiltinRuns", () => {
+describe("migrateLegacyWorkflowSources", () => {
   it("rewrites a proved nonterminal bundle and its queue identity", async () => {
-    const root = await makeTempDir("pi-workflows-migrate-builtins");
+    const root = await makeTempDir("pi-workflows-migrate-sources");
     const store = new WorkflowRunStore(root);
     const state = legacyState("legacy-run");
     const runDir = await store.initializeRunBundle(workflow, state);
@@ -70,7 +70,7 @@ describe("migrateLegacyBuiltinRuns", () => {
     });
     queue.parkWorkflowRun({ runId: "legacy-run", claimToken: "old-claim" });
 
-    const result = await migrateLegacyBuiltinRuns({ catalog: catalog(), store, queue });
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
 
     expect(result).toEqual({ migratedRunIds: ["legacy-run"], blocked: [] });
     expect(queue.getWorkflowRun("legacy-run")).toMatchObject({
@@ -99,7 +99,7 @@ describe("migrateLegacyBuiltinRuns", () => {
     state.workflowPath = "/package/dist/workflows/fixture.workflow.js";
     const runDir = await store.initializeRunBundle(workflow, state);
 
-    const result = await migrateLegacyBuiltinRuns({ catalog: catalog(), store });
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store });
 
     expect(result.migratedRunIds).toEqual(["old-dir-run"]);
     expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
@@ -115,7 +115,7 @@ describe("migrateLegacyBuiltinRuns", () => {
     const state = legacyState("old-revision-run");
     const runDir = await store.initializeRunBundle(workflow, state);
 
-    const result = await migrateLegacyBuiltinRuns({ catalog: catalog("r2"), store });
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog("r2"), store });
 
     expect(result.migratedRunIds).toEqual(["old-revision-run"]);
     expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
@@ -125,8 +125,27 @@ describe("migrateLegacyBuiltinRuns", () => {
     });
   });
 
-  it("does not migrate an unknown hash or a terminal run", async () => {
-    const root = await makeTempDir("pi-workflows-migrate-builtins-skip");
+  it("migrates a legacy user file source", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-file-source");
+    const store = new WorkflowRunStore(root);
+    const state = legacyState("file-run");
+    state.workflowName = "user-flow";
+    state.workflowPath = "/project/.pi/workflows/user-flow.workflow.ts";
+    state.workflowHash = "file-hash";
+    const runDir = await store.initializeRunBundle(workflow, state);
+
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store });
+
+    expect(result.migratedRunIds).toEqual(["file-run"]);
+    expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
+      kind: "file",
+      path: "/project/.pi/workflows/user-flow.workflow.ts",
+      hash: "file-hash",
+    });
+  });
+
+  it("does not migrate an unknown built-in hash or a terminal run", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-sources-skip");
     const store = new WorkflowRunStore(root);
     const unknown = legacyState("unknown-run");
     unknown.workflowHash = "unknown";
@@ -135,7 +154,7 @@ describe("migrateLegacyBuiltinRuns", () => {
     terminal.status = "completed";
     const terminalDir = await store.initializeRunBundle(workflow, terminal);
 
-    const result = await migrateLegacyBuiltinRuns({ catalog: catalog(), store });
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store });
 
     expect(result).toEqual({
       migratedRunIds: [],
@@ -147,16 +166,16 @@ describe("migrateLegacyBuiltinRuns", () => {
   });
 
   it("does not rewrite the bundle when its queue row cannot migrate", async () => {
-    const root = await makeTempDir("pi-workflows-migrate-builtins-blocked");
+    const root = await makeTempDir("pi-workflows-migrate-sources-blocked");
     const store = new WorkflowRunStore(root);
     const state = legacyState("blocked-run");
     const runDir = await store.initializeRunBundle(workflow, state);
 
-    const result = await migrateLegacyBuiltinRuns({
+    const result = await migrateLegacyWorkflowSources({
       catalog: catalog(),
       store,
       queue: {
-        claimLegacyBuiltinWorkflowRun: () => false,
+        claimLegacyWorkflowSourceRun: () => false,
         parkWorkflowRun: () => false,
       },
     });

@@ -1110,8 +1110,8 @@ function workflowSourceMismatch(
   if (state.workflowSource !== undefined) {
     return !isDeepStrictEqual(state.workflowSource, source);
   }
-  // Bounded compatibility check for pre-catalog file runs. Legacy built-ins
-  // are converted before resume by migrateLegacyBuiltinRuns.
+  // Bounded compatibility check for pre-catalog file runs. Startup normally
+  // converts these records with migrateLegacyWorkflowSources first.
   return (
     state.workflowHash !== undefined &&
     (source.kind !== "file" || state.workflowHash !== source.hash)
