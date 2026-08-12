@@ -196,6 +196,64 @@ describe("migrateLegacyWorkflowSources", () => {
     expect((await readRunBundle(terminalDir))?.state.workflowPath).toBeDefined();
   });
 
+  it("does not block a canonical run with a live queue owner", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-live-owner");
+    const store = new WorkflowRunStore(root);
+    const state = {
+      ...legacyState("live-owner-run"),
+      workflowSource: { kind: "builtin" as const, id: "fixture", revision: "r1" },
+    };
+    delete state.workflowPath;
+    delete state.workflowHash;
+    await store.initializeRunBundle(workflow, state);
+    const queue = new SqliteControllerStore(path.join(root, "live-owner.sqlite"));
+    queue.enqueueWorkflowRun({
+      runId: "live-owner-run",
+      workflowName: "fixture",
+      workflowSourceRef: "builtin:fixture",
+      input: null,
+      runnerId: "live-runner",
+      claimToken: "live-claim",
+      leaseMs: 60_000,
+    });
+
+    const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
+
+    expect(result.blocked).toEqual([]);
+    expect(queue.getWorkflowRun("live-owner-run")?.status).toBe("claimed");
+    queue.close();
+  });
+
+  it("reports a canonical queue claim that cannot be released", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-release-failure");
+    const store = new WorkflowRunStore(root);
+    const state = {
+      ...legacyState("release-failure-run"),
+      workflowSource: { kind: "builtin" as const, id: "fixture", revision: "r1" },
+    };
+    delete state.workflowPath;
+    delete state.workflowHash;
+    await store.initializeRunBundle(workflow, state);
+
+    const result = await migrateLegacyWorkflowSources({
+      catalog: catalog(),
+      store,
+      queue: {
+        repairCanonicalWorkflowSourceRun: () => "claimed",
+        claimLegacyWorkflowSourceRun: () => false,
+        parkWorkflowRun: () => false,
+        getWorkflowRun: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toEqual([
+      {
+        runId: "release-failure-run",
+        reason: "canonical queue repair could not release its claim",
+      },
+    ]);
+  });
+
   it("repairs the queue when the bundle migration already committed", async () => {
     const root = await makeTempDir("pi-workflows-migrate-repair");
     const store = new WorkflowRunStore(root);
