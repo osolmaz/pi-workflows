@@ -211,6 +211,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
   let runQueueStore: SqliteControllerStore | null = null;
+  const migrationBlockedRuns = new Set<string>();
   const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
     runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
     return runQueueStore;
@@ -978,6 +979,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       runnerId,
       claimToken,
       leaseMs: RUN_CLAIM_LEASE_MS,
+      excludeRunIds: [...migrationBlockedRuns],
     });
     if (claimed === undefined) {
       return;
@@ -1646,6 +1648,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
         catalog: builtinWorkflowCatalog,
         queue,
       });
+      migrationBlockedRuns.clear();
+      for (const blocked of migration.blocked) migrationBlockedRuns.add(blocked.runId);
       if (migration.blocked.length > 0) {
         notify(
           ctx,
