@@ -20,27 +20,28 @@ export function captureBuiltinWorkflows(candidates: BuiltinWorkflowCandidate[]):
   byPath: Map<string, BuiltinWorkflow>;
 } {
   const byName = new Map<string, BuiltinWorkflow>();
+  const byPath = new Map<string, BuiltinWorkflow>();
   for (const candidate of candidates) {
-    const modulePath = candidate.candidatePaths
-      .map((filePath) => {
-        try {
-          return { filePath, source: readFileSync(filePath) };
-        } catch {
-          return undefined;
-        }
-      })
-      .find((file) => file !== undefined);
-    if (modulePath === undefined) {
+    const moduleFiles = candidate.candidatePaths.flatMap((filePath) => {
+      try {
+        return [{ filePath, source: readFileSync(filePath) }];
+      } catch {
+        return [];
+      }
+    });
+    const moduleFile = moduleFiles[0];
+    if (moduleFile === undefined) {
       throw new Error(`Built-in workflow module is missing: ${candidate.name}`);
     }
-    byName.set(candidate.name, {
+    const workflow = {
       definition: candidate.definition,
-      path: modulePath.filePath,
-      sourceHash: createHash("sha256").update(modulePath.source).digest("hex"),
-    });
+      path: moduleFile.filePath,
+      sourceHash: createHash("sha256").update(moduleFile.source).digest("hex"),
+    };
+    byName.set(candidate.name, workflow);
+    for (const file of moduleFiles) {
+      byPath.set(file.filePath, workflow);
+    }
   }
-  return {
-    byName,
-    byPath: new Map([...byName.values()].map((workflow) => [workflow.path, workflow])),
-  };
+  return { byName, byPath };
 }

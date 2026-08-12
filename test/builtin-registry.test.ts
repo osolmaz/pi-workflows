@@ -16,9 +16,11 @@ describe("captureBuiltinWorkflows", () => {
   it("keeps a definition and source hash stable after its temp file changes", async () => {
     const dir = await makeTempDir("pi-workflows-builtins");
     const filePath = path.join(dir, "fixture.workflow.js");
+    const aliasPath = path.join(dir, "fixture.workflow.ts");
     await fs.writeFile(filePath, "export default 'first';\n", "utf8");
+    await fs.writeFile(aliasPath, "export default 'source alias';\n", "utf8");
     const captured = captureBuiltinWorkflows([
-      { name: "fixture", definition: workflow, candidatePaths: [filePath] },
+      { name: "fixture", definition: workflow, candidatePaths: [filePath, aliasPath] },
     ]);
     const before = captured.byName.get("fixture");
 
@@ -26,6 +28,7 @@ describe("captureBuiltinWorkflows", () => {
 
     expect(before?.definition).toBe(workflow);
     expect(captured.byPath.get(filePath)).toBe(before);
+    expect(captured.byPath.get(aliasPath)).toBe(before);
     expect(captured.byName.get("fixture")?.sourceHash).toBe(before?.sourceHash);
   });
 

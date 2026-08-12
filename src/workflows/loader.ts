@@ -23,6 +23,13 @@ export type WorkflowSearchPaths = {
 };
 
 const BUILTIN_DIR = fileURLToPath(new URL("./", import.meta.url));
+const PACKAGE_ROOT = path.resolve(BUILTIN_DIR, "..", "..");
+
+function builtinCandidatePaths(name: string): string[] {
+  return ["src/workflows", "dist/workflows"].flatMap((dir) =>
+    WORKFLOW_FILE_SUFFIXES.map((suffix) => path.join(PACKAGE_ROOT, dir, `${name}${suffix}`)),
+  );
+}
 
 // Capture each built-in definition and source hash when this module loads.
 // Later package updates cannot mix new files with this process's old engine.
@@ -30,9 +37,7 @@ const { byName: BUILTIN_WORKFLOWS, byPath: BUILTIN_WORKFLOWS_BY_PATH } = capture
   {
     name: "monitor",
     definition: monitorWorkflow,
-    candidatePaths: WORKFLOW_FILE_SUFFIXES.map((suffix) =>
-      path.join(BUILTIN_DIR, `monitor${suffix}`),
-    ),
+    candidatePaths: builtinCandidatePaths("monitor"),
   },
 ]);
 
