@@ -793,6 +793,34 @@ export default defineWorkflow({
     }
   });
 
+  it("does not abort a later user turn after Escape holds the workflow", async () => {
+    const cwd = await makeTempDir("pi-workflows-held-timeout");
+    const runsDir = await makeTempDir("pi-workflows-held-timeout-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeTimeoutWorkflow(cwd);
+      let promptDelivered = false;
+      const harness = makeHarness({
+        cwd,
+        respond: () => {
+          promptDelivered = true;
+        },
+      });
+
+      await harness.command.handler("timeout", harness.ctx);
+      await waitFor(() => promptDelivered);
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      expect(harness.notifications.at(-1)).toContain("paused (turn interrupted)");
+      harness.setIdle(false);
+
+      await waitFor(() => harness.notifications.some((note) => note.includes("timed_out")));
+
+      expect(harness.abortCalls).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("does not present cancelled runs", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");

@@ -772,7 +772,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           contract,
           reason: reason instanceof TimeoutError ? "timed out" : `ended: ${errorMessage(reason)}`,
         };
-        if (!ctx.isIdle()) {
+        if (!executor.held && !ctx.isIdle()) {
           systemTurnAbort = contract;
           ctx.abort();
         }
