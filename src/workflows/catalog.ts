@@ -7,6 +7,7 @@ const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type LegacyBuiltinSource = {
   workflowHash: string;
+  revision: string;
   pathSuffixes: readonly string[];
 };
 
@@ -24,6 +25,11 @@ export type BuiltinWorkflowEntry = Readonly<{
   definition: WorkflowDefinition;
   legacySources: readonly LegacyBuiltinSource[];
 }>;
+
+export type LegacyBuiltinMatch = {
+  entry: BuiltinWorkflowEntry;
+  revision: string;
+};
 
 /** Process-local catalog of package-provided workflow definitions. */
 export class BuiltinWorkflowCatalog {
@@ -98,16 +104,15 @@ export class BuiltinWorkflowCatalog {
     workflowName: string;
     workflowPath: string;
     workflowHash: string;
-  }): BuiltinWorkflowEntry | undefined {
+  }): LegacyBuiltinMatch | undefined {
     const entry = this.legacyPathEntry(options);
     if (entry === undefined) return undefined;
-    return entry.legacySources.some(
-      (legacy) =>
-        legacy.workflowHash === options.workflowHash &&
-        legacy.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
-    )
-      ? entry
-      : undefined;
+    const legacy = entry.legacySources.find(
+      (candidate) =>
+        candidate.workflowHash === options.workflowHash &&
+        candidate.pathSuffixes.some((suffix) => options.workflowPath.endsWith(suffix)),
+    );
+    return legacy === undefined ? undefined : { entry, revision: legacy.revision };
   }
 
   /** Identify a registered old built-in path without accepting its revision. */

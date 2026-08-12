@@ -42,7 +42,9 @@ describe("BuiltinWorkflowCatalog", () => {
         id: "fixture",
         revision: "r1",
         definition: fixture(),
-        legacySources: [{ workflowHash: "old", pathSuffixes: ["/builtins/fixture.workflow.js"] }],
+        legacySources: [
+          { workflowHash: "old", revision: "r1", pathSuffixes: ["/builtins/fixture.workflow.js"] },
+        ],
       },
     ]);
 
@@ -51,8 +53,8 @@ describe("BuiltinWorkflowCatalog", () => {
         workflowName: "fixture",
         workflowPath: "/package/dist/builtins/fixture.workflow.js",
         workflowHash: "old",
-      })?.id,
-    ).toBe("fixture");
+      }),
+    ).toMatchObject({ entry: { id: "fixture" }, revision: "r1" });
     expect(
       catalog.matchLegacy({
         workflowName: "fixture",

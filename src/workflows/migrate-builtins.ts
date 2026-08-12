@@ -46,17 +46,18 @@ export async function migrateLegacyBuiltinRuns(options: {
     };
     const pathEntry = options.catalog.legacyPathEntry(legacyPath);
     if (pathEntry === undefined) continue;
-    const builtin = options.catalog.matchLegacy({
+    const legacy = options.catalog.matchLegacy({
       ...legacyPath,
       workflowHash: state.workflowHash,
     });
-    if (builtin === undefined) {
+    if (legacy === undefined) {
       result.blocked.push({
         runId: state.runId,
         reason: `legacy built-in ${pathEntry.id} has an unknown source revision`,
       });
       continue;
     }
+    const builtin = legacy.entry;
     const claimToken = randomUUID();
     if (
       options.queue !== undefined &&
@@ -77,7 +78,7 @@ export async function migrateLegacyBuiltinRuns(options: {
     }
     const migrated: WorkflowRunState = {
       ...state,
-      workflowSource: { kind: "builtin", id: builtin.id, revision: builtin.revision },
+      workflowSource: { kind: "builtin", id: builtin.id, revision: legacy.revision },
     };
     delete migrated.workflowPath;
     delete migrated.workflowHash;

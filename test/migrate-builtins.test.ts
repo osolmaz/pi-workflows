@@ -16,15 +16,16 @@ const workflow = defineWorkflow({
   edges: [],
 });
 
-function catalog() {
+function catalog(revision = "r1") {
   return new BuiltinWorkflowCatalog([
     {
       id: "fixture",
-      revision: "r1",
+      revision,
       definition: workflow,
       legacySources: [
         {
           workflowHash: "old-hash",
+          revision: "r1",
           pathSuffixes: ["/builtins/fixture.workflow.js", "/workflows/fixture.workflow.js"],
         },
       ],
@@ -101,6 +102,22 @@ describe("migrateLegacyBuiltinRuns", () => {
     const result = await migrateLegacyBuiltinRuns({ catalog: catalog(), store });
 
     expect(result.migratedRunIds).toEqual(["old-dir-run"]);
+    expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
+      kind: "builtin",
+      id: "fixture",
+      revision: "r1",
+    });
+  });
+
+  it("preserves the registered legacy revision across a direct upgrade", async () => {
+    const root = await makeTempDir("pi-workflows-migrate-old-revision");
+    const store = new WorkflowRunStore(root);
+    const state = legacyState("old-revision-run");
+    const runDir = await store.initializeRunBundle(workflow, state);
+
+    const result = await migrateLegacyBuiltinRuns({ catalog: catalog("r2"), store });
+
+    expect(result.migratedRunIds).toEqual(["old-revision-run"]);
     expect((await readRunBundle(runDir))?.state.workflowSource).toEqual({
       kind: "builtin",
       id: "fixture",
