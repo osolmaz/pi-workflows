@@ -54,10 +54,8 @@ export async function migrateLegacyWorkflowSources(options: {
         leaseMs: MIGRATION_LEASE_MS,
       });
       if (repaired === false) {
-        result.blocked.push({
-          runId: state.runId,
-          reason: "canonical bundle has an active, terminal, or unavailable queue row",
-        });
+        // Another runner can own a canonical run during startup. Its source is
+        // already safe; the normal queue lease will make it claimable later.
       } else if (
         repaired === "claimed" &&
         !options.queue.parkWorkflowRun({ runId: state.runId, claimToken })
