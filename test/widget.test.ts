@@ -157,6 +157,23 @@ describe("buildWidgetLines", () => {
     if (width === 43) expect(view.layout).toBe("compact");
   });
 
+  it.each([2, 1])("keeps the active glyph visible at width %i", (width) => {
+    const view = buildWidgetView(
+      makeState({
+        workflowName: "wide-demo",
+        currentNode: "compare-the-observation-with-the-requested-stop-condition",
+      }),
+      wideSnapshot,
+      undefined,
+      null,
+      false,
+      width,
+    );
+    expect(view.layout).toBe("compact");
+    expect(view.lines.some((line) => line.includes("◐"))).toBe(true);
+    expect(view.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+  });
+
   it("keeps the boxed graph when its displayed lines fit", () => {
     const view = buildWidgetView(
       makeState({ currentNode: "second" }),

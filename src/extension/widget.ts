@@ -128,8 +128,12 @@ function compactWidgetView(
   }
   const anchor = scroll ?? compactFocusIndex(state, snapshot);
   const windowed = windowLines(nodes, budget, anchor, scroll !== null);
+  const indentation = width >= 3 ? "  " : "";
   return {
-    lines: fitLines([header, ...windowed.lines.map((line) => `  ${line}`), ...footer], width),
+    lines: fitLines(
+      [header, ...windowed.lines.map((line) => `${indentation}${line}`), ...footer],
+      width,
+    ),
     layout: "compact",
     scroll: windowed.scroll,
     maxScroll: windowed.maxScroll,
