@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { projectControllerStorePath, SqliteControllerStore } from "../src/controllers/index.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { compute, defineWorkflow, notify } from "../src/workflows/definition.js";
 import { hashWorkflowSource } from "../src/workflows/loader.js";
 import { RUN_STATE_SCHEMA, readRunBundle, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
@@ -56,12 +56,15 @@ describe("WorkflowHost", () => {
         const workflowPath = path.join(cwd, ".pi", "workflows", "parked-demo.workflow.ts");
         await fs.writeFile(
           workflowPath,
-          `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+          `import { compute, defineWorkflow, notify } from "@osolmaz/pi-workflows";
 export default defineWorkflow({
   name: "parked-demo",
   startAt: "work",
-  nodes: { work: compute({ run: () => "host-finished" }) },
-  edges: [],
+  nodes: {
+    work: compute({ run: () => "host-finished" }),
+    report: notify({ kind: "final", message: ({ outputs }) => String(outputs.work) }),
+  },
+  edges: [{ from: "work", to: "report" }],
 });
 `,
           "utf8",
@@ -77,14 +80,18 @@ export default defineWorkflow({
           runnerId: "session-a",
           claimToken: "token-a",
           leaseMs: 60_000,
+          originSessionId: "origin-session",
         });
         queue.parkWorkflowRun({ runId: "host-run-1", claimToken: "token-a" });
         const runStore = new WorkflowRunStore(runsDir);
         const workflow = defineWorkflow({
           name: "parked-demo",
           startAt: "work",
-          nodes: { work: compute({ run: () => "ignored" }) },
-          edges: [],
+          nodes: {
+            work: compute({ run: () => "ignored" }),
+            report: notify({ kind: "final", message: ({ outputs }) => String(outputs.work) }),
+          },
+          edges: [{ from: "work", to: "report" }],
         });
         const state = {
           ...runningState("host-run-1"),
@@ -121,7 +128,7 @@ export default defineWorkflow({
 
         const bundle = await readRunBundle(runDir);
         expect(bundle?.state.status).toBe("completed");
-        expect(bundle?.state.finalOutput).toBe("host-finished");
+        expect(bundle?.state.outputs.work).toBe("host-finished");
         const reader = new SqliteControllerStore(projectControllerStorePath(cwd), {
           readOnly: true,
         });
@@ -129,6 +136,9 @@ export default defineWorkflow({
           const types = reader.listRunEventsAfter(0).map((event) => event.type);
           expect(types).toContain("resumed");
           expect(types).toContain("completed");
+          expect(reader.listPendingWorkflowNotifications("origin-session")).toMatchObject([
+            { runId: "host-run-1", kind: "final", content: "host-finished" },
+          ]);
         } finally {
           reader.close();
         }

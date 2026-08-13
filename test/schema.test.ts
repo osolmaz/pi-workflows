@@ -6,6 +6,7 @@ import {
   compute,
   defineWorkflow,
   isWorkflowDefinition,
+  notify,
   shell,
 } from "../src/workflows/definition.js";
 import {
@@ -109,6 +110,12 @@ describe("node constructors", () => {
     expect(() => compute({ run: "nope" as never })).toThrow(/requires a run function/);
   });
 
+  it("validates notification nodes", () => {
+    expect(() => notify({ message: "nope" as never })).toThrow(/requires a message function/);
+    expect(() => notify({ message: () => "ok", kind: "other" as never })).toThrow(/kind/);
+    expect(notify({ message: () => "ok" }).nodeType).toBe("notify");
+  });
+
   it("validates action nodes", () => {
     expect(() => action({} as never)).toThrow(/exactly one of run or exec/);
     expect(() => action({ run: () => 1, exec: () => ({ command: "x" }) } as never)).toThrow(
@@ -168,12 +175,14 @@ describe("definition snapshots", () => {
         }),
         act: shell({ exec: () => ({ command: "true" }) }),
         fn: action({ run: () => 1 }),
+        report: notify({ message: () => "done", kind: "final" }),
         stop: checkpoint({ summary: "pause here" }),
       },
       edges: [
         { from: "start", to: "act" },
         { from: "act", to: "fn" },
-        { from: "fn", to: "stop" },
+        { from: "fn", to: "report" },
+        { from: "report", to: "stop" },
       ],
     });
     const snapshot = createDefinitionSnapshot(workflow);
@@ -185,6 +194,7 @@ describe("definition snapshots", () => {
     });
     expect(snapshot.nodes.act).toEqual({ nodeType: "action", actionExecution: "shell" });
     expect(snapshot.nodes.fn).toEqual({ nodeType: "action", actionExecution: "function" });
+    expect(snapshot.nodes.report).toEqual({ nodeType: "notify", summary: "final" });
     expect(snapshot.nodes.stop).toEqual({ nodeType: "checkpoint", summary: "pause here" });
   });
 });

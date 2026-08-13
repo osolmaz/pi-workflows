@@ -6,6 +6,7 @@ import type {
   AgentNodeDefinition,
   AgentStepExecutor,
   ComputeNodeDefinition,
+  NotifyNodeDefinition,
   ShellActionNodeDefinition,
   WorkflowNodeContext,
 } from "../src/workflows/types.js";
@@ -66,6 +67,7 @@ describe("built-in monitor workflow", () => {
   it("runs a report step before finishing when the check asks to report", async () => {
     const outputRoot = await makeTempDir("pi-workflows-monitor-report");
     const prompts: string[] = [];
+    const notifications: string[] = [];
     const outputs = [
       {
         route: "stop_report",
@@ -73,7 +75,6 @@ describe("built-in monitor workflow", () => {
         report: "PR 123 now has a failed Linux check.",
         reason: "A requested report condition is true and the pull request closed.",
       },
-      { reported: true },
     ];
     const executor: AgentStepExecutor = {
       async runAgentStep(request) {
@@ -89,13 +90,19 @@ describe("built-in monitor workflow", () => {
     const engine = new WorkflowEngine({
       executor,
       store: new WorkflowRunStore(outputRoot),
+      notificationSink: {
+        notify: (request) => {
+          notifications.push(request.content);
+          return { notificationId: "notification-1", targetSessionId: "session-1" };
+        },
+      },
     });
 
     const result = await engine.run(monitor, monitorInput());
 
     expect(result.state.status).toBe("completed");
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("PR 123 now has a failed Linux check.");
+    expect(prompts).toHaveLength(1);
+    expect(notifications).toEqual(["PR 123 now has a failed Linux check."]);
     expect(result.state.finalOutput).toMatchObject({ reported: true });
   });
 
@@ -185,7 +192,7 @@ describe("built-in monitor workflow", () => {
       ]),
       store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-no-report")),
     });
-    const invalidAck = new WorkflowEngine({
+    const noSink = new WorkflowEngine({
       executor: scriptedExecutor([
         {
           route: "stop_report",
@@ -193,20 +200,19 @@ describe("built-in monitor workflow", () => {
           report: "State changed.",
           reason: "report",
         },
-        { reported: false },
       ]),
-      store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-bad-ack")),
+      store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-no-sink")),
     });
 
-    const [badCheck, noReport, badAck] = await Promise.all([
+    const [badCheck, noReport, missingSink] = await Promise.all([
       invalidCheck.run(monitor, monitorInput()),
       missingReport.run(monitor, monitorInput()),
-      invalidAck.run(monitor, monitorInput()),
+      noSink.run(monitor, monitorInput()),
     ]);
 
     expect(badCheck.state.error).toContain("route must be one of");
     expect(noReport.state.error).toContain("requires a report");
-    expect(badAck.state.error).toContain("reported to true");
+    expect(missingSink.state.error).toContain("requires a notification sink");
   });
 
   it("formats monitor prompts, guards, and fallback output", async () => {
@@ -253,9 +259,9 @@ describe("built-in monitor workflow", () => {
 
     const check = monitor.nodes.check as AgentNodeDefinition;
     expect(await check.prompt(context)).toContain("Previous accepted observation: Initial state");
-    const report = monitor.nodes.report_stop as AgentNodeDefinition;
+    const report = monitor.nodes.report_stop as NotifyNodeDefinition;
     expect(
-      await report.prompt({
+      await report.message({
         ...context,
         outputs: { check: { observation: "Fallback observation" } },
       }),
@@ -302,13 +308,11 @@ describe("built-in monitor workflow", () => {
       signal: new AbortController().signal,
     };
 
-    for (const nodeId of ["check", "report_continue", "report_stop"] as const) {
-      const node = monitor.nodes[nodeId] as AgentNodeDefinition;
-      expect(node.timeoutMs).toBeTypeOf("function");
-      expect(await (node.timeoutMs as (context: WorkflowNodeContext) => number)(context)).toBe(
-        90 * 60_000,
-      );
-    }
+    const node = monitor.nodes.check as AgentNodeDefinition;
+    expect(node.timeoutMs).toBeTypeOf("function");
+    expect(await (node.timeoutMs as (context: WorkflowNodeContext) => number)(context)).toBe(
+      90 * 60_000,
+    );
     expect(result.state.outputs.prepare).toMatchObject({ checkTimeoutMinutes: 90 });
   });
 

@@ -48,6 +48,7 @@ describe("workflow run queue", () => {
       runnerId: "runner-a",
       claimToken: "token-a",
       affinityRunnerId: "runner-a",
+      originSessionId: null,
       parentRunId: null,
       createdAt: T0,
     });
@@ -61,6 +62,83 @@ describe("workflow run queue", () => {
         now: T0,
       }),
     ).toBeUndefined();
+  });
+
+  it("restricts session-bound runs to their origin session", async () => {
+    const store = await makeStore();
+    store.enqueueWorkflowRun({
+      runId: "bound-run",
+      workflowName: "monitor",
+      workflowSourceRef: "builtin:monitor",
+      input: {},
+      runnerId: "runner-a",
+      claimToken: "token-a",
+      leaseMs: 1_000,
+      originSessionId: "session-a",
+      now: T0,
+    });
+    store.parkWorkflowRun({ runId: "bound-run", claimToken: "token-a", now: T1 });
+
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "runner-b",
+        claimToken: "token-b",
+        leaseMs: 1_000,
+        sessionId: "session-b",
+        now: T2,
+      }),
+    ).toBeUndefined();
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "runner-c",
+        claimToken: "token-c",
+        leaseMs: 1_000,
+        sessionId: "session-a",
+        now: T2,
+      })?.originSessionId,
+    ).toBe("session-a");
+  });
+
+  it("stores and delivers session-addressed notifications idempotently", async () => {
+    const store = await makeStore();
+    const first = store.enqueueWorkflowNotification({
+      runId: "run-1",
+      nodeId: "report",
+      attemptId: "attempt-1",
+      targetSessionId: "session-a",
+      kind: "progress",
+      content: "State changed",
+      notificationId: "notification-1",
+      now: T0,
+    });
+    const duplicate = store.enqueueWorkflowNotification({
+      runId: "run-1",
+      nodeId: "report",
+      attemptId: "attempt-1",
+      targetSessionId: "session-a",
+      kind: "progress",
+      content: "State changed",
+      notificationId: "notification-2",
+      now: T1,
+    });
+    expect(duplicate.notificationId).toBe(first.notificationId);
+    expect(store.listPendingWorkflowNotifications("session-b")).toEqual([]);
+    expect(store.listPendingWorkflowNotifications("session-a")).toEqual([first]);
+    expect(
+      store.markWorkflowNotificationDelivered({
+        notificationId: first.notificationId,
+        targetSessionId: "session-b",
+        now: T1,
+      }),
+    ).toBe(false);
+    expect(
+      store.markWorkflowNotificationDelivered({
+        notificationId: first.notificationId,
+        targetSessionId: "session-a",
+        now: T1,
+      }),
+    ).toBe(true);
+    expect(store.listPendingWorkflowNotifications("session-a")).toEqual([]);
   });
 
   it("rejects duplicate run ids and unsafe inputs", async () => {
@@ -338,7 +416,6 @@ describe("workflow run queue", () => {
       /Invalid workflow run id/,
     );
     expect(() => store.listRunEventsAfter(-1)).toThrow(/Invalid run event watermark/);
-    expect(() => store.setSessionWatermark("s", -1)).toThrow(/Invalid run event watermark/);
     expect(() =>
       store.claimNextWorkflowRun({
         runnerId: "r",
@@ -391,7 +468,6 @@ describe("workflow run queue", () => {
     // A fresh database reports missing runs and empty feeds.
     expect(store.getWorkflowRun("never-existed")).toBeUndefined();
     expect(store.listRunEventsAfter(0)).toEqual([]);
-    expect(store.latestRunEventSeq()).toBe(0);
   });
 
   it("deletes a claimed row by token", async () => {
@@ -449,8 +525,8 @@ describe("workflow run queue", () => {
   });
 });
 
-describe("run event feed and session watermarks", () => {
-  it("records events, pages after a watermark, and tracks sessions independently", async () => {
+describe("run event audit feed", () => {
+  it("records events and pages after a sequence", async () => {
     const store = await makeStore();
     const first = store.recordRunEvent({
       runId: "run-1",
@@ -477,15 +553,6 @@ describe("run event feed and session watermarks", () => {
       type: "completed",
       payload: { finalOutput: "done" },
     });
-
-    expect(store.getSessionWatermark("session-a")).toBe(0);
-    store.setSessionWatermark("session-a", first, T1);
-    store.setSessionWatermark("session-b", second, T2);
-    expect(store.getSessionWatermark("session-a")).toBe(first);
-    expect(store.getSessionWatermark("session-b")).toBe(second);
-    // Watermarks never move backwards.
-    store.setSessionWatermark("session-b", first, T3);
-    expect(store.getSessionWatermark("session-b")).toBe(second);
   });
 
   it("rejects unsafe event fields", async () => {

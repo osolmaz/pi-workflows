@@ -23,6 +23,7 @@ export { createResultHelpers, requeue, requeueAfter, settled } from "./results.j
 export {
   SqliteControllerStore,
   type RunEventRecord,
+  type WorkflowNotificationRecord,
   type WorkflowRunQueueRecord,
 } from "./sqlite.js";
 export {

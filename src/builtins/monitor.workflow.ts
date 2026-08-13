@@ -1,4 +1,4 @@
-import { agent, compute, defineWorkflow, shell } from "../workflows/definition.js";
+import { agent, compute, defineWorkflow, notify, shell } from "../workflows/definition.js";
 import type { WorkflowNodeContext } from "../workflows/types.js";
 
 const MIN_INTERVAL_MINUTES = 1;
@@ -150,22 +150,9 @@ function validateCheck(output: unknown): MonitorCheck {
   };
 }
 
-function validateReportAck(output: unknown): { reported: true } {
-  const value = requireRecord(output, "report acknowledgement");
-  if (value.reported !== true) {
-    throw new Error("report acknowledgement must set reported to true");
-  }
-  return { reported: true };
-}
-
-function reportPrompt(outputs: Record<string, unknown>): string {
+function reportMessage(outputs: Record<string, unknown>): string {
   const check = outputs.check as MonitorCheck;
-  return [
-    "Write one concise normal assistant message to the user with this monitoring update:",
-    check.report ?? check.observation,
-    "Do not add unrelated detail.",
-    "After writing the update, submit the acknowledgement required by the workflow step contract.",
-  ].join("\n\n");
+  return check.report ?? check.observation;
 }
 
 export default defineWorkflow({
@@ -232,19 +219,15 @@ export default defineWorkflow({
         '{ "route": "continue_quiet" | "continue_report" | "stop_quiet" | "stop_report", "observation": "current factual state", "report": "required for report routes", "reason": "short reason" }',
       validate: (output) => validateCheck(output),
     }),
-    report_continue: agent({
-      statusDetail: "reporting monitor update",
-      timeoutMs: agentTimeoutMs,
-      prompt: ({ outputs }) => reportPrompt(outputs),
-      expectedOutput: '{ "reported": true }',
-      validate: (output) => validateReportAck(output),
+    report_continue: notify({
+      statusDetail: "queueing monitor update",
+      message: ({ outputs }) => reportMessage(outputs),
+      kind: "progress",
     }),
-    report_stop: agent({
-      statusDetail: "reporting final monitor update",
-      timeoutMs: agentTimeoutMs,
-      prompt: ({ outputs }) => reportPrompt(outputs),
-      expectedOutput: '{ "reported": true }',
-      validate: (output) => validateReportAck(output),
+    report_stop: notify({
+      statusDetail: "queueing final monitor update",
+      message: ({ outputs }) => reportMessage(outputs),
+      kind: "final",
     }),
     sleep: shell({
       statusDetail: "waiting for next monitor check",

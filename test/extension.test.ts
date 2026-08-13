@@ -36,8 +36,13 @@ type RegisteredCommand = {
 };
 
 type SentMessage = {
-  message: { customType: string; content: string; display: boolean };
-  options: { deliverAs: string; triggerTurn: boolean };
+  message: {
+    customType: string;
+    content: string;
+    display: boolean;
+    details?: Record<string, unknown>;
+  };
+  options?: { deliverAs?: string; triggerTurn?: boolean };
 };
 
 type FakeContext = {
@@ -49,6 +54,7 @@ type FakeContext = {
     getSessionId: () => string;
     getLeafId: () => string | null;
     getSessionFile: () => string | undefined;
+    getBranch: () => never[];
   };
   ui: {
     notify: (message: string, type?: string) => void;
@@ -93,6 +99,7 @@ function makeHarness(options: {
       getSessionId: () => options.sessionId ?? "test-session",
       getLeafId: () => null,
       getSessionFile: () => undefined,
+      getBranch: () => [],
     },
     ui: {
       notify: (message) => notifications.push(message),
@@ -131,8 +138,11 @@ function makeHarness(options: {
       idle = false;
       queueMicrotask(() => options.respond(prompt, tool as RegisteredTool));
     },
-    sendMessage: (message: SentMessage["message"], messageOptions: SentMessage["options"]) => {
-      sentMessages.push({ message, options: messageOptions });
+    sendMessage: (message: SentMessage["message"], messageOptions?: SentMessage["options"]) => {
+      sentMessages.push({
+        message,
+        ...(messageOptions === undefined ? {} : { options: messageOptions }),
+      });
     },
   };
 
@@ -1362,46 +1372,43 @@ export default defineWorkflow({
     }
   });
 
-  it("never replays old events but picks up new ones live", { timeout: 25_000 }, async () => {
-    const cwd = await makeTempDir("pi-workflows-ext-sync");
+  it("delivers notifications only to their target session", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-notifications");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
     try {
-      await writeEchoWorkflow(cwd);
-      const respond = (prompt: string, tool: RegisteredTool) => {
-        const contract = stepFromPrompt(prompt);
-        if (contract) {
-          void tool.execute("call-1", {
-            action: "submit",
-            ...contract,
-            output: { reply: "hi" },
-          });
-        }
-      };
-      // Session A drives a run to completion.
-      const first = makeHarness({ cwd, sessionId: "session-a", respond });
-      await first.emitAsync("session_start");
-      await first.command.handler("mini say hi", first.ctx);
-      await waitFor(() => first.notifications.some((note) => note.includes("completed")));
-      await first.emitAsync("session_shutdown");
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowNotification({
+        runId: "run-targeted",
+        nodeId: "report",
+        attemptId: "attempt-1",
+        targetSessionId: "session-a",
+        kind: "final",
+        content: "Targeted result",
+      });
+      queue.close();
 
-      // Session B opens later: no replay of the completed run.
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
-      await second.emitAsync("session_start");
-      expect(second.notifications.some((note) => note.includes("completed"))).toBe(false);
+      const unrelated = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      await unrelated.emitAsync("session_start");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(unrelated.sentMessages).toHaveLength(0);
 
-      // A new run by session C appears in B's live feed within a poll cycle.
-      const third = makeHarness({ cwd, sessionId: "session-c", respond });
-      await third.emitAsync("session_start");
-      await third.command.handler("mini again", third.ctx);
-      await waitFor(() => third.notifications.some((note) => note.includes("completed")));
-      await waitFor(
-        () =>
-          second.notifications.some((note) => note.includes("mini") && note.includes("completed")),
-        10_000,
+      const origin = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await origin.emitAsync("session_start");
+      await waitFor(() =>
+        origin.sentMessages.some((entry) => entry.message.content === "Targeted result"),
       );
-      await second.emitAsync("session_shutdown");
-      await third.emitAsync("session_shutdown");
+      expect(origin.sentMessages[0]?.message).toMatchObject({
+        customType: "pi-workflows-notification",
+        display: true,
+        details: { runId: "run-targeted", kind: "final" },
+      });
+
+      const check = new SqliteControllerStore(projectControllerStorePath(cwd), { readOnly: true });
+      expect(check.listPendingWorkflowNotifications("session-a")).toHaveLength(0);
+      check.close();
+      await unrelated.emitAsync("session_shutdown");
+      await origin.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1768,7 +1775,7 @@ export default defineWorkflow({
     try {
       const queueFile = projectControllerStorePath(cwd);
       const queue = new SqliteControllerStore(queueFile);
-      const first = queue.recordRunEvent({
+      queue.recordRunEvent({
         runId: "r-skip",
         workflowRef: "old",
         type: "queued",
@@ -1780,7 +1787,6 @@ export default defineWorkflow({
         type: "resumed",
         runnerId: "other-runner",
       });
-      queue.setSessionWatermark("project", first);
       queue.close();
 
       const harness = makeHarness({ cwd, sessionId: "session-y", respond: () => {} });
@@ -1789,138 +1795,6 @@ export default defineWorkflow({
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(harness.notifications.some((note) => note.includes("r-resume"))).toBe(false);
       await harness.emitAsync("session_shutdown");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
-  it("describes each noteworthy event kind in the live feed", { timeout: 20_000 }, async () => {
-    const cwd = await makeTempDir("pi-workflows-ext-feed");
-    const runsDir = await makeTempDir("pi-workflows-ext-runs");
-    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
-    try {
-      const queueFile = projectControllerStorePath(cwd);
-      const queue = new SqliteControllerStore(queueFile);
-      const first = queue.recordRunEvent({
-        runId: "r-skip",
-        workflowRef: "old",
-        type: "queued",
-        runnerId: "other-runner",
-      });
-      for (const [runId, type, payload] of [
-        ["r-done", "completed", {}],
-        ["r-fail", "failed", { error: "boom" }],
-        ["r-wait", "waiting", { waitingOn: "review" }],
-        ["r-park", "parked", {}],
-        ["r-cancel", "cancelled", {}],
-        ["r-timeout", "timed_out", {}],
-        ["r-wait2", "waiting", {}],
-        ["r-fail2", "failed", {}],
-      ] as const) {
-        queue.recordRunEvent({
-          runId,
-          workflowRef: "demo",
-          type,
-          runnerId: "other-runner",
-          payload,
-        });
-      }
-      queue.setSessionWatermark("project", first);
-      queue.close();
-
-      const harness = makeHarness({ cwd, sessionId: "session-x", respond: () => {} });
-      await harness.emitAsync("session_start");
-      await waitFor(() => harness.notifications.some((note) => note.includes("boom")));
-      const feed = harness.notifications.find((note) => note.includes("boom")) as string;
-      expect(feed).toContain("demo run r-done completed");
-      expect(feed).toContain("demo run r-fail failed: boom");
-      expect(feed).toContain("waits at checkpoint review");
-      expect(feed).toContain("was parked and will resume");
-      expect(feed).toContain("demo run r-cancel cancelled");
-      expect(feed).toContain("demo run r-timeout timed_out");
-      expect(feed).toContain("demo run r-fail2 failed");
-      expect(feed).not.toContain("r-skip");
-      await harness.emitAsync("session_shutdown");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
-  it("catches up a reopened session with a state snapshot", { timeout: 20_000 }, async () => {
-    const cwd = await makeTempDir("pi-workflows-ext-snapshot");
-    const runsDir = await makeTempDir("pi-workflows-ext-runs");
-    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
-    try {
-      await fs.mkdir(path.join(cwd, ".pi", "workflows"), { recursive: true });
-      await fs.writeFile(
-        path.join(cwd, ".pi", "workflows", "gate.workflow.ts"),
-        `import { checkpoint, compute, defineWorkflow } from "@osolmaz/pi-workflows";
-export default defineWorkflow({
-  name: "gate",
-  startAt: "approval",
-  nodes: {
-    approval: checkpoint({ summary: "approve" }),
-    apply: compute({ run: () => 1 }),
-  },
-  edges: [{ from: "approval", to: "apply" }],
-});
-`,
-        "utf8",
-      );
-      await fs.writeFile(
-        path.join(cwd, ".pi", "workflows", "slow.workflow.ts"),
-        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
-export default defineWorkflow({
-  name: "slow",
-  startAt: "work",
-  nodes: {
-    work: compute({
-      run: ({ signal }) => new Promise((resolve, reject) => {
-        const timer = setTimeout(() => resolve("done"), 400);
-        signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(signal.reason);
-        }, { once: true });
-      }),
-    }),
-  },
-  edges: [],
-});
-`,
-        "utf8",
-      );
-      // Session A: one run waits at a checkpoint; another parks mid-flight.
-      const first = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
-      await first.emitAsync("session_start");
-      await first.command.handler("gate", first.ctx);
-      await waitFor(() =>
-        first.notifications.some((note) => note.includes("parked at checkpoint approval")),
-      );
-      await first.command.handler("slow", first.ctx);
-      await waitFor(async () => {
-        const runDirs = await fs.readdir(runsDir);
-        for (const dir of runDirs) {
-          const bundle = await readRunBundle(path.join(runsDir, dir));
-          if (bundle?.state.workflowName === "slow" && bundle.state.currentNode === "work") {
-            return true;
-          }
-        }
-        return false;
-      });
-      await first.emitAsync("session_shutdown");
-
-      // Session B opens: the snapshot names both, without event replay.
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
-      await second.emitAsync("session_start");
-      await waitFor(() =>
-        second.notifications.some((note) => note.includes("waits at checkpoint approval")),
-      );
-      const snapshot = second.notifications.find((note) =>
-        note.includes("waits at checkpoint approval"),
-      );
-      expect(snapshot).toContain("waits at checkpoint approval");
-      expect(snapshot).toContain("is parked and will resume");
-      await second.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1956,9 +1830,9 @@ export default defineWorkflow({
       );
       await first.emitAsync("session_shutdown");
 
-      // Session B has no in-memory waiting run; the tool discovers it from disk
-      // and starts the continuation after the answering turn settles.
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      // Reopening session A discovers its waiting run from disk and starts the
+      // continuation after the answering turn settles.
+      const second = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
       await second.emitAsync("session_start");
       const queued = await second.tool.execute("answer-1", {
         action: "answer",
@@ -2080,7 +1954,7 @@ export default defineWorkflow({
       );
       await harness.emitAsync("session_shutdown");
 
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      const second = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
       await second.emitAsync("session_start");
       await second.command.handler('answer {"round":2}', second.ctx);
       await waitFor(() => second.notifications.some((note) => note.includes("completed")));
@@ -2148,7 +2022,7 @@ export default defineWorkflow({
       // The workflow file changes while the run is parked.
       await fs.appendFile(workflowFile, "\n// edited while parked\n", "utf8");
 
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      const second = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
       await second.emitAsync("session_start");
       await waitFor(() => second.notifications.some((note) => note.includes("parked again")));
 
@@ -2216,7 +2090,7 @@ export default defineWorkflow({
 
         // Session B claims it, fails to resume a terminal bundle, and closes
         // the row as done instead of re-parking forever.
-        const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+        const second = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
         await second.emitAsync("session_start");
         await waitFor(() => {
           const reader = new SqliteControllerStore(queueFile, { readOnly: true });
@@ -2274,7 +2148,7 @@ export default defineWorkflow({
 
       // Session B opens: it claims the parked run, resumes the node, and
       // drives it to completion.
-      const second = makeHarness({ cwd, sessionId: "session-b", respond: () => {} });
+      const second = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
       await second.emitAsync("session_start");
       await waitFor(() => second.notifications.some((note) => note.includes("Resumed workflow")));
       await waitFor(() => second.notifications.some((note) => note.includes("completed")));

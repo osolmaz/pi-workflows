@@ -117,10 +117,9 @@ Conversation nodes execute in headless `pi --mode rpc` children that load a
 small bridge extension; the model sees the same `workflow` tool contract as an
 in-session run. The host is a foreground process: start it in a terminal and
 stop it with Ctrl-C. A second host for the same project refuses to start, and
-a host that dies has its orphaned children reaped by the next one. While the
-host works, any open Pi session stays current: a per-session watermark over
-the shared run event feed produces catch-up summaries and quiet context
-updates.
+a host that dies has its orphaned children reaped by the next one. While the host works, reports enter a durable outbox addressed to the Pi
+session that started the run. They remain pending while that session is closed
+and never enter another conversation in the same project.
 
 ## Node types
 
@@ -164,6 +163,24 @@ Runs a TypeScript function inline. Use it for pure data shaping.
 ```typescript
 compute({ run: ({ outputs }) => ({ merged: { ...outputs } }) });
 ```
+
+### notify
+
+Queues a durable plain-text message for the Pi session that started the run.
+The runner does not write the message into its own conversation. A standalone
+host can execute this node, and the message still waits for the origin session.
+
+```typescript
+notify({
+  kind: "progress", // or "final"
+  message: ({ outputs }) => String(outputs.check),
+});
+```
+
+The runtime deduplicates notifications by run, node, and attempt. A workflow
+with a `notify` node must be an interactive queued run with an origin session.
+Controller child workflows are detached and must report through their
+controller resource instead.
 
 ### action
 

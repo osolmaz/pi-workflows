@@ -269,7 +269,25 @@ export class WorkflowHost {
       ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
       ...(this.options.env !== undefined ? { env: this.options.env } : {}),
     });
-    const engine = new WorkflowEngine({ executor, store: fencedStore });
+    const engine = new WorkflowEngine({
+      executor,
+      store: fencedStore,
+      notificationSink: {
+        notify: (request) => {
+          if (record.originSessionId === null) {
+            throw new Error(`Workflow run ${request.runId} has no origin session`);
+          }
+          const notification = store.enqueueWorkflowNotification({
+            ...request,
+            targetSessionId: record.originSessionId,
+          });
+          return {
+            notificationId: notification.notificationId,
+            targetSessionId: notification.targetSessionId,
+          };
+        },
+      },
+    });
     const parkEngine = () => engine.park();
     this.parkedEngines.push(parkEngine);
 

@@ -69,6 +69,13 @@ describe("migrateLegacyWorkflowSources", () => {
       leaseMs: 30_000,
     });
     queue.parkWorkflowRun({ runId: "legacy-run", claimToken: "old-claim" });
+    await store.writeSessionBinding(runDir, {
+      schema: "pi-workflows.session-binding.v1",
+      runId: "legacy-run",
+      piSessionId: "origin-session",
+      cwd: "/project",
+      boundAt: new Date().toISOString(),
+    });
 
     const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
 
@@ -76,6 +83,7 @@ describe("migrateLegacyWorkflowSources", () => {
     expect(queue.getWorkflowRun("legacy-run")).toMatchObject({
       workflowName: "fixture",
       workflowSourceRef: "builtin:fixture",
+      originSessionId: "origin-session",
       status: "parked",
     });
     queue.close();

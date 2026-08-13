@@ -2,11 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
-import {
-  projectControllerStorePath,
-  type RunEventRecord,
-  SqliteControllerStore,
-} from "../controllers/index.js";
+import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { WorkflowEngine } from "../workflows/engine.js";
@@ -217,11 +213,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     return runQueueStore;
   };
 
-  // Session sync: a per-session watermark over the run event feed keeps this
-  // session's context current with runs other runners drove.
-  // The sync watermark is project-scoped: a reopened session catches up
-  // where the last one stopped, and two open sessions share one pointer.
-  const SYNC_WATERMARK_KEY = "project";
+  // Session-addressed delivery: each session polls only its durable outbox.
+  // Run events remain an audit feed and never enter a conversation.
   let syncArmed = false;
   let runSyncTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -238,109 +231,48 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const describeRunEvent = (event: RunEventRecord): string => {
-    const label = `${event.workflowRef} run ${event.runId}`;
-    switch (event.type) {
-      case "waiting": {
-        const waitingOn =
-          typeof event.payload.waitingOn === "string" ? event.payload.waitingOn : "a checkpoint";
-        return `${label} waits at checkpoint ${waitingOn} — answer with /workflow answer`;
+  const deliveredNotificationIds = (ctx: ExtensionContext): Set<string> => {
+    const ids = new Set<string>();
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom_message" || entry.customType !== "pi-workflows-notification") {
+        continue;
       }
-      case "parked":
-        return `${label} was parked and will resume when a runner is available`;
-      case "failed": {
-        const detail = typeof event.payload.error === "string" ? `: ${event.payload.error}` : "";
-        return `${label} failed${detail}`;
+      const details = entry.details;
+      if (details !== null && typeof details === "object" && !Array.isArray(details)) {
+        const notificationId = (details as { notificationId?: unknown }).notificationId;
+        if (typeof notificationId === "string") ids.add(notificationId);
       }
-      default:
-        return `${label} ${event.type}`;
     }
+    return ids;
   };
 
-  const runSyncPass = async (ctx: ExtensionContext): Promise<void> => {
-    if (runQueueStore === null || !syncArmed) {
-      return;
-    }
+  const runSyncPass = (ctx: ExtensionContext): void => {
+    if (runQueueStore === null || !syncArmed) return;
     try {
-      const watermark = runQueueStore.getSessionWatermark(SYNC_WATERMARK_KEY);
-      if (watermark === 0) {
-        // First sync ever for this project: never replay the feed (stale
-        // "waits at checkpoint" lines included). Fast-forward, then catch
-        // up from current state instead — what is parked, resuming, or
-        // waiting for an answer right now.
-        const latest = runQueueStore.latestRunEventSeq();
-        if (latest > 0) {
-          runQueueStore.setSessionWatermark(SYNC_WATERMARK_KEY, latest);
+      const sessionId = ctx.sessionManager.getSessionId();
+      const alreadyDelivered = deliveredNotificationIds(ctx);
+      for (const notification of runQueueStore.listPendingWorkflowNotifications(sessionId)) {
+        if (!alreadyDelivered.has(notification.notificationId)) {
+          pi.sendMessage({
+            customType: "pi-workflows-notification",
+            content: notification.content,
+            display: true,
+            details: {
+              notificationId: notification.notificationId,
+              runId: notification.runId,
+              kind: notification.kind,
+            },
+          });
+          alreadyDelivered.add(notification.notificationId);
         }
-        await sendStateSnapshot(ctx);
-        return;
+        runQueueStore.markWorkflowNotificationDelivered({
+          notificationId: notification.notificationId,
+          targetSessionId: sessionId,
+        });
       }
-      const events = runQueueStore.listRunEventsAfter(watermark, { limit: 20 });
-      if (events.length === 0) {
-        return;
-      }
-      // Persist the watermark first. A crash after this point skips the
-      // message, but snapshots recompute from the store, so no information
-      // stays lost; a duplicated state line is the worst outcome.
-      runQueueStore.setSessionWatermark(SYNC_WATERMARK_KEY, events[events.length - 1]?.seq ?? 0);
-      const noteworthy = events.filter(
-        (event) =>
-          event.runnerId !== runnerId &&
-          ["completed", "failed", "timed_out", "cancelled", "waiting", "parked"].includes(
-            event.type,
-          ),
-      );
-      if (noteworthy.length === 0) {
-        return;
-      }
-      const content = `Workflow run update:\n${noteworthy.map(describeRunEvent).join("\n")}`;
-      pi.sendMessage(
-        { customType: "pi-workflows-run-sync", content, display: false },
-        { deliverAs: "steer", triggerTurn: false },
-      );
-      notify(ctx, noteworthy.map(describeRunEvent).join("; "));
     } catch {
-      // Sync is observational.
+      // Delivery retries on the next poll. It never affects workflow execution.
     }
-  };
-
-  // The first-use catch-up: a snapshot of runs that need attention now.
-  const sendStateSnapshot = async (ctx: ExtensionContext) => {
-    if (runQueueStore === null) {
-      return;
-    }
-    const lines: string[] = [];
-    const rows = runQueueStore.listWorkflowRuns();
-    for (const row of rows) {
-      if (row.status === "parked") {
-        lines.push(`${row.workflowName} run ${row.runId} is parked and will resume`);
-      }
-    }
-    const known = new Set(rows.map((row) => row.runId));
-    const continued = new Set(
-      rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
-    );
-    const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
-    for (const bundle of bundles) {
-      if (
-        bundle.state.status === "waiting" &&
-        known.has(bundle.state.runId) &&
-        !continued.has(bundle.state.runId)
-      ) {
-        lines.push(
-          `${bundle.state.workflowName} run ${bundle.state.runId} waits at checkpoint ${bundle.state.waitingOn ?? "?"} — answer with /workflow answer`,
-        );
-      }
-    }
-    if (lines.length === 0) {
-      return;
-    }
-    const content = `Workflow runs needing attention:\n${lines.join("\n")}`;
-    pi.sendMessage(
-      { customType: "pi-workflows-run-sync", content, display: false },
-      { deliverAs: "steer", triggerTurn: false },
-    );
-    notify(ctx, lines.join("; "));
   };
 
   const startRunSync = (ctx: ExtensionContext) => {
@@ -746,6 +678,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           runnerId,
           claimToken: token,
           leaseMs: RUN_CLAIM_LEASE_MS,
+          originSessionId: ctx.sessionManager.getSessionId(),
           ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
         });
         claimToken = token;
@@ -798,6 +731,23 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const engine = new WorkflowEngine({
       executor,
       store,
+      notificationSink: {
+        notify: (request) => {
+          if (queueStore === null) throw new Error("Workflow notifications require a queued run");
+          const record = queueStore.getWorkflowRun(request.runId);
+          if (record?.originSessionId === null || record?.originSessionId === undefined) {
+            throw new Error(`Workflow run ${request.runId} has no origin session`);
+          }
+          const notification = queueStore.enqueueWorkflowNotification({
+            ...request,
+            targetSessionId: record.originSessionId,
+          });
+          return {
+            notificationId: notification.notificationId,
+            targetSessionId: notification.targetSessionId,
+          };
+        },
+      },
       // Awaited by the engine after run_started is persisted, so the session
       // binding and its trace event always precede node and terminal events.
       onRunStarted: async (runDir, state) => {
@@ -980,6 +930,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       claimToken,
       leaseMs: RUN_CLAIM_LEASE_MS,
       excludeRunIds: [...migrationBlockedRuns],
+      sessionId: ctx.sessionManager.getSessionId(),
     });
     if (claimed === undefined) {
       return;
@@ -1291,7 +1242,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     let parentRunId = requestedRunId ?? lastWaitingRunId;
     if (parentRunId === null) {
       const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
-      const known = new Set(rows.map((row) => row.runId));
+      const sessionId = ctx.sessionManager.getSessionId();
+      const known = new Set(
+        rows
+          .filter((row) => row.originSessionId === null || row.originSessionId === sessionId)
+          .map((row) => row.runId),
+      );
       const continued = new Set(
         rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
       );
@@ -1306,6 +1262,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     if (parentRunId === null) {
       throw new Error("No workflow is waiting for an answer.");
+    }
+    const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(parentRunId);
+    if (
+      queueRecord?.originSessionId !== null &&
+      queueRecord?.originSessionId !== undefined &&
+      queueRecord.originSessionId !== ctx.sessionManager.getSessionId()
+    ) {
+      throw new Error(`Workflow run ${parentRunId} belongs to another Pi session.`);
     }
     const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
     if (

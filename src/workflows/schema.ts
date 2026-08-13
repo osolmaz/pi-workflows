@@ -4,6 +4,7 @@ import type {
   CheckpointNodeDefinition,
   ComputeNodeDefinition,
   FunctionActionNodeDefinition,
+  NotifyNodeDefinition,
   ShellActionNodeDefinition,
   WorkflowDefinition,
   WorkflowEdge,
@@ -62,6 +63,16 @@ export function assertValidComputeNode(node: ComputeNodeDefinition, nodeId = "co
   assertCommonNodeFields(node, nodeId);
 }
 
+export function assertValidNotifyNode(node: NotifyNodeDefinition, nodeId = "notify"): void {
+  if (typeof node.message !== "function") {
+    fail(`node ${nodeId} requires a message function`);
+  }
+  if (node.kind !== undefined && node.kind !== "progress" && node.kind !== "final") {
+    fail(`node ${nodeId} kind must be progress or final`);
+  }
+  assertCommonNodeFields(node, nodeId);
+}
+
 export function assertValidActionNode(node: ActionNodeDefinition, nodeId = "action"): void {
   // Dispatch discriminates with `"exec" in node`, so validation must use the
   // same property semantics: a present-but-invalid `exec` is an error even
@@ -111,6 +122,9 @@ function assertValidNode(node: WorkflowNodeDefinition, nodeId: string): void {
       return;
     case "compute":
       assertValidComputeNode(node, nodeId);
+      return;
+    case "notify":
+      assertValidNotifyNode(node, nodeId);
       return;
     case "action":
       assertValidActionNode(node, nodeId);

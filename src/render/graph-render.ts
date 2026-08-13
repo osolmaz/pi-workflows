@@ -79,6 +79,7 @@ const CARD_DYNAMIC_RESERVE = "↻ 100  ◷ 9999d 23h 59m 59s";
 const NODE_TYPE_GLYPHS: Record<string, string> = {
   agent: "●",
   compute: "ƒ",
+  notify: "✉",
   action: "⚙",
   checkpoint: "◆",
 };
@@ -87,6 +88,8 @@ function nodeTypeStyle(nodeType: string): CanvasStyle {
   switch (nodeType) {
     case "agent":
     case "compute":
+    case "notify":
+      return nodeType === "notify" ? "action" : nodeType;
     case "action":
     case "checkpoint":
       return nodeType;

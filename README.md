@@ -179,10 +179,11 @@ finishes with a JSON output, and edges decide what runs next.
 
 An `agent` node sends a prompt into the pi conversation and waits for the
 model to submit its output through the `workflow` tool. A `compute` node runs
-a pure TypeScript function. An `action` node performs a side effect, either a
-TypeScript function (`action({ run })`) or a runtime-owned shell command
-(`shell({ exec, parse })`). A `checkpoint` node ends the run in a `waiting`
-state so a human can pick it up. On top of `agent`, the `decision` helper asks
+a pure TypeScript function. A `notify` node writes a durable message for the
+Pi session that started the run. An `action` node performs a side effect,
+either a TypeScript function (`action({ run })`) or a runtime-owned shell
+command (`shell({ exec, parse })`). A `checkpoint` node ends the run in a
+`waiting` state so a human can pick it up. On top of `agent`, the `decision` helper asks
 the model to pick from a fixed set of choices and validates the answer, and
 `decisionEdge` routes on the result with compile-time case checking.
 
@@ -221,7 +222,9 @@ The standalone CLI provides read-only views with `pi-workflows controllers` and 
 
 ## Always-on workflows
 
-Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it, and any runner can **resume** it later at the node it stopped on. Reopening Pi resumes parked runs itself and catches the session up through the shared event feed; a checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
+Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it. Another interactive session cannot claim it. Reopening the exact session that started the run resumes it. A standalone host can also resume it without changing where reports go. A checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
+
+Workflow reports use a durable session-addressed outbox. A report waits while its starting session is closed and is delivered only to that session when it opens again. Runs in the same directory do not broadcast messages to each other's conversations.
 
 For runs that must continue while Pi is closed, keep the standalone host running:
 

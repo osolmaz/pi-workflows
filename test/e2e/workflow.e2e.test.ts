@@ -754,7 +754,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "1" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "2" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

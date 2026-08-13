@@ -25,6 +25,7 @@ export type LegacySourceMigrationQueue = {
   }): boolean;
   parkWorkflowRun(options: { runId: string; claimToken: string }): boolean;
   getWorkflowRun(runId: string): { status: "claimed" | "parked" | "done" } | undefined;
+  setWorkflowRunOriginSession?(runId: string, originSessionId: string): boolean;
 };
 
 const MIGRATION_LEASE_MS = 30_000;
@@ -45,6 +46,12 @@ export async function migrateLegacyWorkflowSources(options: {
   for (const bundle of await listRunBundles(store.outputRoot)) {
     const state = bundle.state;
     if (state.status !== "running" && state.status !== "waiting") continue;
+    if (
+      options.queue?.setWorkflowRunOriginSession !== undefined &&
+      bundle.sessionBinding !== null
+    ) {
+      options.queue.setWorkflowRunOriginSession(state.runId, bundle.sessionBinding.piSessionId);
+    }
     if (state.workflowSource !== undefined) {
       if (options.queue === undefined) continue;
       const claimToken = randomUUID();

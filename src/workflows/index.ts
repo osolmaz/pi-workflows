@@ -5,6 +5,7 @@ export {
   compute,
   defineWorkflow,
   isWorkflowDefinition,
+  notify,
   shell,
 } from "./definition.js";
 export { decision, decisionEdge, type DecisionDefinition } from "./decision.js";
@@ -65,6 +66,7 @@ export type {
   ComputeNodeDefinition,
   FunctionActionNodeDefinition,
   MaybePromise,
+  NotifyNodeDefinition,
   ShellActionExecution,
   ShellActionNodeDefinition,
   ShellActionResult,
@@ -79,6 +81,9 @@ export type {
   WorkflowNodeOutcome,
   WorkflowNodeResult,
   WorkflowNodeSnapshot,
+  WorkflowNotificationReceipt,
+  WorkflowNotificationRequest,
+  WorkflowNotificationSink,
   WorkflowPresentationContext,
   WorkflowRunManifest,
   WorkflowRunResult,

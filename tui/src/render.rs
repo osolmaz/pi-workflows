@@ -99,6 +99,7 @@ fn node_type_glyph(node_type: &str) -> char {
     match node_type {
         "agent" => '●',
         "compute" => 'ƒ',
+        "notify" => '✉',
         "action" => '⚙',
         "checkpoint" => '◆',
         _ => '?',
@@ -111,6 +112,8 @@ fn node_type_style(node_type: &str, focused: bool) -> CanvasStyle {
         ("agent", true) => CanvasStyle::AgentFocus,
         ("compute", false) => CanvasStyle::Compute,
         ("compute", true) => CanvasStyle::ComputeFocus,
+        ("notify", false) => CanvasStyle::Action,
+        ("notify", true) => CanvasStyle::ActionFocus,
         ("action", false) => CanvasStyle::Action,
         ("action", true) => CanvasStyle::ActionFocus,
         ("checkpoint", false) => CanvasStyle::Checkpoint,

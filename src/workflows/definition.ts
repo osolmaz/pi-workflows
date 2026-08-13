@@ -3,6 +3,7 @@ import {
   assertValidActionNode,
   assertValidCheckpointNode,
   assertValidComputeNode,
+  assertValidNotifyNode,
   assertValidShellActionNode,
   assertValidWorkflowDefinitionShape,
 } from "./schema.js";
@@ -12,6 +13,7 @@ import type {
   CheckpointNodeDefinition,
   ComputeNodeDefinition,
   FunctionActionNodeDefinition,
+  NotifyNodeDefinition,
   ShellActionNodeDefinition,
   WorkflowDefinition,
 } from "./types.js";
@@ -59,6 +61,15 @@ export function compute(
     ...definition,
   };
   assertValidComputeNode(node);
+  return node;
+}
+
+export function notify(definition: Omit<NotifyNodeDefinition, "nodeType">): NotifyNodeDefinition {
+  const node: NotifyNodeDefinition = {
+    nodeType: "notify",
+    ...definition,
+  };
+  assertValidNotifyNode(node);
   return node;
 }
 

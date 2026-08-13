@@ -30,6 +30,7 @@ import type {
   WorkflowNodeDefinition,
   WorkflowNodeOutcome,
   WorkflowNodeResult,
+  WorkflowNotificationSink,
   WorkflowRunResult,
   WorkflowRunState,
   WorkflowSource,
@@ -74,6 +75,7 @@ type NodeAttempt = {
  */
 export class WorkflowEngine {
   private readonly executor: AgentStepExecutor;
+  private readonly notificationSink: WorkflowNotificationSink | undefined;
   private readonly store: WorkflowRunStore;
   private readonly defaultNodeTimeoutMs: number;
   private readonly maxSteps: number;
@@ -88,6 +90,7 @@ export class WorkflowEngine {
 
   constructor(options: WorkflowEngineOptions) {
     this.executor = options.executor;
+    this.notificationSink = options.notificationSink;
     this.store = options.store ?? new WorkflowRunStore(options.outputRoot);
     this.defaultNodeTimeoutMs = options.defaultNodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -868,6 +871,24 @@ export class WorkflowEngine {
         );
       case "compute":
         return { output: await node.run(context), promptText: null };
+      case "notify": {
+        if (this.notificationSink === undefined) {
+          throw new Error(`Workflow node ${nodeId} requires a notification sink`);
+        }
+        const content = await node.message(context);
+        if (typeof content !== "string" || content.trim().length === 0) {
+          throw new Error(`Workflow node ${nodeId} notification must be a non-empty string`);
+        }
+        const receipt = await this.notificationSink.notify({
+          runId: state.runId,
+          workflowName: workflow.name,
+          nodeId,
+          attemptId,
+          kind: node.kind ?? "progress",
+          content: content.trim(),
+        });
+        return { output: receipt, promptText: null };
+      }
       case "action":
         return await this.runActionNode(node, context, signal, meta);
       case "checkpoint":

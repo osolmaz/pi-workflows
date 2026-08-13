@@ -1323,6 +1323,9 @@ function snapshotNode(node: WorkflowNodeDefinition): WorkflowNodeSnapshot {
   if (node.nodeType === "agent" && node.expectedOutput !== undefined) {
     common.expectedOutput = node.expectedOutput;
   }
+  if (node.nodeType === "notify") {
+    common.summary = node.kind ?? "progress";
+  }
   if (node.nodeType === "checkpoint" && node.summary !== undefined) {
     common.summary = node.summary;
   }

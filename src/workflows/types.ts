@@ -68,6 +68,13 @@ export type ComputeNodeDefinition = WorkflowNodeCommon & {
   run: (context: WorkflowNodeContext) => MaybePromise<unknown>;
 };
 
+/** A durable user-facing message addressed by the runtime to the run's origin session. */
+export type NotifyNodeDefinition = WorkflowNodeCommon & {
+  nodeType: "notify";
+  message: (context: WorkflowNodeContext) => MaybePromise<string>;
+  kind?: "progress" | "final";
+};
+
 /** A deterministic runtime-owned step implemented as a local function. */
 export type FunctionActionNodeDefinition = WorkflowNodeCommon & {
   nodeType: "action";
@@ -121,6 +128,7 @@ export type CheckpointNodeDefinition = WorkflowNodeCommon & {
 export type WorkflowNodeDefinition =
   | AgentNodeDefinition
   | ComputeNodeDefinition
+  | NotifyNodeDefinition
   | ActionNodeDefinition
   | CheckpointNodeDefinition;
 
@@ -444,8 +452,28 @@ export interface AgentStepExecutor {
   runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission>;
 }
 
+export type WorkflowNotificationRequest = {
+  runId: string;
+  workflowName: string;
+  nodeId: string;
+  attemptId: string;
+  kind: "progress" | "final";
+  content: string;
+};
+
+export type WorkflowNotificationReceipt = {
+  notificationId: string;
+  targetSessionId: string;
+};
+
+export interface WorkflowNotificationSink {
+  notify(request: WorkflowNotificationRequest): MaybePromise<WorkflowNotificationReceipt>;
+}
+
 export type WorkflowEngineOptions = {
   executor: AgentStepExecutor;
+  /** Durable destination for notify nodes. Required when a workflow uses one. */
+  notificationSink?: WorkflowNotificationSink;
   /** Root directory for run bundles. Defaults to `~/.pi/agent/workflows/runs`. */
   outputRoot?: string;
   /**

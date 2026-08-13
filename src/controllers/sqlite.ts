@@ -93,6 +93,7 @@ type WorkflowRunQueueRow = {
   claim_token: string | null;
   claim_expires_at: number | null;
   affinity_runner_id: string | null;
+  origin_session_id: string | null;
   parent_run_id: string | null;
   created_at: string;
   updated_at: string;
@@ -111,9 +112,35 @@ export type WorkflowRunQueueRecord = {
   claimToken: string | null;
   claimExpiresAt: string | null;
   affinityRunnerId: string | null;
+  /** Pi session that owns delivery and interactive execution, or null for detached runs. */
+  originSessionId: string | null;
   parentRunId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type WorkflowNotificationRow = {
+  notification_id: string;
+  run_id: string;
+  node_id: string;
+  attempt_id: string;
+  target_session_id: string;
+  kind: "progress" | "final";
+  content: string;
+  created_at: string;
+  delivered_at: string | null;
+};
+
+export type WorkflowNotificationRecord = {
+  notificationId: string;
+  runId: string;
+  nodeId: string;
+  attemptId: string;
+  targetSessionId: string;
+  kind: "progress" | "final";
+  content: string;
+  createdAt: string;
+  deliveredAt: string | null;
 };
 
 type RunEventRow = {
@@ -774,6 +801,13 @@ export class SqliteControllerStore implements ControllerStore {
         .prepare("INSERT OR IGNORE INTO schema_info (singleton, schema_id) VALUES (1, ?)")
         .run(CONTROLLER_STORE_SCHEMA);
       this.database.exec(SCHEMA_SQL);
+      const queueColumns = this.database.pragma("table_info(workflow_run_queue)") as {
+        name: string;
+      }[];
+      if (!queueColumns.some((column) => column.name === "origin_session_id")) {
+        this.database.exec("ALTER TABLE workflow_run_queue ADD COLUMN origin_session_id TEXT");
+      }
+      this.database.exec("DROP TABLE IF EXISTS session_watermarks");
     });
   }
 
@@ -875,6 +909,7 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string;
     leaseMs: number;
     affinityRunnerId?: string;
+    originSessionId?: string;
     parentRunId?: string;
     now?: string;
   }): WorkflowRunQueueRecord {
@@ -884,6 +919,9 @@ export class SqliteControllerStore implements ControllerStore {
     validateKey(options.runnerId, "runner id");
     validateKey(options.claimToken, "claim token");
     validateDuration(options.leaseMs, "leaseMs");
+    if (options.originSessionId !== undefined) {
+      validateKey(options.originSessionId, "origin session id");
+    }
     const inputJson = canonicalJson(options.input ?? null, "workflow run input");
     validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
     const now = validTimestamp(options.now);
@@ -893,8 +931,8 @@ export class SqliteControllerStore implements ControllerStore {
         `INSERT INTO workflow_run_queue (
           run_id, workflow_ref, workflow_path, input_json, status,
           runner_id, claim_token, claim_expires_at, affinity_runner_id,
-          parent_run_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?)`,
+          origin_session_id, parent_run_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         options.runId,
@@ -905,6 +943,7 @@ export class SqliteControllerStore implements ControllerStore {
         options.claimToken,
         expiresAt,
         options.affinityRunnerId ?? options.runnerId,
+        options.originSessionId ?? null,
         options.parentRunId ?? null,
         now,
         now,
@@ -945,11 +984,14 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string;
     leaseMs: number;
     excludeRunIds?: string[];
+    /** Interactive sessions provide their id; detached hosts omit it. */
+    sessionId?: string;
     now?: string;
   }): WorkflowRunQueueRecord | undefined {
     validateKey(options.runnerId, "runner id");
     validateKey(options.claimToken, "claim token");
     validateDuration(options.leaseMs, "leaseMs");
+    if (options.sessionId !== undefined) validateKey(options.sessionId, "session id");
     const now = validTimestamp(options.now);
     const nowMs = epoch(now);
     const expiresAt = nowMs + options.leaseMs;
@@ -959,6 +1001,10 @@ export class SqliteControllerStore implements ControllerStore {
     }
     const exclusion =
       excluded.length === 0 ? "" : `AND run_id NOT IN (${excluded.map(() => "?").join(", ")})`;
+    const sessionFilter =
+      options.sessionId === undefined
+        ? ""
+        : "AND (origin_session_id IS NULL OR origin_session_id = ?)";
     const claimable = `(
       status = 'parked'
       OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
@@ -967,13 +1013,18 @@ export class SqliteControllerStore implements ControllerStore {
       const candidate = this.database
         .prepare(
           `SELECT run_id FROM workflow_run_queue
-           WHERE ${claimable} ${exclusion}
+           WHERE ${claimable} ${exclusion} ${sessionFilter}
            ORDER BY
              CASE WHEN affinity_runner_id = ? THEN 0 ELSE 1 END,
              created_at ASC
            LIMIT 1`,
         )
-        .get(nowMs, ...excluded, options.runnerId) as { run_id: string } | undefined;
+        .get(
+          nowMs,
+          ...excluded,
+          ...(options.sessionId === undefined ? [] : [options.sessionId]),
+          options.runnerId,
+        ) as { run_id: string } | undefined;
       if (candidate === undefined) {
         return undefined;
       }
@@ -1235,37 +1286,96 @@ export class SqliteControllerStore implements ControllerStore {
     }));
   }
 
-  /** The highest run event seq in the feed; 0 when empty. */
-  latestRunEventSeq(): number {
-    const row = this.database.prepare("SELECT MAX(seq) AS latest FROM run_events").get() as {
-      latest: number | null;
-    };
-    return row.latest ?? 0;
-  }
-
-  /** The last run event this session was told about; 0 before any sync. */
-  getSessionWatermark(sessionId: string): number {
-    validateKey(sessionId, "session id");
-    const row = this.database
-      .prepare("SELECT last_event_seq FROM session_watermarks WHERE session_id = ?")
-      .get(sessionId) as { last_event_seq: number } | undefined;
-    return row?.last_event_seq ?? 0;
-  }
-
-  setSessionWatermark(sessionId: string, seq: number, now?: string): void {
-    validateKey(sessionId, "session id");
-    if (!Number.isSafeInteger(seq) || seq < 0) {
-      throw new Error(`Invalid run event watermark: ${seq}`);
+  enqueueWorkflowNotification(options: {
+    runId: string;
+    nodeId: string;
+    attemptId: string;
+    targetSessionId: string;
+    kind: "progress" | "final";
+    content: string;
+    notificationId?: string;
+    now?: string;
+  }): WorkflowNotificationRecord {
+    validateRunId(options.runId);
+    validateKey(options.nodeId, "workflow node id");
+    validateKey(options.attemptId, "workflow attempt id");
+    validateKey(options.targetSessionId, "target session id");
+    if (options.content.trim().length === 0 || options.content.length > MAX_EVENT_BYTES) {
+      throw new Error(`Workflow notification content must be 1-${MAX_EVENT_BYTES} characters`);
     }
+    const notificationId = options.notificationId ?? randomUUID();
+    validateKey(notificationId, "notification id");
     this.database
       .prepare(
-        `INSERT INTO session_watermarks (session_id, last_event_seq, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           last_event_seq = MAX(session_watermarks.last_event_seq, excluded.last_event_seq),
-           updated_at = excluded.updated_at`,
+        `INSERT INTO workflow_notifications (
+          notification_id, run_id, node_id, attempt_id, target_session_id,
+          kind, content, created_at, delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(run_id, node_id, attempt_id) DO NOTHING`,
       )
-      .run(sessionId, seq, validTimestamp(now));
+      .run(
+        notificationId,
+        options.runId,
+        options.nodeId,
+        options.attemptId,
+        options.targetSessionId,
+        options.kind,
+        options.content.trim(),
+        validTimestamp(options.now),
+      );
+    const row = this.database
+      .prepare(
+        "SELECT * FROM workflow_notifications WHERE run_id = ? AND node_id = ? AND attempt_id = ?",
+      )
+      .get(options.runId, options.nodeId, options.attemptId) as WorkflowNotificationRow;
+    return workflowNotificationFromRow(row);
+  }
+
+  listPendingWorkflowNotifications(
+    targetSessionId: string,
+    options: { limit?: number } = {},
+  ): WorkflowNotificationRecord[] {
+    validateKey(targetSessionId, "target session id");
+    const limit = options.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new Error("Workflow notification limit must be an integer from 1 through 100");
+    }
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM workflow_notifications
+         WHERE target_session_id = ? AND delivered_at IS NULL
+         ORDER BY created_at, notification_id LIMIT ?`,
+      )
+      .all(targetSessionId, limit) as WorkflowNotificationRow[];
+    return rows.map(workflowNotificationFromRow);
+  }
+
+  markWorkflowNotificationDelivered(options: {
+    notificationId: string;
+    targetSessionId: string;
+    now?: string;
+  }): boolean {
+    validateKey(options.notificationId, "notification id");
+    validateKey(options.targetSessionId, "target session id");
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_notifications SET delivered_at = ?
+         WHERE notification_id = ? AND target_session_id = ? AND delivered_at IS NULL`,
+      )
+      .run(validTimestamp(options.now), options.notificationId, options.targetSessionId);
+    return result.changes === 1;
+  }
+
+  setWorkflowRunOriginSession(runId: string, originSessionId: string): boolean {
+    validateRunId(runId);
+    validateKey(originSessionId, "origin session id");
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue SET origin_session_id = ?
+         WHERE run_id = ? AND origin_session_id IS NULL`,
+      )
+      .run(originSessionId, runId);
+    return result.changes === 1;
   }
 
   private requireWorkflowRun(runId: string): WorkflowRunQueueRecord {
@@ -1329,6 +1439,7 @@ const SCHEMA_SQL = `
     claim_token TEXT,
     claim_expires_at INTEGER,
     affinity_runner_id TEXT,
+    origin_session_id TEXT,
     parent_run_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -1351,11 +1462,21 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id);
 
-  CREATE TABLE IF NOT EXISTS session_watermarks (
-    session_id TEXT PRIMARY KEY,
-    last_event_seq INTEGER NOT NULL CHECK (last_event_seq >= 0),
-    updated_at TEXT NOT NULL
+  CREATE TABLE IF NOT EXISTS workflow_notifications (
+    notification_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    target_session_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT,
+    UNIQUE (run_id, node_id, attempt_id)
   );
+  CREATE INDEX IF NOT EXISTS workflow_notifications_pending
+    ON workflow_notifications(target_session_id, created_at)
+    WHERE delivered_at IS NULL;
 
   CREATE TABLE IF NOT EXISTS effects (
     effect_key TEXT NOT NULL,
@@ -1447,6 +1568,20 @@ function workflowFromRow(row: WorkflowRow): ChildWorkflowRecord {
   };
 }
 
+function workflowNotificationFromRow(row: WorkflowNotificationRow): WorkflowNotificationRecord {
+  return {
+    notificationId: row.notification_id,
+    runId: row.run_id,
+    nodeId: row.node_id,
+    attemptId: row.attempt_id,
+    targetSessionId: row.target_session_id,
+    kind: row.kind,
+    content: row.content,
+    createdAt: row.created_at,
+    deliveredAt: row.delivered_at,
+  };
+}
+
 function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
   return {
     runId: row.run_id,
@@ -1458,6 +1593,7 @@ function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
     claimToken: row.claim_token,
     claimExpiresAt: row.claim_expires_at === null ? null : iso(row.claim_expires_at),
     affinityRunnerId: row.affinity_runner_id,
+    originSessionId: row.origin_session_id,
     parentRunId: row.parent_run_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
