@@ -1,3 +1,4 @@
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { ansi, stripAnsi } from "../render/ansi.js";
 import { renderGraphLines } from "../render/graph-render.js";
 import { sanitizeText } from "../workflows/text.js";
@@ -44,6 +45,7 @@ export function displayNodeIds(snapshot: WorkflowDefinitionSnapshot): string[] {
 
 export type WidgetView = {
   lines: string[];
+  layout: "graph" | "compact";
   /** The clamped first visible graph row; feed back in to scroll relatively. */
   scroll: number;
   /** Largest useful scroll value; 0 when the whole graph fits. */
@@ -63,7 +65,11 @@ export function buildWidgetView(
   now: Date = new Date(),
   scroll: number | null = null,
   held = false,
+  width = Number.POSITIVE_INFINITY,
 ): WidgetView {
+  const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
+  if (availableWidth === 0) return { lines: [], layout: "compact", scroll: 0, maxScroll: 0 };
+
   // `held` covers pauses the state cannot see yet: an escape-interrupted
   // step or a pause requested while the current node is still finishing.
   const paused = held || state.paused === true;
@@ -79,26 +85,82 @@ export function buildWidgetView(
     footer.push(`  error: ${truncate(sanitizeText(state.error), 120)}`);
   }
   if (state.status === "waiting" && state.waitingOn) {
-    footer.push(`  waiting on checkpoint: ${state.waitingOn}`);
+    footer.push(`  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`);
   }
 
   const budget = PI_MAX_WIDGET_LINES - 1 - footer.length;
   const graph = renderGraphLines({ state, snapshot }, state.steps.length - 1, now, {
     nodeStyle: "box",
   });
-  if (graph.length === 0) {
+  if (graph.length > 0) {
+    const windowed = windowLines(graph, budget, scroll ?? focusLine(graph, state), scroll !== null);
+    const graphLines = windowed.lines.map((line) => `  ${line}`);
+    if (graphLines.every((line) => visibleWidth(line) <= availableWidth)) {
+      return {
+        lines: fitLines([header, ...graphLines, ...footer], availableWidth),
+        layout: "graph",
+        scroll: windowed.scroll,
+        maxScroll: windowed.maxScroll,
+      };
+    }
+  }
+
+  return compactWidgetView(state, snapshot, header, footer, budget, availableWidth, scroll);
+}
+
+function compactWidgetView(
+  state: WorkflowRunState,
+  snapshot: WorkflowDefinitionSnapshot,
+  header: string,
+  footer: string[],
+  budget: number,
+  width: number,
+  scroll: number | null,
+): WidgetView {
+  const nodes = displayNodeIds(snapshot).map((nodeId) => compactNodeLine(state, snapshot, nodeId));
+  if (nodes.length === 0) {
     return {
-      lines: [header, `  ${compactNodeStrip(state, snapshot)}`, ...footer],
+      lines: fitLines([header, ...footer], width),
+      layout: "compact",
       scroll: 0,
       maxScroll: 0,
     };
   }
-  const windowed = windowLines(graph, budget, scroll ?? focusLine(graph, state), scroll !== null);
+  const anchor = scroll ?? compactFocusIndex(state, snapshot);
+  const windowed = windowLines(nodes, budget, anchor, scroll !== null);
   return {
-    lines: [header, ...windowed.lines.map((line) => `  ${line}`), ...footer],
+    lines: fitLines([header, ...windowed.lines.map((line) => `  ${line}`), ...footer], width),
+    layout: "compact",
     scroll: windowed.scroll,
     maxScroll: windowed.maxScroll,
   };
+}
+
+function compactFocusIndex(state: WorkflowRunState, snapshot: WorkflowDefinitionSnapshot): number {
+  const nodeIds = displayNodeIds(snapshot);
+  const focused = state.currentNode ?? state.waitingOn;
+  if (focused === undefined) return Math.max(0, nodeIds.length - 1);
+  const index = nodeIds.indexOf(focused);
+  return index === -1 ? Math.max(0, nodeIds.length - 1) : index;
+}
+
+function compactNodeLine(
+  state: WorkflowRunState,
+  snapshot: WorkflowDefinitionSnapshot,
+  nodeId: string,
+): string {
+  const node = snapshot.nodes[nodeId];
+  const type = node?.nodeType === undefined ? "" : ` · ${node.nodeType}`;
+  const detail =
+    state.currentNode === nodeId && state.statusDetail
+      ? ` · ${sanitizeText(state.statusDetail)}`
+      : "";
+  return `${nodeGlyph(state, nodeId)} ${sanitizeText(nodeId)}${type}${detail}`;
+}
+
+function fitLines(lines: string[], width: number): string[] {
+  if (!Number.isFinite(width)) return lines;
+  return lines.map((line) => truncateToWidth(line, width, width > 1 ? "…" : ""));
 }
 
 /** Back-compatible line view following the active node. */
@@ -165,19 +227,6 @@ function windowLines(
 function clampStart(anchor: number, inner: number, total: number, anchorIsStart: boolean): number {
   const start = anchorIsStart ? anchor : anchor - Math.floor(inner / 2);
   return Math.max(0, Math.min(start, total - inner));
-}
-
-function compactNodeStrip(state: WorkflowRunState, snapshot: WorkflowDefinitionSnapshot): string {
-  return displayNodeIds(snapshot)
-    .map((nodeId) => {
-      const marker = nodeGlyph(state, nodeId);
-      const detail =
-        state.currentNode === nodeId && state.statusDetail
-          ? ` (${sanitizeText(state.statusDetail)})`
-          : "";
-      return `${marker} ${nodeId}${detail}`;
-    })
-    .join("  ");
 }
 
 function truncate(text: string, maxLength: number): string {

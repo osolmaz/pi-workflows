@@ -45,6 +45,13 @@ type SentMessage = {
   options?: { deliverAs?: string; triggerTurn?: boolean };
 };
 
+type WidgetComponent = {
+  render: (width: number) => string[];
+  invalidate: () => void;
+};
+
+type WidgetFactory = () => WidgetComponent;
+
 type FakeContext = {
   cwd: string;
   hasUI: boolean;
@@ -58,7 +65,7 @@ type FakeContext = {
   };
   ui: {
     notify: (message: string, type?: string) => void;
-    setWidget: (key: string, lines: string[] | undefined) => void;
+    setWidget: (key: string, factory: WidgetFactory | undefined) => void;
     setStatus: (key: string, text: string | undefined) => void;
   };
 };
@@ -74,7 +81,7 @@ function makeHarness(options: {
   sessionId?: string;
 }) {
   const notifications: string[] = [];
-  const widgets: (string[] | undefined)[] = [];
+  const widgets: (WidgetFactory | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
   const listeners = new Map<
@@ -103,7 +110,7 @@ function makeHarness(options: {
     },
     ui: {
       notify: (message) => notifications.push(message),
-      setWidget: (_key, lines) => widgets.push(lines),
+      setWidget: (_key, factory) => widgets.push(factory),
       setStatus: (_key, text) => statuses.push(text),
     },
   };
@@ -932,8 +939,9 @@ export default defineWorkflow({
       // the waiting state so the human sees the parked checkpoint.
       const last = harness.widgets.at(-1);
       expect(last).toBeDefined();
-      expect(last?.join("\n")).toContain("[waiting]");
-      expect(last?.join("\n")).toContain("waiting on checkpoint: review");
+      const rendered = last?.().render(80).join("\n");
+      expect(rendered).toContain("[waiting]");
+      expect(rendered).toContain("waiting on checkpoint: review");
 
       // With no live run, cancel clears the parked widget instead of
       // claiming nothing exists.

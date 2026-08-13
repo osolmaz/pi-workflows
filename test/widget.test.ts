@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
   buildWidgetLines,
@@ -23,6 +24,27 @@ const workflow = defineWorkflow({
   ],
 });
 const snapshot = createDefinitionSnapshot(workflow);
+const wideSnapshot = createDefinitionSnapshot(
+  defineWorkflow({
+    name: "wide-demo",
+    startAt: "collect-the-current-observation-from-the-external-system",
+    nodes: {
+      "collect-the-current-observation-from-the-external-system": compute({ run: () => 1 }),
+      "compare-the-observation-with-the-requested-stop-condition": compute({ run: () => 2 }),
+      "report-the-result-to-the-origin-session": compute({ run: () => 3 }),
+    },
+    edges: [
+      {
+        from: "collect-the-current-observation-from-the-external-system",
+        to: "compare-the-observation-with-the-requested-stop-condition",
+      },
+      {
+        from: "compare-the-observation-with-the-requested-stop-condition",
+        to: "report-the-result-to-the-origin-session",
+      },
+    ],
+  }),
+);
 
 function makeResult(nodeId: string, outcome: WorkflowNodeResult["outcome"]): WorkflowNodeResult {
   return {
@@ -111,6 +133,59 @@ describe("buildWidgetLines", () => {
     expect(joined).toContain("┃");
     expect(joined).toContain("┏");
     expect(lines.length).toBeLessThanOrEqual(10);
+  });
+
+  it.each([80, 43, 40, 20, 8, 1])("fits every line within a %i-column terminal", (width) => {
+    const state = makeState({
+      workflowName: "wide-demo",
+      currentNode: "compare-the-observation-with-the-requested-stop-condition",
+      currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
+      statusDetail: "waiting for a long external operation to complete",
+      runTitle: "a long workflow title that cannot fit in a narrow terminal",
+    });
+    const view = buildWidgetView(
+      state,
+      wideSnapshot,
+      new Date("2026-01-01T00:00:02.000Z"),
+      null,
+      false,
+      width,
+    );
+
+    expect(view.lines.length).toBeLessThanOrEqual(10);
+    expect(view.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    if (width === 43) expect(view.layout).toBe("compact");
+  });
+
+  it("keeps the boxed graph when its displayed lines fit", () => {
+    const view = buildWidgetView(
+      makeState({ currentNode: "second" }),
+      snapshot,
+      undefined,
+      null,
+      false,
+      120,
+    );
+    expect(view.layout).toBe("graph");
+    expect(view.lines.join("\n")).toContain("┏");
+  });
+
+  it("uses a compact list at narrow widths and keeps the active node visible", () => {
+    const view = buildWidgetView(
+      makeState({
+        workflowName: "wide-demo",
+        currentNode: "compare-the-observation-with-the-requested-stop-condition",
+        statusDetail: "checking the latest result",
+      }),
+      wideSnapshot,
+      new Date("2026-01-01T00:00:02.000Z"),
+      null,
+      false,
+      43,
+    );
+    expect(view.layout).toBe("compact");
+    expect(view.lines.join("\n")).toContain("◐ compare-the-observation");
+    expect(view.lines.every((line) => visibleWidth(line) <= 43)).toBe(true);
   });
 
   it("windows tall graphs around the active node within pi's line budget", () => {

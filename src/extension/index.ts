@@ -204,6 +204,11 @@ type WidgetSource = {
   snapshot: WorkflowDefinitionSnapshot;
 };
 
+type WorkflowWidgetComponent = {
+  render: (width: number) => string[];
+  invalidate: () => void;
+};
+
 export default function piWorkflows(pi: ExtensionAPI) {
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
@@ -331,10 +336,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const setWidget = (ctx: ExtensionContext, lines: string[] | undefined) => {
+  const setWidget = (
+    ctx: ExtensionContext,
+    factory: (() => WorkflowWidgetComponent) | undefined,
+  ) => {
     try {
       if (ctx.hasUI) {
-        ctx.ui.setWidget(WIDGET_KEY, lines);
+        ctx.ui.setWidget(WIDGET_KEY, factory);
       }
     } catch {
       // Stale ctx; the widget no longer exists.
@@ -365,20 +373,26 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (!widgetSource) {
       return;
     }
-    const held = runHeld();
-    const view = buildWidgetView(
-      widgetSource.state,
-      widgetSource.snapshot,
-      new Date(),
-      widgetScroll,
-      held,
-    );
-    widgetShownScroll = view.scroll;
-    widgetMaxScroll = view.maxScroll;
-    if (widgetScroll !== null) {
-      widgetScroll = view.scroll;
-    }
-    setWidget(ctx, view.lines);
+    setWidget(ctx, () => ({
+      render(width: number): string[] {
+        if (!widgetSource) return [];
+        const view = buildWidgetView(
+          widgetSource.state,
+          widgetSource.snapshot,
+          new Date(),
+          widgetScroll,
+          runHeld(),
+          width,
+        );
+        widgetShownScroll = view.scroll;
+        widgetMaxScroll = view.maxScroll;
+        if (widgetScroll !== null) {
+          widgetScroll = view.scroll;
+        }
+        return view.lines;
+      },
+      invalidate() {},
+    }));
     setStatus(ctx, footerStatus(widgetSource.state));
   };
 
