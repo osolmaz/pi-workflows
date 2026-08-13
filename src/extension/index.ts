@@ -209,6 +209,9 @@ type WorkflowWidgetComponent = {
   invalidate: () => void;
 };
 
+type WorkflowWidgetFactory = () => WorkflowWidgetComponent;
+type WorkflowWidgetContent = string[] | WorkflowWidgetFactory;
+
 export default function piWorkflows(pi: ExtensionAPI) {
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
@@ -337,13 +340,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const setWidget = (
-    ctx: ExtensionContext,
-    factory: (() => WorkflowWidgetComponent) | undefined,
-  ) => {
+  const setWidget = (ctx: ExtensionContext, content: WorkflowWidgetContent | undefined) => {
     try {
       if (ctx.hasUI) {
-        ctx.ui.setWidget(WIDGET_KEY, factory);
+        if (typeof content === "function") {
+          ctx.ui.setWidget(WIDGET_KEY, content);
+        } else {
+          ctx.ui.setWidget(WIDGET_KEY, content);
+        }
       }
     } catch {
       // Stale ctx; the widget no longer exists.
@@ -374,27 +378,30 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (!widgetSource) {
       return;
     }
-    setWidget(ctx, () => ({
-      render(width: number): string[] {
-        if (!widgetSource) return [];
-        const view = buildWidgetView(
-          widgetSource.state,
-          widgetSource.snapshot,
-          new Date(),
-          widgetScroll,
-          runHeld(),
-          width,
-        );
-        widgetLayout = view.layout;
-        widgetShownScroll = view.scroll;
-        widgetMaxScroll = view.maxScroll;
-        if (widgetScroll[view.layout] !== null) {
-          widgetScroll[view.layout] = view.scroll;
-        }
-        return view.lines;
-      },
-      invalidate() {},
-    }));
+    const render = (width = Number.POSITIVE_INFINITY): string[] => {
+      if (!widgetSource) return [];
+      const view = buildWidgetView(
+        widgetSource.state,
+        widgetSource.snapshot,
+        new Date(),
+        widgetScroll,
+        runHeld(),
+        width,
+      );
+      widgetLayout = view.layout;
+      widgetShownScroll = view.scroll;
+      widgetMaxScroll = view.maxScroll;
+      if (widgetScroll[view.layout] !== null) {
+        widgetScroll[view.layout] = view.scroll;
+      }
+      return view.lines;
+    };
+    if (ctx.mode === "tui") {
+      setWidget(ctx, () => ({ render, invalidate() {} }));
+    } else {
+      // RPC transports string widgets but cannot serialize TUI component factories.
+      setWidget(ctx, render());
+    }
     setStatus(ctx, footerStatus(widgetSource.state));
   };
 

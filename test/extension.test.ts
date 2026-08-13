@@ -54,6 +54,7 @@ type WidgetFactory = () => WidgetComponent;
 
 type FakeContext = {
   cwd: string;
+  mode: "tui" | "rpc";
   hasUI: boolean;
   isIdle: () => boolean;
   abort: () => void;
@@ -65,7 +66,7 @@ type FakeContext = {
   };
   ui: {
     notify: (message: string, type?: string) => void;
-    setWidget: (key: string, factory: WidgetFactory | undefined) => void;
+    setWidget: (key: string, content: string[] | WidgetFactory | undefined) => void;
     setStatus: (key: string, text: string | undefined) => void;
   };
 };
@@ -79,9 +80,10 @@ function makeHarness(options: {
   cwd: string;
   respond: (prompt: string, tool: RegisteredTool) => void;
   sessionId?: string;
+  mode?: "tui" | "rpc";
 }) {
   const notifications: string[] = [];
-  const widgets: (WidgetFactory | undefined)[] = [];
+  const widgets: (string[] | WidgetFactory | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
   const listeners = new Map<
@@ -96,6 +98,7 @@ function makeHarness(options: {
 
   const ctx: FakeContext = {
     cwd: options.cwd,
+    mode: options.mode ?? "tui",
     hasUI: true,
     isIdle: () => idle,
     abort: () => {
@@ -110,7 +113,7 @@ function makeHarness(options: {
     },
     ui: {
       notify: (message) => notifications.push(message),
-      setWidget: (_key, factory) => widgets.push(factory),
+      setWidget: (_key, content) => widgets.push(content),
       setStatus: (_key, text) => statuses.push(text),
     },
   };
@@ -938,8 +941,8 @@ export default defineWorkflow({
       // The final widget update must still be present, not cleared, and show
       // the waiting state so the human sees the parked checkpoint.
       const last = harness.widgets.at(-1);
-      expect(last).toBeDefined();
-      const rendered = last?.().render(80).join("\n");
+      expect(last).toBeTypeOf("function");
+      const rendered = typeof last === "function" ? last().render(80).join("\n") : undefined;
       expect(rendered).toContain("[waiting]");
       expect(rendered).toContain("waiting on checkpoint: review");
 
@@ -1424,6 +1427,21 @@ export default defineWorkflow({
       check.close();
       await unrelated.emitAsync("session_shutdown");
       await origin.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps string-array widget updates in RPC mode", { timeout: 20_000 }, async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-rpc-widget");
+    const runsDir = await makeTempDir("pi-workflows-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({ cwd, mode: "rpc", respond: () => {} });
+      await harness.command.handler("mini say hi", harness.ctx);
+      await waitFor(() => harness.widgets.some((widget) => Array.isArray(widget)));
+      expect(harness.widgets.some((widget) => Array.isArray(widget))).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }
