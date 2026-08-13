@@ -457,6 +457,8 @@ export type WorkflowNotificationRequest = {
   workflowName: string;
   nodeId: string;
   attemptId: string;
+  /** Stable one-based occurrence of this notify node within the run. */
+  notificationIndex: number;
   kind: "progress" | "final";
   content: string;
 };

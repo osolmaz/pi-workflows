@@ -177,7 +177,9 @@ notify({
 });
 ```
 
-The runtime deduplicates notifications by run, node, and attempt. A workflow
+The runtime gives each logical execution of a notification node a stable index.
+A retry after a crash reuses that index, so it cannot queue the same message
+twice. Re-entering the node later in a loop gets the next index. A workflow
 with a `notify` node must be an interactive queued run with an origin session.
 Controller child workflows are detached and must report through their
 controller resource instead.

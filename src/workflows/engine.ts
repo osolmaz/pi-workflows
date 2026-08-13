@@ -879,11 +879,16 @@ export class WorkflowEngine {
         if (typeof content !== "string" || content.trim().length === 0) {
           throw new Error(`Workflow node ${nodeId} notification must be a non-empty string`);
         }
+        const notificationIndex =
+          state.steps.filter(
+            (step) => step.nodeId === nodeId && step.nodeType === "notify" && step.outcome === "ok",
+          ).length + 1;
         const receipt = await this.notificationSink.notify({
           runId: state.runId,
           workflowName: workflow.name,
           nodeId,
           attemptId,
+          notificationIndex,
           kind: node.kind ?? "progress",
           content: content.trim(),
         });

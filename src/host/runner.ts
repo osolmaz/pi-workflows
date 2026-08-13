@@ -274,6 +274,7 @@ export class WorkflowHost {
       store: fencedStore,
       notificationSink: {
         notify: (request) => {
+          fence();
           if (record.originSessionId === null) {
             throw new Error(`Workflow run ${request.runId} has no origin session`);
           }

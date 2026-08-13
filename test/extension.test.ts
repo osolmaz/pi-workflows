@@ -1382,6 +1382,7 @@ export default defineWorkflow({
         runId: "run-targeted",
         nodeId: "report",
         attemptId: "attempt-1",
+        notificationIndex: 1,
         targetSessionId: "session-a",
         kind: "final",
         content: "Targeted result",
@@ -1404,8 +1405,14 @@ export default defineWorkflow({
         details: { runId: "run-targeted", kind: "final" },
       });
 
-      const check = new SqliteControllerStore(projectControllerStorePath(cwd), { readOnly: true });
-      expect(check.listPendingWorkflowNotifications("session-a")).toHaveLength(0);
+      const check = new SqliteControllerStore(projectControllerStorePath(cwd));
+      expect(
+        check.claimPendingWorkflowNotifications({
+          targetSessionId: "session-a",
+          claimToken: "post-delivery-check",
+          leaseMs: 1_000,
+        }),
+      ).toHaveLength(0);
       check.close();
       await unrelated.emitAsync("session_shutdown");
       await origin.emitAsync("session_shutdown");

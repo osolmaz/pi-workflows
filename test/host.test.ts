@@ -129,16 +129,18 @@ export default defineWorkflow({
         const bundle = await readRunBundle(runDir);
         expect(bundle?.state.status).toBe("completed");
         expect(bundle?.state.outputs.work).toBe("host-finished");
-        const reader = new SqliteControllerStore(projectControllerStorePath(cwd), {
-          readOnly: true,
-        });
+        const reader = new SqliteControllerStore(projectControllerStorePath(cwd));
         try {
           const types = reader.listRunEventsAfter(0).map((event) => event.type);
           expect(types).toContain("resumed");
           expect(types).toContain("completed");
-          expect(reader.listPendingWorkflowNotifications("origin-session")).toMatchObject([
-            { runId: "host-run-1", kind: "final", content: "host-finished" },
-          ]);
+          expect(
+            reader.claimPendingWorkflowNotifications({
+              targetSessionId: "origin-session",
+              claimToken: "host-test-reader",
+              leaseMs: 1_000,
+            }),
+          ).toMatchObject([{ runId: "host-run-1", kind: "final", content: "host-finished" }]);
         } finally {
           reader.close();
         }

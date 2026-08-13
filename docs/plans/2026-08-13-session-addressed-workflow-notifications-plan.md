@@ -27,19 +27,22 @@ Queue records gain an optional `origin_session_id`. Interactive runs set it from
 
 A `workflow_notifications` table is the durable outbox:
 
-| Field               | Meaning                                    |
-| ------------------- | ------------------------------------------ |
-| `notification_id`   | Stable unique delivery ID                  |
-| `run_id`            | Workflow run that created the notification |
-| `node_id`           | Node that created it                       |
-| `attempt_id`        | Node attempt that created it               |
-| `target_session_id` | Exact Pi session that may receive it       |
-| `kind`              | `progress` or `final`                      |
-| `content`           | Bounded plain-text report                  |
-| `created_at`        | Creation time                              |
-| `delivered_at`      | Delivery time, or null while pending       |
+| Field                       | Meaning                                             |
+| --------------------------- | --------------------------------------------------- |
+| `notification_id`           | Stable unique delivery ID                           |
+| `run_id`                    | Workflow run that created the notification          |
+| `node_id`                   | Node that created it                                |
+| `attempt_id`                | Latest node attempt that requested it               |
+| `notification_index`        | Stable one-based occurrence of this node in the run |
+| `target_session_id`         | Exact Pi session that may receive it                |
+| `kind`                      | `progress` or `final`                               |
+| `content`                   | Bounded plain-text report                           |
+| `created_at`                | Creation time                                       |
+| `delivery_claim_token`      | Current delivery owner, or null                     |
+| `delivery_claim_expires_at` | Delivery lease deadline, or null                    |
+| `delivered_at`              | Delivery time, or null while pending                |
 
-`(run_id, node_id, attempt_id)` is unique. Retrying one accepted node attempt cannot create a duplicate notification. Delivery claims one pending row atomically before adding it to the current session. A stable notification ID is included in the custom session entry so the same session can detect a delivery completed before a crash.
+`(run_id, node_id, notification_index)` is unique. A crash retry reuses the same logical index, even though it gets a new attempt ID. A later loop iteration gets the next index. Delivery polling claims pending rows with a short lease before it writes to a session. This prevents two Pi processes that open the same session from sending the same notification concurrently. If a process stops, another process can reclaim the row after the lease expires. A stable notification ID is included in the custom session entry so the same session can detect a delivery completed before a crash.
 
 The existing `run_events` table remains an execution audit feed. It does not inject conversation messages. The obsolete `session_watermarks` table is no longer used.
 

@@ -105,6 +105,7 @@ describe("workflow run queue", () => {
       runId: "run-1",
       nodeId: "report",
       attemptId: "attempt-1",
+      notificationIndex: 1,
       targetSessionId: "session-a",
       kind: "progress",
       content: "State changed",
@@ -114,7 +115,8 @@ describe("workflow run queue", () => {
     const duplicate = store.enqueueWorkflowNotification({
       runId: "run-1",
       nodeId: "report",
-      attemptId: "attempt-1",
+      attemptId: "attempt-2",
+      notificationIndex: 1,
       targetSessionId: "session-a",
       kind: "progress",
       content: "State changed",
@@ -122,12 +124,34 @@ describe("workflow run queue", () => {
       now: T1,
     });
     expect(duplicate.notificationId).toBe(first.notificationId);
-    expect(store.listPendingWorkflowNotifications("session-b")).toEqual([]);
-    expect(store.listPendingWorkflowNotifications("session-a")).toEqual([first]);
+    expect(
+      store.claimPendingWorkflowNotifications({
+        targetSessionId: "session-b",
+        claimToken: "claim-b",
+        leaseMs: 1_000,
+        now: T0,
+      }),
+    ).toEqual([]);
+    const claimed = store.claimPendingWorkflowNotifications({
+      targetSessionId: "session-a",
+      claimToken: "claim-a",
+      leaseMs: 1_000,
+      now: T0,
+    });
+    expect(claimed).toMatchObject([{ notificationId: first.notificationId }]);
+    expect(
+      store.claimPendingWorkflowNotifications({
+        targetSessionId: "session-a",
+        claimToken: "claim-other",
+        leaseMs: 1_000,
+        now: T0,
+      }),
+    ).toEqual([]);
     expect(
       store.markWorkflowNotificationDelivered({
         notificationId: first.notificationId,
-        targetSessionId: "session-b",
+        targetSessionId: "session-a",
+        claimToken: "wrong-claim",
         now: T1,
       }),
     ).toBe(false);
@@ -135,10 +159,44 @@ describe("workflow run queue", () => {
       store.markWorkflowNotificationDelivered({
         notificationId: first.notificationId,
         targetSessionId: "session-a",
+        claimToken: "claim-a",
         now: T1,
       }),
     ).toBe(true);
-    expect(store.listPendingWorkflowNotifications("session-a")).toEqual([]);
+
+    const reclaimable = store.enqueueWorkflowNotification({
+      runId: "run-1",
+      nodeId: "report",
+      attemptId: "attempt-3",
+      notificationIndex: 2,
+      targetSessionId: "session-a",
+      kind: "final",
+      content: "Finished",
+      notificationId: "notification-3",
+      now: T1,
+    });
+    store.claimPendingWorkflowNotifications({
+      targetSessionId: "session-a",
+      claimToken: "expired-claim",
+      leaseMs: 1_000,
+      now: T1,
+    });
+    expect(
+      store.claimPendingWorkflowNotifications({
+        targetSessionId: "session-a",
+        claimToken: "replacement-claim",
+        leaseMs: 1_000,
+        now: T3,
+      }),
+    ).toMatchObject([{ notificationId: reclaimable.notificationId }]);
+    expect(
+      store.markWorkflowNotificationDelivered({
+        notificationId: reclaimable.notificationId,
+        targetSessionId: "session-a",
+        claimToken: "expired-claim",
+        now: T3,
+      }),
+    ).toBe(false);
   });
 
   it("rejects duplicate run ids and unsafe inputs", async () => {

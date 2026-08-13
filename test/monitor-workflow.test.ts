@@ -67,7 +67,7 @@ describe("built-in monitor workflow", () => {
   it("runs a report step before finishing when the check asks to report", async () => {
     const outputRoot = await makeTempDir("pi-workflows-monitor-report");
     const prompts: string[] = [];
-    const notifications: string[] = [];
+    const notifications: { content: string; notificationIndex: number }[] = [];
     const outputs = [
       {
         route: "stop_report",
@@ -92,7 +92,10 @@ describe("built-in monitor workflow", () => {
       store: new WorkflowRunStore(outputRoot),
       notificationSink: {
         notify: (request) => {
-          notifications.push(request.content);
+          notifications.push({
+            content: request.content,
+            notificationIndex: request.notificationIndex,
+          });
           return { notificationId: "notification-1", targetSessionId: "session-1" };
         },
       },
@@ -102,7 +105,9 @@ describe("built-in monitor workflow", () => {
 
     expect(result.state.status).toBe("completed");
     expect(prompts).toHaveLength(1);
-    expect(notifications).toEqual(["PR 123 now has a failed Linux check."]);
+    expect(notifications).toEqual([
+      { content: "PR 123 now has a failed Linux check.", notificationIndex: 1 },
+    ]);
     expect(result.state.finalOutput).toMatchObject({ reported: true });
   });
 

@@ -124,10 +124,13 @@ type WorkflowNotificationRow = {
   run_id: string;
   node_id: string;
   attempt_id: string;
+  notification_index: number;
   target_session_id: string;
   kind: "progress" | "final";
   content: string;
   created_at: string;
+  delivery_claim_token: string | null;
+  delivery_claim_expires_at: number | null;
   delivered_at: string | null;
 };
 
@@ -136,10 +139,12 @@ export type WorkflowNotificationRecord = {
   runId: string;
   nodeId: string;
   attemptId: string;
+  notificationIndex: number;
   targetSessionId: string;
   kind: "progress" | "final";
   content: string;
   createdAt: string;
+  deliveryClaimExpiresAt: string | null;
   deliveredAt: string | null;
 };
 
@@ -1290,6 +1295,7 @@ export class SqliteControllerStore implements ControllerStore {
     runId: string;
     nodeId: string;
     attemptId: string;
+    notificationIndex: number;
     targetSessionId: string;
     kind: "progress" | "final";
     content: string;
@@ -1299,6 +1305,9 @@ export class SqliteControllerStore implements ControllerStore {
     validateRunId(options.runId);
     validateKey(options.nodeId, "workflow node id");
     validateKey(options.attemptId, "workflow attempt id");
+    if (!Number.isSafeInteger(options.notificationIndex) || options.notificationIndex <= 0) {
+      throw new Error("Workflow notification index must be a positive safe integer");
+    }
     validateKey(options.targetSessionId, "target session id");
     if (options.content.trim().length === 0 || options.content.length > MAX_EVENT_BYTES) {
       throw new Error(`Workflow notification content must be 1-${MAX_EVENT_BYTES} characters`);
@@ -1308,16 +1317,17 @@ export class SqliteControllerStore implements ControllerStore {
     this.database
       .prepare(
         `INSERT INTO workflow_notifications (
-          notification_id, run_id, node_id, attempt_id, target_session_id,
-          kind, content, created_at, delivered_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        ON CONFLICT(run_id, node_id, attempt_id) DO NOTHING`,
+          notification_id, run_id, node_id, attempt_id, notification_index,
+          target_session_id, kind, content, created_at, delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(run_id, node_id, notification_index) DO NOTHING`,
       )
       .run(
         notificationId,
         options.runId,
         options.nodeId,
         options.attemptId,
+        options.notificationIndex,
         options.targetSessionId,
         options.kind,
         options.content.trim(),
@@ -1325,44 +1335,84 @@ export class SqliteControllerStore implements ControllerStore {
       );
     const row = this.database
       .prepare(
-        "SELECT * FROM workflow_notifications WHERE run_id = ? AND node_id = ? AND attempt_id = ?",
+        "SELECT * FROM workflow_notifications WHERE run_id = ? AND node_id = ? AND notification_index = ?",
       )
-      .get(options.runId, options.nodeId, options.attemptId) as WorkflowNotificationRow;
+      .get(options.runId, options.nodeId, options.notificationIndex) as WorkflowNotificationRow;
     return workflowNotificationFromRow(row);
   }
 
-  listPendingWorkflowNotifications(
-    targetSessionId: string,
-    options: { limit?: number } = {},
-  ): WorkflowNotificationRecord[] {
-    validateKey(targetSessionId, "target session id");
+  claimPendingWorkflowNotifications(options: {
+    targetSessionId: string;
+    claimToken: string;
+    leaseMs: number;
+    limit?: number;
+    now?: string;
+  }): WorkflowNotificationRecord[] {
+    validateKey(options.targetSessionId, "target session id");
+    validateKey(options.claimToken, "notification claim token");
+    validateDuration(options.leaseMs, "notification leaseMs");
     const limit = options.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
       throw new Error("Workflow notification limit must be an integer from 1 through 100");
     }
-    const rows = this.database
-      .prepare(
-        `SELECT * FROM workflow_notifications
-         WHERE target_session_id = ? AND delivered_at IS NULL
-         ORDER BY created_at, notification_id LIMIT ?`,
-      )
-      .all(targetSessionId, limit) as WorkflowNotificationRow[];
-    return rows.map(workflowNotificationFromRow);
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    return this.transaction(() => {
+      const ids = this.database
+        .prepare(
+          `SELECT notification_id FROM workflow_notifications
+           WHERE target_session_id = ? AND delivered_at IS NULL
+             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)
+           ORDER BY created_at, notification_id LIMIT ?`,
+        )
+        .all(options.targetSessionId, nowMs, limit) as { notification_id: string }[];
+      if (ids.length === 0) return [];
+      const placeholders = ids.map(() => "?").join(", ");
+      this.database
+        .prepare(
+          `UPDATE workflow_notifications
+           SET delivery_claim_token = ?, delivery_claim_expires_at = ?
+           WHERE notification_id IN (${placeholders}) AND delivered_at IS NULL
+             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
+        )
+        .run(
+          options.claimToken,
+          nowMs + options.leaseMs,
+          ...ids.map((row) => row.notification_id),
+          nowMs,
+        );
+      const rows = this.database
+        .prepare(
+          `SELECT * FROM workflow_notifications WHERE delivery_claim_token = ?
+           ORDER BY created_at, notification_id`,
+        )
+        .all(options.claimToken) as WorkflowNotificationRow[];
+      return rows.map(workflowNotificationFromRow);
+    });
   }
 
   markWorkflowNotificationDelivered(options: {
     notificationId: string;
     targetSessionId: string;
+    claimToken: string;
     now?: string;
   }): boolean {
     validateKey(options.notificationId, "notification id");
     validateKey(options.targetSessionId, "target session id");
+    validateKey(options.claimToken, "notification claim token");
     const result = this.database
       .prepare(
-        `UPDATE workflow_notifications SET delivered_at = ?
-         WHERE notification_id = ? AND target_session_id = ? AND delivered_at IS NULL`,
+        `UPDATE workflow_notifications
+         SET delivered_at = ?, delivery_claim_token = NULL, delivery_claim_expires_at = NULL
+         WHERE notification_id = ? AND target_session_id = ?
+           AND delivery_claim_token = ? AND delivered_at IS NULL`,
       )
-      .run(validTimestamp(options.now), options.notificationId, options.targetSessionId);
+      .run(
+        validTimestamp(options.now),
+        options.notificationId,
+        options.targetSessionId,
+        options.claimToken,
+      );
     return result.changes === 1;
   }
 
@@ -1467,15 +1517,18 @@ const SCHEMA_SQL = `
     run_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     attempt_id TEXT NOT NULL,
+    notification_index INTEGER NOT NULL CHECK (notification_index > 0),
     target_session_id TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('progress', 'final')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    delivery_claim_token TEXT,
+    delivery_claim_expires_at INTEGER,
     delivered_at TEXT,
-    UNIQUE (run_id, node_id, attempt_id)
+    UNIQUE (run_id, node_id, notification_index)
   );
   CREATE INDEX IF NOT EXISTS workflow_notifications_pending
-    ON workflow_notifications(target_session_id, created_at)
+    ON workflow_notifications(target_session_id, delivery_claim_expires_at, created_at)
     WHERE delivered_at IS NULL;
 
   CREATE TABLE IF NOT EXISTS effects (
@@ -1574,10 +1627,13 @@ function workflowNotificationFromRow(row: WorkflowNotificationRow): WorkflowNoti
     runId: row.run_id,
     nodeId: row.node_id,
     attemptId: row.attempt_id,
+    notificationIndex: row.notification_index,
     targetSessionId: row.target_session_id,
     kind: row.kind,
     content: row.content,
     createdAt: row.created_at,
+    deliveryClaimExpiresAt:
+      row.delivery_claim_expires_at === null ? null : iso(row.delivery_claim_expires_at),
     deliveredAt: row.delivered_at,
   };
 }

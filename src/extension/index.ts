@@ -42,6 +42,7 @@ import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
 const RUN_SYNC_POLL_MS = 3_000;
+const NOTIFICATION_DELIVERY_LEASE_MS = 30_000;
 const WIDGET_KEY = "pi-workflows";
 const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
 const FINAL_WIDGET_TTL_MS = 60_000;
@@ -251,7 +252,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     try {
       const sessionId = ctx.sessionManager.getSessionId();
       const alreadyDelivered = deliveredNotificationIds(ctx);
-      for (const notification of runQueueStore.listPendingWorkflowNotifications(sessionId)) {
+      const claimToken = randomUUID();
+      for (const notification of runQueueStore.claimPendingWorkflowNotifications({
+        targetSessionId: sessionId,
+        claimToken,
+        leaseMs: NOTIFICATION_DELIVERY_LEASE_MS,
+      })) {
         if (!alreadyDelivered.has(notification.notificationId)) {
           pi.sendMessage({
             customType: "pi-workflows-notification",
@@ -268,6 +274,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runQueueStore.markWorkflowNotificationDelivered({
           notificationId: notification.notificationId,
           targetSessionId: sessionId,
+          claimToken,
         });
       }
     } catch {
@@ -733,6 +740,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       store,
       notificationSink: {
         notify: (request) => {
+          fence?.();
           if (queueStore === null) throw new Error("Workflow notifications require a queued run");
           const record = queueStore.getWorkflowRun(request.runId);
           if (record?.originSessionId === null || record?.originSessionId === undefined) {
