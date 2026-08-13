@@ -43,10 +43,14 @@ export function displayNodeIds(snapshot: WorkflowDefinitionSnapshot): string[] {
   return Object.keys(snapshot.nodes);
 }
 
+export type WidgetLayout = "graph" | "compact";
+
+export type WidgetScrollState = Record<WidgetLayout, number | null>;
+
 export type WidgetView = {
   lines: string[];
-  layout: "graph" | "compact";
-  /** The clamped first visible graph row; feed back in to scroll relatively. */
+  layout: WidgetLayout;
+  /** The clamped first visible row for the selected layout. */
   scroll: number;
   /** Largest useful scroll value; 0 when the whole graph fits. */
   maxScroll: number;
@@ -63,7 +67,7 @@ export function buildWidgetView(
   state: WorkflowRunState,
   snapshot: WorkflowDefinitionSnapshot,
   now: Date = new Date(),
-  scroll: number | null = null,
+  scroll: WidgetScrollState = { graph: null, compact: null },
   held = false,
   width = Number.POSITIVE_INFINITY,
 ): WidgetView {
@@ -93,7 +97,13 @@ export function buildWidgetView(
     nodeStyle: "box",
   });
   if (graph.length > 0) {
-    const windowed = windowLines(graph, budget, scroll ?? focusLine(graph, state), scroll !== null);
+    const graphScroll = scroll.graph;
+    const windowed = windowLines(
+      graph,
+      budget,
+      graphScroll ?? focusLine(graph, state),
+      graphScroll !== null,
+    );
     const graphLines = windowed.lines.map((line) => `  ${line}`);
     if (graphLines.every((line) => visibleWidth(line) <= availableWidth)) {
       return {
@@ -105,7 +115,7 @@ export function buildWidgetView(
     }
   }
 
-  return compactWidgetView(state, snapshot, header, footer, budget, availableWidth, scroll);
+  return compactWidgetView(state, snapshot, header, footer, budget, availableWidth, scroll.compact);
 }
 
 function compactWidgetView(

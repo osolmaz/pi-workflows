@@ -147,7 +147,7 @@ describe("buildWidgetLines", () => {
       state,
       wideSnapshot,
       new Date("2026-01-01T00:00:02.000Z"),
-      null,
+      { graph: null, compact: null },
       false,
       width,
     );
@@ -165,7 +165,7 @@ describe("buildWidgetLines", () => {
       }),
       wideSnapshot,
       undefined,
-      null,
+      { graph: null, compact: null },
       false,
       width,
     );
@@ -179,7 +179,7 @@ describe("buildWidgetLines", () => {
       makeState({ currentNode: "second" }),
       snapshot,
       undefined,
-      null,
+      { graph: null, compact: null },
       false,
       120,
     );
@@ -196,13 +196,48 @@ describe("buildWidgetLines", () => {
       }),
       wideSnapshot,
       new Date("2026-01-01T00:00:02.000Z"),
-      null,
+      { graph: null, compact: null },
       false,
       43,
     );
     expect(view.layout).toBe("compact");
     expect(view.lines.join("\n")).toContain("◐ compare-the-observation");
     expect(view.lines.every((line) => visibleWidth(line) <= 43)).toBe(true);
+  });
+
+  it("does not apply a graph scroll offset to the compact layout", () => {
+    const nodes = Object.fromEntries(
+      Array.from({ length: 20 }, (_value, index) => [
+        `very-long-monitor-node-name-that-cannot-fit-${String(index)}`,
+        compute({ run: () => index }),
+      ]),
+    );
+    const edges = Array.from({ length: 19 }, (_value, index) => ({
+      from: `very-long-monitor-node-name-that-cannot-fit-${String(index)}`,
+      to: `very-long-monitor-node-name-that-cannot-fit-${String(index + 1)}`,
+    }));
+    const tallWide = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "tall-wide",
+        startAt: "very-long-monitor-node-name-that-cannot-fit-0",
+        nodes,
+        edges,
+      }),
+    );
+    const state = makeState({
+      workflowName: "tall-wide",
+      currentNode: "very-long-monitor-node-name-that-cannot-fit-10",
+    });
+    const view = buildWidgetView(
+      state,
+      tallWide,
+      undefined,
+      { graph: 70, compact: null },
+      false,
+      43,
+    );
+    expect(view.layout).toBe("compact");
+    expect(view.lines.join("\n")).toContain("very-long-monitor-node-name");
   });
 
   it("windows tall graphs around the active node within pi's line budget", () => {
@@ -285,13 +320,13 @@ describe("buildWidgetLines", () => {
     expect(followed.lines.join("\n")).toContain("◐ running");
     expect(followed.lines.join("\n")).toContain("n10");
 
-    const top = buildWidgetView(state, tall, now, 0);
+    const top = buildWidgetView(state, tall, now, { graph: 0, compact: null });
     expect(top.scroll).toBe(0);
     expect(top.lines.join("\n")).toContain("n0");
     expect(top.lines.join("\n")).not.toMatch(/↑ \d+ more/);
     expect(top.lines.join("\n")).toMatch(/↓ \d+ more · shift\+↑\/↓ scroll/);
 
-    const bottom = buildWidgetView(state, tall, now, 9_999);
+    const bottom = buildWidgetView(state, tall, now, { graph: 9_999, compact: null });
     expect(bottom.scroll).toBeLessThanOrEqual(bottom.maxScroll);
     expect(bottom.lines.join("\n")).toContain("n19");
     expect(bottom.lines.join("\n")).not.toMatch(/↓ \d+ more/);

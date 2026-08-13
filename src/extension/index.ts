@@ -36,7 +36,7 @@ import {
 } from "./controller-host.js";
 import { ConversationStepExecutor } from "./executor.js";
 import { SessionRecorder } from "./recorder.js";
-import { buildWidgetView } from "./widget.js";
+import { buildWidgetView, type WidgetLayout, type WidgetScrollState } from "./widget.js";
 import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.js";
 
 const RUN_CLAIM_LEASE_MS = 30_000;
@@ -312,9 +312,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
   // Manual widget scroll: null follows the active node; a number is the
   // first visible graph row, set by shift+↑/↓ and reset on step advance.
   let widgetSource: WidgetSource | null = null;
-  let widgetScroll: number | null = null;
+  let widgetScroll: WidgetScrollState = { graph: null, compact: null };
   let widgetShownScroll = 0;
   let widgetMaxScroll = 0;
+  let widgetLayout: WidgetLayout | null = null;
   let widgetStepCount = 0;
   let sessionClosed = false;
   let runGeneration = 0;
@@ -384,10 +385,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
           runHeld(),
           width,
         );
+        widgetLayout = view.layout;
         widgetShownScroll = view.scroll;
         widgetMaxScroll = view.maxScroll;
-        if (widgetScroll !== null) {
-          widgetScroll = view.scroll;
+        if (widgetScroll[view.layout] !== null) {
+          widgetScroll[view.layout] = view.scroll;
         }
         return view.lines;
       },
@@ -404,7 +406,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (state.steps.length !== widgetStepCount) {
       widgetStepCount = state.steps.length;
       // The workflow moved on; resume following the active node.
-      widgetScroll = null;
+      widgetScroll = { graph: null, compact: null };
     }
     widgetSource = { state, snapshot };
     renderWidget(ctx);
@@ -412,7 +414,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   const clearWidget = (ctx: ExtensionContext) => {
     widgetSource = null;
-    widgetScroll = null;
+    widgetScroll = { graph: null, compact: null };
+    widgetLayout = null;
     setWidget(ctx, undefined);
     setStatus(ctx, undefined);
   };
@@ -421,7 +424,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (!widgetSource || widgetMaxScroll === 0) {
       return;
     }
-    widgetScroll = Math.max(0, Math.min(widgetShownScroll + delta, widgetMaxScroll));
+    if (widgetLayout === null) return;
+    widgetScroll[widgetLayout] = Math.max(0, Math.min(widgetShownScroll + delta, widgetMaxScroll));
     renderWidget(ctx);
   };
 
@@ -1802,7 +1806,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     clearWidgetTimer();
     stopWidgetTicker();
     widgetSource = null;
-    widgetScroll = null;
+    widgetScroll = { graph: null, compact: null };
+    widgetLayout = null;
   });
 }
 
