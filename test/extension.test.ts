@@ -342,6 +342,12 @@ describe("pi-workflows extension", () => {
         true,
       );
       expect(harness.widgets.length).toBeGreaterThan(0);
+      const widget = [...harness.widgets].reverse().find((entry) => typeof entry === "function");
+      expect(widget).toBeTypeOf("function");
+      const renderedWidget =
+        typeof widget === "function" ? widget().render(120).join("\n") : undefined;
+      expect(renderedWidget).toContain("✓ ● reply");
+      expect(renderedWidget).not.toMatch(/[┏┌┃]/u);
       expect(harness.sentMessages).toHaveLength(0);
 
       const runDirs = await fs.readdir(runsDir);

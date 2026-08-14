@@ -46,8 +46,9 @@ the browser.
   the TypeScript renderer. Full bordered cards are the default. Every card in
   one graph has the same width and height, fixed before layout. The exact step
   id is centered in a header above a horizontal divider. Structured body rows
-  pair a type badge with status (`●` agent, `ƒ` compute, `⚙` action, `◆`
-  checkpoint), then attempts (`↻`) with elapsed time (`◷`). Branch labels use
+  pair a type badge with status (`●` agent, `ƒ` compute, `!` notification, `$`
+  shell action, `*` function action, `◆` checkpoint), then attempts (`↻`) with
+  elapsed time (`◷`). Branch labels use
   `◇`; the final reserved row carries a short detail while unbounded content
   stays in the inspector. The outer border and header divider share the node's
   state color on the graph background. The body background starts inside that

@@ -13,6 +13,7 @@ import {
   type GraphLayout,
   type GraphSegment,
 } from "./graph.js";
+import { nodeTypeBadge } from "./node-type.js";
 
 /**
  * Renders the workflow DAG as text, mirroring the acpx replay viewer's graph
@@ -76,14 +77,6 @@ const GRAPH_SIDE_MARGIN = 2;
 const CARD_MIN_CONTENT_WIDTH = 28;
 const CARD_DYNAMIC_RESERVE = "↻ 100  ◷ 9999d 23h 59m 59s";
 
-const NODE_TYPE_GLYPHS: Record<string, string> = {
-  agent: "●",
-  compute: "ƒ",
-  notify: "✉",
-  action: "⚙",
-  checkpoint: "◆",
-};
-
 function nodeTypeStyle(nodeType: string): CanvasStyle {
   switch (nodeType) {
     case "agent":
@@ -96,10 +89,6 @@ function nodeTypeStyle(nodeType: string): CanvasStyle {
     default:
       return "dim";
   }
-}
-
-function nodeTypeBadge(nodeType: string): string {
-  return `${NODE_TYPE_GLYPHS[nodeType] ?? "?"} ${nodeType}`;
 }
 
 function fitText(text: string, width: number): string {
@@ -228,7 +217,7 @@ function cardMetrics(view: GraphView): CardMetrics {
   }
   for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
     measure(sanitizeText(nodeId));
-    measure(nodeTypeBadge(node.nodeType));
+    measure(nodeTypeBadge(node.nodeType, node.actionExecution));
     const labels = nodeBranchLabels(view, nodeId);
     branchRows = Math.max(branchRows, labels.length);
     for (const label of labels) measure(`◇ ${label}`);
@@ -252,6 +241,7 @@ type RenderedCell = {
   text: string;
   nodeId: string;
   nodeType: string;
+  typeBadge: string;
   status: NodeStatus | null;
   attempts: number;
   elapsed: string;
@@ -277,6 +267,7 @@ function renderCellText(
       text: "",
       nodeId: "",
       nodeType: "",
+      typeBadge: "",
       status: null,
       attempts: 0,
       elapsed: "",
@@ -334,6 +325,7 @@ function renderCellText(
     text,
     nodeId: sanitizeText(nodeId),
     nodeType,
+    typeBadge: node ? nodeTypeBadge(node.nodeType, node.actionExecution) : "? unknown",
     status,
     attempts: count,
     elapsed,
@@ -729,7 +721,7 @@ function drawNodeBox(
   canvas.text(startX, y + 2, `${chars.ml}${horizontal}${chars.mr}`, borderStyle);
   pairedRow(
     y + 3,
-    nodeTypeBadge(rendered.nodeType),
+    rendered.typeBadge,
     typeStyle,
     `${STATUS_GLYPHS[status]} ${STATUS_LABELS[status]}`,
     borderStyle,

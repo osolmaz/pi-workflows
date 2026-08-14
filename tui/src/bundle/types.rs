@@ -345,6 +345,13 @@ impl DefinitionSnapshot {
             .and_then(Value::as_str)
     }
 
+    pub fn node_action_execution(&self, node_id: &str) -> Option<&str> {
+        self.nodes
+            .get(node_id)?
+            .get("actionExecution")
+            .and_then(Value::as_str)
+    }
+
     pub fn node_ids(&self) -> impl Iterator<Item = &str> {
         self.nodes.keys().map(String::as_str)
     }

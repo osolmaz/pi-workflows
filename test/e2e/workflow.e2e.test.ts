@@ -882,7 +882,7 @@ export default function captureFailureExtension(pi: unknown) {
     expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("propose");
     expect(stdout).toContain("confirm");
-    expect(stdout).toContain("⚙ action");
+    expect(stdout).toContain("$ action");
     expect(stdout).toContain("✓ completed");
     expect(stdout).toContain("implement");
   }, 30_000);

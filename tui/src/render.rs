@@ -95,13 +95,14 @@ const GRAPH_SIDE_MARGIN: i64 = 2;
 const CARD_MIN_CONTENT_WIDTH: i64 = 28;
 const CARD_DYNAMIC_RESERVE: &str = "↻ 100  ◷ 9999d 23h 59m 59s";
 
-fn node_type_glyph(node_type: &str) -> char {
-    match node_type {
-        "agent" => '●',
-        "compute" => 'ƒ',
-        "notify" => '✉',
-        "action" => '⚙',
-        "checkpoint" => '◆',
+fn node_type_glyph(node_type: &str, action_execution: Option<&str>) -> char {
+    match (node_type, action_execution) {
+        ("agent", _) => '●',
+        ("compute", _) => 'ƒ',
+        ("notify", _) => '!',
+        ("action", Some("shell")) => '$',
+        ("action", _) => '*',
+        ("checkpoint", _) => '◆',
         _ => '?',
     }
 }
@@ -123,8 +124,11 @@ fn node_type_style(node_type: &str, focused: bool) -> CanvasStyle {
     }
 }
 
-fn node_type_badge(node_type: &str) -> String {
-    format!("{} {node_type}", node_type_glyph(node_type))
+fn node_type_badge(node_type: &str, action_execution: Option<&str>) -> String {
+    format!(
+        "{} {node_type}",
+        node_type_glyph(node_type, action_execution)
+    )
 }
 
 fn fit_text(text: &str, width: usize) -> String {
@@ -242,7 +246,7 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
     ] {
         content_width = content_width.max(js_len(&format!(
             "{}  {} {}",
-            node_type_badge("checkpoint"),
+            node_type_badge("checkpoint", None),
             status.glyph(),
             status.label()
         )));
@@ -250,7 +254,9 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
     for (node_id, node) in &snapshot.nodes {
         content_width = content_width.max(js_len(&sanitize_text(node_id)));
         if let Some(node_type) = node.get("nodeType").and_then(Value::as_str) {
-            content_width = content_width.max(js_len(&node_type_badge(node_type)));
+            let action_execution = node.get("actionExecution").and_then(Value::as_str);
+            content_width =
+                content_width.max(js_len(&node_type_badge(node_type, action_execution)));
         }
         let labels = node_branch_labels(view, node_id);
         branch_rows = branch_rows.max(labels.len());
@@ -270,6 +276,7 @@ struct RenderedCell {
     text: String,
     node_id: String,
     node_type: String,
+    type_badge: String,
     status: Option<NodeStatus>,
     attempts: usize,
     elapsed: String,
@@ -295,6 +302,7 @@ fn render_cell_text(
             text: String::new(),
             node_id: String::new(),
             node_type: String::new(),
+            type_badge: String::new(),
             status: None,
             attempts: 0,
             elapsed: String::new(),
@@ -314,6 +322,9 @@ fn render_cell_text(
         .snapshot
         .and_then(|snapshot| snapshot.node_type(node_id))
         .unwrap_or("?");
+    let action_execution = view
+        .snapshot
+        .and_then(|snapshot| snapshot.node_action_execution(node_id));
     let attempt = latest_visible_attempt(visible_steps, node_id);
     let attempts = visible_steps
         .iter()
@@ -388,6 +399,7 @@ fn render_cell_text(
         text: text.clone(),
         node_id: sanitize_text(node_id),
         node_type: node_type.to_string(),
+        type_badge: node_type_badge(node_type, action_execution),
         status: Some(status),
         attempts: count,
         elapsed,
@@ -1058,7 +1070,7 @@ fn draw_node_box(
         border_style,
     );
 
-    let type_badge = fit_text(&node_type_badge(&rendered.node_type), inner_width - 2);
+    let type_badge = fit_text(&rendered.type_badge, inner_width - 2);
     let status_badge = fit_text(
         &format!("{} {}", status.glyph(), status.label()),
         inner_width - 2,
