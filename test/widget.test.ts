@@ -253,6 +253,18 @@ describe("buildWidgetLines", () => {
     expect(joined).not.toContain("third · exit 1 bad · 2.0s");
   });
 
+  it("bounds node errors before rendering an unbounded RPC-width line", () => {
+    const error = `exit 1: ${"x".repeat(1_000_000)}`;
+    const lines = buildWidgetView(
+      makeState({ results: { third: makeResult("third", "failed", { error }) } }),
+      snapshot,
+    ).lines;
+    const failedLine = stripAnsi(lines.find((line) => line.includes("third")) ?? "");
+    expect(failedLine).toContain("exit 1:");
+    expect(failedLine).toMatch(/…$/u);
+    expect(failedLine.length).toBeLessThan(160);
+  });
+
   it.each([120, 80, 43, 40, 20, 8, 2, 1])(
     "fits every line within a %i-column terminal",
     (width) => {

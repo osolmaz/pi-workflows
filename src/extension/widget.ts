@@ -24,6 +24,7 @@ const STATUS_GLYPHS: Record<WorkflowRunStatus, string> = {
  * budget and choose which node rows to show instead of losing the bottom.
  */
 const PI_MAX_WIDGET_LINES = 10;
+const MAX_NODE_ERROR_CHARS = 120;
 
 export function nodeGlyph(state: WorkflowRunState, nodeId: string): string {
   if (state.currentNode === nodeId) {
@@ -167,7 +168,11 @@ function nodeRuntimeSegments(
     return segments;
   }
   if (result.outcome !== "ok") {
-    segments.push(result.error ? sanitizeText(result.error) : result.outcome.replaceAll("_", " "));
+    segments.push(
+      result.error
+        ? truncate(sanitizeText(result.error), MAX_NODE_ERROR_CHARS)
+        : result.outcome.replaceAll("_", " "),
+    );
     return segments;
   }
   if (Number.isFinite(result.durationMs)) {
