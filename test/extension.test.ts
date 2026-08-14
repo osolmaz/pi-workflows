@@ -7,6 +7,7 @@ import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
 import { readRunBundle } from "../src/workflows/store.js";
+import { stripAnsi } from "../src/workflows/text.js";
 import { makeTempDir } from "./helpers.js";
 
 type ToolResult = {
@@ -50,7 +51,17 @@ type WidgetComponent = {
   invalidate: () => void;
 };
 
-type WidgetFactory = () => WidgetComponent;
+type WidgetTheme = {
+  bold: (text: string) => string;
+  fg: (color: string, text: string) => string;
+};
+
+type WidgetFactory = (_tui: unknown, theme: WidgetTheme) => WidgetComponent;
+
+const TEST_THEME: WidgetTheme = {
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+  fg: (color, text) => `\u001b[${color === "accent" ? 36 : 32}m${text}\u001b[0m`,
+};
 
 type FakeContext = {
   cwd: string;
@@ -345,8 +356,11 @@ describe("pi-workflows extension", () => {
       const widget = [...harness.widgets].reverse().find((entry) => typeof entry === "function");
       expect(widget).toBeTypeOf("function");
       const renderedWidget =
-        typeof widget === "function" ? widget().render(120).join("\n") : undefined;
-      expect(renderedWidget).toContain("✓ ● reply");
+        typeof widget === "function"
+          ? widget(undefined, TEST_THEME).render(120).join("\n")
+          : undefined;
+      expect(stripAnsi(renderedWidget ?? "")).toContain("✓ ● reply");
+      expect(renderedWidget).toContain("\u001b[32m✓\u001b[0m");
       expect(renderedWidget).not.toMatch(/[┏┌┃]/u);
       expect(harness.sentMessages).toHaveLength(0);
 
@@ -948,9 +962,10 @@ export default defineWorkflow({
       // the waiting state so the human sees the parked checkpoint.
       const last = harness.widgets.at(-1);
       expect(last).toBeTypeOf("function");
-      const rendered = typeof last === "function" ? last().render(80).join("\n") : undefined;
-      expect(rendered).toContain("[waiting]");
-      expect(rendered).toContain("waiting on checkpoint: review");
+      const rendered =
+        typeof last === "function" ? last(undefined, TEST_THEME).render(80).join("\n") : undefined;
+      expect(stripAnsi(rendered ?? "")).toContain("[waiting]");
+      expect(stripAnsi(rendered ?? "")).toContain("waiting on checkpoint: review");
 
       // With no live run, cancel clears the parked widget instead of
       // claiming nothing exists.
@@ -1447,7 +1462,9 @@ export default defineWorkflow({
       const harness = makeHarness({ cwd, mode: "rpc", respond: () => {} });
       await harness.command.handler("mini say hi", harness.ctx);
       await waitFor(() => harness.widgets.some((widget) => Array.isArray(widget)));
-      expect(harness.widgets.some((widget) => Array.isArray(widget))).toBe(true);
+      const rpcWidget = harness.widgets.find((widget): widget is string[] => Array.isArray(widget));
+      expect(rpcWidget).toBeDefined();
+      expect(rpcWidget?.join("\n")).not.toContain("\u001b");
     } finally {
       vi.unstubAllEnvs();
     }

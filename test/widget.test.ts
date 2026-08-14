@@ -5,6 +5,7 @@ import {
   buildWidgetView,
   displayNodeIds,
   nodeGlyph,
+  type WidgetTheme,
 } from "../src/extension/widget.js";
 import { nodeTypeGlyph } from "../src/render/node-type.js";
 import {
@@ -37,6 +38,15 @@ const workflow = defineWorkflow({
     { from: "second", to: "third" },
   ],
 });
+const TEST_THEME: WidgetTheme = {
+  bold: (text) => `\u001b[1m${text}\u001b[22m`,
+  fg: (color, text) => {
+    const codes = { accent: 36, success: 32, error: 31, warning: 33, dim: 2 } as const;
+    const code = codes[color as keyof typeof codes] ?? 37;
+    return `\u001b[${code}m${text}\u001b[0m`;
+  },
+};
+
 const snapshot = createDefinitionSnapshot(workflow);
 const wideSnapshot = createDefinitionSnapshot(
   defineWorkflow({
@@ -174,7 +184,81 @@ describe("buildWidgetLines", () => {
     expect(joined).toContain("◐ ƒ second · verifying · 2.0s");
     expect(joined).toContain("· ƒ third");
     expect(joined).not.toMatch(/[┏┌┃]/u);
+    expect(lines.join("\n")).not.toContain("\u001b");
     expect(lines.length).toBeLessThanOrEqual(10);
+  });
+
+  it("uses the Pi theme to emphasize status without removing glyphs", () => {
+    const state = makeState({
+      currentNode: "second",
+      currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
+      results: {
+        first: makeResult("first", "ok"),
+        third: makeResult("third", "failed", { error: "exit 1" }),
+      },
+      steps: [makeStep("first", 1), makeStep("third", 1)],
+    });
+    const lines = buildWidgetView(
+      state,
+      snapshot,
+      new Date("2026-01-01T00:00:02.000Z"),
+      null,
+      false,
+      120,
+      TEST_THEME,
+    ).lines;
+    const active = lines.find((line) => stripAnsi(line).includes("second")) ?? "";
+    const completed = lines.find((line) => stripAnsi(line).includes("first")) ?? "";
+    const failed = lines.find((line) => stripAnsi(line).includes("third")) ?? "";
+
+    expect(active).toContain("\u001b[36m◐ ƒ ");
+    expect(active).toContain("\u001b[1msecond\u001b[22m");
+    const heldLines = buildWidgetView(
+      state,
+      snapshot,
+      undefined,
+      null,
+      true,
+      120,
+      TEST_THEME,
+    ).lines;
+    const held = heldLines.find((line) => stripAnsi(line).includes("second")) ?? "";
+    expect(held).toContain("\u001b[33m◐ ƒ ");
+    expect(held).toContain("\u001b[1msecond\u001b[22m");
+    expect(completed).toContain("\u001b[32m✓\u001b[0m");
+    expect(completed).toContain("\u001b[2mƒ\u001b[0m");
+    expect(failed).toContain("\u001b[31m✗\u001b[0m");
+    expect(failed).toContain("\u001b[31mexit 1\u001b[0m");
+    expect(stripAnsi(lines.join("\n"))).toContain("◐ ƒ second");
+
+    const pendingLines = buildWidgetView(
+      makeState({ currentNode: "first" }),
+      snapshot,
+      undefined,
+      null,
+      false,
+      120,
+      TEST_THEME,
+    ).lines;
+    const pending = pendingLines.find((line) => stripAnsi(line).includes("second")) ?? "";
+    expect(pending).toContain("\u001b[2m· ƒ second\u001b[0m");
+
+    const waitingLines = buildWidgetView(
+      makeState({
+        status: "waiting",
+        waitingOn: "third",
+        results: { third: makeResult("third", "ok") },
+      }),
+      snapshot,
+      undefined,
+      null,
+      false,
+      120,
+      TEST_THEME,
+    ).lines;
+    const waiting = waitingLines.find((line) => stripAnsi(line).includes("third")) ?? "";
+    expect(waiting).toContain("\u001b[33m⏸ ƒ ");
+    expect(waiting).toContain("\u001b[1mthird\u001b[22m");
   });
 
   it("shows the real node types without the unsupported glyphs", () => {
@@ -282,6 +366,7 @@ describe("buildWidgetLines", () => {
         null,
         false,
         width,
+        TEST_THEME,
       );
 
       expect(view.lines.length).toBeLessThanOrEqual(10);

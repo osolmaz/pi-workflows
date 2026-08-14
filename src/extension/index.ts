@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
 import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
@@ -209,7 +209,7 @@ type WorkflowWidgetComponent = {
   invalidate: () => void;
 };
 
-type WorkflowWidgetFactory = () => WorkflowWidgetComponent;
+type WorkflowWidgetFactory = (_tui: unknown, theme: Theme) => WorkflowWidgetComponent;
 type WorkflowWidgetContent = string[] | WorkflowWidgetFactory;
 
 export default function piWorkflows(pi: ExtensionAPI) {
@@ -377,7 +377,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (!widgetSource) {
       return;
     }
-    const render = (width = Number.POSITIVE_INFINITY): string[] => {
+    const render = (width = Number.POSITIVE_INFINITY, theme?: Theme): string[] => {
       if (!widgetSource) return [];
       const view = buildWidgetView(
         widgetSource.state,
@@ -386,6 +386,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         widgetScroll,
         runHeld(),
         width,
+        theme,
       );
       widgetShownScroll = view.scroll;
       widgetMaxScroll = view.maxScroll;
@@ -395,7 +396,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
       return view.lines;
     };
     if (ctx.mode === "tui") {
-      setWidget(ctx, () => ({ render, invalidate() {} }));
+      setWidget(ctx, (_tui, theme) => ({
+        render: (width) => render(width, theme),
+        invalidate() {},
+      }));
     } else {
       // RPC transports string widgets but cannot serialize TUI component factories.
       setWidget(ctx, render());

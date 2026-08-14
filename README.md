@@ -171,7 +171,9 @@ Inside pi, a compact widget above the editor shows one line per workflow node.
 The first glyph is the node status. The second glyph is the node type: `●`
 agent, `ƒ` compute, `!` notification, `$` shell action, `*` function action, or
 `◆` checkpoint. Repeated visits, runtime details, and timing appear on the same
-line when they apply. Long workflows are windowed around the active node.
+line when they apply. Pi's current theme highlights the full active-node line,
+while status glyphs keep every state readable without color. Long workflows are
+windowed around the active node.
 Scroll the list with `shift+↑` / `shift+↓`; it snaps back to following the
 active node whenever the workflow advances a step. Use `piw` when you need the
 full boxed graph and its edges.

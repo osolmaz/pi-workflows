@@ -1,5 +1,5 @@
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { ansi } from "../render/ansi.js";
 import { formatDuration } from "../render/format.js";
 import { nodeTypeGlyph } from "../render/node-type.js";
 import { sanitizeText } from "../workflows/text.js";
@@ -45,6 +45,8 @@ export function displayNodeIds(snapshot: WorkflowDefinitionSnapshot): string[] {
   return Object.keys(snapshot.nodes);
 }
 
+export type WidgetTheme = Pick<Theme, "bold" | "fg">;
+
 export type WidgetView = {
   lines: string[];
   /** The clamped first visible node row. */
@@ -65,6 +67,7 @@ export function buildWidgetView(
   scroll: number | null = null,
   held = false,
   width = Number.POSITIVE_INFINITY,
+  theme?: WidgetTheme,
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
@@ -77,19 +80,22 @@ export function buildWidgetView(
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
   const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
-  const header = `${glyph} workflow ${sanitizeText(state.workflowName)}${title} [${statusText}]`;
+  const headerTone = statusTone(paused ? "waiting" : state.status);
+  const header = `${paint(theme, headerTone, glyph)} workflow ${sanitizeText(state.workflowName)}${title} ${paint(theme, headerTone, `[${statusText}]`)}`;
 
   const footer: string[] = [];
   if (state.error) {
-    footer.push(`  error: ${truncate(sanitizeText(state.error), 120)}`);
+    footer.push(paint(theme, "error", `  error: ${truncate(sanitizeText(state.error), 120)}`));
   }
   if (state.status === "waiting" && state.waitingOn) {
-    footer.push(`  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`);
+    footer.push(
+      paint(theme, "warning", `  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`),
+    );
   }
 
   const budget = PI_MAX_WIDGET_LINES - 1 - footer.length;
   const nodes = displayNodeIds(snapshot).map((nodeId) =>
-    compactNodeLine(state, snapshot, nodeId, now),
+    compactNodeLine(state, snapshot, nodeId, now, paused, theme),
   );
   if (nodes.length === 0) {
     return {
@@ -100,7 +106,7 @@ export function buildWidgetView(
   }
 
   const anchor = scroll ?? compactFocusIndex(state, snapshot);
-  const windowed = windowLines(nodes, budget, anchor, scroll !== null);
+  const windowed = windowLines(nodes, budget, anchor, scroll !== null, theme);
   const indentation = availableWidth >= 3 ? "  " : "";
   return {
     lines: fitLines(
@@ -125,12 +131,41 @@ function compactNodeLine(
   snapshot: WorkflowDefinitionSnapshot,
   nodeId: string,
   now: Date,
+  paused: boolean,
+  theme?: WidgetTheme,
 ): string {
   const node = snapshot.nodes[nodeId];
-  const type = node ? ansi.dim(nodeTypeGlyph(node.nodeType, node.actionExecution)) : "?";
+  const glyph = nodeGlyph(state, nodeId);
+  const typeGlyph = node ? nodeTypeGlyph(node.nodeType, node.actionExecution) : "?";
+  const name = sanitizeText(nodeId);
   const segments = nodeRuntimeSegments(state, snapshot, nodeId, now);
-  const detail = segments.length > 0 ? ` · ${segments.join(" · ")}` : "";
-  return `${nodeGlyph(state, nodeId)} ${type} ${sanitizeText(nodeId)}${detail}`;
+  const isCurrent = state.currentNode === nodeId;
+  const isWaiting = state.waitingOn === nodeId;
+
+  if (isCurrent || isWaiting) {
+    const tone = paused || isWaiting ? "warning" : "accent";
+    const focusedName = theme ? theme.bold(name) : name;
+    const detail = segments.length > 0 ? ` · ${segments.join(" · ")}` : "";
+    return paint(theme, tone, `${glyph} ${typeGlyph} ${focusedName}${detail}`);
+  }
+
+  const result = state.results[nodeId];
+  if (!result) {
+    const detail = segments.length > 0 ? ` · ${segments.join(" · ")}` : "";
+    return paint(theme, "dim", `${glyph} ${typeGlyph} ${name}${detail}`);
+  }
+
+  const styledGlyph = paint(theme, result.outcome === "ok" ? "success" : "error", glyph);
+  const styledType = paint(theme, "dim", typeGlyph);
+  const styledSegments = segments.map((segment, index) =>
+    paint(
+      theme,
+      result.outcome !== "ok" && index === segments.length - 1 ? "error" : "dim",
+      segment,
+    ),
+  );
+  const detail = styledSegments.length > 0 ? ` · ${styledSegments.join(" · ")}` : "";
+  return `${styledGlyph} ${styledType} ${name}${detail}`;
 }
 
 function nodeRuntimeSegments(
@@ -188,6 +223,25 @@ function elapsedSince(startedAt: string | undefined, now: Date): string | null {
   return formatDuration(Math.max(0, now.getTime() - started));
 }
 
+function statusTone(status: WorkflowRunStatus): ThemeColor {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "failed":
+    case "timed_out":
+    case "cancelled":
+      return "error";
+    case "waiting":
+      return "warning";
+    case "running":
+      return "accent";
+  }
+}
+
+function paint(theme: WidgetTheme | undefined, color: ThemeColor, text: string): string {
+  return theme ? theme.fg(color, text) : text;
+}
+
 function fitLines(lines: string[], width: number): string[] {
   if (!Number.isFinite(width)) return lines;
   return lines.map((line) => truncateToWidth(line, width, width > 1 ? "…" : ""));
@@ -212,6 +266,7 @@ function windowLines(
   budget: number,
   anchor: number,
   anchorIsStart: boolean,
+  theme?: WidgetTheme,
 ): { lines: string[]; scroll: number; maxScroll: number } {
   if (lines.length <= budget) {
     return { lines, scroll: 0, maxScroll: 0 };
@@ -225,7 +280,7 @@ function windowLines(
   const directions = [above > 0 ? `↑ ${above}` : "", below > 0 ? `↓ ${below}` : ""]
     .filter(Boolean)
     .join(" · ");
-  out.push(ansi.dim(`${directions} more · shift+↑/↓ scroll`));
+  out.push(paint(theme, "dim", `${directions} more · shift+↑/↓ scroll`));
   return { lines: out, scroll: start, maxScroll: Math.max(0, lines.length - inner) };
 }
 

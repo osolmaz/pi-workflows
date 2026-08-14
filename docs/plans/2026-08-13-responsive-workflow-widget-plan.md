@@ -18,6 +18,11 @@ The live workflow widget must remain easy to scan without using most of the conv
 - Put the status glyph first and a one-column node-type glyph second.
 - Use terminal-safe type glyphs: `●` agent, `ƒ` compute, `!` notification, `$` shell action, `*` function action, and `◆` checkpoint.
 - Show concise runtime details when space permits: repeated visits, active elapsed time, latest completed duration, current status detail, and node errors.
+- Use Pi's supplied theme for TUI colors. Keep RPC and other non-TUI widget output plain.
+- Make the active node unmistakable by coloring its full line with the theme accent and making its name bold.
+- Color a held or waiting focus line with the warning color.
+- Color only the status glyph for completed and failed nodes, color failed error text, and dim pending nodes and non-focused type glyphs.
+- Keep status glyphs as the non-color state signal.
 - Keep the widget within Pi's 10-line budget.
 - Ensure every line has a visible width less than or equal to the supplied width.
 - Preserve manual vertical scrolling for long node lists.
@@ -42,14 +47,14 @@ Optional fields are omitted when they do not apply and truncated from the right 
 
 Node-type glyphs come from one shared formatter used by both the compact widget and graph viewer. The node snapshot already distinguishes shell actions from function actions, so this change needs no workflow schema change. A shell action named `sleep` appears as `$ sleep`; it does not become a new wait-node type.
 
-The extension installs one Pi widget component for each active workflow. Its `render(width)` method reads the latest workflow state and calls `buildWidgetView` with that width. State changes request a normal Pi render by setting the component again. Pi calls the component with the current width after terminal resizes. The standalone viewer remains the place to inspect the full workflow graph.
+The extension installs one Pi widget component for each active workflow. The documented component factory supplies Pi's current `Theme`. Its `render(width)` method reads the latest workflow state and calls `buildWidgetView` with that width and theme. State changes request a normal Pi render by setting the component again. Pi calls the component with the current width after terminal resizes. RPC mode keeps using serializable string arrays and does not receive color codes. The standalone viewer remains the place to inspect the full workflow graph.
 
 ## Contract impact
 
 - Session state: no change.
 - Other persistent data: no change.
 - Pi internals: no change.
-- Public API: documented component-form `ctx.ui.setWidget` and `Component.render(width)`.
+- Public API: documented component-form `ctx.ui.setWidget`, its supplied `Theme`, and `Component.render(width)`.
 
 ## Acceptance criteria
 
@@ -59,7 +64,10 @@ The extension installs one Pi widget component for each active workflow. Its `re
 - Every rendered line satisfies `visibleWidth(line) <= width`.
 - Each real node and action subtype uses its documented one-column glyph.
 - A repeated node shows its visit count, and active and completed nodes show useful timing.
-- The active node remains visible in a long workflow.
+- The active node remains visible in a long workflow and its full line uses the theme accent with a bold name.
+- Completed, failed, waiting, and pending states use the specified theme roles without relying on color alone.
+- TUI lines remain width-safe after color codes are added.
+- RPC widget lines contain no ANSI color codes.
 - Existing scrolling and workflow execution behavior remain unchanged.
 
 ## Verification
