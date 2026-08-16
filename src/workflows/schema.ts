@@ -86,7 +86,9 @@ export function assertValidActionNode(node: ActionNodeDefinition, nodeId = "acti
     if (typeof node.exec !== "function") {
       fail(`node ${nodeId} exec must be a function`);
     }
-    assertOptionalFunction((node as ShellActionNodeDefinition).parse, `node ${nodeId} parse`);
+    const shell = node as ShellActionNodeDefinition;
+    assertOptionalFunction(shell.parse, `node ${nodeId} parse`);
+    assertShellUpdates(shell, nodeId);
   } else if (typeof (node as FunctionActionNodeDefinition).run !== "function") {
     fail(`node ${nodeId} run must be a function`);
   }
@@ -101,7 +103,27 @@ export function assertValidShellActionNode(
     fail(`node ${nodeId} requires an exec function`);
   }
   assertOptionalFunction(node.parse, `node ${nodeId} parse`);
+  assertShellUpdates(node, nodeId);
   assertCommonNodeFields(node, nodeId);
+}
+
+function assertShellUpdates(node: ShellActionNodeDefinition, nodeId: string): void {
+  if (node.updates === undefined) return;
+  if (node.updates === null || typeof node.updates !== "object") {
+    fail(`node ${nodeId} updates must be an object`);
+  }
+  if (typeof node.updates.parseLine !== "function") {
+    fail(`node ${nodeId} updates.parseLine must be a function`);
+  }
+  if (node.updates.streams !== undefined) {
+    if (
+      !Array.isArray(node.updates.streams) ||
+      node.updates.streams.length === 0 ||
+      node.updates.streams.some((stream) => stream !== "stdout" && stream !== "stderr")
+    ) {
+      fail(`node ${nodeId} updates.streams must contain stdout or stderr`);
+    }
+  }
 }
 
 export function assertValidCheckpointNode(

@@ -2,6 +2,7 @@ import { ansi, fitWidth, sanitizeText } from "../render/ansi.js";
 import { formatDuration, runElapsedMs } from "../render/format.js";
 import { renderGraphLines } from "../render/graph-render.js";
 import { decodeValueWith } from "../workflows/artifacts.js";
+import { estimateProgress, formatProgressLine } from "../workflows/progress.js";
 import type { LoadedRunBundle } from "../workflows/store.js";
 import type { WorkflowRunStatus, WorkflowStepRecord } from "../workflows/types.js";
 
@@ -201,6 +202,30 @@ export function renderRunDetailLines(
     // No definition snapshot: fall back to a flat executed-node list.
     for (const nodeId of Object.keys(state.results)) {
       lines.push(nodeStatusLine(bundle, nodeId, size.width, now));
+    }
+  }
+
+  const progress = (state.updates ?? []).filter((update) => update.type === "progress");
+  if (progress.length > 0) {
+    lines.push("");
+    lines.push(ansi.bold("progress"));
+    for (const update of progress) {
+      try {
+        const estimate = estimateProgress(
+          update.key,
+          [{ at: update.at, data: update.data as never }],
+          now,
+        );
+        lines.push(fitWidth(formatProgressLine(estimate, now), size.width));
+        lines.push(
+          fitWidth(
+            ansi.dim(`  update ${update.seq} · ${update.at} · attempt ${update.attemptId}`),
+            size.width,
+          ),
+        );
+      } catch {
+        lines.push(fitWidth(`${sanitizeText(update.key)}  invalid progress data`, size.width));
+      }
     }
   }
 

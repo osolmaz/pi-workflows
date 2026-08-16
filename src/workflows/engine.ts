@@ -23,6 +23,7 @@ import type {
   ConversationRange,
   ShellActionNodeDefinition,
   ShellActionResult,
+  WorkflowActionContext,
   WorkflowActionReceipt,
   WorkflowDefinition,
   WorkflowEngineOptions,
@@ -36,7 +37,15 @@ import type {
   WorkflowSource,
   WorkflowStepRecord,
   WorkflowTraceEventDraft,
+  WorkflowUpdateInput,
+  WorkflowUpdateReceipt,
 } from "./types.js";
+import {
+  MAX_CURRENT_UPDATES,
+  UpdateRateLimiter,
+  updateReceipt,
+  validateWorkflowUpdate,
+} from "./updates.js";
 
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
@@ -83,6 +92,17 @@ export class WorkflowEngine {
   private readonly onRunStarted?: WorkflowEngineOptions["onRunStarted"];
   private readonly onRunFinishing?: WorkflowEngineOptions["onRunFinishing"];
   private activeAbort: AbortController | null = null;
+  private activeAttempt:
+    | {
+        runDir: string;
+        state: WorkflowRunState;
+        nodeId: string;
+        attemptId: string;
+        signal: AbortSignal;
+      }
+    | undefined;
+  private readonly updateLimiters = new Map<string, UpdateRateLimiter>();
+  private readonly updateReceipts = new Map<string, WorkflowUpdateReceipt>();
   private cancelled = false;
   private parked = false;
   private paused = false;
@@ -101,6 +121,60 @@ export class WorkflowEngine {
 
   get outputRoot(): string {
     return this.store.outputRoot;
+  }
+
+  /** Publish a durable update for the currently active attempt without completing it. */
+  async publishUpdate(
+    step: string,
+    attempt: string,
+    input: WorkflowUpdateInput,
+    idempotencyKey?: string,
+  ): Promise<WorkflowUpdateReceipt> {
+    const active = this.activeAttempt;
+    if (
+      active === undefined ||
+      active.nodeId !== step ||
+      active.attemptId !== attempt ||
+      active.signal.aborted
+    ) {
+      throw new Error(
+        `Workflow step ${JSON.stringify(step)} attempt ${JSON.stringify(attempt)} is not active`,
+      );
+    }
+    const receiptKey =
+      idempotencyKey === undefined ? undefined : `${active.state.runId}:${idempotencyKey}`;
+    if (receiptKey !== undefined) {
+      const prior = this.updateReceipts.get(receiptKey);
+      if (prior !== undefined) return prior;
+    }
+    const update = validateWorkflowUpdate(input);
+    const exists = (active.state.updates ?? []).some(
+      (record) => record.type === update.type && record.key === update.key,
+    );
+    if (!exists && (active.state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
+      throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
+    }
+    let limiter = this.updateLimiters.get(active.state.runId);
+    if (limiter === undefined) {
+      limiter = new UpdateRateLimiter();
+      this.updateLimiters.set(active.state.runId, limiter);
+    }
+    limiter.take();
+    const { event, record } = await this.store.publishUpdate(
+      active.runDir,
+      active.state,
+      active.nodeId,
+      active.attemptId,
+      update,
+    );
+    try {
+      this.onEvent?.(event, active.state);
+    } catch {
+      // UI and logging observers never determine workflow correctness.
+    }
+    const receipt = updateReceipt(record);
+    if (receiptKey !== undefined) this.updateReceipts.set(receiptKey, receipt);
+    return receipt;
   }
 
   /** Abort the currently running node and mark the run cancelled. */
@@ -492,6 +566,7 @@ export class WorkflowEngine {
       outputs: {},
       results: {},
       steps: [],
+      updates: [],
     };
   }
 
@@ -775,6 +850,7 @@ export class WorkflowEngine {
       timer = setTimeout(() => {
         abort.abort(new TimeoutError(timeoutMs));
       }, timeoutMs);
+      this.activeAttempt = { runDir, state, nodeId, attemptId, signal: abort.signal };
       const dispatched = this.dispatchNode(
         workflow,
         state,
@@ -817,6 +893,9 @@ export class WorkflowEngine {
       }
       if (this.activeAbort === abort) {
         this.activeAbort = null;
+      }
+      if (this.activeAttempt?.attemptId === attemptId) {
+        this.activeAttempt = undefined;
       }
     }
   }
@@ -895,7 +974,7 @@ export class WorkflowEngine {
         return { output: receipt, promptText: null };
       }
       case "action":
-        return await this.runActionNode(node, context, signal, meta);
+        return await this.runActionNode(node, context, nodeId, attemptId, signal, meta);
       case "checkpoint":
         return await runCheckpointNode(node, context);
     }
@@ -964,6 +1043,8 @@ export class WorkflowEngine {
             }
           : {}),
         accept: async (output) => await this.acceptSubmission(node, context, output),
+        publishUpdate: async (update, idempotencyKey) =>
+          await this.publishUpdate(nodeId, attemptId, update, idempotencyKey),
       },
       signal,
     );
@@ -995,14 +1076,20 @@ export class WorkflowEngine {
   private async runActionNode(
     node: ActionNodeDefinition,
     context: WorkflowNodeContext,
+    nodeId: string,
+    attemptId: string,
     signal: AbortSignal,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
+    const actionContext: WorkflowActionContext = {
+      ...context,
+      publishUpdate: async (update) => await this.publishUpdate(nodeId, attemptId, update),
+    };
     if ("exec" in node) {
-      return await runShellActionNode(node, context, signal, meta);
+      return await runShellActionNode(node, context, actionContext, signal, meta);
     }
     meta.action = { actionType: "function" };
-    const output = await node.run(context);
+    const output = await node.run(actionContext);
     return { output, promptText: null, action: { actionType: "function" } };
   }
 
@@ -1086,13 +1173,28 @@ function shellReceipt(result: ShellActionResult): WorkflowActionReceipt {
 async function runShellActionNode(
   node: ShellActionNodeDefinition,
   context: WorkflowNodeContext,
+  actionContext: WorkflowActionContext,
   signal: AbortSignal,
   meta: NodeExecutionMeta,
 ): Promise<NodeExecution> {
   const spec = await node.exec(context);
+  const streams = new Set(node.updates?.streams ?? ["stdout"]);
   let result: ShellActionResult;
   try {
-    result = await runShellAction(spec, signal);
+    result = await runShellAction(
+      spec,
+      signal,
+      node.updates === undefined
+        ? undefined
+        : async (line) => {
+            if (!streams.has(line.stream)) return;
+            const parsed = await node.updates?.parseLine(line, actionContext);
+            if (parsed === undefined) return;
+            for (const update of Array.isArray(parsed) ? parsed : [parsed]) {
+              await actionContext.publishUpdate(update);
+            }
+          },
+    );
   } catch (error) {
     const failed = shellResultFromError(error);
     if (failed) {

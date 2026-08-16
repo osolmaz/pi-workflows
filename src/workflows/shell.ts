@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { CancelledError, TimeoutError } from "./errors.js";
-import type { ShellActionExecution, ShellActionResult } from "./types.js";
+import type { ShellActionExecution, ShellActionResult, ShellUpdateLine } from "./types.js";
 
 /** Default cap on captured stdout/stderr, each. */
 const DEFAULT_MAX_OUTPUT_CHARS = 1_000_000;
@@ -51,6 +51,7 @@ function shellFailure(
 export async function runShellAction(
   spec: ShellActionExecution,
   signal?: AbortSignal,
+  onLine?: (line: ShellUpdateLine) => Promise<void>,
 ): Promise<ShellActionResult> {
   // The node may have been cancelled while an async `exec` callback resolved;
   // never start side effects for an already-abandoned attempt.
@@ -75,6 +76,7 @@ export async function runShellAction(
   let stdout = "";
   let stderr = "";
   let killedBy: "timeout" | "abort" | null = null;
+  let lineError: Error | undefined;
   let timeout: NodeJS.Timeout | undefined;
 
   // Cap retained output so a verbose or unending command cannot exhaust
@@ -114,15 +116,53 @@ export async function runShellAction(
   };
   const onAbort = () => kill("abort");
 
+  const lineBuffers: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
+  let lineWork = Promise.resolve();
+  const processChunk = (
+    stream: "stdout" | "stderr",
+    chunk: string,
+    source: NodeJS.ReadableStream & { pause(): unknown; resume(): unknown },
+  ) => {
+    if (stream === "stdout") stdout = appendCapped(stdout, chunk);
+    else stderr = appendCapped(stderr, chunk);
+    if (onLine === undefined || lineError !== undefined) return;
+    source.pause();
+    lineWork = lineWork
+      .then(async () => {
+        const parts = `${lineBuffers[stream]}${chunk}`.split("\n");
+        lineBuffers[stream] = parts.pop() ?? "";
+        if (Buffer.byteLength(lineBuffers[stream], "utf8") > 64 * 1024) {
+          throw new Error(`shell ${stream} update line exceeded 65536 bytes`);
+        }
+        for (const raw of parts) {
+          const text = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+          if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+            throw new Error(`shell ${stream} update line exceeded 65536 bytes`);
+          }
+          await onLine({ stream, text });
+        }
+      })
+      .catch((error: unknown) => {
+        lineError = error instanceof Error ? error : new Error(String(error));
+        kill("abort");
+      })
+      .finally(() => source.resume());
+  };
+  const flushLines = async () => {
+    await lineWork;
+    if (onLine === undefined || lineError !== undefined) return;
+    for (const stream of ["stdout", "stderr"] as const) {
+      const text = lineBuffers[stream];
+      if (text.length > 0)
+        await onLine({ stream, text: text.endsWith("\r") ? text.slice(0, -1) : text });
+    }
+  };
+
   const finish = new Promise<ShellActionResult>((resolve, reject) => {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout = appendCapped(stdout, chunk);
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr = appendCapped(stderr, chunk);
-    });
+    child.stdout.on("data", (chunk: string) => processChunk("stdout", chunk, child.stdout));
+    child.stderr.on("data", (chunk: string) => processChunk("stderr", chunk, child.stderr));
 
     child.once("error", (error) => {
       // Spawn failures (missing executable, EACCES) still get a receipt so
@@ -143,24 +183,32 @@ export async function runShellAction(
     // `close` (unlike `exit`) fires only after stdio has fully closed, so
     // captured output is never truncated.
     child.once("close", (exitCode, signalName) => {
-      const result: ShellActionResult = {
-        command: spec.command,
-        args,
-        cwd,
-        stdout,
-        stderr,
-        exitCode,
-        signal: signalName,
-        durationMs: Date.now() - startMs,
-      };
-      const error = shellFailure(spec, args, result, killedBy);
-      if (error) {
-        // Attach the result so callers can persist the action receipt.
-        (error as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT] = result;
-        reject(error);
-        return;
-      }
-      resolve(result);
+      void flushLines()
+        .then(() => {
+          const result: ShellActionResult = {
+            command: spec.command,
+            args,
+            cwd,
+            stdout,
+            stderr,
+            exitCode,
+            signal: signalName,
+            durationMs: Date.now() - startMs,
+          };
+          const error = lineError ?? shellFailure(spec, args, result, killedBy);
+          if (error) {
+            // Attach the result so callers can persist the action receipt.
+            (error as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT] = result;
+            reject(error);
+            return;
+          }
+          resolve(result);
+        })
+        .catch((error: unknown) => {
+          const failure = error instanceof Error ? error : new Error(String(error));
+          lineError = failure;
+          reject(failure);
+        });
     });
   });
 

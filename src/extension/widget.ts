@@ -2,6 +2,12 @@ import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatDuration } from "../render/format.js";
 import { nodeTypeGlyph } from "../render/node-type.js";
+import {
+  estimateProgress,
+  formatProgressLine,
+  formatRemaining,
+  type ProgressEstimate,
+} from "../workflows/progress.js";
 import { sanitizeText } from "../workflows/text.js";
 import type {
   WorkflowDefinitionSnapshot,
@@ -93,13 +99,17 @@ export function buildWidgetView(
     );
   }
 
-  const budget = PI_MAX_WIDGET_LINES - 1 - footer.length;
+  const progress = progressLines(state, now).slice(0, 4);
+  const budget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
   const nodes = displayNodeIds(snapshot).map((nodeId) =>
     compactNodeLine(state, snapshot, nodeId, now, paused, theme),
   );
-  if (nodes.length === 0) {
+  if (nodes.length === 0 || budget <= 0) {
     return {
-      lines: fitLines([header, ...footer], availableWidth),
+      lines: fitLines(
+        [header, ...progress, ...footer].slice(0, PI_MAX_WIDGET_LINES),
+        availableWidth,
+      ),
       scroll: 0,
       maxScroll: 0,
     };
@@ -110,12 +120,65 @@ export function buildWidgetView(
   const indentation = availableWidth >= 3 ? "  " : "";
   return {
     lines: fitLines(
-      [header, ...windowed.lines.map((line) => `${indentation}${line}`), ...footer],
+      [
+        header,
+        ...windowed.lines.map((line) => `${indentation}${line}`),
+        ...progress.map((line) => `${indentation}${line}`),
+        ...footer,
+      ],
       availableWidth,
     ),
     scroll: windowed.scroll,
     maxScroll: windowed.maxScroll,
   };
+}
+
+function progressLines(state: WorkflowRunState, now: Date): string[] {
+  const estimates = monitorEstimates(state) ?? latestProgressEstimates(state, now);
+  const lines = estimates.map((estimate) => formatProgressLine(estimate, now));
+  const schedule = (state.updates ?? []).find(
+    (record) => record.type === "monitor.schedule" && record.key === "next-check",
+  );
+  if (schedule !== undefined && typeof schedule.data.nextCheckAt === "string") {
+    const next = Date.parse(schedule.data.nextCheckAt);
+    if (Number.isFinite(next)) {
+      const age = Math.max(0, now.getTime() - Date.parse(schedule.at));
+      lines.push(
+        `Last update ${formatRemaining(age)} ago  next check ${formatRemaining(next - now.getTime())}`,
+      );
+    }
+  }
+  return lines;
+}
+
+function monitorEstimates(state: WorkflowRunState): ProgressEstimate[] | undefined {
+  const output = state.outputs.estimate;
+  if (output === null || typeof output !== "object" || Array.isArray(output)) return undefined;
+  const tracks = (output as { tracks?: unknown }).tracks;
+  if (!Array.isArray(tracks)) return undefined;
+  const estimates = tracks
+    .map((track) =>
+      track !== null && typeof track === "object" && !Array.isArray(track)
+        ? (track as { estimate?: ProgressEstimate }).estimate
+        : undefined,
+    )
+    .filter((estimate): estimate is ProgressEstimate => estimate !== undefined);
+  return estimates.length > 0 ? estimates : undefined;
+}
+
+function latestProgressEstimates(state: WorkflowRunState, now: Date): ProgressEstimate[] {
+  const estimates: ProgressEstimate[] = [];
+  for (const record of state.updates ?? []) {
+    if (record.type !== "progress") continue;
+    try {
+      estimates.push(
+        estimateProgress(record.key, [{ at: record.at, data: record.data as never }], now),
+      );
+    } catch {
+      // A malformed historical update must not break the workflow widget.
+    }
+  }
+  return estimates;
 }
 
 function compactFocusIndex(state: WorkflowRunState, snapshot: WorkflowDefinitionSnapshot): number {

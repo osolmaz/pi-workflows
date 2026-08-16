@@ -16,7 +16,10 @@ import type {
   WorkflowSessionEventRecord,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
+  WorkflowUpdateInput,
+  WorkflowUpdateRecord,
 } from "./types.js";
+import { createUpdateId, updateProjection } from "./updates.js";
 
 export const RUN_BUNDLE_SCHEMA = "pi-workflows.run-bundle.v1" as const;
 export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
@@ -427,6 +430,42 @@ export class WorkflowRunStore {
       await this.writeLoadedProjections(runDir, state);
     });
     return await readRunBundle(runDir);
+  }
+
+  /** Publish one durable update under the run's serialized claim-fenced writer. */
+  async publishUpdate(
+    runDir: string,
+    state: WorkflowRunState,
+    nodeId: string,
+    attemptId: string,
+    update: WorkflowUpdateInput,
+  ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
+    return await this.withRunLock(runDir, async () => {
+      const updateId = createUpdateId();
+      const event = await this.appendTraceEvent(runDir, state.runId, {
+        scope: "update",
+        type: "update_published",
+        nodeId,
+        attemptId,
+        payload: { updateId, type: update.type, key: update.key, data: update.data },
+      });
+      const record: WorkflowUpdateRecord = {
+        updateId,
+        seq: event.seq,
+        at: event.at,
+        runId: state.runId,
+        nodeId,
+        attemptId,
+        type: update.type,
+        key: update.key,
+        data: update.data,
+      };
+      state.updates = updateProjection(state.updates, record);
+      state.traceSeq = event.seq;
+      state.updatedAt = event.at;
+      await this.writeProjections(runDir, state);
+      return { event, record };
+    });
   }
 
   /**

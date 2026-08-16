@@ -168,6 +168,55 @@ describe("nodeTypeGlyph", () => {
 });
 
 describe("buildWidgetLines", () => {
+  it("shows optional progress, ETA, elapsed update age, and next-check time", () => {
+    const now = new Date("2026-01-01T00:10:00.000Z");
+    const state = makeState({
+      currentNode: "second",
+      updates: [
+        {
+          updateId: "u1",
+          seq: 2,
+          at: "2026-01-01T00:09:00.000Z",
+          runId: "r1",
+          nodeId: "work",
+          attemptId: "a1",
+          type: "progress",
+          key: "overall",
+          data: {
+            schema: "pi-workflows.progress.v1",
+            label: "Import",
+            status: "running",
+            completed: 40,
+            total: 100,
+            unit: "rows",
+            sourceEstimatedFinishAt: "2026-01-01T00:30:00.000Z",
+          },
+        },
+        {
+          updateId: "u2",
+          seq: 3,
+          at: "2026-01-01T00:09:00.000Z",
+          runId: "r1",
+          nodeId: "schedule",
+          attemptId: "a2",
+          type: "monitor.schedule",
+          key: "next-check",
+          data: {
+            schema: "pi-workflows.monitor-schedule.v1",
+            lastCheckAt: "2026-01-01T00:09:00.000Z",
+            nextCheckAt: "2026-01-01T00:39:00.000Z",
+            everyMinutes: 30,
+          },
+        },
+      ],
+    });
+
+    const lines = buildWidgetLines(state, snapshot, now).join("\n");
+    expect(lines).toContain("Import  40/100 rows  source ETA 20m");
+    expect(lines).toContain("Last update 1m ago  next check 29m");
+    expect(lines.split("\n").length).toBeLessThanOrEqual(10);
+  });
+
   it("uses the compact one-line node list at wide widths", () => {
     const state = makeState({
       currentNode: "second",

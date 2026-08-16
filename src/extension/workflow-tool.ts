@@ -39,6 +39,22 @@ export const WorkflowToolParameters: TSchema = Type.Union([
   ),
   Type.Object(
     {
+      action: StringEnum(["update"] as const),
+      step: Type.String({ description: "Active step id" }),
+      attempt: Type.String({ description: "Active attempt id" }),
+      update: Type.Object(
+        {
+          type: Type.String(),
+          key: Type.String(),
+          data: Type.Record(Type.String(), Type.Unknown()),
+        },
+        noExtraProperties,
+      ),
+    },
+    noExtraProperties,
+  ),
+  Type.Object(
+    {
       action: StringEnum(["submit"] as const),
       step: Type.String({ description: "Step id from the workflow step contract" }),
       attempt: Type.String({ description: "Attempt id from the workflow step contract" }),
@@ -56,4 +72,10 @@ export type WorkflowToolInput =
   | { action: "resume" }
   | { action: "cancel" }
   | { action: "answer"; input: unknown; runId?: string }
+  | {
+      action: "update";
+      step: string;
+      attempt: string;
+      update: { type: string; key: string; data: Record<string, unknown> };
+    }
   | { action: "submit"; step: string; attempt: string; output: unknown };

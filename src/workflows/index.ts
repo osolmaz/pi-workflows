@@ -29,6 +29,26 @@ export {
   type WorkflowSearchPaths,
 } from "./loader.js";
 export { renderShellCommand, runShellAction } from "./shell.js";
+export {
+  estimateProgress,
+  formatProgressLine,
+  formatProgressReport,
+  formatRemaining,
+  progressTracksFromRecords,
+  type ProgressConfidence,
+  type ProgressEstimate,
+  type ProgressSample,
+  type ProgressTrackState,
+} from "./progress.js";
+export {
+  MAX_CURRENT_UPDATES,
+  MAX_UPDATE_DATA_BYTES,
+  UPDATE_RATE_BURST,
+  UPDATE_RATE_PER_SECOND,
+  updateProjection,
+  validateProgressData,
+  validateWorkflowUpdate,
+} from "./updates.js";
 export { sanitizeText, stripAnsi } from "./text.js";
 export {
   ARTIFACT_THRESHOLD_BYTES,
@@ -71,6 +91,7 @@ export type {
   ShellActionExecution,
   ShellActionNodeDefinition,
   ShellActionResult,
+  WorkflowActionContext,
   WorkflowActionReceipt,
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -86,6 +107,8 @@ export type {
   WorkflowNotificationRequest,
   WorkflowNotificationSink,
   WorkflowPresentationContext,
+  WorkflowProgressData,
+  WorkflowProgressStatus,
   WorkflowRunManifest,
   WorkflowRunResult,
   WorkflowRunState,
@@ -96,4 +119,9 @@ export type {
   WorkflowStepRecord,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
+  WorkflowUpdateInput,
+  WorkflowUpdateReceipt,
+  WorkflowUpdateRecord,
+  ShellActionUpdates,
+  ShellUpdateLine,
 } from "./types.js";

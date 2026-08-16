@@ -19,6 +19,55 @@ export type WorkflowNodeContext<TInput = unknown> = {
   signal: AbortSignal;
 };
 
+export type WorkflowUpdateInput = {
+  type: string;
+  key: string;
+  data: Record<string, unknown>;
+};
+
+export type WorkflowUpdateRecord = {
+  updateId: string;
+  seq: number;
+  at: string;
+  runId: string;
+  nodeId: string;
+  attemptId: string;
+  type: string;
+  key: string;
+  data: Record<string, unknown>;
+};
+
+export type WorkflowUpdateReceipt = Pick<
+  WorkflowUpdateRecord,
+  "updateId" | "seq" | "at" | "type" | "key"
+>;
+
+export type WorkflowActionContext<TInput = unknown> = WorkflowNodeContext<TInput> & {
+  publishUpdate(update: WorkflowUpdateInput): Promise<WorkflowUpdateReceipt>;
+};
+
+export type WorkflowProgressStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export type WorkflowProgressData = {
+  schema: "pi-workflows.progress.v1";
+  status: WorkflowProgressStatus;
+  label?: string;
+  phase?: string;
+  completed?: number;
+  total?: number;
+  unit?: string;
+  sourceUpdatedAt?: string;
+  sourceEstimatedFinishAt?: string;
+};
+
 export type WorkflowNodeCommon = {
   /**
    * Per-node timeout or a callback that derives it from the run context.
@@ -78,7 +127,7 @@ export type NotifyNodeDefinition = WorkflowNodeCommon & {
 /** A deterministic runtime-owned step implemented as a local function. */
 export type FunctionActionNodeDefinition = WorkflowNodeCommon & {
   nodeType: "action";
-  run: (context: WorkflowNodeContext) => MaybePromise<unknown>;
+  run: (context: WorkflowActionContext) => MaybePromise<unknown>;
 };
 
 export type ShellActionExecution = {
@@ -106,10 +155,24 @@ export type ShellActionResult = {
 };
 
 /** A deterministic runtime-owned step implemented as a shell command. */
+export type ShellUpdateLine = {
+  stream: "stdout" | "stderr";
+  text: string;
+};
+
+export type ShellActionUpdates = {
+  streams?: Array<"stdout" | "stderr">;
+  parseLine: (
+    line: ShellUpdateLine,
+    context: WorkflowActionContext,
+  ) => MaybePromise<WorkflowUpdateInput | WorkflowUpdateInput[] | undefined>;
+};
+
 export type ShellActionNodeDefinition = WorkflowNodeCommon & {
   nodeType: "action";
   exec: (context: WorkflowNodeContext) => MaybePromise<ShellActionExecution>;
   parse?: (result: ShellActionResult, context: WorkflowNodeContext) => MaybePromise<unknown>;
+  updates?: ShellActionUpdates;
 };
 
 export type ActionNodeDefinition = FunctionActionNodeDefinition | ShellActionNodeDefinition;
@@ -277,6 +340,8 @@ export type WorkflowRunState = {
   outputs: Record<string, unknown>;
   results: Record<string, WorkflowNodeResult>;
   steps: WorkflowStepRecord[];
+  /** Latest update for each `(type, key)` pair, sorted by trace sequence. */
+  updates?: WorkflowUpdateRecord[];
   currentNode?: string;
   currentAttemptId?: string;
   currentNodeStartedAt?: string;
@@ -308,7 +373,7 @@ export type WorkflowDefinitionSnapshot = {
 export type WorkflowTraceEvent = {
   seq: number;
   at: string;
-  scope: "run" | "node" | "agent" | "action" | "session";
+  scope: "run" | "node" | "agent" | "action" | "session" | "update";
   type: string;
   runId: string;
   nodeId?: string;
@@ -439,6 +504,11 @@ export type AgentStepRequest = {
    * error message the executor should surface to the model for retry.
    */
   accept: (output: unknown) => Promise<{ ok: true; value: unknown } | { ok: false; error: string }>;
+  /** Publish a non-completing update from a headless executor. */
+  publishUpdate?: (
+    update: WorkflowUpdateInput,
+    idempotencyKey?: string,
+  ) => Promise<WorkflowUpdateReceipt>;
 };
 
 export type AgentStepSubmission = {

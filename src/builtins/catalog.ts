@@ -4,7 +4,7 @@ import monitorWorkflow from "./monitor.workflow.js";
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   {
     id: "monitor",
-    revision: "2",
+    revision: "3",
     definition: monitorWorkflow,
     legacySources: [
       {

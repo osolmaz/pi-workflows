@@ -1,52 +1,51 @@
-import { agent, compute, defineWorkflow, notify, shell } from "../workflows/definition.js";
-import type { WorkflowNodeContext } from "../workflows/types.js";
+import { action, agent, compute, defineWorkflow, notify, shell } from "../workflows/definition.js";
+import {
+  estimateProgress,
+  formatProgressReport,
+  type ProgressSample,
+  type ProgressTrackState,
+} from "../workflows/progress.js";
+import type {
+  WorkflowDefinition,
+  WorkflowNodeContext,
+  WorkflowProgressData,
+} from "../workflows/types.js";
+import { validateProgressData } from "../workflows/updates.js";
 
 const MIN_INTERVAL_MINUTES = 1;
 const MAX_INTERVAL_MINUTES = 24 * 60;
+const DEFAULT_INTERVAL_MINUTES = 30;
 const MIN_CHECK_TIMEOUT_MINUTES = 5;
 const MAX_CHECK_TIMEOUT_MINUTES = 24 * 60;
 const DEFAULT_MIN_CHECK_TIMEOUT_MINUTES = 60;
 const DEFAULT_MAX_CHECKS = 1_000;
 const MAX_CHECKS = 1_000;
+const MAX_TRACKS = 256;
 const MAX_OBSERVATION_CHARS = 8_000;
 const MAX_REPORT_CHARS = 4_000;
 const MAX_REASON_CHARS = 2_000;
 const SLEEP_TIMEOUT_MARGIN_MS = 60_000;
 const NODE_TIMEOUT_MARGIN_MS = 2 * 60_000;
 
-type MonitorInput = {
+export type MonitorInput = {
   task: string;
-  everyMinutes: number;
-  reportWhen?: string;
+  everyMinutes?: number;
   stopWhen?: string;
   maxChecks?: number;
   checkTimeoutMinutes?: number;
 };
 
-type MonitorConfig = {
-  task: string;
-  everyMinutes: number;
-  reportWhen: string;
-  stopWhen: string;
-  maxChecks: number;
-  checkTimeoutMinutes: number;
-};
-
-type MonitorRoute = "continue_quiet" | "continue_report" | "stop_quiet" | "stop_report";
-
+type MonitorConfig = Required<MonitorInput>;
+type MonitorRoute = "continue" | "stop";
+type MonitorTrack = { key: string; data: WorkflowProgressData };
 type MonitorCheck = {
   route: MonitorRoute;
   observation: string;
-  report?: string;
+  report: string;
+  progress?: { tracks: MonitorTrack[] };
   reason: string;
 };
-
-const MONITOR_ROUTES = new Set<MonitorRoute>([
-  "continue_quiet",
-  "continue_report",
-  "stop_quiet",
-  "stop_report",
-]);
+type MonitorEstimate = { tracks: ProgressTrackState[] };
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -56,27 +55,21 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 }
 
 function requireBoundedString(value: unknown, label: string, maxChars: number): string {
-  if (typeof value !== "string") {
-    throw new Error(`${label} must be a string`);
-  }
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
   const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-  if (trimmed.length > maxChars) {
-    throw new Error(`${label} must be at most ${maxChars} characters`);
-  }
+  if (trimmed.length === 0) throw new Error(`${label} must not be empty`);
+  if (trimmed.length > maxChars) throw new Error(`${label} must be at most ${maxChars} characters`);
   return trimmed;
 }
 
-function prepareInput(input: unknown): MonitorConfig {
+export function prepareMonitorInput(input: unknown): MonitorConfig {
   const value = requireRecord(input, "monitor input") as Partial<MonitorInput>;
   const task = requireBoundedString(value.task, "task", 8_000);
+  const everyMinutes = value.everyMinutes ?? DEFAULT_INTERVAL_MINUTES;
   if (
-    typeof value.everyMinutes !== "number" ||
-    !Number.isInteger(value.everyMinutes) ||
-    value.everyMinutes < MIN_INTERVAL_MINUTES ||
-    value.everyMinutes > MAX_INTERVAL_MINUTES
+    !Number.isInteger(everyMinutes) ||
+    everyMinutes < MIN_INTERVAL_MINUTES ||
+    everyMinutes > MAX_INTERVAL_MINUTES
   ) {
     throw new Error(
       `everyMinutes must be an integer from ${MIN_INTERVAL_MINUTES} through ${MAX_INTERVAL_MINUTES}`,
@@ -87,7 +80,7 @@ function prepareInput(input: unknown): MonitorConfig {
     throw new Error(`maxChecks must be an integer from 1 through ${MAX_CHECKS}`);
   }
   const checkTimeoutMinutes =
-    value.checkTimeoutMinutes ?? Math.max(DEFAULT_MIN_CHECK_TIMEOUT_MINUTES, value.everyMinutes);
+    value.checkTimeoutMinutes ?? Math.max(DEFAULT_MIN_CHECK_TIMEOUT_MINUTES, everyMinutes);
   if (
     !Number.isInteger(checkTimeoutMinutes) ||
     checkTimeoutMinutes < MIN_CHECK_TIMEOUT_MINUTES ||
@@ -99,14 +92,10 @@ function prepareInput(input: unknown): MonitorConfig {
   }
   return {
     task,
-    everyMinutes: value.everyMinutes,
-    reportWhen:
-      value.reportWhen === undefined
-        ? "The observed state changes materially or needs the user's attention."
-        : requireBoundedString(value.reportWhen, "reportWhen", 4_000),
+    everyMinutes,
     stopWhen:
       value.stopWhen === undefined
-        ? "The user cancels the monitor or it reaches its maximum check count."
+        ? "Stop only when the user explicitly asks to stop."
         : requireBoundedString(value.stopWhen, "stopWhen", 4_000),
     maxChecks,
     checkTimeoutMinutes,
@@ -117,124 +106,181 @@ function configFrom(outputs: Record<string, unknown>): MonitorConfig {
   return outputs.prepare as MonitorConfig;
 }
 
-function agentTimeoutMs({ outputs }: WorkflowNodeContext): number {
-  return configFrom(outputs).checkTimeoutMinutes * 60_000;
-}
-
 function completedChecks(context: WorkflowNodeContext): number {
   return context.state.steps.filter((step) => step.nodeId === "check" && step.outcome === "ok")
     .length;
 }
 
-function validateCheck(output: unknown): MonitorCheck {
+export function validateMonitorCheck(output: unknown): MonitorCheck {
   const value = requireRecord(output, "monitor check output");
-  if (typeof value.route !== "string" || !MONITOR_ROUTES.has(value.route as MonitorRoute)) {
-    throw new Error(`route must be one of ${[...MONITOR_ROUTES].join(", ")}`);
+  const allowed = new Set(["route", "observation", "report", "progress", "reason"]);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`monitor check field ${key} is not supported`);
+  if (value.route !== "continue" && value.route !== "stop")
+    throw new Error("route must be continue or stop");
+  const check: MonitorCheck = {
+    route: value.route,
+    observation: requireBoundedString(value.observation, "observation", MAX_OBSERVATION_CHARS),
+    report: requireBoundedString(value.report, "report", MAX_REPORT_CHARS),
+    reason: requireBoundedString(value.reason, "reason", MAX_REASON_CHARS),
+  };
+  if (value.progress !== undefined) check.progress = validateMonitorProgress(value.progress);
+  return check;
+}
+
+function validateMonitorProgress(input: unknown): { tracks: MonitorTrack[] } {
+  const value = requireRecord(input, "progress");
+  if (Object.keys(value).some((key) => key !== "tracks"))
+    throw new Error("progress only supports tracks");
+  if (!Array.isArray(value.tracks) || value.tracks.length < 1 || value.tracks.length > MAX_TRACKS) {
+    throw new Error(`progress.tracks must contain 1 through ${MAX_TRACKS} entries`);
   }
-  const route = value.route as MonitorRoute;
-  const observation = requireBoundedString(value.observation, "observation", MAX_OBSERVATION_CHARS);
-  const reason = requireBoundedString(value.reason, "reason", MAX_REASON_CHARS);
-  const reports = route === "continue_report" || route === "stop_report";
-  const report =
-    value.report === undefined
-      ? undefined
-      : requireBoundedString(value.report, "report", MAX_REPORT_CHARS);
-  if (reports && report === undefined) {
-    throw new Error(`route ${route} requires a report`);
-  }
+  const keys = new Set<string>();
+  const tracks = value.tracks.map((raw, index) => {
+    const track = requireRecord(raw, `progress.tracks[${index}]`);
+    if (Object.keys(track).some((key) => key !== "key" && key !== "data")) {
+      throw new Error(`progress.tracks[${index}] has an unsupported field`);
+    }
+    const key = requireBoundedString(track.key, `progress.tracks[${index}].key`, 128);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(key))
+      throw new Error(`progress.tracks[${index}].key is invalid`);
+    if (keys.has(key)) throw new Error(`progress track key ${key} is duplicated`);
+    keys.add(key);
+    return {
+      key,
+      data: validateProgressData(requireRecord(track.data, `progress.tracks[${index}].data`)),
+    };
+  });
+  return { tracks };
+}
+
+function estimateTracks(outputs: Record<string, unknown>): MonitorEstimate {
+  const check = outputs.check as MonitorCheck;
+  if (check.progress === undefined) return { tracks: [] };
+  const previous = outputs.estimate as MonitorEstimate | undefined;
+  const previousByKey = new Map((previous?.tracks ?? []).map((track) => [track.key, track]));
+  const at = new Date().toISOString();
   return {
-    route,
-    observation,
-    ...(report !== undefined ? { report } : {}),
-    reason,
+    tracks: check.progress.tracks.map((track) => {
+      const samples: ProgressSample[] = [
+        ...(previousByKey.get(track.key)?.samples ?? []),
+        { at, data: track.data },
+      ].slice(-9);
+      return { key: track.key, samples, estimate: estimateProgress(track.key, samples) };
+    }),
   };
 }
 
 function reportMessage(outputs: Record<string, unknown>): string {
   const check = outputs.check as MonitorCheck;
-  return check.report ?? check.observation;
+  const estimate = outputs.estimate as MonitorEstimate;
+  if (estimate.tracks.length === 0) return check.report;
+  const config = configFrom(outputs);
+  const structured = formatProgressReport(
+    estimate.tracks.map((track) => track.estimate),
+    check.route === "continue" ? config.everyMinutes : undefined,
+  );
+  return `${check.report}\n${structured}`.slice(0, MAX_REPORT_CHARS);
 }
 
-export default defineWorkflow({
+const monitorWorkflow: WorkflowDefinition = defineWorkflow({
   name: "monitor",
   title: ({ input }) => {
     try {
-      const task = prepareInput(input).task;
-      return `monitor: ${task.slice(0, 80)}`;
+      return `monitor: ${prepareMonitorInput(input).task.slice(0, 80)}`;
     } catch {
       return "monitor";
     }
   },
-  presentationPrompt: ({ finalOutput }) => {
-    const result = requireRecord(finalOutput, "monitor result");
-    if (result.reported === true) {
-      return undefined;
-    }
-    return `Tell the user concisely why this monitor stopped: ${String(result.reason ?? "monitor ended")}`;
-  },
   startAt: "prepare",
-  maxSteps: 5_010,
+  maxSteps: 9_010,
   nodes: {
-    prepare: compute({
-      run: ({ input }) => prepareInput(input),
-    }),
-    guard: compute({
-      run: (context) => {
-        const config = configFrom(context.outputs);
-        const checks = completedChecks(context);
-        return checks >= config.maxChecks
-          ? { route: "stop", checks, reason: `Reached the ${config.maxChecks}-check limit.` }
-          : { route: "check", checks };
-      },
-    }),
-    continue_guard: compute({
-      run: (context) => {
-        const config = configFrom(context.outputs);
-        const checks = completedChecks(context);
-        return checks >= config.maxChecks
-          ? { route: "stop", checks, reason: `Reached the ${config.maxChecks}-check limit.` }
-          : { route: "sleep", checks };
-      },
-    }),
+    prepare: compute({ run: ({ input }) => prepareMonitorInput(input) }),
     check: agent({
       statusDetail: "checking monitored target",
-      timeoutMs: agentTimeoutMs,
+      timeoutMs: ({ outputs }) => configFrom(outputs).checkTimeoutMinutes * 60_000,
       prompt: (context) => {
         const config = configFrom(context.outputs);
         const previous = context.outputs.check as MonitorCheck | undefined;
-        const checkNumber = completedChecks(context) + 1;
+        const priorEstimate = context.outputs.estimate as MonitorEstimate | undefined;
         return [
-          `Perform monitoring check ${checkNumber} of at most ${config.maxChecks}.`,
+          `Perform monitoring check ${completedChecks(context) + 1} of at most ${config.maxChecks}.`,
           `Task: ${config.task}`,
-          `Report when: ${config.reportWhen}`,
           `Stop when: ${config.stopWhen}`,
           previous === undefined
-            ? "There is no previous observation. Report the initial state only when the report condition calls for it."
+            ? "There is no previous observation."
             : `Previous accepted observation: ${previous.observation}`,
-          "Use available tools to inspect the current state. Observe only unless the task explicitly authorizes a mutation.",
-          "Choose continue_quiet, continue_report, stop_quiet, or stop_report. A report route requires concise report text.",
+          priorEstimate?.tracks.length
+            ? `Previous progress: ${formatProgressReport(priorEstimate.tracks.map((track) => track.estimate))}`
+            : "There is no previous measured progress.",
+          "Use available tools to inspect the current source of truth. Observe only unless the task explicitly authorizes a mutation.",
+          "Every accepted check must include a concise user-facing report. Add progress tracks only when the target provides measurable facts. Submit observed counts and target-provided finish times; do not invent rates or an ETA.",
+          "Choose route continue or stop.",
         ].join("\n\n");
       },
       expectedOutput:
-        '{ "route": "continue_quiet" | "continue_report" | "stop_quiet" | "stop_report", "observation": "current factual state", "report": "required for report routes", "reason": "short reason" }',
-      validate: (output) => validateCheck(output),
+        '{ "route": "continue" | "stop", "observation": "current factual state", "report": "concise status update", "progress": { "tracks": [{ "key": "stable-key", "data": { "schema": "pi-workflows.progress.v1", "status": "running", "completed": 1, "total": 2, "unit": "items" } }] } (optional), "reason": "short reason" }',
+      validate: (output) => validateMonitorCheck(output),
     }),
-    report_continue: notify({
+    estimate: compute({ run: ({ outputs }) => estimateTracks(outputs) }),
+    publish_progress: action({
+      statusDetail: "publishing monitor progress",
+      run: async ({ outputs, publishUpdate }) => {
+        const check = outputs.check as MonitorCheck;
+        if (check.progress === undefined) return { published: 0 };
+        for (const track of check.progress.tracks) {
+          await publishUpdate({ type: "progress", key: track.key, data: track.data });
+        }
+        return { published: check.progress.tracks.length };
+      },
+    }),
+    report: notify({
       statusDetail: "queueing monitor update",
       message: ({ outputs }) => reportMessage(outputs),
       kind: "progress",
     }),
-    report_stop: notify({
-      statusDetail: "queueing final monitor update",
-      message: ({ outputs }) => reportMessage(outputs),
-      kind: "final",
+    decide: compute({
+      run: (context) => {
+        const check = context.outputs.check as MonitorCheck;
+        const config = configFrom(context.outputs);
+        const checks = completedChecks(context);
+        if (check.route === "stop") return { route: "stop", reason: check.reason, checks };
+        if (checks >= config.maxChecks) {
+          return {
+            route: "stop",
+            reason: `Reached the ${config.maxChecks}-check safety limit.`,
+            checks,
+          };
+        }
+        return { route: "continue", reason: check.reason, checks };
+      },
+    }),
+    schedule: action({
+      statusDetail: "scheduling next monitor check",
+      run: async ({ outputs, publishUpdate }) => {
+        const config = configFrom(outputs);
+        const lastCheckAt = new Date().toISOString();
+        const nextCheckAt = new Date(
+          Date.parse(lastCheckAt) + config.everyMinutes * 60_000,
+        ).toISOString();
+        await publishUpdate({
+          type: "monitor.schedule",
+          key: "next-check",
+          data: {
+            schema: "pi-workflows.monitor-schedule.v1",
+            lastCheckAt,
+            nextCheckAt,
+            everyMinutes: config.everyMinutes,
+          },
+        });
+        return { lastCheckAt, nextCheckAt, everyMinutes: config.everyMinutes };
+      },
     }),
     sleep: shell({
       statusDetail: "waiting for next monitor check",
       timeoutMs: MAX_INTERVAL_MINUTES * 60_000 + NODE_TIMEOUT_MARGIN_MS,
       exec: ({ outputs }) => {
-        const config = configFrom(outputs);
-        const sleepMs = config.everyMinutes * 60_000;
+        const sleepMs = configFrom(outputs).everyMinutes * 60_000;
         return {
           command: process.execPath,
           args: ["-e", "setTimeout(() => {}, Number(process.argv[1]))", String(sleepMs)],
@@ -246,40 +292,27 @@ export default defineWorkflow({
     }),
     finish: compute({
       run: ({ outputs }) => {
-        const check = outputs.check as MonitorCheck | undefined;
-        const guard = outputs.guard as { reason?: string } | undefined;
-        const continueGuard = outputs.continue_guard as { reason?: string } | undefined;
+        const check = outputs.check as MonitorCheck;
+        const decision = outputs.decide as { reason?: string; checks?: number } | undefined;
         return {
-          reason: continueGuard?.reason ?? guard?.reason ?? check?.reason ?? "Monitor finished.",
-          observation: check?.observation ?? null,
-          reported:
-            outputs.report_stop !== undefined ||
-            (check !== undefined && check.route === "stop_report"),
+          reason: decision?.reason ?? check.reason,
+          observation: check.observation,
+          checks: decision?.checks ?? 1,
+          reported: true,
         };
       },
     }),
   },
   edges: [
-    { from: "prepare", to: "guard" },
-    { from: "guard", switch: { on: "$.route", cases: { check: "check", stop: "finish" } } },
-    {
-      from: "check",
-      switch: {
-        on: "$.route",
-        cases: {
-          continue_quiet: "continue_guard",
-          continue_report: "report_continue",
-          stop_quiet: "finish",
-          stop_report: "report_stop",
-        },
-      },
-    },
-    { from: "report_continue", to: "continue_guard" },
-    { from: "report_stop", to: "finish" },
-    {
-      from: "continue_guard",
-      switch: { on: "$.route", cases: { sleep: "sleep", stop: "finish" } },
-    },
-    { from: "sleep", to: "guard" },
+    { from: "prepare", to: "check" },
+    { from: "check", to: "estimate" },
+    { from: "estimate", to: "publish_progress" },
+    { from: "publish_progress", to: "report" },
+    { from: "report", to: "decide" },
+    { from: "decide", switch: { on: "$.route", cases: { stop: "finish", continue: "schedule" } } },
+    { from: "schedule", to: "sleep" },
+    { from: "sleep", to: "check" },
   ],
 });
+
+export default monitorWorkflow;

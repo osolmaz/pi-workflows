@@ -23,6 +23,16 @@ type StepSubmission = {
   output: unknown;
 };
 
+type StepUpdate = {
+  action: "update";
+  step: string;
+  attempt: string;
+  update: { type: string; key: string; data: Record<string, unknown> };
+  idempotencyKey?: string;
+};
+
+type StepAction = StepSubmission | StepUpdate;
+
 export type RpcStepExecutorOptions = {
   cwd: string;
   registry: HostProcessRegistry;
@@ -46,7 +56,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
   private child: ChildProcess | null = null;
   private childExited: { code: number | null; signal: string | null } | null = null;
   private stderrBuffer = "";
-  private submissions: StepSubmission[] = [];
+  private actions: StepAction[] = [];
   private submissionWaiters: Array<() => void> = [];
   private stdoutBuffer = "";
 
@@ -179,13 +189,13 @@ export class RpcStepExecutor implements AgentStepExecutor {
           continue;
         }
         try {
-          const parsed = JSON.parse(line.slice(RPC_SUBMISSION_PREFIX.length)) as StepSubmission;
+          const parsed = JSON.parse(line.slice(RPC_SUBMISSION_PREFIX.length)) as StepAction;
           if (
-            parsed.action === "submit" &&
+            (parsed.action === "submit" || parsed.action === "update") &&
             typeof parsed.step === "string" &&
             typeof parsed.attempt === "string"
           ) {
-            this.submissions.push(parsed);
+            this.actions.push(parsed);
           }
         } catch {
           // A malformed marker line is ignored; the step times out instead.
@@ -209,10 +219,6 @@ export class RpcStepExecutor implements AgentStepExecutor {
     if (child === null || this.childExited !== null) {
       throw new Error("Headless pi session is not running");
     }
-    const matching = this.takeMatchingSubmission(request);
-    if (matching !== undefined) {
-      return matching;
-    }
     child.stdin?.write(`${JSON.stringify({ type: "prompt", message: prompt })}\n`);
     for (;;) {
       throwIfAborted(signal);
@@ -220,9 +226,14 @@ export class RpcStepExecutor implements AgentStepExecutor {
       if (exited !== null) {
         throw new Error(`Headless pi session exited mid-step (code ${exited.code})`);
       }
-      const found = this.takeMatchingSubmission(request);
-      if (found !== undefined) {
-        return found;
+      const found = this.takeMatchingAction(request);
+      if (found?.action === "submit") return found;
+      if (found?.action === "update") {
+        if (request.publishUpdate === undefined) {
+          throw new Error("This workflow host does not support step updates");
+        }
+        await request.publishUpdate(found.update, found.idempotencyKey);
+        continue;
       }
       await new Promise<void>((resolve, reject) => {
         const waiter = () => {
@@ -239,13 +250,13 @@ export class RpcStepExecutor implements AgentStepExecutor {
     }
   }
 
-  private takeMatchingSubmission(request: AgentStepRequest): StepSubmission | undefined {
-    const index = this.submissions.findIndex(
+  private takeMatchingAction(request: AgentStepRequest): StepAction | undefined {
+    const index = this.actions.findIndex(
       (candidate) =>
         candidate.step === request.contract.nodeId &&
         candidate.attempt === request.contract.attemptId,
     );
-    return index === -1 ? undefined : (this.submissions.splice(index, 1)[0] as StepSubmission);
+    return index === -1 ? undefined : (this.actions.splice(index, 1)[0] as StepAction);
   }
 
   private sendAbortQuietly(): void {

@@ -15,26 +15,49 @@ export default function piWorkflowsRpcBridge(pi: ExtensionAPI) {
     name: "workflow",
     label: "Workflow",
     description: [
-      "Submit the output for the pending workflow step with action submit.",
+      "Publish an update or submit the output for the pending workflow step.",
       "Only call this tool when a workflow step contract in the conversation asks you to.",
-      "Pass the exact step id from the contract and your result as the output.",
+      "Pass the exact step and attempt ids from the contract.",
     ].join(" "),
-    parameters: Type.Object(
-      {
-        action: StringEnum(["submit"] as const),
-        step: Type.String({ description: "Step id from the workflow step contract" }),
-        attempt: Type.String({ description: "Attempt id from the workflow step contract" }),
-        output: Type.Unknown({ description: "Step output matching the expected shape" }),
-      },
-      { additionalProperties: false },
-    ),
-    async execute(_toolCallId, params) {
-      process.stderr.write(`${RPC_SUBMISSION_PREFIX}${JSON.stringify(params)}\n`);
+    parameters: Type.Union([
+      Type.Object(
+        {
+          action: StringEnum(["update"] as const),
+          step: Type.String(),
+          attempt: Type.String(),
+          update: Type.Object(
+            {
+              type: Type.String(),
+              key: Type.String(),
+              data: Type.Record(Type.String(), Type.Unknown()),
+            },
+            { additionalProperties: false },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          action: StringEnum(["submit"] as const),
+          step: Type.String({ description: "Step id from the workflow step contract" }),
+          attempt: Type.String({ description: "Attempt id from the workflow step contract" }),
+          output: Type.Unknown({ description: "Step output matching the expected shape" }),
+        },
+        { additionalProperties: false },
+      ),
+    ]),
+    async execute(toolCallId, params) {
+      process.stderr.write(
+        `${RPC_SUBMISSION_PREFIX}${JSON.stringify({ ...params, idempotencyKey: toolCallId })}\n`,
+      );
       return {
         content: [
           {
             type: "text",
-            text: "Submission recorded. Continue only when the workflow sends the next step.",
+            text:
+              params.action === "update"
+                ? "Workflow update recorded; continue the current step."
+                : "Submission recorded. Continue only when the workflow sends the next step.",
           },
         ],
         details: {},

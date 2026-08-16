@@ -118,7 +118,7 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "2" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "3" });
     expect(resolved.definition.name).toBe("monitor");
   });
 

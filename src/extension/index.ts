@@ -197,6 +197,10 @@ function workflowStateSummary(state: WorkflowRunState): JsonObject {
     workflowName: state.workflowName,
     status: state.status,
     steps: state.steps.length,
+    updates: (state.updates ?? []).map(({ data, ...record }) => ({
+      ...record,
+      data: data as JsonObject,
+    })),
     ...(state.currentNode !== undefined ? { currentNode: state.currentNode } : {}),
     ...(state.waitingOn !== undefined ? { waitingOn: state.waitingOn } : {}),
     ...(state.startedAt !== undefined ? { startedAt: state.startedAt } : {}),
@@ -1590,13 +1594,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     name: "workflow",
     label: "Workflow",
     description: [
-      "List, start, inspect, pause, resume, cancel, answer, or complete Pi Workflows runs.",
-      "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, everyMinutes, reportWhen, stopWhen, and optional maxChecks.",
-      "Use submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
+      "List, start, inspect, pause, resume, cancel, answer, update, or complete Pi Workflows runs.",
+      "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, everyMinutes, stopWhen, and optional maxChecks.",
+      "Use update or submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
       "Do not start repeated work without the user's request, and keep monitoring observation-only unless the user authorizes mutations.",
     ].join(" "),
     parameters: WorkflowToolParameters,
-    async execute(_toolCallId, params: WorkflowToolInput, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params: WorkflowToolInput, _signal, _onUpdate, ctx) {
       let control: WorkflowControlResult;
       switch (params.action) {
         case "list":
@@ -1623,6 +1627,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
             parentRunId: waiting.parentRunId,
           });
           break;
+        }
+        case "update": {
+          if (!activeRun) throw new Error("No workflow step is active.");
+          const receipt = await activeRun.engine.publishUpdate(
+            params.step,
+            params.attempt,
+            params.update,
+            toolCallId,
+          );
+          return {
+            content: [
+              { type: "text", text: "Workflow update published; the step remains active." },
+            ],
+            details: { action: "update", ...receipt },
+          };
         }
         case "submit": {
           if (!activeRun) {
