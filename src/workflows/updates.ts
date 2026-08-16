@@ -167,6 +167,14 @@ function optionalString(value: unknown, field: string, max: number): void {
   if (typeof value !== "string" || value.trim().length < 1 || value.trim().length > max) {
     throw new Error(`${field} must be 1 to ${max} characters`);
   }
+  if (
+    [...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  ) {
+    throw new Error(`${field} must not contain control characters`);
+  }
 }
 
 function optionalFiniteNonNegative(value: unknown, field: string): void {

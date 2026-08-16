@@ -162,6 +162,14 @@ describe("workflow updates", () => {
       [{ type: "progress", key: "x", data: { ...progress(1, 2), extra: true } }, "not supported"],
       [{ type: "progress", key: "x", data: { ...progress(1, 2), status: "busy" } }, "status"],
       [
+        { type: "progress", key: "x", data: { ...progress(1, 2), label: "fake\nrow" } },
+        "control characters",
+      ],
+      [
+        { type: "progress", key: "x", data: { ...progress(1, 2), phase: "\u001b[2J" } },
+        "control characters",
+      ],
+      [
         {
           type: "progress",
           key: "x",
@@ -217,6 +225,17 @@ describe("progress estimation", () => {
     expect(bounded.filter((record) => record.key === "a")).toHaveLength(2);
     expect(bounded.filter((record) => record.key === "b")).toHaveLength(3);
     expect(bounded.map((record) => record.updateId)).toEqual(["u15", "u16", "u17", "u18", "u19"]);
+  });
+
+  it("sanitizes progress labels at the terminal formatting boundary", () => {
+    const line = formatProgressLine({
+      key: "job",
+      data: { ...progress(1, 2), label: "\u001b[2Jfake\nrow" },
+      sampleCount: 1,
+    });
+    expect(line).toContain("fake row");
+    expect(line).not.toContain("\u001b");
+    expect(line).not.toContain("\n");
   });
 
   it("uses recent measured intervals and shows an ETA", () => {

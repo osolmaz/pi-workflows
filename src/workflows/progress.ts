@@ -1,3 +1,4 @@
+import { sanitizeText } from "./text.js";
 import type { WorkflowProgressData, WorkflowTraceEvent, WorkflowUpdateRecord } from "./types.js";
 import { validateProgressData } from "./updates.js";
 
@@ -196,13 +197,14 @@ export function progressTracksFromRecords(
 
 export function formatProgressLine(estimate: ProgressEstimate, now = new Date()): string {
   const { data } = estimate;
-  const label = data.label ?? estimate.key;
+  const label = sanitizeText(data.label ?? estimate.key);
+  const unit = data.unit === undefined ? "" : sanitizeText(data.unit);
   const count =
     data.completed === undefined
       ? data.status
       : data.total === undefined
-        ? `${formatNumber(data.completed)} ${data.unit ?? ""}`.trim()
-        : `${formatNumber(data.completed)}/${formatNumber(data.total)} ${data.unit ?? ""}`.trim();
+        ? `${formatNumber(data.completed)} ${unit}`.trim()
+        : `${formatNumber(data.completed)}/${formatNumber(data.total)} ${unit}`.trim();
   let eta = "";
   if (estimate.sourceEstimatedFinishAt !== undefined) {
     eta = `source ETA ${formatRemaining(Date.parse(estimate.sourceEstimatedFinishAt) - now.getTime())}`;
