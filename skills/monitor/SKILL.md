@@ -8,7 +8,7 @@ compatibility: Requires Pi Workflows and the built-in monitor workflow.
 
 Use the built-in Pi `monitor` workflow as an autopilot for the requested objective. Monitoring is not passive status polling. The agent must maintain nominal operation, repair recoverable failures, resume durable work, and continue until the complete objective is verified or a material blocker makes safe continuation impossible.
 
-A monitor request authorizes routine operational actions that are necessary to preserve and finish the stated objective. These actions include restarting or resuming the same Job or process, repairing an exact operational configuration or storage-path error, retrying transient infrastructure failures, restoring a verified checkpoint, and replacing a failed physical attempt with the same immutable execution contract. It does not authorize changing the objective, method, model, data source, production selection, or other consequential contract.
+A monitor request authorizes routine operational actions that are necessary to preserve and finish the stated objective, subject to the conversation and repository approval boundaries. These actions can include restarting or resuming the same non-paid Job or process, repairing an exact operational configuration or storage-path error, retrying transient infrastructure failures, restoring a verified checkpoint, and replacing a failed physical attempt with the same immutable execution contract. Paid launches, resumes, retries, or replacements require the explicit approval described below. Monitoring does not authorize changing the objective, method, model, data source, production selection, or other consequential contract.
 
 ## Prepare and start without delay
 
@@ -34,11 +34,11 @@ When the conversation gives no clear finish criterion, set `stopWhen` to `Stop o
 
 Do not invent a finite check count. Omit `maxChecks` unless the user explicitly requests one. The workflow host can apply its own safety upper bound. Disclose that bound if it appears.
 
-## Default Hugging Face authority
+## Paid infrastructure authority
 
-For an objective that uses Hugging Face infrastructure, invoking this skill grants a default cumulative spending ceiling of **$1,000**, including all related attempts and money already spent, unless the conversation or repository sets a lower ceiling. This is a hard maximum, not a spending target.
+A monitoring request does not grant spending approval or create a default spending ceiling. Before launching, resuming, retrying, or replacing paid work, load and follow the paid-compute, provider, Job-control, and runtime skills that apply. Present the required estimate and obtain explicit approval when those policies require it.
 
-Before launching or resuming paid work, load and follow the paid-compute, Hugging Face, Job-control, and runtime skills that apply. Measure or estimate cost, use the cheapest safe configuration, publish durable partial work, and enforce the cumulative ceiling in receipts or launch guards. Continue autonomously within the approved contract. Stop before the ceiling or when new evidence invalidates the approved estimate, method, hardware, or recovery assumptions.
+After approval, preserve the exact method, hardware, concurrency, cumulative cost ceiling, and recovery assumptions in the monitor task. Continue only within that approved contract. Stop for a decision before new paid work when there is no applicable approval, when the ceiling would be exceeded, or when evidence invalidates an approved assumption.
 
 The monitor may use a credential only when the conversation or repository has already authorized that credential's source, destination, and purpose. It may reuse that authorization for retries and replacement attempts under the same objective. It must not discover unrelated credentials, broaden scopes, copy credentials to a new store, or print secret values.
 
@@ -64,7 +64,7 @@ Do not start a second monitor for the same objective while one is active. Update
 
 ## Complete workflow checks
 
-Each workflow check arrives with an exact step contract. Apply the operational authority recorded in `task`. The default monitor contract is recovery-capable autopilot, not read-only observation.
+Each workflow check arrives with an exact step contract. Apply only the operational authority recorded in `task`. The default monitor contract is recovery-capable autopilot within recorded approval boundaries, not authority to create new spending or change the objective.
 
 For each check:
 

@@ -85,6 +85,13 @@ describe("Pi package resources", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  it("does not grant paid-compute approval through the monitor skill", async () => {
+    const markdown = await fs.readFile(path.join(skillsRoot, "monitor", "SKILL.md"), "utf8");
+
+    expect(markdown).toContain("A monitoring request does not grant spending approval");
+    expect(markdown).not.toContain("grants a default cumulative spending ceiling");
+  });
+
   it("keeps local references in the workflow skill inside the package", async () => {
     const skillPath = path.join(skillsRoot, "pi-workflows", "SKILL.md");
     const markdown = await fs.readFile(skillPath, "utf8");
