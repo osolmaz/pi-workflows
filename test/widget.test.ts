@@ -168,6 +168,40 @@ describe("nodeTypeGlyph", () => {
 });
 
 describe("buildWidgetLines", () => {
+  it("calculates measured ETA from live update history for any workflow", () => {
+    const state = makeState({ currentNode: "second" });
+    const history = [0, 25, 50].map((completed, index) => ({
+      updateId: `u${index}`,
+      seq: index + 1,
+      at: `2026-01-01T00:0${index}:00.000Z`,
+      runId: "r1",
+      nodeId: "work",
+      attemptId: "a1",
+      type: "progress",
+      key: "overall",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        label: "Import",
+        status: "running",
+        completed,
+        total: 100,
+        unit: "rows",
+      },
+    }));
+
+    const view = buildWidgetView(
+      state,
+      snapshot,
+      new Date("2026-01-01T00:02:00.000Z"),
+      null,
+      false,
+      120,
+      undefined,
+      history,
+    );
+    expect(view.lines.join("\n")).toContain("Import  50/100 rows  ETA 2m");
+  });
+
   it("shows optional progress, ETA, elapsed update age, and next-check time", () => {
     const now = new Date("2026-01-01T00:10:00.000Z");
     const state = makeState({

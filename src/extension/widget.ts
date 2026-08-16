@@ -6,6 +6,7 @@ import {
   estimateProgress,
   formatProgressLine,
   formatRemaining,
+  progressTracksFromRecords,
   type ProgressEstimate,
 } from "../workflows/progress.js";
 import { sanitizeText } from "../workflows/text.js";
@@ -13,6 +14,7 @@ import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
   WorkflowRunStatus,
+  WorkflowUpdateRecord,
 } from "../workflows/types.js";
 
 const STATUS_GLYPHS: Record<WorkflowRunStatus, string> = {
@@ -74,6 +76,7 @@ export function buildWidgetView(
   held = false,
   width = Number.POSITIVE_INFINITY,
   theme?: WidgetTheme,
+  updateHistory?: WorkflowUpdateRecord[],
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
@@ -99,7 +102,7 @@ export function buildWidgetView(
     );
   }
 
-  const progress = progressLines(state, now).slice(0, 4);
+  const progress = progressLines(state, now, updateHistory).slice(0, 4);
   const budget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
   const nodes = displayNodeIds(snapshot).map((nodeId) =>
     compactNodeLine(state, snapshot, nodeId, now, paused, theme),
@@ -133,8 +136,20 @@ export function buildWidgetView(
   };
 }
 
-function progressLines(state: WorkflowRunState, now: Date): string[] {
-  const estimates = monitorEstimates(state) ?? latestProgressEstimates(state, now);
+function progressLines(
+  state: WorkflowRunState,
+  now: Date,
+  updateHistory?: WorkflowUpdateRecord[],
+): string[] {
+  const measured =
+    updateHistory === undefined
+      ? undefined
+      : progressTracksFromRecords(updateHistory, now).map((track) => track.estimate);
+  const estimates =
+    monitorEstimates(state) ??
+    (measured !== undefined && measured.length > 0
+      ? measured
+      : latestProgressEstimates(state, now));
   const lines = estimates.map((estimate) => formatProgressLine(estimate, now));
   const schedule = (state.updates ?? []).find(
     (record) => record.type === "monitor.schedule" && record.key === "next-check",

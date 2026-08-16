@@ -3,7 +3,13 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { action, agent, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { estimateProgress, formatProgressLine } from "../src/workflows/progress.js";
+import {
+  estimateProgress,
+  formatProgressLine,
+  formatProgressReport,
+  progressRecordsFromTrace,
+  progressTracksFromRecords,
+} from "../src/workflows/progress.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
 import { validateWorkflowUpdate } from "../src/workflows/updates.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
@@ -103,16 +109,50 @@ describe("workflow updates", () => {
   });
 
   it("validates update envelopes and progress fields", () => {
-    expect(() => validateWorkflowUpdate({ type: "Bad", key: "x", data: {} })).toThrow(
-      "update.type",
-    );
+    const invalid = [
+      [{ type: "Bad", key: "x", data: {} }, "update.type"],
+      [{ type: "ok", key: " bad", data: {} }, "update.key"],
+      [{ type: "ok", key: "x", data: [] }, "update.data"],
+      [{ type: "ok", key: "x", data: { value: Number.NaN } }, "non-finite"],
+      [{ type: "ok", key: "x", data: { value: undefined } }, "undefined"],
+      [{ type: "progress", key: "x", data: { ...progress(2, 1) } }, "at least progress.completed"],
+      [{ type: "progress", key: "x", data: { ...progress(1, 2), extra: true } }, "not supported"],
+      [{ type: "progress", key: "x", data: { ...progress(1, 2), status: "busy" } }, "status"],
+      [
+        {
+          type: "progress",
+          key: "x",
+          data: { schema: "pi-workflows.progress.v1", status: "running", completed: -1, unit: "x" },
+        },
+        "non-negative",
+      ],
+      [
+        {
+          type: "progress",
+          key: "x",
+          data: { schema: "pi-workflows.progress.v1", status: "running", total: 0, unit: "x" },
+        },
+        "greater than zero",
+      ],
+      [
+        {
+          type: "progress",
+          key: "x",
+          data: { schema: "pi-workflows.progress.v1", status: "running", completed: 1 },
+        },
+        "unit is required",
+      ],
+      [
+        { type: "progress", key: "x", data: { ...progress(1, 2), sourceUpdatedAt: "yesterday" } },
+        "RFC 3339",
+      ],
+    ] as const;
+    for (const [value, message] of invalid) {
+      expect(() => validateWorkflowUpdate(value)).toThrow(message);
+    }
     expect(() =>
-      validateWorkflowUpdate({
-        type: "progress",
-        key: "x",
-        data: { ...progress(2, 1) },
-      }),
-    ).toThrow("at least progress.completed");
+      validateWorkflowUpdate({ type: "ok", key: "x", data: { value: "x".repeat(70_000) } }),
+    ).toThrow("65536 bytes");
   });
 });
 
@@ -130,6 +170,103 @@ describe("progress estimation", () => {
     expect(estimate.sampleCount).toBe(3);
     expect(estimate.remainingMedianMs).toBe(180_000);
     expect(formatProgressLine(estimate, new Date("2026-08-16T10:02:00.000Z"))).toContain("ETA 3m");
+  });
+
+  it("handles waiting, terminal, unknown-total, stalled, and expired-source states", () => {
+    const now = new Date("2026-08-16T10:10:00.000Z");
+    const cases = [
+      {
+        data: { ...progress(1, 10), status: "waiting" as const },
+        text: "ETA unavailable (progress is waiting)",
+      },
+      {
+        data: { ...progress(10, 10), status: "completed" as const },
+        text: "10/10 items",
+      },
+      {
+        data: { schema: "pi-workflows.progress.v1" as const, status: "running" as const },
+        text: "ETA unavailable (total is unknown)",
+      },
+    ];
+    for (const item of cases) {
+      const estimate = estimateProgress("job", [{ at: now.toISOString(), data: item.data }], now);
+      expect(formatProgressLine(estimate, now)).toContain(item.text);
+    }
+    const stalled = estimateProgress(
+      "job",
+      [
+        { at: "2026-08-16T10:00:00.000Z", data: progress(1, 10) },
+        { at: "2026-08-16T10:01:00.000Z", data: progress(1, 10) },
+      ],
+      now,
+    );
+    expect(stalled.unavailableReason).toBe("no positive progress rate");
+    const expired = estimateProgress(
+      "job",
+      [
+        {
+          at: "2026-08-16T10:00:00.000Z",
+          data: { ...progress(1, 10), sourceEstimatedFinishAt: "2026-08-16T10:05:00.000Z" },
+        },
+      ],
+      now,
+    );
+    expect(expired.sourceEstimatedFinishAt).toBeUndefined();
+  });
+
+  it("starts a new estimation epoch when progress identity changes", () => {
+    const resetSamples = [
+      { at: "2026-08-16T10:00:00.000Z", data: { ...progress(10, 100), phase: "one" } },
+      { at: "2026-08-16T10:01:00.000Z", data: { ...progress(20, 100), phase: "one" } },
+      { at: "2026-08-16T10:02:00.000Z", data: { ...progress(5, 50), phase: "two" } },
+    ];
+    const estimate = estimateProgress("job", resetSamples, new Date("2026-08-16T10:02:00.000Z"));
+    expect(estimate.sampleCount).toBe(1);
+    expect(estimate.unavailableReason).toBe("needs another progress sample");
+  });
+
+  it("reduces trace history and formats reports without combining tracks", () => {
+    const events = [
+      {
+        seq: 1,
+        at: "2026-08-16T10:00:00.000Z",
+        scope: "update" as const,
+        type: "update_published",
+        runId: "r1",
+        nodeId: "work",
+        attemptId: "a1",
+        payload: { updateId: "u1", type: "progress", key: "a", data: progress(1, 4) },
+      },
+      {
+        seq: 2,
+        at: "2026-08-16T10:01:00.000Z",
+        scope: "update" as const,
+        type: "update_published",
+        runId: "r1",
+        nodeId: "work",
+        attemptId: "a1",
+        payload: { updateId: "u2", type: "progress", key: "a", data: progress(2, 4) },
+      },
+      {
+        seq: 3,
+        at: "2026-08-16T10:01:00.000Z",
+        scope: "node" as const,
+        type: "node_finished",
+        runId: "r1",
+        payload: {},
+      },
+    ];
+    const records = progressRecordsFromTrace(events);
+    expect(records).toHaveLength(2);
+    const tracks = progressTracksFromRecords(records, new Date("2026-08-16T10:01:00.000Z"));
+    expect(tracks).toHaveLength(1);
+    expect(
+      formatProgressReport(
+        tracks.map((track) => track.estimate),
+        30,
+      ),
+    ).toContain("Next check: 30 min");
+    expect(progressTracksFromRecords([{ ...records[0]!, data: { invalid: true } }])).toEqual([]);
   });
 
   it("uses a fresh target-supplied finish time", () => {

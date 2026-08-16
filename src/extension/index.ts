@@ -14,6 +14,7 @@ import {
 } from "../workflows/errors.js";
 import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
 import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
+import { progressRecordsFromTrace } from "../workflows/progress.js";
 import {
   createRunId,
   listRunBundles,
@@ -28,6 +29,7 @@ import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunResult,
   WorkflowRunState,
+  WorkflowUpdateRecord,
 } from "../workflows/types.js";
 import {
   PiControllerHost,
@@ -77,6 +79,7 @@ type ActiveRun = {
   presentationPrompt: WorkflowDefinition["presentationPrompt"];
   generation: number;
   lastState: WorkflowRunState | null;
+  updateHistory: WorkflowUpdateRecord[];
   childKey?: string;
   onFinish?: (result: WorkflowSchedulerResult) => void;
   completion?: Promise<void>;
@@ -212,6 +215,7 @@ function workflowStateSummary(state: WorkflowRunState): JsonObject {
 type WidgetSource = {
   state: WorkflowRunState;
   snapshot: WorkflowDefinitionSnapshot;
+  updateHistory?: WorkflowUpdateRecord[];
 };
 
 type WorkflowWidgetComponent = {
@@ -402,6 +406,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runHeld(),
         width,
         theme,
+        widgetSource.updateHistory,
       );
       widgetShownScroll = view.scroll;
       widgetMaxScroll = view.maxScroll;
@@ -426,13 +431,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     state: WorkflowRunState,
     snapshot: WorkflowDefinitionSnapshot,
+    updateHistory?: WorkflowUpdateRecord[],
   ) => {
     if (state.steps.length !== widgetStepCount) {
       widgetStepCount = state.steps.length;
       // The workflow moved on; resume following the active node.
       widgetScroll = null;
     }
-    widgetSource = { state, snapshot };
+    widgetSource = {
+      state,
+      snapshot,
+      ...(updateHistory !== undefined ? { updateHistory: [...updateHistory] } : {}),
+    };
     renderWidget(ctx);
   };
 
@@ -611,7 +621,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     void run.recorder?.stop();
     stopWidgetTicker();
     const { state } = result;
-    updateWidget(ctx, state, run.snapshot);
+    updateWidget(ctx, state, run.snapshot, run.updateHistory);
     clearWidgetTimer();
     // A waiting run is parked at a checkpoint for a human; keep its widget up
     // until a new workflow replaces it. Terminal runs fade after a grace TTL.
@@ -831,9 +841,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
       onRunFinishing: async () => {
         await run.recorder?.finish();
       },
-      onEvent: (_event, state: WorkflowRunState) => {
+      onEvent: (event, state: WorkflowRunState) => {
         run.lastState = state;
-        updateWidget(ctx, state, snapshot);
+        run.updateHistory.push(...progressRecordsFromTrace([event]));
+        updateWidget(ctx, state, snapshot, run.updateHistory);
       },
     });
     const run: ActiveRun = {
@@ -846,6 +857,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       presentationPrompt: options.presentation === false ? undefined : workflow.presentationPrompt,
       generation,
       lastState: null,
+      updateHistory: [],
       ...(options.childKey !== undefined ? { childKey: options.childKey } : {}),
       ...(options.onFinish !== undefined ? { onFinish: options.onFinish } : {}),
       ...(claimToken !== undefined ? { claimToken } : {}),
