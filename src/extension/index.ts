@@ -531,6 +531,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       presentationPending = run.generation;
+      suppressWorkflowAssistantTail = false;
       pi.sendMessage(
         {
           customType: PRESENTATION_MESSAGE_TYPE,

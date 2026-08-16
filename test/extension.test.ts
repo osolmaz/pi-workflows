@@ -1628,6 +1628,14 @@ export default defineWorkflow({
         (entry) => entry.message.customType === "pi-workflows-presentation",
       );
       expect(presentation?.message.content).toContain("reply was");
+      const presentationResponse = {
+        role: "assistant",
+        content: [{ type: "text", text: "The reply was hi." }],
+      };
+      const [replacement] = await harness.emitAsync("message_end", {
+        message: presentationResponse,
+      });
+      expect(replacement).toBeUndefined();
       await harness.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
