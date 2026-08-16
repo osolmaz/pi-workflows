@@ -320,6 +320,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   };
   let activeRun: ActiveRun | null = null;
   let systemTurnAbort: AgentStepContract | null = null;
+  let suppressWorkflowAssistantTail = false;
   let lastExpiredAttempt: { contract: AgentStepContract; reason: string } | null = null;
   let pendingToolLaunch: {
     ctx: ExtensionContext;
@@ -1682,6 +1683,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           if (!result.accepted) {
             throw new Error(result.message);
           }
+          suppressWorkflowAssistantTail = true;
           return {
             content: [{ type: "text", text: result.message }],
             details: { action: "submit", step: params.step, accepted: true },
@@ -1745,6 +1747,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
+    suppressWorkflowAssistantTail = false;
     if (!activeRun && presentationPending === null && presentationAbort) {
       // A normal user turn started while an async presentation prompt was
       // still resolving. The user's new request supersedes that old result.
@@ -1755,6 +1758,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (event, ctx) => {
+    suppressWorkflowAssistantTail = false;
     const aborted = event.messages.some(
       (message) =>
         typeof message === "object" &&
@@ -1802,6 +1806,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("message_end", (event) => {
+    if (suppressWorkflowAssistantTail && event.message.role === "assistant") {
+      const message = {
+        ...event.message,
+        content: event.message.content.filter((part) => part.type !== "text"),
+      };
+      activeRun?.recorder?.handleMessageEnd({ ...event, message });
+      return { message };
+    }
     activeRun?.recorder?.handleMessageEnd(event);
   });
 
@@ -1847,6 +1859,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     sessionClosed = true;
     systemTurnAbort = null;
+    suppressWorkflowAssistantTail = false;
     supersedePresentation();
     const run = activeRun;
     if (run !== null && run.claimToken !== undefined) {

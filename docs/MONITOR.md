@@ -196,7 +196,7 @@ Each accepted check reaches `report`, including a check that selects `stop`. The
 
 The extension delivers the custom Pi message with `triggerTurn: false`. The notification stays in session history and later model context. Its arrival does not start an assistant response.
 
-The monitor does not use `sendUserMessage`. It does not ask an agent to repeat or acknowledge the notification.
+The monitor does not use `sendUserMessage`. It does not ask an agent to repeat or acknowledge the notification. After the workflow tool accepts the check, the extension removes any extra assistant tail text from that agent run, so only the notification reports the check.
 
 A check that times out or fails before producing accepted output is not an accepted check. The run enters its normal terminal error state and the extension shows the workflow lifecycle notification. It does not invent a successful check report.
 

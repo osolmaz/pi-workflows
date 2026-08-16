@@ -207,11 +207,10 @@ function makeHarness(options: {
         void listener(payload, ctx);
       }
     },
-    emitAsync: async (event: string, payload?: unknown) => {
+    emitAsync: async (event: string, payload?: unknown) =>
       await Promise.all(
         (listeners.get(event) ?? []).map(async (listener) => await listener(payload, ctx)),
-      );
-    },
+      ),
   };
 }
 
@@ -399,6 +398,55 @@ describe("pi-workflows extension", () => {
       } finally {
         queue.close();
       }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("removes assistant tail text after an accepted workflow submission", async () => {
+    const cwd = await makeTempDir("pi-workflows-tail");
+    const runsDir = await makeTempDir("pi-workflows-tail-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("submit-tail", {
+              action: "submit",
+              ...contract,
+              output: { reply: "hi" },
+            });
+          }
+        },
+      });
+
+      await harness.command.handler("mini say hi", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+
+      const assistantMessage = {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "The workflow submission is complete." },
+          { type: "text", text: "This reply must not appear." },
+        ],
+      };
+      await harness.emitAsync("turn_end", { message: assistantMessage, toolResults: [] });
+      const [replacement] = await harness.emitAsync("message_end", {
+        message: assistantMessage,
+      });
+      expect(replacement).toEqual({
+        message: {
+          ...assistantMessage,
+          content: [{ type: "thinking", thinking: "The workflow submission is complete." }],
+        },
+      });
+
+      await harness.emitAsync("agent_end", { messages: [] });
+      const [normal] = await harness.emitAsync("message_end", { message: assistantMessage });
+      expect(normal).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
