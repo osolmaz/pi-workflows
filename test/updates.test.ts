@@ -8,6 +8,7 @@ import {
   estimateProgress,
   formatProgressLine,
   formatProgressReport,
+  formatRemaining,
   progressRecordsFromTrace,
   progressTracksFromRecords,
 } from "../src/workflows/progress.js";
@@ -341,6 +342,25 @@ describe("progress estimation", () => {
       now,
     );
     expect(expired.sourceEstimatedFinishAt).toBeUndefined();
+    const sameTime = estimateProgress(
+      "job",
+      [
+        { at: "2026-08-16T10:10:00.000Z", data: progress(1, 10) },
+        { at: "2026-08-16T10:10:00.000Z", data: progress(2, 10) },
+      ],
+      now,
+    );
+    expect(sameTime.unavailableReason).toBe("needs another progress sample");
+  });
+
+  it("formats sub-minute, minute, hour, and day durations", () => {
+    expect([30_000, 120_000, 7_200_000, 72_000_000, 172_800_000].map(formatRemaining)).toEqual([
+      "30s",
+      "2m",
+      "2.0h",
+      "20h",
+      "2.0d",
+    ]);
   });
 
   it("starts a new estimation epoch when progress identity changes", () => {
@@ -383,6 +403,26 @@ describe("progress estimation", () => {
         type: "node_finished",
         runId: "r1",
         payload: {},
+      },
+      {
+        seq: 4,
+        at: "2026-08-16T10:01:00.000Z",
+        scope: "node" as const,
+        type: "update_published",
+        runId: "r1",
+        nodeId: "work",
+        attemptId: "a1",
+        payload: { updateId: 4, type: "progress", key: "a", data: progress(3, 4) },
+      },
+      {
+        seq: 5,
+        at: "2026-08-16T10:01:00.000Z",
+        scope: "node" as const,
+        type: "update_published",
+        runId: "r1",
+        nodeId: "work",
+        attemptId: "a1",
+        payload: { updateId: "u5", type: "progress", key: "a", data: [] },
       },
     ];
     const records = progressRecordsFromTrace(events);
