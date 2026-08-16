@@ -64,6 +64,10 @@ function requireBoundedString(value: unknown, label: string, maxChars: number): 
 
 export function prepareMonitorInput(input: unknown): MonitorConfig {
   const value = requireRecord(input, "monitor input") as Partial<MonitorInput>;
+  const allowed = new Set(["task", "everyMinutes", "stopWhen", "maxChecks", "checkTimeoutMinutes"]);
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new Error(`monitor input field ${field} is not supported`);
+  }
   const task = requireBoundedString(value.task, "task", 8_000);
   const everyMinutes = value.everyMinutes ?? DEFAULT_INTERVAL_MINUTES;
   if (
@@ -175,19 +179,28 @@ function reportMessage(context: WorkflowNodeContext): string {
   const check = context.outputs.check as MonitorCheck;
   const estimate = context.outputs.estimate as MonitorEstimate;
   const config = configFrom(context.outputs);
-  const parts = [check.report];
+  const suffix: string[] = [];
   if (estimate.tracks.length > 0) {
-    parts.push(
+    suffix.push(
       formatProgressReport(
         estimate.tracks.map((track) => track.estimate),
         check.route === "continue" ? config.everyMinutes : undefined,
+        new Date(),
+        2_000,
       ),
     );
   }
   if (check.route === "continue" && completedChecks(context) >= config.maxChecks) {
-    parts.push(`Reached the ${config.maxChecks}-check safety limit.`);
+    suffix.push(`Reached the ${config.maxChecks}-check safety limit.`);
   }
-  return parts.join("\n").slice(0, MAX_REPORT_CHARS);
+  const suffixText = suffix.filter(Boolean).join("\n");
+  if (suffixText.length === 0) return check.report;
+  const reportBudget = Math.max(1, MAX_REPORT_CHARS - suffixText.length - 1);
+  const report =
+    check.report.length <= reportBudget
+      ? check.report
+      : `${check.report.slice(0, Math.max(0, reportBudget - 1))}…`;
+  return `${report}\n${suffixText}`;
 }
 
 const monitorWorkflow: WorkflowDefinition = defineWorkflow({

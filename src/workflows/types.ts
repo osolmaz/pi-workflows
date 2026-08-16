@@ -373,7 +373,7 @@ export type WorkflowDefinitionSnapshot = {
 export type WorkflowTraceEvent = {
   seq: number;
   at: string;
-  scope: "run" | "node" | "agent" | "action" | "session" | "update";
+  scope: "run" | "node" | "agent" | "action" | "session";
   type: string;
   runId: string;
   nodeId?: string;

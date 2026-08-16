@@ -49,6 +49,9 @@ describe("built-in monitor workflow", () => {
       maxChecks: 1_000,
       checkTimeoutMinutes: 60,
     });
+    expect(() => prepareMonitorInput({ task: "Observe", reportWhen: "state changes" })).toThrow(
+      "reportWhen is not supported",
+    );
   });
 
   it("reports every accepted stop check before completion", async () => {

@@ -19,7 +19,7 @@ import type {
   WorkflowUpdateInput,
   WorkflowUpdateRecord,
 } from "./types.js";
-import { createUpdateId, updateProjection } from "./updates.js";
+import { MAX_CURRENT_UPDATES, createUpdateId, updateProjection } from "./updates.js";
 
 export const RUN_BUNDLE_SCHEMA = "pi-workflows.run-bundle.v1" as const;
 export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
@@ -441,9 +441,15 @@ export class WorkflowRunStore {
     update: WorkflowUpdateInput,
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
     return await this.withRunLock(runDir, async () => {
+      const exists = (state.updates ?? []).some(
+        (record) => record.type === update.type && record.key === update.key,
+      );
+      if (!exists && (state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
+        throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
+      }
       const updateId = createUpdateId();
       const event = await this.appendTraceEvent(runDir, state.runId, {
-        scope: "update",
+        scope: "node",
         type: "update_published",
         nodeId,
         attemptId,

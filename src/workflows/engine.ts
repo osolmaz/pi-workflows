@@ -40,12 +40,7 @@ import type {
   WorkflowUpdateInput,
   WorkflowUpdateReceipt,
 } from "./types.js";
-import {
-  MAX_CURRENT_UPDATES,
-  UpdateRateLimiter,
-  updateReceipt,
-  validateWorkflowUpdate,
-} from "./updates.js";
+import { UpdateRateLimiter, updateReceipt, validateWorkflowUpdate } from "./updates.js";
 
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
@@ -142,18 +137,14 @@ export class WorkflowEngine {
       );
     }
     const receiptKey =
-      idempotencyKey === undefined ? undefined : `${active.state.runId}:${idempotencyKey}`;
+      idempotencyKey === undefined
+        ? undefined
+        : `${active.state.runId}:${active.attemptId}:${idempotencyKey}`;
     if (receiptKey !== undefined) {
       const prior = this.updateReceipts.get(receiptKey);
       if (prior !== undefined) return prior;
     }
     const update = validateWorkflowUpdate(input);
-    const exists = (active.state.updates ?? []).some(
-      (record) => record.type === update.type && record.key === update.key,
-    );
-    if (!exists && (active.state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
-      throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
-    }
     let limiter = this.updateLimiters.get(active.state.runId);
     if (limiter === undefined) {
       limiter = new UpdateRateLimiter();
@@ -896,6 +887,10 @@ export class WorkflowEngine {
       }
       if (this.activeAttempt?.attemptId === attemptId) {
         this.activeAttempt = undefined;
+      }
+      const receiptPrefix = `${state.runId}:${attemptId}:`;
+      for (const key of this.updateReceipts.keys()) {
+        if (key.startsWith(receiptPrefix)) this.updateReceipts.delete(key);
       }
     }
   }

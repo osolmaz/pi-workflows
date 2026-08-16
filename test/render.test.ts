@@ -311,7 +311,7 @@ function progressEvent(seq: number, at: string, completed: number) {
   return {
     seq,
     at,
-    scope: "update" as const,
+    scope: "node" as const,
     type: "update_published",
     runId: "run-1",
     nodeId: "work",

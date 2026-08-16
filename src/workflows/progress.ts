@@ -204,17 +204,43 @@ export function formatProgressReport(
   estimates: ProgressEstimate[],
   nextCheckMinutes?: number,
   now = new Date(),
+  maxChars = 4_000,
 ): string {
+  const footer = nextCheckMinutes === undefined ? undefined : `Next check: ${nextCheckMinutes} min`;
   const lines: string[] = [];
-  for (const estimate of prioritize(estimates)) {
-    lines.push(`Progress: ${formatProgressLine(estimate, now)}`);
+  let omitted = 0;
+  for (const estimate of prioritizeProgressEstimates(estimates)) {
+    const block = [`Progress: ${formatProgressLine(estimate, now)}`];
     if (estimate.rateMedian !== undefined && estimate.data.unit !== undefined) {
-      const perMinute = estimate.rateMedian * 60_000;
-      lines.push(`Rate: ${formatNumber(perMinute)} ${estimate.data.unit}/min`);
+      const median = estimate.rateMedian * 60_000;
+      const low = estimate.rateLow === undefined ? undefined : estimate.rateLow * 60_000;
+      const high = estimate.rateHigh === undefined ? undefined : estimate.rateHigh * 60_000;
+      const rate =
+        low !== undefined && high !== undefined && Math.abs(high - low) >= 0.01
+          ? `${formatNumber(low)}–${formatNumber(high)}`
+          : formatNumber(median);
+      block.push(`Rate: ${rate} ${estimate.data.unit}/min`);
+      block.push(
+        `Estimate: ${estimate.confidence ?? "low"} confidence, ${estimate.sampleCount} samples`,
+      );
+    }
+    const candidate = [...lines, ...block, ...(footer === undefined ? [] : [footer])].join("\n");
+    if (candidate.length > maxChars) {
+      omitted += 1;
+      continue;
+    }
+    lines.push(...block);
+  }
+  if (omitted > 0) {
+    const marker = `${omitted} progress track${omitted === 1 ? "" : "s"} omitted.`;
+    if (
+      [...lines, marker, ...(footer === undefined ? [] : [footer])].join("\n").length <= maxChars
+    ) {
+      lines.push(marker);
     }
   }
-  if (nextCheckMinutes !== undefined) lines.push(`Next check: ${nextCheckMinutes} min`);
-  return lines.join("\n");
+  if (footer !== undefined && [...lines, footer].join("\n").length <= maxChars) lines.push(footer);
+  return lines.join("\n").slice(0, maxChars);
 }
 
 export function formatRemaining(ms: number): string {
@@ -265,13 +291,15 @@ function quantile(sorted: number[], p: number): number {
   return a + (b - a) * fraction;
 }
 
-function prioritize(estimates: ProgressEstimate[]): ProgressEstimate[] {
+export function prioritizeProgressEstimates(estimates: ProgressEstimate[]): ProgressEstimate[] {
   const weight = (item: ProgressEstimate) =>
     item.key === "overall"
-      ? -2
+      ? -3
       : item.data.status === "failed" || item.data.status === "blocked"
-        ? -1
-        : 0;
+        ? -2
+        : item.data.status === "waiting"
+          ? -1
+          : 0;
   return [...estimates].sort((a, b) => weight(a) - weight(b));
 }
 

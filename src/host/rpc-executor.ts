@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { errorMessage } from "../workflows/errors.js";
 import type {
   AgentStepExecutor,
   AgentStepRequest,
@@ -232,7 +233,16 @@ export class RpcStepExecutor implements AgentStepExecutor {
         if (request.publishUpdate === undefined) {
           throw new Error("This workflow host does not support step updates");
         }
-        await request.publishUpdate(found.update, found.idempotencyKey);
+        try {
+          await request.publishUpdate(found.update, found.idempotencyKey);
+        } catch (error) {
+          child.stdin?.write(
+            `${JSON.stringify({
+              type: "prompt",
+              message: `Workflow update rejected: ${errorMessage(error)}. Correct the update and continue the same step.`,
+            })}\n`,
+          );
+        }
         continue;
       }
       await new Promise<void>((resolve, reject) => {

@@ -6,6 +6,7 @@ import {
   estimateProgress,
   formatProgressLine,
   formatRemaining,
+  prioritizeProgressEstimates,
   progressTracksFromRecords,
   type ProgressEstimate,
 } from "../workflows/progress.js";
@@ -150,7 +151,9 @@ function progressLines(
     (measured !== undefined && measured.length > 0
       ? measured
       : latestProgressEstimates(state, now));
-  const lines = estimates.map((estimate) => formatProgressLine(estimate, now));
+  const lines = prioritizeProgressEstimates(estimates).map((estimate) =>
+    formatProgressLine(estimate, now),
+  );
   const schedule = (state.updates ?? []).find(
     (record) => record.type === "monitor.schedule" && record.key === "next-check",
   );

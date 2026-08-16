@@ -37,6 +37,11 @@ const PROGRESS_FIELDS = new Set([
 
 export function validateWorkflowUpdate(input: unknown): WorkflowUpdateInput {
   if (!isRecord(input)) throw new Error("update must be an object");
+  for (const field of Object.keys(input)) {
+    if (field !== "type" && field !== "key" && field !== "data") {
+      throw new Error(`update.${field} is not supported`);
+    }
+  }
   const type = input.type;
   const key = input.key;
   const data = input.data;
@@ -79,15 +84,13 @@ export function validateProgressData(data: Record<string, unknown>): WorkflowPro
     }
   }
   if (data.completed !== undefined || data.total !== undefined) {
-    if (
-      typeof data.unit !== "string" ||
-      data.unit.trim().length < 1 ||
-      data.unit.trim().length > 32
-    ) {
-      throw new Error("progress.unit is required with counts and must be 1 to 32 characters");
+    if (!validUnit(data.unit)) {
+      throw new Error(
+        "progress.unit is required with counts and must be 1 to 32 printable characters",
+      );
     }
-  } else if (data.unit !== undefined) {
-    optionalString(data.unit, "progress.unit", 32);
+  } else if (data.unit !== undefined && !validUnit(data.unit)) {
+    throw new Error("progress.unit must be 1 to 32 printable characters");
   }
   optionalDate(data.sourceUpdatedAt, "progress.sourceUpdatedAt");
   optionalDate(data.sourceEstimatedFinishAt, "progress.sourceEstimatedFinishAt");
@@ -169,6 +172,18 @@ function optionalFiniteNonNegative(value: unknown, field: string): void {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`${field} must be a finite non-negative number`);
   }
+}
+
+function validUnit(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length >= 1 &&
+    value.trim().length <= 32 &&
+    [...value].every((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code >= 32 && !(code >= 127 && code <= 159);
+    })
+  );
 }
 
 function optionalDate(value: unknown, field: string): void {

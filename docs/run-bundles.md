@@ -294,8 +294,8 @@ One event per line, monotonically sequenced per run, schema
 }
 ```
 
-`scope` is one of `run`, `node`, `agent`, `action`, `session`, or `update`.
-An `update_published` event carries the runtime update ID, type, key, and data;
+`scope` is one of `run`, `node`, `agent`, `action`, or `session`.
+A node-scoped `update_published` event carries the runtime update ID, type, key, and data;
 its event sequence and timestamp are the update sequence and timestamp. See
 [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the full contract. `nodeId` and
 `attemptId` are present on node-scoped and agent-scoped events. Consumers must

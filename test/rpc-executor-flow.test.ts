@@ -23,7 +23,7 @@ async function makeFakePi(
   const stdinLog = path.join(dir, "stdin.log");
   await fs.writeFile(
     fakePi,
-    `#!/bin/sh\ncat > ${JSON.stringify(stdinLog)} &\nCATPID=$!\n${script}\nwait $CATPID\n`,
+    `#!/bin/sh\nSTDIN_LOG=${JSON.stringify(stdinLog)}\nexec 3<&0\ncat <&3 > "$STDIN_LOG" &\nCATPID=$!\n${script}\nwait $CATPID\n`,
     { encoding: "utf8", mode: 0o755 },
   );
   return { dir, fakePi, stdinLog };
@@ -31,6 +31,16 @@ async function makeFakePi(
 
 function submissionLine(step: string, attempt: string, output: unknown): string {
   return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({ action: "submit", step, attempt, output })}\\n`;
+}
+
+function updateLine(step: string, attempt: string): string {
+  return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({
+    action: "update",
+    step,
+    attempt,
+    idempotencyKey: "tool-1",
+    update: { type: "progress", key: "job", data: {} },
+  })}\\n`;
 }
 
 describe("RpcStepExecutor submissions", () => {
@@ -48,6 +58,30 @@ describe("RpcStepExecutor submissions", () => {
       new AbortController().signal,
     );
     expect(submission.output).toBeNull();
+    await executor.close();
+  });
+
+  it("reports a rejected update to the headless agent and keeps the step open", async () => {
+    const { fakePi, stdinLog } = await makeFakePi(
+      `sleep 0.2\nprintf '${updateLine("work", "a1")}' >&2\nfor _ in 1 2 3 4 5 6 7 8 9 10; do\n  grep -q 'Workflow update rejected' "$STDIN_LOG" && break\n  sleep 0.1\ndone\ngrep -q 'Workflow update rejected' "$STDIN_LOG" || exit 4\nprintf '${submissionLine("work", "a1", { done: true })}' >&2\nsleep 2\n`,
+    );
+    const executor = new RpcStepExecutor({
+      cwd: "/tmp",
+      registry: new HostProcessRegistry("/tmp"),
+      piBin: fakePi,
+    });
+    const request = requestFor("work", "a1") as AgentStepRequest;
+    request.publishUpdate = async () => {
+      throw new Error("progress.schema must equal pi-workflows.progress.v1");
+    };
+
+    await expect(
+      executor.runAgentStep(request, new AbortController().signal),
+    ).resolves.toMatchObject({ output: null });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await fs.readFile(stdinLog, "utf8")).toContain(
+      "Workflow update rejected: progress.schema must equal pi-workflows.progress.v1",
+    );
     await executor.close();
   });
 

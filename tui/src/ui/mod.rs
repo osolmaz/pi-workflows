@@ -2580,18 +2580,23 @@ fn progress_info_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>
         ]));
 
         let mut detail = Vec::new();
+        let source_at = latest
+            .get("sourceUpdatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp_ms)
+            .unwrap_or(*latest_at);
         let source_eta = latest
             .get("sourceEstimatedFinishAt")
             .and_then(Value::as_str)
             .and_then(parse_timestamp_ms)
-            .filter(|finish| *finish > now_ms());
+            .filter(|finish| *finish > source_at && *finish > now_ms());
         if let Some(finish) = source_eta {
             detail.push(format!("source ETA {}", format_eta_ms(finish - now_ms())));
         } else if !matches!(
             status,
             "completed" | "failed" | "cancelled" | "waiting" | "blocked"
         ) {
-            let rates = progress_rates(samples);
+            let rates = progress_rates(current_progress_epoch(samples));
             if let (Some(all), Some(done), Some(median)) = (total, completed, median_value(&rates))
             {
                 if median > 0.0 {
@@ -2608,7 +2613,7 @@ fn progress_info_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>
                 detail.push("ETA unavailable".to_string());
             }
         }
-        detail.push(format!("{} samples", samples.len()));
+        detail.push(format!("{} samples", current_progress_epoch(samples).len()));
         detail.push(format!(
             "updated {}",
             format_eta_ms((now_ms() - *latest_at).max(0))
@@ -2619,6 +2624,41 @@ fn progress_info_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>
         ]));
     }
     lines
+}
+
+fn current_progress_epoch(samples: &[(i64, Value)]) -> &[(i64, Value)] {
+    let mut start = 0;
+    for index in 1..samples.len() {
+        if progress_resets(&samples[index - 1].1, &samples[index].1) {
+            start = index;
+        }
+    }
+    &samples[start..]
+}
+
+fn progress_resets(previous: &Value, current: &Value) -> bool {
+    let changed_identity = previous.get("phase") != current.get("phase")
+        || previous.get("unit") != current.get("unit")
+        || previous.get("total") != current.get("total");
+    let decreased = match (
+        previous.get("completed").and_then(Value::as_f64),
+        current.get("completed").and_then(Value::as_f64),
+    ) {
+        (Some(before), Some(after)) => after < before,
+        _ => false,
+    };
+    let previous_status = previous
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let current_status = current
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    changed_identity
+        || decreased
+        || (matches!(previous_status, "completed" | "failed" | "cancelled")
+            && !matches!(current_status, "completed" | "failed" | "cancelled"))
 }
 
 fn progress_rates(samples: &[(i64, Value)]) -> Vec<f64> {
@@ -2751,13 +2791,39 @@ fn draw_transport(
 mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
-        graph_position_label, inspector_height_for_drag, inspector_tab_label, inspector_tab_layout,
-        resolve_remote_artifacts, resolved_inspector_height, sidebar_width_for_drag,
-        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
-        InspectorTab, NodeBounds, Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        current_progress_epoch, graph_position_label, inspector_height_for_drag,
+        inspector_tab_label, inspector_tab_layout, progress_rates, resolve_remote_artifacts,
+        resolved_inspector_height, sidebar_width_for_drag, temporal_through_seq,
+        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
+        Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn progress_estimation_resets_on_phase_change() {
+        let samples = vec![
+            (
+                0,
+                json!({ "status": "running", "phase": "one", "completed": 0, "total": 100, "unit": "rows" }),
+            ),
+            (
+                1_000,
+                json!({ "status": "running", "phase": "one", "completed": 10, "total": 100, "unit": "rows" }),
+            ),
+            (
+                2_000,
+                json!({ "status": "running", "phase": "two", "completed": 0, "total": 50, "unit": "rows" }),
+            ),
+            (
+                3_000,
+                json!({ "status": "running", "phase": "two", "completed": 5, "total": 50, "unit": "rows" }),
+            ),
+        ];
+        let epoch = current_progress_epoch(&samples);
+        assert_eq!(epoch.len(), 2);
+        assert_eq!(progress_rates(epoch), vec![0.005]);
+    }
 
     #[test]
     fn bordered_nodes_are_the_default() {

@@ -51,6 +51,42 @@ describe("workflow updates", () => {
     expect(updates.map((event) => event.seq)).toEqual([3, 4]);
   });
 
+  it("serializes concurrent admission at the current-key limit", async () => {
+    const { engine: runtime } = await engine();
+    const workflow = defineWorkflow({
+      name: "concurrent-update-limit",
+      startAt: "work",
+      nodes: {
+        work: action({
+          run: async (context) => {
+            context.state.updates = Array.from({ length: 1_023 }, (_, index) => ({
+              updateId: `seed-${index}`,
+              seq: index + 1,
+              at: "2026-08-16T10:00:00.000Z",
+              runId: context.state.runId,
+              nodeId: "work",
+              attemptId: "seed",
+              type: "seed",
+              key: `key-${index}`,
+              data: {},
+            }));
+            const results = await Promise.allSettled([
+              context.publishUpdate({ type: "test", key: "new-a", data: {} }),
+              context.publishUpdate({ type: "test", key: "new-b", data: {} }),
+            ]);
+            return results.map((result) => result.status);
+          },
+        }),
+      },
+      edges: [],
+    });
+
+    const result = await runtime.run(workflow, {});
+    expect(result.state.status).toBe("completed");
+    expect(result.state.finalOutput).toEqual(expect.arrayContaining(["fulfilled", "rejected"]));
+    expect(result.state.updates).toHaveLength(1_024);
+  });
+
   it("accepts agent updates without completing the step and deduplicates delivery", async () => {
     const executor = new ScriptedExecutor().respond("check", async (request) => {
       const first = await request.publishUpdate?.(
@@ -111,6 +147,7 @@ describe("workflow updates", () => {
   it("validates update envelopes and progress fields", () => {
     const invalid = [
       [{ type: "Bad", key: "x", data: {} }, "update.type"],
+      [{ type: "ok", key: "x", data: {}, seq: 1 }, "update.seq is not supported"],
       [{ type: "ok", key: " bad", data: {} }, "update.key"],
       [{ type: "ok", key: "x", data: [] }, "update.data"],
       [{ type: "ok", key: "x", data: { value: Number.NaN } }, "non-finite"],
@@ -230,7 +267,7 @@ describe("progress estimation", () => {
       {
         seq: 1,
         at: "2026-08-16T10:00:00.000Z",
-        scope: "update" as const,
+        scope: "node" as const,
         type: "update_published",
         runId: "r1",
         nodeId: "work",
@@ -240,7 +277,7 @@ describe("progress estimation", () => {
       {
         seq: 2,
         at: "2026-08-16T10:01:00.000Z",
-        scope: "update" as const,
+        scope: "node" as const,
         type: "update_published",
         runId: "r1",
         nodeId: "work",
