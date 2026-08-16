@@ -90,6 +90,9 @@ Long-running compute, action, and checkpoint callbacks should observe
 steps). When the node times out or the run is cancelled, the engine stops
 waiting immediately, but only cooperative callbacks stop doing work.
 
+Function actions receive `WorkflowActionContext`, which adds
+`publishUpdate(update)`. Other callbacks keep the read-only node context.
+
 ## Durable runs, parking, and resume
 
 Every interactive `/workflow` run is tracked in the project run queue (see
@@ -218,6 +221,32 @@ commands cannot exhaust memory. Both action forms record a receipt (command,
 exit code, duration) in the step record for auditability, including when the
 command fails.
 
+A function action can publish a durable update without completing the node:
+
+```typescript
+action({
+  run: async ({ publishUpdate }) => {
+    await publishUpdate({
+      type: "progress",
+      key: "overall",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        status: "running",
+        completed: 40,
+        total: 100,
+        unit: "rows",
+      },
+    });
+  },
+});
+```
+
+A shell action can parse complete lines from stdout or stderr and return one
+or more updates through `updates.parseLine`. Parsing applies backpressure and
+keeps normal output capture. Lines and update data are each limited to 64 KiB.
+See [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the envelope, progress
+schema, limits, estimation, and error rules.
+
 ### checkpoint
 
 Ends the run in a `waiting` state for human review. The checkpoint bundle is
@@ -294,13 +323,15 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `status` for the active run or a supplied run ID.
 - `pause`, `resume`, and `cancel` for the active run.
 - `answer` with checkpoint input and an optional run ID.
+- `update` for a non-completing update from the current agent attempt.
 - `submit` for the current workflow step contract.
 
 A model-started run is queued until the model's current turn settles. The first
 workflow prompt then starts a new turn. This keeps the requesting turn outside
 the workflow's first attempt and prevents an early missing-submission reminder.
 The normal extension offers all actions. The headless RPC bridge offers only
-`submit`, so a workflow child cannot recursively control other runs.
+`update` and `submit`, so a workflow child cannot recursively control other
+runs.
 
 ### Built-in monitor
 
@@ -310,24 +341,23 @@ one looping workflow run. Its input is:
 ```json
 {
   "task": "Check pull request 123",
-  "everyMinutes": 30,
-  "reportWhen": "Checks fail or the state changes materially",
-  "stopWhen": "The pull request is merged or closed",
-  "maxChecks": 1000,
-  "checkTimeoutMinutes": 60
+  "stopWhen": "The pull request is merged or closed"
 }
 ```
 
-The first check runs immediately. Each accepted check records a bounded current
-observation and chooses whether to continue, report, or stop. A report uses a
-separate agent node so its structured check result is validated before the user
-sees the message. The next check can read the previous accepted observation.
+The first check runs immediately. `everyMinutes` defaults to 30. Each accepted
+check must provide one concise report and choose `continue` or `stop`. The
+runtime queues that report as a workflow notification with `triggerTurn:
+false`, so it does not cause an assistant reply. A check can also provide
+independent progress tracks. Pi Workflows validates the counts and calculates
+rates, confidence, and ETA without a model.
 
-Intervals must be whole minutes from 1 through 1,440. `maxChecks` defaults to
-1,000 and cannot exceed 1,000. `checkTimeoutMinutes` is optional and applies to
-check and report agent nodes. It must be from 5 through 1,440 minutes. Its
-default is the larger of 60 minutes and `everyMinutes`. The workflow also has
-a finite step limit and bounded observation and report sizes.
+Intervals must be whole minutes from 1 through 1,440. When `stopWhen` is
+omitted, the monitor stops only after an explicit user request. `maxChecks`
+defaults to the disclosed safety ceiling of 1,000 and cannot exceed it. Callers
+omit `maxChecks` unless the user requests a fixed count. `checkTimeoutMinutes`
+is from 5 through 1,440 and defaults to the larger of 60 and `everyMinutes`.
+See [MONITOR.md](MONITOR.md) for the check and progress schemas.
 
 The interval uses the existing shell action to launch the current Node
 executable with a timer. This works on every platform supported by Pi. The node

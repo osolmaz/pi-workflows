@@ -287,9 +287,47 @@ describe.sequential("pi-workflows end to end", () => {
               input: {
                 task: "Check the fixture once",
                 everyMinutes: 30,
-                reportWhen: "The fixture fails",
                 stopWhen: "The first check is complete",
                 maxChecks: 1,
+              },
+            },
+          };
+        }
+        if (
+          lastRole === "tool" &&
+          /workflow step contract \(workflow: monitor, step: check/i.test(lastUserText)
+        ) {
+          const monitorStepMatch = lastUserText.match(
+            /workflow step contract \(workflow: monitor, step: check, attempt: ([a-z0-9-]+)\)/i,
+          );
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "check",
+              attempt: monitorStepMatch?.[1] ?? "",
+              output: {
+                route: "stop",
+                observation: "The fixture check completed at 1 of 2 items.",
+                report: "The fixture check completed.",
+                progress: {
+                  tracks: [
+                    {
+                      key: "fixture",
+                      data: {
+                        schema: "pi-workflows.progress.v1",
+                        label: "Fixture",
+                        status: "running",
+                        completed: 1,
+                        total: 2,
+                        unit: "items",
+                        sourceEstimatedFinishAt: "2099-01-01T00:00:00.000Z",
+                      },
+                    },
+                  ],
+                },
+                reason: "The requested first check is complete.",
               },
             },
           };
@@ -340,13 +378,20 @@ describe.sequential("pi-workflows end to end", () => {
             kind: "tool",
             toolName: "workflow",
             args: {
-              action: "submit",
+              action: "update",
               step: "check",
               attempt: monitorStepMatch[2] ?? "",
-              output: {
-                route: "stop_quiet",
-                observation: "The fixture check completed.",
-                reason: "The requested first check is complete.",
+              update: {
+                type: "progress",
+                key: "live-agent",
+                data: {
+                  schema: "pi-workflows.progress.v1",
+                  label: "Live agent",
+                  status: "running",
+                  completed: 1,
+                  total: 2,
+                  unit: "items",
+                },
               },
             },
           };
@@ -818,16 +863,22 @@ describe.sequential("pi-workflows end to end", () => {
       () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
     );
 
-    expect(state.status).toBe("completed");
+    expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "2" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "3" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({
-      observation: "The fixture check completed.",
+      observation: "The fixture check completed at 1 of 2 items.",
       reason: "The requested first check is complete.",
     });
     expect(state.steps.some((step) => step.nodeId === "sleep")).toBe(false);
+    expect(state.updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "progress", key: "live-agent" }),
+        expect.objectContaining({ type: "progress", key: "fixture" }),
+      ]),
+    );
   });
 
   it("reconciles a durable controller through the real pi extension", async () => {

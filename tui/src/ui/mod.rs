@@ -2460,6 +2460,7 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
             state.trace_seq
         )),
     ]));
+    lines.extend(progress_info_lines(data.events, palette));
     let capture = capture_integrity(data);
     lines.push(Line::from(vec![
         label("session"),
@@ -2511,6 +2512,186 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         ]));
     }
     lines
+}
+
+fn progress_info_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>> {
+    let mut tracks: HashMap<String, Vec<(i64, Value)>> = HashMap::new();
+    for event in events {
+        if event.get("type").and_then(Value::as_str) != Some("update_published")
+            || event.pointer("/payload/type").and_then(Value::as_str) != Some("progress")
+        {
+            continue;
+        }
+        let Some(key) = event.pointer("/payload/key").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(data) = event
+            .pointer("/payload/data")
+            .filter(|value| value.is_object())
+        else {
+            continue;
+        };
+        let Some(at) = event
+            .get("at")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp_ms)
+        else {
+            continue;
+        };
+        tracks
+            .entry(key.to_string())
+            .or_default()
+            .push((at, data.clone()));
+    }
+    let mut keys: Vec<String> = tracks.keys().cloned().collect();
+    keys.sort_by_key(|key| (key != "overall", key.clone()));
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let label =
+        |text: &str| Span::styled(format!("{text:<14}"), Style::default().fg(palette.accent));
+    let mut lines = vec![Line::from("")];
+    for key in keys {
+        let samples = tracks.get(&key).expect("progress key exists");
+        let Some((latest_at, latest)) = samples.last() else {
+            continue;
+        };
+        let name = latest.get("label").and_then(Value::as_str).unwrap_or(&key);
+        let status = latest
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let completed = latest.get("completed").and_then(Value::as_f64);
+        let total = latest.get("total").and_then(Value::as_f64);
+        let unit = latest.get("unit").and_then(Value::as_str).unwrap_or("");
+        let count = match (completed, total) {
+            (Some(done), Some(all)) => format!(
+                "{} / {} {}",
+                compact_number(done),
+                compact_number(all),
+                sanitize_text(unit)
+            ),
+            (Some(done), None) => format!("{} {}", compact_number(done), sanitize_text(unit)),
+            _ => status.to_string(),
+        };
+        lines.push(Line::from(vec![
+            label("progress"),
+            Span::raw(format!("{} · {}", sanitize_text(name), count.trim())),
+        ]));
+
+        let mut detail = Vec::new();
+        let source_eta = latest
+            .get("sourceEstimatedFinishAt")
+            .and_then(Value::as_str)
+            .and_then(parse_timestamp_ms)
+            .filter(|finish| *finish > now_ms());
+        if let Some(finish) = source_eta {
+            detail.push(format!("source ETA {}", format_eta_ms(finish - now_ms())));
+        } else if !matches!(
+            status,
+            "completed" | "failed" | "cancelled" | "waiting" | "blocked"
+        ) {
+            let rates = progress_rates(samples);
+            if let (Some(all), Some(done), Some(median)) = (total, completed, median_value(&rates))
+            {
+                if median > 0.0 {
+                    detail.push(format!(
+                        "ETA {}",
+                        format_eta_ms(((all - done).max(0.0) / median) as i64)
+                    ));
+                    detail.push(format!("rate {}/min", compact_number(median * 60_000.0)));
+                    detail.push(format!("{} confidence", progress_confidence(&rates)));
+                } else {
+                    detail.push("ETA unavailable".to_string());
+                }
+            } else {
+                detail.push("ETA unavailable".to_string());
+            }
+        }
+        detail.push(format!("{} samples", samples.len()));
+        detail.push(format!(
+            "updated {}",
+            format_eta_ms((now_ms() - *latest_at).max(0))
+        ));
+        lines.push(Line::from(vec![
+            label("estimate"),
+            Span::styled(detail.join(" · "), Style::default().fg(palette.subtext)),
+        ]));
+    }
+    lines
+}
+
+fn progress_rates(samples: &[(i64, Value)]) -> Vec<f64> {
+    let start = samples.len().saturating_sub(9);
+    let mut rates = Vec::new();
+    for pair in samples[start..].windows(2) {
+        let (previous_at, previous) = &pair[0];
+        let (current_at, current) = &pair[1];
+        let elapsed = current_at - previous_at;
+        let before = previous.get("completed").and_then(Value::as_f64);
+        let after = current.get("completed").and_then(Value::as_f64);
+        if elapsed > 0 && before.is_some() && after.is_some() {
+            rates.push((after.unwrap_or(0.0) - before.unwrap_or(0.0)) / elapsed as f64);
+        }
+    }
+    rates.sort_by(f64::total_cmp);
+    rates
+}
+
+fn median_value(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    })
+}
+
+fn progress_confidence(rates: &[f64]) -> &'static str {
+    if rates.len() < 2 {
+        return "low";
+    }
+    let median = median_value(rates).unwrap_or(0.0);
+    if median <= 0.0 {
+        return "low";
+    }
+    let p25 = rates[((rates.len() - 1) as f64 * 0.25).round() as usize];
+    let p75 = rates[((rates.len() - 1) as f64 * 0.75).round() as usize];
+    let spread = (p75 - p25) / median;
+    if rates.len() >= 5 && spread <= 0.25 {
+        "high"
+    } else if spread <= 0.5 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+fn compact_number(value: f64) -> String {
+    if value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn format_eta_ms(ms: i64) -> String {
+    let seconds = ms.max(0) / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", (seconds + 59) / 60)
+    } else if seconds < 86_400 {
+        format!("{:.1}h", seconds as f64 / 3_600.0)
+    } else {
+        format!("{:.1}d", seconds as f64 / 86_400.0)
+    }
 }
 
 struct TransportOptions<'a> {

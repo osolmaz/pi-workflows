@@ -117,6 +117,10 @@ export async function runShellAction(
   const onAbort = () => kill("abort");
 
   const lineBuffers: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
+  const decoders = {
+    stdout: new TextDecoder("utf-8", { fatal: onLine !== undefined }),
+    stderr: new TextDecoder("utf-8", { fatal: onLine !== undefined }),
+  };
   let lineWork = Promise.resolve();
   const processChunk = (
     stream: "stdout" | "stderr",
@@ -153,16 +157,30 @@ export async function runShellAction(
     if (onLine === undefined || lineError !== undefined) return;
     for (const stream of ["stdout", "stderr"] as const) {
       const text = lineBuffers[stream];
+      if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+        throw new Error(`shell ${stream} update line exceeded 65536 bytes`);
+      }
       if (text.length > 0)
         await onLine({ stream, text: text.endsWith("\r") ? text.slice(0, -1) : text });
     }
   };
 
+  const decodeChunk = (
+    stream: "stdout" | "stderr",
+    chunk: Buffer,
+    source: NodeJS.ReadableStream & { pause(): unknown; resume(): unknown },
+  ) => {
+    try {
+      processChunk(stream, decoders[stream].decode(chunk, { stream: true }), source);
+    } catch (error) {
+      lineError = error instanceof Error ? error : new Error(String(error));
+      kill("abort");
+    }
+  };
+
   const finish = new Promise<ShellActionResult>((resolve, reject) => {
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => processChunk("stdout", chunk, child.stdout));
-    child.stderr.on("data", (chunk: string) => processChunk("stderr", chunk, child.stderr));
+    child.stdout.on("data", (chunk: Buffer) => decodeChunk("stdout", chunk, child.stdout));
+    child.stderr.on("data", (chunk: Buffer) => decodeChunk("stderr", chunk, child.stderr));
 
     child.once("error", (error) => {
       // Spawn failures (missing executable, EACCES) still get a receipt so
@@ -183,6 +201,12 @@ export async function runShellAction(
     // `close` (unlike `exit`) fires only after stdio has fully closed, so
     // captured output is never truncated.
     child.once("close", (exitCode, signalName) => {
+      try {
+        processChunk("stdout", decoders.stdout.decode(), child.stdout);
+        processChunk("stderr", decoders.stderr.decode(), child.stderr);
+      } catch (error) {
+        lineError = error instanceof Error ? error : new Error(String(error));
+      }
       void flushLines()
         .then(() => {
           const result: ShellActionResult = {
@@ -207,6 +231,17 @@ export async function runShellAction(
         .catch((error: unknown) => {
           const failure = error instanceof Error ? error : new Error(String(error));
           lineError = failure;
+          const result: ShellActionResult = {
+            command: spec.command,
+            args,
+            cwd,
+            stdout,
+            stderr,
+            exitCode,
+            signal: signalName,
+            durationMs: Date.now() - startMs,
+          };
+          (failure as Error & { [SHELL_RESULT]?: ShellActionResult })[SHELL_RESULT] = result;
           reject(failure);
         });
     });

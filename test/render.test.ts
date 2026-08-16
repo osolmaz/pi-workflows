@@ -127,6 +127,20 @@ describe("renderRunListLines edges", () => {
 describe("renderRunDetailLines", () => {
   const size = { width: 100, height: 50 };
 
+  it("renders progress history, measured ETA, sample count, and confidence", () => {
+    const bundle = makeBundle();
+    bundle.traceEvents = [
+      progressEvent(2, "2026-07-19T00:00:00.000Z", 0),
+      progressEvent(3, "2026-07-19T00:00:30.000Z", 25),
+      progressEvent(4, "2026-07-19T00:01:00.000Z", 50),
+    ];
+
+    const lines = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
+    expect(lines).toContain("progress");
+    expect(lines).toContain("Import  50/100 rows  ETA 1m");
+    expect(lines).toContain("3 samples · medium confidence");
+  });
+
   it("renders header, nodes, steps, and final output", () => {
     const bundle = makeBundle({
       status: "completed",
@@ -292,6 +306,31 @@ describe("renderRunDetailLines", () => {
     );
   });
 });
+
+function progressEvent(seq: number, at: string, completed: number) {
+  return {
+    seq,
+    at,
+    scope: "update" as const,
+    type: "update_published",
+    runId: "run-1",
+    nodeId: "work",
+    attemptId: "attempt-1",
+    payload: {
+      updateId: `u${seq}`,
+      type: "progress",
+      key: "overall",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        label: "Import",
+        status: "running",
+        completed,
+        total: 100,
+        unit: "rows",
+      },
+    },
+  };
+}
 
 describe("ansi helpers", () => {
   it("strips ANSI and measures visible length", () => {

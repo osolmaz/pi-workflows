@@ -2,7 +2,11 @@ import { ansi, fitWidth, sanitizeText } from "../render/ansi.js";
 import { formatDuration, runElapsedMs } from "../render/format.js";
 import { renderGraphLines } from "../render/graph-render.js";
 import { decodeValueWith } from "../workflows/artifacts.js";
-import { estimateProgress, formatProgressLine } from "../workflows/progress.js";
+import {
+  formatProgressLine,
+  progressRecordsFromTrace,
+  progressTracksFromRecords,
+} from "../workflows/progress.js";
 import type { LoadedRunBundle } from "../workflows/store.js";
 import type { WorkflowRunStatus, WorkflowStepRecord } from "../workflows/types.js";
 
@@ -205,27 +209,25 @@ export function renderRunDetailLines(
     }
   }
 
-  const progress = (state.updates ?? []).filter((update) => update.type === "progress");
+  const progressRecords =
+    bundle.traceEvents === undefined
+      ? (state.updates ?? []).filter((update) => update.type === "progress")
+      : progressRecordsFromTrace(bundle.traceEvents);
+  const progress = progressTracksFromRecords(progressRecords, now);
   if (progress.length > 0) {
     lines.push("");
     lines.push(ansi.bold("progress"));
-    for (const update of progress) {
-      try {
-        const estimate = estimateProgress(
-          update.key,
-          [{ at: update.at, data: update.data as never }],
-          now,
-        );
-        lines.push(fitWidth(formatProgressLine(estimate, now), size.width));
-        lines.push(
-          fitWidth(
-            ansi.dim(`  update ${update.seq} · ${update.at} · attempt ${update.attemptId}`),
-            size.width,
+    for (const track of progress) {
+      lines.push(fitWidth(formatProgressLine(track.estimate, now), size.width));
+      const latest = track.samples.at(-1);
+      lines.push(
+        fitWidth(
+          ansi.dim(
+            `  ${track.estimate.sampleCount} samples · ${track.estimate.confidence ?? "no"} confidence · updated ${latest?.at ?? "unknown"}`,
           ),
-        );
-      } catch {
-        lines.push(fitWidth(`${sanitizeText(update.key)}  invalid progress data`, size.width));
-      }
+          size.width,
+        ),
+      );
     }
   }
 

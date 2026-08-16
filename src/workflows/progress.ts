@@ -1,4 +1,4 @@
-import type { WorkflowProgressData, WorkflowUpdateRecord } from "./types.js";
+import type { WorkflowProgressData, WorkflowTraceEvent, WorkflowUpdateRecord } from "./types.js";
 import { validateProgressData } from "./updates.js";
 
 export type ProgressConfidence = "low" | "medium" | "high";
@@ -117,6 +117,40 @@ export function estimateProgress(
   };
 }
 
+export function progressRecordsFromTrace(events: WorkflowTraceEvent[]): WorkflowUpdateRecord[] {
+  const records: WorkflowUpdateRecord[] = [];
+  for (const event of events) {
+    if (
+      event.type !== "update_published" ||
+      event.nodeId === undefined ||
+      event.attemptId === undefined
+    )
+      continue;
+    const payload = event.payload;
+    if (
+      typeof payload.updateId !== "string" ||
+      typeof payload.type !== "string" ||
+      typeof payload.key !== "string" ||
+      payload.data === null ||
+      typeof payload.data !== "object" ||
+      Array.isArray(payload.data)
+    )
+      continue;
+    records.push({
+      updateId: payload.updateId,
+      seq: event.seq,
+      at: event.at,
+      runId: event.runId,
+      nodeId: event.nodeId,
+      attemptId: event.attemptId,
+      type: payload.type,
+      key: payload.key,
+      data: payload.data as Record<string, unknown>,
+    });
+  }
+  return records;
+}
+
 export function progressTracksFromRecords(
   records: WorkflowUpdateRecord[],
   now = new Date(),
@@ -124,10 +158,14 @@ export function progressTracksFromRecords(
   const grouped = new Map<string, ProgressSample[]>();
   for (const record of records) {
     if (record.type !== "progress") continue;
-    const data = validateProgressData(record.data);
-    const samples = grouped.get(record.key) ?? [];
-    samples.push({ at: record.at, data });
-    grouped.set(record.key, samples);
+    try {
+      const data = validateProgressData(record.data);
+      const samples = grouped.get(record.key) ?? [];
+      samples.push({ at: record.at, data });
+      grouped.set(record.key, samples);
+    } catch {
+      // Readers skip malformed historical update data instead of failing.
+    }
   }
   return [...grouped.entries()].map(([key, samples]) => ({
     key,
@@ -150,7 +188,9 @@ export function formatProgressLine(estimate: ProgressEstimate, now = new Date())
     eta = `source ETA ${formatRemaining(Date.parse(estimate.sourceEstimatedFinishAt) - now.getTime())}`;
   } else if (estimate.remainingMedianMs !== undefined) {
     const range =
-      estimate.remainingLowMs !== undefined && estimate.remainingHighMs !== undefined
+      estimate.remainingLowMs !== undefined &&
+      estimate.remainingHighMs !== undefined &&
+      Math.abs(estimate.remainingHighMs - estimate.remainingLowMs) >= 1_000
         ? `${formatRemaining(estimate.remainingLowMs)}–${formatRemaining(estimate.remainingHighMs)}`
         : formatRemaining(estimate.remainingMedianMs);
     eta = `ETA ${range}`;
@@ -178,7 +218,7 @@ export function formatProgressReport(
 }
 
 export function formatRemaining(ms: number): string {
-  const value = Math.max(0, ms);
+  const value = Math.ceil(Math.max(0, ms) / 1_000) * 1_000;
   if (value < 60_000) return `${Math.ceil(value / 1_000)}s`;
   if (value < 3_600_000) return `${Math.ceil(value / 60_000)}m`;
   if (value < 86_400_000) return `${(value / 3_600_000).toFixed(value < 36_000_000 ? 1 : 0)}h`;

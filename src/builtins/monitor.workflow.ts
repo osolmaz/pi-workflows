@@ -171,16 +171,23 @@ function estimateTracks(outputs: Record<string, unknown>): MonitorEstimate {
   };
 }
 
-function reportMessage(outputs: Record<string, unknown>): string {
-  const check = outputs.check as MonitorCheck;
-  const estimate = outputs.estimate as MonitorEstimate;
-  if (estimate.tracks.length === 0) return check.report;
-  const config = configFrom(outputs);
-  const structured = formatProgressReport(
-    estimate.tracks.map((track) => track.estimate),
-    check.route === "continue" ? config.everyMinutes : undefined,
-  );
-  return `${check.report}\n${structured}`.slice(0, MAX_REPORT_CHARS);
+function reportMessage(context: WorkflowNodeContext): string {
+  const check = context.outputs.check as MonitorCheck;
+  const estimate = context.outputs.estimate as MonitorEstimate;
+  const config = configFrom(context.outputs);
+  const parts = [check.report];
+  if (estimate.tracks.length > 0) {
+    parts.push(
+      formatProgressReport(
+        estimate.tracks.map((track) => track.estimate),
+        check.route === "continue" ? config.everyMinutes : undefined,
+      ),
+    );
+  }
+  if (check.route === "continue" && completedChecks(context) >= config.maxChecks) {
+    parts.push(`Reached the ${config.maxChecks}-check safety limit.`);
+  }
+  return parts.join("\n").slice(0, MAX_REPORT_CHARS);
 }
 
 const monitorWorkflow: WorkflowDefinition = defineWorkflow({
@@ -236,7 +243,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
     }),
     report: notify({
       statusDetail: "queueing monitor update",
-      message: ({ outputs }) => reportMessage(outputs),
+      message: (context) => reportMessage(context),
       kind: "progress",
     }),
     decide: compute({

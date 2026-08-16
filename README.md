@@ -11,10 +11,12 @@ the model keeps everything it already knows from the discussion. The model
 completes each step by calling a JSON `workflow` tool, which gives the engine
 structured, validated output to route on. See the
 [design philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the
-engine and its public parts. Accepted future contracts are documented in
-[workflow updates](docs/WORKFLOW_UPDATES.md), [workflow step
-messages](docs/WORKFLOW_STEP_MESSAGES.md), and the revised [built-in
-monitor](docs/MONITOR.md).
+engine and its public parts. Running steps can publish durable [workflow
+updates](docs/WORKFLOW_UPDATES.md), including progress counts and ETA data.
+Agent instructions use compact [workflow step
+messages](docs/WORKFLOW_STEP_MESSAGES.md), and the built-in
+[monitor](docs/MONITOR.md) reports every check without starting an extra
+assistant turn.
 
 ## Install
 
@@ -254,7 +256,8 @@ example set. Copy any of them into `.pi/workflows/` to use them:
 - `branch` classifies a task with a `decision` and routes to either a
   continue lane or a clarification checkpoint.
 - `shell` runs a runtime-owned shell command and parses its output, with no
-  agent step at all.
+  agent step at all. Shell and function actions can publish durable progress
+  while they run.
 - `two-turn` chains three agent steps that build on each other's outputs in
   the same conversation.
 - `elegant-solution` is the mid-conversation trigger described above.

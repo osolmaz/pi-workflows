@@ -1,10 +1,8 @@
 # Built-in monitor
 
-This specification defines the built-in `monitor` workflow after the workflow-update feature in [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) is available.
+This specification defines the built-in `monitor` workflow and its use of [workflow updates](WORKFLOW_UPDATES.md).
 
 The monitor checks a target, sends one status notification after every accepted check, publishes optional progress tracks, waits, and repeats until its stop rule or safety limit is reached.
-
-This contract is accepted design and is not implemented in release `0.5.3`.
 
 ## Minimal input
 

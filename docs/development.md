@@ -15,7 +15,9 @@ tui/             Rust piw viewer and live replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
-imports nothing outside itself and never imports Pi. `src/builtins` contains
+imports nothing outside itself and never imports Pi. Durable updates,
+progress validation, estimation, and text formatting stay in this layer so the
+engine, extension, hosts, and viewers share one contract. `src/builtins` contains
 package-owned definitions and imports only the public workflow engine.
 `src/controllers` may import the public workflow engine for child-run
 scheduling. `src/extension` and `src/host` may also import the built-in catalog.
@@ -38,8 +40,10 @@ in `src/viewer`
 composes the full detail view (header, graph, step timeline, step inspector)
 and stays pure so tests can assert on rendered lines.
 
-The Rust viewer keeps graph layout and plain rendering in parity with
-`src/render`, then applies ratatui-only presentation through semantic canvas
+The TypeScript and Rust viewers both show progress tracks, sample counts,
+confidence, update time, and ETA from bundle data. The Rust viewer also keeps
+graph layout and plain rendering in parity with `src/render`, then applies
+ratatui-only presentation through semantic canvas
 roles and `tui/src/theme`. Catppuccin is the default. Theme colors must be
 chosen in the theme layer rather than directly in UI components. Graph node
 surfaces are intentional styled spaces, so changing the sparse canvas must

@@ -210,7 +210,8 @@ The full run projection (`WorkflowRunState` in
   "input": { "task": "fix the flaky test" },
   "outputs": {},
   "results": {},
-  "steps": []
+  "steps": [],
+  "updates": []
 }
 ```
 
@@ -235,6 +236,10 @@ The full run projection (`WorkflowRunState` in
 - Per-node data lives in `outputs` (the accepted output of each finished node,
   latest attempt wins on loops) and `results` (the full result record of the
   latest attempt, including outcome and timing).
+- `updates` contains the latest durable record for each `(type, key)` pair,
+  sorted by trace sequence. New runs start with an empty array. Older bundles
+  can omit it. Resume keeps it; checkpoint continuation starts a new empty
+  projection. The trace keeps the complete update history.
 - `steps` is the ordered history, one record per node attempt:
 
 ```json
@@ -289,7 +294,10 @@ One event per line, monotonically sequenced per run, schema
 }
 ```
 
-`scope` is one of `run`, `node`, `agent`, `action`, or `session`. `nodeId` and
+`scope` is one of `run`, `node`, `agent`, `action`, `session`, or `update`.
+An `update_published` event carries the runtime update ID, type, key, and data;
+its event sequence and timestamp are the update sequence and timestamp. See
+[WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the full contract. `nodeId` and
 `attemptId` are present on node-scoped and agent-scoped events. Consumers must
 ignore unknown event types and unknown payload fields so new ones can be added
 within the same schema version.

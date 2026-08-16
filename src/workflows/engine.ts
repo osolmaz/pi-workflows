@@ -1301,6 +1301,8 @@ export function appendStepContract(
     "---",
     `Workflow step contract (workflow: ${workflowName}, step: ${nodeId}, attempt: ${attemptId})`,
     "",
+    "While this step is active, you may publish non-completing updates with:",
+    `{"action": "update", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "update": {"type": "...", "key": "...", "data": {...}}}`,
     "Complete this step by calling the `workflow` tool exactly once with:",
     `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
     `Expected output: ${expectedOutput ?? "a JSON object with your result"}`,

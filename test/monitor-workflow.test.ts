@@ -104,6 +104,7 @@ describe("built-in monitor workflow", () => {
 
     expect(result.state.status).toBe("completed");
     expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.content).toContain("Reached the 1-check safety limit.");
     expect(result.state.finalOutput).toMatchObject({
       reason: "Reached the 1-check safety limit.",
       reported: true,

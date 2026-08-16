@@ -2,8 +2,6 @@
 
 This specification defines durable, non-terminal updates from running Pi Workflows nodes. An update reports current state without finishing a node or choosing a graph route.
 
-This contract is accepted design and is not implemented in release `0.5.3`.
-
 ## Minimal examples
 
 A function action publishes current state while it runs:

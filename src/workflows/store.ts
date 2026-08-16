@@ -1035,6 +1035,8 @@ export type LoadedRunBundle = {
   manifest: WorkflowRunManifest;
   state: WorkflowRunState;
   snapshot: WorkflowDefinitionSnapshot | null;
+  /** Full durable trace when loaded by the current reader. */
+  traceEvents?: WorkflowTraceEvent[];
   sessionBinding: WorkflowSessionBinding | null;
   sessionEntries: WorkflowSessionEntryRecord[];
   sessionEvents: WorkflowSessionEventRecord[];
@@ -1073,6 +1075,9 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
   }
   const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
     resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
+  );
+  const trace = await readNdjsonFile<WorkflowTraceEvent>(
+    resolveBundlePath(runDir, paths.trace, TRACE_PATH),
   );
   const sessionDir = resolveBundlePath(runDir, paths.session, SESSION_DIR);
   const sessionBinding = await readJsonFile<WorkflowSessionBinding>(
@@ -1148,6 +1153,7 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
     manifest,
     state,
     snapshot,
+    traceEvents: trace.records,
     sessionBinding,
     sessionEntries: entries.records,
     sessionEvents: events.records,

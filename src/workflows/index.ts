@@ -34,6 +34,7 @@ export {
   formatProgressLine,
   formatProgressReport,
   formatRemaining,
+  progressRecordsFromTrace,
   progressTracksFromRecords,
   type ProgressConfidence,
   type ProgressEstimate,
