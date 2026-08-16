@@ -244,6 +244,61 @@ describe("buildWidgetLines", () => {
     expect(lines).toContain("Worker  2/10 items");
   });
 
+  it("merges monitor estimates with every durable projected track", () => {
+    const overallData = {
+      schema: "pi-workflows.progress.v1" as const,
+      label: "Overall",
+      status: "running" as const,
+      completed: 5,
+      total: 10,
+      unit: "items",
+    };
+    const state = makeState({
+      currentNode: "second",
+      updates: [
+        {
+          updateId: "u1",
+          seq: 1,
+          at: "2026-01-01T00:01:00.000Z",
+          runId: "r1",
+          nodeId: "work",
+          attemptId: "a1",
+          type: "progress",
+          key: "overall",
+          data: overallData,
+        },
+        {
+          updateId: "u2",
+          seq: 2,
+          at: "2026-01-01T00:01:00.000Z",
+          runId: "r1",
+          nodeId: "work",
+          attemptId: "a1",
+          type: "progress",
+          key: "worker",
+          data: { ...overallData, label: "Worker", completed: 2 },
+        },
+      ],
+      outputs: {
+        estimate: {
+          tracks: [
+            {
+              key: "overall",
+              samples: [],
+              estimate: { key: "overall", data: overallData, sampleCount: 2 },
+            },
+          ],
+        },
+      },
+    });
+
+    const lines = buildWidgetLines(state, snapshot, new Date("2026-01-01T00:01:00.000Z")).join(
+      "\n",
+    );
+    expect(lines).toContain("Overall  5/10 items");
+    expect(lines).toContain("Worker  2/10 items");
+  });
+
   it("shows optional progress, ETA, elapsed update age, and next-check time", () => {
     const now = new Date("2026-01-01T00:10:00.000Z");
     const state = makeState({

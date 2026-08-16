@@ -146,9 +146,8 @@ function progressLines(
     updateHistory === undefined
       ? undefined
       : progressTracksFromRecords(updateHistory, now).map((track) => track.estimate);
-  const estimates =
-    monitorEstimates(state) ??
-    mergeProgressEstimates(latestProgressEstimates(state, now), measured ?? []);
+  const projected = mergeProgressEstimates(latestProgressEstimates(state, now), measured ?? []);
+  const estimates = mergeProgressEstimates(projected, monitorEstimates(state) ?? []);
   const lines = prioritizeProgressEstimates(estimates).map((estimate) =>
     formatProgressLine(estimate, now),
   );
