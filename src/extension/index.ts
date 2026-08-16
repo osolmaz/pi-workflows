@@ -14,7 +14,7 @@ import {
 } from "../workflows/errors.js";
 import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
 import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
-import { progressRecordsFromTrace } from "../workflows/progress.js";
+import { appendProgressHistory, progressRecordsFromTrace } from "../workflows/progress.js";
 import {
   createRunId,
   listRunBundles,
@@ -843,7 +843,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
       },
       onEvent: (event, state: WorkflowRunState) => {
         run.lastState = state;
-        run.updateHistory.push(...progressRecordsFromTrace([event]));
+        run.updateHistory = appendProgressHistory(
+          run.updateHistory,
+          progressRecordsFromTrace([event]),
+        );
         updateWidget(ctx, state, snapshot, run.updateHistory);
       },
     });

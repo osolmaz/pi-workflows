@@ -155,6 +155,27 @@ describe("built-in monitor workflow", () => {
     expect(notifications[0]?.content).toContain("ETA unavailable (needs another progress sample)");
   });
 
+  it("paces large progress batches below the engine update limit", async () => {
+    const tracks = Array.from({ length: 101 }, (_, index) => ({
+      key: `track-${index}`,
+      data: progress(1, 2),
+    }));
+    const engine = new WorkflowEngine({
+      executor: scriptedExecutor([check({ progress: { tracks } })]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-progress-batch")),
+      notificationSink: {
+        notify() {
+          return { notificationId: "n1", targetSessionId: "s1" };
+        },
+      },
+    });
+
+    const result = await engine.run(monitor, input());
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.updates).toHaveLength(101);
+  }, 10_000);
+
   it("includes the prior observation and progress summary in the next prompt", async () => {
     const prompts: string[] = [];
     const executor = scriptedExecutor([], prompts);

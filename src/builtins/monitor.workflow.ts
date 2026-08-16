@@ -62,6 +62,21 @@ function requireBoundedString(value: unknown, label: string, maxChars: number): 
   return trimmed;
 }
 
+async function waitForUpdateSlot(signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("monitor progress publication was cancelled"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 55);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function prepareMonitorInput(input: unknown): MonitorConfig {
   const value = requireRecord(input, "monitor input") as Partial<MonitorInput>;
   const allowed = new Set(["task", "everyMinutes", "stopWhen", "maxChecks", "checkTimeoutMinutes"]);
@@ -245,10 +260,11 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
     estimate: compute({ run: ({ outputs }) => estimateTracks(outputs) }),
     publish_progress: action({
       statusDetail: "publishing monitor progress",
-      run: async ({ outputs, publishUpdate }) => {
+      run: async ({ outputs, publishUpdate, signal }) => {
         const check = outputs.check as MonitorCheck;
         if (check.progress === undefined) return { published: 0 };
         for (const track of check.progress.tracks) {
+          await waitForUpdateSlot(signal);
           await publishUpdate({ type: "progress", key: track.key, data: track.data });
         }
         return { published: check.progress.tracks.length };

@@ -202,6 +202,48 @@ describe("buildWidgetLines", () => {
     expect(view.lines.join("\n")).toContain("Import  50/100 rows  ETA 2m");
   });
 
+  it("keeps latest tracks that are outside the bounded measured history", () => {
+    const overall = {
+      updateId: "u1",
+      seq: 1,
+      at: "2026-01-01T00:01:00.000Z",
+      runId: "r1",
+      nodeId: "work",
+      attemptId: "a1",
+      type: "progress",
+      key: "overall",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        label: "Overall",
+        status: "running",
+        completed: 5,
+        total: 10,
+        unit: "items",
+      },
+    } as const;
+    const worker = {
+      ...overall,
+      updateId: "u2",
+      seq: 2,
+      key: "worker",
+      data: { ...overall.data, label: "Worker", completed: 2 },
+    } as const;
+    const state = makeState({ currentNode: "second", updates: [overall, worker] });
+    const view = buildWidgetView(
+      state,
+      snapshot,
+      new Date("2026-01-01T00:01:00.000Z"),
+      null,
+      false,
+      120,
+      undefined,
+      [overall],
+    );
+    const lines = view.lines.join("\n");
+    expect(lines).toContain("Overall  5/10 items");
+    expect(lines).toContain("Worker  2/10 items");
+  });
+
   it("shows optional progress, ETA, elapsed update age, and next-check time", () => {
     const now = new Date("2026-01-01T00:10:00.000Z");
     const state = makeState({

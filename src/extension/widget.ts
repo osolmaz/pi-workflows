@@ -148,9 +148,7 @@ function progressLines(
       : progressTracksFromRecords(updateHistory, now).map((track) => track.estimate);
   const estimates =
     monitorEstimates(state) ??
-    (measured !== undefined && measured.length > 0
-      ? measured
-      : latestProgressEstimates(state, now));
+    mergeProgressEstimates(latestProgressEstimates(state, now), measured ?? []);
   const lines = prioritizeProgressEstimates(estimates).map((estimate) =>
     formatProgressLine(estimate, now),
   );
@@ -182,6 +180,17 @@ function monitorEstimates(state: WorkflowRunState): ProgressEstimate[] | undefin
     )
     .filter((estimate): estimate is ProgressEstimate => estimate !== undefined);
   return estimates.length > 0 ? estimates : undefined;
+}
+
+function mergeProgressEstimates(
+  latest: ProgressEstimate[],
+  measured: ProgressEstimate[],
+): ProgressEstimate[] {
+  const measuredByKey = new Map(measured.map((estimate) => [estimate.key, estimate]));
+  const merged = latest.map((estimate) => measuredByKey.get(estimate.key) ?? estimate);
+  const latestKeys = new Set(latest.map((estimate) => estimate.key));
+  merged.push(...measured.filter((estimate) => !latestKeys.has(estimate.key)));
+  return merged;
 }
 
 function latestProgressEstimates(state: WorkflowRunState, now: Date): ProgressEstimate[] {

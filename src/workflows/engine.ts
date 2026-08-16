@@ -97,7 +97,7 @@ export class WorkflowEngine {
       }
     | undefined;
   private readonly updateLimiters = new Map<string, UpdateRateLimiter>();
-  private readonly updateReceipts = new Map<string, WorkflowUpdateReceipt>();
+  private readonly updatePublications = new Map<string, Promise<WorkflowUpdateReceipt>>();
   private cancelled = false;
   private parked = false;
   private paused = false;
@@ -141,31 +141,33 @@ export class WorkflowEngine {
         ? undefined
         : `${active.state.runId}:${active.attemptId}:${idempotencyKey}`;
     if (receiptKey !== undefined) {
-      const prior = this.updateReceipts.get(receiptKey);
-      if (prior !== undefined) return prior;
+      const prior = this.updatePublications.get(receiptKey);
+      if (prior !== undefined) return await prior;
     }
-    const update = validateWorkflowUpdate(input);
-    let limiter = this.updateLimiters.get(active.state.runId);
-    if (limiter === undefined) {
-      limiter = new UpdateRateLimiter();
-      this.updateLimiters.set(active.state.runId, limiter);
-    }
-    limiter.take();
-    const { event, record } = await this.store.publishUpdate(
-      active.runDir,
-      active.state,
-      active.nodeId,
-      active.attemptId,
-      update,
-    );
-    try {
-      this.onEvent?.(event, active.state);
-    } catch {
-      // UI and logging observers never determine workflow correctness.
-    }
-    const receipt = updateReceipt(record);
-    if (receiptKey !== undefined) this.updateReceipts.set(receiptKey, receipt);
-    return receipt;
+    const publication = (async () => {
+      const update = validateWorkflowUpdate(input);
+      let limiter = this.updateLimiters.get(active.state.runId);
+      if (limiter === undefined) {
+        limiter = new UpdateRateLimiter();
+        this.updateLimiters.set(active.state.runId, limiter);
+      }
+      limiter.take();
+      const { event, record } = await this.store.publishUpdate(
+        active.runDir,
+        active.state,
+        active.nodeId,
+        active.attemptId,
+        update,
+      );
+      try {
+        this.onEvent?.(event, active.state);
+      } catch {
+        // UI and logging observers never determine workflow correctness.
+      }
+      return updateReceipt(record);
+    })();
+    if (receiptKey !== undefined) this.updatePublications.set(receiptKey, publication);
+    return await publication;
   }
 
   /** Abort the currently running node and mark the run cancelled. */
@@ -889,8 +891,8 @@ export class WorkflowEngine {
         this.activeAttempt = undefined;
       }
       const receiptPrefix = `${state.runId}:${attemptId}:`;
-      for (const key of this.updateReceipts.keys()) {
-        if (key.startsWith(receiptPrefix)) this.updateReceipts.delete(key);
+      for (const key of this.updatePublications.keys()) {
+        if (key.startsWith(receiptPrefix)) this.updatePublications.delete(key);
       }
     }
   }

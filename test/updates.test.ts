@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { action, agent, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import {
+  appendProgressHistory,
   estimateProgress,
   formatProgressLine,
   formatProgressReport,
@@ -87,16 +88,18 @@ describe("workflow updates", () => {
     expect(result.state.updates).toHaveLength(1_024);
   });
 
-  it("accepts agent updates without completing the step and deduplicates delivery", async () => {
+  it("accepts agent updates without completing the step and deduplicates concurrent delivery", async () => {
     const executor = new ScriptedExecutor().respond("check", async (request) => {
-      const first = await request.publishUpdate?.(
-        { type: "progress", key: "job", data: progress(4, 10) },
-        "tool-call-1",
-      );
-      const duplicate = await request.publishUpdate?.(
-        { type: "progress", key: "job", data: progress(9, 10) },
-        "tool-call-1",
-      );
+      const [first, duplicate] = await Promise.all([
+        request.publishUpdate?.(
+          { type: "progress", key: "job", data: progress(4, 10) },
+          "tool-call-1",
+        ),
+        request.publishUpdate?.(
+          { type: "progress", key: "job", data: progress(9, 10) },
+          "tool-call-1",
+        ),
+      ]);
       expect(duplicate).toEqual(first);
       const accepted = await request.accept({ ok: true });
       if (!accepted.ok) throw new Error(accepted.error);
@@ -152,6 +155,9 @@ describe("workflow updates", () => {
       [{ type: "ok", key: "x", data: [] }, "update.data"],
       [{ type: "ok", key: "x", data: { value: Number.NaN } }, "non-finite"],
       [{ type: "ok", key: "x", data: { value: undefined } }, "undefined"],
+      [{ type: "ok", key: "x", data: { value: new Map() } }, "non-JSON"],
+      [{ type: "ok", key: "x", data: { value: new Date() } }, "non-JSON"],
+      [{ type: "ok", key: "x", data: { value: new (class Value {})() } }, "non-JSON"],
       [{ type: "progress", key: "x", data: { ...progress(2, 1) } }, "at least progress.completed"],
       [{ type: "progress", key: "x", data: { ...progress(1, 2), extra: true } }, "not supported"],
       [{ type: "progress", key: "x", data: { ...progress(1, 2), status: "busy" } }, "status"],
@@ -194,6 +200,25 @@ describe("workflow updates", () => {
 });
 
 describe("progress estimation", () => {
+  it("bounds live history per track and across tracks", () => {
+    const records = Array.from({ length: 20 }, (_, index) => ({
+      updateId: `u${index}`,
+      seq: index + 1,
+      at: `2026-08-16T10:${String(index).padStart(2, "0")}:00.000Z`,
+      runId: "r1",
+      nodeId: "work",
+      attemptId: "a1",
+      type: "progress",
+      key: index % 2 === 0 ? "a" : "b",
+      data: progress(index, 20),
+    }));
+    const bounded = appendProgressHistory([], records, 3, 5);
+    expect(bounded).toHaveLength(5);
+    expect(bounded.filter((record) => record.key === "a")).toHaveLength(2);
+    expect(bounded.filter((record) => record.key === "b")).toHaveLength(3);
+    expect(bounded.map((record) => record.updateId)).toEqual(["u15", "u16", "u17", "u18", "u19"]);
+  });
+
   it("uses recent measured intervals and shows an ETA", () => {
     const estimate = estimateProgress(
       "overall",

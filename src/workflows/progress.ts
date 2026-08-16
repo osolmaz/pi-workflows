@@ -151,6 +151,26 @@ export function progressRecordsFromTrace(events: WorkflowTraceEvent[]): Workflow
   return records;
 }
 
+export function appendProgressHistory(
+  history: WorkflowUpdateRecord[],
+  additions: WorkflowUpdateRecord[],
+  maxPerTrack = 9,
+  maxRecords = 576,
+): WorkflowUpdateRecord[] {
+  const retained: WorkflowUpdateRecord[] = [];
+  const counts = new Map<string, number>();
+  const combined = [...history, ...additions];
+  for (let index = combined.length - 1; index >= 0 && retained.length < maxRecords; index -= 1) {
+    const record = combined[index] as WorkflowUpdateRecord;
+    if (record.type !== "progress") continue;
+    const count = counts.get(record.key) ?? 0;
+    if (count >= maxPerTrack) continue;
+    counts.set(record.key, count + 1);
+    retained.push(record);
+  }
+  return retained.reverse();
+}
+
 export function progressTracksFromRecords(
   records: WorkflowUpdateRecord[],
   now = new Date(),
