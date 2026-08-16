@@ -448,12 +448,13 @@ export class WorkflowRunStore {
         throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
       }
       const updateId = createUpdateId();
+      const data = JSON.parse(JSON.stringify(update.data)) as Record<string, unknown>;
       const event = await this.appendTraceEvent(runDir, state.runId, {
         scope: "node",
         type: "update_published",
         nodeId,
         attemptId,
-        payload: { updateId, type: update.type, key: update.key, data: update.data },
+        payload: { updateId, type: update.type, key: update.key, data },
       });
       const record: WorkflowUpdateRecord = {
         updateId,
@@ -464,7 +465,7 @@ export class WorkflowRunStore {
         attemptId,
         type: update.type,
         key: update.key,
-        data: update.data,
+        data,
       };
       state.updates = updateProjection(state.updates, record);
       state.traceSeq = event.seq;
@@ -1063,8 +1064,16 @@ export async function readLastTraceEvent(
   return events.records.at(-1) ?? null;
 }
 
+export type ReadRunBundleOptions = {
+  /** Load the full append-only trace. Detail views need it; run lists do not. */
+  includeTrace?: boolean;
+};
+
 /** Read a run bundle from disk. Returns null when the bundle is unreadable. */
-export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | null> {
+export async function readRunBundle(
+  runDir: string,
+  options: ReadRunBundleOptions = {},
+): Promise<LoadedRunBundle | null> {
   const manifest = await readJsonFile<WorkflowRunManifest>(path.join(runDir, MANIFEST_PATH));
   if (!manifest || manifest.schema !== RUN_BUNDLE_SCHEMA) {
     return null;
@@ -1082,9 +1091,12 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
   const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
     resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
   );
-  const trace = await readNdjsonFile<WorkflowTraceEvent>(
-    resolveBundlePath(runDir, paths.trace, TRACE_PATH),
-  );
+  const trace =
+    options.includeTrace === false
+      ? undefined
+      : await readNdjsonFile<WorkflowTraceEvent>(
+          resolveBundlePath(runDir, paths.trace, TRACE_PATH),
+        );
   const sessionDir = resolveBundlePath(runDir, paths.session, SESSION_DIR);
   const sessionBinding = await readJsonFile<WorkflowSessionBinding>(
     path.join(sessionDir, "binding.json"),
@@ -1159,7 +1171,7 @@ export async function readRunBundle(runDir: string): Promise<LoadedRunBundle | n
     manifest,
     state,
     snapshot,
-    traceEvents: trace.records,
+    ...(trace !== undefined ? { traceEvents: trace.records } : {}),
     sessionBinding,
     sessionEntries: entries.records,
     sessionEvents: events.records,
@@ -1198,7 +1210,7 @@ export async function listRunBundles(outputRoot: string): Promise<LoadedRunBundl
   }
   const bundles: LoadedRunBundle[] = [];
   for (const entry of entries) {
-    const bundle = await readRunBundle(path.join(outputRoot, entry));
+    const bundle = await readRunBundle(path.join(outputRoot, entry), { includeTrace: false });
     if (bundle) {
       bundles.push(bundle);
     }

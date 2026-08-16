@@ -73,6 +73,7 @@ export {
   readRunBundle,
   workflowRunsBaseDir,
   type LoadedRunBundle,
+  type ReadRunBundleOptions,
 } from "./store.js";
 export type {
   AgentNodeDefinition,

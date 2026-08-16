@@ -476,6 +476,9 @@ describe("listRunBundles", () => {
     const bundles = await listRunBundles(outputRoot);
 
     expect(bundles.map((bundle) => bundle.state.runId)).toEqual([newer.runId, older.runId]);
+    expect(bundles.every((bundle) => bundle.traceEvents === undefined)).toBe(true);
+    const detail = await readRunBundle(bundles[0]!.runDir);
+    expect(detail?.traceEvents).toEqual([]);
   });
 
   it("returns empty for a missing directory", async () => {

@@ -52,6 +52,38 @@ describe("workflow updates", () => {
     expect(updates.map((event) => event.seq)).toEqual([3, 4]);
   });
 
+  it("snapshots mutable update data before retaining it", async () => {
+    const { engine: runtime } = await engine();
+    const workflow = defineWorkflow({
+      name: "mutable-update-data",
+      startAt: "work",
+      nodes: {
+        work: action({
+          run: async ({ publishUpdate }) => {
+            const data = progress(1, 3);
+            await publishUpdate({ type: "progress", key: "overall", data });
+            data.completed = 2;
+            await publishUpdate({ type: "progress", key: "overall", data });
+            data.completed = 3;
+            return "done";
+          },
+        }),
+      },
+      edges: [],
+    });
+
+    const result = await runtime.run(workflow, {});
+    expect(result.state.updates?.[0]?.data.completed).toBe(2);
+    const trace = (await fs.readFile(path.join(result.runDir, "trace.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as WorkflowTraceEvent)
+      .filter((event) => event.type === "update_published");
+    expect(trace.map((event) => (event.payload.data as { completed: number }).completed)).toEqual([
+      1, 2,
+    ]);
+  });
+
   it("serializes concurrent admission at the current-key limit", async () => {
     const { engine: runtime } = await engine();
     const workflow = defineWorkflow({
