@@ -56,6 +56,7 @@ export type {
   AgentNodeDefinition,
   AgentStepContract,
   AgentStepExecutor,
+  AgentStepPresentation,
   AgentStepRequest,
   AgentStepSubmission,
   ActionNodeDefinition,

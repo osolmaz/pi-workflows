@@ -174,8 +174,15 @@ describe("WorkflowEngine", () => {
   it("appends the step contract to agent prompts", async () => {
     const workflow = defineWorkflow({
       name: "contract",
+      title: "Contract run",
       startAt: "ask",
-      nodes: { ask: agent({ prompt: () => "Base prompt", expectedOutput: `{ "x": 1 }` }) },
+      nodes: {
+        ask: agent({
+          prompt: () => "Base prompt",
+          expectedOutput: `{ "x": 1 }`,
+          statusDetail: "Checking the contract",
+        }),
+      },
       edges: [],
     });
     const executor = new ScriptedExecutor().respond("ask", { output: { x: 1 } });
@@ -192,6 +199,10 @@ describe("WorkflowEngine", () => {
       `{"action": "submit", "step": "ask", "attempt": "${attemptId}", "output": <your result>}`,
     );
     expect(prompt).toContain(`Expected output: { "x": 1 }`);
+    expect(request?.presentation).toEqual({
+      runTitle: "Contract run",
+      statusDetail: "Checking the contract",
+    });
     expect(prompt).toBe(
       appendStepContract("Base prompt", "contract", "ask", attemptId, `{ "x": 1 }`),
     );

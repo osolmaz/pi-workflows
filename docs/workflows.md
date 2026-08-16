@@ -360,8 +360,18 @@ results. Submissions are rejected (with a reason the model sees) when no step
 is pending, the step id is wrong, the attempt id belongs to an earlier attempt
 of the same node (loops revisit node ids, so each attempt gets a fresh id), or
 `validate` throws.
-Acceptance resolves the step and the engine advances; the next agent prompt
-arrives as a new user message in the same conversation.
+Acceptance resolves the step and the engine advances. In an interactive Pi
+session, each agent prompt arrives as a `pi-workflows-agent-step` custom message
+with `triggerTurn: true`. The model receives the complete prompt, while the
+conversation shows a compact workflow and node card. Expanding tool output with
+Ctrl+O shows the exact contract and full prompt. Reminders and resumed prompts
+use the same card and keep the active attempt id.
+
+Headless RPC execution receives the same complete prompt without TUI metadata.
+Workflow notifications use a separate message type with `triggerTurn: false`,
+so a notification does not start an assistant response. See
+[WORKFLOW_STEP_MESSAGES.md](WORKFLOW_STEP_MESSAGES.md) for the message contract
+and renderer rules.
 
 ## Result presentation
 

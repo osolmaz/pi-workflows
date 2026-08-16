@@ -12,6 +12,7 @@ function makeRequest(overrides: Partial<AgentStepRequest> = {}): AgentStepReques
       expectedOutput: `{ "x": 1 }`,
     },
     prompt: "Do the step",
+    presentation: { runTitle: "Run one", statusDetail: "Doing the step" },
     accept: async (output) => ({ ok: true, value: output }),
     ...overrides,
   };
@@ -31,7 +32,21 @@ describe("ConversationStepExecutor", () => {
     const { executor, sent } = makeExecutor();
     const stepPromise = executor.runAgentStep(makeRequest(), new AbortController().signal);
 
-    expect(sent).toEqual([{ prompt: "Do the step", streaming: false }]);
+    expect(sent).toEqual([
+      {
+        prompt: "Do the step",
+        contract: {
+          runId: "r1",
+          workflowName: "w",
+          nodeId: "step1",
+          attemptId: "a1",
+          expectedOutput: `{ "x": 1 }`,
+        },
+        presentation: { runTitle: "Run one", statusDetail: "Doing the step" },
+        kind: "step",
+        streaming: false,
+      },
+    ]);
     expect(executor.pendingStepId).toBe("step1");
 
     const result = await executor.submit("step1", "a1", { x: 1 });
@@ -182,6 +197,11 @@ describe("ConversationStepExecutor", () => {
     expect(sent).toHaveLength(3);
     expect(sent[1]?.prompt).toMatch(/Reminder: workflow step "step1"/);
     expect(sent[1]?.prompt).toContain(`{ "x": 1 }`);
+    expect(sent[1]).toMatchObject({
+      kind: "reminder",
+      contract: { nodeId: "step1", attemptId: "a1" },
+      presentation: { runTitle: "Run one", statusDetail: "Doing the step" },
+    });
 
     expect(executor.handleAgentSettled()).toBe(false);
     await expect(stepPromise).rejects.toThrow(/without submitting step "step1"/);
@@ -190,8 +210,9 @@ describe("ConversationStepExecutor", () => {
 
   it("re-establishes attempt ownership for nudge and resume deliveries", async () => {
     const owners: string[] = [];
+    const deliveries: PromptDelivery[] = [];
     const executor = new ConversationStepExecutor({
-      sendPrompt: () => undefined,
+      sendPrompt: (delivery) => deliveries.push(delivery),
       conversation: {
         beginAttempt: (contract) => owners.push(contract.attemptId),
         mark: () => 0,
@@ -204,6 +225,8 @@ describe("ConversationStepExecutor", () => {
     expect(executor.handleAgentSettled()).toBe(false);
     executor.release();
     expect(owners).toEqual(["a1", "a1", "a1"]);
+    expect(deliveries.map((delivery) => delivery.kind)).toEqual(["step", "reminder", "resume"]);
+    expect(deliveries.every((delivery) => delivery.contract.attemptId === "a1")).toBe(true);
     await executor.submit("step1", "a1", {});
     await stepPromise;
   });

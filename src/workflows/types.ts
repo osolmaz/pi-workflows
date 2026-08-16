@@ -424,9 +424,16 @@ export type AgentStepContract = {
   expectedOutput?: string;
 };
 
+/** Optional human-facing labels for an agent step. They never affect execution. */
+export type AgentStepPresentation = {
+  runTitle?: string;
+  statusDetail?: string;
+};
+
 export type AgentStepRequest = {
   contract: AgentStepContract;
   prompt: string;
+  presentation?: AgentStepPresentation;
   /**
    * Validate a submission from the model. Returns the normalized output or an
    * error message the executor should surface to the model for retry.

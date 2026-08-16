@@ -955,6 +955,14 @@ export class WorkflowEngine {
           ...(node.expectedOutput !== undefined ? { expectedOutput: node.expectedOutput } : {}),
         },
         prompt,
+        ...(state.runTitle !== undefined || node.statusDetail !== undefined
+          ? {
+              presentation: {
+                ...(state.runTitle !== undefined ? { runTitle: state.runTitle } : {}),
+                ...(node.statusDetail !== undefined ? { statusDetail: node.statusDetail } : {}),
+              },
+            }
+          : {}),
         accept: async (output) => await this.acceptSubmission(node, context, output),
       },
       signal,

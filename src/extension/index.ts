@@ -36,6 +36,12 @@ import {
 } from "./controller-host.js";
 import { ConversationStepExecutor } from "./executor.js";
 import { SessionRecorder } from "./recorder.js";
+import {
+  registerWorkflowAgentStepMessageRenderer,
+  WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
+  WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+  type WorkflowAgentStepMessageDetails,
+} from "./step-message.js";
 import { buildWidgetView } from "./widget.js";
 import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.js";
 
@@ -213,6 +219,8 @@ type WorkflowWidgetFactory = (_tui: unknown, theme: Theme) => WorkflowWidgetComp
 type WorkflowWidgetContent = string[] | WorkflowWidgetFactory;
 
 export default function piWorkflows(pi: ExtensionAPI) {
+  registerWorkflowAgentStepMessageRenderer(pi);
+
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
   let runQueueStore: SqliteControllerStore | null = null;
@@ -267,16 +275,19 @@ export default function piWorkflows(pi: ExtensionAPI) {
         leaseMs: NOTIFICATION_DELIVERY_LEASE_MS,
       })) {
         if (!alreadyDelivered.has(notification.notificationId)) {
-          pi.sendMessage({
-            customType: "pi-workflows-notification",
-            content: notification.content,
-            display: true,
-            details: {
-              notificationId: notification.notificationId,
-              runId: notification.runId,
-              kind: notification.kind,
+          pi.sendMessage(
+            {
+              customType: "pi-workflows-notification",
+              content: notification.content,
+              display: true,
+              details: {
+                notificationId: notification.notificationId,
+                runId: notification.runId,
+                kind: notification.kind,
+              },
             },
-          });
+            { triggerTurn: false },
+          );
           alreadyDelivered.add(notification.notificationId);
         }
         runQueueStore.markWorkflowNotificationDelivered({
@@ -734,8 +745,25 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
 
     const executor = new ConversationStepExecutor({
-      sendPrompt: ({ prompt, streaming }) => {
-        pi.sendUserMessage(prompt, streaming ? { deliverAs: "steer" } : undefined);
+      sendPrompt: ({ prompt, contract, presentation, kind, streaming }) => {
+        const details: WorkflowAgentStepMessageDetails = {
+          schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
+          kind,
+          contract,
+          ...(presentation !== undefined ? { presentation } : {}),
+        };
+        pi.sendMessage(
+          {
+            customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+            content: prompt,
+            display: true,
+            details,
+          },
+          {
+            triggerTurn: true,
+            deliverAs: streaming ? "steer" : "followUp",
+          },
+        );
       },
       onAbort: (contract, reason) => {
         lastExpiredAttempt = {

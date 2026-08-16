@@ -19,6 +19,18 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
 
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (part === null || typeof part !== "object" || !("text" in part)) return "";
+      const text = (part as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    })
+    .join("\n");
+}
+
 const E2E_CONTROLLER = `import {
   conditionTrue,
   defineController,
@@ -106,6 +118,7 @@ export default defineWorkflow({
     propose: agent({
       prompt: ({ input }) => \`Propose a solution for: \${(input as { task?: string }).task}\`,
       expectedOutput: '{ "proposal": "one sentence" }',
+      statusDetail: "Proposing a solution",
     }),
     confirm: decision({
       choices,
@@ -519,10 +532,11 @@ describe.sequential("pi-workflows end to end", () => {
     expect(manifest.status).toBe("completed");
 
     const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-    const types = trace
+    const traceEvents = trace
       .trim()
       .split("\n")
-      .map((line) => (JSON.parse(line) as { type: string }).type);
+      .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+    const types = traceEvents.map((event) => event.type);
     expect(types[0]).toBe("run_started");
     expect(types.at(-1)).toBe("run_completed");
     expect(types).toContain("agent_prompt_sent");
@@ -551,6 +565,51 @@ describe.sequential("pi-workflows end to end", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as WorkflowSessionEntryRecord);
     const entryIds = new Set(sessionEntries.map((record) => record.entry.id));
+    const agentPrompts = traceEvents
+      .filter((event) => event.type === "agent_prompt_sent")
+      .map((event) => event.payload.prompt)
+      .filter((prompt): prompt is string => typeof prompt === "string");
+    const stepEntries = sessionEntries.filter(
+      ({ entry }) =>
+        entry.type === "custom_message" && entry.customType === "pi-workflows-agent-step",
+    );
+    expect(stepEntries).toHaveLength(2);
+    expect(stepEntries.map(({ entry }) => entry.content)).toEqual(agentPrompts);
+    expect(stepEntries[0]?.entry.details).toMatchObject({
+      schema: "pi-workflows.agent-step-message.v1",
+      kind: "step",
+      contract: {
+        workflowName: "e2e",
+        nodeId: "propose",
+        attemptId: expect.any(String),
+      },
+      presentation: {
+        runTitle: "e2e: ship it",
+        statusDetail: "Proposing a solution",
+      },
+    });
+    for (const prompt of agentPrompts) {
+      expect(
+        mock.requests.some((request) =>
+          request.messages.some(
+            (message) => message.role === "user" && contentText(message.content) === prompt,
+          ),
+        ),
+      ).toBe(true);
+    }
+    const duplicateUserPrompts = sessionEntries.filter(({ entry }) => {
+      if (entry.type !== "message") return false;
+      const message = entry.message;
+      return (
+        message !== null &&
+        typeof message === "object" &&
+        (message as { role?: unknown }).role === "user" &&
+        agentPrompts.some(
+          (prompt) => contentText((message as { content?: unknown }).content) === prompt,
+        )
+      );
+    });
+    expect(duplicateUserPrompts).toHaveLength(0);
 
     const streamGroups = (deltaType: "text_delta" | "thinking_delta" | "toolcall_delta") => {
       const groups = new Map<string, WorkflowSessionEventRecord[]>();
@@ -670,7 +729,14 @@ describe.sequential("pi-workflows end to end", () => {
     ).toBe(true);
 
     const finishedMessages = sessionEvents.filter((event) => event.type === "message_finished");
-    expect(finishedMessages.every((event) => event.payload.settled === true)).toBe(true);
+    const customMessages = finishedMessages.filter((event) => event.payload.role === "custom");
+    expect(customMessages).toHaveLength(2);
+    expect(customMessages.every((event) => event.payload.settled === false)).toBe(true);
+    expect(
+      finishedMessages
+        .filter((event) => event.payload.role !== "custom")
+        .every((event) => event.payload.settled === true),
+    ).toBe(true);
     const linkedEntryIds = finishedMessages.flatMap((event) => {
       const id = event.payload.entryId;
       return typeof id === "string" ? [id] : [];

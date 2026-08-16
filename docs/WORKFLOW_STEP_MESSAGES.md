@@ -2,7 +2,7 @@
 
 This specification defines how Pi Workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded.
 
-This contract is accepted design and is not implemented in release `0.5.3`.
+This contract is implemented for the release after `0.5.3`.
 
 ## Goal
 

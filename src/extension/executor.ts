@@ -9,8 +9,13 @@ export type SubmissionResult =
   | { accepted: true; message: string }
   | { accepted: false; message: string };
 
+export type PromptDeliveryKind = "step" | "reminder" | "resume";
+
 export type PromptDelivery = {
   prompt: string;
+  contract: AgentStepRequest["contract"];
+  presentation?: AgentStepRequest["presentation"];
+  kind: PromptDeliveryKind;
   /** True when the agent is known to be mid-run, so delivery must be queued. */
   streaming: boolean;
 };
@@ -54,8 +59,8 @@ const DEFAULT_MAX_NUDGES = 2;
 
 /**
  * AgentStepExecutor that runs steps inside the current pi conversation. The
- * engine hands it a prompt; it delivers the prompt as a user message and
- * resolves once the model submits an accepted output through the `workflow`
+ * engine hands it a prompt; it delivers the prompt as a model-facing workflow
+ * message and resolves once the model submits an accepted output through the `workflow`
  * tool. If the agent settles without submitting, it nudges the model a
  * bounded number of times before failing the step.
  */
@@ -111,7 +116,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     }
     try {
       this.conversation?.beginAttempt?.(pending.request.contract);
-      this.sendPrompt({ prompt: pending.request.prompt, streaming: this.streaming });
+      this.sendPrompt(this.delivery(pending.request, pending.request.prompt, "resume"));
     } catch (error) {
       this.clearPending();
       pending.reject(error);
@@ -156,7 +161,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         return;
       }
       try {
-        this.sendPrompt({ prompt: request.prompt, streaming: this.streaming });
+        this.sendPrompt(this.delivery(request, request.prompt, "step"));
       } catch (error) {
         // A failed delivery must not leave the step installed, or every
         // subsequent agent node would fail with "already awaiting output".
@@ -227,7 +232,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       accepted: true,
       message: [
         `Output accepted for step ${JSON.stringify(stepId)}.`,
-        "If the workflow continues, the next step arrives as a new user message. End your turn now.",
+        "If the workflow continues, the next step arrives as a new workflow message. End your turn now.",
       ].join(" "),
     };
   }
@@ -262,15 +267,18 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     const { nodeId, attemptId } = pending.request.contract;
     try {
       this.conversation?.beginAttempt?.(pending.request.contract);
-      this.sendPrompt({
-        prompt: [
-          `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
-          "Complete it by calling the `workflow` tool with:",
-          `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
-          `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
-        ].join("\n"),
-        streaming: this.streaming,
-      });
+      this.sendPrompt(
+        this.delivery(
+          pending.request,
+          [
+            `Reminder: workflow step ${JSON.stringify(nodeId)} is still awaiting your output.`,
+            "Complete it by calling the `workflow` tool with:",
+            `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
+            `Expected output: ${pending.request.contract.expectedOutput ?? "a JSON object with your result"}`,
+          ].join("\n"),
+          "reminder",
+        ),
+      );
     } catch (error) {
       // No reminder turn was started, so nothing would settle the step; fail
       // it promptly instead of waiting out the node timeout.
@@ -279,6 +287,20 @@ export class ConversationStepExecutor implements AgentStepExecutor {
       return false;
     }
     return true;
+  }
+
+  private delivery(
+    request: AgentStepRequest,
+    prompt: string,
+    kind: PromptDeliveryKind,
+  ): PromptDelivery {
+    return {
+      prompt,
+      contract: request.contract,
+      ...(request.presentation !== undefined ? { presentation: request.presentation } : {}),
+      kind,
+      streaming: this.streaming,
+    };
   }
 
   private clearPending(): void {

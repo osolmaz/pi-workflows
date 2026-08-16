@@ -97,6 +97,8 @@ function makeHarness(options: {
   const widgets: (string[] | WidgetFactory | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
+  const sentUserMessages: string[] = [];
+  const messageRenderers = new Map<string, unknown>();
   const listeners = new Map<
     string,
     ((event?: unknown, ctx?: FakeContext) => void | Promise<void>)[]
@@ -149,13 +151,16 @@ function makeHarness(options: {
     registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
       shortcuts.set(key, spec.handler);
     },
+    registerMessageRenderer: (customType: string, renderer: unknown) => {
+      messageRenderers.set(customType, renderer);
+    },
     on: (event: string, listener: (event?: unknown, ctx?: FakeContext) => void | Promise<void>) => {
       const queue = listeners.get(event) ?? [];
       queue.push(listener);
       listeners.set(event, queue);
     },
     sendUserMessage: (prompt: string) => {
-      // Deliver asynchronously like the real runtime would.
+      sentUserMessages.push(prompt);
       idle = false;
       queueMicrotask(() => options.respond(prompt, tool as RegisteredTool));
     },
@@ -164,6 +169,13 @@ function makeHarness(options: {
         message,
         ...(messageOptions === undefined ? {} : { options: messageOptions }),
       });
+      if (
+        message.customType === "pi-workflows-agent-step" &&
+        messageOptions?.triggerTurn === true
+      ) {
+        idle = false;
+        queueMicrotask(() => options.respond(message.content, tool as RegisteredTool));
+      }
     },
   };
 
@@ -178,6 +190,8 @@ function makeHarness(options: {
     widgets,
     statuses,
     sentMessages,
+    sentUserMessages,
+    messageRenderers,
     get abortCalls() {
       return abortCalls;
     },
@@ -362,7 +376,9 @@ describe("pi-workflows extension", () => {
       expect(stripAnsi(renderedWidget ?? "")).toContain("✓ ● reply");
       expect(renderedWidget).toContain("\u001b[32m✓\u001b[0m");
       expect(renderedWidget).not.toMatch(/[┏┌┃]/u);
-      expect(harness.sentMessages).toHaveLength(0);
+      expect(harness.sentMessages).toHaveLength(1);
+      expect(harness.sentMessages[0]?.message.customType).toBe("pi-workflows-agent-step");
+      expect(harness.sentUserMessages).toHaveLength(0);
 
       const runDirs = await fs.readdir(runsDir);
       expect(runDirs).toHaveLength(1);
@@ -427,7 +443,30 @@ describe("pi-workflows extension", () => {
       );
 
       await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-agent-step",
+        ),
+      );
+      const stepMessage = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-agent-step",
+      );
+      expect(stepMessage).toMatchObject({
+        message: {
+          display: true,
+          details: {
+            schema: "pi-workflows.agent-step-message.v1",
+            kind: "step",
+            contract: { workflowName: "mini", nodeId: "reply" },
+          },
+        },
+        options: { deliverAs: "followUp", triggerTurn: true },
+      });
+      expect(harness.sentUserMessages).toHaveLength(0);
+      expect(harness.messageRenderers.has("pi-workflows-agent-step")).toBe(true);
+
       await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+      await harness.emitAsync("agent_settled");
 
       const status = await harness.tool.execute("status-1", { action: "status" });
       expect(status.details).toMatchObject({ workflowName: "mini", status: "completed" });
@@ -581,9 +620,15 @@ export default defineWorkflow({
       });
 
       await harness.command.handler("present", harness.ctx);
-      await waitFor(() => harness.sentMessages.length === 1);
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      );
 
-      const sent = harness.sentMessages[0];
+      const sent = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-presentation",
+      );
       expect(sent?.message.customType).toBe("pi-workflows-presentation");
       expect(sent?.message.display).toBe(false);
       expect(sent?.message.content).toContain("Explain the answer plainly.");
@@ -811,7 +856,16 @@ export default defineWorkflow({
         false,
       );
       expect(harness.notifications.some((note) => note.includes("must not present"))).toBe(false);
-      expect(harness.sentMessages).toHaveLength(0);
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      ).toHaveLength(0);
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-agent-step",
+        ),
+      ).toHaveLength(1);
 
       const capturedContract = contract as unknown as {
         step: string;
@@ -890,7 +944,11 @@ export default defineWorkflow({
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(harness.sentMessages).toHaveLength(0);
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      ).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1436,6 +1494,7 @@ export default defineWorkflow({
         display: true,
         details: { runId: "run-targeted", kind: "final" },
       });
+      expect(origin.sentMessages[0]?.options).toEqual({ triggerTurn: false });
 
       const check = new SqliteControllerStore(projectControllerStorePath(cwd));
       expect(
@@ -1512,8 +1571,15 @@ export default defineWorkflow({
       });
       await harness.emitAsync("session_start");
       await harness.command.handler("mini-present", harness.ctx);
-      await waitFor(() => harness.sentMessages.length > 0);
-      expect(harness.sentMessages[0]?.message.content).toContain("reply was");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      );
+      const presentation = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-presentation",
+      );
+      expect(presentation?.message.content).toContain("reply was");
       await harness.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();
