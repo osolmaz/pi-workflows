@@ -36,6 +36,29 @@ Or try the npm package without installing it:
 pi -e npm:@osolmaz/pi-workflows
 ```
 
+The Pi package includes the extension and two optional skills:
+
+- `pi-workflows` teaches the agent how to operate and author workflows.
+- `monitor` starts and operates the built-in monitor workflow.
+
+Pi discovers both skills when it loads the package. Use `pi config` to disable
+the extension, all bundled skills, or one skill independently. The equivalent
+settings entry below keeps the extension and disables only `monitor`:
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:@osolmaz/pi-workflows",
+      "skills": ["-skills/monitor"]
+    }
+  ]
+}
+```
+
+Set `"skills": []` to disable both bundled skills while keeping the extension.
+Set `"extensions": []` to keep the skills without loading the extension.
+
 Install the interactive terminal viewer separately from crates.io. The crate
 is named `pi-workflows`; its command is `piw`:
 
