@@ -2684,7 +2684,7 @@ fn median_value(values: &[f64]) -> Option<f64> {
         return None;
     }
     let middle = values.len() / 2;
-    Some(if values.len() % 2 == 0 {
+    Some(if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]
