@@ -158,6 +158,7 @@ export class WorkflowEngine {
         active.nodeId,
         active.attemptId,
         update,
+        { signal: active.signal },
       );
       try {
         this.onEvent?.(event, active.state);
@@ -883,6 +884,9 @@ export class WorkflowEngine {
     } finally {
       if (timer !== undefined) {
         clearTimeout(timer);
+      }
+      if (!abort.signal.aborted) {
+        abort.abort(new Error(`Workflow node ${nodeId} is no longer active`));
       }
       if (this.activeAbort === abort) {
         this.activeAbort = null;

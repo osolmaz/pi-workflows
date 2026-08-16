@@ -92,6 +92,29 @@ describe("WorkflowRunStore", () => {
     expect(events.map((event) => event.type)).toEqual(["run_completed"]);
   });
 
+  it("rejects an update when its attempt was aborted before admission", async () => {
+    const outputRoot = await makeTempDir("pi-workflows-store");
+    const store = new WorkflowRunStore(outputRoot);
+    const state = makeState();
+    const runDir = await store.initializeRunBundle(workflow, state);
+    const abort = new AbortController();
+    abort.abort(new Error("attempt ended"));
+
+    await expect(
+      store.publishUpdate(
+        runDir,
+        state,
+        "one",
+        "attempt-1",
+        { type: "test", key: "job", data: {} },
+        { signal: abort.signal },
+      ),
+    ).rejects.toThrow("attempt ended");
+    expect(state.updates).toBeUndefined();
+    const detail = await readRunBundle(runDir, { includeTrace: true });
+    expect(detail?.traceEvents).toEqual([]);
+  });
+
   it("assigns monotonic trace sequence numbers", async () => {
     const outputRoot = await makeTempDir("pi-workflows-store");
     const store = new WorkflowRunStore(outputRoot);
@@ -477,7 +500,9 @@ describe("listRunBundles", () => {
 
     expect(bundles.map((bundle) => bundle.state.runId)).toEqual([newer.runId, older.runId]);
     expect(bundles.every((bundle) => bundle.traceEvents === undefined)).toBe(true);
-    const detail = await readRunBundle(bundles[0]!.runDir);
+    const projected = await readRunBundle(bundles[0]!.runDir);
+    expect(projected?.traceEvents).toBeUndefined();
+    const detail = await readRunBundle(bundles[0]!.runDir, { includeTrace: true });
     expect(detail?.traceEvents).toEqual([]);
   });
 

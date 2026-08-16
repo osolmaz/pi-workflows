@@ -439,8 +439,12 @@ export class WorkflowRunStore {
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
+    options: { signal?: AbortSignal } = {},
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
     return await this.withRunLock(runDir, async () => {
+      if (options.signal?.aborted === true) {
+        throw options.signal.reason ?? new Error("workflow update attempt is no longer active");
+      }
       const exists = (state.updates ?? []).some(
         (record) => record.type === update.type && record.key === update.key,
       );
@@ -1092,11 +1096,9 @@ export async function readRunBundle(
     resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
   );
   const trace =
-    options.includeTrace === false
-      ? undefined
-      : await readNdjsonFile<WorkflowTraceEvent>(
-          resolveBundlePath(runDir, paths.trace, TRACE_PATH),
-        );
+    options.includeTrace === true
+      ? await readNdjsonFile<WorkflowTraceEvent>(resolveBundlePath(runDir, paths.trace, TRACE_PATH))
+      : undefined;
   const sessionDir = resolveBundlePath(runDir, paths.session, SESSION_DIR);
   const sessionBinding = await readJsonFile<WorkflowSessionBinding>(
     path.join(sessionDir, "binding.json"),

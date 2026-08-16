@@ -138,7 +138,7 @@ async function printOnce(dir: string, runId: string | undefined): Promise<void> 
   if (!match) {
     throw new Error(`Run not found: ${runId}`);
   }
-  const bundle = await readRunBundle(match.runDir);
+  const bundle = await readRunBundle(match.runDir, { includeTrace: true });
   if (!bundle) {
     throw new Error(`Run bundle unreadable: ${match.runDir}`);
   }

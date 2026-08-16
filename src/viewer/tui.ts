@@ -62,7 +62,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   };
 
   const renderDetail = async (runDir: string, size: ViewportSize): Promise<string[]> => {
-    const bundle = await readRunBundle(runDir);
+    const bundle = await readRunBundle(runDir, { includeTrace: true });
     if (!bundle) {
       return ["Run bundle disappeared. Press q to go back."];
     }
