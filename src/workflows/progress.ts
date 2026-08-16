@@ -42,14 +42,10 @@ export function estimateProgress(
   for (const sample of samples) validateProgressData(sample.data as Record<string, unknown>);
   const latest = samples.at(-1) as ProgressSample;
   const data = latest.data;
-  const sourceFinish = validSourceFinish(latest, now);
-  const base: ProgressEstimate = {
-    key,
-    data,
-    sampleCount: 1,
-    ...(sourceFinish !== undefined ? { sourceEstimatedFinishAt: sourceFinish } : {}),
-  };
+  const base: ProgressEstimate = { key, data, sampleCount: 1 };
   if (TERMINAL.has(data.status)) return base;
+  const sourceFinish = validSourceFinish(latest, now);
+  if (sourceFinish !== undefined) base.sourceEstimatedFinishAt = sourceFinish;
   if (data.status === "waiting" || data.status === "blocked") {
     return sourceFinish === undefined
       ? { ...base, unavailableReason: `progress is ${data.status}` }

@@ -314,6 +314,22 @@ describe("progress estimation", () => {
       now,
     );
     expect(stalled.unavailableReason).toBe("no positive progress rate");
+    const terminal = estimateProgress(
+      "job",
+      [
+        {
+          at: "2026-08-16T10:10:00.000Z",
+          data: {
+            ...progress(10, 10),
+            status: "completed" as const,
+            sourceEstimatedFinishAt: "2026-08-16T10:30:00.000Z",
+          },
+        },
+      ],
+      now,
+    );
+    expect(terminal.sourceEstimatedFinishAt).toBeUndefined();
+    expect(formatProgressLine(terminal, now)).not.toContain("ETA");
     const expired = estimateProgress(
       "job",
       [

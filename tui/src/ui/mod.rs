@@ -2590,27 +2590,28 @@ fn progress_info_lines(events: &[Value], palette: &Palette) -> Vec<Line<'static>
             .and_then(Value::as_str)
             .and_then(parse_timestamp_ms)
             .filter(|finish| *finish > source_at && *finish > now_ms());
-        if let Some(finish) = source_eta {
-            detail.push(format!("source ETA {}", format_eta_ms(finish - now_ms())));
-        } else if !matches!(
-            status,
-            "completed" | "failed" | "cancelled" | "waiting" | "blocked"
-        ) {
-            let rates = progress_rates(current_progress_epoch(samples));
-            if let (Some(all), Some(done), Some(median)) = (total, completed, median_value(&rates))
-            {
-                if median > 0.0 {
-                    detail.push(format!(
-                        "ETA {}",
-                        format_eta_ms(((all - done).max(0.0) / median) as i64)
-                    ));
-                    detail.push(format!("rate {}/min", compact_number(median * 60_000.0)));
-                    detail.push(format!("{} confidence", progress_confidence(&rates)));
+        let terminal = matches!(status, "completed" | "failed" | "cancelled");
+        if !terminal {
+            if let Some(finish) = source_eta {
+                detail.push(format!("source ETA {}", format_eta_ms(finish - now_ms())));
+            } else if !matches!(status, "waiting" | "blocked") {
+                let rates = progress_rates(current_progress_epoch(samples));
+                if let (Some(all), Some(done), Some(median)) =
+                    (total, completed, median_value(&rates))
+                {
+                    if median > 0.0 {
+                        detail.push(format!(
+                            "ETA {}",
+                            format_eta_ms(((all - done).max(0.0) / median) as i64)
+                        ));
+                        detail.push(format!("rate {}/min", compact_number(median * 60_000.0)));
+                        detail.push(format!("{} confidence", progress_confidence(&rates)));
+                    } else {
+                        detail.push("ETA unavailable".to_string());
+                    }
                 } else {
                     detail.push("ETA unavailable".to_string());
                 }
-            } else {
-                detail.push("ETA unavailable".to_string());
             }
         }
         detail.push(format!("{} samples", current_progress_epoch(samples).len()));
