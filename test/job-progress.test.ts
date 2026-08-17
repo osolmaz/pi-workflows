@@ -116,6 +116,30 @@ describe("durable job progress", () => {
     expect(published.map((value) => value.sequence)).toEqual([1, 2]);
   });
 
+  it("joins an in-flight publication when flush sees the same sequence", async () => {
+    let release: (() => void) | undefined;
+    let calls = 0;
+    const reporter = createJobProgressReporter({
+      ...reporterOptions(
+        async () => {
+          calls += 1;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+        () => new Date("2026-08-17T10:00:01.000Z"),
+      ),
+      minimumIntervalMs: 30_000,
+    });
+
+    const report = reporter.report({ tracks: [track(1)] });
+    const flush = reporter.flush();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release?.();
+    await Promise.all([report, flush]);
+    expect(calls).toBe(1);
+  });
+
   it("publishes phase changes and terminal states immediately", async () => {
     const published: JobProgressSnapshot[] = [];
     let nowMs = Date.parse("2026-08-17T10:00:01.000Z");

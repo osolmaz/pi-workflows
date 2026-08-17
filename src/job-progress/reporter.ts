@@ -51,16 +51,31 @@ export function createJobProgressReporter(
     tracks: options.initialTracks ?? [],
   });
   let lastQueuedAtMs = Number.NEGATIVE_INFINITY;
+  let lastQueuedSequence = -1;
   let lastPublishedSequence = -1;
+  let queuedOperation: Promise<void> | undefined;
   let tail: Promise<void> = Promise.resolve();
 
   const enqueue = (snapshot: JobProgressSnapshot): Promise<void> => {
+    if (lastQueuedSequence === snapshot.sequence && queuedOperation !== undefined) {
+      return queuedOperation;
+    }
     lastQueuedAtMs = Date.parse(snapshot.updatedAt);
+    lastQueuedSequence = snapshot.sequence;
     const operation = tail.then(async () => {
       await publishWithDeadline(options.publish, cloneSnapshot(snapshot), publishTimeoutMs);
       lastPublishedSequence = Math.max(lastPublishedSequence, snapshot.sequence);
     });
+    queuedOperation = operation;
     tail = operation.catch(() => undefined);
+    void operation
+      .finally(() => {
+        if (lastQueuedSequence === snapshot.sequence) {
+          lastQueuedSequence = -1;
+          queuedOperation = undefined;
+        }
+      })
+      .catch(() => undefined);
     return operation;
   };
 
