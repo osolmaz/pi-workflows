@@ -16,6 +16,16 @@ const reporter = createJobProgressReporter({
   sourceRevision: "abc123",
   contractHash: "def456",
   startedAt: new Date().toISOString(),
+  initialTracks: [
+    {
+      key: "overall",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        status: "running",
+        phase: "starting",
+      },
+    },
+  ],
   minimumIntervalMs: 30_000,
   publishTimeoutMs: 15_000,
   publish: async (snapshot, signal) => {

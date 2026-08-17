@@ -115,6 +115,7 @@ export function isTerminalJobProgressState(
 
 function requiredTracks(value: unknown): JobProgressTrack[] {
   if (!Array.isArray(value)) throw new Error("job progress.tracks must be an array");
+  if (value.length < 1) throw new Error("job progress.tracks must contain at least one entry");
   if (value.length > MAX_JOB_PROGRESS_TRACKS) {
     throw new Error(`job progress.tracks must contain at most ${MAX_JOB_PROGRESS_TRACKS} entries`);
   }

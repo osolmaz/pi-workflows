@@ -35,25 +35,24 @@ export function createJobProgressReporter(
     options.publishTimeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS,
     "publishTimeoutMs",
   );
-  const initial = validateJobProgressSnapshot({
-    schema: JOB_PROGRESS_SCHEMA,
-    application: options.application,
-    component: options.component,
-    jobId: options.jobId,
-    sourceRevision: options.sourceRevision,
-    contractHash: options.contractHash,
-    sequence: 0,
-    state: options.initialState ?? "running",
-    phase: options.initialPhase ?? "starting",
-    startedAt: options.startedAt,
-    updatedAt: options.startedAt,
-    ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }),
-    tracks: options.initialTracks ?? [],
-  });
   let current =
     options.previousSnapshot === undefined
-      ? initial
-      : validatePreviousSnapshot(initial, options.previousSnapshot);
+      ? validateJobProgressSnapshot({
+          schema: JOB_PROGRESS_SCHEMA,
+          application: options.application,
+          component: options.component,
+          jobId: options.jobId,
+          sourceRevision: options.sourceRevision,
+          contractHash: options.contractHash,
+          sequence: 0,
+          state: options.initialState ?? "running",
+          phase: options.initialPhase ?? "starting",
+          startedAt: options.startedAt,
+          updatedAt: options.startedAt,
+          ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }),
+          tracks: options.initialTracks,
+        })
+      : validatePreviousSnapshot(options, options.previousSnapshot);
   let lastQueuedAtMs = Number.NEGATIVE_INFINITY;
   let lastQueuedSequence = -1;
   let lastPublishedSequence = -1;
@@ -120,9 +119,9 @@ export function createJobProgressReporter(
         isTerminalJobProgressState(state) ||
         Date.parse(timestamp) - lastQueuedAtMs >= minimumIntervalMs;
       current = next;
-      if (!publishNow) return { snapshot: cloneSnapshot(current), published: false };
-      await enqueue(current);
-      return { snapshot: cloneSnapshot(current), published: true };
+      if (!publishNow) return { snapshot: cloneSnapshot(next), published: false };
+      await enqueue(next);
+      return { snapshot: cloneSnapshot(next), published: true };
     },
 
     async flush() {
@@ -247,15 +246,26 @@ function startPublication(
 }
 
 function validatePreviousSnapshot(
-  initial: JobProgressSnapshot,
+  identity: JobProgressReporterOptions,
   previous: JobProgressSnapshot,
 ): JobProgressSnapshot {
   const validated = validateJobProgressSnapshot(previous);
-  assertSameIdentity(initial, validated);
+  for (const field of [
+    "application",
+    "component",
+    "jobId",
+    "sourceRevision",
+    "contractHash",
+    "startedAt",
+  ] as const) {
+    if (identity[field] !== validated[field]) {
+      throw new Error(`job progress previous snapshot ${field} does not match`);
+    }
+  }
   if (isTerminalJobProgressState(validated.state)) {
     throw new Error("job progress cannot resume from a terminal snapshot");
   }
-  if (initial.deadlineAt !== validated.deadlineAt) {
+  if (identity.deadlineAt !== validated.deadlineAt) {
     throw new Error("job progress previous snapshot deadlineAt does not match");
   }
   return validated;

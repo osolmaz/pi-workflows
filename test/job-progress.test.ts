@@ -65,6 +65,9 @@ describe("durable job progress", () => {
     expect(() => validateJobProgressSnapshot({ ...snapshot(), token: "secret" })).toThrow(
       "job progress.token is not supported",
     );
+    expect(() => validateJobProgressSnapshot({ ...snapshot(), tracks: [] })).toThrow(
+      "tracks must contain at least one entry",
+    );
     expect(() =>
       validateJobProgressSnapshot({ ...snapshot(), tracks: [track(1), track(2)] }),
     ).toThrow("job progress track key records is duplicated");
@@ -121,6 +124,30 @@ describe("durable job progress", () => {
     expect((await reporter.flush()).published).toBe(true);
     expect(published.map((value) => value.tracks[0]?.data.completed)).toEqual([1, 2]);
     expect(published.map((value) => value.sequence)).toEqual([1, 2]);
+  });
+
+  it("returns the exact snapshot written by an in-flight report", async () => {
+    let release: (() => void) | undefined;
+    const reporter = createJobProgressReporter({
+      ...reporterOptions(
+        async () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        () => new Date("2026-08-17T10:00:01.000Z"),
+      ),
+      minimumIntervalMs: 30_000,
+    });
+
+    const first = reporter.report({ tracks: [track(1)] });
+    const second = await reporter.report({ tracks: [track(2)] });
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release?.();
+    const firstResult = await first;
+    expect(firstResult.snapshot.sequence).toBe(1);
+    expect(firstResult.snapshot.tracks[0]?.data.completed).toBe(1);
+    expect(second.snapshot.sequence).toBe(2);
+    expect(second.published).toBe(false);
   });
 
   it("joins an in-flight publication when flush sees the same sequence", async () => {

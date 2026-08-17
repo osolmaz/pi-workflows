@@ -65,16 +65,20 @@ export type JobProgressPublish = (
   signal: AbortSignal,
 ) => Promise<void>;
 
-export type JobProgressReporterOptions = JobProgressIdentity & {
+type JobProgressReporterBaseOptions = JobProgressIdentity & {
   initialState?: JobProgressState;
   initialPhase?: string;
-  initialTracks?: JobProgressTrack[];
-  previousSnapshot?: JobProgressSnapshot;
   publish: JobProgressPublish;
   minimumIntervalMs?: number;
   publishTimeoutMs?: number;
   now?: () => Date;
 };
+
+export type JobProgressReporterOptions = JobProgressReporterBaseOptions &
+  (
+    | { initialTracks: JobProgressTrack[]; previousSnapshot?: never }
+    | { initialTracks?: JobProgressTrack[]; previousSnapshot: JobProgressSnapshot }
+  );
 
 export type JobProgressPublishResult = {
   snapshot: JobProgressSnapshot;
