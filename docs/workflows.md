@@ -369,6 +369,16 @@ and resume later by running that wait again from the beginning.
 A monitor uses the session's single active workflow slot. It does not provide
 cron syntax, calendar scheduling, OS notifications, or a background service.
 
+### Durable remote Job progress
+
+Remote workers can publish the same progress tracks through
+`@osolmaz/pi-workflows/job-progress`. The storage-neutral reporter writes a
+strict, versioned snapshot through an application-supplied callback. A monitor
+can read consecutive snapshots from an existing remote store and use the normal
+progress estimator without treating logs as durable state. See
+[JOB_PROGRESS.md](JOB_PROGRESS.md) for the API, snapshot schema, restart rules,
+and discovery labels.
+
 ## The step contract
 
 Every `agent` prompt ends with a step contract block naming the workflow, the

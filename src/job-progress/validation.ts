@@ -78,6 +78,9 @@ export function validateJobProgressSnapshot(value: unknown): JobProgressSnapshot
   if (finishedAt !== undefined && Date.parse(finishedAt) < Date.parse(startedAt)) {
     throw new Error("job progress.finishedAt must not be before startedAt");
   }
+  if (finishedAt !== undefined && Date.parse(finishedAt) > Date.parse(updatedAt)) {
+    throw new Error("job progress.finishedAt must not be after updatedAt");
+  }
   if (isTerminal(state) && finishedAt === undefined) {
     throw new Error("job progress.finishedAt is required for a terminal state");
   }

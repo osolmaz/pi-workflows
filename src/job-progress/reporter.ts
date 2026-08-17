@@ -53,9 +53,10 @@ export function createJobProgressReporter(
           tracks: options.initialTracks,
         })
       : validatePreviousSnapshot(options, options.previousSnapshot);
-  let lastQueuedAtMs = Number.NEGATIVE_INFINITY;
+  const resumed = options.previousSnapshot !== undefined;
+  let lastQueuedAtMs = resumed ? Date.parse(current.updatedAt) : Number.NEGATIVE_INFINITY;
   let lastQueuedSequence = -1;
-  let lastPublishedSequence = -1;
+  let lastPublishedSequence = resumed ? current.sequence : -1;
   let queuedOperation: Promise<void> | undefined;
   let tail: Promise<void> = Promise.resolve();
 

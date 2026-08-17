@@ -95,13 +95,20 @@ describe("durable job progress", () => {
       "finishedAt is required",
     );
     expect(() =>
-      validateJobProgressSnapshot({ ...snapshot(), finishedAt: "2026-08-17T10:02:00.000Z" }),
+      validateJobProgressSnapshot({ ...snapshot(), finishedAt: "2026-08-17T10:01:00.000Z" }),
     ).toThrow("allowed only for a terminal state");
     expect(() =>
       validateJobProgressSnapshot({
         ...snapshot(),
         state: "completed",
         finishedAt: "2026-08-17T10:02:00.000Z",
+      }),
+    ).toThrow("finishedAt must not be after updatedAt");
+    expect(() =>
+      validateJobProgressSnapshot({
+        ...snapshot(),
+        state: "completed",
+        finishedAt: "2026-08-17T10:01:00.000Z",
       }),
     ).toThrow("tracks must be terminal");
   });
@@ -224,6 +231,21 @@ describe("durable job progress", () => {
     const result = await reporter.report({ tracks: [track(51)] });
     expect(result.snapshot.sequence).toBe(8);
     expect(published[0]?.sequence).toBe(8);
+  });
+
+  it("treats a resumed snapshot as already published", async () => {
+    const published: JobProgressSnapshot[] = [];
+    const reporter = createJobProgressReporter({
+      ...reporterOptions(
+        async (value) => void published.push(value),
+        () => new Date("2026-08-17T10:01:10.000Z"),
+      ),
+      previousSnapshot: snapshot({ sequence: 7, tracks: [track(50)] }),
+      minimumIntervalMs: 30_000,
+    });
+    expect((await reporter.flush()).published).toBe(false);
+    expect((await reporter.report({ tracks: [track(51)] })).published).toBe(false);
+    expect(published).toHaveLength(0);
   });
 
   it("publishes phase changes and terminal states immediately", async () => {
