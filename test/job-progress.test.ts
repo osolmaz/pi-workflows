@@ -140,6 +140,58 @@ describe("durable job progress", () => {
     expect(calls).toBe(1);
   });
 
+  it("keeps an aborted write serialized until its storage operation settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: number[] = [];
+      let releaseFirst: (() => void) | undefined;
+      const reporter = createJobProgressReporter({
+        ...reporterOptions(
+          async (value) => {
+            calls.push(value.sequence);
+            if (value.sequence === 1) {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
+          },
+          () => new Date("2026-08-17T10:00:01.000Z"),
+        ),
+        minimumIntervalMs: 0,
+        publishTimeoutMs: 50,
+      });
+
+      const first = reporter.report({ tracks: [track(1)] });
+      const firstRejection = expect(first).rejects.toThrow("publication timed out after 50 ms");
+      await vi.advanceTimersByTimeAsync(50);
+      await firstRejection;
+      const second = reporter.report({ phase: "next", tracks: [track(0, 10, "next")] });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls).toEqual([1]);
+      releaseFirst?.();
+      await second;
+      expect(calls).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes sequence numbers from a prior snapshot", async () => {
+    const published: JobProgressSnapshot[] = [];
+    const prior = snapshot({ sequence: 7, tracks: [track(50)] });
+    const reporter = createJobProgressReporter({
+      ...reporterOptions(
+        async (value) => void published.push(value),
+        () => new Date("2026-08-17T10:02:00.000Z"),
+      ),
+      previousSnapshot: prior,
+      minimumIntervalMs: 0,
+    });
+    const result = await reporter.report({ tracks: [track(51)] });
+    expect(result.snapshot.sequence).toBe(8);
+    expect(published[0]?.sequence).toBe(8);
+  });
+
   it("publishes phase changes and terminal states immediately", async () => {
     const published: JobProgressSnapshot[] = [];
     let nowMs = Date.parse("2026-08-17T10:00:01.000Z");

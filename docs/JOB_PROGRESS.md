@@ -43,7 +43,9 @@ await reporter.report({
 
 The first update, each phase change, and each terminal update publishes immediately. Other updates are coalesced until `minimumIntervalMs` has passed. Call `flush()` at a durable checkpoint or before exit when the current snapshot has not been published.
 
-The reporter keeps the latest snapshot after a write failure. The application decides when to log and retry that failure. A progress failure must not replace receipt or checkpoint validation.
+On process restart, read and validate the existing snapshot and pass it as `previousSnapshot`. The reporter continues its sequence number and rejects an identity, deadline, or terminal-state mismatch.
+
+The reporter keeps the latest snapshot after a write failure. The application decides when to log and retry that failure. A timed-out storage write remains serialized until the underlying write settles, so an older write cannot overwrite a newer snapshot. Storage adapters must honor the abort signal and settle after cancellation. A progress failure must not replace receipt or checkpoint validation.
 
 ## Finish a job
 

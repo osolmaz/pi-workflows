@@ -69,6 +69,7 @@ export type JobProgressReporterOptions = JobProgressIdentity & {
   initialState?: JobProgressState;
   initialPhase?: string;
   initialTracks?: JobProgressTrack[];
+  previousSnapshot?: JobProgressSnapshot;
   publish: JobProgressPublish;
   minimumIntervalMs?: number;
   publishTimeoutMs?: number;

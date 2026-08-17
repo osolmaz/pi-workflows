@@ -35,7 +35,7 @@ export function createJobProgressReporter(
     options.publishTimeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS,
     "publishTimeoutMs",
   );
-  let current = validateJobProgressSnapshot({
+  const initial = validateJobProgressSnapshot({
     schema: JOB_PROGRESS_SCHEMA,
     application: options.application,
     component: options.component,
@@ -50,6 +50,10 @@ export function createJobProgressReporter(
     ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }),
     tracks: options.initialTracks ?? [],
   });
+  let current =
+    options.previousSnapshot === undefined
+      ? initial
+      : validatePreviousSnapshot(initial, options.previousSnapshot);
   let lastQueuedAtMs = Number.NEGATIVE_INFINITY;
   let lastQueuedSequence = -1;
   let lastPublishedSequence = -1;
@@ -62,12 +66,15 @@ export function createJobProgressReporter(
     }
     lastQueuedAtMs = Date.parse(snapshot.updatedAt);
     lastQueuedSequence = snapshot.sequence;
-    const operation = tail.then(async () => {
-      await publishWithDeadline(options.publish, cloneSnapshot(snapshot), publishTimeoutMs);
+    const started = tail.then(() =>
+      startPublication(options.publish, cloneSnapshot(snapshot), publishTimeoutMs),
+    );
+    const operation = started.then(async (publication) => {
+      await publication.result;
       lastPublishedSequence = Math.max(lastPublishedSequence, snapshot.sequence);
     });
     queuedOperation = operation;
-    tail = operation.catch(() => undefined);
+    tail = started.then((publication) => publication.settled).catch(() => undefined);
     void operation
       .finally(() => {
         if (lastQueuedSequence === snapshot.sequence) {
@@ -192,24 +199,45 @@ function assertSameIdentity(expected: JobProgressSnapshot, actual: JobProgressSn
   }
 }
 
-async function publishWithDeadline(
+function startPublication(
   publish: JobProgressReporterOptions["publish"],
   snapshot: JobProgressSnapshot,
   timeoutMs: number,
-): Promise<void> {
+): { result: Promise<void>; settled: Promise<void> } {
   const controller = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
+  const write = publish(snapshot, controller.signal);
   const deadline = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
       controller.abort();
       reject(new Error(`job progress publication timed out after ${timeoutMs} ms`));
     }, timeoutMs);
   });
-  try {
-    await Promise.race([publish(snapshot, controller.signal), deadline]);
-  } finally {
+  const result = Promise.race([write, deadline]).finally(() => {
     if (timeout !== undefined) clearTimeout(timeout);
+  });
+  return {
+    result,
+    settled: write.then(
+      () => undefined,
+      () => undefined,
+    ),
+  };
+}
+
+function validatePreviousSnapshot(
+  initial: JobProgressSnapshot,
+  previous: JobProgressSnapshot,
+): JobProgressSnapshot {
+  const validated = validateJobProgressSnapshot(previous);
+  assertSameIdentity(initial, validated);
+  if (isTerminalJobProgressState(validated.state)) {
+    throw new Error("job progress cannot resume from a terminal snapshot");
   }
+  if (initial.deadlineAt !== validated.deadlineAt) {
+    throw new Error("job progress previous snapshot deadlineAt does not match");
+  }
+  return validated;
 }
 
 function cloneSnapshot(snapshot: JobProgressSnapshot): JobProgressSnapshot {
