@@ -66,7 +66,7 @@ export type JobProgressPublish = (
 ) => Promise<void>;
 
 type JobProgressReporterBaseOptions = JobProgressIdentity & {
-  initialState?: JobProgressState;
+  initialState?: Exclude<JobProgressState, "completed" | "failed" | "cancelled">;
   initialPhase?: string;
   publish: JobProgressPublish;
   minimumIntervalMs?: number;

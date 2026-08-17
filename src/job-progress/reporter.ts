@@ -146,9 +146,21 @@ export function estimateJobProgress(
 ): JobProgressEstimate {
   if (snapshots.length === 0)
     throw new Error("job progress estimation requires at least one snapshot");
-  const validated = snapshots.map(validateJobProgressSnapshot);
+  const validated = snapshots
+    .map(validateJobProgressSnapshot)
+    .sort((left, right) => left.sequence - right.sequence);
   const latest = validated.at(-1) as JobProgressSnapshot;
   for (const snapshot of validated) assertSameIdentity(latest, snapshot);
+  for (let index = 1; index < validated.length; index += 1) {
+    const previous = validated[index - 1] as JobProgressSnapshot;
+    const current = validated[index] as JobProgressSnapshot;
+    if (previous.sequence === current.sequence) {
+      throw new Error(`job progress sequence ${current.sequence} is duplicated`);
+    }
+    if (Date.parse(previous.updatedAt) > Date.parse(current.updatedAt)) {
+      throw new Error("job progress updatedAt must not decrease as sequence increases");
+    }
+  }
   const keys = latest.tracks.map((track) => track.key);
   const tracks: ProgressTrackState[] = keys.map((key) => {
     const samples: ProgressSample[] = validated.flatMap((snapshot) => {

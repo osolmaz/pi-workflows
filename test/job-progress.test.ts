@@ -381,13 +381,20 @@ describe("durable job progress", () => {
   it("estimates remaining time from repeated durable snapshots", () => {
     const result = estimateJobProgress(
       [
+        snapshot({ sequence: 3, updatedAt: "2026-08-17T10:02:00.000Z", tracks: [track(40)] }),
         snapshot({ sequence: 1, updatedAt: "2026-08-17T10:00:00.000Z", tracks: [track(0)] }),
         snapshot({ sequence: 2, updatedAt: "2026-08-17T10:01:00.000Z", tracks: [track(20)] }),
-        snapshot({ sequence: 3, updatedAt: "2026-08-17T10:02:00.000Z", tracks: [track(40)] }),
       ],
       new Date("2026-08-17T10:02:00.000Z"),
     );
+    expect(result.snapshot.sequence).toBe(3);
     expect(result.estimates[0]?.remainingMedianMs).toBe(180_000);
     expect(result.tracks[0]?.samples).toHaveLength(3);
+  });
+
+  it("rejects duplicate snapshot sequences", () => {
+    expect(() =>
+      estimateJobProgress([snapshot({ sequence: 1 }), snapshot({ sequence: 1 })]),
+    ).toThrow("sequence 1 is duplicated");
   });
 });
