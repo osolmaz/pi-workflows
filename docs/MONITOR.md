@@ -242,6 +242,11 @@ One monitor can track several processes. Each uses a stable progress key. A miss
 
 The progress estimator treats each key independently. A phase, unit, total, or counter reset in one track does not reset another track.
 
+Remote Jobs can publish the same tracks in a strict
+[`pi-workflows.job-progress.v1` snapshot](JOB_PROGRESS.md). A monitor discovers
+the snapshot from immutable Job labels, validates its identity, and submits its
+tracks without copying log-derived guesses into progress fields.
+
 ## Interval and lifetime
 
 The normal workflow engine remains finite. The built-in monitor therefore retains the 1,000-check safety ceiling and must not claim to be mathematically unbounded.

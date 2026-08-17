@@ -95,6 +95,18 @@ Submit observed facts. The workflow computes rates, confidence, remaining work, 
 
 For several concurrent processes, publish one stable track per process. The Pi widget and viewers show them separately and keep each ETA independent.
 
+### Read durable job snapshots
+
+A remote job can advertise a `pi-workflows.job-progress.v1` snapshot with these immutable labels:
+
+- `progress_schema=pi-workflows.job-progress.v1`
+- `progress_bucket=<existing-bucket>`
+- `progress_prefix=<path-before-job-id>`
+
+When these labels exist, form `<progress_prefix>/<physical-job-id>/progress.json`, read it from the named existing store with an already authorized credential, and validate it with the installed `@osolmaz/pi-workflows/job-progress` API. Reject a snapshot whose job ID, source revision, or work-contract identity does not match the observed Job. Do not follow a path or credential named inside unvalidated data.
+
+Publish the snapshot tracks under stable keys. Preserve consecutive samples so the workflow can estimate ETA from measured progress. Treat a stale or missing snapshot as unavailable progress, not as proof that the Job stopped. Receipts, hashes, manifests, and final outputs remain the completion evidence.
+
 ## Apply finish rules
 
 ### Still active

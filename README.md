@@ -13,8 +13,9 @@ structured, validated output to route on. See the
 [design philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the
 engine and its public parts. Running steps can publish durable [workflow
 updates](docs/WORKFLOW_UPDATES.md), including progress counts and ETA data.
-Agent instructions use compact [workflow step
-messages](docs/WORKFLOW_STEP_MESSAGES.md), and the built-in
+Remote workers can publish the same tracks through the storage-neutral
+[durable job progress API](docs/JOB_PROGRESS.md). Agent instructions use compact
+[workflow step messages](docs/WORKFLOW_STEP_MESSAGES.md), and the built-in
 [monitor](docs/MONITOR.md) reports every check without starting an extra
 assistant turn.
 
