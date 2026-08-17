@@ -175,10 +175,15 @@ describe("durable job progress", () => {
 
     const report = reporter.report({ tracks: [track(1)] });
     const flush = reporter.flush();
+    const coalesced = await reporter.report({ tracks: [track(2)] });
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
     release?.();
-    await Promise.all([report, flush]);
+    const [, flushResult] = await Promise.all([report, flush]);
     expect(calls).toBe(1);
+    expect(flushResult.snapshot.sequence).toBe(1);
+    expect(flushResult.snapshot.tracks[0]?.data.completed).toBe(1);
+    expect(coalesced.snapshot.sequence).toBe(2);
+    expect(coalesced.published).toBe(false);
   });
 
   it("keeps an aborted write serialized until its storage operation settles", async () => {

@@ -126,12 +126,13 @@ export function createJobProgressReporter(
     },
 
     async flush() {
-      if (lastPublishedSequence >= current.sequence) {
+      const snapshot = current;
+      if (lastPublishedSequence >= snapshot.sequence) {
         await tail;
-        return { snapshot: cloneSnapshot(current), published: false };
+        return { snapshot: cloneSnapshot(snapshot), published: false };
       }
-      await enqueue(current);
-      return { snapshot: cloneSnapshot(current), published: true };
+      await enqueue(snapshot);
+      return { snapshot: cloneSnapshot(snapshot), published: true };
     },
 
     snapshot() {
