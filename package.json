@@ -1,6 +1,6 @@
 {
   "name": "@osolmaz/pi-workflows",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Workflow and controller runtime with a live terminal viewer for the pi coding agent",
   "keywords": [
     "pi-package"
@@ -39,10 +39,6 @@
     "./controllers": {
       "types": "./dist/controllers/index.d.ts",
       "default": "./dist/controllers/index.js"
-    },
-    "./job-progress": {
-      "types": "./dist/job-progress/index.d.ts",
-      "default": "./dist/job-progress/index.js"
     }
   },
   "publishConfig": {

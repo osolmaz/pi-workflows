@@ -197,6 +197,9 @@ describe("built-in monitor workflow", () => {
     });
     expect(prompt).toContain("Perform monitoring check 2 of at most 5");
     expect(prompt).toContain("Previous accepted observation: The target is at 4 of 10.");
+    expect(prompt).toContain("You are the regular Pi model running this check");
+    expect(prompt).toContain("publish them with workflow action update");
+    expect(prompt).toContain("Do not require the monitored target to implement a Pi-specific");
     expect(executor).toBeDefined();
   });
 

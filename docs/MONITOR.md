@@ -124,6 +124,14 @@ It tells the model that every accepted check must include a concise report. It t
 
 A check may use available tools to read current state. It must use the target's authoritative source instead of treating a prior report or workflow update as current truth.
 
+## Progress ownership boundary
+
+The regular Pi model running the check is the observation adapter. It uses the target-specific tools authorized by the task, converts observed facts into `pi-workflows.progress.v1` tracks, and publishes them through the existing `workflow` tool. Pi Workflows validates, stores, estimates, and displays those tracks.
+
+The monitored target stays independent of Pi Workflows. A monitor must not require a target Job or application to import Pi Workflows, emit a Pi schema, write a Pi progress file, expose a Pi endpoint, create a progress store, or add a progress reader command solely for monitoring. Provider-specific clients and credentials do not belong in Pi Workflows.
+
+When a target does not expose a factual count, total, or source estimate, the check reports that ETA is unavailable. Better application telemetry is separate work. It should expose normal operational facts for all operators, not a Pi-specific reporting protocol.
+
 ## Progress publication
 
 `estimate` keeps the last eight usable intervals for each track in its normal node output. The output is durable and becomes the prior estimator state on the next loop visit.
@@ -241,11 +249,6 @@ When an ETA expires, the widget shows that the estimate passed and waits for the
 One monitor can track several processes. Each uses a stable progress key. A missing key in a later check does not mean completion; the check should publish an explicit terminal or `unknown` state before it stops reporting that process.
 
 The progress estimator treats each key independently. A phase, unit, total, or counter reset in one track does not reset another track.
-
-Remote Jobs can publish the same tracks in a strict
-[`pi-workflows.job-progress.v1` snapshot](JOB_PROGRESS.md). A monitor discovers
-the snapshot from immutable Job labels, validates its identity, and submits its
-tracks without copying log-derived guesses into progress fields.
 
 ## Interval and lifetime
 

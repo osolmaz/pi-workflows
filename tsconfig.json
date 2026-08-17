@@ -18,7 +18,6 @@
     "paths": {
       "@osolmaz/pi-workflows": ["./src/workflows/index.ts"],
       "@osolmaz/pi-workflows/controllers": ["./src/controllers/index.ts"],
-      "@osolmaz/pi-workflows/job-progress": ["./src/job-progress/index.ts"],
       "pi-workflows/extension": ["./src/extension/index.ts"]
     }
   },

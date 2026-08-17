@@ -349,8 +349,10 @@ The first check runs immediately. `everyMinutes` defaults to 30. Each accepted
 check must provide one concise report and choose `continue` or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:
 false`, so it does not cause an assistant reply. A check can also provide
-independent progress tracks. Pi Workflows validates the counts and calculates
-rates, confidence, and ETA without a model.
+independent progress tracks. The regular Pi model running the check observes
+the target and submits those facts. Pi Workflows validates the counts and
+calculates rates, confidence, and ETA deterministically. The target does not
+need a Pi Workflows dependency or reporting protocol.
 
 Intervals must be whole minutes from 1 through 1,440. When `stopWhen` is
 omitted, the monitor stops only after an explicit user request. `maxChecks`
@@ -368,16 +370,6 @@ and resume later by running that wait again from the beginning.
 
 A monitor uses the session's single active workflow slot. It does not provide
 cron syntax, calendar scheduling, OS notifications, or a background service.
-
-### Durable remote Job progress
-
-Remote workers can publish the same progress tracks through
-`@osolmaz/pi-workflows/job-progress`. The storage-neutral reporter writes a
-strict, versioned snapshot through an application-supplied callback. A monitor
-can read consecutive snapshots from an existing remote store and use the normal
-progress estimator without treating logs as durable state. See
-[JOB_PROGRESS.md](JOB_PROGRESS.md) for the API, snapshot schema, restart rules,
-and discovery labels.
 
 ## The step contract
 

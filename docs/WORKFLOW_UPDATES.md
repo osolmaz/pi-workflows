@@ -76,6 +76,14 @@ Updates do not:
 
 A node's final result remains the only value that completes the node and controls routing.
 
+## Model-mediated observation
+
+For monitoring, the regular Pi model running the workflow step observes the external target and publishes progress with the existing `workflow` tool. This is the intended adapter boundary. Deterministic runtime code validates, persists, estimates, and renders the submitted data.
+
+External Jobs and applications do not need a Pi Workflows dependency or reporting protocol. Provider-specific observation stays in the agent task and its authorized tools. If the target does not expose enough facts, the model publishes only what is known and leaves ETA unavailable.
+
+Do not add a transport, endpoint, store, schema, or provider integration when the regular Pi model can observe the target and use `workflow update` or `submit`.
+
 ## Public types
 
 The workflow layer adds these public types:

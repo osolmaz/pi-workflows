@@ -80,9 +80,11 @@ The workflow sends each report as a Pi notification. Notifications do not start 
 
 ## Publish progress when measurable
 
+The regular Pi model that runs the check is the observation adapter. It reads the target through the tools and sources named in the task, maps observed facts to progress tracks, and publishes them through the existing `workflow` tool. There is no separate monitor model.
+
 Progress is optional. Do not invent it for work that has no factual count, total, rate, or source estimate.
 
-When the target exposes measurable progress, include one or more tracks in the check output. Use a stable key for each independent process or workstream. Use `overall` for a real aggregate only; do not add unrelated tracks together.
+When the target exposes measurable progress, publish one or more tracks with `workflow` action `update` while the check is active when that gives the user useful current state. Include the latest tracks in the final check output, then call `submit` exactly once. Use a stable key for each independent process or workstream. Use `overall` for a real aggregate only; do not add unrelated tracks together.
 
 Each track uses `pi-workflows.progress.v1` and can include:
 
@@ -95,17 +97,9 @@ Submit observed facts. The workflow computes rates, confidence, remaining work, 
 
 For several concurrent processes, publish one stable track per process. The Pi widget and viewers show them separately and keep each ETA independent.
 
-### Read durable job snapshots
+Keep the monitored target independent of Pi Workflows. Do not require a target Job or application to import Pi Workflows, emit a Pi schema, write a Pi progress file, expose a Pi endpoint, create a progress store, or add a progress reader command solely for monitoring. Do not add provider-specific clients or credentials to Pi Workflows. Target-specific observation belongs in the check task and is performed by the regular Pi model with already authorized tools.
 
-A remote job can advertise a `pi-workflows.job-progress.v1` snapshot with these immutable labels:
-
-- `progress_schema=pi-workflows.job-progress.v1`
-- `progress_bucket=<existing-bucket>`
-- `progress_prefix=<path-before-job-id>`
-
-When these labels exist, form `<progress_prefix>/<physical-job-id>/progress.json`, read it from the named existing store with an already authorized credential, and validate it with the installed `@osolmaz/pi-workflows/job-progress` API. Reject a snapshot whose job ID, source revision, or work-contract identity does not match the observed Job. Do not follow a path or credential named inside unvalidated data.
-
-Publish the snapshot tracks under stable keys. Preserve consecutive samples so the workflow can estimate ETA from measured progress. Treat a stale or missing snapshot as unavailable progress, not as proof that the Job stopped. Receipts, hashes, manifests, and final outputs remain the completion evidence.
+Before proposing a new progress API, transport, schema, or persistence layer, prove that the model cannot observe the needed facts and publish them through the existing `workflow update` and `submit` path. If the target does not expose enough facts for ETA, report `ETA unavailable`. Application telemetry changes require separate scope and should expose normal operational facts rather than a Pi-specific protocol.
 
 ## Apply finish rules
 

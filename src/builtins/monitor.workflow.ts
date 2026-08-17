@@ -249,6 +249,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
             ? `Previous progress: ${formatProgressReport(priorEstimate.tracks.map((track) => track.estimate))}`
             : "There is no previous measured progress.",
           "Use available tools to inspect the current source of truth. Observe only unless the task explicitly authorizes a mutation.",
+          "You are the regular Pi model running this check and the observation adapter. When useful measurable facts appear during the check, publish them with workflow action update. Include the latest tracks in the final submission. Do not require the monitored target to implement a Pi-specific progress API, file, store, schema, or command.",
           "Every accepted check must include a concise user-facing report. Add progress tracks only when the target provides measurable facts. Submit observed counts and target-provided finish times; do not invent rates or an ETA.",
           "Choose route continue or stop.",
         ].join("\n\n");
