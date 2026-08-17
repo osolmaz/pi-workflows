@@ -73,6 +73,58 @@ describe("durable job progress", () => {
     ).toThrow("job progress track key records is duplicated");
   });
 
+  it("rejects malformed snapshot fields at strict boundaries", () => {
+    const invalid: Array<[unknown, string]> = [
+      [null, "must be an object"],
+      [{ ...snapshot(), schema: "other" }, "schema must equal"],
+      [{ ...snapshot(), sequence: -1 }, "sequence must be a non-negative safe integer"],
+      [{ ...snapshot(), state: "sleeping" }, "state is invalid"],
+      [{ ...snapshot(), phase: "bad\nphase" }, "phase must not contain control characters"],
+      [{ ...snapshot(), updatedAt: "2026-08-17T09:59:00.000Z" }, "updatedAt must not be before"],
+      [{ ...snapshot(), deadlineAt: STARTED_AT }, "deadlineAt must be after"],
+      [
+        {
+          ...snapshot(),
+          state: "failed",
+          updatedAt: "2026-08-17T10:02:00.000Z",
+          finishedAt: "2026-08-17T09:59:00.000Z",
+          tracks: [{ ...track(1), data: { ...track(1).data, status: "failed" } }],
+        },
+        "finishedAt must not be before",
+      ],
+      [{ ...snapshot(), tracks: [null] }, "tracks[0] must be an object"],
+      [{ ...snapshot(), tracks: [{ key: "bad key", data: track(1).data }] }, "key must match"],
+      [{ ...snapshot(), tracks: [{ key: "records", data: null }] }, "data must be an object"],
+      [{ ...snapshot(), cost: null }, "cost must be an object"],
+      [
+        { ...snapshot(), cost: { settledUsd: -1, reservedUsd: 0 } },
+        "settledUsd must be a finite non-negative number",
+      ],
+      [
+        { ...snapshot(), cost: { settledUsd: 0, reservedUsd: 0, token: "secret" } },
+        "cost.token is not supported",
+      ],
+    ];
+    for (const [value, message] of invalid) {
+      expect(() => validateJobProgressSnapshot(value)).toThrow(message);
+    }
+  });
+
+  it("rejects excessive track and snapshot sizes", () => {
+    expect(() =>
+      validateJobProgressSnapshot({
+        ...snapshot(),
+        tracks: Array.from({ length: 129 }, (_value, index) => ({
+          ...track(1),
+          key: `track-${index}`,
+        })),
+      }),
+    ).toThrow("at most 128 entries");
+    expect(() =>
+      validateJobProgressSnapshot({ ...snapshot(), application: "x".repeat(70_000) }),
+    ).toThrow("at most 65536 bytes");
+  });
+
   it("snapshots mutable track input", () => {
     const input = snapshot();
     const validated = validateJobProgressSnapshot(input);
@@ -111,6 +163,27 @@ describe("durable job progress", () => {
         finishedAt: "2026-08-17T10:01:00.000Z",
       }),
     ).toThrow("tracks must be terminal");
+  });
+
+  it("rejects invalid reporter bounds", () => {
+    expect(() =>
+      createJobProgressReporter({
+        ...reporterOptions(
+          async () => undefined,
+          () => new Date(STARTED_AT),
+        ),
+        minimumIntervalMs: -1,
+      }),
+    ).toThrow("minimumIntervalMs must be a non-negative safe integer");
+    expect(() =>
+      createJobProgressReporter({
+        ...reporterOptions(
+          async () => undefined,
+          () => new Date(STARTED_AT),
+        ),
+        publishTimeoutMs: 0,
+      }),
+    ).toThrow("publishTimeoutMs must be a positive safe integer");
   });
 
   it("publishes the first update, coalesces frequent updates, and flushes the latest one", async () => {
@@ -251,6 +324,31 @@ describe("durable job progress", () => {
     expect((await reporter.flush()).published).toBe(false);
     expect((await reporter.report({ tracks: [track(51)] })).published).toBe(false);
     expect(published).toHaveLength(0);
+  });
+
+  it("rejects an incompatible or terminal prior snapshot", () => {
+    expect(() =>
+      createJobProgressReporter({
+        ...reporterOptions(
+          async () => undefined,
+          () => new Date(STARTED_AT),
+        ),
+        previousSnapshot: snapshot({ application: "other" }),
+      }),
+    ).toThrow("previous snapshot application does not match");
+    expect(() =>
+      createJobProgressReporter({
+        ...reporterOptions(
+          async () => undefined,
+          () => new Date(STARTED_AT),
+        ),
+        previousSnapshot: snapshot({
+          state: "completed",
+          finishedAt: "2026-08-17T10:01:00.000Z",
+          tracks: [{ ...track(10), data: { ...track(10).data, status: "completed" } }],
+        }),
+      }),
+    ).toThrow("cannot resume from a terminal snapshot");
   });
 
   it("publishes phase changes and terminal states immediately", async () => {
@@ -395,6 +493,15 @@ describe("durable job progress", () => {
     expect(result.snapshot.sequence).toBe(3);
     expect(result.estimates[0]?.remainingMedianMs).toBe(180_000);
     expect(result.tracks[0]?.samples).toHaveLength(3);
+  });
+
+  it("rejects sample time regression across increasing sequences", () => {
+    expect(() =>
+      estimateJobProgress([
+        snapshot({ sequence: 1, updatedAt: "2026-08-17T10:02:00.000Z" }),
+        snapshot({ sequence: 2, updatedAt: "2026-08-17T10:01:00.000Z" }),
+      ]),
+    ).toThrow("updatedAt must not decrease");
   });
 
   it("rejects duplicate snapshot sequences", () => {
