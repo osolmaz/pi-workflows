@@ -40,6 +40,8 @@ const STATES = new Set<JobProgressState>([
   "unknown",
 ]);
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const RFC_3339_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 export function validateJobProgressSnapshot(value: unknown): JobProgressSnapshot {
   const bytes = jsonBytes(value);
@@ -177,14 +179,26 @@ function requiredTimestamp(value: unknown, field: string): string {
 
 function optionalTimestamp(value: unknown, field: string): string | undefined {
   if (value === undefined) return undefined;
-  if (
-    typeof value !== "string" ||
-    !Number.isFinite(Date.parse(value)) ||
-    !/[zZ]|[+-]\d\d:\d\d$/.test(value)
-  ) {
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be an RFC 3339 timestamp with an offset`);
+  }
+  const match = RFC_3339_PATTERN.exec(value);
+  if (match === null || !validCalendarDate(match[1], match[2], match[3])) {
     throw new Error(`${field} must be an RFC 3339 timestamp with an offset`);
   }
   return value;
+}
+
+function validCalendarDate(
+  yearText: string | undefined,
+  monthText: string | undefined,
+  dayText: string | undefined,
+): boolean {
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (!Number.isInteger(year) || year < 1 || month < 1 || month > 12 || day < 1) return false;
+  return day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
 }
 
 function rejectUnknown(

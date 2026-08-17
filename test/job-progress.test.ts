@@ -78,6 +78,15 @@ describe("durable job progress", () => {
     expect(validated.tracks[0]?.data.completed).toBe(10);
   });
 
+  it("rejects normalized and partial timestamp values", () => {
+    expect(() =>
+      validateJobProgressSnapshot({ ...snapshot(), updatedAt: "2026-02-31T10:00:00Z" }),
+    ).toThrow("must be an RFC 3339 timestamp");
+    expect(() => validateJobProgressSnapshot({ ...snapshot(), updatedAt: "not-a-date-Z" })).toThrow(
+      "must be an RFC 3339 timestamp",
+    );
+  });
+
   it("requires terminal timestamps and rejects timestamps on active states", () => {
     expect(() => validateJobProgressSnapshot({ ...snapshot(), state: "completed" })).toThrow(
       "finishedAt is required",
@@ -204,6 +213,24 @@ describe("durable job progress", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("does not estimate a track removed from the latest snapshot", () => {
+    const oldTrack: JobProgressTrack = {
+      key: "old-phase",
+      data: {
+        schema: "pi-workflows.progress.v1",
+        status: "running",
+        completed: 1,
+        total: 2,
+        unit: "items",
+      },
+    };
+    const result = estimateJobProgress([
+      snapshot({ sequence: 1, tracks: [track(10), oldTrack] }),
+      snapshot({ sequence: 2, updatedAt: "2026-08-17T10:02:00.000Z", tracks: [track(20)] }),
+    ]);
+    expect(result.estimates.map((estimate) => estimate.key)).toEqual(["records"]);
   });
 
   it("estimates remaining time from repeated durable snapshots", () => {

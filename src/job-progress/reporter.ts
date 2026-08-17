@@ -124,8 +124,8 @@ export function estimateJobProgress(
   const validated = snapshots.map(validateJobProgressSnapshot);
   const latest = validated.at(-1) as JobProgressSnapshot;
   for (const snapshot of validated) assertSameIdentity(latest, snapshot);
-  const keys = new Set(validated.flatMap((snapshot) => snapshot.tracks.map((track) => track.key)));
-  const tracks: ProgressTrackState[] = [...keys].map((key) => {
+  const keys = latest.tracks.map((track) => track.key);
+  const tracks: ProgressTrackState[] = keys.map((key) => {
     const samples: ProgressSample[] = validated.flatMap((snapshot) => {
       const track = snapshot.tracks.find((candidate) => candidate.key === key);
       return track === undefined ? [] : [{ at: snapshot.updatedAt, data: track.data }];
