@@ -100,13 +100,16 @@ export function createJobProgressReporter(
       const finishedAt = isTerminalJobProgressState(state)
         ? (update.finishedAt ?? timestamp)
         : update.finishedAt;
+      const tracks = isTerminalJobProgressState(state)
+        ? terminalizeTracks(update.tracks ?? current.tracks, state)
+        : (update.tracks ?? current.tracks);
       const next = validateJobProgressSnapshot({
         ...current,
         sequence: current.sequence + 1,
         state,
         phase,
         updatedAt: timestamp,
-        tracks: update.tracks ?? current.tracks,
+        tracks,
         ...(update.cost === undefined ? {} : { cost: update.cost }),
         ...(finishedAt === undefined ? {} : { finishedAt }),
       });
@@ -159,6 +162,24 @@ export function estimateJobProgress(
     tracks,
     estimates: tracks.map((track) => track.estimate),
   };
+}
+
+function terminalizeTracks(
+  tracks: JobProgressTrack[],
+  state: "completed" | "failed" | "cancelled",
+): JobProgressTrack[] {
+  return tracks.map((track) => ({
+    key: track.key,
+    data: {
+      ...track.data,
+      status:
+        track.data.status === "completed" ||
+        track.data.status === "failed" ||
+        track.data.status === "cancelled"
+          ? track.data.status
+          : state,
+    },
+  }));
 }
 
 function assertMonotonicTracks(previous: JobProgressSnapshot, next: JobProgressSnapshot): void {

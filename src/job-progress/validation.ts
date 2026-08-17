@@ -84,6 +84,9 @@ export function validateJobProgressSnapshot(value: unknown): JobProgressSnapshot
   if (!isTerminal(state) && finishedAt !== undefined) {
     throw new Error("job progress.finishedAt is allowed only for a terminal state");
   }
+  if (isTerminal(state) && tracks.some((track) => !isTerminalTrack(track))) {
+    throw new Error("job progress tracks must be terminal when the job state is terminal");
+  }
 
   return {
     schema: JOB_PROGRESS_SCHEMA,
@@ -104,7 +107,9 @@ export function validateJobProgressSnapshot(value: unknown): JobProgressSnapshot
   };
 }
 
-export function isTerminalJobProgressState(state: JobProgressState): boolean {
+export function isTerminalJobProgressState(
+  state: JobProgressState,
+): state is "completed" | "failed" | "cancelled" {
   return isTerminal(state);
 }
 
@@ -235,4 +240,12 @@ function isControlCharacter(character: string): boolean {
 
 function isTerminal(state: JobProgressState): boolean {
   return state === "completed" || state === "failed" || state === "cancelled";
+}
+
+function isTerminalTrack(track: JobProgressTrack): boolean {
+  return (
+    track.data.status === "completed" ||
+    track.data.status === "failed" ||
+    track.data.status === "cancelled"
+  );
 }

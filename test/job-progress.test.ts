@@ -94,6 +94,13 @@ describe("durable job progress", () => {
     expect(() =>
       validateJobProgressSnapshot({ ...snapshot(), finishedAt: "2026-08-17T10:02:00.000Z" }),
     ).toThrow("allowed only for a terminal state");
+    expect(() =>
+      validateJobProgressSnapshot({
+        ...snapshot(),
+        state: "completed",
+        finishedAt: "2026-08-17T10:02:00.000Z",
+      }),
+    ).toThrow("tracks must be terminal");
   });
 
   it("publishes the first update, coalesces frequent updates, and flushes the latest one", async () => {
@@ -220,9 +227,22 @@ describe("durable job progress", () => {
 
     expect(published).toHaveLength(3);
     expect(result.snapshot.finishedAt).toBe("2026-08-17T10:00:03.000Z");
-    expect(() => reporter.report({ phase: "late" })).rejects.toThrow(
+    await expect(reporter.report({ phase: "late" })).rejects.toThrow(
       "cannot change after a terminal state",
     );
+  });
+
+  it("makes carried tracks terminal when the job completes", async () => {
+    const reporter = createJobProgressReporter({
+      ...reporterOptions(
+        async () => undefined,
+        () => new Date("2026-08-17T10:01:00.000Z"),
+      ),
+      previousSnapshot: snapshot({ sequence: 2, tracks: [track(50)] }),
+    });
+    const result = await reporter.report({ state: "completed", phase: "complete" });
+    expect(result.snapshot.tracks[0]?.data.status).toBe("completed");
+    expect(result.snapshot.finishedAt).toBe("2026-08-17T10:01:00.000Z");
   });
 
   it("rejects counter regressions but permits a new phase epoch", async () => {
