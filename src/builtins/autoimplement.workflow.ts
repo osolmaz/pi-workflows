@@ -105,7 +105,7 @@ function parseInput(value: unknown): AutoimplementInput {
     ...(input.baseBranch !== undefined
       ? { baseBranch: requireString(input.baseBranch, "baseBranch") }
       : {}),
-    merge: input.merge !== false,
+    merge: input.merge === true,
   };
 }
 
@@ -685,10 +685,14 @@ export const autoimplementWorkflow = defineWorkflow({
         ].join("\n");
       },
       expectedOutput: `{ "status": "completed" | "blocked", "merged": true | false, "pr": "URL", "reportComment": "URL or summary", "reason": "result" }`,
-      validate: (value) => {
+      validate: (value, context) => {
         const result = requireRecord(value, "delivery result");
         if (result.status !== "completed" && result.status !== "blocked") {
           throw new Error("delivery status must be completed or blocked");
+        }
+        const request = context.input as AutoimplementInput;
+        if (request.merge !== true && result.merged === true) {
+          throw new Error("delivery cannot merge without explicit merge: true");
         }
         return result;
       },

@@ -114,7 +114,7 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
       throw new Error(`Workflow include cycle: ${chain.join(" -> ")}`);
     }
     activeDefinitions.push(current);
-    validateAuthoredWorkflow(current);
+    validateAuthoredWorkflow(current, scopePath !== "");
 
     const authoredNodes = Object.fromEntries(
       Object.keys(current.nodes).map((nodeId) => [nodeId, qualify(scopePath, nodeId)]),
@@ -279,7 +279,10 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
   return compiled;
 }
 
-function validateAuthoredWorkflow(workflow: WorkflowDefinition<any, any, any>): void {
+function validateAuthoredWorkflow(
+  workflow: WorkflowDefinition<any, any, any>,
+  included = false,
+): void {
   if (!Object.hasOwn(workflow.nodes, workflow.startAt)) {
     throw new Error(`Workflow start node is missing: ${workflow.startAt}`);
   }
@@ -307,6 +310,16 @@ function validateAuthoredWorkflow(workflow: WorkflowDefinition<any, any, any>): 
       throw new Error(`Workflow terminal node has more than one exit: ${exit.from}`);
     }
     exitNodes.add(exit.from);
+  }
+  if (included) {
+    const undeclared = Object.keys(workflow.nodes).filter(
+      (nodeId) => !outgoing.has(nodeId) && !exitNodes.has(nodeId),
+    );
+    if (undeclared.length > 0) {
+      throw new Error(
+        `Included workflow ${workflow.name} has terminal nodes without named exits: ${undeclared.join(", ")}`,
+      );
+    }
   }
 
   const reachable = new Set<string>([workflow.startAt]);

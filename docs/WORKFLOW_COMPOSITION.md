@@ -267,7 +267,9 @@ Review rounds record findings at every severity from P0 through P2. P0 or P1 fin
 
 Reviewer and CI commands record the executable, arguments, working directory, and timeout as structured fields. A failed reviewer invocation returns to a model step that corrects the command. The executable remains `pi-reviewer`; no hidden reviewer substitution is allowed.
 
-A CI wait is bounded to five minutes. If CI remains pending, the workflow asks the model to run additional useful local tests. It does not spend another model turn waiting and checks CI again after the tests. Required CI still gates merge unless repository policy permits a documented unrelated failure.
+A CI wait is bounded to five minutes. If CI remains pending, the workflow asks the model to run additional useful local tests. It does not spend another model turn waiting and checks CI again after the tests.
+
+Autoimplement prepares a ready PR by default. It merges only when its input explicitly sets `merge: true`. Monitor repair passes that permission only when `repair.merge` is explicitly true. Required CI still gates merge unless repository policy permits a documented unrelated failure.
 
 ## Monitor repair
 

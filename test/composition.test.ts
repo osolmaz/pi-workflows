@@ -301,6 +301,40 @@ describe("workflow composition", () => {
     expect(state.error).toContain("maxSteps=1");
   });
 
+  it("rejects an included child terminal path without a named exit", () => {
+    const child = defineWorkflow({
+      name: "partial-exits",
+      startAt: "choose",
+      exits: { ready: { from: "ready" } },
+      nodes: {
+        choose: compute({ run: () => ({ route: "ready" }) }),
+        ready: compute({ run: () => ({ ok: true }) }),
+        undeclared: compute({ run: () => ({ ok: false }) }),
+      },
+      edges: [
+        {
+          from: "choose",
+          switch: { on: "$.route", cases: { ready: "ready", other: "undeclared" } },
+        },
+      ],
+    });
+    const parent = defineWorkflow({
+      name: "partial-parent",
+      startAt: "start",
+      includes: { child: includeWorkflow(child) },
+      nodes: {
+        start: compute({ run: () => ({}) }),
+        finish: compute({ run: () => ({}) }),
+      },
+      edges: [
+        { from: "start", to: "child" },
+        { from: "child.ready", to: "finish" },
+      ],
+    });
+
+    expect(() => compileWorkflowDefinition(parent)).toThrow(/terminal nodes without named exits/);
+  });
+
   it("rejects recursive direct includes", () => {
     const a: WorkflowDefinition = defineWorkflow({
       name: "a",

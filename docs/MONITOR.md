@@ -36,7 +36,7 @@ The monitor checks a target, sends one status notification after every accepted 
 
 `checkTimeoutMinutes` is from 5 through 1,440. When omitted, the workflow uses the larger of 60 minutes and `everyMinutes`. The node timeout includes the existing two-minute runtime margin.
 
-`repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
+`repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
 
 `reportWhen` is removed. The monitor always reports after every accepted check.
 

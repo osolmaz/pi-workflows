@@ -395,7 +395,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
           ...(config.repair?.baseBranch !== undefined
             ? { baseBranch: config.repair.baseBranch }
             : {}),
-          merge: config.repair?.merge !== false,
+          merge: config.repair?.merge === true,
         };
         return request;
       },

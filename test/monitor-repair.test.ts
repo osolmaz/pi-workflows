@@ -180,7 +180,7 @@ describe("monitor automatic repair", () => {
         task: "Monitor and repair test-a",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: { authorized: true, scope: "current repository", repository },
+        repair: { authorized: true, scope: "current repository", repository, merge: true },
       },
       { workflowSource: resolved.source },
     );
@@ -225,7 +225,7 @@ describe("monitor automatic repair", () => {
         task: "Monitor and repair test-a",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: { authorized: true, scope: "current repository", repository },
+        repair: { authorized: true, scope: "current repository", repository, merge: true },
       },
       { workflowSource: resolved.source },
     );

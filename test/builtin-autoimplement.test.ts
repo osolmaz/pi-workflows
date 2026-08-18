@@ -90,6 +90,7 @@ describe("built-in autoimplement", () => {
   it("validates input, reviewer severities, repair commands, and CI tracking", async () => {
     const parseInput = autoimplementWorkflow.input;
     if (parseInput === undefined) throw new Error("autoimplement input parser is missing");
+    expect(await parseInput({ task: "demo" })).toMatchObject({ task: "demo", merge: false });
     expect(
       await parseInput({
         task: "demo",
@@ -396,6 +397,12 @@ describe("built-in autoimplement", () => {
     expect(() => delivery.validate?.({ status: "invalid" }, makeContext())).toThrow(
       "delivery status",
     );
+    expect(() =>
+      delivery.validate?.(
+        { status: "completed", merged: true, reason: "merged" },
+        makeContext({ input: { task: "demo", merge: false } }),
+      ),
+    ).toThrow("explicit merge: true");
   });
 
   it("addresses P2 findings without running a second review round", async () => {
@@ -449,6 +456,7 @@ describe("built-in autoimplement", () => {
       task: "implement demo",
       plan: { steps: ["change code"] },
       repository,
+      merge: true,
     });
 
     expect(state.status).toBe("completed");
@@ -551,6 +559,7 @@ describe("built-in autoimplement", () => {
       task: "implement demo",
       plan: { steps: ["change code"] },
       repository,
+      merge: true,
     });
 
     expect(state.status).toBe("completed");
@@ -591,6 +600,7 @@ describe("built-in autoimplement", () => {
       task: "implement demo",
       plan: { steps: ["change code"] },
       repository,
+      merge: true,
     });
 
     expect(state.status).toBe("completed");
