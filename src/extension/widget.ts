@@ -372,7 +372,7 @@ function windowLines(
   theme?: WidgetTheme,
   actionHint?: string,
 ): { lines: string[]; scroll: number; maxScroll: number } {
-  if (lines.length <= budget) {
+  if (lines.length <= budget && actionHint === undefined) {
     return { lines, scroll: 0, maxScroll: 0 };
   }
   const inner = Math.max(1, budget - 1);

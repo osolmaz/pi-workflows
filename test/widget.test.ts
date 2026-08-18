@@ -616,6 +616,36 @@ describe("buildWidgetLines", () => {
     expect(controls).toContain("shift+↑/↓ scroll · Ctrl+Shift+R piw");
     expect(view.lines.length).toBeLessThanOrEqual(10);
     expect(view.lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+
+    const exactNodes = Object.fromEntries(
+      Array.from({ length: 9 }, (_value, index) => [`n${index}`, compute({ run: () => index })]),
+    );
+    const exact = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "exact",
+        startAt: "n0",
+        nodes: exactNodes,
+        edges: Array.from({ length: 8 }, (_value, index) => ({
+          from: `n${index}`,
+          to: `n${index + 1}`,
+        })),
+      }),
+    );
+    const exactView = buildWidgetView(
+      makeState({ workflowName: "exact", currentNode: "n0" }),
+      exact,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      "Ctrl+Shift+R piw",
+    );
+    expect(stripAnsi(exactView.lines.at(-1) ?? "")).toContain(
+      "shift+↑/↓ scroll · Ctrl+Shift+R piw",
+    );
+    expect(exactView.lines.length).toBe(10);
   });
 
   it("reports no scroll range when the node list fits", () => {
