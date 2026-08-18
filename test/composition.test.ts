@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { compileWorkflowDefinition, compositionMetadata } from "../src/workflows/composition.js";
 import {
   checkpoint,
@@ -299,6 +299,55 @@ describe("workflow composition", () => {
     expect(state.status).toBe("failed");
     expect(state.error).toContain("bounded-child");
     expect(state.error).toContain("maxSteps=1");
+  });
+
+  it("applies an ancestor child limit before nested side effects", async () => {
+    const sideEffect = vi.fn(() => ({ done: true }));
+    const inner = defineWorkflow({
+      name: "inner-limit",
+      startAt: "work",
+      exits: { ready: { from: "work" } },
+      nodes: { work: compute({ run: sideEffect }) },
+      edges: [],
+    });
+    const middle = defineWorkflow({
+      name: "middle-limit",
+      startAt: "start",
+      maxSteps: 1,
+      includes: { inner: includeWorkflow(inner) },
+      exits: { ready: { from: "finish" } },
+      nodes: {
+        start: compute({ run: () => ({}) }),
+        finish: compute({ run: () => ({}) }),
+      },
+      edges: [
+        { from: "start", to: "inner" },
+        { from: "inner.ready", to: "finish" },
+      ],
+    });
+    const parent = defineWorkflow({
+      name: "ancestor-limit",
+      startAt: "start",
+      includes: { middle: includeWorkflow(middle) },
+      nodes: {
+        start: compute({ run: () => ({}) }),
+        finish: compute({ run: () => ({}) }),
+      },
+      edges: [
+        { from: "start", to: "middle" },
+        { from: "middle.ready", to: "finish" },
+      ],
+    });
+    const engine = new WorkflowEngine({
+      executor: new ScriptedExecutor(),
+      outputRoot: await makeTempDir("pi-workflows-composition-ancestor-limit"),
+    });
+
+    const { state } = await engine.run(parent, {});
+
+    expect(state.status).toBe("failed");
+    expect(state.error).toContain("middle-limit");
+    expect(sideEffect).not.toHaveBeenCalled();
   });
 
   it("rejects an included child terminal path without a named exit", () => {

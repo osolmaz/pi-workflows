@@ -1315,30 +1315,36 @@ function assertInvocationStepLimit(
   steps: WorkflowStepRecord[],
 ): void {
   if (metadata === undefined) return;
-  const scope = Object.values(metadata.scopes)
-    .filter((candidate) => candidate.path !== "" && nodeId.startsWith(`${candidate.path}/`))
-    .sort((a, b) => b.path.length - a.path.length)[0];
-  if (scope?.maxSteps === undefined) return;
-  let entryIndex = -1;
-  for (let index = steps.length - 1; index >= 0; index -= 1) {
-    if (steps[index]?.nodeId === scope.path) {
-      entryIndex = index;
-      break;
-    }
-  }
-  if (entryIndex < 0) throw new Error(`Workflow include entry is missing: ${scope.path}`);
-  const attempts = steps
-    .slice(entryIndex + 1)
+  const scopes = Object.values(metadata.scopes)
     .filter(
-      (step) =>
-        step.nodeId.startsWith(`${scope.path}/`) &&
-        metadata.entries[step.nodeId] === undefined &&
-        metadata.exits[step.nodeId] === undefined,
-    ).length;
-  if (attempts >= scope.maxSteps) {
-    throw new Error(
-      `Included workflow ${scope.workflowName} at ${scope.path} exceeded maxSteps=${scope.maxSteps}`,
-    );
+      (candidate) =>
+        candidate.path !== "" &&
+        candidate.maxSteps !== undefined &&
+        nodeId.startsWith(`${candidate.path}/`),
+    )
+    .sort((a, b) => a.path.length - b.path.length);
+  for (const scope of scopes) {
+    let entryIndex = -1;
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+      if (steps[index]?.nodeId === scope.path) {
+        entryIndex = index;
+        break;
+      }
+    }
+    if (entryIndex < 0) throw new Error(`Workflow include entry is missing: ${scope.path}`);
+    const attempts = steps
+      .slice(entryIndex + 1)
+      .filter(
+        (step) =>
+          step.nodeId.startsWith(`${scope.path}/`) &&
+          metadata.entries[step.nodeId] === undefined &&
+          metadata.exits[step.nodeId] === undefined,
+      ).length;
+    if (attempts >= (scope.maxSteps as number)) {
+      throw new Error(
+        `Included workflow ${scope.workflowName} at ${scope.path} exceeded maxSteps=${scope.maxSteps}`,
+      );
+    }
   }
 }
 
