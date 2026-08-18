@@ -243,13 +243,43 @@ describe("built-in monitor workflow", () => {
     ).toThrow("duplicated");
   });
 
-  it("mounts outer design and implementation while keeping observation-only defaults", () => {
+  it("mounts outer design and validates the explicit repair policy", () => {
     expect(prepareMonitorInput(input()).repair).toBeUndefined();
     expect(
-      prepareMonitorInput(input({ repair: { authorized: true, scope: "current repo" } })),
+      prepareMonitorInput(
+        input({
+          repair: {
+            authorized: true,
+            scope: "current repo",
+            constraints: ["keep API"],
+            repository: "/repo",
+            baseBranch: "main",
+            merge: false,
+          },
+        }),
+      ),
     ).toMatchObject({
-      repair: { authorized: true, scope: "current repo" },
+      repair: {
+        authorized: true,
+        scope: "current repo",
+        constraints: ["keep API"],
+        repository: "/repo",
+        baseBranch: "main",
+        merge: false,
+      },
     });
+    expect(() => prepareMonitorInput(input({ repair: { authorized: false } }))).toThrow(
+      "authorized",
+    );
+    expect(() =>
+      prepareMonitorInput(input({ repair: { authorized: true, constraints: "bad" } })),
+    ).toThrow("constraints");
+    expect(() =>
+      prepareMonitorInput(input({ repair: { authorized: true, constraints: [3] } })),
+    ).toThrow("constraints");
+    expect(() =>
+      prepareMonitorInput(input({ repair: { authorized: true, merge: "yes" } })),
+    ).toThrow("boolean");
     expect(Object.keys(monitor.includes ?? {})).toEqual(["initialDesign", "implementation"]);
   });
 
