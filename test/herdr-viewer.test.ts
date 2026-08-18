@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   HerdrWorkflowViewer,
+  parseViewerPlacement,
   PIW_SHORTCUT,
   viewerPaneLabel,
   type WorkflowViewTarget,
@@ -103,6 +104,83 @@ describe("HerdrWorkflowViewer", () => {
     ]);
   });
 
+  it("reports unavailable plugin, piw, and malformed Herdr responses", async () => {
+    const missingPlugin = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin list")) {
+        return {
+          stdout: json({
+            result: {
+              plugins: [
+                { plugin_id: "osolmaz.pi-workflows", enabled: false },
+                { plugin_id: "other.plugin", enabled: true },
+                null,
+              ],
+            },
+          }),
+        };
+      }
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    await expect(
+      new HerdrWorkflowViewer(missingPlugin.exec, { HERDR_ENV: "1" }).probe(),
+    ).resolves.toEqual({
+      available: false,
+      reason: "Herdr plugin osolmaz.pi-workflows is not linked and enabled.",
+    });
+
+    const missingPiw = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin list")) {
+        return {
+          stdout: json({
+            result: { plugins: [{ plugin_id: "osolmaz.pi-workflows", enabled: true }] },
+          }),
+        };
+      }
+      if (key === "piw --version") return { code: 1, stderr: "piw missing" };
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    await expect(
+      new HerdrWorkflowViewer(missingPiw.exec, { HERDR_ENV: "1" }).probe(),
+    ).resolves.toEqual({ available: false, reason: "piw failed: piw missing" });
+
+    const malformed = execHarness(() => ({ stdout: "not json" }));
+    await expect(
+      new HerdrWorkflowViewer(malformed.exec, { HERDR_ENV: "1" }).probe(),
+    ).resolves.toEqual({ available: false, reason: "herdr returned invalid JSON." });
+  });
+
+  it("bounds command, timeout, and malformed snapshot failures", async () => {
+    const killed = execHarness(() => ({ killed: true }));
+    await expect(new HerdrWorkflowViewer(killed.exec, { HERDR_ENV: "1" }).probe()).resolves.toEqual(
+      { available: false, reason: "herdr timed out." },
+    );
+
+    const large = execHarness(() => ({ stdout: "x".repeat(1_000_001) }));
+    await expect(new HerdrWorkflowViewer(large.exec, { HERDR_ENV: "1" }).probe()).resolves.toEqual({
+      available: false,
+      reason: "herdr returned too much data.",
+    });
+
+    const missingPanes = execHarness(() => ({ stdout: json({ result: { snapshot: {} } }) }));
+    await expect(
+      new HerdrWorkflowViewer(missingPanes.exec, { HERDR_ENV: "1" }).find(target),
+    ).rejects.toThrow("snapshot has no panes");
+
+    const longFailure = execHarness(() => ({ code: 1, stderr: "x".repeat(400) }));
+    const capability = await new HerdrWorkflowViewer(longFailure.exec, {
+      HERDR_ENV: "1",
+    }).probe();
+    expect(capability.available).toBe(false);
+    if (!capability.available) {
+      expect(capability.reason.length).toBeLessThan(330);
+      expect(capability.reason).toMatch(/…$/u);
+    }
+  });
+
   it("opens right and below splits with exact argv and run environment", async () => {
     for (const placement of ["right", "below"] as const) {
       const harness = execHarness((call) => {
@@ -148,6 +226,22 @@ describe("HerdrWorkflowViewer", () => {
     }
   });
 
+  it("closes a new split when left-side placement cannot swap", async () => {
+    const harness = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin pane open")) return { stdout: json(openedPane()) };
+      if (key.includes("pane swap")) return { code: 1, stderr: "swap failed" };
+      if (key === "herdr plugin pane close w1:p2") return {};
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+
+    await expect(viewer.open(target, "left", "/repo")).rejects.toThrow("swap failed");
+    expect(harness.calls.map(commandKey)).toContain("herdr plugin pane close w1:p2");
+  });
+
   it("opens a tab in the caller workspace", async () => {
     const harness = execHarness((call) => {
       const key = commandKey(call);
@@ -165,6 +259,38 @@ describe("HerdrWorkflowViewer", () => {
     expect(open?.args).toContain("tab");
     expect(open?.args).toContain("w1");
     expect(open?.args).not.toContain("--target-pane");
+  });
+
+  it("rejects malformed pane and workspace creation responses", async () => {
+    const malformedPane = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin pane open")) return { stdout: json({ result: {} }) };
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    await expect(
+      new HerdrWorkflowViewer(malformedPane.exec, { HERDR_ENV: "1" }).open(
+        target,
+        "right",
+        "/repo",
+      ),
+    ).rejects.toThrow("plugin pane response has no plugin_pane");
+
+    const malformedWorkspace = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("workspace create")) return { stdout: json({ result: {} }) };
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    await expect(
+      new HerdrWorkflowViewer(malformedWorkspace.exec, { HERDR_ENV: "1" }).open(
+        target,
+        "workspace",
+        "/repo",
+      ),
+    ).rejects.toThrow("workspace response has no workspace");
   });
 
   it("creates a plugin tab in a new workspace and removes its bootstrap tab", async () => {
@@ -258,6 +384,7 @@ describe("HerdrWorkflowViewer", () => {
         return {
           stdout: json(
             snapshot([
+              null,
               {
                 pane_id: "w9:p4",
                 tab_id: "w9:t2",
@@ -350,7 +477,9 @@ describe("HerdrWorkflowViewer", () => {
     });
   });
 
-  it("uses the requested Ctrl+Shift shortcut", () => {
+  it("parses placements and uses the requested Ctrl+Shift shortcut", () => {
+    expect(parseViewerPlacement("workspace")).toBe("workspace");
+    expect(parseViewerPlacement("diagonal")).toBeUndefined();
     expect(PIW_SHORTCUT).toBe("ctrl+shift+r");
   });
 });

@@ -111,6 +111,110 @@ describe("setupHerdrPlugin", () => {
     ).toThrow("Unlink it before linking");
   });
 
+  it("reports Herdr inspection and registration failures", async () => {
+    const root = await makeTempDir("pi-workflows-herdr-setup");
+    await fs.writeFile(path.join(root, "herdr-plugin.toml"), `id = "${HERDR_PLUGIN_ID}"\n`);
+
+    expect(() =>
+      setupHerdrPlugin(root, () => reply("", { error: new Error("missing Herdr") })),
+    ).toThrow("Could not run Herdr: missing Herdr");
+    expect(() =>
+      setupHerdrPlugin(root, () => reply("", { status: 1, stderr: "socket unavailable" })),
+    ).toThrow("Could not inspect Herdr plugins: socket unavailable");
+    expect(() => setupHerdrPlugin(root, () => reply("not json"))).toThrow("invalid plugin JSON");
+    expect(() => setupHerdrPlugin(root, () => reply(JSON.stringify({ result: {} })))).toThrow(
+      "invalid plugin list",
+    );
+
+    const listEmpty = JSON.stringify({ result: { plugins: [] } });
+    let calls = 0;
+    expect(() =>
+      setupHerdrPlugin(root, () => {
+        calls += 1;
+        return calls === 1 ? reply(listEmpty) : reply("", { status: 1, stderr: "link refused" });
+      }),
+    ).toThrow("Could not link the Herdr plugin: link refused");
+
+    calls = 0;
+    expect(() =>
+      setupHerdrPlugin(root, () => {
+        calls += 1;
+        return calls === 1
+          ? reply(listEmpty)
+          : reply("", { error: new Error("link executable failed") });
+      }),
+    ).toThrow("Could not run Herdr: link executable failed");
+
+    calls = 0;
+    expect(() =>
+      setupHerdrPlugin(root, () => {
+        calls += 1;
+        return calls === 1 ? reply(listEmpty) : reply("", { status: 1, stderr: "x".repeat(400) });
+      }),
+    ).toThrow(/Could not link the Herdr plugin: x+…/u);
+  });
+
+  it("reports failures while enabling a linked plugin", async () => {
+    const root = await makeTempDir("pi-workflows-herdr-setup");
+    await fs.writeFile(path.join(root, "herdr-plugin.toml"), `id = "${HERDR_PLUGIN_ID}"\n`);
+    let calls = 0;
+
+    expect(() =>
+      setupHerdrPlugin(root, () => {
+        calls += 1;
+        return calls === 1
+          ? reply(
+              JSON.stringify({
+                result: {
+                  plugins: [{ plugin_id: HERDR_PLUGIN_ID, plugin_root: root, enabled: false }],
+                },
+              }),
+            )
+          : reply("", { status: 1, stderr: "enable refused" });
+      }),
+    ).toThrow("Could not enable the Herdr plugin: enable refused");
+
+    calls = 0;
+    expect(() =>
+      setupHerdrPlugin(root, () => {
+        calls += 1;
+        return calls === 1
+          ? reply(
+              JSON.stringify({
+                result: {
+                  plugins: [{ plugin_id: HERDR_PLUGIN_ID, plugin_root: root, enabled: false }],
+                },
+              }),
+            )
+          : reply("", { error: new Error("enable executable failed") });
+      }),
+    ).toThrow("Could not run Herdr: enable executable failed");
+  });
+
+  it("ignores incomplete plugin records and links the complete package", async () => {
+    const root = await makeTempDir("pi-workflows-herdr-setup");
+    await fs.writeFile(path.join(root, "herdr-plugin.toml"), `id = "${HERDR_PLUGIN_ID}"\n`);
+    let calls = 0;
+    const result = setupHerdrPlugin(root, () => {
+      calls += 1;
+      return calls === 1
+        ? reply(
+            JSON.stringify({
+              result: {
+                plugins: [
+                  null,
+                  { plugin_id: HERDR_PLUGIN_ID, plugin_root: root },
+                  { plugin_id: "other.plugin", plugin_root: root, enabled: true },
+                ],
+              },
+            }),
+          )
+        : reply();
+    });
+
+    expect(result.changed).toBe(true);
+  });
+
   it("fails before calling Herdr when the package has no manifest", async () => {
     const root = await makeTempDir("pi-workflows-herdr-setup");
     expect(() => setupHerdrPlugin(root, () => reply())).toThrow("manifest not found");
