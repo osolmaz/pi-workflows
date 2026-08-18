@@ -15,12 +15,12 @@ const target: WorkflowViewTarget = {
 type Call = { command: string; args: string[] };
 type Reply = { stdout?: string; stderr?: string; code?: number; killed?: boolean };
 
-function execHarness(respond: (call: Call) => Reply) {
+function execHarness(respond: (call: Call) => Reply | Promise<Reply>) {
   const calls: Call[] = [];
   const exec = async (command: string, args: string[]) => {
     const call = { command, args: [...args] };
     calls.push(call);
-    const reply = respond(call);
+    const reply = await respond(call);
     return {
       stdout: reply.stdout ?? "",
       stderr: reply.stderr ?? "",
@@ -197,6 +197,35 @@ describe("HerdrWorkflowViewer", () => {
     expect(harness.calls.map(commandKey)).toContain("herdr tab close w2:t1");
   });
 
+  it("keeps a launched workspace viewer when bootstrap-tab cleanup fails", async () => {
+    const harness = execHarness((call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("workspace create")) {
+        return {
+          stdout: json({
+            result: {
+              workspace: { workspace_id: "w2" },
+              root_pane: { pane_id: "w2:p1", tab_id: "w2:t1", workspace_id: "w2" },
+            },
+          }),
+        };
+      }
+      if (key.includes("plugin pane open")) {
+        return { stdout: json(openedPane("w2:p2", "w2:t2", "w2")) };
+      }
+      if (key === "herdr tab close w2:t1") return { code: 1, stderr: "temporary failure" };
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+
+    const result = await viewer.open(target, "workspace", "/repo");
+    expect(result).toMatchObject({ paneId: "w2:p2", reused: false });
+    expect(result.warning).toContain("viewer opened");
+    expect(harness.calls.map(commandKey)).not.toContain("herdr workspace close w2");
+  });
+
   it("rolls back a new workspace after plugin launch failure", async () => {
     const harness = execHarness((call) => {
       const key = commandKey(call);
@@ -252,6 +281,37 @@ describe("HerdrWorkflowViewer", () => {
       "herdr api snapshot",
       "herdr plugin pane focus w9:p4",
     ]);
+  });
+
+  it("serializes concurrent opens before the launcher labels its pane", async () => {
+    let releaseOpen: (() => void) | undefined;
+    const openGate = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    const harness = execHarness(async (call) => {
+      const key = commandKey(call);
+      if (key === "herdr api snapshot") return { stdout: json(snapshot()) };
+      if (key === "herdr pane current --current") return { stdout: json(currentPane()) };
+      if (key.includes("plugin pane open")) {
+        await openGate;
+        return { stdout: json(openedPane()) };
+      }
+      throw new Error(`Unexpected command: ${key}`);
+    });
+    const viewer = new HerdrWorkflowViewer(harness.exec, { HERDR_ENV: "1" });
+
+    const first = viewer.open(target, "right", "/repo");
+    const second = viewer.open(target, "below", "/repo");
+    await Promise.resolve();
+    releaseOpen?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { paneId: "w1:p2", reused: false },
+      { paneId: "w1:p2", reused: false },
+    ]);
+    expect(
+      harness.calls.filter((call) => call.args.slice(0, 3).join(" ") === "plugin pane open"),
+    ).toHaveLength(1);
   });
 
   it("opens a replacement when a discovered viewer closes before focus", async () => {

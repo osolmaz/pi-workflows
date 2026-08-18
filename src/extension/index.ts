@@ -547,7 +547,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
         }
         return;
       }
-      await herdrViewer.open(target, placement, ctx.cwd);
+      const opened = await herdrViewer.open(target, placement, ctx.cwd);
+      if (opened.warning !== undefined) notify(ctx, opened.warning, "warning");
     } catch (error) {
       notify(ctx, `Could not open piw: ${errorMessage(error)}`, "error");
     }

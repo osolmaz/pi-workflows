@@ -19,6 +19,12 @@ export type WorkflowViewTarget = {
 
 export type HerdrCapability = { available: true } | { available: false; reason: string };
 
+export type ViewerOpenResult = {
+  paneId: string;
+  reused: boolean;
+  warning?: string;
+};
+
 type Exec = ExtensionAPI["exec"];
 
 type HerdrPane = {
@@ -35,6 +41,9 @@ type OpenedPane = {
 };
 
 export class HerdrWorkflowViewer {
+  private readonly knownPanes = new Map<string, string>();
+  private readonly opening = new Map<string, Promise<ViewerOpenResult>>();
+
   constructor(
     private readonly exec: Exec,
     private readonly env: NodeJS.ProcessEnv = process.env,
@@ -67,35 +76,39 @@ export class HerdrWorkflowViewer {
   }
 
   async focusExisting(target: WorkflowViewTarget): Promise<boolean> {
-    const existing = await this.find(target);
-    if (existing === undefined) return false;
-    try {
-      await this.run("herdr", ["plugin", "pane", "focus", existing.paneId]);
-      return true;
-    } catch {
-      // The pane can close between the snapshot and focus request.
-      return false;
-    }
+    return (await this.findAndFocus(target)) !== undefined;
   }
 
   async open(
     target: WorkflowViewTarget,
     placement: ViewerPlacement,
     cwd: string,
-  ): Promise<{ paneId: string; reused: boolean }> {
-    const existing = await this.find(target);
-    if (existing !== undefined) {
-      try {
-        await this.run("herdr", ["plugin", "pane", "focus", existing.paneId]);
-        return { paneId: existing.paneId, reused: true };
-      } catch {
-        // Continue with a new pane when the old pane closed after discovery.
-      }
+  ): Promise<ViewerOpenResult> {
+    const pending = this.opening.get(target.runId);
+    if (pending !== undefined) return await pending;
+
+    const opening = this.openOnce(target, placement, cwd).finally(() => {
+      if (this.opening.get(target.runId) === opening) this.opening.delete(target.runId);
+    });
+    this.opening.set(target.runId, opening);
+    return await opening;
+  }
+
+  private async openOnce(
+    target: WorkflowViewTarget,
+    placement: ViewerPlacement,
+    cwd: string,
+  ): Promise<ViewerOpenResult> {
+    const existingPaneId = await this.findAndFocus(target);
+    if (existingPaneId !== undefined) {
+      return { paneId: existingPaneId, reused: true };
     }
 
     const caller = await this.currentPane();
     if (placement === "workspace") {
-      return { paneId: await this.openWorkspace(target, cwd), reused: false };
+      const opened = await this.openWorkspace(target, cwd);
+      this.knownPanes.set(target.runId, opened.paneId);
+      return { ...opened, reused: false };
     }
 
     const opened = await this.openPluginPane(target, placement, caller, cwd);
@@ -114,7 +127,31 @@ export class HerdrWorkflowViewer {
         throw error;
       }
     }
+    this.knownPanes.set(target.runId, opened.paneId);
     return { paneId: opened.paneId, reused: false };
+  }
+
+  private async findAndFocus(target: WorkflowViewTarget): Promise<string | undefined> {
+    const knownPaneId = this.knownPanes.get(target.runId);
+    if (knownPaneId !== undefined) {
+      try {
+        await this.run("herdr", ["plugin", "pane", "focus", knownPaneId]);
+        return knownPaneId;
+      } catch {
+        this.knownPanes.delete(target.runId);
+      }
+    }
+
+    const existing = await this.find(target);
+    if (existing === undefined) return undefined;
+    try {
+      await this.run("herdr", ["plugin", "pane", "focus", existing.paneId]);
+      this.knownPanes.set(target.runId, existing.paneId);
+      return existing.paneId;
+    } catch {
+      // The pane can close between the snapshot and focus request.
+      return undefined;
+    }
   }
 
   async find(target: WorkflowViewTarget): Promise<HerdrPane | undefined> {
@@ -163,7 +200,10 @@ export class HerdrWorkflowViewer {
     return parseOpenedPane(await this.runJson("herdr", args));
   }
 
-  private async openWorkspace(target: WorkflowViewTarget, cwd: string): Promise<string> {
+  private async openWorkspace(
+    target: WorkflowViewTarget,
+    cwd: string,
+  ): Promise<{ paneId: string; warning?: string }> {
     const created = parseCreatedWorkspace(
       await this.runJson("herdr", [
         "workspace",
@@ -175,8 +215,9 @@ export class HerdrWorkflowViewer {
         "--no-focus",
       ]),
     );
+    let opened: OpenedPane;
     try {
-      const opened = parseOpenedPane(
+      opened = parseOpenedPane(
         await this.runJson("herdr", [
           "plugin",
           "pane",
@@ -198,11 +239,19 @@ export class HerdrWorkflowViewer {
           "--focus",
         ]),
       );
-      await this.run("herdr", ["tab", "close", created.bootstrapTabId]);
-      return opened.paneId;
     } catch (error) {
       await this.run("herdr", ["workspace", "close", created.workspaceId]).catch(() => undefined);
       throw error;
+    }
+
+    try {
+      await this.run("herdr", ["tab", "close", created.bootstrapTabId]);
+      return { paneId: opened.paneId };
+    } catch (error) {
+      return {
+        paneId: opened.paneId,
+        warning: `The piw viewer opened, but its empty bootstrap tab could not be closed: ${errorMessage(error)}`,
+      };
     }
   }
 
