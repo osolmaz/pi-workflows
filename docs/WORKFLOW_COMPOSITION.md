@@ -1,26 +1,49 @@
 # Workflow composition
 
-This specification defines how one Pi Workflows graph can include another graph. An included workflow keeps one source definition and can still run on its own. The parent supplies its input and connects each named exit to the next parent node.
+Pi Workflows can include one workflow inside another without copying nodes, prompts, or routing logic. The included workflow still runs on its own. The parent supplies input and connects the included workflow's named exits to later parent steps.
 
-This specification is proposed and not yet implemented. Work is tracked in the [workflow composition plan](plans/2026-08-19-workflow-composition-plan.md).
+Composition keeps one run, trace, pause state, cancellation state, and final presentation. Controllers remain the correct tool for independent or indefinitely reconciled child runs.
 
-## Minimal example
+Work is tracked in the [workflow composition plan](plans/2026-08-19-workflow-composition-plan.md).
 
-The included workflow starts at `startAt` and declares one or more named exits.
+## TypeScript API
+
+A TypeScript workflow definition is both executable code and a typed contract. Its input parser and exit parsers provide runtime validation and TypeScript inference from one declaration.
 
 ```typescript
 import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
 
+type RepairInput = { task: string };
+type Fixed = { summary: string };
+type Blocked = { reason: string };
+
 export default defineWorkflow({
-  name: "autoimplement",
+  source: import.meta.url,
+  name: "repair",
+  input: (value): RepairInput => {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      typeof (value as RepairInput).task !== "string"
+    ) {
+      throw new Error("repair input requires task");
+    }
+    return value as RepairInput;
+  },
   startAt: "implement",
   exits: {
-    fixed: { from: "finish" },
-    blocked: { from: "blocked" },
+    fixed: {
+      from: "finish",
+      validate: (value): Fixed => value as Fixed,
+    },
+    blocked: {
+      from: "blocked",
+      validate: (value): Blocked => value as Blocked,
+    },
   },
   nodes: {
     implement: agent({
-      prompt: ({ input }) => `Implement ${(input as { task: string }).task}`,
+      prompt: ({ input }) => `Implement ${input.task}`,
       expectedOutput: `{ "route": "fixed" | "blocked", "summary": "result" }`,
     }),
     finish: compute({ run: ({ outputs }) => outputs.implement }),
@@ -38,27 +61,28 @@ export default defineWorkflow({
 });
 ```
 
-A parent includes it under the name `repair`. The input function maps parent state to the included workflow input each time the parent enters `repair`.
+### Direct imports
+
+Direct imports are the normal TypeScript interface. `includeWorkflow()` checks the mapped input and makes the child exit names available to the parent definition.
 
 ```typescript
 import { agent, compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
+import repair from "./repair.workflow.js";
 
 export default defineWorkflow({
+  source: import.meta.url,
   name: "monitor-with-repair",
   startAt: "check",
   includes: {
-    repair: includeWorkflow({
-      workflow: "autoimplement",
+    repair: includeWorkflow(repair, {
       input: ({ outputs }) => ({
         task: (outputs.check as { issue: string }).issue,
       }),
     }),
   },
   nodes: {
-    check: agent({
-      prompt: () => "Check the target and report continue, repair, or stop.",
-    }),
-    wait: compute({ run: () => ({ route: "check" }) }),
+    check: agent({ prompt: () => "Check the target." }),
+    wait: compute({ run: () => ({}) }),
     finish: compute({ run: ({ outputs }) => outputs.check }),
   },
   edges: [
@@ -76,203 +100,117 @@ export default defineWorkflow({
 });
 ```
 
-`repair` is the included workflow's only entry. `repair.fixed` and `repair.blocked` are its named exits. The parent cannot connect to internal nodes such as `implement` or `finish`.
+`repair` is the only parent-visible entry. `repair.fixed` and `repair.blocked` are its exits. The parent cannot connect to an internal child node.
 
-## Goals
+### Dynamic references
 
-Workflow composition must provide these properties:
-
-- A workflow has one implementation whether it runs alone or inside another workflow.
-- Inclusion is visible in the parent definition.
-- The parent maps input without changing the included workflow.
-- The included workflow has one entry and multiple named exits.
-- Included callbacks see only their current invocation and its local data.
-- The parent sees only the included workflow's declared result.
-- Pause, cancellation, and timeout behavior remain part of one run.
-- Checkpoints and user-facing reports also remain in that run.
-- A run records every source used to build its graph and refuses unsafe resume after a source change.
-- Controllers remain the mechanism for independent, parallel, or indefinitely reconciled child runs.
-
-## Public definition API
-
-### Included workflows
-
-`includeWorkflow()` creates an inclusion declaration. It does not run work and is not a workflow node.
+Names and paths remain available for project overrides and configuration-driven loading:
 
 ```typescript
-type WorkflowIncludeDefinition = {
-  workflow: string;
-  input?: (context: WorkflowNodeContext) => MaybePromise<unknown>;
-};
+includeWorkflow({ workflow: "repair", input: mapRepair });
+includeWorkflow({ workflow: "builtin:repair", input: mapRepair });
+includeWorkflow({ workflow: "./repair.workflow.ts", input: mapRepair });
 ```
 
-`workflow` accepts the same stable references as `/workflow`:
+A dynamic reference is resolved before the run starts. Runtime input and exit validation still applies. A direct import gives better TypeScript inference and is preferred when the parent and child ship together.
 
-- a discovered project, global, or built-in workflow name;
-- an explicit built-in reference such as `builtin:monitor`;
-- a workflow file path.
+Relative references resolve from the including workflow file. Absolute paths keep their normal meaning. Project and global lookup remain available, as do built-ins. Built-ins cannot use relative paths unless their definitions use direct imports.
 
-A relative path is resolved from the file that declares the inclusion. A built-in workflow cannot use a relative file path because it has no source directory. An absolute path keeps its existing meaning.
+## Definition rules
 
-The `input` function is optional. Omission passes the parent workflow input unchanged. The function runs on every entry and can read the parent input plus prior node data and run state. It must be pure. Its JSON-serializable result becomes the included workflow input and is persisted before the included start node runs.
+- A workflow has one entry through `startAt`.
+- A workflow can declare several named exits.
+- Each exit points to one successful terminal node.
+- One terminal node can define at most one exit.
+- Exit and mount names use the normal node-name rules.
+- A parent edge enters a child through the mount name.
+- A parent edge leaves a child through `<mount>.<exit>`.
+- Parent edges cannot name child nodes.
+- The same child source can be mounted several times under different names.
+- Re-entering a mount creates a fresh invocation.
 
-A workflow definition can declare several includes under different mount names:
+A standalone workflow ignores its exit names for routing. Its terminal node completes the run as before.
+
+## Typed contracts
+
+`WorkflowDefinition` carries generic input and exit types. `includeWorkflow()` uses them to check the parent input mapper and expose a discriminated child result:
 
 ```typescript
-includes: {
-  repair: includeWorkflow({ workflow: "autoimplement", input: mapRepair }),
-  audit: includeWorkflow({ workflow: "review", input: mapAudit }),
-}
+type RepairResult = { exit: "fixed"; output: Fixed } | { exit: "blocked"; output: Blocked };
 ```
 
-The same workflow can be included more than once. Each mount has separate state.
+The parent reads the latest result from `outputs.repair`. Unknown exit names and incompatible direct-import input mappers are TypeScript errors. Dynamic references use runtime checks and can supply an explicit contract when compile-time checking is required.
 
-### One entry
+`defineWorkflowRegistry()` creates a typed set of shipped workflows. A project or global override must keep the registered input and exit contract. The selected source remains subject to the normal project, global, and built-in precedence rules.
 
-`startAt` remains the only workflow entry. Inclusion does not add alternate start nodes.
+## Resolution
 
-Several parent edges may target the same mount. Every entry starts at the included workflow's `startAt` node with a fresh invocation. A workflow that needs a reusable later phase should make that phase a smaller workflow and include it. This keeps earlier required work from being skipped.
+Composition is resolved before `run_started`.
 
-### Named exits
-
-A reusable workflow declares exits at the top level:
-
-```typescript
-exits: {
-  fixed: { from: "finish" },
-  unchanged: { from: "no_change" },
-  blocked: { from: "blocked" },
-}
-```
-
-An exit name follows the workflow node naming rules. `from` must name a node in that workflow. The node must have no outgoing edge. One node can define at most one exit.
-
-When the workflow runs alone, its final output stays the terminal node output. The run state can also record the matching exit name. This preserves current standalone output behavior.
-
-When the workflow is included, a named exit produces this parent-visible value:
-
-```json
-{
-  "exit": "fixed",
-  "output": {
-    "summary": "repair completed"
-  }
-}
-```
-
-The value is stored at `outputs.<mount>`, such as `outputs.repair`. The parent routes from `<mount>.<exit>`, such as `repair.fixed`.
-
-An unconnected included exit completes the parent successfully with the parent-visible value. Graph validation and viewers must show the exit as terminal so an omitted edge is visible.
-
-An unhandled node failure, timeout, or cancellation does not become a successful named exit. It keeps the existing run outcome unless the included graph routes that node result to a declared terminal exit. This lets an included workflow make expected blocked states explicit without hiding unexpected failures.
-
-### Input and exit validation
-
-Workflow definitions may declare input validation that applies both to standalone runs and included invocations:
-
-```typescript
-input: {
-  expected: `{ "task": "work to complete" }`,
-  validate: (value) => validateAutoimplementInput(value),
-}
-```
-
-An exit may validate or normalize the terminal output:
-
-```typescript
-exits: {
-  fixed: {
-    from: "finish",
-    expectedOutput: `{ "summary": "completed work" }`,
-    validate: (value) => validateFixedResult(value),
-  },
-}
-```
-
-Validation runs before the normalized value is persisted. Validation failure stops the invocation and records a bounded error. Pi Workflows does not require a schema library. Authors can use TypeBox, another validator, or a plain function.
-
-Existing workflows without an `input` declaration keep accepting JSON-serializable input. A workflow must declare `exits` before another workflow can include it.
-
-## Parent graph syntax
-
-Mount names share the workflow node naming rules and must not collide with parent node names. Dots remain invalid in node and mount names because the parent syntax reserves one dot between a mount and an exit.
-
-An authored edge can use these references:
-
-- `to: "repair"` enters the included workflow.
-- `from: "repair.fixed"` leaves its `fixed` exit.
-- `from: "repair.blocked"` leaves its `blocked` exit.
-
-No authored edge may name an included internal node. Nested includes use their own local mount names. Internal qualified names appear only in the resolved graph and run records.
-
-Every ordinary parent node still has at most one outgoing edge. Every included exit also has at most one outgoing parent edge.
-
-## Resolution and graph construction
-
-Composition is resolved before a run starts.
-
-1. Resolve the root workflow source.
-2. Resolve every included workflow through the existing project, global, built-in, or path lookup rules.
+1. Resolve the root source.
+2. Resolve every direct or dynamic child reference.
 3. Repeat for nested includes.
-4. Reject a source cycle and report the full mount chain.
-5. Validate every root and included graph on its own.
-6. Validate mount names, input declarations, exit declarations, and parent edge references.
-7. Build one executable graph with qualified internal node identities and inclusion metadata.
-8. Freeze the source list and resolved graph before writing `run_started`.
+4. Validate each standalone graph and its input and exit declarations.
+5. Reject source cycles and report the full mount chain.
+6. Build one executable graph with qualified node names.
+7. Freeze the source set and resolved definition digest.
 
-Resolution is eager. Every declared include must exist even when the current input will not take that branch. Dynamic workflow references are excluded because they would make the graph and source set change during a run.
+Resolution is eager. An unused include must still exist. A workflow reference cannot change after the run starts.
 
-Including the same source at two different mount paths is allowed. Including an ancestor source beneath itself is a cycle and is rejected.
+Direct and indirect source cycles are invalid:
 
-Internal node identities use the mount path, for example `repair/implement` and `outer/repair/verify`. The slash form cannot collide with an authored node ID. Author callbacks continue to use local names such as `outputs.implement`.
+```text
+A -> A
+A -> B -> A
+A -> B -> C -> A
+```
+
+Using one source at independent mount paths is valid:
+
+```text
+monitor/initialDesign
+monitor/implementation/redesign
+```
 
 ## Runtime behavior
 
-### Scoped callback context
+### Local child context
 
-A callback inside an included workflow receives a local view:
+A child callback receives:
 
-- `input` is the mapped and validated included input.
-- `outputs` contains outputs from the current invocation under local node names.
-- `results` contains results from the current invocation under local node names.
-- `state.steps` contains the current invocation's steps with local node names.
-- `state.currentNode` uses the local node name while the included workflow runs.
-- `signal` is the parent run's active cancellation and timeout signal.
-- `runId` remains the parent run ID wherever it is present in state or step contracts.
+- its mapped and validated input;
+- outputs and results from its current invocation under local node names;
+- local steps for its current invocation;
+- the local current node name;
+- the root run ID and active abort signal.
 
-The included workflow cannot read parent outputs except through its mapped input. The parent cannot read internal included outputs. This keeps a workflow reusable and prevents accidental coupling to one parent graph.
+A child cannot read parent state except through mapped input. A parent sees only the declared child result.
 
 ### Re-entry
 
-Each entry increments a mount-local invocation number and starts with empty local outputs and results. Prior invocation data cannot satisfy a callback in the new invocation.
+Each mount entry starts with empty local outputs and results. Earlier invocation data stays in the trace but cannot satisfy callbacks in a later invocation. The latest named exit replaces the parent-visible mount output.
 
-The ordered step history and trace retain every invocation. The parent-visible `outputs.<mount>` value is replaced when the latest invocation reaches a named exit.
+### Limits and progress
 
-### Step limits
+The root `maxSteps` limits all real node attempts in the run. Each child `maxSteps` limits one invocation. Include entry and exit transitions are recorded but do not count as user-authored node attempts.
 
-The parent `maxSteps` limits all real node attempts in the complete run. An included workflow's own `maxSteps` also limits each invocation of that workflow. The smaller applicable limit stops execution first.
+A repair loop must also check useful progress. A repeated issue stops as blocked when the issue, plan, implementation revision, supporting evidence, and target state have not changed. `maxSteps` remains the final safety bound.
 
-Input and exit boundary transitions are persisted but do not count as model, compute, action, notify, or checkpoint steps.
+### Failures, pauses, and cancellation
 
-### Timeouts and failures
+Child nodes keep their normal timeouts. Unhandled failures, timeouts, cancellations, and routing errors keep their existing run outcome. A parent cannot turn an unhandled failure into success through a named exit.
 
-Included nodes keep their declared node timeouts. Parent cancellation aborts the active included node. A checkpoint inside an included workflow creates the same continuation run used by an ordinary checkpoint and resumes at the qualified included location.
-
-Unhandled included failures preserve `failed`, `timed_out`, or `cancelled`. The parent cannot convert them to success by wiring an exit because named exits are reached only through successful terminal nodes.
+A checkpoint inside a child uses the normal continuation behavior and resumes at the qualified child location. Pause and cancellation apply to the complete run.
 
 ### Reports and presentation
 
-Notify nodes and workflow updates keep their current behavior. Their persisted node identity includes the mount path, which prevents duplicate identities when the same workflow is mounted twice.
+Notify nodes and updates keep qualified node identities. Only the root workflow produces final presentation. A child's `presentationPrompt` applies when the child runs alone and is ignored when included.
 
-Only the root workflow can produce a final presentation. An included workflow's `presentationPrompt` is ignored during inclusion and remains active when that workflow runs alone. Its title is retained as viewer metadata but does not replace the parent run title.
+## Persistence
 
-## Persistence and resume
+Composition extends the existing run bundle.
 
-Composition extends the current run bundle without adding another run or store.
-
-### Source set
-
-The manifest records the root source and every included source:
+The manifest and state record:
 
 ```json
 {
@@ -284,10 +222,10 @@ The manifest records the root source and every included source:
   "workflowSources": [
     {
       "mountPath": ["repair"],
-      "workflowName": "autoimplement",
+      "workflowName": "repair",
       "source": {
         "kind": "file",
-        "path": "/path/to/autoimplement.workflow.ts",
+        "path": "/path/to/repair.workflow.ts",
         "hash": "2222222222222222222222222222222222222222222222222222222222222222"
       }
     }
@@ -296,97 +234,91 @@ The manifest records the root source and every included source:
 }
 ```
 
-`workflowSources` is sorted by mount path. Nested paths contain one array item per mount level. `definitionDigest` uses `sha256:` followed by 64 lowercase hexadecimal characters. No credential or source file content is copied into this record.
+`workflowSources` is sorted by mount path. The definition snapshot records the resolved mounts and qualified graph. The trace adds `include_entered` and `include_exited` events with mount path, invocation number, and named exit. It does not copy source text or credentials.
 
-Resume resolves the root and full included source set again. A missing source, changed file hash, changed built-in revision, changed mount path, or changed resolved definition digest refuses resume with a source-change error. A force-resume option keeps its existing explicit meaning and must name the mismatch in the resulting audit evidence.
-
-### Definition snapshot
-
-`workflow.json` stores the resolved nodes and edges used by the engine. It also stores mount metadata with the workflow name, mount path, start node, and named exits. Existing readers can continue to render the resolved flat graph. Updated viewers can group nodes by mount.
-
-The definition snapshot remains the graph authority for replay. Source files are required only to execute or resume callbacks.
-
-### Trace and state
-
-The trace adds `include_entered` and `include_exited` event types. Their payloads contain the mount path, invocation number, included workflow name, and declared exit when applicable. The entered event contains the mapped input, subject to normal artifact externalization. The exited event contains the parent-visible output.
-
-Qualified node IDs identify included attempts in trace and step records. The state projection keeps the latest parent-visible mount output and enough entry data to rebuild a local callback view after restart. The trace remains the source of truth.
-
-These are additive version 1 fields and event types. Existing readers must continue to ignore fields and event types they do not understand. If implementation requires changing the meaning of an existing field instead of adding data, the affected schema identifier must change.
-
-## Validation errors
-
-Resolution fails before `run_started` for these conditions:
-
-- an included reference cannot be resolved;
-- a relative include path is declared by a source without a directory;
-- an include cycle exists;
-- a mount collides with a node or another mount;
-- an included workflow declares no exits;
-- an exit name is invalid or duplicated;
-- an exit references an unknown or nonterminal node;
-- two exits reference the same node;
-- a parent edge references an unknown mount or exit;
-- a parent edge attempts to reference an included internal node;
-- a composed node identity collides after qualification;
-- a source set or resolved definition differs during resume.
-
-Runtime input or exit validation errors are recorded as invocation failures because their values depend on runtime data.
+Resume resolves and verifies the complete source set and definition digest. Any missing or changed child source refuses normal resume. Old runs without composition metadata remain readable.
 
 ## Viewer behavior
 
-Viewers should show an included workflow as a group labeled with its mount and workflow name. Expanded views show internal nodes. Collapsed views show the active internal node, invocation count, latest exit, and outcome.
+Existing readers can render qualified nodes as a flat graph. Updated viewers group nodes under their mount path while keeping the exact qualified name available in details and replay.
 
-Replay uses the resolved definition snapshot and trace. It does not load source files. Older viewers may show the qualified nodes as a flat graph and remain correct.
+```text
+monitor
+  initialDesign
+    frame
+    choose
+    plan
+  implementation
+    implement
+    verify
+    redesign
+      frame
+      choose
+      plan
+```
 
-## Controller boundary
+## Autodevise and autoimplement
 
-Same-run composition and controller child workflows solve different problems.
+`autodevise` accepts the problem, scope, constraints, an optional previous plan, and new evidence. It automatically selects the best practical in-scope solution. The ideal end state can win when it is feasible, but an unavailable upstream change cannot block a valid practical solution. It exits through `ready` or `blocked` and returns a plan digest and change status.
 
-Use inclusion when work should share one run, one conversation, one pause and cancellation state, and one final result. Use a controller child workflow when work needs independent retries, parallel execution, a separate run bundle, a stable request key, or an indefinite resource lifecycle.
+`autoimplement` accepts an optional plan and includes `autodevise` as `redesign`. It moves back to redesign when implementation, verification, review, or CI proves that the approach is wrong. Local bugs go to a fix step instead.
 
-A workflow cannot start another independent workflow recursively through the model tool. This specification does not change that rule.
+Review rounds record findings at every severity from P0 through P2. P0 or P1 findings require another implementation and review round. A P2-only round can be addressed, but the workflow does not run the reviewer again solely because P2 work changed files.
 
-## Monitor repair example
+Reviewer and CI commands record the executable, arguments, working directory, and timeout as structured fields. A failed reviewer invocation returns to a model step that corrects the command. The executable remains `pi-reviewer`; no hidden reviewer substitution is allowed.
 
-A repair-capable monitor can report a detected bug, route to an included `autoimplement` workflow, and return to checking after the `fixed` exit. The monitor detects the issue, contains unsafe work, and decides whether the repair stays within the approved objective. Autoimplement owns the repair, its checks and review, the merge, and deployment.
+A CI wait is bounded to five minutes. If CI remains pending, the workflow asks the model to run additional useful local tests. It does not spend another model turn waiting and checks CI again after the tests. Required CI still gates merge unless repository policy permits a documented unrelated failure.
 
-The parent passes the issue, evidence, repository, allowed scope, and success criteria through the include input. It does not copy autoimplement prompts or graph nodes. A change to model choice, benchmark method, credentials, hardware, spending authorization, or another protected decision must route to a blocked exit or stop before repair.
+## Monitor repair
 
-## Compatibility
+Monitor remains observation-only unless its input explicitly authorizes mutation. An authorized repair path is:
 
-Existing workflows without `includes`, `input`, or `exits` run unchanged. Existing controller child workflows also remain unchanged.
+```text
+check
+  -> initialDesign: autodevise
+  -> implementation: autoimplement
+       -> redesign: autodevise when needed
+  -> check
+```
 
-This feature is a compatible public API addition for the current pre-1.0 package and should ship in the next minor release. A workflow that wants to be included opts into the exit contract. No migration rewrites existing workflow files or terminal run bundles.
+The outer `autodevise` creates the first plan. The inner mount revises it only when new evidence invalidates it. The monitor checks the target again after implementation and does not trust a repair claim by itself.
+
+A protected change to model choice, benchmark method, credentials, hardware, spending authority, or another user decision exits as blocked. The workflow never changes the protected part of the task silently.
+
+## Compatibility and release
+
+Workflows without inputs, exits, or includes run unchanged. Existing controller child workflows remain unchanged. Existing terminal run bundles remain readable.
+
+This is a compatible public API addition under the project's pre-1.0 policy. It targets `0.10.0` if no earlier release changes the next version.
 
 ## Contract impact
 
-- **Session state:** included agent nodes create the same normal Pi messages and tool results as ordinary workflow nodes. No new Pi session entry type is required.
-- **Other persistent data:** run manifests, definition snapshots, state projections, and traces gain the additive composition data defined above.
+- **Session state:** normal workflow messages and tool results only.
+- **Other persistent data:** additive source and mount data, definition digests, and include events in existing run bundles.
 - **Pi internals:** none.
-- **Public Pi API:** existing documented extension hooks only.
-- **Public Pi Workflows API:** `includeWorkflow()`, workflow `includes`, workflow `input`, and workflow `exits`.
+- **Public Pi API:** existing extension APIs only.
+- **Public Pi Workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, and `defineWorkflowRegistry()`.
 
-## Conformance tests
+## Required tests
 
-An implementation must verify:
+The implementation must cover:
 
-- standalone behavior of a workflow that declares exits;
-- one include with one exit and one include with several exits;
-- input mapping and input normalization;
-- exit output validation and parent-visible output;
-- two mounts of the same workflow with isolated state;
-- nested includes;
-- re-entry with no stale local outputs or results;
-- parent and per-invocation step limits;
-- failure and timeout propagation, plus cancellation;
-- checkpoint continuation from inside an include;
-- notify and update identity under two mounts;
-- top-level presentation with included presentation suppressed;
-- project and global source resolution;
-- built-in, absolute-path, and relative-path resolution;
-- eager rejection of missing references and source cycles;
-- resume with identical sources and rejection after any included source changes;
-- definition snapshot replay without source files;
-- flat rendering by existing viewers and grouped rendering by updated viewers;
-- real-Pi execution of a monitor that repairs through the existing autoimplement workflow and then resumes checking.
+- standalone workflows with exits;
+- direct typed imports and dynamic references;
+- compile-time invalid input and exit examples;
+- runtime input and exit validation;
+- one and several named exits;
+- nested and repeated mounts;
+- re-entry without stale data;
+- source-cycle rejection;
+- root and per-invocation step limits;
+- failures and timeouts plus cancellation, checkpoint resume, and pause behavior;
+- changed child sources and changed definition digests;
+- include trace events and definition snapshots;
+- flat and grouped rendering;
+- reviewer command correction;
+- P0 through P2 plus clean review routes;
+- five-minute CI wait and opportunistic testing routes;
+- monitor observation-only and authorized repair modes;
+- repeated repair with no progress;
+- real-Pi execution of nested monitor repair.
