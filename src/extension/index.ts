@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
@@ -486,7 +487,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     workflowViewTarget = {
       runId: state.runId,
       workflowName: state.workflowName,
-      runDir: new WorkflowRunStore().runDirFor(state.runId),
+      runDir: path.resolve(new WorkflowRunStore().runDirFor(state.runId)),
     };
     renderWidget(ctx);
   };

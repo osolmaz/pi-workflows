@@ -419,7 +419,7 @@ describe("pi-workflows extension", () => {
   it("shows the native Herdr shortcut and opens the exact run bundle in piw", async () => {
     const cwd = await makeTempDir("pi-workflows-herdr-ext");
     const runsDir = await makeTempDir("pi-workflows-herdr-ext-runs");
-    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", path.relative(process.cwd(), runsDir));
     vi.stubEnv("HERDR_ENV", "1");
     const execCalls: { command: string; args: string[] }[] = [];
     try {
