@@ -73,6 +73,10 @@ describe("parseCliArgs", () => {
       controllerDir: "/tmp/controllers",
     });
     expect(parseCliArgs(["--help"]).command).toBe("help");
+    expect(parseCliArgs(["herdr", "setup"])).toMatchObject({
+      command: "herdr",
+      herdrAction: "setup",
+    });
   });
 
   it("parses the host command with project and passthrough args", () => {
@@ -203,6 +207,10 @@ describe("pi-workflows CLI", () => {
 
     expect(await main(["controller", "missing"])).toBe(2);
     expect(stderr).toContain("requires <controller> and <key>");
+
+    stderr = "";
+    expect(await main(["herdr", "wrong"])).toBe(2);
+    expect(stderr).toContain("herdr requires the setup action");
 
     stderr = "";
     expect(await main(["frobnicate"])).toBe(2);

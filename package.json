@@ -1,6 +1,6 @@
 {
   "name": "@osolmaz/pi-workflows",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Workflow and controller runtime with a live terminal viewer for the pi coding agent",
   "keywords": [
     "pi-package"
@@ -23,6 +23,8 @@
     "skills",
     "examples",
     "docs",
+    "plugins/herdr",
+    "herdr-plugin.toml",
     "README.md",
     "LICENSE"
   ],

@@ -8,6 +8,7 @@ const packageJsonPath = path.join(repoRoot, "package.json");
 const skillsRoot = path.join(repoRoot, "skills");
 
 interface PackageManifest {
+  version: string;
   files?: string[];
   pi?: {
     extensions?: string[];
@@ -47,6 +48,8 @@ describe("Pi package resources", () => {
     const manifest = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as PackageManifest;
 
     expect(manifest.files).toContain("skills");
+    expect(manifest.files).toContain("plugins/herdr");
+    expect(manifest.files).toContain("herdr-plugin.toml");
     expect(manifest.pi?.extensions).toEqual(["./src/extension/index.ts"]);
     expect(manifest.pi?.skills).toEqual(["./skills"]);
 
@@ -57,6 +60,16 @@ describe("Pi package resources", () => {
     }
     await expect(fs.stat(path.join(repoRoot, extensionPath))).resolves.toBeDefined();
     await expect(fs.stat(path.join(repoRoot, skillPath))).resolves.toBeDefined();
+  });
+
+  it("ships one matching Herdr plugin from the package root", async () => {
+    const manifest = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as PackageManifest;
+    const herdrManifest = await fs.readFile(path.join(repoRoot, "herdr-plugin.toml"), "utf8");
+
+    expect(herdrManifest).toContain('id = "osolmaz.pi-workflows"');
+    expect(herdrManifest).toContain(`version = "${manifest.version}"`);
+    expect(herdrManifest).toContain('command = ["node", "plugins/herdr/viewer.mjs"]');
+    await expect(fs.stat(path.join(repoRoot, "plugins/herdr/viewer.mjs"))).resolves.toBeDefined();
   });
 
   it("ships valid uniquely named skills", async () => {

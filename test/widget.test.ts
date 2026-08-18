@@ -585,6 +585,39 @@ describe("buildWidgetLines", () => {
     expect(bottom.lines.length).toBeLessThanOrEqual(10);
   });
 
+  it("reserves a bounded footer line for an optional viewer shortcut", () => {
+    const nodes = Object.fromEntries(
+      Array.from({ length: 20 }, (_value, index) => [`n${index}`, compute({ run: () => index })]),
+    );
+    const tall = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "tall",
+        startAt: "n0",
+        nodes,
+        edges: Array.from({ length: 19 }, (_value, index) => ({
+          from: `n${index}`,
+          to: `n${index + 1}`,
+        })),
+      }),
+    );
+    const view = buildWidgetView(
+      makeState({ workflowName: "tall", currentNode: "n10" }),
+      tall,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      "Ctrl+Shift+R piw",
+    );
+
+    const controls = stripAnsi(view.lines.at(-1) ?? "");
+    expect(controls).toContain("shift+↑/↓ scroll · Ctrl+Shift+R piw");
+    expect(view.lines.length).toBeLessThanOrEqual(10);
+    expect(view.lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+  });
+
   it("reports no scroll range when the node list fits", () => {
     const view = buildWidgetView(makeState(), snapshot);
     expect(view.maxScroll).toBe(0);

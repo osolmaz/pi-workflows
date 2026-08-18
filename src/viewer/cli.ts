@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import fs, { realpathSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { SqliteControllerStore } from "../controllers/sqlite.js";
 import { projectControllerStoreBaseDir } from "../controllers/store.js";
+import { setupHerdrPlugin } from "../herdr/setup.js";
 import { sanitizeText } from "../render/ansi.js";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
 import {
@@ -23,6 +24,7 @@ Usage:
   pi-workflows controllers [--controller-dir <dir>]
   pi-workflows controller <controller> <key> [--controller-dir <dir>]
   pi-workflows host [--project <dir>] [-- <extra pi args>]
+  pi-workflows herdr setup
 
 Commands:
   view          Open the live workflow TUI. With --once, print a snapshot.
@@ -30,6 +32,7 @@ Commands:
   controllers   List durable controller resources.
   controller    Show one resource, its effects, child workflows, and events.
   host          Run the always-on workflow host in the foreground.
+  herdr         Set up the bundled Herdr plugin.
 
 Options:
   --dir <runsDir>          Runs directory (default: ~/.pi/agent/workflows/runs)
@@ -43,6 +46,7 @@ export type CliArgs = {
   runId?: string;
   controllerName?: string;
   resourceKey?: string;
+  herdrAction?: string;
   dir: string;
   controllerDir: string;
   once: boolean;
@@ -97,6 +101,12 @@ export function parseCliArgs(argv: string[]): CliArgs {
       controllerDir,
       once,
     };
+  }
+  if (command === "herdr") {
+    if (positionals.length !== 1 || positionals[0] !== "setup") {
+      throw new Error("herdr requires the setup action");
+    }
+    return { command, herdrAction: positionals[0], dir, controllerDir, once };
   }
   if (positionals.length > 1) {
     throw new Error(`Unexpected argument: ${positionals[1]}`);
@@ -229,6 +239,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     if (args.command === "host") {
       return await runHost(args.project ?? process.cwd(), args.piArgs);
     }
+    if (args.command === "herdr") {
+      const result = setupHerdrPlugin(packageRoot());
+      process.stdout.write(`${result.message}\n`);
+      return 0;
+    }
     if (args.command === "view") {
       if (args.once || !process.stdout.isTTY) {
         await printOnce(args.dir, args.runId);
@@ -269,6 +284,10 @@ function openControllerStore(controllerDir: string): SqliteControllerStore | und
     return undefined;
   }
   return new SqliteControllerStore(file, { readOnly: true });
+}
+
+function packageRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
 function requiredValue(args: string[], option: string): string {

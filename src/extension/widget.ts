@@ -78,6 +78,7 @@ export function buildWidgetView(
   width = Number.POSITIVE_INFINITY,
   theme?: WidgetTheme,
   updateHistory?: WorkflowUpdateRecord[],
+  actionHint?: string,
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
@@ -102,12 +103,18 @@ export function buildWidgetView(
       paint(theme, "warning", `  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`),
     );
   }
-
+  const hint = actionHint?.trim() ? sanitizeText(actionHint) : undefined;
   const progress = progressLines(state, now, updateHistory).slice(0, 4);
-  const budget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
+  const baseBudget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
   const nodes = displayNodeIds(snapshot).map((nodeId) =>
     compactNodeLine(state, snapshot, nodeId, now, paused, theme),
   );
+  const combineHintWithWindow =
+    hint !== undefined && nodes.length > 0 && nodes.length + 1 > baseBudget;
+  if (hint !== undefined && !combineHintWithWindow) {
+    footer.push(paint(theme, "dim", `  ${hint}`));
+  }
+  const budget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
   if (nodes.length === 0 || budget <= 0) {
     return {
       lines: fitLines(
@@ -120,7 +127,14 @@ export function buildWidgetView(
   }
 
   const anchor = scroll ?? compactFocusIndex(state, snapshot);
-  const windowed = windowLines(nodes, budget, anchor, scroll !== null, theme);
+  const windowed = windowLines(
+    nodes,
+    budget,
+    anchor,
+    scroll !== null,
+    theme,
+    combineHintWithWindow ? hint : undefined,
+  );
   const indentation = availableWidth >= 3 ? "  " : "";
   return {
     lines: fitLines(
@@ -356,6 +370,7 @@ function windowLines(
   anchor: number,
   anchorIsStart: boolean,
   theme?: WidgetTheme,
+  actionHint?: string,
 ): { lines: string[]; scroll: number; maxScroll: number } {
   if (lines.length <= budget) {
     return { lines, scroll: 0, maxScroll: 0 };
@@ -369,7 +384,10 @@ function windowLines(
   const directions = [above > 0 ? `↑ ${above}` : "", below > 0 ? `↓ ${below}` : ""]
     .filter(Boolean)
     .join(" · ");
-  out.push(paint(theme, "dim", `${directions} more · shift+↑/↓ scroll`));
+  const controls = [`${directions} more`, "shift+↑/↓ scroll", actionHint]
+    .filter((item): item is string => Boolean(item))
+    .join(" · ");
+  out.push(paint(theme, "dim", controls));
   return { lines: out, scroll: start, maxScroll: Math.max(0, lines.length - inner) };
 }
 

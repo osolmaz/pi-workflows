@@ -71,6 +71,25 @@ The npm package also includes the simpler `pi-workflows` snapshot viewer. To
 link that command from a clone, run `npm install && npm run build && npm link`,
 or run it in place with `npx tsx src/viewer/cli.ts`.
 
+## Herdr integration
+
+Pi Workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
+`piw` and Pi Workflows, link the bundled plugin once:
+
+```bash
+pi-workflows herdr setup
+```
+
+When Pi runs inside Herdr, a workflow widget shows `Ctrl+Shift+R piw`. When the widget has hidden rows, this call to action shares the existing scroll-controls line instead of taking another line.
+The shortcut opens the exact run bundle and lets you choose a split, tab, or new
+workspace. `/piw` opens the same menu, and `/piw right`, `/piw below`, `/piw
+left`, `/piw above`, `/piw tab`, or `/piw workspace` selects a placement
+directly. If a viewer for that run already exists, Pi Workflows focuses it
+instead of opening a duplicate.
+
+The plugin uses Herdr's public pane APIs and runs no service or polling loop. It
+is also available through the [Herdr plugin marketplace](https://herdr.dev/plugins/).
+
 ## Quick start
 
 Put a workflow file in `.pi/workflows/` (project) or `~/.pi/agent/workflows/`

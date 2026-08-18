@@ -37,13 +37,17 @@ typescript:
         - src/builtins
         - src/controllers
         - src/render
+        - src/herdr
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
         - src/workflows
         - src/builtins
         - src/controllers
-    # The viewer only reads run bundles and dispatches the host command; it
+    # Herdr setup is a standalone host integration with no engine imports.
+    - from: src/herdr
+      allow: []
+    # The viewer only reads run bundles and dispatches host commands; it
     # must never import the extension.
     - from: src/viewer
       allow:
@@ -51,3 +55,4 @@ typescript:
         - src/controllers
         - src/render
         - src/host
+        - src/herdr

@@ -30,6 +30,20 @@ cargo install pi-workflows
 Direct filesystem mode and connected mode use the same semantic run view.
 The protocol is the network form of that view.
 
+## Herdr
+
+The npm package contains a native Herdr plugin. Link the installed package with
+`pi-workflows herdr setup`. A workflow running in Pi inside Herdr then shows
+`Ctrl+Shift+R piw` in its widget. When rows are hidden, the call to action shares
+the scroll-controls line. The shortcut and `/piw` command open
+the current bundle directly in a managed Herdr pane. The placement menu supports
+right, below, left, above, a new tab, and a new workspace.
+
+The integration resolves the calling pane at invocation time and uses returned
+Herdr IDs for every layout change. Existing viewers are found from their exact
+run title and focused after Pi reload. Normal Pi sessions do not probe Herdr or
+show the shortcut.
+
 ## Layout
 
 The normal layout contains a run browser, graph, inspector, and two-line replay

@@ -1,6 +1,6 @@
 [package]
 name = "pi-workflows"
-version = "0.7.0"
+version = "0.9.0"
 edition = "2021"
 description = "Terminal viewer and live replay server for pi-workflows run bundles"
 license = "MIT"

@@ -79,6 +79,7 @@ type FakeContext = {
     notify: (message: string, type?: string) => void;
     setWidget: (key: string, content: string[] | WidgetFactory | undefined) => void;
     setStatus: (key: string, text: string | undefined) => void;
+    select: (title: string, options: string[]) => Promise<string | undefined>;
   };
 };
 
@@ -92,6 +93,11 @@ function makeHarness(options: {
   respond: (prompt: string, tool: RegisteredTool) => void;
   sessionId?: string;
   mode?: "tui" | "rpc";
+  select?: (title: string, choices: string[]) => Promise<string | undefined>;
+  exec?: (
+    command: string,
+    args: string[],
+  ) => Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>;
 }) {
   const notifications: string[] = [];
   const widgets: (string[] | WidgetFactory | undefined)[] = [];
@@ -103,7 +109,7 @@ function makeHarness(options: {
     string,
     ((event?: unknown, ctx?: FakeContext) => void | Promise<void>)[]
   >();
-  const shortcuts = new Map<string, (ctx: FakeContext) => void>();
+  const shortcuts = new Map<string, (ctx: FakeContext) => void | Promise<void>>();
   const commands = new Map<string, RegisteredCommand>();
   let tool: RegisteredTool | null = null;
   let idle = true;
@@ -128,6 +134,7 @@ function makeHarness(options: {
       notify: (message) => notifications.push(message),
       setWidget: (_key, content) => widgets.push(content),
       setStatus: (_key, text) => statuses.push(text),
+      select: async (title, choices) => await options.select?.(title, choices),
     },
   };
 
@@ -148,9 +155,14 @@ function makeHarness(options: {
           ),
       };
     },
-    registerShortcut: (key: string, spec: { handler: (ctx: FakeContext) => void }) => {
+    registerShortcut: (
+      key: string,
+      spec: { handler: (ctx: FakeContext) => void | Promise<void> },
+    ) => {
       shortcuts.set(key, spec.handler);
     },
+    exec:
+      options.exec ?? (async () => ({ stdout: "", stderr: "unavailable", code: 1, killed: false })),
     registerMessageRenderer: (customType: string, renderer: unknown) => {
       messageRenderers.set(customType, renderer);
     },
@@ -334,6 +346,7 @@ describe("pi-workflows extension", () => {
     // Interactive runs are tracked in the project run queue; keep that
     // store inside a temp dir so tests never touch the real home state.
     vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", await makeTempDir("pi-workflows-ext-controllers"));
+    vi.stubEnv("HERDR_ENV", "0");
   });
 
   it("runs a workflow end to end through the command and tool", async () => {
@@ -401,6 +414,119 @@ describe("pi-workflows extension", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("shows the native Herdr shortcut and opens the exact run bundle in piw", async () => {
+    const cwd = await makeTempDir("pi-workflows-herdr-ext");
+    const runsDir = await makeTempDir("pi-workflows-herdr-ext-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("HERDR_ENV", "1");
+    const execCalls: { command: string; args: string[] }[] = [];
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({
+        cwd,
+        select: async (_title, choices) => choices.find((choice) => choice === "Split right"),
+        exec: async (command, args) => {
+          execCalls.push({ command, args: [...args] });
+          const key = `${command} ${args.join(" ")}`;
+          if (key === "piw --version") {
+            return { stdout: "piw 0.1.0\n", stderr: "", code: 0, killed: false };
+          }
+          if (key === "herdr pane current --current") {
+            return {
+              stdout: JSON.stringify({
+                result: {
+                  pane: { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1" },
+                },
+              }),
+              stderr: "",
+              code: 0,
+              killed: false,
+            };
+          }
+          if (key.includes("plugin list")) {
+            return {
+              stdout: JSON.stringify({
+                result: {
+                  plugins: [{ plugin_id: "osolmaz.pi-workflows", enabled: true }],
+                },
+              }),
+              stderr: "",
+              code: 0,
+              killed: false,
+            };
+          }
+          if (key === "herdr api snapshot") {
+            return {
+              stdout: JSON.stringify({ result: { snapshot: { panes: [] } } }),
+              stderr: "",
+              code: 0,
+              killed: false,
+            };
+          }
+          if (key.includes("plugin pane open")) {
+            return {
+              stdout: JSON.stringify({
+                result: {
+                  plugin_pane: {
+                    pane: { pane_id: "w1:p2", tab_id: "w1:t1", workspace_id: "w1" },
+                  },
+                },
+              }),
+              stderr: "",
+              code: 0,
+              killed: false,
+            };
+          }
+          return { stdout: "", stderr: `unexpected: ${key}`, code: 1, killed: false };
+        },
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (contract) {
+            void tool.execute("call-herdr", {
+              action: "submit",
+              ...contract,
+              output: { reply: "hi" },
+            });
+          }
+        },
+      });
+
+      await harness.emitAsync("session_start", {});
+      await harness.command.handler("mini", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+      await waitFor(() => {
+        const widget = [...harness.widgets].reverse().find((entry) => typeof entry === "function");
+        if (typeof widget !== "function") return false;
+        return stripAnsi(widget(undefined, TEST_THEME).render(120).join("\n")).includes(
+          "Ctrl+Shift+R piw",
+        );
+      });
+
+      expect(harness.commands.has("piw")).toBe(true);
+      expect(harness.shortcuts.has("ctrl+shift+r")).toBe(true);
+      await harness.shortcuts.get("ctrl+shift+r")?.(harness.ctx);
+      const opened = execCalls.find(
+        (call) => call.args.slice(0, 3).join(" ") === "plugin pane open",
+      );
+      const runDirEnv = opened?.args.find((arg) => arg.startsWith("PI_WORKFLOWS_RUN_DIR="));
+      expect(runDirEnv).toBeDefined();
+      expect(
+        runDirEnv?.slice("PI_WORKFLOWS_RUN_DIR=".length).startsWith(`${runsDir}${path.sep}`),
+      ).toBe(true);
+      expect(opened?.args).toContain("--target-pane");
+      expect(opened?.args.at(-1)).toBe("right");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not register the Herdr shortcut outside Herdr", async () => {
+    const cwd = await makeTempDir("pi-workflows-no-herdr-ext");
+    const harness = makeHarness({ cwd, respond: () => {} });
+    expect(harness.commands.has("piw")).toBe(true);
+    expect(harness.shortcuts.has("ctrl+shift+r")).toBe(false);
   });
 
   it("removes assistant tail text after an accepted workflow submission", async () => {

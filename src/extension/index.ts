@@ -37,6 +37,16 @@ import {
   type PiChildWorkflowStarter,
 } from "./controller-host.js";
 import { ConversationStepExecutor } from "./executor.js";
+import {
+  HerdrWorkflowViewer,
+  parseViewerPlacement,
+  PIW_SHORTCUT,
+  PIW_SHORTCUT_HINT,
+  VIEWER_PLACEMENTS,
+  type HerdrCapability,
+  type ViewerPlacement,
+  type WorkflowViewTarget,
+} from "./herdr-viewer.js";
 import { SessionRecorder } from "./recorder.js";
 import {
   registerWorkflowAgentStepMessageRenderer,
@@ -60,6 +70,18 @@ const MAX_STATUS_ERROR_CHARS = 4_000;
 const MAX_WORKFLOW_LIST_ITEMS = 50;
 const MAX_WORKFLOW_LIST_NAME_CHARS = 3_500;
 const PRESENTATION_TIMEOUT_MS = 30_000;
+
+const PIW_PLACEMENT_LABELS: Readonly<Record<ViewerPlacement, string>> = {
+  right: "Split right",
+  below: "Split below",
+  left: "Split left",
+  above: "Split above",
+  tab: "New tab",
+  workspace: "New workspace",
+};
+const PIW_PLACEMENT_BY_LABEL = new Map(
+  VIEWER_PLACEMENTS.map((placement) => [PIW_PLACEMENT_LABELS[placement], placement] as const),
+);
 
 class PresentationSupersededError extends Error {}
 class PresentationTimeoutError extends Error {}
@@ -228,6 +250,17 @@ type WorkflowWidgetContent = string[] | WorkflowWidgetFactory;
 
 export default function piWorkflows(pi: ExtensionAPI) {
   registerWorkflowAgentStepMessageRenderer(pi);
+
+  const herdrEnabled = process.env.HERDR_ENV === "1";
+  const herdrViewer = new HerdrWorkflowViewer((command, args, options) =>
+    pi.exec(command, args, options),
+  );
+  let herdrCapability: HerdrCapability = {
+    available: false,
+    reason: "Herdr integration has not been checked.",
+  };
+  let workflowViewTarget: WorkflowViewTarget | null = null;
+  let herdrProbeGeneration = 0;
 
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
@@ -408,6 +441,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
         width,
         theme,
         widgetSource.updateHistory,
+        ctx.mode === "tui" &&
+          herdrEnabled &&
+          herdrCapability.available &&
+          workflowViewTarget?.runId === widgetSource.state.runId
+          ? PIW_SHORTCUT_HINT
+          : undefined,
       );
       widgetShownScroll = view.scroll;
       widgetMaxScroll = view.maxScroll;
@@ -444,14 +483,73 @@ export default function piWorkflows(pi: ExtensionAPI) {
       snapshot,
       ...(updateHistory !== undefined ? { updateHistory: [...updateHistory] } : {}),
     };
+    workflowViewTarget = {
+      runId: state.runId,
+      workflowName: state.workflowName,
+      runDir: new WorkflowRunStore().runDirFor(state.runId),
+    };
     renderWidget(ctx);
   };
 
   const clearWidget = (ctx: ExtensionContext) => {
     widgetSource = null;
+    workflowViewTarget = null;
     widgetScroll = null;
     setWidget(ctx, undefined);
     setStatus(ctx, undefined);
+  };
+
+  const refreshHerdrCapability = async (ctx: ExtensionContext): Promise<HerdrCapability> => {
+    const generation = ++herdrProbeGeneration;
+    const capability = await herdrViewer.probe();
+    if (!sessionClosed && generation === herdrProbeGeneration) {
+      herdrCapability = capability;
+      renderWidget(ctx);
+    }
+    return capability;
+  };
+
+  const selectPiwPlacement = async (
+    ctx: ExtensionContext,
+  ): Promise<ViewerPlacement | undefined> => {
+    if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
+    const label = await ctx.ui.select(
+      "Open workflow in piw",
+      VIEWER_PLACEMENTS.map((placement) => PIW_PLACEMENT_LABELS[placement]),
+    );
+    return label === undefined ? undefined : PIW_PLACEMENT_BY_LABEL.get(label);
+  };
+
+  const openPiw = async (
+    ctx: ExtensionContext,
+    requestedPlacement?: ViewerPlacement,
+  ): Promise<void> => {
+    const target = workflowViewTarget;
+    if (target === null) {
+      notify(ctx, "No workflow run is available to open in piw.", "warning");
+      return;
+    }
+    const capability = await refreshHerdrCapability(ctx);
+    if (!capability.available) {
+      notify(ctx, capability.reason, "warning");
+      return;
+    }
+    try {
+      if (await herdrViewer.focusExisting(target)) {
+        notify(ctx, `Focused the piw viewer for ${target.workflowName}.`);
+        return;
+      }
+      const placement = requestedPlacement ?? (await selectPiwPlacement(ctx));
+      if (placement === undefined) {
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          notify(ctx, "Specify a piw placement: right, below, left, above, tab, or workspace.");
+        }
+        return;
+      }
+      await herdrViewer.open(target, placement, ctx.cwd);
+    } catch (error) {
+      notify(ctx, `Could not open piw: ${errorMessage(error)}`, "error");
+    }
   };
 
   const scrollWidget = (ctx: ExtensionContext, delta: number) => {
@@ -890,6 +988,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       run.renewTimer.unref?.();
     }
     clearWidgetTimer();
+    workflowViewTarget = null;
     startWidgetTicker(ctx, run);
     if (!options.quiet) {
       notify(ctx, `Workflow ${workflow.name} started. Follow it live with: pi-workflows view`);
@@ -1462,6 +1561,25 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
+  pi.registerCommand("piw", {
+    description: "Open the current workflow run in piw through Herdr",
+    getArgumentCompletions: async (prefix: string) => {
+      const items = VIEWER_PLACEMENTS.filter((placement) => placement.startsWith(prefix)).map(
+        (placement) => ({ value: placement, label: placement }),
+      );
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      const value = args.trim();
+      const placement = value.length === 0 ? undefined : parseViewerPlacement(value);
+      if (value.length > 0 && placement === undefined) {
+        notify(ctx, "piw placement must be right, below, left, above, tab, or workspace.", "error");
+        return;
+      }
+      await openPiw(ctx, placement);
+    },
+  });
+
   pi.registerCommand("workflow", {
     description:
       "Run or manage a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, answer",
@@ -1698,6 +1816,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     },
   });
 
+  if (herdrEnabled) {
+    pi.registerShortcut(PIW_SHORTCUT, {
+      description: "Open the current workflow run in piw",
+      handler: async (ctx) => await openPiw(ctx),
+    });
+  }
+
   pi.registerShortcut("shift+up", {
     description: "Scroll the workflow widget up",
     handler: (ctx) => scrollWidget(ctx, -WIDGET_SCROLL_STEP),
@@ -1711,6 +1836,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionClosed = false;
     controllerContext = ctx;
+    if (herdrEnabled) void refreshHerdrCapability(ctx);
     try {
       const queue = ensureRunQueueStore(ctx.cwd);
       const migration = await migrateLegacyWorkflowSources({
@@ -1859,6 +1985,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     sessionClosed = true;
+    herdrProbeGeneration += 1;
     systemTurnAbort = null;
     suppressWorkflowAssistantTail = false;
     supersedePresentation();
@@ -1889,6 +2016,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     clearWidgetTimer();
     stopWidgetTicker();
     widgetSource = null;
+    workflowViewTarget = null;
     widgetScroll = null;
   });
 }
