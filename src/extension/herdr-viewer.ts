@@ -111,7 +111,7 @@ export class HerdrWorkflowViewer {
       return { ...opened, reused: false };
     }
 
-    const opened = await this.openPluginPane(target, placement, caller, cwd);
+    const opened = await this.openPluginPane(target, placement, caller);
     if (placement === "left" || placement === "above") {
       try {
         await this.run("herdr", [
@@ -167,7 +167,6 @@ export class HerdrWorkflowViewer {
     target: WorkflowViewTarget,
     placement: Exclude<ViewerPlacement, "workspace">,
     caller: HerdrPane,
-    cwd: string,
   ): Promise<OpenedPane> {
     const args = [
       "plugin",
@@ -177,8 +176,6 @@ export class HerdrWorkflowViewer {
       HERDR_PLUGIN_ID,
       "--entrypoint",
       HERDR_PLUGIN_ENTRYPOINT,
-      "--cwd",
-      cwd,
       "--env",
       `PI_WORKFLOWS_RUN_ID=${target.runId}`,
       "--env",
@@ -230,8 +227,6 @@ export class HerdrWorkflowViewer {
           "tab",
           "--workspace",
           created.workspaceId,
-          "--cwd",
-          cwd,
           "--env",
           `PI_WORKFLOWS_RUN_ID=${target.runId}`,
           "--env",

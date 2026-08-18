@@ -202,6 +202,7 @@ describe("HerdrWorkflowViewer", () => {
       expect(open?.command).toBe("herdr");
       expect(open?.args).toContain(`PI_WORKFLOWS_RUN_ID=${target.runId}`);
       expect(open?.args).toContain(`PI_WORKFLOWS_RUN_DIR=${target.runDir}`);
+      expect(open?.args).not.toContain("--cwd");
       expect(open?.args).toContain("--target-pane");
       expect(open?.args.at(-1)).toBe(placement === "below" ? "down" : "right");
     }
@@ -321,6 +322,15 @@ describe("HerdrWorkflowViewer", () => {
       reused: false,
     });
     expect(harness.calls.map(commandKey)).toContain("herdr tab close w2:t1");
+    const workspaceCreate = harness.calls.find(
+      (call) => call.args.slice(0, 2).join(" ") === "workspace create",
+    );
+    expect(workspaceCreate?.args).toContain("--cwd");
+    expect(workspaceCreate?.args).toContain("/repo");
+    const pluginOpen = harness.calls.find(
+      (call) => call.args.slice(0, 3).join(" ") === "plugin pane open",
+    );
+    expect(pluginOpen?.args).not.toContain("--cwd");
   });
 
   it("keeps a launched workspace viewer when bootstrap-tab cleanup fails", async () => {
