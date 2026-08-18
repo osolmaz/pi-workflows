@@ -204,12 +204,88 @@ export type WorkflowPresentationContext = {
   signal: AbortSignal;
 };
 
-export type WorkflowDefinition = {
+/** Runtime parser that also carries its normalized TypeScript result type. */
+export type WorkflowValueParser<T> = (value: unknown) => MaybePromise<T>;
+
+export type WorkflowExitDefinition<TOutput = unknown> = {
+  /** Successful terminal node whose output leaves through this exit. */
+  from: string;
+  /** Optional runtime output normalizer and validator. */
+  validate?: WorkflowValueParser<TOutput>;
+};
+
+export type WorkflowExitMap = Record<string, WorkflowExitDefinition>;
+
+export type WorkflowInputOf<TWorkflow> =
+  TWorkflow extends WorkflowDefinition<infer TInput, any, any> ? TInput : unknown;
+
+export type WorkflowExitOutputs<TWorkflow> =
+  TWorkflow extends WorkflowDefinition<any, infer TExits, any>
+    ? {
+        [K in keyof TExits]: TExits[K] extends WorkflowExitDefinition<infer TOutput>
+          ? TOutput
+          : unknown;
+      }
+    : Record<string, unknown>;
+
+export type WorkflowIncludedResult<TWorkflow> = {
+  [K in keyof WorkflowExitOutputs<TWorkflow>]: {
+    exit: K;
+    output: WorkflowExitOutputs<TWorkflow>[K];
+  };
+}[keyof WorkflowExitOutputs<TWorkflow>];
+
+export type WorkflowIncludeDefinition<
+  TWorkflow extends WorkflowDefinition<any, any, any> = WorkflowDefinition<any, any, any>,
+> = {
+  /** Imported child definition or dynamic discovered name/path. */
+  workflow: TWorkflow | string;
+  /** Pure parent-to-child input mapping, evaluated on every mount entry. */
+  input?: (context: WorkflowNodeContext) => MaybePromise<WorkflowInputOf<TWorkflow>>;
+  /** Optional direct definition that supplies the contract for a dynamic reference. */
+  contract?: TWorkflow;
+};
+
+export type WorkflowIncludeMap = Record<string, WorkflowIncludeDefinition>;
+
+export type WorkflowIncludeExitReference<TIncludes extends WorkflowIncludeMap> = {
+  [K in keyof TIncludes & string]: TIncludes[K] extends WorkflowIncludeDefinition<infer TWorkflow>
+    ? `${K}.${Extract<keyof WorkflowExitOutputs<TWorkflow>, string>}`
+    : never;
+}[keyof TIncludes & string];
+
+export type WorkflowTypedEdge<
+  TNodes extends Record<string, WorkflowNodeDefinition>,
+  TIncludes extends WorkflowIncludeMap,
+> =
+  | {
+      from: (keyof TNodes & string) | WorkflowIncludeExitReference<TIncludes>;
+      to: (keyof TNodes & string) | (keyof TIncludes & string);
+    }
+  | {
+      from: keyof TNodes & string;
+      switch: {
+        on: string;
+        cases: Record<string, (keyof TNodes & string) | (keyof TIncludes & string)>;
+      };
+    };
+
+export type WorkflowDefinition<
+  TInput = any,
+  TExits extends WorkflowExitMap = WorkflowExitMap,
+  TIncludes extends WorkflowIncludeMap = WorkflowIncludeMap,
+> = {
   name: string;
+  /** Module URL used to attest directly imported child workflow files. */
+  source?: string;
+  /** Stable public input-and-exit contract identity for compatible overrides. */
+  contractId?: string;
+  /** Optional runtime input normalizer and validator. */
+  input?: WorkflowValueParser<TInput>;
   /** Optional human-readable run title (static or derived from input). */
   title?:
     | string
-    | ((context: { input: unknown; workflowName: string }) => MaybePromise<string | undefined>);
+    | ((context: { input: TInput; workflowName: string }) => MaybePromise<string | undefined>);
   /**
    * Optional instructions for a normal assistant response after the run ends.
    * The Pi extension resolves this only after the final state is persisted;
@@ -220,6 +296,8 @@ export type WorkflowDefinition = {
     | ((context: WorkflowPresentationContext) => MaybePromise<string | undefined>);
   startAt: string;
   nodes: Record<string, WorkflowNodeDefinition>;
+  includes?: TIncludes;
+  exits?: TExits;
   edges: WorkflowEdge[];
   /** Guard against unbounded loops. Defaults to the engine's maxSteps. */
   maxSteps?: number;
@@ -308,6 +386,24 @@ export type WorkflowSource =
   | { kind: "builtin"; id: string; revision: string }
   | { kind: "file"; path: string; hash: string };
 
+export type WorkflowMountedSource = {
+  mountPath: string[];
+  workflowName: string;
+  source: WorkflowSource;
+};
+
+export type WorkflowMountSnapshot = {
+  mountPath: string[];
+  workflowName: string;
+  entryNode: string;
+  exits: Record<string, string>;
+  maxSteps?: number;
+};
+
+export type WorkflowCompositionSnapshot = {
+  mounts: WorkflowMountSnapshot[];
+};
+
 export type WorkflowRunState = {
   schema: "pi-workflows.run-state.v1";
   /**
@@ -329,6 +425,10 @@ export type WorkflowRunState = {
   runTitle?: string;
   /** Stable built-in identity or immutable file source used by this run. */
   workflowSource?: WorkflowSource;
+  /** Sorted immutable sources used by included workflow mounts. */
+  workflowSources?: WorkflowMountedSource[];
+  /** SHA-256 of the fully resolved definition snapshot. */
+  definitionDigest?: string;
   /** Legacy fields accepted only by the bounded built-in migration. */
   workflowPath?: string;
   workflowHash?: string;
@@ -360,14 +460,19 @@ export type WorkflowNodeSnapshot = {
   summary?: string;
   expectedOutput?: string;
   actionExecution?: "function" | "shell";
+  mountPath?: string[];
+  localNodeId?: string;
+  includeTransition?: "entry" | "exit";
 };
 
 export type WorkflowDefinitionSnapshot = {
   schema: "pi-workflows.definition-snapshot.v1";
   name: string;
+  contractId?: string;
   startAt: string;
   nodes: Record<string, WorkflowNodeSnapshot>;
   edges: WorkflowEdge[];
+  composition?: WorkflowCompositionSnapshot;
 };
 
 export type WorkflowTraceEvent = {
@@ -460,6 +565,8 @@ export type WorkflowRunManifest = {
   workflowName: string;
   runTitle?: string;
   workflowSource?: WorkflowSource;
+  workflowSources?: WorkflowMountedSource[];
+  definitionDigest?: string;
   startedAt: string;
   finishedAt?: string;
   status: WorkflowRunStatus;

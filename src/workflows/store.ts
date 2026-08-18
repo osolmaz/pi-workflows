@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ArtifactWriter, encodeValue } from "./artifacts.js";
+import { compositionMetadata } from "./composition.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -1350,6 +1351,8 @@ function createManifest(
     workflowName: state.workflowName,
     ...(state.runTitle !== undefined ? { runTitle: state.runTitle } : {}),
     ...(state.workflowSource !== undefined ? { workflowSource: state.workflowSource } : {}),
+    ...(state.workflowSources !== undefined ? { workflowSources: state.workflowSources } : {}),
+    ...(state.definitionDigest !== undefined ? { definitionDigest: state.definitionDigest } : {}),
     startedAt: state.startedAt,
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
     status: state.status,
@@ -1368,20 +1371,52 @@ function createManifest(
 }
 
 export function createDefinitionSnapshot(workflow: WorkflowDefinition): WorkflowDefinitionSnapshot {
+  const composition = compositionMetadata(workflow)?.snapshot;
   return {
     schema: DEFINITION_SNAPSHOT_SCHEMA,
     name: workflow.name,
+    ...(workflow.contractId !== undefined ? { contractId: workflow.contractId } : {}),
     startAt: workflow.startAt,
     nodes: Object.fromEntries(
-      Object.entries(workflow.nodes).map(([nodeId, node]) => [nodeId, snapshotNode(node)]),
+      Object.entries(workflow.nodes).map(([nodeId, node]) => [
+        nodeId,
+        snapshotNode(workflow, nodeId, node),
+      ]),
     ),
     edges: structuredClone(workflow.edges),
+    ...(composition !== undefined ? { composition: structuredClone(composition) } : {}),
   };
 }
 
-function snapshotNode(node: WorkflowNodeDefinition): WorkflowNodeSnapshot {
+function snapshotNode(
+  workflow: WorkflowDefinition,
+  nodeId: string,
+  node: WorkflowNodeDefinition,
+): WorkflowNodeSnapshot {
+  const composition = compositionMetadata(workflow);
+  const entry = composition?.entries[nodeId];
+  const exit = composition?.exits[nodeId];
+  const scope = Object.values(composition?.scopes ?? {})
+    .filter((candidate) => candidate.path !== "" && nodeId.startsWith(`${candidate.path}/`))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  const mountPath = entry?.mountPath ?? exit?.mountPath ?? scope?.path;
+  const localNodeId =
+    entry !== undefined
+      ? entry.mountName
+      : exit !== undefined
+        ? exit.exitName
+        : scope !== undefined
+          ? nodeId.slice(scope.path.length + 1)
+          : undefined;
   const common: WorkflowNodeSnapshot = {
     nodeType: node.nodeType,
+    ...(mountPath !== undefined ? { mountPath: mountPath.split("/") } : {}),
+    ...(localNodeId !== undefined ? { localNodeId } : {}),
+    ...(entry !== undefined
+      ? { includeTransition: "entry" as const }
+      : exit !== undefined
+        ? { includeTransition: "exit" as const }
+        : {}),
     ...(typeof node.timeoutMs === "number" ? { timeoutMs: node.timeoutMs } : {}),
     ...(node.statusDetail !== undefined ? { statusDetail: node.statusDetail } : {}),
   };

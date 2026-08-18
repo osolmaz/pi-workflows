@@ -10,7 +10,7 @@ A new primitive belongs in the engine only when it solves a general problem that
 
 ## Composition
 
-Workflows combine `agent`, `compute`, `action`, `notify`, and `checkpoint` nodes through explicit edges. `shell` is the command form of an action. Built-in workflows should use the same public parts available to workflow authors.
+Workflows combine `agent`, `compute`, `action`, `notify`, and `checkpoint` nodes through explicit edges. `shell` is the command form of an action. A finite workflow can include another finite workflow through typed input and named exits. This keeps shared prompts and routing in one source. Built-in workflows should use the same public parts available to workflow authors.
 
 Shared behavior should usually start as a data format or pure helper used by a workflow composition. For example, progress can be structured data carried through a general update channel instead of a special progress node.
 

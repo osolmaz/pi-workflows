@@ -139,6 +139,37 @@ structured run ends to request one normal, human-readable assistant response.
 Workflows without it remain silent after their final structured output, which
 keeps shell-only and machine-consumed workflows model-free.
 
+## Compose workflows
+
+A workflow can import another workflow and connect its named exits without copying its nodes:
+
+```typescript
+import { compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
+import autodevise from "./autodevise.workflow.js";
+
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "parent",
+  startAt: "start",
+  includes: {
+    design: includeWorkflow(autodevise, {
+      input: ({ outputs }) => ({ problem: String(outputs.start) }),
+    }),
+  },
+  nodes: {
+    start: compute({ run: () => "Fix the reported defect" }),
+    finish: compute({ run: ({ outputs }) => outputs.design }),
+  },
+  edges: [
+    { from: "start", to: "design" },
+    { from: "design.ready", to: "finish" },
+    { from: "design.blocked", to: "finish" },
+  ],
+});
+```
+
+Direct imports check child input and exit names in TypeScript. Names and paths remain available for dynamic discovery. Nested children share one run, trace, pause state, and cancellation state. See [Workflow composition](docs/WORKFLOW_COMPOSITION.md) for the complete contract.
+
 ## Agent-managed workflows
 
 The model can use the same `workflow` tool to list, start, inspect, pause,
@@ -151,10 +182,10 @@ Pi Workflows includes a `monitor` workflow for plain-language requests such as:
 
 The monitor checks immediately, reports only the states requested by the user,
 waits with a normal shell action, and loops until its stop condition or check
-limit. Its input supports `task`, `everyMinutes`, `reportWhen`, `stopWhen`,
-`maxChecks`, and an optional `checkTimeoutMinutes`. Project and global
-workflows can replace the built-in `monitor`
-by using the same file name.
+limit. Its input supports `task`, `everyMinutes`, `stopWhen`, `maxChecks`, and
+an optional `checkTimeoutMinutes`.
+
+Monitor is observation-only by default. An explicit `repair` policy authorizes its composed `autodevise` and `autoimplement` path. The monitor checks the target again after repair and stops when the same issue and target evidence return without progress. Project and global workflows can replace the built-in `monitor` by using the same file name.
 
 A monitor occupies the session's one active workflow slot. If its Pi runner
 stops during the shell wait, the run parks and repeats that wait node when a
@@ -182,7 +213,7 @@ pi-workflows view --once   # print a snapshot and exit (good for scripts)
 ```
 
 The run detail view draws the workflow as a boxed graph, like the acpx replay
-viewer. Every card has a centered step-name header and a divider above its
+viewer. Included nodes use hierarchical labels such as `implementation › redesign › plan`. Every card has a centered step-name header and a divider above its
 structured metadata. Border characters keep the graph background, the body
 surface begins inside the border, and the header interior uses a separate
 surface. Node type, status, attempts, and timing use compact symbol rows; start
@@ -304,9 +335,11 @@ example set. Copy any of them into `.pi/workflows/` to use them:
 - `autodevise` turns the current problem into a chosen practical solution and
   a detailed implementation plan, using the ideal end state as guidance rather
   than an out-of-scope requirement.
-- `autoimplement` runs an implement, verify, review loop where the review
-  decision routes `issues_found` back to a fix step until it comes back
-  `clean`, bounded by `maxSteps`.
+- `autoimplement` implements and verifies a plan, writes and runs the exact Pi
+  Reviewer command, tracks P0 through P2, handles PR comments and CI, and
+  finalizes the PR. P0 and P1 fixes require another review. P2-only work is
+  verified without another reviewer round. A five-minute CI wait routes to
+  additional useful local testing.
 - `autoresearch` runs an iterative feature-search loop in the style of
   [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup
   creates a frozen evaluation harness, one editable feature file, and a

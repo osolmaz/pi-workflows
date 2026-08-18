@@ -224,6 +224,29 @@ fn node_branch_labels(view: &GraphView, node_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn hierarchical_node_label(node_id: &str, node: Option<&Value>) -> String {
+    let Some(node) = node else {
+        return sanitize_text(node_id);
+    };
+    let Some(mount_path) = node.get("mountPath").and_then(Value::as_array) else {
+        return sanitize_text(node_id);
+    };
+    let path = mount_path
+        .iter()
+        .filter_map(Value::as_str)
+        .map(sanitize_text)
+        .collect::<Vec<_>>()
+        .join(" › ");
+    let Some(local_node_id) = node.get("localNodeId").and_then(Value::as_str) else {
+        return sanitize_text(node_id);
+    };
+    match node.get("includeTransition").and_then(Value::as_str) {
+        Some("entry") => format!("{path} · enter"),
+        Some("exit") => format!("{path} · {} exit", sanitize_text(local_node_id)),
+        _ => format!("{path} › {}", sanitize_text(local_node_id)),
+    }
+}
+
 fn card_metrics(view: &GraphView) -> CardMetrics {
     let Some(snapshot) = view.snapshot else {
         return CardMetrics {
@@ -252,7 +275,7 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
         )));
     }
     for (node_id, node) in &snapshot.nodes {
-        content_width = content_width.max(js_len(&sanitize_text(node_id)));
+        content_width = content_width.max(js_len(&hierarchical_node_label(node_id, Some(node))));
         if let Some(node_type) = node.get("nodeType").and_then(Value::as_str) {
             let action_execution = node.get("actionExecution").and_then(Value::as_str);
             content_width =
@@ -393,13 +416,18 @@ fn render_cell_text(
     } else {
         "not visited".to_string()
     };
-    let text = format!("{node_id} [{node_type}] {timing}");
+    let display_node_id = hierarchical_node_label(node_id, node);
+    let text = format!("{display_node_id} [{node_type}] {timing}");
     RenderedCell {
         cell: cell.clone(),
         text: text.clone(),
-        node_id: sanitize_text(node_id),
+        node_id: display_node_id,
         node_type: node_type.to_string(),
-        type_badge: node_type_badge(node_type, action_execution),
+        type_badge: if node.is_some() {
+            node_type_badge(node_type, action_execution)
+        } else {
+            "? unknown".to_string()
+        },
         status: Some(status),
         attempts: count,
         elapsed,

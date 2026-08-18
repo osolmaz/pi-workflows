@@ -139,9 +139,9 @@ A standalone workflow ignores its exit names for routing. Its terminal node comp
 type RepairResult = { exit: "fixed"; output: Fixed } | { exit: "blocked"; output: Blocked };
 ```
 
-The parent reads the latest result from `outputs.repair`. Unknown exit names and incompatible direct-import input mappers are TypeScript errors. Dynamic references use runtime checks and can supply an explicit contract when compile-time checking is required.
+The parent reads the latest result from `outputs.repair`. `includedResult(repairWorkflow, outputs.repair)` returns the discriminated result type without a cast. Unknown exit names and incompatible direct-import input mappers are TypeScript errors. Dynamic references use runtime checks and can supply an explicit contract when compile-time checking is required.
 
-`defineWorkflowRegistry()` creates a typed set of shipped workflows. A project or global override must keep the registered input and exit contract. The selected source remains subject to the normal project, global, and built-in precedence rules.
+`defineWorkflowRegistry()` creates a typed set of shipped workflows. Shipped contracts use a stable `contractId`. A project or global override must match that identity and keep the registered input and exit shape. The selected source remains subject to the normal project, global, and built-in precedence rules.
 
 ## Resolution
 

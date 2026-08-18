@@ -1,6 +1,6 @@
 import { agent } from "./definition.js";
 import { extractJsonValue } from "./json.js";
-import type { AgentNodeDefinition, WorkflowEdge, WorkflowNodeContext } from "./types.js";
+import type { AgentNodeDefinition, WorkflowNodeContext } from "./types.js";
 
 const DEFAULT_FIELD = "route";
 const SIMPLE_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -64,12 +64,19 @@ export function decision<TChoice extends string>(
  * Build the matching `switch` edge for a `decision` node. Typing `cases` as
  * `Record<TChoice, string>` makes a missing case a compile error.
  */
-export function decisionEdge<TChoice extends string>(args: {
-  from: string;
+export function decisionEdge<
+  TChoice extends string,
+  const TFrom extends string,
+  const TCases extends Record<TChoice, string>,
+>(args: {
+  from: TFrom;
   choices: readonly TChoice[];
   field?: string;
-  cases: Record<TChoice, string>;
-}): WorkflowEdge {
+  cases: TCases;
+}): {
+  from: TFrom;
+  switch: { on: string; cases: TCases };
+} {
   const field = normalizeField(args.field);
   assertValidChoices(args.choices);
   for (const choice of args.choices) {

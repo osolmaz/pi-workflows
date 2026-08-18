@@ -142,10 +142,12 @@ Identity and pointers, kept in sync with the state on every snapshot:
 }
 ```
 
-`workflowSource` identifies the definition used by the run. User workflow
+`workflowSource` identifies the root definition used by the run. User workflow
 files use an absolute path and SHA-256 hash. Package-provided workflows use a
-stable identity such as `{ "kind": "builtin", "id": "monitor", "revision": "1" }`.
+stable identity such as `{ "kind": "builtin", "id": "monitor", "revision": "4" }`.
 A built-in identity does not contain an installation path.
+
+A composed run also records `workflowSources`, sorted by mount path, and `definitionDigest`. Each mounted source has `mountPath`, `workflowName`, and the same file or built-in source identity. The digest is SHA-256 over the resolved definition snapshot.
 
 `paths.artifacts` is declared from bundle creation so a live session-event
 patch can safely reference a newly written artifact before the next workflow
@@ -160,8 +162,7 @@ A serializable snapshot of the graph taken at run start
 (`pi-workflows.definition-snapshot.v1`). Functions such as prompts and
 validators are not serialized. Each node keeps only its metadata (`nodeType`,
 `timeoutMs`, `statusDetail`, `expectedOutput`, `summary`, `actionExecution`),
-and edges are copied verbatim. The snapshot is what lets viewers draw all
-nodes, including ones that have not run yet. It is immutable after run start.
+and edges are copied verbatim. Included nodes also record `mountPath`, `localNodeId`, and internal entry or exit status. The top-level `composition.mounts` list records every mount, entry, named exit, and child step limit. The snapshot is what lets viewers draw all nodes, including ones that have not run yet. It is immutable after run start.
 
 ## Resume and repair
 
@@ -176,10 +177,12 @@ instead of failing. Resume is a named operation with strict rules:
    `state.traceSeq` and the trace agree again before any new event.
 3. Completed nodes replay from the projection. The in-flight node reruns with
    a fresh attempt; a `run_resumed` trace event marks the boundary.
-4. `state.workflowSource` pins the workflow source from run start. File
+4. `state.workflowSource` pins the root workflow source from run start. File
    sources require the same hash. Built-in sources require the same catalog
-   id and revision. Resume refuses a mismatch unless forced, and a forced
-   resume records the mismatch in the `run_resumed` payload.
+   id and revision.
+5. Composed runs also require the same sorted `workflowSources` and
+   `definitionDigest`. A changed or missing child refuses normal resume.
+6. A forced resume records the identity mismatch in the `run_resumed` payload.
 
 Continuation runs (answering a checkpoint) are new bundles, not resumed ones.
 They link back through `state.parentRunId`, carry the parent's outputs,
@@ -204,6 +207,14 @@ The full run projection (`WorkflowRunState` in
     "path": "/repo/.pi/workflows/autoimplement.workflow.ts",
     "hash": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
   },
+  "workflowSources": [
+    {
+      "mountPath": ["redesign"],
+      "workflowName": "autodevise",
+      "source": { "kind": "builtin", "id": "autodevise", "revision": "1" }
+    }
+  ],
+  "definitionDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "startedAt": "…",
   "updatedAt": "…",
   "status": "running",
@@ -215,9 +226,10 @@ The full run projection (`WorkflowRunState` in
 }
 ```
 
-- `workflowSource` is the canonical source identity. Resuming a file requires
-  the same hash. Resuming a built-in requires the same catalog revision. A
-  mismatch refuses the resume instead of loading another definition.
+- `workflowSource` is the canonical root source identity. Resuming a file requires
+  the same hash. Resuming a built-in requires the same catalog revision.
+- `workflowSources` and `definitionDigest` attest the complete composed graph.
+  A mismatch refuses resume instead of loading another child definition.
 - `status` is one of `running`, `waiting`, `completed`, `failed`, `timed_out`,
   or `cancelled`. A controller host records an abandoned bundle as `failed`
   with a final `run_interrupted` trace event. Before doing that, recovery checks
@@ -315,6 +327,8 @@ Event catalog and payload contracts:
 | `agent_prompt_sent` | agent   | `prompt`                                                            |
 | `node_finished`     | node    | `outcome: "ok"`, `durationMs`, `output`, `conversation?`, `action?` |
 | `node_failed`       | node    | `outcome`, `durationMs`, `error`, `conversation?`, `action?`        |
+| `include_entered`   | run     | `mountPath`, `workflowName`, `invocation`                           |
+| `include_exited`    | run     | `mountPath`, `workflowName`, `invocation`, `exit`, `output`         |
 | `run_paused`        | run     | _(empty)_                                                           |
 | `run_resumed`       | run     | _(empty)_                                                           |
 | `run_completed`     | run     | `status`, `finalOutput`                                             |

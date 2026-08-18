@@ -1,10 +1,14 @@
 import { BuiltinWorkflowCatalog } from "../workflows/catalog.js";
+import autodeviseWorkflow from "./autodevise.workflow.js";
+import autoimplementWorkflow from "./autoimplement.workflow.js";
 import monitorWorkflow from "./monitor.workflow.js";
 
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
+  { id: "autodevise", revision: "1", definition: autodeviseWorkflow },
+  { id: "autoimplement", revision: "1", definition: autoimplementWorkflow },
   {
     id: "monitor",
-    revision: "3",
+    revision: "4",
     definition: monitorWorkflow,
     legacySources: [
       {

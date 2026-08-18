@@ -199,7 +199,10 @@ function assertValidEdgeShape(edge: WorkflowEdge, index: number): void {
  */
 const RESERVED_WORKFLOW_NAMES = new Set(["answer", "cancel", "list", "pause", "resume", "status"]);
 
-export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinition): void {
+export function assertValidWorkflowDefinitionShape(
+  definition: WorkflowDefinition,
+  options: { compiled?: boolean } = {},
+): void {
   assertRecord(definition, "workflow");
   if (typeof definition.name !== "string" || definition.name.length === 0) {
     fail("workflow requires a name");
@@ -207,6 +210,17 @@ export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinitio
   if (RESERVED_WORKFLOW_NAMES.has(definition.name)) {
     fail(`workflow name ${JSON.stringify(definition.name)} is reserved for /workflow subcommands`);
   }
+  if (definition.source !== undefined && typeof definition.source !== "string") {
+    fail("workflow source must be a string");
+  }
+  if (
+    definition.contractId !== undefined &&
+    (typeof definition.contractId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(definition.contractId))
+  ) {
+    fail("workflow contractId must be a stable identifier");
+  }
+  assertOptionalFunction(definition.input, "workflow input");
   if (
     definition.title !== undefined &&
     typeof definition.title !== "string" &&
@@ -237,7 +251,14 @@ export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinitio
     fail("workflow requires at least one node");
   }
   for (const [nodeId, node] of Object.entries(definition.nodes)) {
-    if (!NODE_ID_PATTERN.test(nodeId)) {
+    const segments = nodeId.split("/");
+    if (
+      segments.some(
+        (segment) =>
+          !NODE_ID_PATTERN.test(segment) || (!options.compiled && segment.startsWith("__piw_")),
+      ) ||
+      (!options.compiled && segments.length !== 1)
+    ) {
       fail(`node id ${JSON.stringify(nodeId)} must match ${NODE_ID_PATTERN.source}`);
     }
     // Ids like __proto__ or toString would collide with Object prototype
@@ -247,6 +268,45 @@ export function assertValidWorkflowDefinitionShape(definition: WorkflowDefinitio
     }
     assertRecord(node, `node ${nodeId}`);
     assertValidNode(node, nodeId);
+  }
+  if (definition.includes !== undefined) {
+    assertRecord(definition.includes, "workflow includes");
+    for (const [mountName, include] of Object.entries(definition.includes)) {
+      if (!NODE_ID_PATTERN.test(mountName) || mountName.startsWith("__piw_")) {
+        fail(`include name ${JSON.stringify(mountName)} must match ${NODE_ID_PATTERN.source}`);
+      }
+      if (Object.hasOwn(definition.nodes, mountName)) {
+        fail(`include name ${JSON.stringify(mountName)} collides with a node id`);
+      }
+      assertRecord(include, `include ${mountName}`);
+      if (
+        typeof include.workflow !== "string" &&
+        (include.workflow === null || typeof include.workflow !== "object")
+      ) {
+        fail(`include ${mountName} requires a workflow definition or reference`);
+      }
+      assertOptionalFunction(include.input, `include ${mountName} input`);
+      if (
+        include.contract !== undefined &&
+        (include.contract === null || typeof include.contract !== "object")
+      ) {
+        fail(`include ${mountName} contract must be a workflow definition`);
+      }
+    }
+  }
+  if (definition.exits !== undefined) {
+    assertRecord(definition.exits, "workflow exits");
+    if (Object.keys(definition.exits).length === 0) fail("workflow exits must not be empty");
+    for (const [exitName, exit] of Object.entries(definition.exits)) {
+      if (!NODE_ID_PATTERN.test(exitName) || exitName.startsWith("__piw_")) {
+        fail(`exit name ${JSON.stringify(exitName)} must match ${NODE_ID_PATTERN.source}`);
+      }
+      assertRecord(exit, `exit ${exitName}`);
+      if (typeof exit.from !== "string" || exit.from.length === 0) {
+        fail(`exit ${exitName} requires from`);
+      }
+      assertOptionalFunction(exit.validate, `exit ${exitName} validate`);
+    }
   }
   if (!Array.isArray(definition.edges)) {
     fail("workflow edges must be an array");

@@ -105,6 +105,38 @@ export default defineWorkflow({
 });
 `;
 
+const COMPOSED_CHILD_WORKFLOW = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "composed-child",
+  input: (value) => value,
+  startAt: "work",
+  exits: { ready: { from: "work" } },
+  nodes: { work: compute({ run: ({ input }) => ({ child: input }) }) },
+  edges: [],
+});
+`;
+
+const COMPOSED_PARENT_WORKFLOW = `import { compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
+import child from "./composed-child.workflow.ts";
+
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "composed-e2e",
+  startAt: "start",
+  includes: { child: includeWorkflow(child, { input: ({ outputs }) => outputs.start }) },
+  nodes: {
+    start: compute({ run: ({ input }) => input }),
+    finish: compute({ run: ({ outputs }) => outputs.child }),
+  },
+  edges: [
+    { from: "start", to: "child" },
+    { from: "child.ready", to: "finish" },
+  ],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -454,6 +486,16 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "composed-child.workflow.ts"),
+      COMPOSED_CHILD_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "composed-e2e.workflow.ts"),
+      COMPOSED_PARENT_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "timeout-e2e.workflow.ts"),
       TIMEOUT_E2E_WORKFLOW,
       "utf8",
@@ -497,6 +539,7 @@ describe.sequential("pi-workflows end to end", () => {
     pi = startPiRpc({
       cwd: projectDir,
       env: {
+        HOME: agentDir,
         PI_CODING_AGENT_DIR: agentDir,
         PI_WORKFLOWS_RUNS_DIR: runsDir,
         PI_WORKFLOWS_CONTROLLER_DIR: controllerDir,
@@ -507,6 +550,41 @@ describe.sequential("pi-workflows end to end", () => {
   afterAll(async () => {
     await pi?.stop();
     await mock?.close();
+  });
+
+  it("runs a directly imported child in one real Pi workflow run", async () => {
+    pi.send({
+      id: "wf-composed",
+      type: "prompt",
+      message: '/workflow composed-e2e --input-json {"task":"nested"}',
+    });
+
+    const { state, runDir } = await waitForRunState(
+      runsDir,
+      (candidate) => candidate.workflowName === "composed-e2e" && candidate.status === "completed",
+      pi.stderr,
+    );
+
+    expect(state.finalOutput).toEqual({
+      exit: "ready",
+      output: { child: { task: "nested" } },
+    });
+    expect(state.steps.map((step) => step.nodeId)).toEqual([
+      "start",
+      "child",
+      "child/work",
+      "child/__piw_exit_ready",
+      "finish",
+    ]);
+    expect(state.workflowSources).toEqual([
+      expect.objectContaining({ mountPath: ["child"], workflowName: "composed-child" }),
+    ]);
+    const trace = (await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string });
+    expect(trace.map((event) => event.type)).toContain("include_entered");
+    expect(trace.map((event) => event.type)).toContain("include_exited");
   });
 
   it("runs a workflow to completion inside a real pi session", async () => {
@@ -559,7 +637,9 @@ describe.sequential("pi-workflows end to end", () => {
 
     const { state, runDir } = await waitForRunState(
       runsDir,
-      (candidate) => candidate.status === "completed" || candidate.status === "failed",
+      (candidate) =>
+        candidate.workflowName === "e2e" &&
+        (candidate.status === "completed" || candidate.status === "failed"),
       () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
     );
 
@@ -865,7 +945,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "3" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "4" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

@@ -29,10 +29,13 @@ Derive the workflow input from the full conversation:
 - `task`: State the complete objective, the exact current target and stable identifiers, authoritative status sources, durable progress and final-output surfaces, routine actions authorized by the monitor request, other recorded approvals, immutable boundaries, cost and credential rules, and required validation or downstream operations.
 - `everyMinutes`: Use the user's interval when present. Use `30` when the user gives no interval. The built-in workflow accepts intervals from 1 minute through 24 hours.
 - `stopWhen`: Infer verified completion from the full conversation. Describe completion of the complete objective, not only the end of one physical process. Also name material blockers that require human intervention.
+- `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work.
 
 When the conversation gives no clear finish criterion, set `stopWhen` to `Stop only when the user explicitly asks to stop.` Do not use that fallback when a broader implementation, repair, publication, or deployment objective is clear from context.
 
 Do not invent a finite check count. Omit `maxChecks` unless the user explicitly requests one. The workflow host can apply its own safety upper bound. Disclose that bound if it appears.
+
+When repair is authorized, route a concrete code or design defect through the monitor's composed repair path. Supply the problem, observed evidence, and a stable fingerprint of the issue plus target state. The workflow runs outer `autodevise`, `autoimplement`, and internal redesign when needed, then checks the target again. Do not copy their prompts into the monitor task.
 
 ## Keep routine work moving
 
@@ -140,7 +143,9 @@ Stop only for a material blocker, such as:
 - a cost, time, or resource ceiling that cannot safely contain the remaining work;
 - evidence that the requested result cannot be made truthful or valid under the current contract.
 
-Never keep paid workers retrying a deterministic shared failure. Contain affected work, report the evidence and ETA impact, and stop for a decision.
+Never keep paid workers retrying a deterministic shared failure. When repair is authorized and the defect is inside scope, stop affected work, preserve the evidence, and use the composed repair path. Stop for a decision when repair is outside scope or would change a protected contract.
+
+If the same issue and target-state fingerprint return after a completed repair, report the no-progress result and stop. Do not start the same repair again.
 
 ### Status unavailable
 

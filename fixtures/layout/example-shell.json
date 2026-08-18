@@ -18,7 +18,10 @@
         "from": "echo_text",
         "to": "finalize"
       }
-    ]
+    ],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [

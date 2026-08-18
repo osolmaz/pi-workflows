@@ -50,6 +50,8 @@ describe("discoverWorkflows", () => {
     expect(discovered.map((w) => [w.name, w.source])).toEqual([
       ["local", "project"],
       ["global", "global"],
+      ["autodevise", "builtin"],
+      ["autoimplement", "builtin"],
       ["monitor", "builtin"],
     ]);
   });
@@ -61,17 +63,21 @@ describe("discoverWorkflows", () => {
 
     const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(discovered).toHaveLength(2);
+    expect(discovered).toHaveLength(4);
     expect(discovered[0]?.source).toBe("project");
-    expect(discovered[1]).toMatchObject({ name: "monitor", source: "builtin" });
+    expect(discovered.slice(1).map((item) => item.name)).toEqual([
+      "autodevise",
+      "autoimplement",
+      "monitor",
+    ]);
   });
 
   it("returns the built-in monitor for missing user directories", async () => {
     const cwd = await makeTempDir("pi-workflows-empty");
     const homeDir = await makeTempDir("pi-workflows-empty-home");
-    expect(await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).toEqual([
-      expect.objectContaining({ name: "monitor", source: "builtin" }),
-    ]);
+    expect(
+      (await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).map((item) => item.name),
+    ).toEqual(["autodevise", "autoimplement", "monitor"]);
   });
 
   it("lets a project workflow override the built-in monitor", async () => {
@@ -118,8 +124,73 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "3" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "4" });
     expect(resolved.definition.name).toBe("monitor");
+    expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
+      "implementation",
+      "implementation/redesign",
+      "initialDesign",
+    ]);
+  });
+
+  it("resolves relative nested includes and records their source", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const dir = path.join(cwd, ".pi", "workflows");
+    const api = JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "index.ts"));
+    const child = path.join(dir, "child.workflow.ts");
+    const parent = path.join(dir, "parent.workflow.ts");
+    await fs.writeFile(
+      child,
+      `import { compute, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "child", startAt: "done", exits: { ready: { from: "done" } }, nodes: { done: compute({ run: () => ({ ok: true }) }) }, edges: [] });\n`,
+      "utf8",
+    );
+    await fs.writeFile(
+      parent,
+      `import { compute, defineWorkflow, includeWorkflow } from ${api};\nexport default defineWorkflow({ name: "parent", startAt: "start", includes: { child: includeWorkflow({ workflow: "./child.workflow.ts" }) }, nodes: { start: compute({ run: () => ({}) }), finish: compute({ run: ({ outputs }) => outputs.child }) }, edges: [{ from: "start", to: "child" }, { from: "child.ready", to: "finish" }] });\n`,
+      "utf8",
+    );
+
+    const resolved = await resolveWorkflowRef(parent, { cwd, homeDir }, builtinWorkflowCatalog);
+
+    expect(resolved.sources).toEqual([
+      expect.objectContaining({
+        mountPath: ["child"],
+        workflowName: "child",
+        source: expect.objectContaining({ kind: "file", path: child }),
+      }),
+    ]);
+    expect(resolved.definition.nodes).toHaveProperty("child/done");
+  });
+
+  it("rejects nested source cycles before a run starts", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const dir = path.join(cwd, ".pi", "workflows");
+    const api = JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "index.ts"));
+    const a = path.join(dir, "a.workflow.ts");
+    const b = path.join(dir, "b.workflow.ts");
+    const source = (name: string, child: string) =>
+      `import { compute, defineWorkflow, includeWorkflow } from ${api};\nexport default defineWorkflow({ name: ${JSON.stringify(name)}, startAt: "start", includes: { child: includeWorkflow({ workflow: ${JSON.stringify(child)} }) }, exits: { ready: { from: "finish" } }, nodes: { start: compute({ run: () => ({}) }), finish: compute({ run: () => ({}) }) }, edges: [{ from: "start", to: "child" }, { from: "child.ready", to: "finish" }] });\n`;
+    await fs.writeFile(a, source("a", "./b.workflow.ts"), "utf8");
+    await fs.writeFile(b, source("b", "./a.workflow.ts"), "utf8");
+
+    await expect(resolveWorkflowRef(a, { cwd, homeDir }, builtinWorkflowCatalog)).rejects.toThrow(
+      /source cycle/i,
+    );
+  });
+
+  it("rejects a project override that changes a registered child contract", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const dir = path.join(cwd, ".pi", "workflows");
+    const api = JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "index.ts"));
+    await fs.writeFile(
+      path.join(dir, "autodevise.workflow.ts"),
+      `import { compute, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "autodevise", startAt: "done", exits: { wrong: { from: "done" } }, nodes: { done: compute({ run: () => ({}) }) }, edges: [] });\n`,
+      "utf8",
+    );
+
+    await expect(
+      resolveWorkflowRef("builtin:monitor", { cwd, homeDir }, builtinWorkflowCatalog),
+    ).rejects.toThrow(/contract mismatch/i);
   });
 
   it("resolves direct paths", async () => {

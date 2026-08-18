@@ -77,6 +77,27 @@ describe("defineWorkflow validation", () => {
     );
   });
 
+  it("validates workflow input, includes, exits, and reserved ids", () => {
+    expect(() => define({ source: 3 as never })).toThrow(/source must be a string/);
+    expect(() => define({ contractId: "bad contract" })).toThrow(/stable identifier/);
+    expect(() => define({ input: "bad" as never })).toThrow(/workflow input/);
+    expect(() => define({ nodes: { __piw_internal: compute({ run: () => 1 }) } })).toThrow(
+      /must match/,
+    );
+    expect(() => define({ includes: [] as never })).toThrow(/includes must be an object/);
+    expect(() => define({ includes: { start: { workflow: "child" } } })).toThrow(
+      /collides with a node/,
+    );
+    expect(() => define({ includes: { child: { workflow: 3 as never } } })).toThrow(
+      /requires a workflow definition or reference/,
+    );
+    expect(() => define({ exits: {} })).toThrow(/must not be empty/);
+    expect(() => define({ exits: { ready: { from: "" } } })).toThrow(/requires from/);
+    expect(() => define({ exits: { ready: { from: "start", validate: "bad" as never } } })).toThrow(
+      /exit ready validate/,
+    );
+  });
+
   it("rejects malformed edges", () => {
     const edge = (value: unknown) => define({ edges: [value as WorkflowEdge] });
     expect(() => edge({ to: "start" })).toThrow(/requires a from/);

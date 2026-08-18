@@ -25,7 +25,7 @@ The first production use case is pull request automation. A controller can obser
 
 ## Boundaries
 
-The graph engine remains the execution layer for finite work. It does not import the controller runtime. The controller runtime may start workflows through a narrow scheduler interface.
+The graph engine remains the execution layer for finite work. A finite workflow can include another finite workflow in the same run through `includeWorkflow()`. Use a controller child run when work needs an independent retry history, stable request key, parallel lifecycle, or indefinite reconciliation. The graph engine does not import the controller runtime. The controller runtime may start workflows through a narrow scheduler interface.
 
 The Pi extension is a host. It discovers definitions, displays status, and supplies the conversation-backed agent executor while Pi is running. A headless host can use the same controller runtime with another `AgentStepExecutor`.
 

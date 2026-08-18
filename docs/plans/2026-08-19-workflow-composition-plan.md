@@ -277,6 +277,20 @@ Run Pi Reviewer against the pushed branch. Fix every P0 and P1 finding and rerun
 
 This adds compatible public APIs to a pre-1.0 package. The planned version is `0.10.0`. Existing `0.9.x` run bundles remain readable, and no published version is rewritten.
 
+## Implementation record
+
+The implementation follows the canonical specification with one visible detail: compiled include entry and exit transitions have durable internal step records so resume can reconstruct the active invocation. They do not consume root or child `maxSteps` limits. Viewers label them as entry and named-exit transitions.
+
+Direct imports check mapped input and exit names. `includedResult()` recovers the discriminated child result type from a parent output. Dynamic overrides carry a direct contract definition and must match its stable `contractId`, input presence, and named exits.
+
+The shipped workflows are registered built-ins:
+
+- `autodevise` returns `ready` or `blocked` with plan lineage.
+- `autoimplement` supports redesign, implementation fixes, exact reviewer and CI commands, P0 through P2 history, bounded CI watches, PR comments, merge, and final reporting.
+- `monitor` remains observation-only by default and enables composed repair only through an explicit repair policy.
+
+The package and Rust viewer version is `0.10.0`.
+
 ## Contract impact
 
 - **Session state:** normal workflow messages and tool results only.

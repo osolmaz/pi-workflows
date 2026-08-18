@@ -56,7 +56,10 @@
         "from": "conclude",
         "to": "finalize"
       }
-    ]
+    ],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [

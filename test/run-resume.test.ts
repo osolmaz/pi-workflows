@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
+import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import {
   readLastTraceEvent,
   readRunBundle,
@@ -11,7 +13,7 @@ import {
   WorkflowRunStore,
 } from "../src/workflows/store.js";
 import type { WorkflowDefinition, WorkflowRunState } from "../src/workflows/types.js";
-import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
 function runningState(runId: string, workflow: WorkflowDefinition): WorkflowRunState {
   const now = "2026-08-04T00:00:00.000Z";
@@ -43,6 +45,55 @@ async function traceTypes(runDir: string): Promise<string[]> {
 }
 
 describe("WorkflowEngine.resumeRun", () => {
+  it("refuses resume when an included source changes", async () => {
+    const project = await makeTempDir("pi-resume-composed-project");
+    const homeDir = await makeTempDir("pi-resume-composed-home");
+    const workflowDir = path.join(project, ".pi", "workflows");
+    await fs.mkdir(workflowDir, { recursive: true });
+    const api = JSON.stringify(path.resolve(__dirname, "..", "src", "workflows", "index.ts"));
+    const childPath = path.join(workflowDir, "child.workflow.ts");
+    const parentPath = path.join(workflowDir, "parent.workflow.ts");
+    const childSource = (prompt: string) =>
+      `import { agent, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "child", startAt: "work", exits: { ready: { from: "work" } }, nodes: { work: agent({ prompt: () => ${JSON.stringify(prompt)} }) }, edges: [] });\n`;
+    await fs.writeFile(childPath, childSource("first prompt"), "utf8");
+    await fs.writeFile(
+      parentPath,
+      `import { compute, defineWorkflow, includeWorkflow } from ${api};\nexport default defineWorkflow({ name: "parent", startAt: "start", includes: { child: includeWorkflow({ workflow: "./child.workflow.ts" }) }, nodes: { start: compute({ run: () => ({}) }), finish: compute({ run: () => ({}) }) }, edges: [{ from: "start", to: "child" }, { from: "child.ready", to: "finish" }] });\n`,
+      "utf8",
+    );
+    const resolved = await resolveWorkflowRef(
+      parentPath,
+      { cwd: project, homeDir },
+      builtinWorkflowCatalog,
+    );
+    const events: string[] = [];
+    const outputRoot = await makeTempDir("pi-resume-composed-runs");
+    const engine = new WorkflowEngine({
+      executor: new ScriptedExecutor().respond("child/work", { hang: true }),
+      outputRoot,
+      onEvent: (event) => events.push(`${event.type}:${event.nodeId ?? ""}`),
+    });
+    const running = engine.run(resolved.definition, {}, { workflowSource: resolved.source });
+    await waitUntil(() => events.includes("node_started:child/work"));
+    engine.park();
+    const parked = await running;
+    expect(parked.state.status).toBe("running");
+
+    await fs.writeFile(childPath, childSource("changed prompt"), "utf8");
+    const changed = await resolveWorkflowRef(
+      parentPath,
+      { cwd: project, homeDir },
+      builtinWorkflowCatalog,
+    );
+    const resumed = new WorkflowEngine({ executor: new ScriptedExecutor(), outputRoot });
+
+    await expect(
+      resumed.resumeRun(changed.definition, parked.state.runId, {
+        workflowSource: changed.source,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowSourceChangedError);
+  });
+
   it("resumes at the interrupted node without rerunning completed work", async () => {
     const outputRoot = await makeTempDir("pi-resume-runs");
     const store = new WorkflowRunStore(outputRoot);

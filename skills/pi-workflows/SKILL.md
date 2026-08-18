@@ -53,6 +53,8 @@ A workflow is a `.workflow.ts`, `.workflow.js`, `.workflow.mts`, or `.workflow.m
 Follow these rules:
 
 - Compose the existing node and edge primitives before adding a new primitive.
+- Reuse a finite workflow with a direct typed `includeWorkflow()` mount. Use a controller only when the child needs an independent run or indefinite reconciliation.
+- Give included workflows named exits, map their input explicitly, and keep parent edges out of child internals.
 - Keep `compute` pure. Put external effects in agent, function-action, or shell-action nodes.
 - Use structured node outputs for routing.
 - Use a checkpoint when progress requires human input.
@@ -62,7 +64,7 @@ Follow these rules:
 - Keep presentation separate from execution. Use `presentationPrompt` only when a final assistant response is needed.
 - Preserve the single active workflow rule in one Pi session.
 
-Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
+Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
 
 ## Verify changes
 

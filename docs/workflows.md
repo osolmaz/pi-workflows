@@ -53,15 +53,20 @@ export default defineWorkflow({
 
 Top-level fields:
 
-| Field                | Type                   | Notes                                                                                                                                                                                                              |
-| -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`               | `string`               | Required. Used in run ids and the step contract. `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are reserved for `/workflow` subcommands.                                                             |
-| `title`              | `string` or function   | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                                      |
-| `presentationPrompt` | `string` or function   | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput, signal }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
-| `startAt`            | `string`               | Required. Id of the first node.                                                                                                                                                                                    |
-| `nodes`              | `Record<string, node>` | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                                                                                |
-| `edges`              | `WorkflowEdge[]`       | Required. See routing below.                                                                                                                                                                                       |
-| `maxSteps`           | `number`               | Optional loop bound, default 100. The run fails when exceeded.                                                                                                                                                     |
+| Field                | Type                      | Notes                                                                                                                                                                                                              |
+| -------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`               | `string`                  | Required. Used in run ids and the step contract. `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are reserved for `/workflow` subcommands.                                                             |
+| `source`             | `string`                  | Optional `import.meta.url` for exact provenance when another TypeScript workflow imports this definition directly.                                                                                                 |
+| `contractId`         | `string`                  | Optional stable input-and-exit contract identity. Dynamic overrides must match it.                                                                                                                                 |
+| `input`              | `function`                | Optional runtime input normalizer and validator. Its return type is the workflow input type.                                                                                                                       |
+| `title`              | `string` or function      | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                                      |
+| `presentationPrompt` | `string` or function      | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput, signal }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
+| `startAt`            | `string`                  | Required. Id of the first node.                                                                                                                                                                                    |
+| `nodes`              | `Record<string, node>`    | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                                                                                |
+| `includes`           | `Record<string, include>` | Optional imported or dynamically resolved child workflows.                                                                                                                                                         |
+| `exits`              | `Record<string, exit>`    | Optional named successful terminal nodes used when another workflow includes this workflow.                                                                                                                        |
+| `edges`              | `WorkflowEdge[]`          | Required. See routing below.                                                                                                                                                                                       |
+| `maxSteps`           | `number`                  | Optional loop bound, default 100. The run fails when exceeded.                                                                                                                                                     |
 
 `defineWorkflow` validates the shape eagerly (node ids, edge shapes, function
 fields) and validates the graph (unknown targets, duplicate outgoing edges,
@@ -314,6 +319,43 @@ A missing case for the resolved value fails the run with a routing error. A
 node with no outgoing edge (or no matching failure route) ends the run:
 `completed` on success, `failed`/`timed_out`/`cancelled` otherwise.
 
+## Included workflows
+
+Use `includeWorkflow()` to mount a standalone workflow under a parent name:
+
+```typescript
+import repair from "./repair.workflow.js";
+
+includes: {
+  repair: includeWorkflow(repair, {
+    input: ({ outputs }) => ({ issue: outputs.check }),
+  }),
+},
+```
+
+The child declares named exits:
+
+```typescript
+exits: {
+  completed: { from: "finalize", validate: parseCompleted },
+  blocked: { from: "blocked", validate: parseBlocked },
+},
+```
+
+Enter through the mount and leave through `<mount>.<exit>`:
+
+```typescript
+{ from: "check", to: "repair" }
+{ from: "repair.completed", to: "check" }
+{ from: "repair.blocked", to: "finish" }
+```
+
+Direct imports check child input and exit names in TypeScript. Use `includedResult(child, outputs.mount)` to recover the child's discriminated exit output without a cast. Dynamic discovered names, built-in references, and file paths are also supported. Every reference resolves before the run starts.
+
+Child callbacks receive local input, outputs, results, and steps from their current invocation. Persisted node identities include the mount path. Re-entry starts with empty child-local state. Root and child step limits both apply. Internal entry and exit transitions do not consume those limits.
+
+The run records every mounted source and a digest of the resolved graph. Resume refuses a changed child source. Source cycles are rejected before the run starts. See [Workflow composition](WORKFLOW_COMPOSITION.md) for typing, persistence, nesting, and viewer rules.
+
 ## Model workflow control
 
 The model sees one `workflow` tool. Its `action` field supports:
@@ -333,6 +375,12 @@ The normal extension offers all actions. The headless RPC bridge offers only
 `update` and `submit`, so a workflow child cannot recursively control other
 runs.
 
+### Built-in planning and implementation
+
+The built-in `autodevise` workflow selects a practical in-scope solution and writes a detailed plan. The built-in `autoimplement` workflow implements a supplied plan and returns to its internal `autodevise` mount when new evidence invalidates that plan.
+
+Autoimplement writes and runs the exact Pi Reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
+
 ### Built-in monitor
 
 The built-in `monitor` workflow turns a plain request for repeated checks into
@@ -341,12 +389,17 @@ one looping workflow run. Its input is:
 ```json
 {
   "task": "Check pull request 123",
-  "stopWhen": "The pull request is merged or closed"
+  "stopWhen": "The pull request is merged or closed",
+  "repair": {
+    "authorized": true,
+    "scope": "the current repository"
+  }
 }
 ```
 
-The first check runs immediately. `everyMinutes` defaults to 30. Each accepted
-check must provide one concise report and choose `continue` or `stop`. The
+The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair can route through outer `autodevise`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked.
+
+`everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:
 false`, so it does not cause an assistant reply. A check can also provide
 independent progress tracks. The regular Pi model running the check observes

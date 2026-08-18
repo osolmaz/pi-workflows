@@ -3,33 +3,34 @@
   "snapshot": {
     "schema": "pi-workflows.definition-snapshot.v1",
     "name": "autodevise",
+    "contractId": "pi-workflows.autodevise.v1",
     "startAt": "frame",
     "nodes": {
       "frame": {
         "nodeType": "agent",
         "statusDetail": "framing the problem",
-        "expectedOutput": "{ \"problem\": \"concise problem statement\", \"success\": [\"observable success criterion\"], \"inScope\": [\"system or change\"], \"outOfScope\": [\"system or change\"], \"constraints\": [\"constraint\"], \"controlBoundary\": \"what can be changed directly\" }"
+        "expectedOutput": "{ \"problem\": \"concise statement\", \"success\": [\"criterion\"], \"inScope\": [\"change\"], \"outOfScope\": [\"change\"], \"constraints\": [\"constraint\"], \"controlBoundary\": \"what can change\" }"
       },
       "propose": {
         "nodeType": "agent",
         "statusDetail": "devising a solution",
-        "expectedOutput": "{ \"solution\": \"concrete proposed solution\", \"rationale\": \"why it is the best long-term design\", \"parts\": [\"main part\"], \"tradeoffs\": [\"important trade-off\"] }"
+        "expectedOutput": "{ \"solution\": \"proposal\", \"rationale\": \"why\", \"parts\": [\"part\"], \"tradeoffs\": [\"trade-off\"] }"
       },
       "ideal": {
         "nodeType": "agent",
         "statusDetail": "describing the ideal end state",
-        "expectedOutput": "{ \"ideal\": \"ideal end state\", \"outsideDependencies\": [\"dependency outside our authority\"], \"additionalValue\": [\"benefit beyond the proposal\"] }"
+        "expectedOutput": "{ \"ideal\": \"ideal end state\", \"outsideDependencies\": [\"dependency\"], \"additionalValue\": [\"benefit\"] }"
       },
       "choose": {
         "nodeType": "agent",
         "statusDetail": "choosing the practical solution",
-        "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selected\": \"chosen practical solution\", \"why\": \"why this is the right choice\", \"relationshipToIdeal\": \"how it matches or evolves toward the ideal\", \"excluded\": [\"outside-scope requirement not selected\"], \"compromises\": [\"accepted compromise\"] }"
+        "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selected\": \"solution\", \"why\": \"reason\", \"relationshipToIdeal\": \"relationship\", \"excluded\": [\"excluded work\"], \"compromises\": [\"compromise\"], \"blocker\": \"required only when blocked\" }"
       },
       "plan": {
         "nodeType": "agent",
         "timeoutMs": 1800000,
         "statusDetail": "writing the implementation plan",
-        "expectedOutput": "{ \"summary\": \"implementation approach\", \"steps\": [{ \"change\": \"specific change\", \"where\": \"component or file area\", \"verification\": \"evidence that proves it works\" }], \"contracts\": [\"contract impact\"], \"tests\": [\"required test\"], \"risks\": [{ \"risk\": \"risk\", \"mitigation\": \"mitigation\" }], \"boundaries\": [\"work explicitly excluded\"] }"
+        "expectedOutput": "{ \"summary\": \"approach\", \"steps\": [{ \"change\": \"change\", \"where\": \"location\", \"verification\": \"evidence\" }], \"contracts\": [\"impact\"], \"tests\": [\"test\"], \"risks\": [{ \"risk\": \"risk\", \"mitigation\": \"mitigation\" }], \"boundaries\": [\"excluded work\"] }"
       },
       "blocked": {
         "nodeType": "compute"
@@ -65,7 +66,10 @@
         "from": "plan",
         "to": "finalize"
       }
-    ]
+    ],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [

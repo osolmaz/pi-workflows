@@ -10,7 +10,10 @@
         "expectedOutput": "{ \"reply\": \"your concise answer\" }"
       }
     },
-    "edges": []
+    "edges": [],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [

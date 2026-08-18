@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../../src/render/ansi.js";
 import { renderGraphLines } from "../../src/render/graph-render.js";
 import { layoutGraph } from "../../src/render/graph.js";
+import { compileWorkflowDefinition } from "../../src/workflows/composition.js";
 import { loadWorkflowFile } from "../../src/workflows/loader.js";
 import { createDefinitionSnapshot } from "../../src/workflows/store.js";
 import type { WorkflowDefinitionSnapshot, WorkflowRunState } from "../../src/workflows/types.js";
@@ -110,7 +111,8 @@ function buildFixture(
 export async function buildLayoutFixtures(): Promise<LayoutFixture[]> {
   const fixtures: LayoutFixture[] = [];
   for (const file of EXAMPLE_FILES) {
-    const workflow = await loadWorkflowFile(path.join(EXAMPLES_DIR, file));
+    const loaded = await loadWorkflowFile(path.join(EXAMPLES_DIR, file));
+    const workflow = compileWorkflowDefinition(loaded);
     const snapshot = createDefinitionSnapshot(workflow);
     fixtures.push(buildFixture(`example-${workflow.name}`, snapshot, freshState(snapshot)));
   }

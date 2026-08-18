@@ -17,13 +17,14 @@ The monitor checks a target, sends one status notification after every accepted 
 
 ## Input fields
 
-| Field                 | Required | Type    | Default            | Meaning                          |
-| --------------------- | -------- | ------- | ------------------ | -------------------------------- |
-| `task`                | Yes      | string  | None               | Self-contained monitor task.     |
-| `everyMinutes`        | No       | integer | `30`               | Minutes between accepted checks. |
-| `stopWhen`            | No       | string  | Explicit user stop | Condition that ends monitoring.  |
-| `maxChecks`           | No       | integer | `1000`             | Run safety limit.                |
-| `checkTimeoutMinutes` | No       | integer | Derived            | Timeout for one agent check.     |
+| Field                 | Required | Type    | Default            | Meaning                           |
+| --------------------- | -------- | ------- | ------------------ | --------------------------------- |
+| `task`                | Yes      | string  | None               | Self-contained monitor task.      |
+| `everyMinutes`        | No       | integer | `30`               | Minutes between accepted checks.  |
+| `stopWhen`            | No       | string  | Explicit user stop | Condition that ends monitoring.   |
+| `maxChecks`           | No       | integer | `1000`             | Run safety limit.                 |
+| `checkTimeoutMinutes` | No       | integer | Derived            | Timeout for one agent check.      |
+| `repair`              | No       | object  | None               | Explicit automatic-repair policy. |
 
 `task` is 1 to 8,000 characters after trimming. It should name the target, stable identifier, source of truth, durable outputs, authorized routine work, and safety boundary. It must state any authorized mutations. Monitoring is read-only when the task does not authorize a mutation.
 
@@ -34,6 +35,8 @@ The monitor checks a target, sends one status notification after every accepted 
 `maxChecks` is from 1 through 1,000. Agents must omit it unless the user explicitly asks for a fixed check count. The workflow's default of 1,000 is a disclosed runtime safety limit. The agent does not infer it as a finish condition.
 
 `checkTimeoutMinutes` is from 5 through 1,440. When omitted, the workflow uses the larger of 60 minutes and `everyMinutes`. The node timeout includes the existing two-minute runtime margin.
+
+`repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
 
 `reportWhen` is removed. The monitor always reports after every accepted check.
 
@@ -67,19 +70,20 @@ The check agent submits:
 
 Fields:
 
-| Field         | Required | Type   | Meaning                        |
-| ------------- | -------- | ------ | ------------------------------ |
-| `route`       | Yes      | string | `continue` or `stop`.          |
-| `observation` | Yes      | string | Current factual state.         |
-| `report`      | Yes      | string | Concise user-facing update.    |
-| `progress`    | No       | object | Current progress tracks.       |
-| `reason`      | Yes      | string | Reason for the selected route. |
+| Field         | Required   | Type   | Meaning                                     |
+| ------------- | ---------- | ------ | ------------------------------------------- |
+| `route`       | Yes        | string | `continue`, authorized `repair`, or `stop`. |
+| `observation` | Yes        | string | Current factual state.                      |
+| `report`      | Yes        | string | Concise user-facing update.                 |
+| `progress`    | No         | object | Current progress tracks.                    |
+| `repair`      | For repair | object | Problem, evidence, and stable fingerprint.  |
+| `reason`      | Yes        | string | Reason for the selected route.              |
 
 `observation` is at most 8,000 characters. `report` is at most 4,000 characters. `reason` is at most 2,000 characters. All three must be non-empty after trimming.
 
 `progress.tracks` contains from 1 through 256 entries. Each entry has a unique `key` and one valid `pi-workflows.progress.v1` data object. The progress update rules, reserved `overall` key, and validation behavior come from [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md).
 
-Unknown check fields are validation errors. A missing report is a validation error for both routes.
+Unknown check fields are validation errors. A missing report is a validation error for every route. A repair route without input authorization or repair details is also invalid.
 
 ## Graph
 
@@ -93,7 +97,14 @@ prepare
   → report
   → decide
       ├─ stop → finish
-      └─ continue → schedule → sleep → check
+      ├─ continue → schedule → sleep → check
+      └─ repair → repairGuard
+           ├─ blocked → repairBlocked → repairReport → finish
+           └─ initialDesign: autodevise
+                ├─ blocked → repairBlocked
+                └─ implementation: autoimplement
+                     ├─ blocked → repairBlocked
+                     └─ completed → check
 ```
 
 - `prepare` is a `compute` node that validates and applies input defaults.
@@ -102,6 +113,9 @@ prepare
 - `publish_progress` is a function `action` that publishes each validated observed track.
 - `report` is a `notify` node that queues exactly one report.
 - `decide` is a `compute` node that applies the route and check safety limit.
+- `repairGuard` stops a repeated issue when a completed repair did not change its fingerprint or observed target state.
+- `initialDesign` and `implementation` are included workflows. Autoimplement can enter its own nested `autodevise` when later evidence requires redesign.
+- `repairBlocked` and `repairReport` preserve a truthful blocked result and user notification.
 - `schedule` is a function `action` that publishes the next-check time.
 - `sleep` is the existing runtime-owned shell wait.
 - `finish` is a `compute` node that returns the final observation and reason.
@@ -260,7 +274,7 @@ The monitor skill must disclose a surfaced host limit and must never invent a sm
 
 ## Safety boundaries
 
-An observation-only request authorizes only observation and scheduled checks. When the user asks the monitor to keep an objective running or finish it, the monitor skill may record routine, bounded work in `task`, including retries, restarts, pinned task code, tests, configuration repairs, and temporary cleanup. The task must preserve the exact objective and state every mutation boundary.
+An observation-only request authorizes only observation and scheduled checks. Automatic repair also requires the explicit `repair` input object. When the user asks the monitor to keep an objective running or finish it, the monitor skill may record routine, bounded work in `task` and the repair policy. This can include retries, restarts, pinned task code, tests, configuration repairs, and temporary cleanup. The task must preserve the exact objective and state every mutation boundary.
 
 A progress object is data. It cannot contain a command or grant execution authority. Fixed probes belong in workflow-authored `action` or `shell` nodes.
 
@@ -273,7 +287,10 @@ The implementation must test:
 - input defaults and bounds
 - removal of `reportWhen`
 - rejection of old quiet routes
-- required reports on both routes
+- required reports on every route
+- repair rejection without explicit authorization
+- outer design, nested redesign, and post-repair checking
+- repeated no-progress repair detection
 - exactly one notification per accepted check
 - no assistant turn from a notification
 - progress omission and multiple tracks

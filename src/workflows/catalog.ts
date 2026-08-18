@@ -83,6 +83,13 @@ export class BuiltinWorkflowCatalog {
     return this.byName.get(name);
   }
 
+  sourceForDefinition(definition: WorkflowDefinition): WorkflowSource | undefined {
+    const entry = this.list().find((candidate) => candidate.definition === definition);
+    return entry === undefined
+      ? undefined
+      : { kind: "builtin", id: entry.id, revision: entry.revision };
+  }
+
   resolve(
     source: WorkflowSource,
     runId = `builtin:${source.kind === "builtin" ? source.id : "unknown"}`,

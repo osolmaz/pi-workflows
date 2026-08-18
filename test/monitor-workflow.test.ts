@@ -203,6 +203,27 @@ describe("built-in monitor workflow", () => {
     expect(executor).toBeDefined();
   });
 
+  it("requires explicit authorization and details for repair routes", () => {
+    const repair = check({
+      route: "repair",
+      observation: "A fixable defect is present.",
+      report: "A fixable defect is present.",
+      repair: {
+        problem: "Fix the defect",
+        evidence: { failingTest: "test-a" },
+        issueFingerprint: "issue-a-state-1",
+      },
+    });
+    expect(() => validateMonitorCheck(repair)).toThrow("authorization");
+    expect(validateMonitorCheck(repair, true)).toMatchObject({
+      route: "repair",
+      repair: { issueFingerprint: "issue-a-state-1" },
+    });
+    expect(() => validateMonitorCheck({ ...repair, repair: undefined }, true)).toThrow(
+      "requires repair details",
+    );
+  });
+
   it("rejects quiet routes, missing reports, duplicate tracks, and unknown fields", () => {
     expect(() => validateMonitorCheck(check({ route: "stop_quiet" }))).toThrow("route");
     const { report: _report, ...withoutReport } = check();
@@ -220,6 +241,16 @@ describe("built-in monitor workflow", () => {
         }),
       ),
     ).toThrow("duplicated");
+  });
+
+  it("mounts outer design and implementation while keeping observation-only defaults", () => {
+    expect(prepareMonitorInput(input()).repair).toBeUndefined();
+    expect(
+      prepareMonitorInput(input({ repair: { authorized: true, scope: "current repo" } })),
+    ).toMatchObject({
+      repair: { authorized: true, scope: "current repo" },
+    });
+    expect(Object.keys(monitor.includes ?? {})).toEqual(["initialDesign", "implementation"]);
   });
 
   it("has no presentation prompt, report acknowledgement, or quiet routing", () => {

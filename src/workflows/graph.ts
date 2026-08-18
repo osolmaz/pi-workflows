@@ -1,3 +1,4 @@
+import { compileWorkflowDefinition, isCompiledWorkflow } from "./composition.js";
 import { assertValidWorkflowDefinitionShape } from "./schema.js";
 import type { WorkflowDefinition, WorkflowEdge, WorkflowNodeResult } from "./types.js";
 
@@ -6,17 +7,18 @@ import type { WorkflowDefinition, WorkflowEdge, WorkflowNodeResult } from "./typ
  * at most one outgoing edge per node.
  */
 export function validateWorkflowDefinition(workflow: WorkflowDefinition): void {
-  assertValidWorkflowDefinitionShape(workflow);
-  if (!Object.hasOwn(workflow.nodes, workflow.startAt)) {
-    throw new Error(`Workflow start node is missing: ${workflow.startAt}`);
+  const executable = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
+  assertValidWorkflowDefinitionShape(executable, { compiled: true });
+  if (!Object.hasOwn(executable.nodes, executable.startAt)) {
+    throw new Error(`Workflow start node is missing: ${executable.startAt}`);
   }
 
   const outgoingEdges = new Set<string>();
-  for (const edge of workflow.edges) {
-    validateWorkflowEdge(workflow, edge, outgoingEdges);
+  for (const edge of executable.edges) {
+    validateWorkflowEdge(executable, edge, outgoingEdges);
   }
 
-  assertAllNodesReachable(workflow);
+  assertAllNodesReachable(executable);
 }
 
 /** Reject nodes that no path from `startAt` can ever reach. */

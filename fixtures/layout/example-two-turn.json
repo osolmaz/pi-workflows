@@ -34,7 +34,10 @@
         "from": "checklist",
         "to": "finalize"
       }
-    ]
+    ],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [

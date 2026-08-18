@@ -1,6 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolveArtifacts } from "./artifacts.js";
+import {
+  compileWorkflowDefinition,
+  compositionMetadata,
+  isCompiledWorkflow,
+} from "./composition.js";
 import {
   CancelledError,
   errorMessage,
@@ -14,7 +19,13 @@ import {
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
-import { RUN_STATE_SCHEMA, WorkflowRunStore, createRunId, readRunBundle } from "./store.js";
+import {
+  RUN_STATE_SCHEMA,
+  WorkflowRunStore,
+  createDefinitionSnapshot,
+  createRunId,
+  readRunBundle,
+} from "./store.js";
 import type {
   AgentNodeDefinition,
   AgentStepExecutor,
@@ -215,10 +226,12 @@ export class WorkflowEngine {
     input: unknown,
     options: { workflowSource?: WorkflowSource; runId?: string } = {},
   ): Promise<WorkflowRunResult> {
+    workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
     // Fail before any bundle exists so bad input cannot leave a partial run
     // on disk or silently change shape when state.json round-trips.
-    const normalizedInput = input === undefined ? null : input;
+    const suppliedInput = input === undefined ? null : input;
+    const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
     assertJsonSerializable(normalizedInput, "Workflow run input");
     if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
       throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
@@ -270,6 +283,7 @@ export class WorkflowEngine {
     runId: string,
     options: { workflowSource?: WorkflowSource; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
+    workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
     // Reset before any await: a park or cancel landing during preparation
     // must survive, or a host drain would hang while the run executes.
@@ -279,7 +293,7 @@ export class WorkflowEngine {
     const bundle = await this.store.prepareRunResume(runId);
     const { runDir } = bundle;
     const state = bundle.state;
-    const sourceMismatch = workflowSourceMismatch(state, options.workflowSource);
+    const sourceMismatch = workflowIdentityMismatch(state, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
     }
@@ -330,7 +344,7 @@ export class WorkflowEngine {
         state,
         runDir,
         point.nodeId,
-        state.steps.length,
+        countExecutableSteps(workflow, state.steps),
         point.lastOutput,
       );
     } catch (error) {
@@ -354,6 +368,7 @@ export class WorkflowEngine {
     input: unknown,
     options: { workflowSource?: WorkflowSource; runId?: string; force?: boolean } = {},
   ): Promise<WorkflowRunResult> {
+    workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
     this.cancelled = false;
     this.paused = false;
@@ -367,12 +382,13 @@ export class WorkflowEngine {
         `Cannot continue workflow run ${parentRunId} with status ${parent.state.status}`,
       );
     }
-    const sourceMismatch = workflowSourceMismatch(parent.state, options.workflowSource);
+    const sourceMismatch = workflowIdentityMismatch(parent.state, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(parentRunId);
     }
 
-    const normalizedInput = input === undefined ? null : input;
+    const suppliedInput = input === undefined ? null : input;
+    const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
     assertJsonSerializable(normalizedInput, "Workflow run input");
     if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
       throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
@@ -428,7 +444,7 @@ export class WorkflowEngine {
         state,
         runDir,
         point.nodeId,
-        state.steps.length,
+        countExecutableSteps(workflow, state.steps),
         point.lastOutput,
       );
     } catch (error) {
@@ -546,6 +562,7 @@ export class WorkflowEngine {
     runId: string | undefined,
   ): Promise<WorkflowRunState> {
     const now = new Date().toISOString();
+    const composition = compositionMetadata(workflow);
     return {
       schema: RUN_STATE_SCHEMA,
       traceSeq: 0,
@@ -553,6 +570,10 @@ export class WorkflowEngine {
       workflowName: workflow.name,
       ...(await this.resolveTitleBounded(workflow, input)),
       ...(workflowSource !== undefined ? { workflowSource } : {}),
+      ...(composition?.sources.length ? { workflowSources: composition.sources } : {}),
+      ...(composition?.snapshot.mounts.length
+        ? { definitionDigest: definitionDigest(workflow) }
+        : {}),
       startedAt: now,
       updatedAt: now,
       status: "running",
@@ -573,17 +594,24 @@ export class WorkflowEngine {
     initialLastOutput?: unknown,
   ): Promise<void> {
     const maxSteps = workflow.maxSteps ?? this.maxSteps;
+    const composition = compositionMetadata(workflow);
     let currentNodeId: string | null = startNodeId;
     let executedSteps = executedStepsBase;
     let lastOutput: unknown = initialLastOutput;
 
     while (currentNodeId !== null) {
       await this.holdWhilePaused(state, runDir);
-      executedSteps += 1;
-      if (executedSteps > maxSteps) {
-        throw new Error(
-          `Workflow exceeded maxSteps=${maxSteps}; aborting to avoid an unbounded loop`,
-        );
+      const isTransition =
+        composition?.entries[currentNodeId] !== undefined ||
+        composition?.exits[currentNodeId] !== undefined;
+      if (!isTransition) {
+        executedSteps += 1;
+        if (executedSteps > maxSteps) {
+          throw new Error(
+            `Workflow exceeded maxSteps=${maxSteps}; aborting to avoid an unbounded loop`,
+          );
+        }
+        assertInvocationStepLimit(composition, currentNodeId, state.steps);
       }
 
       const node = workflow.nodes[currentNodeId];
@@ -597,7 +625,7 @@ export class WorkflowEngine {
         // as in-flight, and resume reruns it with a fresh attempt.
         throw new RunParkedError();
       }
-      this.recordAttempt(state, attempt);
+      this.recordAttempt(workflow, state, attempt);
       // The terminal node event carries the output, receipt, and conversation
       // linkage so the trace alone is sufficient to reconstruct the run.
       await this.persist(runDir, state, {
@@ -620,6 +648,35 @@ export class WorkflowEngine {
       if (attempt.result.outcome !== "ok") {
         currentNodeId = this.routeAfterFailure(workflow, state, attempt);
         continue;
+      }
+
+      const entered = composition?.entries[attempt.result.nodeId];
+      if (entered !== undefined) {
+        const value = attempt.result.output as { invocation?: number } | undefined;
+        await this.persist(runDir, state, {
+          scope: "run",
+          type: "include_entered",
+          payload: {
+            mountPath: entered.mountPath.split("/"),
+            workflowName: entered.workflowName,
+            invocation: value?.invocation ?? 1,
+          },
+        });
+      }
+      const exited = composition?.exits[attempt.result.nodeId];
+      if (exited !== undefined) {
+        const entrySteps = state.steps.filter((step) => step.nodeId === exited.mountPath);
+        await this.persist(runDir, state, {
+          scope: "run",
+          type: "include_exited",
+          payload: {
+            mountPath: exited.mountPath.split("/"),
+            workflowName: composition?.scopes[exited.mountPath]?.workflowName ?? exited.mountName,
+            invocation: entrySteps.length,
+            exit: exited.exitName,
+            output: attempt.result.output ?? null,
+          },
+        });
       }
 
       lastOutput = attempt.result.output;
@@ -678,12 +735,12 @@ export class WorkflowEngine {
     state: WorkflowRunState,
     attempt: NodeAttempt,
   ): string | null {
+    if (attempt.result.outcome === "cancelled" || this.cancelled) {
+      throw new CancelledError();
+    }
     const next = resolveNextForOutcome(workflow.edges, attempt.result.nodeId, attempt.result);
     if (next !== null) {
       return next;
-    }
-    if (attempt.result.outcome === "cancelled" || this.cancelled) {
-      throw new CancelledError();
     }
     if (attempt.result.outcome === "timed_out") {
       state.status = "timed_out";
@@ -693,7 +750,11 @@ export class WorkflowEngine {
       : new Error(attempt.result.error ?? `Workflow node failed: ${attempt.result.nodeId}`);
   }
 
-  private recordAttempt(state: WorkflowRunState, attempt: NodeAttempt): void {
+  private recordAttempt(
+    workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+    attempt: NodeAttempt,
+  ): void {
     state.results[attempt.result.nodeId] = attempt.result;
     if (attempt.result.outcome === "ok") {
       state.outputs[attempt.result.nodeId] = attempt.result.output;
@@ -701,6 +762,11 @@ export class WorkflowEngine {
       // A failed repeat attempt supersedes an earlier success; stale output
       // must not survive next to a non-ok latest result.
       delete state.outputs[attempt.result.nodeId];
+    }
+    const exit = compositionMetadata(workflow)?.exits[attempt.result.nodeId];
+    if (exit !== undefined && attempt.result.outcome === "ok") {
+      state.outputs[exit.mountPath] = attempt.result.output;
+      state.results[exit.mountPath] = { ...attempt.result, nodeId: exit.mountPath };
     }
     const step: WorkflowStepRecord = {
       attemptId: attempt.result.attemptId,
@@ -1234,6 +1300,48 @@ function abortRejection(signal: AbortSignal): Promise<never> {
   });
 }
 
+function countExecutableSteps(workflow: WorkflowDefinition, steps: WorkflowStepRecord[]): number {
+  const metadata = compositionMetadata(workflow);
+  if (metadata === undefined) return steps.length;
+  return steps.filter(
+    (step) =>
+      metadata.entries[step.nodeId] === undefined && metadata.exits[step.nodeId] === undefined,
+  ).length;
+}
+
+function assertInvocationStepLimit(
+  metadata: ReturnType<typeof compositionMetadata>,
+  nodeId: string,
+  steps: WorkflowStepRecord[],
+): void {
+  if (metadata === undefined) return;
+  const scope = Object.values(metadata.scopes)
+    .filter((candidate) => candidate.path !== "" && nodeId.startsWith(`${candidate.path}/`))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  if (scope?.maxSteps === undefined) return;
+  let entryIndex = -1;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index]?.nodeId === scope.path) {
+      entryIndex = index;
+      break;
+    }
+  }
+  if (entryIndex < 0) throw new Error(`Workflow include entry is missing: ${scope.path}`);
+  const attempts = steps
+    .slice(entryIndex + 1)
+    .filter(
+      (step) =>
+        step.nodeId.startsWith(`${scope.path}/`) &&
+        metadata.entries[step.nodeId] === undefined &&
+        metadata.exits[step.nodeId] === undefined,
+    ).length;
+  if (attempts >= scope.maxSteps) {
+    throw new Error(
+      `Included workflow ${scope.workflowName} at ${scope.path} exceeded maxSteps=${scope.maxSteps}`,
+    );
+  }
+}
+
 /**
  * Outputs are persisted to the run bundle, so they must be JSON-serializable.
  * Failing here turns a bad callback return value into a normal node failure
@@ -1253,6 +1361,25 @@ function workflowSourceMismatch(
     state.workflowHash !== undefined &&
     (source.kind !== "file" || state.workflowHash !== source.hash)
   );
+}
+
+function workflowIdentityMismatch(
+  state: WorkflowRunState,
+  workflow: WorkflowDefinition,
+  source: WorkflowSource | undefined,
+): boolean {
+  if (workflowSourceMismatch(state, source)) return true;
+  const metadata = compositionMetadata(workflow);
+  const currentSources = metadata?.sources ?? [];
+  if (!isDeepStrictEqual(state.workflowSources ?? [], currentSources)) return true;
+  const currentDigest = metadata?.snapshot.mounts.length ? definitionDigest(workflow) : undefined;
+  return state.definitionDigest !== currentDigest;
+}
+
+function definitionDigest(workflow: WorkflowDefinition): string {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(createDefinitionSnapshot(workflow)))
+    .digest("hex")}`;
 }
 
 function assertJsonSerializable(value: unknown, what: string): void {

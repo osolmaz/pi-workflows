@@ -4,11 +4,21 @@ export {
   checkpoint,
   compute,
   defineWorkflow,
+  defineWorkflowRegistry,
+  includeWorkflow,
+  includedResult,
   isWorkflowDefinition,
   notify,
   shell,
 } from "./definition.js";
 export { decision, decisionEdge, type DecisionDefinition } from "./decision.js";
+export {
+  compileWorkflowDefinition,
+  compositionMetadata,
+  isCompiledWorkflow,
+  type CompileWorkflowOptions,
+  type WorkflowCompositionMetadata,
+} from "./composition.js";
 export { WorkflowEngine, appendStepContract } from "./engine.js";
 export { CancelledError, TimeoutError } from "./errors.js";
 export {
@@ -96,9 +106,19 @@ export type {
   ShellActionResult,
   WorkflowActionContext,
   WorkflowActionReceipt,
+  WorkflowCompositionSnapshot,
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowEdge,
+  WorkflowExitDefinition,
+  WorkflowExitMap,
+  WorkflowExitOutputs,
+  WorkflowIncludeDefinition,
+  WorkflowIncludedResult,
+  WorkflowInputOf,
+  WorkflowMountedSource,
+  WorkflowMountSnapshot,
+  WorkflowValueParser,
   WorkflowEngineOptions,
   WorkflowNodeCommon,
   WorkflowNodeContext,

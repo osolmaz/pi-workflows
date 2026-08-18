@@ -319,11 +319,12 @@ function renderCellText(
   const count = atLatestStep && state.currentNode === nodeId ? Math.max(attempts, 1) : attempts;
   const timing =
     attempt || count > 0 ? `${count} attempt${count === 1 ? "" : "s"} · ${elapsed}` : "not visited";
-  const text = `${nodeId} [${nodeType}] ${timing}`;
+  const displayNodeId = hierarchicalNodeLabel(nodeId, node);
+  const text = `${displayNodeId} [${nodeType}] ${timing}`;
   return {
     cell,
     text,
-    nodeId: sanitizeText(nodeId),
+    nodeId: sanitizeText(displayNodeId),
     nodeType,
     typeBadge: node ? nodeTypeBadge(node.nodeType, node.actionExecution) : "? unknown",
     status,
@@ -335,6 +336,17 @@ function renderCellText(
     isEnd,
     width: nodeStyle === "box" ? metrics.width : text.length + 2,
   };
+}
+
+function hierarchicalNodeLabel(
+  nodeId: string,
+  node: WorkflowDefinitionSnapshot["nodes"][string] | undefined,
+): string {
+  if (node?.mountPath === undefined || node.localNodeId === undefined) return nodeId;
+  const path = node.mountPath.join(" › ");
+  if (node.includeTransition === "entry") return `${path} · enter`;
+  if (node.includeTransition === "exit") return `${path} · ${node.localNodeId} exit`;
+  return `${path} › ${node.localNodeId}`;
 }
 
 type RankGeometry = {

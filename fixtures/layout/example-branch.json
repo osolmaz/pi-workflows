@@ -29,7 +29,10 @@
           }
         }
       }
-    ]
+    ],
+    "composition": {
+      "mounts": []
+    }
   },
   "layout": {
     "ranks": [
