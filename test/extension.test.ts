@@ -523,6 +523,30 @@ describe("pi-workflows extension", () => {
     });
   });
 
+  it("cancels a recovered human decision without relying on a restored widget", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-recovered-cancel");
+    const runsDir = await makeTempDir("pi-workflows-human-recovered-cancel-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd);
+    const first = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-a" });
+
+    await first.command.handler("human", first.ctx);
+    await waitFor(() => first.notifications.some((note) => note.includes("verified human")));
+    const waiting = (await listRunBundles(runsDir)).find(
+      (bundle) => bundle.state.status === "waiting",
+    );
+    const request = waiting?.state.finalOutput as HumanDecisionRequest | undefined;
+    if (request === undefined) throw new Error("missing recovered decision request");
+
+    const reopened = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-a" });
+    await reopened.emitAsync("session_start", {});
+    await reopened.command.handler("cancel", reopened.ctx);
+    expect(reopened.notifications.at(-1)).toContain("Cancelled the pending human decision");
+    expect(
+      await new HumanDecisionStore(runsDir).readCancellation(request.decisionId),
+    ).toMatchObject({ reason: "cancelled" });
+  });
+
   it("recovers an accepted human decision into one deterministic continuation", async () => {
     const cwd = await makeTempDir("pi-workflows-human-recovery");
     const runsDir = await makeTempDir("pi-workflows-human-recovery-runs");

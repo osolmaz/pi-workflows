@@ -1363,6 +1363,46 @@ export default function piWorkflows(pi: ExtensionAPI) {
     notify(ctx, result.message, result.level);
   };
 
+  const cancelHumanDecision = async (request: HumanDecisionRequest): Promise<void> => {
+    const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+    await store.cancel(request, "cancelled");
+    const cancellation = await store.readCancellation(request.decisionId);
+    if (cancellation !== null) {
+      await Promise.allSettled(
+        [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(cancellation)),
+      );
+    }
+    lastWaitingRunId = null;
+  };
+
+  const findOwnedWaitingHumanDecision = async (
+    ctx: ExtensionContext,
+  ): Promise<{ state: WorkflowRunState; request: HumanDecisionRequest } | null> => {
+    const rows = ensureRunQueueStore(ctx.cwd).listWorkflowRuns();
+    const sessionId = ctx.sessionManager.getSessionId();
+    const owned = new Set(
+      rows
+        .filter((row) => row.originSessionId === null || row.originSessionId === sessionId)
+        .map((row) => row.runId),
+    );
+    const continued = new Set(
+      rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
+    );
+    const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+    for (const bundle of bundles) {
+      if (
+        bundle.state.status !== "waiting" ||
+        !owned.has(bundle.state.runId) ||
+        continued.has(bundle.state.runId)
+      ) {
+        continue;
+      }
+      const request = humanDecisionRequest(bundle.state.finalOutput);
+      if (request !== null) return { state: bundle.state, request };
+    }
+    return null;
+  };
+
   const cancelWorkflowControl = async (ctx: ExtensionContext): Promise<WorkflowControlResult> => {
     if (activeRun) {
       const workflowName = activeRun.workflowName;
@@ -1385,17 +1425,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const { state } = widgetSource;
       const request = humanDecisionRequest(state.finalOutput);
       if (state.status === "waiting" && request !== null) {
-        const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
-        await store.cancel(request, "cancelled");
-        const cancellation = await store.readCancellation(request.decisionId);
-        if (cancellation !== null) {
-          await Promise.allSettled(
-            [...telegramDecisionChannels.values()].map(async (channel) =>
-              channel.settle(cancellation),
-            ),
-          );
-        }
-        lastWaitingRunId = null;
+        await cancelHumanDecision(request);
         clearWidgetTimer();
         clearWidget(ctx);
         return {
@@ -1412,6 +1442,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
       return {
         message: `Workflow ${state.workflowName} ${detail}; cleared its widget.`,
         details: { action: "clear", workflowName: state.workflowName, runId: state.runId },
+      };
+    }
+    const recovered = await findOwnedWaitingHumanDecision(ctx);
+    if (recovered !== null) {
+      await cancelHumanDecision(recovered.request);
+      return {
+        message: `Cancelled the pending human decision for workflow ${recovered.state.workflowName}.`,
+        details: {
+          action: "cancel",
+          workflowName: recovered.state.workflowName,
+          runId: recovered.state.runId,
+        },
       };
     }
     return {

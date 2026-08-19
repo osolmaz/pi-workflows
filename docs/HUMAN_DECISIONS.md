@@ -306,7 +306,7 @@ Recovery follows these rules:
 - stale responses are rejected;
 - one accepted response creates one continuation;
 - channel settlement can retry without changing the accepted answer; and
-- cancellation closes pending views and prevents a later answer from continuing the run.
+- cancellation resolves the owned waiting decision from durable state, even after restart, closes pending views, and prevents a later answer from continuing the run.
 
 A decision with no available channel remains waiting and reports the configuration problem. It does not silently continue or choose a default.
 
