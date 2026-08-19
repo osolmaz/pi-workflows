@@ -56,7 +56,7 @@ import {
   type WorkflowAgentStepMessageDetails,
 } from "./step-message.js";
 import { buildWidgetView } from "./widget.js";
-import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.js";
+import { parseWorkflowToolInput, WorkflowToolParameters } from "./workflow-tool.js";
 
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
@@ -1737,7 +1737,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
       "Do not start repeated work without the user's request, and keep monitoring observation-only unless the user authorizes mutations.",
     ].join(" "),
     parameters: WorkflowToolParameters,
-    async execute(toolCallId, params: WorkflowToolInput, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      const params = parseWorkflowToolInput(rawParams);
       let control: WorkflowControlResult;
       switch (params.action) {
         case "list":
