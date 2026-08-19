@@ -255,6 +255,7 @@ describe("built-in monitor workflow", () => {
             repository: "/repo",
             baseBranch: "main",
             merge: false,
+            approval: { audience: "operator", maxReplans: 4 },
           },
         }),
       ),
@@ -266,6 +267,7 @@ describe("built-in monitor workflow", () => {
         repository: "/repo",
         baseBranch: "main",
         merge: false,
+        approval: { audience: "operator", maxReplans: 4 },
       },
     });
     expect(() => prepareMonitorInput(input({ repair: { authorized: false } }))).toThrow(
@@ -280,7 +282,17 @@ describe("built-in monitor workflow", () => {
     expect(() =>
       prepareMonitorInput(input({ repair: { authorized: true, merge: "yes" } })),
     ).toThrow("boolean");
-    expect(Object.keys(monitor.includes ?? {})).toEqual(["initialDesign", "implementation"]);
+    expect(() =>
+      prepareMonitorInput(
+        input({ repair: { authorized: true, approval: { audience: "operator", maxReplans: 0 } } }),
+      ),
+    ).toThrow("maxReplans");
+    expect(Object.keys(monitor.includes ?? {})).toEqual([
+      "initialDesign",
+      "documentation",
+      "approval",
+      "implementation",
+    ]);
   });
 
   it("has no presentation prompt, report acknowledgement, or quiet routing", () => {

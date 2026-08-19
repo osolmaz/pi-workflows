@@ -23,6 +23,7 @@
     "skills",
     "examples",
     "docs",
+    "schemas",
     "plugins/herdr",
     "herdr-plugin.toml",
     "README.md",

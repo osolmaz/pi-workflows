@@ -21,7 +21,9 @@ import type {
 } from "../workflows/types.js";
 import { validateProgressData } from "../workflows/updates.js";
 import autodeviseWorkflow from "./autodevise.workflow.js";
+import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
 import autoimplementWorkflow, { type AutoimplementInput } from "./autoimplement.workflow.js";
+import planApprovalWorkflow, { type PlanApprovalInput } from "./plan-approval.workflow.js";
 
 const MIN_INTERVAL_MINUTES = 1;
 const MAX_INTERVAL_MINUTES = 24 * 60;
@@ -45,6 +47,10 @@ export type MonitorRepairPolicy = {
   repository?: string;
   baseBranch?: string;
   merge?: boolean;
+  approval?: {
+    audience: string;
+    maxReplans: number;
+  };
 };
 
 export type MonitorInput = {
@@ -163,6 +169,22 @@ export function prepareMonitorInput(input: unknown): MonitorConfig {
     if (raw.merge !== undefined && typeof raw.merge !== "boolean") {
       throw new Error("repair merge must be a boolean");
     }
+    let approval: MonitorRepairPolicy["approval"];
+    if (raw.approval !== undefined) {
+      const value = requireRecord(raw.approval, "repair approval");
+      const maxReplans = value.maxReplans ?? 3;
+      if (
+        !Number.isInteger(maxReplans) ||
+        (maxReplans as number) < 1 ||
+        (maxReplans as number) > 20
+      ) {
+        throw new Error("repair approval maxReplans must be from 1 through 20");
+      }
+      approval = {
+        audience: requireBoundedString(value.audience, "repair approval audience", 200),
+        maxReplans: maxReplans as number,
+      };
+    }
     repair = {
       authorized: true,
       ...(raw.scope !== undefined
@@ -176,6 +198,7 @@ export function prepareMonitorInput(input: unknown): MonitorConfig {
         ? { baseBranch: requireBoundedString(raw.baseBranch, "repair base branch", 256) }
         : {}),
       ...(raw.merge !== undefined ? { merge: raw.merge !== false } : {}),
+      ...(approval !== undefined ? { approval } : {}),
     };
   }
   return {
@@ -297,9 +320,44 @@ function repeatedRepairWithoutProgress(context: WorkflowNodeContext): boolean {
   return false;
 }
 
+function currentRepairPlan(outputs: Record<string, unknown>): {
+  plan: unknown;
+  planDigest: string;
+} {
+  const documentation = outputs.documentation as
+    | { exit?: string; output?: { plan?: unknown; planDigest?: string } }
+    | undefined;
+  if (
+    documentation?.exit === "ready" &&
+    documentation.output?.plan !== undefined &&
+    typeof documentation.output.planDigest === "string"
+  ) {
+    return { plan: documentation.output.plan, planDigest: documentation.output.planDigest };
+  }
+  const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
+  if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
+  return { plan: design.output.plan, planDigest: design.output.planDigest };
+}
+
+function latestReplanInstructions(outputs: Record<string, unknown>): string | undefined {
+  const approval = outputs.approval as
+    | { exit?: string; output?: { instructions?: unknown } }
+    | undefined;
+  return approval?.exit === "replan" && typeof approval.output?.instructions === "string"
+    ? approval.output.instructions
+    : undefined;
+}
+
 function repairBlockedReason(outputs: Record<string, unknown>): string {
   const guard = outputs.repairGuard as { reason?: string; route?: string } | undefined;
   if (guard?.route === "blocked" && guard.reason !== undefined) return guard.reason;
+  const replan = outputs.replanGuard as { reason?: string; route?: string } | undefined;
+  if (replan?.route === "blocked" && replan.reason !== undefined) return replan.reason;
+  const approval = outputs.approval as { exit?: string; output?: { status?: string } } | undefined;
+  if (approval?.exit === "stop") return "The operator stopped the proposed repair.";
+  const documentation = outputs.documentation as
+    | { exit?: string; output?: { reason?: string } }
+    | undefined;
   const implementation = outputs.implementation as
     | { exit?: string; output?: { reason?: string } }
     | undefined;
@@ -308,6 +366,7 @@ function repairBlockedReason(outputs: Record<string, unknown>): string {
     | undefined;
   return (
     implementation?.output?.reason ??
+    documentation?.output?.reason ??
     design?.output?.reason ??
     "The repair did not produce new verified progress."
   );
@@ -363,13 +422,60 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
         const config = configFrom(outputs);
         const repair = (outputs.check as MonitorCheck).repair;
         if (repair === undefined) throw new Error("monitor repair details are missing");
+        const prior = outputs.initialDesign as
+          | { exit?: string; output?: { plan?: unknown } }
+          | undefined;
+        const instructions = latestReplanInstructions(outputs);
         return {
           problem: repair.problem,
           ...(config.repair?.scope !== undefined ? { scope: config.repair.scope } : {}),
           ...(config.repair?.constraints !== undefined
             ? { constraints: config.repair.constraints }
             : {}),
-          newEvidence: repair.evidence,
+          ...(prior?.exit === "ready" && prior.output?.plan !== undefined
+            ? { previousPlan: prior.output.plan }
+            : {}),
+          newEvidence:
+            instructions === undefined
+              ? repair.evidence
+              : { observedEvidence: repair.evidence, operatorInstructions: instructions },
+        };
+      },
+    }),
+    documentation: includeWorkflow(autodocWorkflow, {
+      input: ({ outputs }): AutodocInput => {
+        const config = configFrom(outputs);
+        const repair = (outputs.check as MonitorCheck).repair;
+        const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
+        if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
+        if (repair === undefined) throw new Error("monitor repair details are missing");
+        return {
+          task: repair.problem,
+          plan: design.output.plan,
+          ...(config.repair?.repository !== undefined
+            ? { repository: config.repair.repository }
+            : {}),
+          evidence: latestReplanInstructions(outputs) ?? repair.evidence,
+        };
+      },
+    }),
+    approval: includeWorkflow(planApprovalWorkflow, {
+      input: ({ outputs, state }): PlanApprovalInput => {
+        const config = configFrom(outputs);
+        const repair = (outputs.check as MonitorCheck).repair;
+        const approval = config.repair?.approval;
+        if (repair === undefined || approval === undefined) {
+          throw new Error("monitor approval was entered without an approval policy");
+        }
+        const current = currentRepairPlan(outputs);
+        const revision =
+          state.steps.filter((step) => step.nodeId === "approval/approve").length + 1;
+        return {
+          task: repair.problem,
+          plan: current.plan,
+          planDigest: current.planDigest,
+          audience: approval.audience,
+          revision,
         };
       },
     }),
@@ -379,12 +485,11 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
       input: ({ outputs }) => {
         const config = configFrom(outputs);
         const repair = (outputs.check as MonitorCheck).repair;
-        const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
-        if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
+        const documented = currentRepairPlan(outputs);
         if (repair === undefined) throw new Error("monitor repair details are missing");
         const request: AutoimplementInput = {
           task: repair.problem,
-          plan: design.output.plan,
+          plan: documented.plan,
           ...(config.repair?.scope !== undefined ? { scope: config.repair.scope } : {}),
           ...(config.repair?.constraints !== undefined
             ? { constraints: config.repair.constraints }
@@ -481,6 +586,25 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
             }
           : { route: "repair", reason: "The issue is new or has changed evidence." },
     }),
+    approvalRoute: compute({
+      run: ({ outputs }) => ({
+        route: configFrom(outputs).repair?.approval === undefined ? "implement" : "approve",
+      }),
+    }),
+    replanGuard: compute({
+      run: (context) => {
+        const limit = configFrom(context.outputs).repair?.approval?.maxReplans ?? 3;
+        const replans = context.state.steps.filter(
+          (step) => step.nodeId === "approval/replan",
+        ).length;
+        return replans > limit
+          ? {
+              route: "blocked",
+              reason: `Monitor repair reached the ${limit}-replan safety limit.`,
+            }
+          : { route: "design", replans, limit };
+      },
+    }),
     repairBlocked: compute({
       run: (context) => ({
         reason: repairBlockedReason(context.outputs),
@@ -568,8 +692,21 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
       from: "repairGuard",
       switch: { on: "$.route", cases: { repair: "initialDesign", blocked: "repairBlocked" } },
     },
-    { from: "initialDesign.ready", to: "implementation" },
+    { from: "initialDesign.ready", to: "documentation" },
     { from: "initialDesign.blocked", to: "repairBlocked" },
+    { from: "documentation.ready", to: "approvalRoute" },
+    { from: "documentation.blocked", to: "repairBlocked" },
+    {
+      from: "approvalRoute",
+      switch: { on: "$.route", cases: { approve: "approval", implement: "implementation" } },
+    },
+    { from: "approval.continue", to: "implementation" },
+    { from: "approval.stop", to: "repairBlocked" },
+    { from: "approval.replan", to: "replanGuard" },
+    {
+      from: "replanGuard",
+      switch: { on: "$.route", cases: { design: "initialDesign", blocked: "repairBlocked" } },
+    },
     { from: "implementation.completed", to: "check" },
     { from: "implementation.blocked", to: "repairBlocked" },
     { from: "repairBlocked", to: "repairReport" },

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-receipt-v1.schema.json",
+  "title": "Pi Workflows redacted human decision receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "decisionId", "requestDigest", "response", "acceptedAt", "answerDigest"],
+  "properties": {
+    "schema": { "const": "pi-workflows.human-decision-receipt.v1" },
+    "decisionId": { "type": "string" },
+    "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["choice"],
+      "properties": {
+        "choice": { "type": "string" },
+        "input": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "acceptedAt": { "type": "string", "format": "date-time" },
+    "answerDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

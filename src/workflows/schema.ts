@@ -134,6 +134,23 @@ export function assertValidCheckpointNode(
     fail(`node ${nodeId} summary must be a string`);
   }
   assertOptionalFunction(node.run, `node ${nodeId} run`);
+  if (node.humanDecision !== undefined) {
+    assertRecord(node.humanDecision, `node ${nodeId} humanDecision`);
+    if (
+      (typeof node.humanDecision.audience !== "string" ||
+        node.humanDecision.audience.length === 0) &&
+      typeof node.humanDecision.audience !== "function"
+    ) {
+      fail(`node ${nodeId} humanDecision audience must be a non-empty string or function`);
+    }
+    assertRecord(node.humanDecision.choices, `node ${nodeId} humanDecision choices`);
+    if (Object.keys(node.humanDecision.choices).length === 0) {
+      fail(`node ${nodeId} humanDecision choices must not be empty`);
+    }
+    if (typeof node.humanDecision.request !== "function") {
+      fail(`node ${nodeId} humanDecision request must be a function`);
+    }
+  }
   assertCommonNodeFields(node, nodeId);
 }
 

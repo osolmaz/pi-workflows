@@ -12,14 +12,26 @@ The canonical behavior and public contracts are in [Human decisions](../HUMAN_DE
 
 ## Outcome
 
-Workflow authors get two reusable levels:
+Workflow authors get three reusable levels:
 
 1. `humanDecision()` adds a custom typed decision gate to any graph.
 2. The included `plan-approval` workflow provides standard `continue`, `stop`, and `replan` exits.
+3. The standalone `autodoc` workflow records selected plans and is composed into autoimplement and monitor repair.
 
 Pi and Telegram implement one channel interface. Workflows address a named audience and contain no transport details. The first valid human response wins, stale and conflicting responses fail, and crash recovery creates one continuation.
 
 ## Scope
+
+### Planning workflow contracts
+
+- Add a standalone typed `autodoc` built-in with `ready` and `blocked` exits.
+- Make autodoc locate an already selected plan, update or adopt canonical documents, run documentation checks, and return a documented-plan record.
+- Keep autodoc separate from solution selection and implementation.
+- Make autoimplement locate and record an existing plan from input, conversation context, or referenced documents.
+- Block autoimplement when no clear plan exists.
+- Skip autodoc when canonical documents are current.
+- Route every evidence-driven revision through `autodevise`, then `autodoc`, before implementation resumes.
+- Never run initial autodevise only because the structured plan input is absent.
 
 ### Public authoring API
 
@@ -49,7 +61,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Add a Pi channel using documented TUI APIs.
 - Add a Telegram channel using the Bot API and private profiles.
 - Add named audience resolution and private channel configuration.
-- Add a setup command that writes private configuration with mode `600` and verifies a Telegram bot without printing its token.
+- Add a setup command that writes private configuration with mode `600`, references an existing mode-`0600` token file, and verifies the Telegram bot without reading the token into a prompt or printing it.
 - Keep Telegram optional. Pi Workflows must start and run normal workflows without Telegram configuration.
 - Use one leased long-poll owner per Telegram profile across active Pi processes.
 
@@ -109,6 +121,9 @@ Add versioned JSON schemas for:
 - `human-decision-delivery-v1`;
 - `human-decision-answer-attempt-v1`;
 - `human-decision-accepted-v1`;
+- `human-decision-cancellation-v1`;
+- `human-decision-resolution-v1`;
+- `human-decision-receipt-v1` for redacted continuation state;
 - `human-decision-settlement-v1`; and
 - `human-decision-continuation-v1`.
 
@@ -121,7 +136,9 @@ decisions/<decision-id>/
   request.json
   deliveries/<channel>/<attempt-id>.json
   answers/<attempt-id>.json
+  resolution.json
   accepted.json
+  cancelled.json
   settlements/<channel>/<attempt-id>.json
   continuation.json
 ```
@@ -180,7 +197,7 @@ Test crashes before acceptance, after acceptance, during continuation creation, 
 ### Telegram channel
 
 - Add private profile and credential-reference parsing.
-- Add a configuration command with hidden token input and `getMe` verification.
+- Add a configuration command that accepts a private token-file reference and performs `getMe` verification without copying or displaying the token.
 - Add the shared long-poll lease and durable update offset.
 - Render choice buttons with opaque callback IDs.
 - Implement the bound `ForceReply` text flow.
@@ -189,6 +206,16 @@ Test crashes before acceptance, after acceptance, during continuation creation, 
 - Edit confirmed messages after a decision settles.
 
 Use a fake Bot API in all automated tests. Do not require a real token or network access.
+
+### Autodoc and autoimplement
+
+- Define the typed standalone `autodoc` built-in workflow.
+- Add a durable documented-plan result shared by autodoc, autoimplement, and monitor.
+- Replace autoimplement's missing-input redesign route with existing-plan discovery.
+- Block when discovery finds no clear plan.
+- Skip autodoc for current canonical documents.
+- Route undocumented and revised plans through autodoc.
+- Keep autodevise only on evidence-driven redesign edges.
 
 ### Reusable plan approval
 
@@ -206,8 +233,15 @@ Use a fake Bot API in all automated tests. Do not require a real token or networ
 - Document setup, authoring, cancellation, recovery, Telegram delivery ambiguity, and the no-service limitation.
 - Update the plan with meaningful implementation departures.
 
+## Implementation note
+
+The setup command uses an existing mode-`0600` token file instead of collecting and copying a token. This keeps credential ownership with the existing private store and follows the no-copy credential boundary while still verifying the bot with `getMe`.
+
 ## Acceptance criteria
 
+- Autodoc runs alone, adopts current documents, updates stale documents, and blocks without a selected plan.
+- Autoimplement uses the plan already present in context or documentation and never devises merely because `input.plan` is absent.
+- Every revised plan is documented before implementation resumes.
 - A TypeScript workflow can define custom human choices and route them exhaustively.
 - A text choice returns the exact submitted text.
 - The engine and run snapshot still identify the node as a checkpoint.

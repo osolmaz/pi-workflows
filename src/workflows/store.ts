@@ -1429,6 +1429,14 @@ function snapshotNode(
   if (node.nodeType === "checkpoint" && node.summary !== undefined) {
     common.summary = node.summary;
   }
+  if (node.nodeType === "checkpoint" && node.humanDecision !== undefined) {
+    common.humanDecision = {
+      audience:
+        typeof node.humanDecision.audience === "string" ? node.humanDecision.audience : "<dynamic>",
+      ...(typeof node.humanDecision.audience === "function" ? { dynamicAudience: true } : {}),
+      choices: structuredClone(node.humanDecision.choices),
+    };
+  }
   if (node.nodeType === "action") {
     common.actionExecution = "exec" in node ? "shell" : "function";
   }

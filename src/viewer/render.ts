@@ -132,10 +132,35 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
     suffix = ansi.cyan(` running ${formatDuration(now.getTime() - startedAt)}${detail}`);
   } else if (state.waitingOn === nodeId) {
     glyph = ansi.yellow("⏸");
-    suffix = ansi.yellow(" waiting");
+    const human = bundle.snapshot?.nodes[nodeId]?.humanDecision;
+    const requestAudience =
+      state.finalOutput !== null &&
+      typeof state.finalOutput === "object" &&
+      (state.finalOutput as { schema?: unknown }).schema ===
+        "pi-workflows.human-decision-request.v1" &&
+      typeof (state.finalOutput as { audience?: unknown }).audience === "string"
+        ? (state.finalOutput as { audience: string }).audience
+        : human?.audience;
+    suffix = ansi.yellow(
+      human === undefined
+        ? " waiting"
+        : ` waiting for human · ${sanitizeText(requestAudience ?? "operator")} · ${Object.values(
+            human.choices,
+          )
+            .map((choice) => sanitizeText(choice.label))
+            .join(" / ")}`,
+    );
   } else if (result) {
     glyph = result.outcome === "ok" ? ansi.green("✓") : ansi.red("✗");
-    suffix = ansi.dim(` ${formatDuration(result.durationMs)}`);
+    const human = bundle.snapshot?.nodes[nodeId]?.humanDecision;
+    const accepted = state.humanDecision;
+    const selected =
+      human !== undefined && accepted !== undefined
+        ? human.choices[accepted.response.choice]
+        : undefined;
+    suffix = ansi.dim(
+      ` ${formatDuration(result.durationMs)}${selected === undefined ? "" : ` · human: ${sanitizeText(selected.label)}`}`,
+    );
   }
   return fitWidth(`  ${glyph} ${nodeId} ${ansi.dim(`[${nodeType}]`)}${suffix}`, width);
 }

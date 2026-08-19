@@ -271,6 +271,31 @@ checkpoint({
 });
 ```
 
+A typed human decision is an authoring layer over checkpoint:
+
+```typescript
+const choices = defineHumanChoices({
+  continue: choice({ label: "Continue" }),
+  stop: choice({ label: "Stop" }),
+  replan: choice({
+    label: "Replan",
+    input: textInput({ name: "instructions", prompt: "What should change?" }),
+  }),
+});
+
+humanDecision({
+  audience: "operator",
+  choices,
+  request: ({ outputs }) => ({ title: "Approve plan", body: outputs.plan }),
+});
+```
+
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The first valid verified human answer wins. A continuation preserves the original workflow input and exposes the accepted answer as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices.
+
+The model-facing workflow tool cannot answer a protected human decision. Pi interactive UI and configured external channels use a host-owned answer path. Ordinary checkpoints keep the existing `/workflow answer` behavior.
+
+See [Human decisions](HUMAN_DECISIONS.md) for channels, recovery, persistence, and plan approval.
+
 ### decision
 
 `decision` is sugar over `agent` for constrained choices. It builds the prompt
@@ -364,7 +389,7 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `start` with a workflow name or path and structured input.
 - `status` for the active run or a supplied run ID.
 - `pause`, `resume`, and `cancel` for the active run.
-- `answer` with checkpoint input and an optional run ID.
+- `answer` with ordinary checkpoint input and an optional run ID. Protected `humanDecision()` gates reject this model-facing action.
 - `update` for a non-completing update from the current agent attempt.
 - `submit` for the current workflow step contract.
 
@@ -377,7 +402,9 @@ runs.
 
 ### Built-in planning and implementation
 
-The built-in `autodevise` workflow selects a practical in-scope solution and writes a detailed plan. The built-in `autoimplement` workflow implements a supplied plan and returns to its internal `autodevise` mount when new evidence invalidates that plan.
+The built-in `autodevise` workflow selects a practical in-scope solution and writes a detailed plan. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists, runs autodoc only when documentation is missing or stale, and returns to `autodevise` followed by `autodoc` when later evidence invalidates the plan.
+
+The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autodevise, documents the revised plan, and asks again through a new plan digest.
 
 Autoimplement writes and runs the exact Pi Reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
 
@@ -397,7 +424,7 @@ one looping workflow run. Its input is:
 }
 ```
 
-The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair can route through outer `autodevise`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked.
+The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through outer `autodevise`, `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked. Add `repair.approval` with a named audience and bounded replan limit only when the operator wants a human decision before implementation.
 
 `everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:

@@ -17,6 +17,11 @@ import {
   WorkflowSourceChangedError,
 } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
+import {
+  HumanDecisionStore,
+  createHumanDecisionRequest,
+  validateHumanDecisionResponse,
+} from "./human-decision.js";
 import { extractJsonValue } from "./json.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
 import {
@@ -27,6 +32,7 @@ import {
   readRunBundle,
 } from "./store.js";
 import type {
+  AcceptedHumanDecision,
   AgentNodeDefinition,
   AgentStepExecutor,
   ActionNodeDefinition,
@@ -43,6 +49,7 @@ import type {
   WorkflowNodeOutcome,
   WorkflowNodeResult,
   WorkflowNotificationSink,
+  HumanDecisionRequest,
   WorkflowRunResult,
   WorkflowRunState,
   WorkflowSource,
@@ -366,7 +373,12 @@ export class WorkflowEngine {
     workflow: WorkflowDefinition,
     parentRunId: string,
     input: unknown,
-    options: { workflowSource?: WorkflowSource; runId?: string; force?: boolean } = {},
+    options: {
+      workflowSource?: WorkflowSource;
+      runId?: string;
+      force?: boolean;
+      humanDecision?: AcceptedHumanDecision;
+    } = {},
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
@@ -387,8 +399,30 @@ export class WorkflowEngine {
       throw new WorkflowSourceChangedError(parentRunId);
     }
 
-    const suppliedInput = input === undefined ? null : input;
-    const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
+    const waitingNodeId = parent.state.waitingOn;
+    const waitingNode = workflow.nodes[waitingNodeId];
+    const humanContract =
+      waitingNode?.nodeType === "checkpoint" ? waitingNode.humanDecision : undefined;
+    let acceptedResponse: unknown;
+    let normalizedInput: unknown;
+    if (humanContract !== undefined) {
+      if (options.humanDecision === undefined) {
+        throw new Error(`Checkpoint ${waitingNodeId} requires an accepted verified human decision`);
+      }
+      const request = parent.state.finalOutput as HumanDecisionRequest;
+      if (
+        request?.schema !== "pi-workflows.human-decision-request.v1" ||
+        request.decisionId !== options.humanDecision.decisionId ||
+        request.requestDigest !== options.humanDecision.requestDigest
+      ) {
+        throw new Error("Accepted human decision does not match the waiting request");
+      }
+      acceptedResponse = validateHumanDecisionResponse(request, options.humanDecision.response);
+      normalizedInput = await resolveArtifacts(parent.state.input, parent.runDir);
+    } else {
+      const suppliedInput = input === undefined ? null : input;
+      normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
+    }
     assertJsonSerializable(normalizedInput, "Workflow run input");
     if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
       throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
@@ -415,6 +449,29 @@ export class WorkflowEngine {
       parent.state.steps,
       parent.runDir,
     )) as WorkflowRunState["steps"];
+    if (humanContract !== undefined && options.humanDecision !== undefined) {
+      state.humanDecision = {
+        schema: "pi-workflows.human-decision-receipt.v1",
+        decisionId: options.humanDecision.decisionId,
+        requestDigest: options.humanDecision.requestDigest,
+        response: options.humanDecision.response,
+        acceptedAt: options.humanDecision.acceptedAt,
+        answerDigest: options.humanDecision.answerDigest,
+      };
+      state.outputs[waitingNodeId] = acceptedResponse;
+      const priorResult = state.results[waitingNodeId];
+      if (priorResult === undefined) {
+        throw new Error(`Waiting human decision result is missing for ${waitingNodeId}`);
+      }
+      state.results[waitingNodeId] = { ...priorResult, output: acceptedResponse };
+      const stepIndex = state.steps.findLastIndex((step) => step.nodeId === waitingNodeId);
+      if (stepIndex < 0)
+        throw new Error(`Waiting human decision step is missing for ${waitingNodeId}`);
+      const priorStep = state.steps[stepIndex];
+      if (priorStep === undefined)
+        throw new Error("Waiting human decision step became unavailable");
+      state.steps[stepIndex] = { ...priorStep, output: acceptedResponse };
+    }
     state.carriedStepCount = state.steps.length;
 
     const runDir = await this.store.initializeRunBundle(workflow, state);
@@ -1043,7 +1100,12 @@ export class WorkflowEngine {
       case "action":
         return await this.runActionNode(node, context, nodeId, attemptId, signal, meta);
       case "checkpoint":
-        return await runCheckpointNode(node, context);
+        return await runCheckpointNode(node, context, {
+          store: this.store,
+          workflowName: workflow.name,
+          nodeId,
+          attemptId,
+        });
     }
   }
 
@@ -1220,7 +1282,30 @@ export class WorkflowEngine {
 async function runCheckpointNode(
   node: CheckpointNodeDefinition,
   context: WorkflowNodeContext,
+  execution: {
+    store: WorkflowRunStore;
+    workflowName: string;
+    nodeId: string;
+    attemptId: string;
+  },
 ): Promise<NodeExecution> {
+  if (node.humanDecision !== undefined) {
+    const prompt = await node.humanDecision.request(context);
+    const audience =
+      typeof node.humanDecision.audience === "function"
+        ? await node.humanDecision.audience(context)
+        : node.humanDecision.audience;
+    const request = createHumanDecisionRequest({
+      runId: context.state.runId,
+      workflowName: execution.workflowName,
+      nodeId: execution.nodeId,
+      attemptId: execution.attemptId,
+      contract: { audience, choices: node.humanDecision.choices },
+      prompt,
+    });
+    await new HumanDecisionStore(execution.store.outputRoot).createRequest(request);
+    return { output: request, promptText: null };
+  }
   const output = node.run ? await node.run(context) : { summary: node.summary ?? "checkpoint" };
   return { output, promptText: null };
 }

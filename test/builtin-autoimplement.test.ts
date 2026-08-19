@@ -318,7 +318,7 @@ describe("built-in autoimplement", () => {
       },
     });
     expect(await adopt.run(makeContext({ outputs: { redesign: ready(true) } }))).toMatchObject({
-      route: "implement",
+      route: "document",
       changed: true,
     });
     expect(await adopt.run(makeContext({ outputs: { redesign: ready(false) } }))).toMatchObject({

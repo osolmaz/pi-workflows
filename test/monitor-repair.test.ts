@@ -74,6 +74,14 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
         boundaries: [],
       },
     })
+    .respond("documentation/inspectDocumentation", {
+      output: {
+        route: "current",
+        files: ["docs/spec.md", "docs/plans/plan.md"],
+        reason: "The repair plan is documented.",
+        evidence: "checked",
+      },
+    })
     .respond("implementation/implement", {
       output: {
         status: "implemented",
@@ -194,7 +202,11 @@ describe("monitor automatic repair", () => {
       "The repair is verified.",
     ]);
     expect(state.workflowSources?.map((item) => item.mountPath.join("/"))).toEqual([
+      "approval",
+      "documentation",
       "implementation",
+      "implementation/approval",
+      "implementation/documentation",
       "implementation/redesign",
       "initialDesign",
     ]);

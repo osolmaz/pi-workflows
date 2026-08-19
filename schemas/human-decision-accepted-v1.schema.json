@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-accepted-v1.schema.json",
+  "title": "Pi Workflows accepted human decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "decisionId",
+    "requestDigest",
+    "response",
+    "source",
+    "idempotencyKey",
+    "acceptedAt",
+    "answerDigest"
+  ],
+  "properties": {
+    "schema": { "const": "pi-workflows.human-decision-accepted.v1" },
+    "decisionId": { "type": "string" },
+    "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["choice"],
+      "properties": {
+        "choice": { "type": "string" },
+        "input": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "actorId", "eventId"],
+      "properties": {
+        "channel": { "type": "string" },
+        "actorId": { "type": "string" },
+        "eventId": { "type": "string" }
+      }
+    },
+    "idempotencyKey": { "type": "string" },
+    "acceptedAt": { "type": "string", "format": "date-time" },
+    "answerDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

@@ -335,11 +335,17 @@ example set. Copy any of them into `.pi/workflows/` to use them:
 - `autodevise` turns the current problem into a chosen practical solution and
   a detailed implementation plan, using the ideal end state as guidance rather
   than an out-of-scope requirement.
-- `autoimplement` implements and verifies a plan, writes and runs the exact Pi
-  Reviewer command, tracks P0 through P2, handles PR comments and CI, and
+- `autoimplement` finds a clear existing plan, documents it when needed,
+  implements and verifies it, writes and runs the exact Pi Reviewer command,
+  tracks P0 through P2, handles PR comments and CI, and
   finalizes the PR. P0 and P1 fixes require another review. P2-only work is
   verified without another reviewer round. A five-minute CI wait routes to
-  additional useful local testing.
+  additional useful local testing. New evidence can route through autodevise
+  and autodoc before implementation resumes.
+- `human-decision` shows a reusable verified-human gate with plain choices and
+  exact replan text.
+- `approved-plan` composes autodevise, autodoc, and the reusable plan-approval
+  workflow without copying their internal nodes.
 - `autoresearch` runs an iterative feature-search loop in the style of
   [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup
   creates a frozen evaluation harness, one editable feature file, and a

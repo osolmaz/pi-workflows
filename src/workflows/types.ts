@@ -177,6 +177,134 @@ export type ShellActionNodeDefinition = WorkflowNodeCommon & {
 
 export type ActionNodeDefinition = FunctionActionNodeDefinition | ShellActionNodeDefinition;
 
+export type HumanDecisionTextInput = {
+  kind: "text";
+  name: string;
+  prompt: string;
+  minLength: number;
+  maxLength: number;
+};
+
+export type HumanDecisionChoice = {
+  label: string;
+  input?: HumanDecisionTextInput;
+};
+
+export type HumanDecisionChoiceMap = Record<string, HumanDecisionChoice>;
+
+export type HumanDecisionPrompt = {
+  title: string;
+  body: unknown;
+  /** Optional absolute expiry. An expired request cannot accept an answer. */
+  expiresAt?: string;
+};
+
+export type HumanDecisionAudience =
+  | string
+  | ((context: WorkflowNodeContext) => MaybePromise<string>);
+
+export type HumanDecisionNodeContract = {
+  audience: HumanDecisionAudience;
+  choices: HumanDecisionChoiceMap;
+  request: (context: WorkflowNodeContext) => MaybePromise<HumanDecisionPrompt>;
+};
+
+export type HumanDecisionRequest = {
+  schema: "pi-workflows.human-decision-request.v1";
+  decisionId: string;
+  requestDigest: string;
+  runId: string;
+  workflowName: string;
+  nodeId: string;
+  attemptId: string;
+  audience: string;
+  title: string;
+  body: unknown;
+  choices: HumanDecisionChoiceMap;
+  createdAt: string;
+  expiresAt?: string;
+};
+
+export type HumanDecisionResponse = {
+  choice: string;
+  input?: Record<string, string>;
+};
+
+export type HumanDecisionAnswerSource = {
+  channel: string;
+  actorId: string;
+  eventId: string;
+};
+
+export type HumanDecisionSubmission = HumanDecisionResponse & {
+  decisionId: string;
+  requestDigest: string;
+  source: HumanDecisionAnswerSource;
+  idempotencyKey: string;
+};
+
+export type AcceptedHumanDecision = {
+  schema: "pi-workflows.human-decision-accepted.v1";
+  decisionId: string;
+  requestDigest: string;
+  response: HumanDecisionResponse;
+  source: HumanDecisionAnswerSource;
+  idempotencyKey: string;
+  acceptedAt: string;
+  answerDigest: string;
+};
+
+export type HumanDecisionReceipt = {
+  schema: "pi-workflows.human-decision-receipt.v1";
+  decisionId: string;
+  requestDigest: string;
+  response: HumanDecisionResponse;
+  acceptedAt: string;
+  answerDigest: string;
+};
+
+export type HumanDecisionDeliveryRecord = {
+  schema: "pi-workflows.human-decision-delivery.v1";
+  attemptId: string;
+  decisionId: string;
+  requestDigest: string;
+  channel: string;
+  state: "intent" | "confirmed" | "failed" | "unknown";
+  createdAt: string;
+  finishedAt?: string;
+  messageCount?: number;
+  errorCode?: string;
+};
+
+export type HumanDecisionSettlementRecord = {
+  schema: "pi-workflows.human-decision-settlement.v1";
+  attemptId: string;
+  decisionId: string;
+  requestDigest: string;
+  channel: string;
+  state: "confirmed" | "failed";
+  createdAt: string;
+  finishedAt: string;
+  errorCode?: string;
+};
+
+export type HumanDecisionCancellationRecord = {
+  schema: "pi-workflows.human-decision-cancellation.v1";
+  decisionId: string;
+  requestDigest: string;
+  cancelledAt: string;
+  reason: "cancelled" | "expired";
+};
+
+export type HumanDecisionContinuationRecord = {
+  schema: "pi-workflows.human-decision-continuation.v1";
+  decisionId: string;
+  requestDigest: string;
+  parentRunId: string;
+  runId: string;
+  createdAt: string;
+};
+
 /**
  * A pause point. The run terminates with status `waiting` so a human (or an
  * external trigger) can decide how to continue. The optional `run` callback
@@ -186,6 +314,8 @@ export type CheckpointNodeDefinition = WorkflowNodeCommon & {
   nodeType: "checkpoint";
   summary?: string;
   run?: (context: WorkflowNodeContext) => MaybePromise<unknown>;
+  /** Typed verified-human request. Still executes as a checkpoint node. */
+  humanDecision?: HumanDecisionNodeContract;
 };
 
 export type WorkflowNodeDefinition =
@@ -446,6 +576,8 @@ export type WorkflowRunState = {
   currentAttemptId?: string;
   currentNodeStartedAt?: string;
   statusDetail?: string;
+  /** Redacted verified-human receipt carried by a continuation run. */
+  humanDecision?: HumanDecisionReceipt;
   /** True while the run is held at a step boundary by a pause request. */
   paused?: boolean;
   waitingOn?: string;
@@ -463,6 +595,11 @@ export type WorkflowNodeSnapshot = {
   mountPath?: string[];
   localNodeId?: string;
   includeTransition?: "entry" | "exit";
+  humanDecision?: {
+    audience: string;
+    dynamicAudience?: boolean;
+    choices: HumanDecisionChoiceMap;
+  };
 };
 
 export type WorkflowDefinitionSnapshot = {

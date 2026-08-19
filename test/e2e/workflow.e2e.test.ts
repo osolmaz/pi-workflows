@@ -137,6 +137,33 @@ export default defineWorkflow({
 });
 `;
 
+const HUMAN_DECISION_E2E_WORKFLOW = `import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge } from "@osolmaz/pi-workflows";
+
+const choices = defineHumanChoices({
+  continue: choice({ label: "Continue" }),
+  stop: choice({ label: "Stop" }),
+});
+
+export default defineWorkflow({
+  name: "human-decision-e2e",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({
+      audience: "operator",
+      choices,
+      request: ({ input }) => ({ title: "Approve", body: input }),
+    }),
+    continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+    stopped: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+  },
+  edges: [humanDecisionEdge({
+    from: "approve",
+    choices,
+    cases: { continue: "continued", stop: "stopped" },
+  })],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -483,6 +510,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "e2e.workflow.ts"),
       E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "human-decision-e2e.workflow.ts"),
+      HUMAN_DECISION_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -932,6 +964,49 @@ describe.sequential("pi-workflows end to end", () => {
     await expect(fs.stat(timeoutMarker)).rejects.toThrow();
   }, 90_000);
 
+  it("continues a protected human decision through a real Pi command without Telegram", async () => {
+    pi.send({
+      id: "human-decision-1",
+      type: "prompt",
+      message: '/workflow human-decision-e2e --input-json {"original":true}',
+    });
+    const waiting = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "human-decision-e2e" && candidate.status === "waiting",
+      () => `${pi.stderr()}\n${pi.stdoutLines.join("\n")}`,
+    );
+    expect(waiting.state.waitingOn).toBe("approve");
+    expect(waiting.state.finalOutput).toMatchObject({
+      schema: "pi-workflows.human-decision-request.v1",
+      audience: "operator",
+    });
+
+    pi.send({
+      id: "human-decision-2",
+      type: "prompt",
+      message: `/workflow answer ${waiting.state.runId} {"choice":"continue"}`,
+    });
+    const continued = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "human-decision-e2e" &&
+        candidate.parentRunId === waiting.state.runId &&
+        candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.join("\n")}`,
+    );
+    expect(continued.state.input).toEqual({ original: true });
+    expect(continued.state.finalOutput).toEqual({
+      input: { original: true },
+      answer: { choice: "continue" },
+    });
+    expect(continued.state.humanDecision).toMatchObject({
+      schema: "pi-workflows.human-decision-receipt.v1",
+      response: { choice: "continue" },
+    });
+    expect(continued.state.humanDecision).not.toHaveProperty("source");
+  });
+
   it("starts the built-in monitor from the model-facing workflow tool", async () => {
     pi.send({ id: "monitor-1", type: "prompt", message: "Start the built-in monitor now." });
 
@@ -945,7 +1020,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "4" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "5" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

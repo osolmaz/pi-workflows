@@ -294,6 +294,43 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
     }
 }
 
+fn human_decision_detail(state: &RunState, node_id: &str, node: Option<&Value>) -> Option<String> {
+    let human = node?.get("humanDecision")?;
+    let choices = human.get("choices")?.as_object()?;
+    let selected = state
+        .human_decision
+        .as_ref()
+        .and_then(|decision| decision.pointer("/response/choice"))
+        .and_then(Value::as_str)
+        .and_then(|choice| choices.get(choice))
+        .and_then(|choice| choice.get("label"))
+        .and_then(Value::as_str);
+    if let Some(label) = selected {
+        return Some(format!("human: {}", sanitize_text(label)));
+    }
+    if state.waiting_on.as_deref() != Some(node_id) {
+        return None;
+    }
+    let audience = state
+        .final_output
+        .as_ref()
+        .and_then(|request| request.get("audience"))
+        .and_then(Value::as_str)
+        .or_else(|| human.get("audience").and_then(Value::as_str))
+        .unwrap_or("operator");
+    let labels = choices
+        .values()
+        .filter_map(|choice| choice.get("label").and_then(Value::as_str))
+        .map(sanitize_text)
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Some(format!(
+        "human decision · {} · {}",
+        sanitize_text(audience),
+        labels
+    ))
+}
+
 struct RenderedCell {
     cell: GraphCell,
     text: String,
@@ -383,21 +420,23 @@ fn render_cell_text(
     } else {
         "—".to_string()
     };
-    let detail = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
-        state
-            .status_detail
-            .as_deref()
+    let detail = human_decision_detail(state, node_id, node).unwrap_or_else(|| {
+        if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+            state
+                .status_detail
+                .as_deref()
+                .map(sanitize_text)
+                .unwrap_or_default()
+        } else {
+            node.and_then(|node| {
+                node.get("statusDetail")
+                    .or_else(|| node.get("summary"))
+                    .and_then(Value::as_str)
+            })
             .map(sanitize_text)
             .unwrap_or_default()
-    } else {
-        node.and_then(|node| {
-            node.get("statusDetail")
-                .or_else(|| node.get("summary"))
-                .and_then(Value::as_str)
-        })
-        .map(sanitize_text)
-        .unwrap_or_default()
-    };
+        }
+    });
     let mut branch_lines: Vec<String> = labels
         .into_iter()
         .map(|label| format!("◇ {label}"))

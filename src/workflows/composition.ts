@@ -477,7 +477,9 @@ function wrapNode(
         message: (context) => (node as NotifyNodeDefinition).message(project(context)),
         ...(node.kind !== undefined ? { kind: node.kind } : {}),
       };
-    case "checkpoint":
+    case "checkpoint": {
+      const human = node.humanDecision;
+      const audience = human?.audience;
       return {
         ...common,
         nodeType: "checkpoint",
@@ -485,7 +487,20 @@ function wrapNode(
         ...(node.run !== undefined
           ? { run: (context: WorkflowNodeContext) => node.run?.(project(context)) }
           : {}),
+        ...(human !== undefined
+          ? {
+              humanDecision: {
+                audience:
+                  typeof audience === "function"
+                    ? (context: WorkflowNodeContext) => audience(project(context))
+                    : audience!,
+                choices: human.choices,
+                request: (context: WorkflowNodeContext) => human.request(project(context)),
+              },
+            }
+          : {}),
       } as CheckpointNodeDefinition;
+    }
     case "action":
       if ("exec" in node) {
         const shell = node as ShellActionNodeDefinition;

@@ -13,6 +13,11 @@ import {
   isClaimLostError,
   TimeoutError,
 } from "../workflows/errors.js";
+import {
+  HumanDecisionStore,
+  createHumanDecisionAttemptId,
+  validateHumanDecisionResponse,
+} from "../workflows/human-decision.js";
 import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
 import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
 import { appendProgressHistory, progressRecordsFromTrace } from "../workflows/progress.js";
@@ -25,7 +30,10 @@ import {
   createDefinitionSnapshot,
 } from "../workflows/store.js";
 import type {
+  AcceptedHumanDecision,
   AgentStepContract,
+  HumanDecisionRequest,
+  HumanDecisionSubmission,
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowRunResult,
@@ -37,6 +45,17 @@ import {
   parseControllerArgs,
   type PiChildWorkflowStarter,
 } from "./controller-host.js";
+import {
+  PiDecisionChannel,
+  TelegramDecisionChannel,
+  audienceChannels,
+  createTelegramChannels,
+  loadDecisionChannelConfig,
+  verifyTelegramTokenFile,
+  writeDecisionChannelProfile,
+  type DecisionChannelConfig,
+  type HumanDecisionChannelAnswer,
+} from "./decision-channels.js";
 import { ConversationStepExecutor } from "./executor.js";
 import {
   HerdrWorkflowViewer,
@@ -57,6 +76,26 @@ import {
 } from "./step-message.js";
 import { buildWidgetView } from "./widget.js";
 import { WorkflowToolParameters, type WorkflowToolInput } from "./workflow-tool.js";
+
+export {
+  PiDecisionChannel,
+  TelegramDecisionChannel,
+  audienceChannels,
+  createTelegramChannels,
+  decisionConfigDir,
+  loadDecisionChannelConfig,
+  verifyTelegramTokenFile,
+  writeDecisionChannelProfile,
+  type DecisionChannelConfig,
+  type DecisionCredentialConfig,
+  type HumanDecisionChannel,
+  type HumanDecisionChannelAnswer,
+  type HumanDecisionDeliveryResult,
+  type LoadedDecisionChannelConfig,
+  type PiDecisionUi,
+  type SettledHumanDecision,
+  type TelegramFetch,
+} from "./decision-channels.js";
 
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
@@ -115,6 +154,17 @@ type ActiveRun = {
   parentRunId?: string | undefined;
 };
 
+function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    (value as { schema?: unknown }).schema !== "pi-workflows.human-decision-request.v1"
+  ) {
+    return null;
+  }
+  return value as HumanDecisionRequest;
+}
+
 type StartRunOptions = {
   runId?: string;
   childKey?: string;
@@ -122,8 +172,10 @@ type StartRunOptions = {
   presentation?: boolean;
   quiet?: boolean;
   signal?: AbortSignal;
-  /** Continue a checkpointed run: input becomes the answer payload. */
+  /** Continue a checkpointed run: input becomes the legacy answer payload. */
   parentRunId?: string;
+  /** Accepted verified-human answer for a protected decision continuation. */
+  humanDecision?: AcceptedHumanDecision;
   /** Resume a parked run at its stopped node instead of starting fresh. */
   resume?: boolean;
   /** An existing queue claim token, when the caller already claimed the run. */
@@ -266,6 +318,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
   // One runner identity per session; it names this session in run claims.
   const runnerId = randomUUID();
   let runQueueStore: SqliteControllerStore | null = null;
+  let decisionChannelConfig: DecisionChannelConfig | null = null;
+  let telegramDecisionChannels = new Map<string, TelegramDecisionChannel>();
   const migrationBlockedRuns = new Set<string>();
   const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
     runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
@@ -276,6 +330,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
   // Run events remain an audit feed and never enter a conversation.
   let syncArmed = false;
   let runSyncTimer: ReturnType<typeof setInterval> | null = null;
+  let decisionRecoveryTimer: ReturnType<typeof setInterval> | null = null;
+  let decisionRecoveryActive = false;
 
   const recordRunEvent = (event: {
     runId: string;
@@ -734,9 +790,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (state.status === "waiting" && run.childKey === undefined) {
       lastWaitingRunId = run.runId;
     }
+    const pendingDecision = humanDecisionRequest(state.finalOutput);
     const summary =
       state.status === "waiting" && state.waitingOn
-        ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — answer with /workflow answer <json> (run ${state.runId})`
+        ? pendingDecision === null
+          ? `Workflow ${state.workflowName} parked at checkpoint ${state.waitingOn} — answer with /workflow answer <json> (run ${state.runId})`
+          : `Workflow ${state.workflowName} is waiting for a verified human decision: ${pendingDecision.title} (run ${state.runId})`
         : `Workflow ${state.workflowName} ${state.status} (run ${state.runId})${
             state.error !== undefined ? `: ${state.error.slice(0, MAX_STATUS_ERROR_CHARS)}` : ""
           }`;
@@ -757,6 +816,28 @@ export default function piWorkflows(pi: ExtensionAPI) {
       notify(ctx, `Could not record child workflow completion: ${errorMessage(error)}`, "warning");
     }
     void presentRun(ctx, run, state);
+    if (pendingDecision !== null && state.status === "waiting") {
+      const channels = audienceChannels(decisionChannelConfig, pendingDecision.audience);
+      let available = false;
+      if (ctx.mode === "tui" && channels.includes("pi")) {
+        available = true;
+        queueMicrotask(() => void promptHumanDecision(ctx, pendingDecision));
+      }
+      for (const channelId of channels) {
+        const channel = telegramDecisionChannels.get(channelId);
+        if (channel !== undefined) {
+          available = true;
+          queueMicrotask(() => void channel.deliver(pendingDecision));
+        }
+      }
+      if (!available) {
+        notify(
+          ctx,
+          `Human decision ${pendingDecision.title} remains waiting because its audience has no available channel.`,
+          "warning",
+        );
+      }
+    }
   };
 
   const startRun = async (
@@ -1004,6 +1085,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
           : engine.continueRun(workflow, options.parentRunId, input, {
               workflowSource,
               runId,
+              ...(options.humanDecision !== undefined
+                ? { humanDecision: options.humanDecision }
+                : {}),
             })
     )
       .then((result) => finishRun(ctx, run, result))
@@ -1279,7 +1363,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     notify(ctx, result.message, result.level);
   };
 
-  const cancelWorkflowControl = (ctx: ExtensionContext): WorkflowControlResult => {
+  const cancelWorkflowControl = async (ctx: ExtensionContext): Promise<WorkflowControlResult> => {
     if (activeRun) {
       const workflowName = activeRun.workflowName;
       const runId = activeRun.runId;
@@ -1299,6 +1383,26 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     if (widgetSource) {
       const { state } = widgetSource;
+      const request = humanDecisionRequest(state.finalOutput);
+      if (state.status === "waiting" && request !== null) {
+        const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+        await store.cancel(request, "cancelled");
+        const cancellation = await store.readCancellation(request.decisionId);
+        if (cancellation !== null) {
+          await Promise.allSettled(
+            [...telegramDecisionChannels.values()].map(async (channel) =>
+              channel.settle(cancellation),
+            ),
+          );
+        }
+        lastWaitingRunId = null;
+        clearWidgetTimer();
+        clearWidget(ctx);
+        return {
+          message: `Cancelled the pending human decision for workflow ${state.workflowName}.`,
+          details: { action: "cancel", workflowName: state.workflowName, runId: state.runId },
+        };
+      }
       clearWidgetTimer();
       clearWidget(ctx);
       const detail =
@@ -1421,6 +1525,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   const resolveWaitingWorkflow = async (
     ctx: ExtensionContext,
     requestedRunId?: string,
+    allowOtherSession = false,
   ): Promise<{ parentRunId: string; workflowRef: string }> => {
     let parentRunId = requestedRunId ?? lastWaitingRunId;
     if (parentRunId === null) {
@@ -1448,6 +1553,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(parentRunId);
     if (
+      !allowOtherSession &&
       queueRecord?.originSessionId !== null &&
       queueRecord?.originSessionId !== undefined &&
       queueRecord.originSessionId !== ctx.sessionManager.getSessionId()
@@ -1478,13 +1584,112 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     input: unknown,
     requestedRunId?: string,
+    verified?: HumanDecisionChannelAnswer,
   ): Promise<WorkflowControlResult> => {
-    const waiting = await resolveWaitingWorkflow(ctx, requestedRunId);
-    const continued = await startRun(ctx, waiting.workflowRef, input, {
+    const waiting = await resolveWaitingWorkflow(ctx, requestedRunId, verified !== undefined);
+    const parent = await readRunBundle(new WorkflowRunStore().runDirFor(waiting.parentRunId));
+    if (parent === null) throw new Error(`Workflow run ${waiting.parentRunId} is unreadable.`);
+    const request = humanDecisionRequest(parent.state.finalOutput);
+    let accepted: AcceptedHumanDecision | undefined;
+    let continuationInput = input;
+    let continuationRunId: string | undefined;
+    if (request !== null) {
+      if (
+        verified !== undefined &&
+        (verified.request.decisionId !== request.decisionId ||
+          verified.request.requestDigest !== request.requestDigest)
+      ) {
+        throw new Error("Verified human answer does not match the waiting decision.");
+      }
+      const response = validateHumanDecisionResponse(request, verified?.response ?? input);
+      const submission: HumanDecisionSubmission = {
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        ...response,
+        source: verified?.source ?? {
+          channel: "pi",
+          actorId: ctx.sessionManager.getSessionId(),
+          eventId: createHumanDecisionAttemptId(),
+        },
+        idempotencyKey: verified?.idempotencyKey ?? createHumanDecisionAttemptId(),
+      };
+      const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+      const acceptance = await store.accept(request, submission);
+      if (acceptance.status === "conflict") {
+        throw new Error("That human decision was already answered differently.");
+      }
+      accepted = acceptance.decision;
+      continuationInput = parent.state.input;
+      continuationRunId = `continuation-${request.decisionId.slice("decision-".length)}`;
+    }
+    if (request !== null && accepted !== undefined && verified !== undefined) {
+      const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(waiting.parentRunId);
+      const currentSessionId = ctx.sessionManager.getSessionId();
+      if (
+        queueRecord === undefined ||
+        (queueRecord.originSessionId !== null && queueRecord.originSessionId !== currentSessionId)
+      ) {
+        await Promise.allSettled(
+          [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
+        );
+        return {
+          message: "Human decision accepted; its owning Pi session will continue the workflow.",
+          details: {
+            action: "answer",
+            parentRunId: waiting.parentRunId,
+            accepted: true,
+            continuationPending: true,
+          },
+        };
+      }
+    }
+    const decisionStore = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+    if (request !== null && continuationRunId !== undefined && accepted !== undefined) {
+      await decisionStore.recordContinuation(request.decisionId, {
+        schema: "pi-workflows.human-decision-continuation.v1",
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        parentRunId: waiting.parentRunId,
+        runId: continuationRunId,
+        createdAt: accepted.acceptedAt,
+      });
+    }
+    if (continuationRunId !== undefined) {
+      const existingContinuation = await readRunBundle(
+        new WorkflowRunStore().runDirFor(continuationRunId),
+      );
+      if (existingContinuation !== null) {
+        if (accepted !== undefined) {
+          await Promise.allSettled(
+            [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
+          );
+        }
+        lastWaitingRunId = null;
+        return {
+          message: `Human decision already continued as ${continuationRunId}.`,
+          details: {
+            action: "answer",
+            parentRunId: waiting.parentRunId,
+            runId: continuationRunId,
+            adopted: true,
+          },
+        };
+      }
+    }
+    const continued = await startRun(ctx, waiting.workflowRef, continuationInput, {
       parentRunId: waiting.parentRunId,
+      ...(accepted !== undefined ? { humanDecision: accepted } : {}),
+      ...(continuationRunId !== undefined ? { runId: continuationRunId } : {}),
     });
     if (continued === undefined) {
       throw new Error("Could not start the checkpoint continuation.");
+    }
+    if (request !== null) {
+      if (accepted !== undefined) {
+        await Promise.allSettled(
+          [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
+        );
+      }
     }
     lastWaitingRunId = null;
     return {
@@ -1495,6 +1700,148 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runId: continued,
       },
     };
+  };
+
+  async function promptHumanDecision(
+    ctx: ExtensionContext,
+    request: HumanDecisionRequest,
+  ): Promise<void> {
+    try {
+      const channel = new PiDecisionChannel({
+        actorId: ctx.sessionManager.getSessionId(),
+        ui: ctx.ui,
+        store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
+        onAnswer: async (answer) => {
+          const result = await answerWorkflowControl(ctx, answer.response, request.runId, answer);
+          notify(ctx, result.message, result.level);
+        },
+      });
+      await channel.deliver(request);
+    } catch (error) {
+      notify(ctx, `Could not answer human decision: ${errorMessage(error)}`, "error");
+    }
+  }
+
+  const stopDecisionChannels = async (): Promise<void> => {
+    await Promise.allSettled(
+      [...telegramDecisionChannels.values()].map(async (channel) => channel.stop()),
+    );
+    telegramDecisionChannels.clear();
+    decisionChannelConfig = null;
+  };
+
+  const reloadDecisionChannels = async (ctx: ExtensionContext): Promise<void> => {
+    await stopDecisionChannels();
+    const loaded = await loadDecisionChannelConfig();
+    if (loaded === null) return;
+    decisionChannelConfig = loaded.channels;
+    telegramDecisionChannels = createTelegramChannels({
+      config: loaded.channels,
+      credentials: loaded.credentials,
+      configDir: loaded.configDir,
+      store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
+      onAnswer: async (answer) => {
+        await answerWorkflowControl(ctx, answer.response, answer.request.runId, answer);
+      },
+    });
+    await Promise.all(
+      [...telegramDecisionChannels.values()].map(async (channel) => channel.start()),
+    );
+  };
+
+  const recoverHumanDecisions = async (
+    ctx: ExtensionContext,
+    deliverPending = true,
+  ): Promise<void> => {
+    const runStore = new WorkflowRunStore();
+    const store = new HumanDecisionStore(runStore.outputRoot);
+    const requests = (await store.listRequests()).sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    );
+    for (const request of requests) {
+      const parent = await readRunBundle(runStore.runDirFor(request.runId));
+      if (parent === null || parent.state.status !== "waiting") continue;
+      const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(request.runId);
+      const ownedBySession =
+        queueRecord !== undefined &&
+        (queueRecord.originSessionId === null ||
+          queueRecord.originSessionId === ctx.sessionManager.getSessionId());
+      const accepted = await store.readAccepted(request.decisionId);
+      if (accepted === null) {
+        let cancellation = await store.readCancellation(request.decisionId);
+        if (
+          cancellation === null &&
+          request.expiresAt !== undefined &&
+          Date.parse(request.expiresAt) <= Date.now()
+        ) {
+          await store.cancel(request, "expired");
+          cancellation = await store.readCancellation(request.decisionId);
+        }
+        if (cancellation !== null) {
+          await Promise.allSettled(
+            [...telegramDecisionChannels.values()].map(async (channel) =>
+              channel.settle(cancellation),
+            ),
+          );
+          continue;
+        }
+        if (!deliverPending || !ownedBySession) continue;
+        const channels = audienceChannels(decisionChannelConfig, request.audience);
+        for (const channelId of channels) {
+          const channel = telegramDecisionChannels.get(channelId);
+          if (channel !== undefined) await channel.deliver(request);
+        }
+        if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
+          lastWaitingRunId = request.runId;
+          queueMicrotask(() => void promptHumanDecision(ctx, request));
+        }
+        continue;
+      }
+
+      if (!ownedBySession) continue;
+      const runId = `continuation-${request.decisionId.slice("decision-".length)}`;
+      const continuation = (await store.readContinuation(request.decisionId)) ?? {
+        schema: "pi-workflows.human-decision-continuation.v1" as const,
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        parentRunId: request.runId,
+        runId,
+        createdAt: accepted.acceptedAt,
+      };
+      await store.recordContinuation(request.decisionId, continuation);
+      const existing = await readRunBundle(runStore.runDirFor(continuation.runId));
+      if (existing === null && activeRun === null) {
+        if (parent.state.workflowSource === undefined) continue;
+        const workflowRef =
+          parent.state.workflowSource.kind === "builtin"
+            ? `builtin:${parent.state.workflowSource.id}`
+            : parent.state.workflowSource.path;
+        await startRun(ctx, workflowRef, parent.state.input, {
+          parentRunId: request.runId,
+          humanDecision: accepted,
+          runId: continuation.runId,
+          quiet: true,
+        });
+      }
+      await Promise.allSettled(
+        [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
+      );
+      if (activeRun !== null) break;
+    }
+  };
+
+  const startDecisionRecovery = (ctx: ExtensionContext): void => {
+    if (decisionRecoveryTimer !== null) return;
+    decisionRecoveryTimer = setInterval(() => {
+      if (decisionRecoveryActive || sessionClosed) return;
+      decisionRecoveryActive = true;
+      void recoverHumanDecisions(ctx, false)
+        .catch(() => undefined)
+        .finally(() => {
+          decisionRecoveryActive = false;
+        });
+    }, 1_000);
+    decisionRecoveryTimer.unref?.();
   };
 
   const startWorkflowControl = async (
@@ -1610,7 +1957,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (parsed.kind === "cancel") {
-        const result = cancelWorkflowControl(ctx);
+        const result = await cancelWorkflowControl(ctx);
         notify(ctx, result.message, result.level);
         return;
       }
@@ -1654,6 +2001,69 @@ export default function piWorkflows(pi: ExtensionAPI) {
         notify(ctx, result.message, result.level);
       } catch (error) {
         notify(ctx, `Could not start workflow: ${errorMessage(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("workflow-channel", {
+    description: "Configure or reload private human decision channels",
+    handler: async (args, ctx) => {
+      const action = args.trim() || "status";
+      try {
+        if (action === "reload") {
+          await reloadDecisionChannels(ctx);
+          notify(ctx, "Human decision channels reloaded.");
+          return;
+        }
+        if (action === "status") {
+          notify(
+            ctx,
+            decisionChannelConfig === null
+              ? "Human decisions use the Pi channel only."
+              : `Human decision channels are configured for ${Object.keys(decisionChannelConfig.audiences).length} audience(s).`,
+          );
+          return;
+        }
+        if (action !== "setup") {
+          throw new Error("Use /workflow-channel status, setup, or reload.");
+        }
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          throw new Error("Channel setup requires interactive Pi TUI mode.");
+        }
+        const tokenFile = await ctx.ui.input(
+          "Absolute path to the mode-0600 Telegram token file",
+          "",
+        );
+        if (tokenFile === undefined) return;
+        const audience = await ctx.ui.input("Logical audience", "operator");
+        if (audience === undefined) return;
+        const profile = await ctx.ui.input("Private Telegram profile name", "default");
+        if (profile === undefined) return;
+        const credential = await ctx.ui.input("Private credential reference name", "telegram");
+        if (credential === undefined) return;
+        const users = await ctx.ui.input("Allowed numeric Telegram user IDs, comma separated", "");
+        if (users === undefined) return;
+        const chats = await ctx.ui.input("Allowed numeric Telegram chat IDs, comma separated", "");
+        if (chats === undefined) return;
+        await verifyTelegramTokenFile(tokenFile.trim());
+        await writeDecisionChannelProfile({
+          audience: audience.trim(),
+          profile: profile.trim(),
+          credential: credential.trim(),
+          tokenFile: tokenFile.trim(),
+          allowedUserIds: users
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+          allowedChatIds: chats
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        });
+        await reloadDecisionChannels(ctx);
+        notify(ctx, "The private human decision channel profile was verified and installed.");
+      } catch (error) {
+        notify(ctx, `Human decision channel setup failed: ${errorMessage(error)}`, "error");
       }
     },
   });
@@ -1756,10 +2166,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
           control = resumeWorkflowControl(ctx);
           break;
         case "cancel":
-          control = cancelWorkflowControl(ctx);
+          control = await cancelWorkflowControl(ctx);
           break;
         case "answer": {
           const waiting = await resolveWaitingWorkflow(ctx, params.runId);
+          const parent = await readRunBundle(new WorkflowRunStore().runDirFor(waiting.parentRunId));
+          if (parent !== null && humanDecisionRequest(parent.state.finalOutput) !== null) {
+            throw new Error(
+              "This checkpoint requires a verified human answer from Pi UI or a configured decision channel.",
+            );
+          }
           control = await queueToolLaunch(ctx, waiting.workflowRef, params.input, {
             parentRunId: waiting.parentRunId,
           });
@@ -1858,10 +2274,26 @@ export default function piWorkflows(pi: ExtensionAPI) {
       notify(ctx, `Could not migrate legacy workflow sources: ${errorMessage(error)}`, "warning");
     }
     try {
+      await reloadDecisionChannels(ctx);
+    } catch {
+      await stopDecisionChannels();
+      notify(
+        ctx,
+        "Could not start human decision channels because the private channel configuration is invalid or unavailable.",
+        "warning",
+      );
+    }
+    try {
       syncArmed = true;
       startRunSync(ctx);
     } catch {
       // Session sync is best-effort; runs themselves never depend on it.
+    }
+    try {
+      await recoverHumanDecisions(ctx);
+      startDecisionRecovery(ctx);
+    } catch (error) {
+      notify(ctx, `Could not recover human decisions: ${errorMessage(error)}`, "warning");
     }
     try {
       await resumeParkedRun(ctx);
@@ -2008,7 +2440,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
       clearInterval(runSyncTimer);
       runSyncTimer = null;
     }
+    if (decisionRecoveryTimer !== null) {
+      clearInterval(decisionRecoveryTimer);
+      decisionRecoveryTimer = null;
+    }
+    decisionRecoveryActive = false;
     syncArmed = false;
+    await stopDecisionChannels();
     await controllerHost?.close().catch(() => undefined);
     controllerHost = undefined;
     controllerContext = null;

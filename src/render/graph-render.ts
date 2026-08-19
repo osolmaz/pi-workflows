@@ -216,7 +216,7 @@ function cardMetrics(view: GraphView): CardMetrics {
     measure(`${nodeTypeBadge("checkpoint")}  ${STATUS_GLYPHS[status]} ${STATUS_LABELS[status]}`);
   }
   for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
-    measure(sanitizeText(nodeId));
+    measure(sanitizeText(hierarchicalNodeLabel(nodeId, node)));
     measure(nodeTypeBadge(node.nodeType, node.actionExecution));
     const labels = nodeBranchLabels(view, nodeId);
     branchRows = Math.max(branchRows, labels.length);
@@ -305,14 +305,39 @@ function renderCellText(
     const durationMs = Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
     elapsed = formatDuration(durationMs);
   }
+  const human = node?.humanDecision;
+  const waitingRequest =
+    state.waitingOn === nodeId &&
+    state.finalOutput !== null &&
+    typeof state.finalOutput === "object" &&
+    (state.finalOutput as { schema?: unknown }).schema === "pi-workflows.human-decision-request.v1"
+      ? (state.finalOutput as { audience?: unknown })
+      : undefined;
+  const selected =
+    human !== undefined && state.humanDecision !== undefined
+      ? human.choices[state.humanDecision.response.choice]
+      : undefined;
+  const humanDetail =
+    human === undefined
+      ? undefined
+      : selected !== undefined
+        ? `human: ${sanitizeText(selected.label)}`
+        : state.waitingOn === nodeId
+          ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)} · ${Object.values(
+              human.choices,
+            )
+              .map((choice) => sanitizeText(choice.label))
+              .join(" / ")}`
+          : undefined;
   const detail =
-    atLatestStep && state.currentNode === nodeId && state.statusDetail
+    humanDetail ??
+    (atLatestStep && state.currentNode === nodeId && state.statusDetail
       ? sanitizeText(state.statusDetail)
       : node?.statusDetail
         ? sanitizeText(node.statusDetail)
         : node?.summary
           ? sanitizeText(node.summary)
-          : "";
+          : "");
   const branchLines = Array.from({ length: metrics.branchRows }, (_, index) =>
     labels[index] ? `◇ ${labels[index]}` : "",
   );

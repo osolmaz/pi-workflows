@@ -168,7 +168,7 @@ Private configuration maps the audience to channels:
   },
   "telegramProfiles": {
     "default": {
-      "credential": "telegram/default",
+      "credential": "telegram-default",
       "allowedUserIds": ["<telegram-user-id>"],
       "allowedChatIds": ["<telegram-chat-id>"]
     }
@@ -178,7 +178,20 @@ Private configuration maps the audience to channels:
 
 The workflow never receives a bot token, user ID, chat ID, Telegram message ID, or Pi session detail. Channel profiles are private host configuration and are excluded from run presentation.
 
-Pi Workflows keeps credentials in a separate private credential file or resolves them through a configured credential provider. The setup command writes private files with mode `600`. Token values never enter source files, workflow inputs, run bundles, logs, child environments, or model-visible tool results.
+Pi Workflows keeps credential references in a separate private file. A Telegram credential points to an existing absolute mode-`0600` token file:
+
+```json
+{
+  "schema": "pi-workflows.credentials.v1",
+  "telegram": {
+    "telegram-default": {
+      "tokenFile": "<absolute-mode-0600-token-file>"
+    }
+  }
+}
+```
+
+Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect whether profiles are active, and `/workflow-channel reload` after a private configuration change. Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, run bundles, logs, child environments, or model-visible tool results.
 
 The same Unix account can read a local credential file. This design prevents accidental propagation, not a hostile same-account process. A separately owned connector can implement the same channel interface later if stronger isolation becomes necessary.
 
@@ -188,10 +201,10 @@ All decision channels implement one interface:
 
 ```typescript
 interface HumanDecisionChannel {
-  readonly kind: string;
-  start(context: HumanDecisionChannelContext): Promise<void>;
+  readonly id: string;
+  start(): Promise<void>;
   deliver(request: HumanDecisionRequest): Promise<DecisionDeliveryResult>;
-  settle(decision: AcceptedHumanDecision): Promise<void>;
+  settle(decision: AcceptedHumanDecision | HumanDecisionCancellation): Promise<void>;
   stop(): Promise<void>;
 }
 ```
@@ -220,7 +233,7 @@ A choice without input submits from its button. A text choice such as `replan` w
 
 The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. The private channel store maps each opaque ID to the full decision request.
 
-Telegram permits one long-polling consumer for a bot profile. Active Pi processes use a shared lease so one process owns polling and the others use the same private channel state. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
+Telegram permits one long-polling consumer for a bot profile. Active Pi processes use a shared lease so one process owns polling and the others use the same private channel state. The lease owner can accept a verified reply, but only the Pi session that owns the waiting run creates its continuation. Active sessions inspect the durable accepted-answer fence and recover their own continuation. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
 
 The Bot API does not provide an idempotency key for `sendMessage`. Pi Workflows therefore writes a delivery intent before sending and never blindly retries an ambiguous send. A timed-out send is recorded as `unknown`; Pi remains available and an operator can request another delivery. This avoids automatic duplicate messages while keeping decision acceptance exactly once.
 
@@ -231,19 +244,34 @@ Decision records live next to workflow run bundles under the Pi Workflows state 
 - the request;
 - channel delivery intents and results;
 - answer attempts;
-- the accepted answer;
+- the atomic accepted-or-cancelled resolution;
+- the accepted answer or cancellation detail;
 - channel settlement results; and
 - the continuation request and result.
 
-The accepted-answer record uses a no-replace create. The first valid writer wins. A retry with identical canonical bytes adopts the existing answer. A conflicting answer receives an `already decided` result.
+The resolution record uses a no-replace create. The first valid acceptance, cancellation, or expiry writer wins. Acceptance then materializes the matching accepted-answer detail. Cancellation or expiry materializes cancellation detail. A retry with the same response and idempotency key adopts the existing answer. A conflicting answer receives an `already decided` result.
 
-The continuation run ID is derived from the accepted decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after answer acceptance cannot run the next workflow step twice.
+The continuation run ID is derived from the accepted decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after answer acceptance cannot run the next workflow step twice. The continuation run carries a redacted receipt with the decision ID, request digest, choice, acceptance time, and answer digest. Actor, channel, event, and idempotency provenance stays only in the private decision records and never enters the run bundle or model context.
 
 SQLite may index pending decisions and channel leases, but immutable decision files remain the source of truth. The index is disposable and rebuildable.
 
+## Planning workflow composition
+
+Pi Workflows keeps solution choice, documentation, and implementation in separate built-ins:
+
+- `autodevise` chooses a solution or revises one after new evidence.
+- `autodoc` records an already selected solution in the canonical specification and implementation plan. It does not choose a solution or implement it.
+- `autoimplement` executes a clear existing plan.
+
+`autodoc` runs by itself and as an included workflow. It returns a documented-plan record with the plan, plan digest, document paths, document digests, and check results. If the canonical documents already describe the selected plan, it adopts them without rewriting files.
+
+`autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A current documented plan goes straight to implementation. A clear plan with missing or stale documentation goes through `autodoc` first. The absence of a structured `plan` input never authorizes `autodevise`.
+
+If later implementation, verification, review, comments, or CI evidence invalidates the plan, autoimplement runs `autodevise`, sends the revised plan through `autodoc`, and then resumes implementation. An optional approval policy inserts `plan-approval` after the revised documentation.
+
 ## Reusable plan approval workflow
 
-Pi Workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its input contains the plan, plan digest, audience, and display summary. It has three named exits:
+Pi Workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its input contains the documented plan, plan digest, audience, and display summary. It has three named exits:
 
 - `continue`, with the approval receipt;
 - `stop`, with the stop receipt; and
@@ -263,9 +291,9 @@ includes: {
 },
 ```
 
-A `replan` exit returns to `autodevise` with the previous plan and the human instructions as new evidence. The revised plan has a new digest and enters a new approval decision. Step limits bound repeated replanning.
+A `replan` exit returns to `autodevise` with the previous plan and the exact human instructions as new evidence. The revised plan passes through `autodoc`, receives a new digest, and enters a new approval decision. Step limits bound repeated replanning.
 
-Monitor and autoimplement can mount this workflow when their input explicitly asks for human approval. Existing behavior stays unchanged when no approval policy is present.
+Monitor repair composes `autodevise`, `autodoc`, optional `plan-approval`, `autoimplement`, and a fresh target check. Autoimplement can mount the same approval workflow after evidence-driven redesign. Existing behavior stays unchanged when no approval policy is present.
 
 ## Recovery and cancellation
 

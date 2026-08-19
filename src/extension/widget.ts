@@ -297,8 +297,25 @@ function nodeRuntimeSegments(
   }
 
   if (state.waitingOn === nodeId) {
-    const summary = snapshot.nodes[nodeId]?.summary;
-    segments.push(summary ? sanitizeText(summary) : "waiting");
+    const human = snapshot.nodes[nodeId]?.humanDecision;
+    if (human !== undefined) {
+      const requestAudience =
+        state.finalOutput !== null &&
+        typeof state.finalOutput === "object" &&
+        (state.finalOutput as { schema?: unknown }).schema ===
+          "pi-workflows.human-decision-request.v1" &&
+        typeof (state.finalOutput as { audience?: unknown }).audience === "string"
+          ? (state.finalOutput as { audience: string }).audience
+          : human.audience;
+      segments.push(
+        `human decision · ${sanitizeText(requestAudience)} · ${Object.values(human.choices)
+          .map((choice) => sanitizeText(choice.label))
+          .join(" / ")}`,
+      );
+    } else {
+      const summary = snapshot.nodes[nodeId]?.summary;
+      segments.push(summary ? sanitizeText(summary) : "waiting");
+    }
     return segments;
   }
 
@@ -312,6 +329,11 @@ function nodeRuntimeSegments(
         : result.outcome.replaceAll("_", " "),
     );
     return segments;
+  }
+  const human = snapshot.nodes[nodeId]?.humanDecision;
+  if (human !== undefined && state.humanDecision !== undefined) {
+    const selected = human.choices[state.humanDecision.response.choice];
+    if (selected !== undefined) segments.push(`human: ${sanitizeText(selected.label)}`);
   }
   if (Number.isFinite(result.durationMs)) {
     segments.push(formatDuration(result.durationMs));

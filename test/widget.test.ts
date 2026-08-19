@@ -17,6 +17,7 @@ import {
   notify,
   shell,
 } from "../src/workflows/definition.js";
+import { choice, defineHumanChoices, humanDecision } from "../src/workflows/human-decision.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import { stripAnsi } from "../src/workflows/text.js";
 import type {
@@ -164,6 +165,60 @@ describe("nodeTypeGlyph", () => {
       checkpoint: "◆",
     });
     expect(Object.values(symbols).every((symbol) => visibleWidth(symbol) === 1)).toBe(true);
+  });
+});
+
+describe("human decision widget", () => {
+  const humanChoices = defineHumanChoices({
+    continue: choice({ label: "Continue" }),
+    stop: choice({ label: "Stop" }),
+  });
+  const humanSnapshot = createDefinitionSnapshot(
+    defineWorkflow({
+      name: "human-widget",
+      startAt: "approve",
+      nodes: {
+        approve: humanDecision({
+          audience: "operator",
+          choices: humanChoices,
+          request: () => ({ title: "Approve", body: {} }),
+        }),
+      },
+      edges: [],
+    }),
+  );
+
+  it("shows a pending audience and choice labels without actor or channel details", () => {
+    const state = makeState({
+      status: "waiting",
+      waitingOn: "approve",
+      results: { approve: makeResult("approve", "ok", { nodeType: "checkpoint" }) },
+    });
+    const lines = buildWidgetLines(state, humanSnapshot).join("\n");
+    expect(lines).toContain("human decision");
+    expect(lines).toContain("operator");
+    expect(lines).toContain("Continue / Stop");
+    expect(lines).not.toContain("actor");
+    expect(lines).not.toContain("telegram");
+  });
+
+  it("shows only the accepted choice label", () => {
+    const state = makeState({
+      status: "completed",
+      results: { approve: makeResult("approve", "ok", { nodeType: "checkpoint" }) },
+      humanDecision: {
+        schema: "pi-workflows.human-decision-receipt.v1",
+        decisionId: "decision-a",
+        requestDigest: `sha256:${"a".repeat(64)}`,
+        response: { choice: "continue" },
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+        answerDigest: `sha256:${"b".repeat(64)}`,
+      },
+    });
+    const lines = buildWidgetLines(state, humanSnapshot).join("\n");
+    expect(lines).toContain("human: Continue");
+    expect(lines).not.toContain("telegram-private");
+    expect(lines).not.toContain("actorId");
   });
 });
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-continuation-v1.schema.json",
+  "title": "Pi Workflows human decision continuation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "decisionId", "requestDigest", "parentRunId", "runId", "createdAt"],
+  "properties": {
+    "schema": { "const": "pi-workflows.human-decision-continuation.v1" },
+    "decisionId": { "type": "string" },
+    "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "parentRunId": { "type": "string" },
+    "runId": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

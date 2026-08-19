@@ -51,7 +51,9 @@ describe("discoverWorkflows", () => {
       ["local", "project"],
       ["global", "global"],
       ["autodevise", "builtin"],
+      ["autodoc", "builtin"],
       ["autoimplement", "builtin"],
+      ["plan-approval", "builtin"],
       ["monitor", "builtin"],
     ]);
   });
@@ -63,11 +65,13 @@ describe("discoverWorkflows", () => {
 
     const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(discovered).toHaveLength(4);
+    expect(discovered).toHaveLength(6);
     expect(discovered[0]?.source).toBe("project");
     expect(discovered.slice(1).map((item) => item.name)).toEqual([
       "autodevise",
+      "autodoc",
       "autoimplement",
+      "plan-approval",
       "monitor",
     ]);
   });
@@ -77,7 +81,7 @@ describe("discoverWorkflows", () => {
     const homeDir = await makeTempDir("pi-workflows-empty-home");
     expect(
       (await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).map((item) => item.name),
-    ).toEqual(["autodevise", "autoimplement", "monitor"]);
+    ).toEqual(["autodevise", "autodoc", "autoimplement", "plan-approval", "monitor"]);
   });
 
   it("lets a project workflow override the built-in monitor", async () => {
@@ -124,10 +128,14 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "4" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "5" });
     expect(resolved.definition.name).toBe("monitor");
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
+      "approval",
+      "documentation",
       "implementation",
+      "implementation/approval",
+      "implementation/documentation",
       "implementation/redesign",
       "initialDesign",
     ]);

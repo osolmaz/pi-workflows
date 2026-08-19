@@ -177,16 +177,18 @@ A pending result must include a validated `gh` tracking command. The shell actio
 - Return whether the selected plan changed.
 - Keep the current practical, in-scope selection rule.
 
-### 7. Autoimplement
+### 7. Autodoc and autoimplement
 
-Build this graph:
+Add standalone autodoc and build this autoimplement graph:
 
 ```text
-prepare plan
-  -> implement
+find existing plan
+  -> missing or unclear -> blocked
+  -> documentation current -> implement
+  -> documentation missing or stale -> autodoc -> implement
   -> verify
   -> classify issue
-     -> redesign -> autodevise -> implement
+     -> redesign -> autodevise -> autodoc -> optional approval -> implement
      -> fix -> verify
      -> publish -> write reviewer command -> run reviewer
 
@@ -210,14 +212,17 @@ CI
   -> unavailable or forbidden -> blocked
 ```
 
+The structured plan input is optional because the plan can already exist in conversation context or canonical documentation. Its absence never authorizes initial autodevise. Autoimplement blocks when no clear plan exists, skips autodoc for current documentation, and records every evidence-driven revision through autodoc before continuing.
+
 The workflow will collect all review rounds in its final output. It will never rerun Pi Reviewer solely because P2 work changed files.
 
 ### 8. Monitor repair
 
 - Add explicit repair authorization to monitor input.
 - Add `repair` to the check result only when authorization is present.
-- Mount outer `autodevise` and `autoimplement`.
-- Pass the outer plan into autoimplement.
+- Mount outer `autodevise`, `autodoc`, optional `plan-approval`, and `autoimplement`.
+- Pass the documented outer plan into autoimplement.
+- Return exact replan instructions to autodevise and ask again.
 - Check the target again after a reported repair.
 - Stop on repeated no-progress evidence.
 - Keep ordinary monitor calls observation-only and backward compatible.
@@ -236,7 +241,9 @@ The workflow will collect all review rounds in its final output. It will never r
 - Invalid child exit names fail type checking or definition validation.
 - Dynamic references resolve through existing precedence rules.
 - Two mounts of one child do not share invocation state.
-- Nested redesign uses a fresh autodevise invocation.
+- Standalone autodoc adopts current documents, updates stale documents, and blocks without a selected plan.
+- Autoimplement finds a clear existing plan and never invokes initial autodevise because a plan input is absent.
+- Nested redesign uses a fresh autodevise invocation and passes the revised plan through autodoc.
 - Source cycles fail before the run bundle is created.
 - Included checkpoints, updates, notifications, pause, cancellation, and resume behave like root nodes.
 - Every mounted source and the resolved digest is durable.
@@ -286,7 +293,8 @@ Direct imports check mapped input and exit names. `includedResult()` recovers th
 The shipped workflows are registered built-ins:
 
 - `autodevise` returns `ready` or `blocked` with plan lineage.
-- `autoimplement` supports redesign, implementation fixes, exact reviewer and CI commands, P0 through P2 history, bounded CI watches, PR comments, merge, and final reporting.
+- `autodoc` records selected plans as a standalone and included built-in.
+- `autoimplement` finds an existing plan, conditionally documents it, and supports evidence-driven redesign, implementation fixes, exact reviewer and CI commands, P0 through P2 history, bounded CI watches, PR comments, merge, and final reporting.
 - `monitor` remains observation-only by default and enables composed repair only through an explicit repair policy.
 
 The package and Rust viewer version is `0.10.0`.

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-request-v1.schema.json",
+  "title": "Pi Workflows human decision request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "decisionId",
+    "requestDigest",
+    "runId",
+    "workflowName",
+    "nodeId",
+    "attemptId",
+    "audience",
+    "title",
+    "body",
+    "choices",
+    "createdAt"
+  ],
+  "properties": {
+    "schema": { "const": "pi-workflows.human-decision-request.v1" },
+    "decisionId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$" },
+    "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "runId": { "type": "string" },
+    "workflowName": { "type": "string" },
+    "nodeId": { "type": "string" },
+    "attemptId": { "type": "string" },
+    "audience": { "type": "string" },
+    "title": { "type": "string", "minLength": 1 },
+    "body": true,
+    "choices": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1 },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "prompt", "minLength", "maxLength"],
+            "properties": {
+              "kind": { "const": "text" },
+              "name": { "type": "string" },
+              "prompt": { "type": "string", "minLength": 1 },
+              "minLength": { "type": "integer", "minimum": 0 },
+              "maxLength": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-answer-attempt-v1.schema.json",
+  "title": "Pi Workflows human decision answer attempt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "attemptId",
+    "attemptedAt",
+    "decisionId",
+    "requestDigest",
+    "choice",
+    "source",
+    "idempotencyKey"
+  ],
+  "properties": {
+    "schema": { "const": "pi-workflows.human-decision-answer-attempt.v1" },
+    "attemptId": { "type": "string" },
+    "attemptedAt": { "type": "string", "format": "date-time" },
+    "decisionId": { "type": "string" },
+    "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "choice": { "type": "string" },
+    "input": { "type": "object", "additionalProperties": { "type": "string" } },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "actorId", "eventId"],
+      "properties": {
+        "channel": { "type": "string" },
+        "actorId": { "type": "string" },
+        "eventId": { "type": "string" }
+      }
+    },
+    "idempotencyKey": { "type": "string" }
+  }
+}

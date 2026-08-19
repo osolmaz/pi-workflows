@@ -257,11 +257,15 @@ monitor
       plan
 ```
 
-## Autodevise and autoimplement
+## Autodevise, autodoc, and autoimplement
 
 `autodevise` accepts the problem, scope, constraints, an optional previous plan, and new evidence. It automatically selects the best practical in-scope solution. The ideal end state can win when it is feasible, but an unavailable upstream change cannot block a valid practical solution. It exits through `ready` or `blocked` and returns a plan digest and change status.
 
-`autoimplement` accepts an optional plan and includes `autodevise` as `redesign`. It moves back to redesign when implementation, verification, review, or CI proves that the approach is wrong. Local bugs go to a fix step instead.
+`autodoc` accepts an already selected plan or finds it in the active conversation and referenced canonical documents. It adopts current documentation or updates the canonical specification and implementation plan, runs documentation checks, and returns a documented-plan record. It never selects a solution or implements one.
+
+`autoimplement` requires a clear existing plan, but the structured `plan` input is optional because the plan can already be in conversation context or canonical documentation. It blocks when it cannot find a clear plan. It skips autodoc when documentation is current and includes autodoc when documentation is missing or stale. The absence of `input.plan` never routes to initial autodevise.
+
+Autoimplement includes `autodevise` only as evidence-driven `redesign`. When implementation, verification, review, comments, or CI proves that the approach is wrong, the revised plan passes through autodoc before implementation resumes. Local bugs go to a fix step instead.
 
 Review rounds record findings at every severity from P0 through P2. P0 or P1 findings require another implementation and review round. A P2-only round can be addressed, but the workflow does not run the reviewer again solely because P2 work changed files.
 
@@ -278,12 +282,15 @@ Monitor remains observation-only unless its input explicitly authorizes mutation
 ```text
 check
   -> initialDesign: autodevise
+  -> documentation: autodoc
+  -> approval: plan-approval when requested
+       -> replan: initialDesign
   -> implementation: autoimplement
-       -> redesign: autodevise when needed
+       -> redesign: autodevise -> autodoc when needed
   -> check
 ```
 
-The outer `autodevise` creates the first plan. The inner mount revises it only when new evidence invalidates it. The monitor checks the target again after implementation and does not trust a repair claim by itself.
+The outer `autodevise` creates the first plan. Autodoc records it before implementation. An optional plan approval gate can continue, stop, or return exact replan instructions to autodevise. The inner redesign mount revises a plan only when new evidence invalidates it and records the revision through autodoc. The monitor checks the target again after implementation and does not trust a repair claim by itself.
 
 A protected change to model choice, benchmark method, credentials, hardware, spending authority, or another user decision exits as blocked. The workflow never changes the protected part of the task silently.
 

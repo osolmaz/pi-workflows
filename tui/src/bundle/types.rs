@@ -153,6 +153,8 @@ pub struct RunState {
     pub current_node_started_at: Option<String>,
     #[serde(rename = "statusDetail", skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
+    #[serde(rename = "humanDecision", skip_serializing_if = "Option::is_none")]
+    pub human_decision: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
     #[serde(rename = "waitingOn", skip_serializing_if = "Option::is_none")]

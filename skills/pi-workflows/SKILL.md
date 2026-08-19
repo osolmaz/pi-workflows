@@ -18,7 +18,7 @@ Use the smallest applicable action:
 - `start` starts a discovered workflow name or workflow file path with structured input.
 - `status` reads the active run, or the named run when `runId` is supplied.
 - `pause`, `resume`, and `cancel` control the current active run.
-- `answer` supplies input to a waiting checkpoint.
+- `answer` supplies input to an ordinary waiting checkpoint. It cannot satisfy a protected `humanDecision()` gate.
 - `update` publishes a non-completing durable update for the active step attempt.
 - `submit` completes the active agent step with its required output.
 
@@ -57,14 +57,14 @@ Follow these rules:
 - Give included workflows named exits, map their input explicitly, and keep parent edges out of child internals.
 - Keep `compute` pure. Put external effects in agent, function-action, or shell-action nodes.
 - Use structured node outputs for routing.
-- Use a checkpoint when progress requires human input.
+- Use an ordinary checkpoint for external continuation data that the model may submit. Use `humanDecision()` for a verified human choice, and use the included `plan-approval` workflow for standard continue, stop, and exact-text replan routing.
 - Set explicit step and command timeouts.
 - Bound ordinary loops with `maxSteps` or another clear finish rule.
 - Use a controller instead of a workflow for indefinite resource reconciliation.
 - Keep presentation separate from execution. Use `presentationPrompt` only when a final assistant response is needed.
 - Preserve the single active workflow rule in one Pi session.
 
-Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
+Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/HUMAN_DECISIONS.md](../../docs/HUMAN_DECISIONS.md) before adding a human gate or channel. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.
 
 ## Verify changes
 

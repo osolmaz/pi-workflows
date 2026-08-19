@@ -32,6 +32,25 @@ temporary directories.
       sha256-<64 hex>.txt
 ```
 
+Human decision records use a separate additive directory next to `runs/` so a waiting run bundle remains immutable:
+
+```text
+~/.pi/agent/workflows/decisions/
+  <decision-id>/
+    request.json
+    deliveries/<channel>/<attempt-id>.json
+    answers/<attempt-id>.json
+    resolution.json # atomic accepted-or-cancelled fence
+    accepted.json
+    cancelled.json   # present only when a pending request is cancelled or expires
+    settlements/<channel>/<attempt-id>.json
+    continuation.json
+```
+
+The request links to the waiting run, node, attempt, workflow source, and canonical request digest. Final records use no-replace creation and adopt only identical retries. `resolution.json` is the first accepted-or-cancelled fence. It materializes either `accepted.json` or the mutually exclusive `cancelled.json`; a crash can rebuild that detail from the resolution. `continuation.json` binds an accepted answer to one deterministic continuation run. Delivery and settlement records cannot change the accepted answer.
+
+A human-decision continuation preserves the parent's original workflow input and replaces the carried checkpoint output with the accepted typed response for routing. Its `humanDecision` state is a redacted receipt. Verified actor, channel, event, and idempotency provenance remains in the private sibling decision records and is not copied into the run bundle. Ordinary checkpoint continuations keep using the answer as the continuation input. Existing bundles without human decision data remain valid.
+
 Run ids are `<UTC timestamp>-<workflow slug>-<8 hex chars>`, so lexical order
 is chronological order.
 

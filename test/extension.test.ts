@@ -6,7 +6,8 @@ import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
-import { readRunBundle } from "../src/workflows/store.js";
+import { HumanDecisionStore } from "../src/workflows/human-decision.js";
+import { listRunBundles, readRunBundle } from "../src/workflows/store.js";
 import { stripAnsi } from "../src/workflows/text.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -80,6 +81,7 @@ type FakeContext = {
     setWidget: (key: string, content: string[] | WidgetFactory | undefined) => void;
     setStatus: (key: string, text: string | undefined) => void;
     select: (title: string, options: string[]) => Promise<string | undefined>;
+    input: (title: string, initial?: string) => Promise<string | undefined>;
   };
 };
 
@@ -94,6 +96,7 @@ function makeHarness(options: {
   sessionId?: string;
   mode?: "tui" | "rpc";
   select?: (title: string, choices: string[]) => Promise<string | undefined>;
+  input?: (title: string, initial?: string) => Promise<string | undefined>;
   exec?: (
     command: string,
     args: string[],
@@ -135,6 +138,7 @@ function makeHarness(options: {
       setWidget: (_key, content) => widgets.push(content),
       setStatus: (_key, text) => statuses.push(text),
       select: async (title, choices) => await options.select?.(title, choices),
+      input: async (title, initial) => await options.input?.(title, initial),
     },
   };
 
@@ -323,6 +327,31 @@ export default defineWorkflow({
   );
 }
 
+async function writeHumanDecisionWorkflow(cwd: string): Promise<void> {
+  const dir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "human.workflow.ts"),
+    `import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge, textInput } from "@osolmaz/pi-workflows";
+const choices = defineHumanChoices({
+  continue: choice({ label: "Continue" }),
+  replan: choice({ label: "Replan", input: textInput({ name: "instructions", prompt: "What should change?" }) }),
+});
+export default defineWorkflow({
+  name: "human",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", body: input }) }),
+    continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+    replanned: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+  },
+  edges: [humanDecisionEdge({ from: "approve", choices, cases: { continue: "continued", replan: "replanned" } })],
+});
+`,
+    "utf8",
+  );
+}
+
 function stepFromPrompt(prompt: string): { step: string; attempt: string } | null {
   const match = prompt.match(/"step": "([^"]+)", "attempt": "([^"]+)"/);
   return match ? { step: match[1] as string, attempt: match[2] as string } : null;
@@ -346,6 +375,7 @@ describe("pi-workflows extension", () => {
     // Interactive runs are tracked in the project run queue; keep that
     // store inside a temp dir so tests never touch the real home state.
     vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", await makeTempDir("pi-workflows-ext-controllers"));
+    vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", await makeTempDir("pi-workflows-ext-config"));
     vi.stubEnv("HERDR_ENV", "0");
   });
 
@@ -414,6 +444,137 @@ describe("pi-workflows extension", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("rejects model-tool answers for protected human decisions", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-tool");
+    const runsDir = await makeTempDir("pi-workflows-human-tool-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd);
+    const harness = makeHarness({ cwd, mode: "rpc", respond: () => {} });
+
+    await harness.command.handler(
+      'human --input-json {"task":"approve","original":true}',
+      harness.ctx,
+    );
+    await waitFor(() => harness.notifications.some((note) => note.includes("verified human")));
+    await expect(
+      harness.tool.execute("model-answer", {
+        action: "answer",
+        input: { choice: "continue" },
+      }),
+    ).rejects.toThrow(/verified human answer/);
+  });
+
+  it("continues a protected decision through Pi UI and preserves exact replan text", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-pi");
+    const runsDir = await makeTempDir("pi-workflows-human-pi-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd);
+    const exact = "  use option B\nkeep this exact  ";
+    const harness = makeHarness({
+      cwd,
+      respond: () => {},
+      select: async () => "Replan",
+      input: async () => exact,
+    });
+
+    await harness.command.handler(
+      'human --input-json {"task":"approve","original":true}',
+      harness.ctx,
+    );
+    await waitFor(() => harness.notifications.some((note) => note.includes("continuation")));
+    await waitFor(async () =>
+      (await listRunBundles(runsDir)).some((bundle) => bundle.state.status === "completed"),
+    );
+    const bundles = await listRunBundles(runsDir);
+    const completed = bundles.find((bundle) => bundle.state.status === "completed");
+    expect(completed?.state.parentRunId).toBeDefined();
+    expect(completed?.state.input).toEqual({ task: "approve", original: true });
+    expect(completed?.state.finalOutput).toEqual({
+      input: { task: "approve", original: true },
+      answer: { choice: "replan", input: { instructions: exact } },
+    });
+    expect(JSON.stringify(completed?.state.finalOutput)).not.toContain("actorId");
+  });
+
+  it("cancels a pending human decision and rejects later acceptance", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-cancel");
+    const runsDir = await makeTempDir("pi-workflows-human-cancel-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd);
+    const harness = makeHarness({ cwd, mode: "rpc", respond: () => {} });
+
+    await harness.command.handler("human", harness.ctx);
+    await waitFor(() => harness.notifications.some((note) => note.includes("verified human")));
+    await harness.command.handler("cancel", harness.ctx);
+    const waiting = (await listRunBundles(runsDir)).find(
+      (bundle) => bundle.state.status === "waiting",
+    );
+    const request = waiting?.state.finalOutput as
+      | { decisionId: string; requestDigest: string }
+      | undefined;
+    expect(request).toBeDefined();
+    const store = new HumanDecisionStore(runsDir);
+    expect(await store.readCancellation(request!.decisionId)).toMatchObject({
+      reason: "cancelled",
+      requestDigest: request!.requestDigest,
+    });
+  });
+
+  it("recovers an accepted human decision into one deterministic continuation", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-recovery");
+    const runsDir = await makeTempDir("pi-workflows-human-recovery-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd);
+    const first = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-a" });
+
+    await first.command.handler("human", first.ctx);
+    await waitFor(() => first.notifications.some((note) => note.includes("verified human")));
+    const waiting = (await listRunBundles(runsDir)).find(
+      (bundle) => bundle.state.status === "waiting",
+    );
+    const request = waiting?.state.finalOutput as
+      | {
+          decisionId: string;
+          requestDigest: string;
+          choices: Record<string, unknown>;
+        }
+      | undefined;
+    if (request === undefined) throw new Error("missing human decision request");
+    await new HumanDecisionStore(runsDir).accept(request as never, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "session-a", eventId: "recovery-event" },
+      idempotencyKey: "recovery-event",
+    });
+
+    const outsider = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-b" });
+    await outsider.emitAsync("session_start", {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(
+      (await listRunBundles(runsDir)).filter(
+        (bundle) => bundle.state.parentRunId === waiting?.state.runId,
+      ),
+    ).toHaveLength(0);
+
+    const second = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-a" });
+    await second.emitAsync("session_start", {});
+    await waitFor(async () => {
+      const bundles = await listRunBundles(runsDir);
+      return bundles.some(
+        (bundle) =>
+          bundle.state.parentRunId === waiting?.state.runId && bundle.state.status === "completed",
+      );
+    });
+    const continuations = (await listRunBundles(runsDir)).filter(
+      (bundle) => bundle.state.parentRunId === waiting?.state.runId,
+    );
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]?.state.finalOutput).toMatchObject({
+      answer: { choice: "continue" },
+    });
   });
 
   it("shows the native Herdr shortcut and opens the exact run bundle in piw", async () => {
@@ -667,13 +828,13 @@ describe("pi-workflows extension", () => {
       const harness = makeHarness({ cwd, respond: () => {} });
 
       const first = await harness.tool.execute("list-first", { action: "list" });
-      expect(first.details).toMatchObject({ total: 63, offset: 0, omitted: 13, nextOffset: 50 });
+      expect(first.details).toMatchObject({ total: 65, offset: 0, omitted: 15, nextOffset: 50 });
       expect(first.details.workflows).toHaveLength(50);
-      expect(first.content[0]?.text).toContain("13 more omitted; list again with offset 50");
+      expect(first.content[0]?.text).toContain("15 more omitted; list again with offset 50");
 
       const second = await harness.tool.execute("list-second", { action: "list", offset: 50 });
-      expect(second.details).toMatchObject({ total: 63, offset: 50, omitted: 0 });
-      expect(second.details.workflows).toHaveLength(13);
+      expect(second.details).toMatchObject({ total: 65, offset: 50, omitted: 0 });
+      expect(second.details.workflows).toHaveLength(15);
       expect(second.details).not.toHaveProperty("nextOffset");
 
       await expect(
@@ -683,7 +844,7 @@ describe("pi-workflows extension", () => {
         harness.tool.execute("list-negative", { action: "list", offset: -1 }),
       ).rejects.toThrow(/offset must be an integer/);
       await expect(
-        harness.tool.execute("list-too-large", { action: "list", offset: 64 }),
+        harness.tool.execute("list-too-large", { action: "list", offset: 66 }),
       ).rejects.toThrow(/offset must be an integer/);
     } finally {
       vi.unstubAllEnvs();
