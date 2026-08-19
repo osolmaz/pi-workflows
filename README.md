@@ -77,11 +77,18 @@ or run it in place with `npx tsx src/viewer/cli.ts`.
 ## Herdr integration
 
 Pi Workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
-`piw` and Pi Workflows, link the bundled plugin once:
+`piw` and Pi Workflows, synchronize the bundled plugin:
 
 ```bash
-pi-workflows herdr setup
+pi-workflows herdr sync
 ```
+
+Run the same command after a Pi Workflows update. It finds the package that
+provides the running CLI and repairs a Herdr link when npm moved that package.
+`pi-workflows herdr setup` remains an alias for existing installations. Use
+`--json` for versioned machine-readable output. The [Herdr plugin sync
+plan](docs/plans/2026-08-20-herdr-plugin-sync-plan.md) defines update and
+recovery behavior.
 
 When Pi runs inside Herdr, a workflow widget shows `Ctrl+Shift+R piw`. When the widget has hidden rows, this call to action shares the existing scroll-controls line instead of taking another line.
 The shortcut opens the exact run bundle and lets you choose a split, tab, or new

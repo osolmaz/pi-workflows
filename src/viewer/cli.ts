@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SqliteControllerStore } from "../controllers/sqlite.js";
 import { projectControllerStoreBaseDir } from "../controllers/store.js";
-import { setupHerdrPlugin } from "../herdr/setup.js";
+import { syncHerdrPlugin } from "../herdr/setup.js";
 import { sanitizeText } from "../render/ansi.js";
 import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
 import {
@@ -24,7 +24,8 @@ Usage:
   pi-workflows controllers [--controller-dir <dir>]
   pi-workflows controller <controller> <key> [--controller-dir <dir>]
   pi-workflows host [--project <dir>] [-- <extra pi args>]
-  pi-workflows herdr setup
+  pi-workflows herdr sync [--json]
+  pi-workflows herdr setup [--json]
 
 Commands:
   view          Open the live workflow TUI. With --once, print a snapshot.
@@ -32,13 +33,14 @@ Commands:
   controllers   List durable controller resources.
   controller    Show one resource, its effects, child workflows, and events.
   host          Run the always-on workflow host in the foreground.
-  herdr         Set up the bundled Herdr plugin.
+  herdr         Synchronize the bundled Herdr plugin. setup is an alias for sync.
 
 Options:
   --dir <runsDir>          Runs directory (default: ~/.pi/agent/workflows/runs)
   --controller-dir <dir>  Controller directory (default: project-scoped local store)
   --once                   Render once without the interactive TUI
   --project <dir>          Project directory for the host (default: cwd)
+  --json                   Print a versioned JSON result for herdr sync
 `;
 
 export type CliArgs = {
@@ -50,6 +52,7 @@ export type CliArgs = {
   dir: string;
   controllerDir: string;
   once: boolean;
+  json: boolean;
   project?: string | undefined;
   piArgs?: string[] | undefined;
 };
@@ -60,6 +63,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   let dir = workflowRunsBaseDir();
   let controllerDir = projectControllerStoreBaseDir(process.cwd());
   let once = false;
+  let json = false;
   const positionals: string[] = [];
   let project: string | undefined;
   const piArgs: string[] = [];
@@ -74,8 +78,10 @@ export function parseCliArgs(argv: string[]): CliArgs {
       project = requiredValue(args, "--project");
     } else if (arg === "--once") {
       once = true;
+    } else if (arg === "--json") {
+      json = true;
     } else if (arg === "--help" || arg === "-h") {
-      return { command: "help", dir, controllerDir, once };
+      return { command: "help", dir, controllerDir, once, json };
     } else if (arg === "--") {
       piArgs.push(...args.splice(0));
     } else if (arg.startsWith("-")) {
@@ -85,8 +91,12 @@ export function parseCliArgs(argv: string[]): CliArgs {
     }
   }
 
+  if (command !== "herdr" && json) {
+    throw new Error("--json is available only for herdr sync");
+  }
+
   if (command === "host") {
-    return { command, dir, controllerDir, once, project, piArgs };
+    return { command, dir, controllerDir, once, json, project, piArgs };
   }
 
   if (command === "controller") {
@@ -100,13 +110,14 @@ export function parseCliArgs(argv: string[]): CliArgs {
       dir,
       controllerDir,
       once,
+      json,
     };
   }
   if (command === "herdr") {
-    if (positionals.length !== 1 || positionals[0] !== "setup") {
-      throw new Error("herdr requires the setup action");
+    if (positionals.length !== 1 || (positionals[0] !== "sync" && positionals[0] !== "setup")) {
+      throw new Error("herdr requires the sync action");
     }
-    return { command, herdrAction: positionals[0], dir, controllerDir, once };
+    return { command, herdrAction: positionals[0], dir, controllerDir, once, json };
   }
   if (positionals.length > 1) {
     throw new Error(`Unexpected argument: ${positionals[1]}`);
@@ -117,6 +128,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
     dir,
     controllerDir,
     once,
+    json,
   };
 }
 
@@ -240,8 +252,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return await runHost(args.project ?? process.cwd(), args.piArgs);
     }
     if (args.command === "herdr") {
-      const result = setupHerdrPlugin(packageRoot());
-      process.stdout.write(`${result.message}\n`);
+      const result = syncHerdrPlugin(packageRoot());
+      process.stdout.write(args.json ? `${JSON.stringify(result)}\n` : `${result.message}\n`);
       return 0;
     }
     if (args.command === "view") {

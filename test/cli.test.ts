@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
@@ -36,6 +37,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("parseCliArgs", () => {
@@ -73,9 +75,15 @@ describe("parseCliArgs", () => {
       controllerDir: "/tmp/controllers",
     });
     expect(parseCliArgs(["--help"]).command).toBe("help");
+    expect(parseCliArgs(["herdr", "sync", "--json"])).toMatchObject({
+      command: "herdr",
+      herdrAction: "sync",
+      json: true,
+    });
     expect(parseCliArgs(["herdr", "setup"])).toMatchObject({
       command: "herdr",
       herdrAction: "setup",
+      json: false,
     });
   });
 
@@ -182,6 +190,31 @@ describe("pi-workflows CLI", () => {
     expect(stdout).toContain('"type": "created"');
   });
 
+  it("prints the versioned Herdr sync result as JSON", async () => {
+    const temp = await makeTempDir("pi-workflows-cli-herdr");
+    const bin = path.join(temp, "bin");
+    await fs.mkdir(bin);
+    const root = path.resolve(import.meta.dirname, "..");
+    const herdr = path.join(bin, "herdr");
+    await fs.writeFile(
+      herdr,
+      `#!/usr/bin/env node\nconst path = require("node:path");\nconst root = process.env.TEST_HERDR_ROOT;\nprocess.stdout.write(JSON.stringify({ result: { plugins: [{ plugin_id: "osolmaz.pi-workflows", plugin_root: root, manifest_path: path.join(root, "herdr-plugin.toml"), version: "0.11.0", enabled: true }] } }));\n`,
+    );
+    await fs.chmod(herdr, 0o755);
+    vi.stubEnv("TEST_HERDR_ROOT", root);
+    vi.stubEnv("PATH", `${bin}:${process.env["PATH"] ?? ""}`);
+
+    expect(await main(["herdr", "sync", "--json"])).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      schema: "pi-workflows.herdr-sync.v1",
+      status: "unchanged",
+      changed: false,
+      expectedVersion: "0.11.0",
+      effectiveVersion: "0.11.0",
+      enabled: true,
+    });
+  });
+
   it("reports missing and empty controller stores", async () => {
     const controllerDir = await makeTempDir("pi-workflows-cli-controllers");
     expect(await main(["controllers", "--controller-dir", controllerDir])).toBe(0);
@@ -210,7 +243,11 @@ describe("pi-workflows CLI", () => {
 
     stderr = "";
     expect(await main(["herdr", "wrong"])).toBe(2);
-    expect(stderr).toContain("herdr requires the setup action");
+    expect(stderr).toContain("herdr requires the sync action");
+
+    stderr = "";
+    expect(await main(["runs", "--json"])).toBe(2);
+    expect(stderr).toContain("--json is available only for herdr sync");
 
     stderr = "";
     expect(await main(["frobnicate"])).toBe(2);
