@@ -312,28 +312,28 @@ function latestCiCommand(context: WorkflowNodeContext): StructuredCommand {
 }
 
 function currentPlan(context: WorkflowNodeContext): unknown {
+  const adopted = context.outputs.adoptPlan as { plan?: unknown } | undefined;
+  if (adopted?.plan !== undefined) return adopted.plan;
   const documented = context.outputs.documentation as
     | { exit?: string; output?: { plan?: unknown } }
     | undefined;
   if (documented?.exit === "ready" && documented.output?.plan !== undefined) {
     return documented.output.plan;
   }
-  const adopted = context.outputs.adoptPlan as { plan?: unknown } | undefined;
-  if (adopted?.plan !== undefined) return adopted.plan;
   const discovered = context.outputs.findPlan as ExistingPlanDiscovery | undefined;
   if (discovered?.route === "found" && discovered.plan !== undefined) return discovered.plan;
   return (context.input as AutoimplementInput).plan;
 }
 
 function currentPlanDigest(context: WorkflowNodeContext): string {
+  const adopted = context.outputs.adoptPlan as { planDigest?: unknown } | undefined;
+  if (typeof adopted?.planDigest === "string") return adopted.planDigest;
   const documented = context.outputs.documentation as
     | { exit?: string; output?: { planDigest?: unknown } }
     | undefined;
   if (documented?.exit === "ready" && typeof documented.output?.planDigest === "string") {
     return documented.output.planDigest;
   }
-  const adopted = context.outputs.adoptPlan as { planDigest?: unknown } | undefined;
-  if (typeof adopted?.planDigest === "string") return adopted.planDigest;
   const plan = currentPlan(context);
   if (plan === undefined) throw new Error("autoimplement does not have a selected plan");
   return digest(plan);

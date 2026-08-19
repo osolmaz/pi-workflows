@@ -275,5 +275,12 @@ describe("autoimplement existing-plan startup", () => {
     expect(redesigned).toBeGreaterThanOrEqual(0);
     expect(documented).toBeGreaterThan(redesigned);
     expect(implementations[1]?.index).toBeGreaterThan(documented);
+    const implementationRequests = executor.requests.filter(
+      (request) => request.contract.nodeId === "implement",
+    );
+    expect(implementationRequests[1]?.prompt).toContain(JSON.stringify(revised));
+    expect(implementationRequests[1]?.prompt).not.toContain(
+      JSON.stringify({ summary: "old", steps: ["old"] }),
+    );
   });
 });

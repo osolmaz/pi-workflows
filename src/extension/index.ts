@@ -1761,6 +1761,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
     for (const request of requests) {
       const parent = await readRunBundle(runStore.runDirFor(request.runId));
       if (parent === null || parent.state.status !== "waiting") continue;
+      const currentRequest = humanDecisionRequest(parent.state.finalOutput);
+      if (
+        currentRequest === null ||
+        currentRequest.decisionId !== request.decisionId ||
+        currentRequest.requestDigest !== request.requestDigest
+      ) {
+        continue;
+      }
       const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(request.runId);
       const ownedBySession =
         queueRecord !== undefined &&

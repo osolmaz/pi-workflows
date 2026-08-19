@@ -9,6 +9,7 @@ import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { listRunBundles, readRunBundle } from "../src/workflows/store.js";
 import { stripAnsi } from "../src/workflows/text.js";
+import type { HumanDecisionRequest } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
 type ToolResult = {
@@ -534,15 +535,25 @@ describe("pi-workflows extension", () => {
     const waiting = (await listRunBundles(runsDir)).find(
       (bundle) => bundle.state.status === "waiting",
     );
-    const request = waiting?.state.finalOutput as
-      | {
-          decisionId: string;
-          requestDigest: string;
-          choices: Record<string, unknown>;
-        }
-      | undefined;
+    const request = waiting?.state.finalOutput as HumanDecisionRequest | undefined;
     if (request === undefined) throw new Error("missing human decision request");
-    await new HumanDecisionStore(runsDir).accept(request as never, {
+    const decisionStore = new HumanDecisionStore(runsDir);
+    const staleRequest: HumanDecisionRequest = {
+      ...request,
+      decisionId: "decision-stale-request",
+      requestDigest: `sha256:${"0".repeat(64)}`,
+      attemptId: "stale-attempt",
+      createdAt: "2000-01-01T00:00:00.000Z",
+    };
+    await decisionStore.createRequest(staleRequest);
+    await decisionStore.accept(staleRequest, {
+      decisionId: staleRequest.decisionId,
+      requestDigest: staleRequest.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "session-a", eventId: "stale-event" },
+      idempotencyKey: "stale-event",
+    });
+    await decisionStore.accept(request, {
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       choice: "continue",

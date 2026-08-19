@@ -285,6 +285,17 @@ describe("decision channel configuration", () => {
         allowedChatIds: ["-200"],
       }),
     ).rejects.toThrow(/numeric/);
+    await expect(
+      writeDecisionChannelProfile({
+        configDir,
+        audience: "operator",
+        profile: "approval",
+        credential: "approval",
+        tokenFile: "relative-token-file",
+        allowedUserIds: ["100"],
+        allowedChatIds: ["-200"],
+      }),
+    ).rejects.toThrow(/absolute/);
     expect(() =>
       createTelegramChannels({
         config: {

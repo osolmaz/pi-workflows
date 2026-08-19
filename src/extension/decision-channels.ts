@@ -827,6 +827,9 @@ export async function writeDecisionChannelProfile(options: {
   requireSimpleId(options.credential, "Telegram credential");
   validateNumericIds(options.allowedUserIds, "Telegram allowed user IDs");
   validateNumericIds(options.allowedChatIds, "Telegram allowed chat IDs");
+  if (!path.isAbsolute(options.tokenFile)) {
+    throw new Error("Telegram token file path must be absolute");
+  }
   await requirePrivateFile(options.tokenFile, "Telegram token file");
   await fsp.mkdir(configDir, { recursive: true, mode: 0o700 });
   const channelPath = path.join(configDir, "channels.json");
