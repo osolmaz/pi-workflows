@@ -50,7 +50,7 @@ describe("discoverWorkflows", () => {
     expect(discovered.map((w) => [w.name, w.source])).toEqual([
       ["local", "project"],
       ["global", "global"],
-      ["autodevise", "builtin"],
+      ["autoplan", "builtin"],
       ["autodoc", "builtin"],
       ["autoimplement", "builtin"],
       ["plan-approval", "builtin"],
@@ -68,7 +68,7 @@ describe("discoverWorkflows", () => {
     expect(discovered).toHaveLength(6);
     expect(discovered[0]?.source).toBe("project");
     expect(discovered.slice(1).map((item) => item.name)).toEqual([
-      "autodevise",
+      "autoplan",
       "autodoc",
       "autoimplement",
       "plan-approval",
@@ -81,7 +81,7 @@ describe("discoverWorkflows", () => {
     const homeDir = await makeTempDir("pi-workflows-empty-home");
     expect(
       (await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).map((item) => item.name),
-    ).toEqual(["autodevise", "autodoc", "autoimplement", "plan-approval", "monitor"]);
+    ).toEqual(["autoplan", "autodoc", "autoimplement", "plan-approval", "monitor"]);
   });
 
   it("lets a project workflow override the built-in monitor", async () => {
@@ -128,7 +128,7 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "5" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "6" });
     expect(resolved.definition.name).toBe("monitor");
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
       "approval",
@@ -191,8 +191,8 @@ describe("resolveWorkflowRef", () => {
     const dir = path.join(cwd, ".pi", "workflows");
     const api = JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "index.ts"));
     await fs.writeFile(
-      path.join(dir, "autodevise.workflow.ts"),
-      `import { compute, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "autodevise", startAt: "done", exits: { wrong: { from: "done" } }, nodes: { done: compute({ run: () => ({}) }) }, edges: [] });\n`,
+      path.join(dir, "autoplan.workflow.ts"),
+      `import { compute, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "autoplan", startAt: "done", exits: { wrong: { from: "done" } }, nodes: { done: compute({ run: () => ({}) }) }, edges: [] });\n`,
       "utf8",
     );
 

@@ -36,12 +36,15 @@ Or try the npm package without installing it:
 pi -e npm:@osolmaz/pi-workflows
 ```
 
-The Pi package includes the extension and two optional skills:
+The Pi package includes the extension and five optional skills:
 
 - `pi-workflows` teaches the agent how to operate and author workflows.
 - `monitor` starts and operates the built-in monitor workflow.
+- `autoplan` selects the best practical solution and writes an implementation plan.
+- `autodoc` records an existing plan in canonical documentation.
+- `autoimplement` implements an existing plan and verifies the result.
 
-Pi discovers both skills when it loads the package. Use `pi config` to disable
+Pi discovers these skills when it loads the package. Use `pi config` to disable
 the extension, all bundled skills, or one skill independently. The equivalent
 settings entry below keeps the extension and disables only `monitor`:
 
@@ -56,7 +59,7 @@ settings entry below keeps the extension and disables only `monitor`:
 }
 ```
 
-Set `"skills": []` to disable both bundled skills while keeping the extension.
+Set `"skills": []` to disable all bundled skills while keeping the extension.
 Set `"extensions": []` to keep the skills without loading the extension.
 
 Install the interactive terminal viewer separately from crates.io. The crate
@@ -145,14 +148,14 @@ A workflow can import another workflow and connect its named exits without copyi
 
 ```typescript
 import { compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
-import autodevise from "./autodevise.workflow.js";
+import autoplan from "./autoplan.workflow.js";
 
 export default defineWorkflow({
   source: import.meta.url,
   name: "parent",
   startAt: "start",
   includes: {
-    design: includeWorkflow(autodevise, {
+    design: includeWorkflow(autoplan, {
       input: ({ outputs }) => ({ problem: String(outputs.start) }),
     }),
   },
@@ -185,7 +188,7 @@ waits with a normal shell action, and loops until its stop condition or check
 limit. Its input supports `task`, `everyMinutes`, `stopWhen`, `maxChecks`, and
 an optional `checkTimeoutMinutes`.
 
-Monitor is observation-only by default. An explicit `repair` policy authorizes its composed `autodevise` and `autoimplement` path. The monitor checks the target again after repair and stops when the same issue and target evidence return without progress. Project and global workflows can replace the built-in `monitor` by using the same file name.
+Monitor is observation-only by default. An explicit `repair` policy authorizes its composed `autoplan` and `autoimplement` path. The monitor checks the target again after repair and stops when the same issue and target evidence return without progress. Project and global workflows can replace the built-in `monitor` by using the same file name.
 
 A monitor occupies the session's one active workflow slot. If its Pi runner
 stops during the shell wait, the run parks and repeats that wait node when a
@@ -193,12 +196,13 @@ runner resumes it.
 
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The
-`autodevise` example does exactly that. It frames the problem and scope, devises
+`autoplan` example does exactly that. It frames the problem and scope, devises
 an elegant production-ready solution, and compares it with the holy grail. It
 then selects the best practical in-scope solution without asking the user to
 resolve the gap. The ideal can win when it is feasible, but work outside the
 current authority cannot block a valid practical solution. The workflow ends
-with a detailed implementation plan.
+with a detailed implementation plan. `autoplan` replaces the earlier
+`autodevise` name; the old command and export are not retained.
 
 ## Watching a run
 
@@ -332,7 +336,7 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   while they run.
 - `two-turn` chains three agent steps that build on each other's outputs in
   the same conversation.
-- `autodevise` turns the current problem into a chosen practical solution and
+- `autoplan` turns the current problem into a chosen practical solution and
   a detailed implementation plan, using the ideal end state as guidance rather
   than an out-of-scope requirement.
 - `autoimplement` finds a clear existing plan, documents it when needed,
@@ -340,11 +344,11 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   tracks P0 through P2, handles PR comments and CI, and
   finalizes the PR. P0 and P1 fixes require another review. P2-only work is
   verified without another reviewer round. A five-minute CI wait routes to
-  additional useful local testing. New evidence can route through autodevise
+  additional useful local testing. New evidence can route through autoplan
   and autodoc before implementation resumes.
 - `human-decision` shows a reusable verified-human gate with plain choices and
   exact replan text.
-- `approved-plan` composes autodevise, autodoc, and the reusable plan-approval
+- `approved-plan` composes autoplan, autodoc, and the reusable plan-approval
   workflow without copying their internal nodes.
 - `autoresearch` runs an iterative feature-search loop in the style of
   [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup

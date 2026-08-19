@@ -51,7 +51,7 @@ const EXAMPLES_DIR = path.join(
 );
 
 const EXAMPLE_FILES = [
-  "autodevise.workflow.ts",
+  "autoplan.workflow.ts",
   "autoimplement.workflow.ts",
   "autoresearch.workflow.ts",
   "branch.workflow.ts",

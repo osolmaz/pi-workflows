@@ -289,21 +289,21 @@
         "mountPath": ["redesign"],
         "localNodeId": "redesign",
         "includeTransition": "entry",
-        "statusDetail": "entering autodevise"
+        "statusDetail": "entering autoplan"
       },
       "redesign/__piw_exit_ready": {
         "nodeType": "compute",
         "mountPath": ["redesign"],
         "localNodeId": "ready",
         "includeTransition": "exit",
-        "statusDetail": "leaving autodevise through ready"
+        "statusDetail": "leaving autoplan through ready"
       },
       "redesign/__piw_exit_blocked": {
         "nodeType": "compute",
         "mountPath": ["redesign"],
         "localNodeId": "blocked",
         "includeTransition": "exit",
-        "statusDetail": "leaving autodevise through blocked"
+        "statusDetail": "leaving autoplan through blocked"
       },
       "redesign/frame": {
         "nodeType": "agent",
@@ -775,7 +775,7 @@
         },
         {
           "mountPath": ["redesign"],
-          "workflowName": "autodevise",
+          "workflowName": "autoplan",
           "entryNode": "redesign",
           "exits": {
             "ready": "redesign/__piw_exit_ready",
@@ -10372,7 +10372,7 @@
         "                                                                                │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │ ◇ blocked                            │      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
         "                                                                                │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
         "                                                                                │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
-        "                                                                                │      │      │      │      │      │      │ … entering autodevise                │      │      │      │      │      │      │      │      │      │      │ … finalizing PR                      │      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
+        "                                                                                │      │      │      │      │      │      │ … entering autoplan                  │      │      │      │      │      │      │      │      │      │      │ … finalizing PR                      │      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
         "                                                                                │      │      │      │      │      │      └──────────────────────────────────────┘      │      │      │      │      │      │      │      │      │      └──────────────────────────────────────┘      │      │      │      │      │      │      │      │      │                                                                                  │ │ │       │       │",
         "                                                                                └──────┼──────┼─┐    └──────┼──────┼─┐                        └───────────────┐         └──────┼──────┼─┐    └──────┼──────┼─┐    └──────┼──────┼────────┐               │ └────── completed ──────┐ │    ┌─┼──────┼──────┘    ┌─┼──────┼──────┘      │      │                                                                                  │ │ │       │       │",
         "                                                                                       └──────┼─┼──────┐    └──────┼─┼──────┐                                 │                └──────┼─┼──────┐    └──────┼─┼──────┐    └──────┼────────┼──────┐        │    ┌────────────────────┼─┘    │ │    ┌─┼───────────┼─┘    ┌─┼─────────────┘      │                                                                                  │ │ │       │       │",
@@ -10471,7 +10471,7 @@
         "                                                                                            │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
         "                                                                                            │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
         "                                                                                            │      │      │      │      │      │                                      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
-        "                                                                                            │      │      │      │      │      │ … leaving autodevise through ready   │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
+        "                                                                                            │      │      │      │      │      │ … leaving autoplan through ready     │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
         "                                                                                            │      │      │      │      │      └──────────────────────────────────────┘      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
         "                                                                                            │      │      │      │      │                          │                         │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
         "                                                                                            │      │      │      │      │                          ▼                         │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                               │ │ │       │       │",
@@ -10616,7 +10616,7 @@
         "  │                                      │      │      │      │      │                                      │      │      │      │      │                                      │      │ ◇ blocked                            │      │      │ ◇ blocked                            │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │    │ │ │       │       │",
         "  │                                      │      │      │      │      │                                      │      │      │      │      │                                      │      │                                      │      │      │                                      │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │    │ │ │       │       │",
         "  │                                      │      │      │      │      │                                      │      │      │      │      │                                      │      │                                      │      │      │                                      │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │      │    │ │ │       │       │",
-        "  │                                      │      │      │      │      │ … leaving autodoc through blocked    │      │      │      │      │ … leaving autodevise through blocked │      │ … correcting reviewer command        │      │      │ … correcting CI tracking command     │      │      │      │      │      │      │      │ … leaving plan-approval through stop │      │      │      │      │      │      │      │    │ │ │       │       │",
+        "  │                                      │      │      │      │      │ … leaving autodoc through blocked    │      │      │      │      │ … leaving autoplan through blocked   │      │ … correcting reviewer command        │      │      │ … correcting CI tracking command     │      │      │      │      │      │      │      │ … leaving plan-approval through stop │      │      │      │      │      │      │      │    │ │ │       │       │",
         "  └──────────────────────────────────────┘      │      │      │      └──────────────────────────────────────┘      │      │      │      └──────────────────────────────────────┘      └──────────────────────────────────────┘      │      └──────────────────────────────────────┘      │      │      │      │      │      │      └──────────────────────────────────────┘      │      │      │      │      │      │      │    │ │ │       │       │",
         "                      │                         │      │      │                          │                         │      │      │                          │                                             │ └───────────────────────┼──────────────────────────┼───┼─────────────────────┼──────┼──────┼──────┼──────┼──────┼──────────────────────────┼─────────────────────────┼──────┼──────┼──────┼──────┼──────┼──────┼────┼─┼─┘       │       │",
         "                      │                         │      │      │                          │                         │      │      │                          │                                             │                         │                          │   └─────────────────────┼──────┼──────┼──────┼──────┼──────┼──────────────────────────┼─────────────────────────┼──────┼──────┼──────┼──────┼──────┼──────┼────┼─┼─────────┘       │",

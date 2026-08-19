@@ -4,6 +4,12 @@ Pi Workflows needs a reusable way to stop at a proposal and wait for a person. T
 
 This document defines that behavior. The implementation is tracked in the [human decision gates plan](plans/2026-08-19-human-decision-gates-plan.md).
 
+The current request contract can render a structured `body` as JSON. The planned
+[human decision presentation contract](HUMAN_DECISION_PRESENTATIONS.md) separates
+canonical subject data from the complete readable message shown in Pi and
+Telegram. Its [implementation plan](plans/2026-08-19-human-decision-presentations-plan.md)
+preserves v1 records without rewriting them.
+
 ## Goals
 
 A workflow author can:
@@ -259,15 +265,15 @@ SQLite may index pending decisions and channel leases, but immutable decision fi
 
 Pi Workflows keeps solution choice, documentation, and implementation in separate built-ins:
 
-- `autodevise` chooses a solution or revises one after new evidence.
+- `autoplan` chooses a solution or revises one after new evidence.
 - `autodoc` records an already selected solution in the canonical specification and implementation plan. It does not choose a solution or implement it.
 - `autoimplement` executes a clear existing plan.
 
 `autodoc` runs by itself and as an included workflow. It returns a documented-plan record with the plan, plan digest, document paths, document digests, and check results. If the canonical documents already describe the selected plan, it adopts them without rewriting files.
 
-`autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A caller can bypass discovery and autodoc only by supplying both the explicit plan and a `documentation` receipt whose plan digest matches it. A plan without that current-document evidence enters autodoc so the canonical documents are inspected and adopted or updated. The absence of a structured `plan` input never authorizes `autodevise`.
+`autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A caller can bypass discovery and autodoc only by supplying both the explicit plan and a `documentation` receipt whose plan digest matches it. A plan without that current-document evidence enters autodoc so the canonical documents are inspected and adopted or updated. The absence of a structured `plan` input never authorizes `autoplan`.
 
-If later implementation, verification, review, comments, or CI evidence invalidates the plan, autoimplement runs `autodevise`, sends the revised plan through `autodoc`, and then resumes implementation. An optional approval policy inserts `plan-approval` after the revised documentation.
+If later implementation, verification, review, comments, or CI evidence invalidates the plan, autoimplement runs `autoplan`, sends the revised plan through `autodoc`, and then resumes implementation. An optional approval policy inserts `plan-approval` after the revised documentation.
 
 ## Reusable plan approval workflow
 
@@ -291,9 +297,9 @@ includes: {
 },
 ```
 
-A `replan` exit returns to `autodevise` with the previous plan and the exact human instructions as new evidence. The revised plan passes through `autodoc`, receives a new digest, and enters a new approval decision. Step limits bound repeated replanning.
+A `replan` exit returns to `autoplan` with the previous plan and the exact human instructions as new evidence. The revised plan passes through `autodoc`, receives a new digest, and enters a new approval decision. Step limits bound repeated replanning.
 
-Monitor repair composes `autodevise`, `autodoc`, optional `plan-approval`, `autoimplement`, and a fresh target check. Autoimplement can mount the same approval workflow after evidence-driven redesign. Existing behavior stays unchanged when no approval policy is present.
+Monitor repair composes `autoplan`, `autodoc`, optional `plan-approval`, `autoimplement`, and a fresh target check. Autoimplement can mount the same approval workflow after evidence-driven redesign. Existing behavior stays unchanged when no approval policy is present.
 
 ## Recovery and cancellation
 

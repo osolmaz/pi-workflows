@@ -30,8 +30,8 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Make autoimplement locate and record an existing plan from input, conversation context, or referenced documents.
 - Block autoimplement when no clear plan exists.
 - Skip autodoc only when plan discovery verifies current canonical documents or an explicit documentation receipt has a matching plan digest.
-- Route every evidence-driven revision through `autodevise`, then `autodoc`, before implementation resumes.
-- Never run initial autodevise only because the structured plan input is absent.
+- Route every evidence-driven revision through `autoplan`, then `autodoc`, before implementation resumes.
+- Never run initial autoplan only because the structured plan input is absent.
 
 ### Public authoring API
 
@@ -78,7 +78,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 
 - Change Pi core or use undocumented Pi APIs.
 - Create a Telegram bot or copy a token without explicit source and destination approval.
-- Add Telegram-specific logic to monitor, autoimplement, autodevise, or user workflows.
+- Add Telegram-specific logic to monitor, autoimplement, autoplan, or user workflows.
 - Run an always-on service when no Pi process is active.
 - Promise exactly-once Telegram message creation after an ambiguous Bot API response.
 - Add arbitrary forms in the first release. Choice buttons and one text input cover the required flows.
@@ -215,7 +215,7 @@ Use a fake Bot API in all automated tests. Do not require a real token or networ
 - Block when discovery finds no clear plan.
 - Skip autodoc for current canonical documents.
 - Route undocumented and revised plans through autodoc.
-- Keep autodevise only on evidence-driven redesign edges.
+- Keep autoplan only on evidence-driven redesign edges.
 
 ### Reusable plan approval
 
@@ -223,7 +223,7 @@ Use a fake Bot API in all automated tests. Do not require a real token or networ
 - Return named `continue`, `stop`, and `replan` exits.
 - Include the accepted decision receipt in every exit.
 - Return exact instructions from `replan`.
-- Add an example that loops through `autodevise`, plan approval, and implementation.
+- Add an example that loops through `autoplan`, plan approval, and implementation.
 - Keep monitor and autoimplement behavior unchanged unless their input requests the approval workflow.
 
 ### Viewers and documentation

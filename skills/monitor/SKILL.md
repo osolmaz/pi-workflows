@@ -35,9 +35,9 @@ When the conversation gives no clear finish criterion, set `stopWhen` to `Stop o
 
 Do not invent a finite check count. Omit `maxChecks` unless the user explicitly requests one. The workflow host can apply its own safety upper bound. Disclose that bound if it appears.
 
-When repair is authorized, route a concrete code or design defect through the monitor's composed repair path. Supply the problem, observed evidence, and a stable fingerprint of the issue plus target state. The workflow runs outer `autodevise`, standalone `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign when needed, then checks the target again. Do not copy their prompts into the monitor task.
+When repair is authorized, route a concrete code or design defect through the monitor's composed repair path. Supply the problem, observed evidence, and a stable fingerprint of the issue plus target state. The workflow runs outer `autoplan`, standalone `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign when needed, then checks the target again. Do not copy their prompts into the monitor task.
 
-Add `repair.approval` only when the user requests a human plan decision. Set its named `audience` and a bounded `maxReplans`. A verified continue answer starts implementation. Stop ends the repair truthfully. Replan preserves the exact operator text, sends it back to autodevise, documents the revised plan, and asks again. The model-facing workflow answer tool cannot answer this gate.
+Add `repair.approval` only when the user requests a human plan decision. Set its named `audience` and a bounded `maxReplans`. A verified continue answer starts implementation. Stop ends the repair truthfully. Replan preserves the exact operator text, sends it back to autoplan, documents the revised plan, and asks again. The model-facing workflow answer tool cannot answer this gate.
 
 ## Keep routine work moving
 

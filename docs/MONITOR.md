@@ -38,7 +38,7 @@ The monitor checks a target, sends one status notification after every accepted 
 
 `repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
 
-`repair.approval` is optional. It contains a logical `audience` and `maxReplans` from 1 through 20. When present, monitor sends the documented repair plan through the reusable human `plan-approval` workflow. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before autodevise and autodoc run again. The model-facing workflow tool cannot approve the gate.
+`repair.approval` is optional. It contains a logical `audience` and `maxReplans` from 1 through 20. When present, monitor sends the documented repair plan through the reusable human `plan-approval` workflow. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before autoplan and autodoc run again. The model-facing workflow tool cannot approve the gate.
 
 `reportWhen` is removed. The monitor always reports after every accepted check.
 
@@ -102,7 +102,7 @@ prepare
       ├─ continue → schedule → sleep → check
       └─ repair → repairGuard
            ├─ blocked → repairBlocked → repairReport → finish
-           └─ initialDesign: autodevise
+           └─ initialDesign: autoplan
                 ├─ blocked → repairBlocked
                 └─ documentation: autodoc
                      ├─ blocked → repairBlocked
@@ -122,7 +122,7 @@ prepare
 - `report` is a `notify` node that queues exactly one report.
 - `decide` is a `compute` node that applies the route and check safety limit.
 - `repairGuard` stops a repeated issue when a completed repair did not change its fingerprint or observed target state.
-- `initialDesign`, `documentation`, optional `approval`, and `implementation` are included workflows. Replan returns exact operator text to initialDesign. Autoimplement can enter nested `autodevise`, then autodoc, when later evidence requires redesign.
+- `initialDesign`, `documentation`, optional `approval`, and `implementation` are included workflows. Replan returns exact operator text to initialDesign. Autoimplement can enter nested `autoplan`, then autodoc, when later evidence requires redesign.
 - `repairBlocked` and `repairReport` preserve a truthful blocked result and user notification.
 - `schedule` is a function `action` that publishes the next-check time.
 - `sleep` is the existing runtime-owned shell wait.
@@ -282,7 +282,7 @@ The monitor skill must disclose a surfaced host limit and must never invent a sm
 
 ## Safety boundaries
 
-An observation-only request authorizes only observation and scheduled checks. Automatic repair also requires the explicit `repair` input object. An optional `repair.approval` object names a logical audience and inserts human plan approval after autodoc. Continue starts implementation, stop ends truthfully, and replan sends the exact human text back to autodevise before autodoc and approval run again.
+An observation-only request authorizes only observation and scheduled checks. Automatic repair also requires the explicit `repair` input object. An optional `repair.approval` object names a logical audience and inserts human plan approval after autodoc. Continue starts implementation, stop ends truthfully, and replan sends the exact human text back to autoplan before autodoc and approval run again.
 
 When the user asks the monitor to keep an objective running or finish it, the monitor skill may record routine, bounded work in `task` and the repair policy. This can include retries, restarts, pinned task code, tests, configuration repairs, and temporary cleanup. The task must preserve the exact objective and state every mutation boundary.
 

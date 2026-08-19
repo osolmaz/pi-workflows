@@ -15,8 +15,11 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 2. `~/.pi/agent/workflows/` globally
 3. Workflows built into Pi Workflows
 
-Pi Workflows includes a built-in `monitor` workflow. A project or global file
-named `monitor.workflow.ts` replaces it. The package registers each built-in in
+Pi Workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
+`plan-approval`, and `monitor` workflows. `autoplan` is the current name for the
+planning workflow that was first released as `autodevise`; the old command and
+export are not retained. A project or global file named `monitor.workflow.ts`
+replaces the built-in monitor. The package registers each built-in in
 a process-local catalog with a stable reference such as `builtin:monitor` and
 an explicit revision. Built-ins are imported with the engine when a Pi process
 starts. They are not read from the package directory when a run starts or
@@ -402,9 +405,9 @@ runs.
 
 ### Built-in planning and implementation
 
-The built-in `autodevise` workflow selects a practical in-scope solution and writes a detailed plan. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autodevise` followed by `autodoc`.
+The built-in `autoplan` workflow selects a practical in-scope solution and writes a detailed plan. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
 
-The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autodevise, documents the revised plan, and asks again through a new plan digest.
+The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autoplan, documents the revised plan, and asks again through a new plan digest.
 
 Autoimplement writes and runs the exact Pi Reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
 
@@ -424,7 +427,7 @@ one looping workflow run. Its input is:
 }
 ```
 
-The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through outer `autodevise`, `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked. Add `repair.approval` with a named audience and bounded replan limit only when the operator wants a human decision before implementation.
+The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through outer `autoplan`, `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked. Add `repair.approval` with a named audience and bounded replan limit only when the operator wants a human decision before implementation.
 
 `everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:

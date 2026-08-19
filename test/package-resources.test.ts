@@ -75,6 +75,9 @@ describe("Pi package resources", () => {
   it("ships valid uniquely named skills", async () => {
     const files = await skillFiles();
     expect(files.map((file) => path.relative(skillsRoot, file))).toEqual([
+      "autodoc/SKILL.md",
+      "autoimplement/SKILL.md",
+      "autoplan/SKILL.md",
       "monitor/SKILL.md",
       "pi-workflows/SKILL.md",
     ]);

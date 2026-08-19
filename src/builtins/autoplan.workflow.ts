@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { agent, compute, defineWorkflow } from "../workflows/definition.js";
 
-export type AutodeviseInput = {
+export type AutoplanInput = {
   problem: string;
   scope?: string;
   constraints?: string[];
@@ -9,7 +9,7 @@ export type AutodeviseInput = {
   newEvidence?: unknown;
 };
 
-export type AutodeviseReady = {
+export type AutoplanReady = {
   status: "ready";
   frame: unknown;
   proposal: unknown;
@@ -21,7 +21,7 @@ export type AutodeviseReady = {
   changed: boolean;
 };
 
-export type AutodeviseBlocked = {
+export type AutoplanBlocked = {
   status: "blocked";
   frame: unknown;
   proposal: unknown;
@@ -44,18 +44,18 @@ function requireString(value: unknown, label: string): string {
   return value.trim();
 }
 
-function parseInput(value: unknown): AutodeviseInput {
-  const input = requireRecord(value, "autodevise input");
+function parseInput(value: unknown): AutoplanInput {
+  const input = requireRecord(value, "autoplan input");
   const constraints = input.constraints;
   if (
     constraints !== undefined &&
     (!Array.isArray(constraints) || constraints.some((item) => typeof item !== "string"))
   ) {
-    throw new Error("autodevise constraints must be an array of strings");
+    throw new Error("autoplan constraints must be an array of strings");
   }
   return {
-    problem: requireString(input.problem, "autodevise problem"),
-    ...(input.scope !== undefined ? { scope: requireString(input.scope, "autodevise scope") } : {}),
+    problem: requireString(input.problem, "autoplan problem"),
+    ...(input.scope !== undefined ? { scope: requireString(input.scope, "autoplan scope") } : {}),
     ...(constraints !== undefined ? { constraints: [...constraints] as string[] } : {}),
     ...(input.previousPlan !== undefined ? { previousPlan: input.previousPlan } : {}),
     ...(input.newEvidence !== undefined ? { newEvidence: input.newEvidence } : {}),
@@ -63,13 +63,13 @@ function parseInput(value: unknown): AutodeviseInput {
 }
 
 function parseSelection(value: unknown): Record<string, unknown> {
-  const selection = requireRecord(value, "autodevise selection");
+  const selection = requireRecord(value, "autoplan selection");
   if (selection.status !== "ready" && selection.status !== "blocked") {
-    throw new Error("autodevise selection status must be ready or blocked");
+    throw new Error("autoplan selection status must be ready or blocked");
   }
-  requireString(selection.selected, "autodevise selected solution");
-  requireString(selection.why, "autodevise selection reason");
-  if (selection.status === "blocked") requireString(selection.blocker, "autodevise blocker");
+  requireString(selection.selected, "autoplan selected solution");
+  requireString(selection.why, "autoplan selection reason");
+  if (selection.status === "blocked") requireString(selection.blocker, "autoplan blocker");
   return selection;
 }
 
@@ -77,12 +77,12 @@ function digest(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
-export const autodeviseWorkflow = defineWorkflow({
+export const autoplanWorkflow = defineWorkflow({
   source: import.meta.url,
-  contractId: "pi-workflows.autodevise.v1",
-  name: "autodevise",
+  contractId: "pi-workflows.autoplan.v1",
+  name: "autoplan",
   input: parseInput,
-  title: ({ input }) => `autodevise: ${input.problem.slice(0, 60)}`,
+  title: ({ input }) => `autoplan: ${input.problem.slice(0, 60)}`,
   presentationPrompt: [
     "Present the selected practical solution and its implementation plan.",
     "Briefly state how the ideal informed the choice and what was excluded as outside scope.",
@@ -93,18 +93,18 @@ export const autodeviseWorkflow = defineWorkflow({
   exits: {
     ready: {
       from: "finalize",
-      validate: (value: unknown): AutodeviseReady => value as AutodeviseReady,
+      validate: (value: unknown): AutoplanReady => value as AutoplanReady,
     },
     blocked: {
       from: "blocked",
-      validate: (value: unknown): AutodeviseBlocked => value as AutodeviseBlocked,
+      validate: (value: unknown): AutoplanBlocked => value as AutoplanBlocked,
     },
   },
   nodes: {
     frame: agent({
       statusDetail: "framing the problem",
       prompt: ({ input }) => {
-        const request = input as AutodeviseInput;
+        const request = input as AutoplanInput;
         return [
           `Frame this problem: ${request.problem}`,
           `Authorized scope: ${request.scope ?? "infer it conservatively from the request and current project"}.`,
@@ -116,7 +116,7 @@ export const autodeviseWorkflow = defineWorkflow({
         ].join("\n");
       },
       expectedOutput: `{ "problem": "concise statement", "success": ["criterion"], "inScope": ["change"], "outOfScope": ["change"], "constraints": ["constraint"], "controlBoundary": "what can change" }`,
-      validate: (value) => requireRecord(value, "autodevise frame"),
+      validate: (value) => requireRecord(value, "autoplan frame"),
     }),
     propose: agent({
       statusDetail: "devising a solution",
@@ -129,7 +129,7 @@ export const autodeviseWorkflow = defineWorkflow({
           `Problem frame: ${JSON.stringify(outputs.frame)}`,
         ].join("\n"),
       expectedOutput: `{ "solution": "proposal", "rationale": "why", "parts": ["part"], "tradeoffs": ["trade-off"] }`,
-      validate: (value) => requireRecord(value, "autodevise proposal"),
+      validate: (value) => requireRecord(value, "autoplan proposal"),
     }),
     ideal: agent({
       statusDetail: "describing the ideal end state",
@@ -141,10 +141,10 @@ export const autodeviseWorkflow = defineWorkflow({
           "Explain the practical value beyond the proposal.",
           `Problem frame: ${JSON.stringify(outputs.frame)}`,
           `Proposal: ${JSON.stringify(outputs.propose)}`,
-          `New evidence: ${JSON.stringify((input as AutodeviseInput).newEvidence ?? null)}`,
+          `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
       expectedOutput: `{ "ideal": "ideal end state", "outsideDependencies": ["dependency"], "additionalValue": ["benefit"] }`,
-      validate: (value) => requireRecord(value, "autodevise ideal"),
+      validate: (value) => requireRecord(value, "autoplan ideal"),
     }),
     choose: agent({
       statusDetail: "choosing the practical solution",
@@ -177,11 +177,11 @@ export const autodeviseWorkflow = defineWorkflow({
           "Do not implement the plan.",
           `Frame: ${JSON.stringify(outputs.frame)}`,
           `Selection: ${JSON.stringify(outputs.choose)}`,
-          `Previous plan: ${JSON.stringify((input as AutodeviseInput).previousPlan ?? null)}`,
-          `New evidence: ${JSON.stringify((input as AutodeviseInput).newEvidence ?? null)}`,
+          `Previous plan: ${JSON.stringify((input as AutoplanInput).previousPlan ?? null)}`,
+          `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
       expectedOutput: `{ "summary": "approach", "steps": [{ "change": "change", "where": "location", "verification": "evidence" }], "contracts": ["impact"], "tests": ["test"], "risks": [{ "risk": "risk", "mitigation": "mitigation" }], "boundaries": ["excluded work"] }`,
-      validate: (value) => requireRecord(value, "autodevise plan"),
+      validate: (value) => requireRecord(value, "autoplan plan"),
     }),
     blocked: compute({
       run: ({ outputs }) => {
@@ -192,13 +192,13 @@ export const autodeviseWorkflow = defineWorkflow({
           proposal: outputs.propose,
           ideal: outputs.ideal,
           selection,
-          reason: requireString(selection.blocker, "autodevise blocker"),
-        } satisfies AutodeviseBlocked;
+          reason: requireString(selection.blocker, "autoplan blocker"),
+        } satisfies AutoplanBlocked;
       },
     }),
     finalize: compute({
       run: ({ outputs, input }) => {
-        const request = input as AutodeviseInput;
+        const request = input as AutoplanInput;
         const planDigest = digest(outputs.plan);
         const previousPlanDigest =
           request.previousPlan === undefined ? undefined : digest(request.previousPlan);
@@ -212,7 +212,7 @@ export const autodeviseWorkflow = defineWorkflow({
           planDigest,
           ...(previousPlanDigest !== undefined ? { previousPlanDigest } : {}),
           changed: previousPlanDigest === undefined || previousPlanDigest !== planDigest,
-        } satisfies AutodeviseReady;
+        } satisfies AutoplanReady;
       },
     }),
   },
@@ -228,4 +228,4 @@ export const autodeviseWorkflow = defineWorkflow({
   ],
 });
 
-export default autodeviseWorkflow;
+export default autoplanWorkflow;

@@ -1,18 +1,18 @@
 import { BuiltinWorkflowCatalog } from "../workflows/catalog.js";
-import autodeviseWorkflow from "./autodevise.workflow.js";
 import autodocWorkflow from "./autodoc.workflow.js";
 import autoimplementWorkflow from "./autoimplement.workflow.js";
+import autoplanWorkflow from "./autoplan.workflow.js";
 import monitorWorkflow from "./monitor.workflow.js";
 import planApprovalWorkflow from "./plan-approval.workflow.js";
 
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
-  { id: "autodevise", revision: "1", definition: autodeviseWorkflow },
+  { id: "autoplan", revision: "1", definition: autoplanWorkflow },
   { id: "autodoc", revision: "1", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "2", definition: autoimplementWorkflow },
+  { id: "autoimplement", revision: "3", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "1", definition: planApprovalWorkflow },
   {
     id: "monitor",
-    revision: "5",
+    revision: "6",
     definition: monitorWorkflow,
     legacySources: [
       {

@@ -293,7 +293,7 @@ describe("monitor human repair approval", () => {
     );
   });
 
-  it("feeds exact replan text to autodevise, documents the revision, and asks again", async () => {
+  it("feeds exact replan text to autoplan, documents the revision, and asks again", async () => {
     const executor = completedRepairExecutor(2);
     const store = new WorkflowRunStore(await makeTempDir("monitor-replan-runs"));
     const resolved = await resolveWorkflowRef(

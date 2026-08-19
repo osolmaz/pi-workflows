@@ -1,9 +1,9 @@
 export {
-  autodeviseWorkflow,
-  type AutodeviseBlocked,
-  type AutodeviseInput,
-  type AutodeviseReady,
-} from "./autodevise.workflow.js";
+  autoplanWorkflow,
+  type AutoplanBlocked,
+  type AutoplanInput,
+  type AutoplanReady,
+} from "./autoplan.workflow.js";
 export {
   autodocWorkflow,
   type AutodocBlocked,

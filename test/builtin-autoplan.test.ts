@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import autodeviseWorkflow from "../src/builtins/autodevise.workflow.js";
+import autoplanWorkflow from "../src/builtins/autoplan.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 
@@ -33,7 +33,7 @@ function commonExecutor(selection: Record<string, unknown>) {
     .respond("choose", { output: selection });
 }
 
-describe("built-in autodevise", () => {
+describe("built-in autoplan", () => {
   it("selects a practical plan and records plan lineage", async () => {
     const previousPlan = { summary: "old plan" };
     const executor = commonExecutor({
@@ -55,10 +55,10 @@ describe("built-in autodevise", () => {
     });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autodevise"),
+      outputRoot: await makeTempDir("pi-workflows-autoplan"),
     });
 
-    const { state } = await engine.run(autodeviseWorkflow, {
+    const { state } = await engine.run(autoplanWorkflow, {
       problem: "solve demo",
       previousPlan,
       newEvidence: { failure: "old plan failed" },
@@ -85,10 +85,10 @@ describe("built-in autodevise", () => {
     });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autodevise-blocked"),
+      outputRoot: await makeTempDir("pi-workflows-autoplan-blocked"),
     });
 
-    const { state } = await engine.run(autodeviseWorkflow, { problem: "solve demo" });
+    const { state } = await engine.run(autoplanWorkflow, { problem: "solve demo" });
 
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({

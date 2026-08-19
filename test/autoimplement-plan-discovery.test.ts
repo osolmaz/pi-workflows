@@ -37,7 +37,7 @@ async function run(executor: ScriptedExecutor, input: unknown) {
 }
 
 describe("autoimplement existing-plan startup", () => {
-  it("uses a current plan from context without initial autodevise or autodoc", async () => {
+  it("uses a current plan from context without initial autoplan or autodoc", async () => {
     const plan = { summary: "existing", steps: ["implement"] };
     const executor = blockedImplementation(
       new ScriptedExecutor().respond("findPlan", {

@@ -13,8 +13,8 @@ import type {
   ShellActionResult,
   WorkflowNodeContext,
 } from "../workflows/types.js";
-import autodeviseWorkflow, { type AutodeviseInput } from "./autodevise.workflow.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
+import autoplanWorkflow, { type AutoplanInput } from "./autoplan.workflow.js";
 import planApprovalWorkflow, { type PlanApprovalInput } from "./plan-approval.workflow.js";
 
 export type AutoimplementInput = {
@@ -490,9 +490,9 @@ export const autoimplementWorkflow = defineWorkflow({
       },
     }),
     redesign: includeWorkflow({
-      workflow: "autodevise",
-      contract: autodeviseWorkflow,
-      input: (context): AutodeviseInput => {
+      workflow: "autoplan",
+      contract: autoplanWorkflow,
+      input: (context): AutoplanInput => {
         const request = context.input as AutoimplementInput;
         return {
           problem: request.task,
@@ -563,7 +563,7 @@ export const autoimplementWorkflow = defineWorkflow({
     }),
     adoptPlan: compute({
       run: ({ outputs }) => {
-        const result = includedResult(autodeviseWorkflow, outputs.redesign);
+        const result = includedResult(autoplanWorkflow, outputs.redesign);
         if (result.exit !== "ready") throw new Error("redesign did not return a ready plan");
         return {
           route: result.output.changed ? "document" : "blocked",

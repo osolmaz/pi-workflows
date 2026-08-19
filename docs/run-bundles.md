@@ -229,8 +229,8 @@ The full run projection (`WorkflowRunState` in
   "workflowSources": [
     {
       "mountPath": ["redesign"],
-      "workflowName": "autodevise",
-      "source": { "kind": "builtin", "id": "autodevise", "revision": "1" }
+      "workflowName": "autoplan",
+      "source": { "kind": "builtin", "id": "autoplan", "revision": "1" }
     }
   ],
   "definitionDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

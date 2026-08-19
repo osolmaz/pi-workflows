@@ -14,7 +14,7 @@ The canonical behavior is in [Workflow composition](../WORKFLOW_COMPOSITION.md).
 
 A workflow can run alone or as a typed child in one durable parent run. Authors can import a child definition, map its input, and route from named exits. Dynamic project, global, built-in, and path references remain available.
 
-The package will ship `autodevise`, `autoimplement`, and `monitor` as compatible built-ins. Monitor will remain observation-only by default. An explicitly authorized monitor can run outer solution design, autoimplementation, internal redesign, and a fresh target check without copying workflow nodes.
+The package will ship `autoplan`, `autoimplement`, and `monitor` as compatible built-ins. Monitor will remain observation-only by default. An explicitly authorized monitor can run outer solution design, autoimplementation, internal redesign, and a fresh target check without copying workflow nodes.
 
 ## Scope
 
@@ -49,10 +49,10 @@ The package will ship `autodevise`, `autoimplement`, and `monitor` as compatible
 
 ### Workflow library
 
-- Make `autodevise` accept an existing plan and new evidence.
-- Add `ready` and `blocked` exits to `autodevise`.
+- Make `autoplan` accept an existing plan and new evidence.
+- Add `ready` and `blocked` exits to `autoplan`.
 - Rebuild `autoimplement` around explicit issue routes.
-- Include `autodevise` inside `autoimplement` for redesign.
+- Include `autoplan` inside `autoimplement` for redesign.
 - Track P0, P1, and P2 review findings by round.
 - Rerun review only after P0 or P1 work.
 - Permit P2 work without another reviewer round.
@@ -60,7 +60,7 @@ The package will ship `autodevise`, `autoimplement`, and `monitor` as compatible
 - Track PR comments, CI, merge, and final PR reporting.
 - Bound one CI watch to five minutes.
 - Route a long CI wait to useful local testing before checking CI again.
-- Add authorized repair to monitor through outer `autodevise` and `autoimplement` mounts.
+- Add authorized repair to monitor through outer `autoplan` and `autoimplement` mounts.
 - Detect repeated repair with no changed issue, plan, implementation, evidence, or target state.
 
 ## Non-goals
@@ -168,7 +168,7 @@ A pending result must include a validated `gh` tracking command. The shell actio
 - Keep qualified names in replay and details.
 - Update TypeScript and Rust fixtures together.
 
-### 6. Autodevise
+### 6. Autoplan
 
 - Move the current workflow into the built-in library.
 - Add typed input, `ready`, and `blocked` exits.
@@ -188,7 +188,7 @@ find existing plan
   -> documentation missing or stale -> autodoc -> implement
   -> verify
   -> classify issue
-     -> redesign -> autodevise -> autodoc -> optional approval -> implement
+     -> redesign -> autoplan -> autodoc -> optional approval -> implement
      -> fix -> verify
      -> publish -> write reviewer command -> run reviewer
 
@@ -212,7 +212,7 @@ CI
   -> unavailable or forbidden -> blocked
 ```
 
-The structured plan input is optional because the plan can already exist in conversation context or canonical documentation. Its absence never authorizes initial autodevise. Autoimplement blocks when no clear plan exists, skips autodoc for current documentation, and records every evidence-driven revision through autodoc before continuing.
+The structured plan input is optional because the plan can already exist in conversation context or canonical documentation. Its absence never authorizes initial autoplan. Autoimplement blocks when no clear plan exists, skips autodoc for current documentation, and records every evidence-driven revision through autodoc before continuing.
 
 The workflow will collect all review rounds in its final output. It will never rerun Pi Reviewer solely because P2 work changed files.
 
@@ -220,9 +220,9 @@ The workflow will collect all review rounds in its final output. It will never r
 
 - Add explicit repair authorization to monitor input.
 - Add `repair` to the check result only when authorization is present.
-- Mount outer `autodevise`, `autodoc`, optional `plan-approval`, and `autoimplement`.
+- Mount outer `autoplan`, `autodoc`, optional `plan-approval`, and `autoimplement`.
 - Pass the documented outer plan into autoimplement.
-- Return exact replan instructions to autodevise and ask again.
+- Return exact replan instructions to autoplan and ask again.
 - Check the target again after a reported repair.
 - Stop on repeated no-progress evidence.
 - Keep ordinary monitor calls observation-only and backward compatible.
@@ -242,8 +242,8 @@ The workflow will collect all review rounds in its final output. It will never r
 - Dynamic references resolve through existing precedence rules.
 - Two mounts of one child do not share invocation state.
 - Standalone autodoc adopts current documents, updates stale documents, and blocks without a selected plan.
-- Autoimplement finds a clear existing plan and never invokes initial autodevise because a plan input is absent.
-- Nested redesign uses a fresh autodevise invocation and passes the revised plan through autodoc.
+- Autoimplement finds a clear existing plan and never invokes initial autoplan because a plan input is absent.
+- Nested redesign uses a fresh autoplan invocation and passes the revised plan through autodoc.
 - Source cycles fail before the run bundle is created.
 - Included checkpoints, updates, notifications, pause, cancellation, and resume behave like root nodes.
 - Every mounted source and the resolved digest is durable.
@@ -264,7 +264,7 @@ Run focused checks while implementing:
 ```bash
 npx vitest run test/composition.test.ts test/graph.test.ts test/loader.test.ts
 npx vitest run test/engine.test.ts test/run-resume.test.ts test/store.test.ts
-npx vitest run test/builtin-autodevise.test.ts test/builtin-autoimplement.test.ts test/builtin-monitor.test.ts
+npx vitest run test/builtin-autoplan.test.ts test/builtin-autoimplement.test.ts test/builtin-monitor.test.ts
 ```
 
 Run all repository gates before review:
@@ -292,7 +292,7 @@ Direct imports check mapped input and exit names. `includedResult()` recovers th
 
 The shipped workflows are registered built-ins:
 
-- `autodevise` returns `ready` or `blocked` with plan lineage.
+- `autoplan` returns `ready` or `blocked` with plan lineage.
 - `autodoc` records selected plans as a standalone and included built-in.
 - `autoimplement` finds an existing plan, conditionally documents it, and supports evidence-driven redesign, implementation fixes, exact reviewer and CI commands, P0 through P2 history, bounded CI watches, PR comments, merge, and final reporting.
 - `monitor` remains observation-only by default and enables composed repair only through an explicit repair policy.

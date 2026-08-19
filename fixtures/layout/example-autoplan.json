@@ -1,9 +1,9 @@
 {
-  "name": "example-autodevise",
+  "name": "example-autoplan",
   "snapshot": {
     "schema": "pi-workflows.definition-snapshot.v1",
-    "name": "autodevise",
-    "contractId": "pi-workflows.autodevise.v1",
+    "name": "autoplan",
+    "contractId": "pi-workflows.autoplan.v1",
     "startAt": "frame",
     "nodes": {
       "frame": {
@@ -217,8 +217,8 @@
   "state": {
     "schema": "pi-workflows.run-state.v1",
     "traceSeq": 1,
-    "runId": "run-autodevise",
-    "workflowName": "autodevise",
+    "runId": "run-autoplan",
+    "workflowName": "autoplan",
     "startedAt": "2026-01-01T00:00:00.000Z",
     "updatedAt": "2026-01-01T00:01:00.000Z",
     "status": "running",

@@ -1,6 +1,6 @@
 import { compute, defineWorkflow, includeWorkflow, includedResult } from "@osolmaz/pi-workflows";
-import autodevise from "../../src/builtins/autodevise.workflow.js";
 import autodoc from "../../src/builtins/autodoc.workflow.js";
+import autoplan from "../../src/builtins/autoplan.workflow.js";
 import planApproval from "../../src/builtins/plan-approval.workflow.js";
 
 export default defineWorkflow({
@@ -8,7 +8,7 @@ export default defineWorkflow({
   startAt: "design",
   maxSteps: 80,
   includes: {
-    design: includeWorkflow(autodevise, {
+    design: includeWorkflow(autoplan, {
       input: ({ input, outputs }) => {
         const prior = outputs.design as { exit?: string; output?: { plan?: unknown } } | undefined;
         const answer = outputs.approval as
@@ -23,7 +23,7 @@ export default defineWorkflow({
     }),
     documentation: includeWorkflow(autodoc, {
       input: ({ input, outputs }) => {
-        const result = includedResult(autodevise, outputs.design);
+        const result = includedResult(autoplan, outputs.design);
         if (result.exit !== "ready") throw new Error("design is not ready");
         return { task: (input as { task: string }).task, plan: result.output.plan };
       },

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Autoimplement"
+  short_description: "Finish a plan and ready its PR"
+  default_prompt: "Use $autoimplement to implement the approved plan end-to-end, test it, run `codex review --base <branch>` until no P0/P1 findings remain, clear valid PR feedback, and confirm CI/CD is green without merging."

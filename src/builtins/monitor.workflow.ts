@@ -20,9 +20,9 @@ import type {
   WorkflowProgressData,
 } from "../workflows/types.js";
 import { validateProgressData } from "../workflows/updates.js";
-import autodeviseWorkflow from "./autodevise.workflow.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
 import autoimplementWorkflow, { type AutoimplementInput } from "./autoimplement.workflow.js";
+import autoplanWorkflow from "./autoplan.workflow.js";
 import planApprovalWorkflow, { type PlanApprovalInput } from "./plan-approval.workflow.js";
 
 const MIN_INTERVAL_MINUTES = 1;
@@ -346,7 +346,7 @@ function currentRepairPlan(outputs: Record<string, unknown>): {
       documents: documentation.output.documentation?.files ?? [],
     };
   }
-  const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
+  const design = includedResult(autoplanWorkflow, outputs.initialDesign);
   if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
   return { plan: design.output.plan, planDigest: design.output.planDigest, documents: [] };
 }
@@ -428,8 +428,8 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
   maxSteps: 200_000,
   includes: {
     initialDesign: includeWorkflow({
-      workflow: "autodevise",
-      contract: autodeviseWorkflow,
+      workflow: "autoplan",
+      contract: autoplanWorkflow,
       input: ({ outputs }) => {
         const config = configFrom(outputs);
         const repair = (outputs.check as MonitorCheck).repair;
@@ -458,7 +458,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
       input: ({ outputs }): AutodocInput => {
         const config = configFrom(outputs);
         const repair = (outputs.check as MonitorCheck).repair;
-        const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
+        const design = includedResult(autoplanWorkflow, outputs.initialDesign);
         if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
         if (repair === undefined) throw new Error("monitor repair details are missing");
         return {
