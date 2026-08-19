@@ -247,11 +247,28 @@ describe("syncHerdrPlugin", () => {
     );
   });
 
+  it("reports link and enable failures when the target state was not reached", async () => {
+    const root = await makePackage();
+    const linkFailure = new FakeHerdr();
+    linkFailure.failAction = "link";
+    expect(() => syncHerdrPlugin(root, linkFailure.spawn)).toThrow("command failed: link refused");
+
+    const enableFailure = new FakeHerdr(record(root, false));
+    enableFailure.failAction = "enable";
+    expect(() => syncHerdrPlugin(root, enableFailure.spawn)).toThrow(
+      "command failed: enable refused",
+    );
+  });
+
   it("rejects malformed or ambiguous Herdr records", async () => {
     const root = await makePackage();
     const malformed = new FakeHerdr();
     malformed.malformedList = "{";
     expect(() => syncHerdrPlugin(root, malformed.spawn)).toThrow("invalid plugin JSON");
+
+    const invalidShape = new FakeHerdr();
+    invalidShape.malformedList = "{}";
+    expect(() => syncHerdrPlugin(root, invalidShape.spawn)).toThrow("invalid plugin list");
 
     const incomplete = new FakeHerdr({
       ...record(root),
@@ -268,6 +285,12 @@ describe("syncHerdrPlugin", () => {
         ),
       ),
     ).toThrow("duplicate records");
+
+    const invalidWarnings = new FakeHerdr({
+      ...record(root),
+      warnings: 1,
+    } as unknown as PluginRecord);
+    expect(() => syncHerdrPlugin(root, invalidWarnings.spawn)).toThrow("invalid warnings");
   });
 
   it("rejects warnings and failed final verification", async () => {
@@ -283,6 +306,90 @@ describe("syncHerdrPlugin", () => {
     expect(() =>
       syncHerdrPlugin(root, () => reply("", { status: 1, stderr: "x".repeat(400) })),
     ).toThrow(/Could not inspect Herdr plugins: x+…/u);
+  });
+
+  it("rejects missing and non-directory package roots", async () => {
+    const temp = await makeTempDir("pi-workflows-invalid-root");
+    expect(() => syncHerdrPlugin(path.join(temp, "missing"), () => reply())).toThrow(
+      "package root is missing",
+    );
+    const file = path.join(temp, "file");
+    await fs.writeFile(file, "not a package\n");
+    expect(() => syncHerdrPlugin(file, () => reply())).toThrow("package root is not a directory");
+  });
+
+  it("rejects malformed package metadata", async () => {
+    const invalidJson = await makePackage("pi-workflows-invalid-json");
+    await fs.writeFile(path.join(invalidJson, "package.json"), "{\n");
+    expect(() => syncHerdrPlugin(invalidJson, () => reply())).toThrow("not valid JSON");
+
+    const invalidShape = await makePackage("pi-workflows-invalid-package-shape");
+    await fs.writeFile(path.join(invalidShape, "package.json"), "[]\n");
+    expect(() => syncHerdrPlugin(invalidShape, () => reply())).toThrow(
+      "must contain a JSON object",
+    );
+  });
+
+  it("rejects invalid package identity and missing versions", async () => {
+    const wrongName = await makePackage("pi-workflows-wrong-name");
+    await fs.writeFile(
+      path.join(wrongName, "package.json"),
+      `${JSON.stringify({ name: "other", version: "0.11.0" })}\n`,
+    );
+    expect(() => syncHerdrPlugin(wrongName, () => reply())).toThrow("Unexpected Pi Workflows");
+
+    const missingVersion = await makePackage("pi-workflows-missing-version");
+    await fs.writeFile(
+      path.join(missingVersion, "package.json"),
+      `${JSON.stringify({ name: "@osolmaz/pi-workflows" })}\n`,
+    );
+    expect(() => syncHerdrPlugin(missingVersion, () => reply())).toThrow(
+      "package version is missing",
+    );
+  });
+
+  it("rejects invalid manifest identity and arrays", async () => {
+    const wrongId = await makePackage("pi-workflows-wrong-plugin-id");
+    const wrongIdPath = path.join(wrongId, "herdr-plugin.toml");
+    const wrongIdManifest = await fs.readFile(wrongIdPath, "utf8");
+    await fs.writeFile(
+      wrongIdPath,
+      wrongIdManifest.replace(`id = "${HERDR_PLUGIN_ID}"`, 'id = "other.plugin"'),
+    );
+    expect(() => syncHerdrPlugin(wrongId, () => reply())).toThrow("Unexpected Herdr plugin ID");
+
+    const badPlatforms = await makePackage("pi-workflows-bad-platforms");
+    const badPlatformsPath = path.join(badPlatforms, "herdr-plugin.toml");
+    const badPlatformsManifest = await fs.readFile(badPlatformsPath, "utf8");
+    await fs.writeFile(
+      badPlatformsPath,
+      badPlatformsManifest.replace('platforms = ["linux", "macos"]', "platforms = []"),
+    );
+    expect(() => syncHerdrPlugin(badPlatforms, () => reply())).toThrow(
+      "invalid platforms string array",
+    );
+  });
+
+  it("rejects an unexpected viewer command and a missing viewer", async () => {
+    const wrongCommand = await makePackage("pi-workflows-wrong-command");
+    const manifestPath = path.join(wrongCommand, "herdr-plugin.toml");
+    const manifest = await fs.readFile(manifestPath, "utf8");
+    await fs.writeFile(
+      manifestPath,
+      manifest.replace(
+        'command = ["node", "plugins/herdr/viewer.mjs"]',
+        'command = ["node", "plugins/herdr/other.mjs"]',
+      ),
+    );
+    expect(() => syncHerdrPlugin(wrongCommand, () => reply())).toThrow(
+      "Unexpected Herdr plugin viewer command",
+    );
+
+    const missingViewer = await makePackage("pi-workflows-missing-viewer");
+    await fs.rm(path.join(missingViewer, "plugins", "herdr", "viewer.mjs"));
+    expect(() => syncHerdrPlugin(missingViewer, () => reply())).toThrow(
+      "Package file plugins/herdr/viewer.mjs is missing",
+    );
   });
 
   it("validates the bundled package before running Herdr", async () => {
