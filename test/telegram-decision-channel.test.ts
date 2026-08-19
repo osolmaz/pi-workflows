@@ -391,15 +391,15 @@ describe("TelegramDecisionChannel", () => {
     await adapter.stop();
   });
 
-  it("settles confirmed messages and records bounded settlement failures", async () => {
+  it("settles confirmed messages once and bounds settlement failures", async () => {
     const bot = fakeBot();
     const runs = await makeTempDir("telegram-settle-runs");
+    const store = new HumanDecisionStore(runs);
     const configDir = await makeTempDir("telegram-settle-config");
     const adapter = await channel({ fetchFn: bot.fetchFn, runs, configDir });
     const decision = request();
-    await adapter.deliver(decision);
-    await adapter.settle({
-      schema: "pi-workflows.human-decision-accepted.v1",
+    const accepted = {
+      schema: "pi-workflows.human-decision-accepted.v1" as const,
       decisionId: decision.decisionId,
       requestDigest: decision.requestDigest,
       response: { choice: "continue" },
@@ -407,13 +407,62 @@ describe("TelegramDecisionChannel", () => {
       idempotencyKey: "event",
       acceptedAt: "2026-08-19T00:01:00.000Z",
       answerDigest: `sha256:${"a".repeat(64)}`,
-    });
-    expect(bot.calls.some((call) => call.method === "editMessageReplyMarkup")).toBe(true);
+    };
+    await adapter.deliver(decision);
+    await Promise.all([adapter.settle(accepted), adapter.settle(accepted)]);
+    await adapter.settle(accepted);
+    expect(bot.calls.filter((call) => call.method === "editMessageReplyMarkup")).toHaveLength(1);
+    expect(await store.listSettlements(decision.decisionId, "telegram-approval")).toHaveLength(1);
     await adapter.stop();
 
+    const failingRuns = await makeTempDir("telegram-settle-fail-runs");
+    const failingStore = new HumanDecisionStore(failingRuns);
+    let editAttempts = 0;
     const failing = await channel({
-      runs: await makeTempDir("telegram-settle-fail-runs"),
+      runs: failingRuns,
       configDir: await makeTempDir("telegram-settle-fail-config"),
+      fetchFn: async (url) => {
+        if (url.endsWith("/sendMessage")) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { ok: true, result: { message_id: 1 } };
+            },
+          };
+        }
+        editAttempts += 1;
+        return {
+          ok: false,
+          status: 500,
+          async json() {
+            return {};
+          },
+        };
+      },
+    });
+    await failing.deliver(decision);
+    const cancellation = {
+      schema: "pi-workflows.human-decision-cancellation.v1" as const,
+      decisionId: decision.decisionId,
+      requestDigest: decision.requestDigest,
+      cancelledAt: "2026-08-19T00:01:00.000Z",
+      reason: "cancelled" as const,
+    };
+    for (let attempt = 0; attempt < 10; attempt += 1) await failing.settle(cancellation);
+    expect(editAttempts).toBe(3);
+    expect(
+      await failingStore.listSettlements(decision.decisionId, "telegram-approval"),
+    ).toHaveLength(3);
+    await failing.stop();
+  });
+
+  it("adopts Telegram's already-settled response as a confirmed settlement", async () => {
+    const runs = await makeTempDir("telegram-settle-adopt-runs");
+    const store = new HumanDecisionStore(runs);
+    const adapter = await channel({
+      runs,
+      configDir: await makeTempDir("telegram-settle-adopt-config"),
       fetchFn: async (url) => {
         if (url.endsWith("/sendMessage")) {
           return {
@@ -426,24 +475,26 @@ describe("TelegramDecisionChannel", () => {
         }
         return {
           ok: false,
-          status: 500,
+          status: 400,
           async json() {
-            return {};
+            return { ok: false, description: "Bad Request: message is not modified" };
           },
         };
       },
     });
-    await failing.deliver(decision);
-    await expect(
-      failing.settle({
-        schema: "pi-workflows.human-decision-cancellation.v1",
-        decisionId: decision.decisionId,
-        requestDigest: decision.requestDigest,
-        cancelledAt: "2026-08-19T00:01:00.000Z",
-        reason: "cancelled",
-      }),
-    ).resolves.toBeUndefined();
-    await failing.stop();
+    const decision = request();
+    await adapter.deliver(decision);
+    await adapter.settle({
+      schema: "pi-workflows.human-decision-cancellation.v1",
+      decisionId: decision.decisionId,
+      requestDigest: decision.requestDigest,
+      cancelledAt: "2026-08-19T00:01:00.000Z",
+      reason: "cancelled",
+    });
+    expect(await store.listSettlements(decision.decisionId, "telegram-approval")).toMatchObject([
+      { state: "confirmed" },
+    ]);
+    await adapter.stop();
   });
 
   it("bounds malformed and rejected Bot API responses", async () => {

@@ -55,6 +55,7 @@ import {
   writeDecisionChannelProfile,
   type DecisionChannelConfig,
   type HumanDecisionChannelAnswer,
+  type SettledHumanDecision,
 } from "./decision-channels.js";
 import { ConversationStepExecutor } from "./executor.js";
 import {
@@ -320,6 +321,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let runQueueStore: SqliteControllerStore | null = null;
   let decisionChannelConfig: DecisionChannelConfig | null = null;
   let telegramDecisionChannels = new Map<string, TelegramDecisionChannel>();
+  const activePiDecisionChannels = new Map<string, PiDecisionChannel>();
+  const settleHumanDecisionChannels = async (decision: SettledHumanDecision): Promise<void> => {
+    const piChannel = activePiDecisionChannels.get(decision.decisionId);
+    await Promise.allSettled([
+      ...(piChannel === undefined ? [] : [piChannel.settle(decision)]),
+      ...[...telegramDecisionChannels.values()].map(async (channel) => channel.settle(decision)),
+    ]);
+  };
   const migrationBlockedRuns = new Set<string>();
   const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
     runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
@@ -1367,11 +1376,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
     await store.cancel(request, "cancelled");
     const cancellation = await store.readCancellation(request.decisionId);
-    if (cancellation !== null) {
-      await Promise.allSettled(
-        [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(cancellation)),
-      );
-    }
+    if (cancellation !== null) await settleHumanDecisionChannels(cancellation);
     lastWaitingRunId = null;
   };
 
@@ -1671,9 +1676,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         queueRecord === undefined ||
         (queueRecord.originSessionId !== null && queueRecord.originSessionId !== currentSessionId)
       ) {
-        await Promise.allSettled(
-          [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
-        );
+        await settleHumanDecisionChannels(accepted);
         return {
           message: "Human decision accepted; its owning Pi session will continue the workflow.",
           details: {
@@ -1701,11 +1704,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         new WorkflowRunStore().runDirFor(continuationRunId),
       );
       if (existingContinuation !== null) {
-        if (accepted !== undefined) {
-          await Promise.allSettled(
-            [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
-          );
-        }
+        if (accepted !== undefined) await settleHumanDecisionChannels(accepted);
         lastWaitingRunId = null;
         return {
           message: `Human decision already continued as ${continuationRunId}.`,
@@ -1726,12 +1725,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (continued === undefined) {
       throw new Error("Could not start the checkpoint continuation.");
     }
-    if (request !== null) {
-      if (accepted !== undefined) {
-        await Promise.allSettled(
-          [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
-        );
-      }
+    if (request !== null && accepted !== undefined) {
+      await settleHumanDecisionChannels(accepted);
     }
     lastWaitingRunId = null;
     return {
@@ -1748,26 +1743,34 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     request: HumanDecisionRequest,
   ): Promise<void> {
+    if (activePiDecisionChannels.has(request.decisionId)) return;
+    const channel = new PiDecisionChannel({
+      actorId: ctx.sessionManager.getSessionId(),
+      ui: ctx.ui,
+      store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
+      onAnswer: async (answer) => {
+        const result = await answerWorkflowControl(ctx, answer.response, request.runId, answer);
+        notify(ctx, result.message, result.level);
+      },
+    });
+    activePiDecisionChannels.set(request.decisionId, channel);
     try {
-      const channel = new PiDecisionChannel({
-        actorId: ctx.sessionManager.getSessionId(),
-        ui: ctx.ui,
-        store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
-        onAnswer: async (answer) => {
-          const result = await answerWorkflowControl(ctx, answer.response, request.runId, answer);
-          notify(ctx, result.message, result.level);
-        },
-      });
       await channel.deliver(request);
     } catch (error) {
       notify(ctx, `Could not answer human decision: ${errorMessage(error)}`, "error");
+    } finally {
+      if (activePiDecisionChannels.get(request.decisionId) === channel) {
+        activePiDecisionChannels.delete(request.decisionId);
+      }
     }
   }
 
   const stopDecisionChannels = async (): Promise<void> => {
-    await Promise.allSettled(
-      [...telegramDecisionChannels.values()].map(async (channel) => channel.stop()),
-    );
+    await Promise.allSettled([
+      ...[...activePiDecisionChannels.values()].map(async (channel) => channel.stop()),
+      ...[...telegramDecisionChannels.values()].map(async (channel) => channel.stop()),
+    ]);
+    activePiDecisionChannels.clear();
     telegramDecisionChannels.clear();
     decisionChannelConfig = null;
   };
@@ -1828,11 +1831,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           cancellation = await store.readCancellation(request.decisionId);
         }
         if (cancellation !== null) {
-          await Promise.allSettled(
-            [...telegramDecisionChannels.values()].map(async (channel) =>
-              channel.settle(cancellation),
-            ),
-          );
+          await settleHumanDecisionChannels(cancellation);
           continue;
         }
         if (!deliverPending || !ownedBySession) continue;
@@ -1873,9 +1872,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           quiet: true,
         });
       }
-      await Promise.allSettled(
-        [...telegramDecisionChannels.values()].map(async (channel) => channel.settle(accepted)),
-      );
+      await settleHumanDecisionChannels(accepted);
       if (activeRun !== null) break;
     }
   };

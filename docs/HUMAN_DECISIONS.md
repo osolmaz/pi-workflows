@@ -305,7 +305,9 @@ Recovery follows these rules:
 - duplicate channel updates are harmless;
 - stale responses are rejected;
 - one accepted response creates one continuation;
-- channel settlement can retry without changing the accepted answer; and
+- the winning channel dismisses any pending Pi dialog;
+- confirmed channel settlement is adopted without another remote call;
+- failed channel settlement has a bounded retry count and cannot create an unbounded record loop; and
 - cancellation resolves the owned waiting decision from durable state, even after restart, closes pending views, and prevents a later answer from continuing the run.
 
 A decision with no available channel remains waiting and reports the configuration problem. It does not silently continue or choose a default.

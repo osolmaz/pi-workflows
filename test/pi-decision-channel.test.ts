@@ -142,4 +142,52 @@ describe("PiDecisionChannel", () => {
       input: { instructions: exact },
     });
   });
+
+  it("dismisses a pending Pi dialog when another channel settles the decision", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("pi-decision-external-settlement"));
+    let signal: AbortSignal | undefined;
+    let markPromptReady: (() => void) | undefined;
+    const promptReady = new Promise<void>((resolve) => {
+      markPromptReady = resolve;
+    });
+    const channel = new PiDecisionChannel({
+      actorId: "session-a",
+      ui: {
+        async select(_title, _options, dialogOptions) {
+          signal = dialogOptions?.signal;
+          markPromptReady?.();
+          return await new Promise<string | undefined>((resolve) => {
+            signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+          });
+        },
+        async input() {
+          return undefined;
+        },
+      },
+      store,
+      onAnswer: async () => {},
+    });
+    const decision = request();
+    const delivery = channel.deliver(decision);
+    await promptReady;
+    expect(signal?.aborted).toBe(false);
+    const accepted = {
+      schema: "pi-workflows.human-decision-accepted.v1" as const,
+      decisionId: decision.decisionId,
+      requestDigest: decision.requestDigest,
+      response: { choice: "continue" },
+      source: { channel: "telegram:approval", actorId: "person", eventId: "event" },
+      idempotencyKey: "event",
+      acceptedAt: "2026-08-19T00:01:00.000Z",
+      answerDigest: `sha256:${"a".repeat(64)}`,
+    };
+    await Promise.all([channel.settle(accepted), channel.settle(accepted)]);
+    expect(signal?.aborted).toBe(true);
+    await expect(delivery).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "pi_selection_settled_elsewhere",
+    });
+    await channel.settle(accepted);
+    expect(await store.listSettlements(decision.decisionId, "pi")).toHaveLength(1);
+  });
 });

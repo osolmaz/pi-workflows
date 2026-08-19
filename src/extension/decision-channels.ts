@@ -20,6 +20,7 @@ const DEFAULT_API_BASE = "https://api.telegram.org";
 const LEASE_TTL_MS = 60_000;
 const LEASE_RETRY_MS = 5_000;
 const POLL_BACKOFF_MS = 1_000;
+const MAX_SETTLEMENT_ATTEMPTS = 3;
 const NUMERIC_ID = /^-?[0-9]+$/;
 const SIMPLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
@@ -79,8 +80,16 @@ export type TelegramFetch = (
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 export type PiDecisionUi = {
-  select(title: string, options: string[]): Promise<string | undefined>;
-  input(title: string, initial?: string): Promise<string | undefined>;
+  select(
+    title: string,
+    options: string[],
+    dialogOptions?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
+  input(
+    title: string,
+    initial?: string,
+    dialogOptions?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
 };
 
 export function decisionConfigDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -128,6 +137,8 @@ export function audienceChannels(config: DecisionChannelConfig | null, audience:
 
 export class PiDecisionChannel implements HumanDecisionChannel {
   readonly id = "pi";
+  private promptAbort: AbortController | null = null;
+  private settlementTask: Promise<void> | null = null;
 
   constructor(
     private readonly options: {
@@ -140,87 +151,104 @@ export class PiDecisionChannel implements HumanDecisionChannel {
 
   async start(): Promise<void> {}
 
-  async stop(): Promise<void> {}
+  async stop(): Promise<void> {
+    this.promptAbort?.abort();
+  }
 
   async deliver(request: HumanDecisionRequest): Promise<HumanDecisionDeliveryResult> {
     const attemptId = createHumanDecisionAttemptId();
     const createdAt = new Date().toISOString();
-    await this.options.store.recordDelivery(request, this.id, {
-      schema: "pi-workflows.human-decision-delivery.v1",
-      attemptId,
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      channel: this.id,
-      state: "intent",
-      createdAt,
-    });
-    const entries = Object.entries(request.choices);
-    const selectedLabel = await this.options.ui.select(
-      request.title,
-      entries.map(([, definition]) => definition.label),
-    );
-    if (selectedLabel === undefined) {
-      const record = deliveryRecord(
-        request,
-        this.id,
-        `${attemptId}-cancelled`,
-        "failed",
-        createdAt,
-        {
-          errorCode: "pi_selection_cancelled",
-        },
-      );
-      await this.options.store.recordDelivery(request, this.id, record);
-      return {
-        status: "failed",
-        channel: this.id,
+    const controller = new AbortController();
+    this.promptAbort = controller;
+    try {
+      await this.options.store.recordDelivery(request, this.id, {
+        schema: "pi-workflows.human-decision-delivery.v1",
         attemptId,
-        errorCode: "pi_selection_cancelled",
-      };
-    }
-    const selected = entries.find(([, definition]) => definition.label === selectedLabel);
-    if (selected === undefined) throw new Error("Pi decision selection is not in the request");
-    const [choiceId, definition] = selected;
-    let response: HumanDecisionResponse = { choice: choiceId };
-    if (definition.input !== undefined) {
-      const text = await this.options.ui.input(definition.input.prompt, "");
-      if (text === undefined) {
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        channel: this.id,
+        state: "intent",
+        createdAt,
+      });
+      const entries = Object.entries(request.choices);
+      const selectedLabel = await this.options.ui.select(
+        request.title,
+        entries.map(([, definition]) => definition.label),
+        { signal: controller.signal },
+      );
+      if (selectedLabel === undefined) {
+        const errorCode = controller.signal.aborted
+          ? "pi_selection_settled_elsewhere"
+          : "pi_selection_cancelled";
         const record = deliveryRecord(
           request,
           this.id,
           `${attemptId}-cancelled`,
           "failed",
           createdAt,
-          {
-            errorCode: "pi_input_cancelled",
-          },
+          { errorCode },
         );
         await this.options.store.recordDelivery(request, this.id, record);
-        return {
-          status: "failed",
-          channel: this.id,
-          attemptId,
-          errorCode: "pi_input_cancelled",
-        };
+        return { status: "failed", channel: this.id, attemptId, errorCode };
       }
-      response = { choice: choiceId, input: { [definition.input.name]: text } };
+      const selected = entries.find(([, definition]) => definition.label === selectedLabel);
+      if (selected === undefined) throw new Error("Pi decision selection is not in the request");
+      const [choiceId, definition] = selected;
+      let response: HumanDecisionResponse = { choice: choiceId };
+      if (definition.input !== undefined) {
+        const text = await this.options.ui.input(definition.input.prompt, "", {
+          signal: controller.signal,
+        });
+        if (text === undefined) {
+          const errorCode = controller.signal.aborted
+            ? "pi_input_settled_elsewhere"
+            : "pi_input_cancelled";
+          const record = deliveryRecord(
+            request,
+            this.id,
+            `${attemptId}-cancelled`,
+            "failed",
+            createdAt,
+            { errorCode },
+          );
+          await this.options.store.recordDelivery(request, this.id, record);
+          return { status: "failed", channel: this.id, attemptId, errorCode };
+        }
+        response = { choice: choiceId, input: { [definition.input.name]: text } };
+      }
+      const eventId = createHumanDecisionAttemptId();
+      await this.options.onAnswer({
+        request,
+        response,
+        source: { channel: this.id, actorId: this.options.actorId, eventId },
+        idempotencyKey: `${this.id}:${eventId}`,
+      });
+      await this.options.store.recordDelivery(
+        request,
+        this.id,
+        deliveryRecord(request, this.id, `${attemptId}-confirmed`, "confirmed", createdAt),
+      );
+      return { status: "confirmed", channel: this.id, attemptId };
+    } finally {
+      if (this.promptAbort === controller) this.promptAbort = null;
     }
-    const eventId = createHumanDecisionAttemptId();
-    await this.options.onAnswer({
-      request,
-      response,
-      source: { channel: this.id, actorId: this.options.actorId, eventId },
-      idempotencyKey: `${this.id}:${eventId}`,
-    });
-    await this.options.store.recordDelivery(
-      request,
-      this.id,
-      deliveryRecord(request, this.id, `${attemptId}-confirmed`, "confirmed", createdAt),
-    );
-    return { status: "confirmed", channel: this.id, attemptId };
   }
 
   async settle(decision: SettledHumanDecision): Promise<void> {
+    this.promptAbort?.abort();
+    if (this.settlementTask !== null) return await this.settlementTask;
+    const task = this.settleOnce(decision);
+    this.settlementTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.settlementTask === task) this.settlementTask = null;
+    }
+  }
+
+  private async settleOnce(decision: SettledHumanDecision): Promise<void> {
+    const prior = await this.options.store.listSettlements(decision.decisionId, this.id);
+    if (prior.some((record) => record.state === "confirmed")) return;
     const createdAt = new Date().toISOString();
     const record: HumanDecisionSettlementRecord = {
       schema: "pi-workflows.human-decision-settlement.v1",
@@ -450,6 +478,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
   private running = false;
   private pollAbort: AbortController | null = null;
   private pollTask: Promise<void> | null = null;
+  private readonly settlementTasks = new Map<string, Promise<void>>();
 
   constructor(options: {
     profileName: string;
@@ -496,6 +525,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     this.running = false;
     this.pollAbort?.abort();
     await this.pollTask?.catch(() => undefined);
+    await Promise.allSettled(this.settlementTasks.values());
     this.pollAbort = null;
     this.pollTask = null;
     this.projection.close();
@@ -581,6 +611,28 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
   }
 
   async settle(decision: SettledHumanDecision): Promise<void> {
+    const existing = this.settlementTasks.get(decision.decisionId);
+    if (existing !== undefined) return await existing;
+    const task = this.settleOnce(decision);
+    this.settlementTasks.set(decision.decisionId, task);
+    try {
+      await task;
+    } finally {
+      if (this.settlementTasks.get(decision.decisionId) === task) {
+        this.settlementTasks.delete(decision.decisionId);
+      }
+    }
+  }
+
+  private async settleOnce(decision: SettledHumanDecision): Promise<void> {
+    const channelPath = this.channelPath();
+    const prior = await this.store.listSettlements(decision.decisionId, channelPath);
+    if (
+      prior.some((record) => record.state === "confirmed") ||
+      prior.length >= MAX_SETTLEMENT_ATTEMPTS
+    ) {
+      return;
+    }
     const attemptId = createHumanDecisionAttemptId();
     const createdAt = new Date().toISOString();
     let failed = false;
@@ -591,8 +643,8 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
           message_id: Number(message.message_id),
           reply_markup: { inline_keyboard: [] },
         });
-      } catch {
-        failed = true;
+      } catch (error) {
+        if (normalizeCallError(error).code !== "telegram_message_not_modified") failed = true;
       }
     }
     const record: HumanDecisionSettlementRecord = {
@@ -606,7 +658,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
       finishedAt: new Date().toISOString(),
       ...(failed ? { errorCode: "telegram_settlement_failed" } : {}),
     };
-    await this.store.recordSettlement(decision.decisionId, this.channelPath(), record);
+    await this.store.recordSettlement(decision.decisionId, channelPath, record);
   }
 
   async handleUpdate(value: unknown): Promise<void> {
@@ -737,14 +789,25 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         "telegram_response_unknown",
       );
     }
+    const body = record(await response.json(), `Telegram ${method} response`);
     if (!response.ok) {
+      const description = typeof body.description === "string" ? body.description : "";
+      if (
+        method === "editMessageReplyMarkup" &&
+        description.toLowerCase().includes("message is not modified")
+      ) {
+        throw new TelegramCallError(
+          "Telegram message was already settled",
+          false,
+          "telegram_message_not_modified",
+        );
+      }
       throw new TelegramCallError(
         `Telegram ${method} failed with HTTP ${response.status}`,
         false,
         `telegram_http_${response.status}`,
       );
     }
-    const body = record(await response.json(), `Telegram ${method} response`);
     if (body.ok !== true) {
       throw new TelegramCallError(
         `Telegram ${method} rejected the request`,

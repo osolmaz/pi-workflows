@@ -183,6 +183,13 @@ describe("HumanDecisionStore", () => {
     await expect(store.recordSettlement(request.decisionId, "pi", settlement)).rejects.toThrow(
       /attempt/,
     );
+    expect(await store.listSettlements(request.decisionId, "pi")).toEqual([]);
+    const validSettlement = { ...settlement, attemptId: "attempt-a" };
+    await store.recordSettlement(request.decisionId, "pi", validSettlement);
+    expect(await store.listSettlements(request.decisionId, "pi")).toEqual([validSettlement]);
+    await expect(store.listSettlements(request.decisionId, "bad/channel")).rejects.toThrow(
+      /channel/,
+    );
   });
 
   it("rebuilds cancellation detail and refuses to cancel an accepted decision", async () => {

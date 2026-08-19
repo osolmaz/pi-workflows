@@ -409,6 +409,15 @@ export class HumanDecisionStore {
     );
   }
 
+  async listSettlements(
+    decisionId: string,
+    channel: string,
+  ): Promise<HumanDecisionSettlementRecord[]> {
+    const safeChannel = requireSimpleId(channel, "Human decision channel");
+    const directory = path.join(this.decisionDir(decisionId), "settlements", safeChannel);
+    return (await readJsonDirectory(directory)) as HumanDecisionSettlementRecord[];
+  }
+
   async cancel(
     request: HumanDecisionRequest,
     reason: HumanDecisionCancellationRecord["reason"],
