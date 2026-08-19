@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
 import piWorkflows from "../src/extension/index.js";
+import { WorkflowToolParameters } from "../src/extension/workflow-tool.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
 import { readRunBundle } from "../src/workflows/store.js";
 import { stripAnsi } from "../src/workflows/text.js";
@@ -340,6 +341,26 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+describe("workflow tool schema", () => {
+  it("declares a single object root so strict providers accept it", () => {
+    const schema = WorkflowToolParameters as unknown as Record<string, unknown>;
+    expect(schema.type).toBe("object");
+    expect(schema.anyOf).toBeUndefined();
+    const props = Object.keys((schema.properties ?? {}) as Record<string, unknown>).sort();
+    expect(props).toEqual([
+      "action",
+      "attempt",
+      "input",
+      "offset",
+      "output",
+      "runId",
+      "step",
+      "update",
+      "workflow",
+    ]);
+  });
+});
 
 describe("pi-workflows extension", () => {
   beforeEach(async () => {
