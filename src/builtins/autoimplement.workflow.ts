@@ -87,8 +87,22 @@ export type AutoimplementBlocked = {
   evidence: unknown;
 };
 
+type BlockerChallenge = {
+  route: "continue" | "blocked";
+  blockingNow: boolean;
+  outsideAuthority: boolean;
+  canProceed: boolean;
+  reason: string;
+  nextAction: string;
+  alternativesChecked: string[];
+  evidence: string[];
+};
+
 const FIVE_MINUTES_MS = 5 * 60_000;
 const TEN_MINUTES_MS = 10 * 60_000;
+const MAX_BLOCKER_CHALLENGES = 3;
+const MAX_CHALLENGE_ITEMS = 5;
+const MAX_CHALLENGE_TEXT = 500;
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -102,6 +116,80 @@ function requireString(value: unknown, label: string): string {
     throw new Error(`${label} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function boundedChallengeItems(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > MAX_CHALLENGE_ITEMS) {
+    throw new Error(`${label} must be an array with at most ${MAX_CHALLENGE_ITEMS} items`);
+  }
+  return value.map((item, index) => {
+    const text = requireString(item, `${label}[${index}]`);
+    if (text.length > MAX_CHALLENGE_TEXT) {
+      throw new Error(`${label}[${index}] must be at most ${MAX_CHALLENGE_TEXT} characters`);
+    }
+    return text;
+  });
+}
+
+function parseBlockerChallenge(value: unknown): BlockerChallenge {
+  const result = requireRecord(value, "blocker challenge");
+  if (result.route !== "continue" && result.route !== "blocked") {
+    throw new Error("blocker challenge route must be continue or blocked");
+  }
+  for (const key of ["blockingNow", "outsideAuthority", "canProceed"] as const) {
+    if (typeof result[key] !== "boolean") {
+      throw new Error(`blocker challenge ${key} must be a boolean`);
+    }
+  }
+  const blockingNow = result.blockingNow as boolean;
+  const outsideAuthority = result.outsideAuthority as boolean;
+  const canProceed = result.canProceed as boolean;
+  const reason = requireString(result.reason, "blocker challenge reason");
+  if (reason.length > MAX_CHALLENGE_TEXT) {
+    throw new Error(`blocker challenge reason must be at most ${MAX_CHALLENGE_TEXT} characters`);
+  }
+  if (typeof result.nextAction !== "string") {
+    throw new Error("blocker challenge nextAction must be a string");
+  }
+  const nextAction = result.nextAction.trim();
+  if (nextAction.length > MAX_CHALLENGE_TEXT) {
+    throw new Error(
+      `blocker challenge nextAction must be at most ${MAX_CHALLENGE_TEXT} characters`,
+    );
+  }
+  const alternativesChecked = boundedChallengeItems(
+    result.alternativesChecked,
+    "blocker challenge alternativesChecked",
+  );
+  const evidence = boundedChallengeItems(result.evidence, "blocker challenge evidence");
+
+  if (result.route === "blocked") {
+    if (
+      blockingNow !== true ||
+      outsideAuthority !== true ||
+      canProceed !== false ||
+      nextAction.length > 0 ||
+      alternativesChecked.length === 0 ||
+      evidence.length === 0
+    ) {
+      throw new Error(
+        "blocked challenge requires blockingNow=true, outsideAuthority=true, canProceed=false, an empty nextAction, and concrete alternatives and evidence",
+      );
+    }
+  } else if (canProceed !== true || nextAction.length === 0) {
+    throw new Error("continue challenge requires canProceed=true and a practical nextAction");
+  }
+
+  return {
+    route: result.route,
+    blockingNow,
+    outsideAuthority,
+    canProceed,
+    reason,
+    nextAction,
+    alternativesChecked,
+    evidence,
+  };
 }
 
 function parseInput(value: unknown): AutoimplementInput {
@@ -339,6 +427,41 @@ function currentPlanDigest(context: WorkflowNodeContext): string {
   return digest(plan);
 }
 
+function blockerChallenges(context: WorkflowNodeContext): BlockerChallenge[] {
+  return context.state.steps
+    .filter((step) => step.nodeId === "challengeBlocker" && step.outcome === "ok")
+    .map((step) => step.output as BlockerChallenge);
+}
+
+function latestBlockerClaim(context: WorkflowNodeContext): unknown {
+  const ids = [
+    "classifyImplementation",
+    "classifyVerification",
+    "repairReviewCommand",
+    "inspectComments",
+    "inspectCi",
+    "repairCiCommand",
+    "assessTrackedCi",
+    "classifyCi",
+    "finalizeDelivery",
+  ];
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step && ids.includes(step.nodeId)) {
+      return { source: step.nodeId, result: step.output };
+    }
+  }
+  throw new Error("No model-generated blocker claim is available to challenge");
+}
+
+function recentWorkflowAttempts(context: WorkflowNodeContext): unknown[] {
+  return context.state.steps.slice(-12).map((step) => ({
+    nodeId: step.nodeId,
+    outcome: step.outcome,
+    output: step.output,
+  }));
+}
+
 function latestIssue(context: WorkflowNodeContext): unknown {
   const approval = context.outputs.approval as
     | { exit?: string; output?: { instructions?: unknown } }
@@ -351,6 +474,7 @@ function latestIssue(context: WorkflowNodeContext): unknown {
     };
   }
   const ids = [
+    "challengeBlocker",
     "classifyImplementation",
     "classifyVerification",
     "triageReview",
@@ -415,6 +539,8 @@ function reviewRounds(context: WorkflowNodeContext): ReviewAssessment[] {
 
 function latestBlockedReason(context: WorkflowNodeContext): { reason: string; evidence: unknown } {
   const candidates = [
+    "challengeBlockerGuard",
+    "challengeBlocker",
     "finalizeDelivery",
     "inspectCi",
     "assessTrackedCi",
@@ -633,6 +759,51 @@ export const autoimplementWorkflow = defineWorkflow({
           ["verify", "redesign", "fix", "blocked"] as const,
           "implementation assessment",
         ),
+    }),
+    challengeBlockerGuard: compute({
+      run: (context) => {
+        const challenges = blockerChallenges(context);
+        return challenges.length >= MAX_BLOCKER_CHALLENGES
+          ? {
+              route: "blocked",
+              reason: `Blocker challenge reached the ${MAX_BLOCKER_CHALLENGES}-attempt workflow safety limit.`,
+              evidence: { attempts: challenges.length, challenges },
+            }
+          : {
+              route: "challenge",
+              attempt: challenges.length + 1,
+              limit: MAX_BLOCKER_CHALLENGES,
+            };
+      },
+    }),
+    challengeBlocker: agent({
+      statusDetail: "challenging blocker claim",
+      prompt: (context) => {
+        const request = context.input as AutoimplementInput;
+        return [
+          "Independently challenge the latest claim that autoimplement is blocked.",
+          "Are you really blocked?",
+          "Is this really a blocker right now?",
+          "Can you find a safe way to move forward and finish this?",
+          "Are you getting stuck on something trivial, procedural, reversible, or already authorized?",
+          "Inspect the task, approved plan, current result, evidence, scope, authority, previous attempts, and viable alternatives.",
+          "Distinguish a true external blocker from ordinary rollout work, local implementation work, a design adjustment, a missing verification step, or a reversible operational task.",
+          "A local test failure, stale package, packaging or artifact mismatch, rollback preparation, or deployment procedure is not by itself outside authority.",
+          "If a safe deployment and rollback path is already authorized, a supported cutover is work to do, not a blocker.",
+          "Confirm blocked only when the issue blocks progress now, is outside authority, and has no safe practical path forward.",
+          "Return continue with the next practical action when work can proceed. Keep text concise, with at most five alternatives and five evidence items.",
+          `Task: ${request.task}`,
+          `Approved plan: ${JSON.stringify(currentPlan(context))}`,
+          `Current result and claimed blocker: ${JSON.stringify(latestBlockerClaim(context))}`,
+          `Authorized scope: ${request.scope ?? request.repository ?? "the current repository and task"}`,
+          `Constraints and authority: ${JSON.stringify(request.constraints ?? [])}`,
+          `Merge authorized: ${request.merge === true}`,
+          `Previous blocker challenges: ${JSON.stringify(blockerChallenges(context))}`,
+          `Recent workflow attempts: ${JSON.stringify(recentWorkflowAttempts(context))}`,
+        ].join("\n");
+      },
+      expectedOutput: `{ "route": "continue" | "blocked", "blockingNow": true | false, "outsideAuthority": true | false, "canProceed": true | false, "reason": "concise reason", "nextAction": "practical action or empty when blocked", "alternativesChecked": ["checked alternative"], "evidence": ["concrete evidence"] }`,
+      validate: parseBlockerChallenge,
     }),
     verify: agent({
       timeoutMs: 45 * 60_000,
@@ -1008,15 +1179,33 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "classifyImplementation",
       switch: {
         on: "$.route",
-        cases: { verify: "verify", redesign: "redesign", fix: "fix", blocked: "blocked" },
+        cases: {
+          verify: "verify",
+          redesign: "redesign",
+          fix: "fix",
+          blocked: "challengeBlockerGuard",
+        },
       },
+    },
+    {
+      from: "challengeBlockerGuard",
+      switch: { on: "$.route", cases: { challenge: "challengeBlocker", blocked: "blocked" } },
+    },
+    {
+      from: "challengeBlocker",
+      switch: { on: "$.route", cases: { continue: "redesign", blocked: "blocked" } },
     },
     { from: "verify", to: "classifyVerification" },
     {
       from: "classifyVerification",
       switch: {
         on: "$.route",
-        cases: { publish: "publish", redesign: "redesign", fix: "fix", blocked: "blocked" },
+        cases: {
+          publish: "publish",
+          redesign: "redesign",
+          fix: "fix",
+          blocked: "challengeBlockerGuard",
+        },
       },
     },
     { from: "fix", to: "verify" },
@@ -1035,7 +1224,10 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "repairReviewCommand",
-      switch: { on: "$.route", cases: { retry: "runReview", blocked: "blocked" } },
+      switch: {
+        on: "$.route",
+        cases: { retry: "runReview", blocked: "challengeBlockerGuard" },
+      },
     },
     {
       from: "assessReview",
@@ -1062,7 +1254,12 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "inspectComments",
       switch: {
         on: "$.route",
-        cases: { redesign: "redesign", fix: "fix", ci: "inspectCi", blocked: "blocked" },
+        cases: {
+          redesign: "redesign",
+          fix: "fix",
+          ci: "inspectCi",
+          blocked: "challengeBlockerGuard",
+        },
       },
     },
     {
@@ -1073,7 +1270,7 @@ export const autoimplementWorkflow = defineWorkflow({
           green: "finalizeDelivery",
           failed: "classifyCi",
           pending: "trackCi",
-          unavailable: "blocked",
+          unavailable: "challengeBlockerGuard",
         },
       },
     },
@@ -1086,7 +1283,10 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "repairCiCommand",
-      switch: { on: "$.route", cases: { retry: "trackCi", blocked: "blocked" } },
+      switch: {
+        on: "$.route",
+        cases: { retry: "trackCi", blocked: "challengeBlockerGuard" },
+      },
     },
     {
       from: "assessTrackedCi",
@@ -1096,7 +1296,7 @@ export const autoimplementWorkflow = defineWorkflow({
           green: "finalizeDelivery",
           failed: "classifyCi",
           pending: "opportunisticTest",
-          unavailable: "blocked",
+          unavailable: "challengeBlockerGuard",
         },
       },
     },
@@ -1109,13 +1309,16 @@ export const autoimplementWorkflow = defineWorkflow({
           redesign: "redesign",
           fix: "fix",
           unrelated: "finalizeDelivery",
-          blocked: "blocked",
+          blocked: "challengeBlockerGuard",
         },
       },
     },
     {
       from: "finalizeDelivery",
-      switch: { on: "$.status", cases: { completed: "finalize", blocked: "blocked" } },
+      switch: {
+        on: "$.status",
+        cases: { completed: "finalize", blocked: "challengeBlockerGuard" },
+      },
     },
   ],
 });

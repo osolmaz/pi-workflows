@@ -81,6 +81,77 @@ function commonExecutor(reviewerCwd = repository): ScriptedExecutor {
     .respond("authorReviewCommand", { output: reviewerCommand(reviewerCwd) });
 }
 
+function continueChallenge(reason: string, nextAction: string) {
+  return {
+    route: "continue",
+    blockingNow: false,
+    outsideAuthority: false,
+    canProceed: true,
+    reason,
+    nextAction,
+    alternativesChecked: ["Use the supported path", "Keep rollback ready"],
+    evidence: ["The task authorizes the required local and rollout work"],
+  };
+}
+
+function confirmedChallenge(reason: string) {
+  return {
+    route: "blocked",
+    blockingNow: true,
+    outsideAuthority: true,
+    canProceed: false,
+    reason,
+    nextAction: "",
+    alternativesChecked: ["Complete without the prohibited remote mutation"],
+    evidence: ["The required external authorization is absent"],
+  };
+}
+
+function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): ScriptedExecutor {
+  return executor
+    .respond("redesign/frame", {
+      output: {
+        problem: "finish the task",
+        success: ["work completes"],
+        inScope: ["repository and authorized rollout"],
+        outOfScope: ["unapproved remote mutation"],
+        constraints: [],
+        controlBoundary: "authorized repository and rollout",
+      },
+    })
+    .respond("redesign/propose", {
+      output: {
+        solution: "use the supported path",
+        rationale: "it is authorized",
+        parts: ["adjust plan", "verify"],
+        tradeoffs: [],
+      },
+    })
+    .respond("redesign/ideal", {
+      output: { ideal: "completed work", outsideDependencies: [], additionalValue: [] },
+    })
+    .respond("redesign/choose", {
+      output: {
+        status: "ready",
+        selected: "use the supported path",
+        why: "it completes in scope",
+        relationshipToIdeal: "same result",
+        excluded: [],
+        compromises: [],
+      },
+    })
+    .respond("redesign/plan", ...plans.map((plan) => ({ output: plan })))
+    .respond("documentation/inspectDocumentation", {
+      output: {
+        route: "current",
+        files: ["docs/workflows.md"],
+        digests: {},
+        reason: "The revised plan is documented.",
+        evidence: "checked",
+      },
+    });
+}
+
 beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
   commandDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-commands-"));
@@ -273,6 +344,24 @@ describe("built-in autoimplement", () => {
       }),
     ).resolves.toMatchObject({ trackingCommand: { args: ["run", "watch", "123"] } });
     await expect(
+      validate("challengeBlocker", continueChallenge("rollout is authorized", "deploy safely")),
+    ).resolves.toMatchObject({ route: "continue", canProceed: true });
+    await expect(
+      validate("challengeBlocker", confirmedChallenge("external authorization is required")),
+    ).resolves.toMatchObject({ route: "blocked", outsideAuthority: true });
+    await expect(
+      validate("challengeBlocker", {
+        ...confirmedChallenge("contradictory blocker"),
+        canProceed: true,
+      }),
+    ).rejects.toThrow("blocked challenge requires");
+    await expect(
+      validate("challengeBlocker", {
+        ...continueChallenge("no next action", "deploy safely"),
+        nextAction: "",
+      }),
+    ).rejects.toThrow("practical nextAction");
+    await expect(
       validate("inspectComments", { route: "unknown", summary: "bad", evidence: [] }),
     ).rejects.toThrow("route must be one of");
     await expect(
@@ -426,6 +515,268 @@ describe("built-in autoimplement", () => {
     ).toThrow("explicit merge: true");
   });
 
+  it("challenges the Bob artifact mismatch and continues through redesign", async () => {
+    const executor = new ScriptedExecutor()
+      .respond(
+        "implement",
+        {
+          output: {
+            status: "blocked",
+            summary: "Bob owns an incompatible artifact, so deployment cannot continue.",
+            files: [],
+            issueKind: "design",
+            evidence: "The current artifact does not match the supported package.",
+          },
+        },
+        {
+          output: {
+            status: "implemented",
+            summary: "Deployed through the supported cutover with rollback ready.",
+            files: ["deploy/cutover.ts"],
+            issueKind: null,
+            evidence: "The supported artifact is active.",
+          },
+        },
+      )
+      .respond(
+        "classifyImplementation",
+        {
+          output: {
+            route: "blocked",
+            summary: "Artifact ownership prevents deployment.",
+            evidence: "Bob artifact mismatch",
+          },
+        },
+        { output: { route: "verify", summary: "cutover complete", evidence: "deployed" } },
+      )
+      .respond("challengeBlocker", {
+        output: continueChallenge(
+          "The mismatch needs an authorized supported cutover, not an external permission.",
+          "Revise the rollout plan and deploy the supported artifact with rollback ready.",
+        ),
+      })
+      .respond("verify", {
+        output: {
+          passed: true,
+          commands: [{ command: "npm test", outcome: "passed" }],
+          failures: [],
+          untested: [],
+        },
+      })
+      .respond("classifyVerification", {
+        output: { route: "publish", summary: "verified", evidence: "npm test" },
+      })
+      .respond("publish", {
+        output: {
+          branch: "feat/cutover",
+          baseBranch: "main",
+          headRevision: "cutover123",
+          pr: "https://example.test/pr/2",
+          pushed: true,
+        },
+      })
+      .respond("authorReviewCommand", { output: reviewerCommand() })
+      .respond("assessReview", { output: cleanReview() })
+      .respond("inspectComments", {
+        output: { route: "ci", summary: "clear", evidence: [] },
+      })
+      .respond("inspectCi", {
+        output: { route: "green", reason: "green", relatedFailures: [], unrelatedFailures: [] },
+      })
+      .respond("finalizeDelivery", {
+        output: {
+          status: "completed",
+          merged: false,
+          pr: "https://example.test/pr/2",
+          reportComment: "done",
+          reason: "ready without merge",
+        },
+      });
+    addRedesignResponses(executor, [
+      {
+        summary: "Use the supported cutover.",
+        steps: ["prepare rollback", "deploy supported artifact"],
+        revision: 1,
+      },
+    ]);
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-bob"),
+    });
+
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Resolve the Bob artifact mismatch and deploy safely",
+      ...documentedPlan({ steps: ["deploy Bob artifact"] }),
+      scope: "repository deployment and rollback",
+      constraints: ["Safe deployment and rollback are authorized"],
+      repository,
+      merge: false,
+    });
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ status: "completed" });
+    expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
+    expect(state.steps.map((step) => step.nodeId)).toContain("redesign/frame");
+    expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(2);
+
+    const challengeRequest = executor.requests.find(
+      (request) => request.contract.nodeId === "challengeBlocker",
+    );
+    expect(challengeRequest?.prompt).toContain("Are you really blocked?");
+    expect(challengeRequest?.prompt).toContain("Is this really a blocker right now?");
+    expect(challengeRequest?.prompt).toContain(
+      "Can you find a safe way to move forward and finish this?",
+    );
+    expect(challengeRequest?.prompt).toContain(
+      "Are you getting stuck on something trivial, procedural, reversible, or already authorized?",
+    );
+    expect(challengeRequest?.prompt).toContain("Bob artifact mismatch");
+
+    const redesignRequest = executor.requests.find(
+      (request) => request.contract.nodeId === "redesign/frame",
+    );
+    expect(redesignRequest?.prompt).toContain(
+      "Revise the rollout plan and deploy the supported artifact with rollback ready.",
+    );
+  });
+
+  it("allows a confirmed missing external authorization to stop", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("implement", {
+        output: {
+          status: "blocked",
+          summary: "The task requires a prohibited remote mutation.",
+          files: [],
+          issueKind: "design",
+          evidence: "No external authorization is present.",
+        },
+      })
+      .respond("classifyImplementation", {
+        output: {
+          route: "blocked",
+          summary: "Required remote mutation lacks authorization.",
+          evidence: "The non-mutating paths do not meet the task.",
+        },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The required remote mutation is outside current authority."),
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-confirmed-blocker"),
+    });
+
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Complete the protected remote mutation",
+      ...documentedPlan({ steps: ["mutate protected remote"] }),
+      scope: "local repository only",
+      constraints: ["Do not mutate the protected remote without approval"],
+      repository,
+      merge: false,
+    });
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "The required remote mutation is outside current authority.",
+    });
+  });
+
+  it("limits blocker challenges to three and supplies prior challenge context", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("implement", {
+        output: {
+          status: "blocked",
+          summary: "The same unsupported blocker was asserted again.",
+          files: [],
+          issueKind: "design",
+          evidence: "claim only",
+        },
+      })
+      .respond("classifyImplementation", {
+        output: {
+          route: "blocked",
+          summary: "Cannot continue.",
+          evidence: "No new evidence.",
+        },
+      })
+      .respond(
+        "challengeBlocker",
+        { output: continueChallenge("challenge one", "revise plan one") },
+        { output: continueChallenge("challenge two", "revise plan two") },
+        { output: continueChallenge("challenge three", "revise plan three") },
+      );
+    addRedesignResponses(executor, [
+      { summary: "revision one", revision: 1 },
+      { summary: "revision two", revision: 2 },
+      { summary: "revision three", revision: 3 },
+    ]);
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-challenge-limit"),
+    });
+
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Finish despite repeated unsupported blocker claims",
+      ...documentedPlan({ summary: "initial plan", revision: 0 }),
+      repository,
+      merge: false,
+    });
+
+    const challengeRequests = executor.requests.filter(
+      (request) => request.contract.nodeId === "challengeBlocker",
+    );
+    expect(challengeRequests).toHaveLength(3);
+    expect(challengeRequests[2]?.prompt).toContain("challenge one");
+    expect(challengeRequests[2]?.prompt).toContain("challenge two");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "Blocker challenge reached the 3-attempt workflow safety limit.",
+      evidence: { evidence: { attempts: 3 } },
+    });
+  });
+
+  it("routes model blockers through the challenge and preserves hard stops", () => {
+    const edge = (from: string) =>
+      autoimplementWorkflow.edges.find((candidate) => candidate.from === from);
+
+    expect(edge("classifyImplementation")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("classifyVerification")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("repairReviewCommand")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("inspectComments")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("inspectCi")).toMatchObject({
+      switch: { cases: { unavailable: "challengeBlockerGuard" } },
+    });
+    expect(edge("repairCiCommand")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("assessTrackedCi")).toMatchObject({
+      switch: { cases: { unavailable: "challengeBlockerGuard" } },
+    });
+    expect(edge("classifyCi")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+    expect(edge("finalizeDelivery")).toMatchObject({
+      switch: { cases: { blocked: "challengeBlockerGuard" } },
+    });
+
+    expect(edge("approval.stop")).toMatchObject({ to: "blocked" });
+    expect(edge("redesign.blocked")).toMatchObject({ to: "blocked" });
+    expect(edge("documentation.blocked")).toMatchObject({ to: "blocked" });
+    expect(edge("replanGuard")).toMatchObject({ switch: { cases: { blocked: "blocked" } } });
+    expect(edge("challengeBlocker")).toMatchObject({
+      switch: { cases: { continue: "redesign", blocked: "blocked" } },
+    });
+  });
+
   it("addresses P2 findings without running a second review round", async () => {
     const executor = commonExecutor()
       .respond("assessReview", {
@@ -488,6 +839,9 @@ describe("built-in autoimplement", () => {
       executor.requests.filter((request) => request.contract.nodeId === "authorReviewCommand"),
     ).toHaveLength(1);
     expect(state.steps.map((step) => step.nodeId)).toContain("verifyP2");
+    expect(
+      executor.requests.some((request) => request.contract.nodeId === "challengeBlocker"),
+    ).toBe(false);
     const result = state.finalOutput as { reviewRounds: Array<{ p2: unknown[] }> };
     expect(result.reviewRounds).toHaveLength(1);
     expect(result.reviewRounds[0]?.p2).toHaveLength(1);
