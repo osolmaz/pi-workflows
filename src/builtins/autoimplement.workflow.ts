@@ -26,6 +26,11 @@ export type AutoimplementInput = {
   baseBranch?: string;
   merge?: boolean;
   documents?: string[];
+  documentation?: {
+    status: "current";
+    planDigest: string;
+    documents: string[];
+  };
   approval?: {
     audience: string;
     maxReplans: number;
@@ -118,6 +123,28 @@ function parseInput(value: unknown): AutoimplementInput {
   ) {
     throw new Error("autoimplement documents must be an array of strings");
   }
+  let documentation: AutoimplementInput["documentation"];
+  if (input.documentation !== undefined) {
+    if (input.plan === undefined) {
+      throw new Error("autoimplement documentation requires an explicit plan");
+    }
+    const raw = requireRecord(input.documentation, "autoimplement documentation");
+    if (raw.status !== "current") {
+      throw new Error("autoimplement documentation status must be current");
+    }
+    const planDigest = requireString(raw.planDigest, "autoimplement documentation planDigest");
+    if (planDigest !== digest(input.plan)) {
+      throw new Error("autoimplement documentation planDigest does not match the explicit plan");
+    }
+    if (!Array.isArray(raw.documents) || raw.documents.some((item) => typeof item !== "string")) {
+      throw new Error("autoimplement documentation documents must be an array of strings");
+    }
+    documentation = {
+      status: "current",
+      planDigest,
+      documents: [...raw.documents] as string[],
+    };
+  }
   let approval: AutoimplementInput["approval"];
   if (input.approval !== undefined) {
     const raw = requireRecord(input.approval, "autoimplement approval");
@@ -147,6 +174,7 @@ function parseInput(value: unknown): AutoimplementInput {
       : {}),
     merge: input.merge === true,
     ...(documents !== undefined ? { documents: [...documents] as string[] } : {}),
+    ...(documentation !== undefined ? { documentation } : {}),
     ...(approval !== undefined ? { approval } : {}),
   };
 }
@@ -435,7 +463,8 @@ export const autoimplementWorkflow = defineWorkflow({
           task: request.task,
           plan,
           ...(request.repository !== undefined ? { repository: request.repository } : {}),
-          documents: request.documents ?? discovery?.documents ?? [],
+          documents:
+            request.documents ?? request.documentation?.documents ?? discovery?.documents ?? [],
           evidence: latestIssue(context),
         };
       },
@@ -487,9 +516,17 @@ export const autoimplementWorkflow = defineWorkflow({
   },
   nodes: {
     prepare: compute({
-      run: ({ input }) => ({
-        route: (input as AutoimplementInput).plan === undefined ? "find" : "ready",
-      }),
+      run: ({ input }) => {
+        const request = input as AutoimplementInput;
+        return {
+          route:
+            request.plan === undefined
+              ? "find"
+              : request.documentation?.status === "current"
+                ? "ready"
+                : "document",
+        };
+      },
     }),
     findPlan: agent({
       statusDetail: "finding existing plan",
@@ -931,7 +968,10 @@ export const autoimplementWorkflow = defineWorkflow({
   edges: [
     {
       from: "prepare",
-      switch: { on: "$.route", cases: { find: "findPlan", ready: "maybeApproval" } },
+      switch: {
+        on: "$.route",
+        cases: { find: "findPlan", document: "documentation", ready: "maybeApproval" },
+      },
     },
     {
       from: "findPlan",

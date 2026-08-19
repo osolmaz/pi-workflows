@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { HumanDecisionStore } from "../src/workflows/human-decision.js";
+import { HumanDecisionStore, digest } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+
+function documentedPlan(plan: unknown) {
+  return {
+    plan,
+    documentation: { status: "current" as const, planDigest: digest(plan), documents: [] },
+  };
+}
 
 function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
   return executor
@@ -112,9 +119,10 @@ describe("autoimplement existing-plan startup", () => {
 
   it("lets an explicit documented plan bypass discovery and autodoc", async () => {
     const executor = blockedImplementation(new ScriptedExecutor());
+    const plan = { summary: "explicit", steps: ["implement"] };
     const { state } = await run(executor, {
       task: "implement explicit plan",
-      plan: { summary: "explicit", steps: ["implement"] },
+      ...documentedPlan(plan),
     });
     const steps = state.steps.map((step) => step.nodeId);
     expect(steps).not.toContain("findPlan");
@@ -123,12 +131,34 @@ describe("autoimplement existing-plan startup", () => {
     expect(steps).toContain("implement");
   });
 
+  it("inspects documentation when an explicit plan has no current-document evidence", async () => {
+    const plan = { summary: "explicit", steps: ["implement"] };
+    const executor = blockedImplementation(
+      new ScriptedExecutor().respond("documentation/inspectDocumentation", {
+        output: {
+          route: "current",
+          files: ["docs/plans/plan.md"],
+          digests: { "docs/plans/plan.md": `sha256:${"a".repeat(64)}` },
+          reason: "The canonical plan is current.",
+          evidence: "checked",
+        },
+      }),
+    );
+    const { state } = await run(executor, {
+      task: "implement explicit plan",
+      plan,
+    });
+    expect(state.steps.map((step) => step.nodeId)).toContain("documentation/inspectDocumentation");
+    expect(state.steps.some((step) => step.nodeId.startsWith("redesign/"))).toBe(false);
+  });
+
   it("uses optional plan approval before implementation", async () => {
     const executor = blockedImplementation(new ScriptedExecutor());
     const store = new WorkflowRunStore(await makeTempDir("autoimplement-approval"));
+    const plan = { summary: "explicit", steps: ["implement"] };
     const first = await new WorkflowEngine({ executor, store }).run(autoimplementWorkflow, {
       task: "implement approved plan",
-      plan: { summary: "explicit", steps: ["implement"] },
+      ...documentedPlan(plan),
       approval: { audience: "operator", maxReplans: 3 },
     });
     expect(first.state.status).toBe("waiting");
@@ -231,9 +261,10 @@ describe("autoimplement existing-plan startup", () => {
       .respond("documentation/verifyDocumentation", {
         output: { passed: true, commands: [], failures: [] },
       });
+    const oldPlan = { summary: "old", steps: ["old"] };
     const { state } = await run(executor, {
       task: "implement and redesign",
-      plan: { summary: "old", steps: ["old"] },
+      ...documentedPlan(oldPlan),
     });
     const steps = state.steps.map((step) => step.nodeId);
     const redesigned = steps.indexOf("redesign/plan");

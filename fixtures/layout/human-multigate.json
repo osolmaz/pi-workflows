@@ -1,0 +1,200 @@
+{
+  "name": "human-multigate",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "human-multigate",
+    "startAt": "first",
+    "nodes": {
+      "first": {
+        "nodeType": "checkpoint",
+        "humanDecision": {
+          "audience": "operator",
+          "choices": {
+            "continue": {
+              "label": "Continue"
+            },
+            "stop": {
+              "label": "Stop"
+            }
+          }
+        }
+      },
+      "second": {
+        "nodeType": "checkpoint",
+        "humanDecision": {
+          "audience": "reviewer",
+          "choices": {
+            "continue": {
+              "label": "Continue"
+            },
+            "replan": {
+              "label": "Replan"
+            }
+          }
+        }
+      }
+    },
+    "edges": [
+      {
+        "from": "first",
+        "to": "second"
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "first"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "second"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "first->second#0.0",
+        "from": "first",
+        "to": "second",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "first->second#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "first": 0,
+      "second": 1
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-human-multigate",
+    "workflowName": "human-multigate",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "waiting",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": [
+      {
+        "attemptId": "attempt-first",
+        "nodeId": "first",
+        "nodeType": "checkpoint",
+        "outcome": "ok",
+        "startedAt": "2026-01-01T00:00:00.000Z",
+        "finishedAt": "2026-01-01T00:00:01.000Z",
+        "prompt": null,
+        "output": {
+          "choice": "continue"
+        }
+      },
+      {
+        "attemptId": "attempt-second",
+        "nodeId": "second",
+        "nodeType": "checkpoint",
+        "outcome": "ok",
+        "startedAt": "2026-01-01T00:00:02.000Z",
+        "finishedAt": "2026-01-01T00:00:03.000Z",
+        "prompt": null,
+        "output": {
+          "schema": "pi-workflows.human-decision-request.v1"
+        }
+      }
+    ],
+    "waitingOn": "second",
+    "finalOutput": {
+      "schema": "pi-workflows.human-decision-request.v1",
+      "audience": "reviewer"
+    },
+    "humanDecision": {
+      "schema": "pi-workflows.human-decision-receipt.v1",
+      "decisionId": "decision-first",
+      "requestDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "nodeId": "first",
+      "response": {
+        "choice": "continue"
+      },
+      "acceptedAt": "2026-01-01T00:00:10.000Z",
+      "answerDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "▶ · first [checkpoint] not visited",
+        "                  │",
+        "                  ▼",
+        "  · second [checkpoint] not visited ■"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "  ┌──────────────────────────────┐",
+        "▶ │            first             │",
+        "  ├──────────────────────────────┤",
+        "  │ ◆ checkpoint        · queued │",
+        "  │ ↻ 0                      ◷ — │",
+        "  │ … human: Continue            │",
+        "  └──────────────────────────────┘",
+        "                  │",
+        "                  ▼",
+        "  ┌──────────────────────────────┐",
+        "  │            second            │ ■",
+        "  ├──────────────────────────────┤",
+        "  │ ◆ checkpoint        · queued │",
+        "  │ ↻ 0                      ◷ — │",
+        "  │ … human decision · reviewer… │",
+        "  └──────────────────────────────┘"
+      ]
+    },
+    {
+      "stepIndex": 1,
+      "nodeStyle": "line",
+      "lines": [
+        " ▶ ✓ first [checkpoint] 1 attempt · 1.0s",
+        "                     │",
+        "                     ▼",
+        "  ⏸ second [checkpoint] 1 attempt · 1.0s ■"
+      ]
+    },
+    {
+      "stepIndex": 1,
+      "nodeStyle": "box",
+      "lines": [
+        "  ┌──────────────────────────────┐",
+        "▶ │            first             │",
+        "  ├──────────────────────────────┤",
+        "  │ ◆ checkpoint     ✓ completed │",
+        "  │ ↻ 1                   ◷ 1.0s │",
+        "  │ … human: Continue            │",
+        "  └──────────────────────────────┘",
+        "                  │",
+        "                  ▼",
+        "  ┌──────────────────────────────┐",
+        "  │            second            │ ■",
+        "  ├──────────────────────────────┤",
+        "  │ ◆ checkpoint       ⏸ waiting │",
+        "  │ ↻ 1                   ◷ 1.0s │",
+        "  │ … human decision · reviewer… │",
+        "  └──────────────────────────────┘"
+      ]
+    }
+  ]
+}

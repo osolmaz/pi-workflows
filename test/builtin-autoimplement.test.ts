@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { digest } from "../src/workflows/human-decision.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 let originalPath = "";
@@ -22,6 +23,13 @@ function reviewerCommand(cwd = repository) {
     args: ["--base", "main"],
     cwd,
     timeoutMs: 600_000,
+  };
+}
+
+function documentedPlan(plan: unknown) {
+  return {
+    plan,
+    documentation: { status: "current" as const, planDigest: digest(plan), documents: [] },
   };
 }
 
@@ -107,6 +115,19 @@ describe("built-in autoimplement", () => {
     expect(() => parseInput({ task: "demo", constraints: "bad" })).toThrow("constraints");
     expect(() => parseInput({ task: "demo", constraints: [3] })).toThrow("constraints");
     expect(() => parseInput({ task: "demo", merge: "yes" })).toThrow("boolean");
+    expect(() =>
+      parseInput({
+        task: "demo",
+        documentation: { status: "current", planDigest: digest({}), documents: [] },
+      }),
+    ).toThrow("requires an explicit plan");
+    expect(() =>
+      parseInput({
+        task: "demo",
+        plan: {},
+        documentation: { status: "current", planDigest: "sha256:wrong", documents: [] },
+      }),
+    ).toThrow("does not match");
 
     const validate = async (nodeId: string, output: unknown) => {
       const node = autoimplementWorkflow.nodes[nodeId];
@@ -454,7 +475,7 @@ describe("built-in autoimplement", () => {
 
     const { state } = await engine.run(autoimplementWorkflow, {
       task: "implement demo",
-      plan: { steps: ["change code"] },
+      ...documentedPlan({ steps: ["change code"] }),
       repository,
       merge: true,
     });
@@ -557,7 +578,7 @@ describe("built-in autoimplement", () => {
 
     const { state } = await engine.run(autoimplementWorkflow, {
       task: "implement demo",
-      plan: { steps: ["change code"] },
+      ...documentedPlan({ steps: ["change code"] }),
       repository,
       merge: true,
     });
@@ -598,7 +619,7 @@ describe("built-in autoimplement", () => {
 
     const { state } = await engine.run(autoimplementWorkflow, {
       task: "implement demo",
-      plan: { steps: ["change code"] },
+      ...documentedPlan({ steps: ["change code"] }),
       repository,
       merge: true,
     });

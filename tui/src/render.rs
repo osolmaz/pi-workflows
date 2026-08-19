@@ -297,38 +297,36 @@ fn card_metrics(view: &GraphView) -> CardMetrics {
 fn human_decision_detail(state: &RunState, node_id: &str, node: Option<&Value>) -> Option<String> {
     let human = node?.get("humanDecision")?;
     let choices = human.get("choices")?.as_object()?;
-    let selected = state
+    if state.waiting_on.as_deref() == Some(node_id) {
+        let audience = state
+            .final_output
+            .as_ref()
+            .and_then(|request| request.get("audience"))
+            .and_then(Value::as_str)
+            .or_else(|| human.get("audience").and_then(Value::as_str))
+            .unwrap_or("operator");
+        let labels = choices
+            .values()
+            .filter_map(|choice| choice.get("label").and_then(Value::as_str))
+            .map(sanitize_text)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        return Some(format!(
+            "human decision · {} · {}",
+            sanitize_text(audience),
+            labels
+        ));
+    }
+    state
         .human_decision
         .as_ref()
+        .filter(|decision| decision.get("nodeId").and_then(Value::as_str) == Some(node_id))
         .and_then(|decision| decision.pointer("/response/choice"))
         .and_then(Value::as_str)
         .and_then(|choice| choices.get(choice))
         .and_then(|choice| choice.get("label"))
-        .and_then(Value::as_str);
-    if let Some(label) = selected {
-        return Some(format!("human: {}", sanitize_text(label)));
-    }
-    if state.waiting_on.as_deref() != Some(node_id) {
-        return None;
-    }
-    let audience = state
-        .final_output
-        .as_ref()
-        .and_then(|request| request.get("audience"))
         .and_then(Value::as_str)
-        .or_else(|| human.get("audience").and_then(Value::as_str))
-        .unwrap_or("operator");
-    let labels = choices
-        .values()
-        .filter_map(|choice| choice.get("label").and_then(Value::as_str))
-        .map(sanitize_text)
-        .collect::<Vec<_>>()
-        .join(" / ");
-    Some(format!(
-        "human decision · {} · {}",
-        sanitize_text(audience),
-        labels
-    ))
+        .map(|label| format!("human: {}", sanitize_text(label)))
 }
 
 struct RenderedCell {

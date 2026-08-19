@@ -404,6 +404,7 @@ export class WorkflowEngine {
     const humanContract =
       waitingNode?.nodeType === "checkpoint" ? waitingNode.humanDecision : undefined;
     let acceptedResponse: unknown;
+    let acceptedNodeId: string | undefined;
     let normalizedInput: unknown;
     if (humanContract !== undefined) {
       if (options.humanDecision === undefined) {
@@ -417,7 +418,14 @@ export class WorkflowEngine {
       ) {
         throw new Error("Accepted human decision does not match the waiting request");
       }
-      acceptedResponse = validateHumanDecisionResponse(request, options.humanDecision.response);
+      const durableDecision = await new HumanDecisionStore(this.store.outputRoot).readAccepted(
+        request.decisionId,
+      );
+      if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
+        throw new Error("Accepted human decision does not match the durable decision record");
+      }
+      acceptedResponse = validateHumanDecisionResponse(request, durableDecision.response);
+      acceptedNodeId = request.nodeId;
       normalizedInput = await resolveArtifacts(parent.state.input, parent.runDir);
     } else {
       const suppliedInput = input === undefined ? null : input;
@@ -454,6 +462,7 @@ export class WorkflowEngine {
         schema: "pi-workflows.human-decision-receipt.v1",
         decisionId: options.humanDecision.decisionId,
         requestDigest: options.humanDecision.requestDigest,
+        nodeId: acceptedNodeId ?? waitingNodeId,
         response: options.humanDecision.response,
         acceptedAt: options.humanDecision.acceptedAt,
         answerDigest: options.humanDecision.answerDigest,

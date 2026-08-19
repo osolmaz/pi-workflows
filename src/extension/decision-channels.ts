@@ -543,8 +543,12 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     });
     const keyboard = this.registerCallbacks(request);
     try {
-      let messageCount = 0;
+      const deliveredChats = new Set(
+        this.projection.messages(request.decisionId).map((message) => message.chat_id),
+      );
+      let messageCount = deliveredChats.size;
       for (const chatId of this.profile.allowedChatIds) {
+        if (deliveredChats.has(chatId)) continue;
         const result = await this.call("sendMessage", {
           chat_id: chatId,
           text: renderTelegramRequest(request),

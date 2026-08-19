@@ -314,20 +314,22 @@ function renderCellText(
       ? (state.finalOutput as { audience?: unknown })
       : undefined;
   const selected =
-    human !== undefined && state.humanDecision !== undefined
+    human !== undefined &&
+    state.humanDecision !== undefined &&
+    state.humanDecision.nodeId === nodeId
       ? human.choices[state.humanDecision.response.choice]
       : undefined;
   const humanDetail =
     human === undefined
       ? undefined
-      : selected !== undefined
-        ? `human: ${sanitizeText(selected.label)}`
-        : state.waitingOn === nodeId
-          ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)} · ${Object.values(
-              human.choices,
-            )
-              .map((choice) => sanitizeText(choice.label))
-              .join(" / ")}`
+      : state.waitingOn === nodeId
+        ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)} · ${Object.values(
+            human.choices,
+          )
+            .map((choice) => sanitizeText(choice.label))
+            .join(" / ")}`
+        : selected !== undefined
+          ? `human: ${sanitizeText(selected.label)}`
           : undefined;
   const detail =
     humanDetail ??

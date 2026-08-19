@@ -30,6 +30,29 @@ const LOOP_SNAPSHOT: WorkflowDefinitionSnapshot = {
   ],
 };
 
+const HUMAN_SNAPSHOT: WorkflowDefinitionSnapshot = {
+  schema: "pi-workflows.definition-snapshot.v1",
+  name: "human-gates",
+  startAt: "first",
+  nodes: {
+    first: {
+      nodeType: "checkpoint",
+      humanDecision: {
+        audience: "operator",
+        choices: { continue: { label: "Continue" }, stop: { label: "Stop" } },
+      },
+    },
+    second: {
+      nodeType: "checkpoint",
+      humanDecision: {
+        audience: "reviewer",
+        choices: { continue: { label: "Continue" }, replan: { label: "Replan" } },
+      },
+    },
+  },
+  edges: [{ from: "first", to: "second" }],
+};
+
 const BRANCH_SNAPSHOT: WorkflowDefinitionSnapshot = {
   schema: "pi-workflows.definition-snapshot.v1",
   name: "branchy",
@@ -156,6 +179,33 @@ describe("layoutGraph", () => {
 });
 
 describe("renderGraphLines", () => {
+  it("shows a second waiting human gate instead of an inherited receipt", () => {
+    const steps = [makeStep("first", 0), makeStep("second", 1)];
+    const bundle = makeBundle(HUMAN_SNAPSHOT, steps, {
+      status: "waiting",
+      waitingOn: "second",
+      finalOutput: {
+        schema: "pi-workflows.human-decision-request.v1",
+        audience: "reviewer",
+      },
+      humanDecision: {
+        schema: "pi-workflows.human-decision-receipt.v1",
+        decisionId: "decision-first",
+        requestDigest: `sha256:${"a".repeat(64)}`,
+        nodeId: "first",
+        response: { choice: "continue" },
+        acceptedAt: "2026-08-19T00:00:00.000Z",
+        answerDigest: `sha256:${"b".repeat(64)}`,
+      },
+    });
+    const text = renderGraphLines(bundle, steps.length - 1, new Date(), {
+      nodeStyle: "box",
+    })
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("human decision · reviewer");
+    expect(text).toContain("human: Continue");
+  });
   const loopSteps = ["plan", "implement", "verify", "review", "fix", "verify", "review"].map(
     (nodeId, index) => makeStep(nodeId, index),
   );

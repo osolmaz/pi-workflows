@@ -251,7 +251,7 @@ Decision records live next to workflow run bundles under the Pi Workflows state 
 
 The resolution record uses a no-replace create. The first valid acceptance, cancellation, or expiry writer wins. Acceptance then materializes the matching accepted-answer detail. Cancellation or expiry materializes cancellation detail. A retry with the same response and idempotency key adopts the existing answer. A conflicting answer receives an `already decided` result.
 
-The continuation run ID is derived from the accepted decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after answer acceptance cannot run the next workflow step twice. The continuation run carries a redacted receipt with the decision ID, request digest, choice, acceptance time, and answer digest. Actor, channel, event, and idempotency provenance stays only in the private decision records and never enters the run bundle or model context.
+The continuation run ID is derived from the accepted decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after answer acceptance cannot run the next workflow step twice. The continuation run carries a redacted receipt with the decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Actor, channel, event, and idempotency provenance stays only in the private decision records and never enters the run bundle or model context.
 
 SQLite may index pending decisions and channel leases, but immutable decision files remain the source of truth. The index is disposable and rebuildable.
 
@@ -265,7 +265,7 @@ Pi Workflows keeps solution choice, documentation, and implementation in separat
 
 `autodoc` runs by itself and as an included workflow. It returns a documented-plan record with the plan, plan digest, document paths, document digests, and check results. If the canonical documents already describe the selected plan, it adopts them without rewriting files.
 
-`autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A current documented plan goes straight to implementation. A clear plan with missing or stale documentation goes through `autodoc` first. The absence of a structured `plan` input never authorizes `autodevise`.
+`autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A caller can bypass discovery and autodoc only by supplying both the explicit plan and a `documentation` receipt whose plan digest matches it. A plan without that current-document evidence enters autodoc so the canonical documents are inspected and adopted or updated. The absence of a structured `plan` input never authorizes `autodevise`.
 
 If later implementation, verification, review, comments, or CI evidence invalidates the plan, autoimplement runs `autodevise`, sends the revised plan through `autodoc`, and then resumes implementation. An optional approval policy inserts `plan-approval` after the revised documentation.
 

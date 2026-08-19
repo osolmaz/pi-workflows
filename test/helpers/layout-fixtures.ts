@@ -76,6 +76,72 @@ function freshState(snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
   };
 }
 
+function humanDecisionFixture(): LayoutFixture {
+  const snapshot: WorkflowDefinitionSnapshot = {
+    schema: "pi-workflows.definition-snapshot.v1",
+    name: "human-multigate",
+    startAt: "first",
+    nodes: {
+      first: {
+        nodeType: "checkpoint",
+        humanDecision: {
+          audience: "operator",
+          choices: { continue: { label: "Continue" }, stop: { label: "Stop" } },
+        },
+      },
+      second: {
+        nodeType: "checkpoint",
+        humanDecision: {
+          audience: "reviewer",
+          choices: { continue: { label: "Continue" }, replan: { label: "Replan" } },
+        },
+      },
+    },
+    edges: [{ from: "first", to: "second" }],
+  };
+  const state: WorkflowRunState = {
+    ...freshState(snapshot),
+    status: "waiting",
+    waitingOn: "second",
+    finalOutput: {
+      schema: "pi-workflows.human-decision-request.v1",
+      audience: "reviewer",
+    },
+    humanDecision: {
+      schema: "pi-workflows.human-decision-receipt.v1",
+      decisionId: "decision-first",
+      requestDigest: `sha256:${"a".repeat(64)}`,
+      nodeId: "first",
+      response: { choice: "continue" },
+      acceptedAt: "2026-01-01T00:00:10.000Z",
+      answerDigest: `sha256:${"b".repeat(64)}`,
+    },
+    steps: [
+      {
+        attemptId: "attempt-first",
+        nodeId: "first",
+        nodeType: "checkpoint",
+        outcome: "ok",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:00:01.000Z",
+        prompt: null,
+        output: { choice: "continue" },
+      },
+      {
+        attemptId: "attempt-second",
+        nodeId: "second",
+        nodeType: "checkpoint",
+        outcome: "ok",
+        startedAt: "2026-01-01T00:00:02.000Z",
+        finishedAt: "2026-01-01T00:00:03.000Z",
+        prompt: null,
+        output: { schema: "pi-workflows.human-decision-request.v1" },
+      },
+    ],
+  };
+  return buildFixture("human-multigate", snapshot, state);
+}
+
 function buildFixture(
   name: string,
   snapshot: WorkflowDefinitionSnapshot,
@@ -116,6 +182,7 @@ export async function buildLayoutFixtures(): Promise<LayoutFixture[]> {
     const snapshot = createDefinitionSnapshot(workflow);
     fixtures.push(buildFixture(`example-${workflow.name}`, snapshot, freshState(snapshot)));
   }
+  fixtures.push(humanDecisionFixture());
   for (const seed of RANDOM_SEEDS) {
     const snapshot = randomSnapshot(seed);
     const steps = randomSteps(snapshot, seed);

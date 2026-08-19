@@ -317,6 +317,57 @@ describe("TelegramDecisionChannel", () => {
     await adapter.stop();
   });
 
+  it("retries only chats that did not already receive a multi-chat decision", async () => {
+    const counts = new Map<string, number>();
+    const fetchFn: TelegramFetch = async (url, init) => {
+      if (!url.endsWith("/sendMessage")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: true };
+          },
+        };
+      }
+      const chatId = String((JSON.parse(String(init?.body)) as { chat_id: string }).chat_id);
+      const count = (counts.get(chatId) ?? 0) + 1;
+      counts.set(chatId, count);
+      if (chatId === "-201" && count === 1) {
+        return {
+          ok: false,
+          status: 400,
+          async json() {
+            return {};
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, result: { message_id: count } };
+        },
+      };
+    };
+    const adapter = new TelegramDecisionChannel({
+      profileName: "approval",
+      token: "fixture",
+      allowedUserIds: ["100"],
+      allowedChatIds: ["-200", "-201"],
+      store: new HumanDecisionStore(await makeTempDir("telegram-multichat-runs")),
+      configDir: await makeTempDir("telegram-multichat-config"),
+      onAnswer: async () => {},
+      fetchFn,
+      apiBase: "https://telegram.test",
+    });
+    const decision = request();
+    expect((await adapter.deliver(decision)).status).toBe("failed");
+    expect((await adapter.deliver(decision)).status).toBe("confirmed");
+    expect(counts.get("-200")).toBe(1);
+    expect(counts.get("-201")).toBe(2);
+    await adapter.stop();
+  });
+
   it("ignores an expired callback binding", async () => {
     const answers: HumanDecisionChannelAnswer[] = [];
     const bot = fakeBot();

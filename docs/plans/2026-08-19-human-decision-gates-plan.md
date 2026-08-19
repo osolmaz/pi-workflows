@@ -29,7 +29,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Keep autodoc separate from solution selection and implementation.
 - Make autoimplement locate and record an existing plan from input, conversation context, or referenced documents.
 - Block autoimplement when no clear plan exists.
-- Skip autodoc when canonical documents are current.
+- Skip autodoc only when plan discovery verifies current canonical documents or an explicit documentation receipt has a matching plan digest.
 - Route every evidence-driven revision through `autodevise`, then `autodoc`, before implementation resumes.
 - Never run initial autodevise only because the structured plan input is absent.
 

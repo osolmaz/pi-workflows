@@ -331,7 +331,11 @@ function nodeRuntimeSegments(
     return segments;
   }
   const human = snapshot.nodes[nodeId]?.humanDecision;
-  if (human !== undefined && state.humanDecision !== undefined) {
+  if (
+    human !== undefined &&
+    state.humanDecision !== undefined &&
+    state.humanDecision.nodeId === nodeId
+  ) {
     const selected = human.choices[state.humanDecision.response.choice];
     if (selected !== undefined) segments.push(`human: ${sanitizeText(selected.label)}`);
   }

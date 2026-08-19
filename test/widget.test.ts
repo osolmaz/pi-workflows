@@ -210,6 +210,7 @@ describe("human decision widget", () => {
         schema: "pi-workflows.human-decision-receipt.v1",
         decisionId: "decision-a",
         requestDigest: `sha256:${"a".repeat(64)}`,
+        nodeId: "approve",
         response: { choice: "continue" },
         acceptedAt: "2026-01-01T00:00:00.000Z",
         answerDigest: `sha256:${"b".repeat(64)}`,

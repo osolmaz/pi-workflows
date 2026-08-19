@@ -258,6 +258,7 @@ export type HumanDecisionReceipt = {
   schema: "pi-workflows.human-decision-receipt.v1";
   decisionId: string;
   requestDigest: string;
+  nodeId: string;
   response: HumanDecisionResponse;
   acceptedAt: string;
   answerDigest: string;

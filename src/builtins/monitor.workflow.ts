@@ -323,20 +323,32 @@ function repeatedRepairWithoutProgress(context: WorkflowNodeContext): boolean {
 function currentRepairPlan(outputs: Record<string, unknown>): {
   plan: unknown;
   planDigest: string;
+  documents: string[];
 } {
   const documentation = outputs.documentation as
-    | { exit?: string; output?: { plan?: unknown; planDigest?: string } }
+    | {
+        exit?: string;
+        output?: {
+          plan?: unknown;
+          planDigest?: string;
+          documentation?: { files?: string[] };
+        };
+      }
     | undefined;
   if (
     documentation?.exit === "ready" &&
     documentation.output?.plan !== undefined &&
     typeof documentation.output.planDigest === "string"
   ) {
-    return { plan: documentation.output.plan, planDigest: documentation.output.planDigest };
+    return {
+      plan: documentation.output.plan,
+      planDigest: documentation.output.planDigest,
+      documents: documentation.output.documentation?.files ?? [],
+    };
   }
   const design = includedResult(autodeviseWorkflow, outputs.initialDesign);
   if (design.exit !== "ready") throw new Error("monitor design did not return a ready plan");
-  return { plan: design.output.plan, planDigest: design.output.planDigest };
+  return { plan: design.output.plan, planDigest: design.output.planDigest, documents: [] };
 }
 
 function latestReplanInstructions(outputs: Record<string, unknown>): string | undefined {
@@ -490,6 +502,11 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
         const request: AutoimplementInput = {
           task: repair.problem,
           plan: documented.plan,
+          documentation: {
+            status: "current",
+            planDigest: documented.planDigest,
+            documents: documented.documents,
+          },
           ...(config.repair?.scope !== undefined ? { scope: config.repair.scope } : {}),
           ...(config.repair?.constraints !== undefined
             ? { constraints: config.repair.constraints }

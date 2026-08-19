@@ -89,6 +89,36 @@ describe("human decision engine continuation", () => {
     expect(continued.state.humanDecision).not.toHaveProperty("source");
   });
 
+  it("rejects a forged accepted object that is not in the durable decision store", async () => {
+    const runs = await makeTempDir("human-decision-engine-forged");
+    const store = new WorkflowRunStore(runs);
+    const parent = await engine(store).run(
+      workflow,
+      { audience: "operator" },
+      { runId: "human-parent-forged" },
+    );
+    const request = parent.state.finalOutput as HumanDecisionRequest;
+    await expect(
+      engine(store).continueRun(
+        workflow,
+        parent.state.runId,
+        {},
+        {
+          humanDecision: {
+            schema: "pi-workflows.human-decision-accepted.v1",
+            decisionId: request.decisionId,
+            requestDigest: request.requestDigest,
+            response: { choice: "continue" },
+            source: { channel: "pi", actorId: "forged", eventId: "forged" },
+            idempotencyKey: "forged",
+            acceptedAt: "2026-08-19T00:00:00.000Z",
+            answerDigest: `sha256:${"0".repeat(64)}`,
+          },
+        },
+      ),
+    ).rejects.toThrow(/durable decision record/);
+  });
+
   it("rejects a continuation without the verified accepted decision", async () => {
     const runs = await makeTempDir("human-decision-engine-reject");
     const store = new WorkflowRunStore(runs);

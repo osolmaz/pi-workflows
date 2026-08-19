@@ -155,7 +155,7 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
     const human = bundle.snapshot?.nodes[nodeId]?.humanDecision;
     const accepted = state.humanDecision;
     const selected =
-      human !== undefined && accepted !== undefined
+      human !== undefined && accepted !== undefined && accepted.nodeId === nodeId
         ? human.choices[accepted.response.choice]
         : undefined;
     suffix = ansi.dim(
