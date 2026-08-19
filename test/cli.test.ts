@@ -195,10 +195,15 @@ describe("pi-workflows CLI", () => {
     const bin = path.join(temp, "bin");
     await fs.mkdir(bin);
     const root = path.resolve(import.meta.dirname, "..");
+    const packageVersion = JSON.parse(
+      await fs.readFile(path.join(root, "package.json"), "utf8"),
+    ) as {
+      version: string;
+    };
     const herdr = path.join(bin, "herdr");
     await fs.writeFile(
       herdr,
-      `#!/usr/bin/env node\nconst path = require("node:path");\nconst root = process.env.TEST_HERDR_ROOT;\nprocess.stdout.write(JSON.stringify({ result: { plugins: [{ plugin_id: "osolmaz.pi-workflows", plugin_root: root, manifest_path: path.join(root, "herdr-plugin.toml"), version: "0.11.0", enabled: true }] } }));\n`,
+      `#!/usr/bin/env node\nconst path = require("node:path");\nconst root = process.env.TEST_HERDR_ROOT;\nconst pkg = require(path.join(root, "package.json"));\nprocess.stdout.write(JSON.stringify({ result: { plugins: [{ plugin_id: "osolmaz.pi-workflows", plugin_root: root, manifest_path: path.join(root, "herdr-plugin.toml"), version: pkg.version, enabled: true }] } }));\n`,
     );
     await fs.chmod(herdr, 0o755);
     vi.stubEnv("TEST_HERDR_ROOT", root);
@@ -209,8 +214,8 @@ describe("pi-workflows CLI", () => {
       schema: "pi-workflows.herdr-sync.v1",
       status: "unchanged",
       changed: false,
-      expectedVersion: "0.11.0",
-      effectiveVersion: "0.11.0",
+      expectedVersion: packageVersion.version,
+      effectiveVersion: packageVersion.version,
       enabled: true,
     });
   });
