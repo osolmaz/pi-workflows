@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   choice,
+  createHumanDecisionRequest,
   defineHumanChoices,
   humanDecision,
   humanDecisionEdge,
   textInput,
   validateHumanDecisionResponse,
+  validateHumanDecisionSubmission,
 } from "../src/workflows/human-decision.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
 
@@ -104,6 +106,130 @@ describe("human decision authoring", () => {
       request: () => ({ title: "Approve", body: {} }),
     });
     expect(typeof gate.humanDecision?.audience).toBe("function");
+  });
+
+  it("rejects invalid text and choice contracts", () => {
+    expect(() => textInput({ name: "instructions", prompt: "Prompt", minLength: -1 })).toThrow(
+      /minLength/,
+    );
+    expect(() => textInput({ name: "instructions", prompt: "Prompt", maxLength: 0 })).toThrow(
+      /maxLength/,
+    );
+    expect(() =>
+      textInput({ name: "instructions", prompt: "Prompt", minLength: 3, maxLength: 2 }),
+    ).toThrow(/maxLength/);
+    expect(() => defineHumanChoices({})).toThrow(/must not be empty/);
+    expect(() => choice({ label: "" })).toThrow(/label/);
+    expect(() =>
+      choice({
+        label: "Bad",
+        input: { kind: "number", name: "value", prompt: "Prompt", minLength: 1, maxLength: 2 },
+      } as never),
+    ).toThrow(/kind/);
+    expect(() =>
+      choice({
+        label: "Bad",
+        input: { kind: "text", name: "bad/name", prompt: "Prompt", minLength: 1, maxLength: 2 },
+      }),
+    ).toThrow(/name/);
+  });
+
+  it("rejects invalid request metadata and expiry", () => {
+    expect(() =>
+      humanDecision({ audience: "bad/name", choices, request: () => ({ title: "A", body: {} }) }),
+    ).toThrow(/audience/);
+    expect(() => humanDecision({ audience: "operator", choices, request: null as never })).toThrow(
+      /request/,
+    );
+    expect(() =>
+      createHumanDecisionRequest({
+        runId: "run-a",
+        workflowName: "workflow-a",
+        nodeId: "approve",
+        attemptId: "attempt-a",
+        contract: { audience: "operator", choices },
+        prompt: { title: "Approve", body: 1n },
+      }),
+    ).toThrow(/JSON-serializable/);
+    expect(() =>
+      createHumanDecisionRequest({
+        runId: "run-a",
+        workflowName: "workflow-a",
+        nodeId: "approve",
+        attemptId: "attempt-a",
+        contract: { audience: "operator", choices },
+        prompt: { title: "Approve", body: {}, expiresAt: "invalid" },
+      }),
+    ).toThrow(/expiry/);
+    expect(() =>
+      createHumanDecisionRequest({
+        runId: "run-a",
+        workflowName: "workflow-a",
+        nodeId: "approve",
+        attemptId: "attempt-a",
+        contract: { audience: "operator", choices },
+        prompt: { title: "Approve", body: {}, expiresAt: "2026-01-01T00:00:00.000Z" },
+        createdAt: "2026-01-02T00:00:00.000Z",
+      }),
+    ).toThrow(/after creation/);
+  });
+
+  it("rejects malformed text answers and unverified source fields", () => {
+    expect(() => validateHumanDecisionResponse(request(), { choice: "replan" })).toThrow(/input/);
+    expect(() =>
+      validateHumanDecisionResponse(request(), {
+        choice: "replan",
+        input: { other: "text" },
+      }),
+    ).toThrow(/only instructions/);
+    expect(() =>
+      validateHumanDecisionResponse(request(), {
+        choice: "replan",
+        input: { instructions: 3 },
+      }),
+    ).toThrow(/must be text/);
+    expect(() =>
+      validateHumanDecisionResponse(
+        {
+          ...request(),
+          choices: {
+            replan: {
+              label: "Replan",
+              input: {
+                kind: "text",
+                name: "instructions",
+                prompt: "Prompt",
+                minLength: 2,
+                maxLength: 3,
+              },
+            },
+          },
+        },
+        { choice: "replan", input: { instructions: "x" } },
+      ),
+    ).toThrow(/length/);
+    const base = {
+      decisionId: request().decisionId,
+      requestDigest: request().requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "person", eventId: "event" },
+      idempotencyKey: "event",
+    };
+    expect(() =>
+      validateHumanDecisionSubmission(request(), {
+        ...base,
+        source: { ...base.source, channel: "bad/channel" },
+      }),
+    ).toThrow(/channel/);
+    expect(() =>
+      validateHumanDecisionSubmission(request(), {
+        ...base,
+        source: { ...base.source, actorId: "" },
+      }),
+    ).toThrow(/actor/);
+    expect(() =>
+      validateHumanDecisionSubmission(request(), { ...base, idempotencyKey: "" }),
+    ).toThrow(/idempotency/);
   });
 
   it("rejects duplicate labels because Pi selections return labels", () => {

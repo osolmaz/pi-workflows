@@ -8,7 +8,11 @@ import {
   choice,
   textInput,
 } from "../src/workflows/human-decision.js";
-import type { HumanDecisionSubmission } from "../src/workflows/types.js";
+import type {
+  HumanDecisionDeliveryRecord,
+  HumanDecisionSettlementRecord,
+  HumanDecisionSubmission,
+} from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
 function makeRequest() {
@@ -146,6 +150,57 @@ describe("HumanDecisionStore", () => {
     const cancelled = await store.readCancellation(request.decisionId);
     expect(Number(accepted !== null) + Number(cancelled !== null)).toBe(1);
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+  });
+
+  it("handles empty indexes and validates delivery and settlement paths", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-record-paths"));
+    expect(await store.listRequests()).toEqual([]);
+    const request = makeRequest();
+    const delivery: HumanDecisionDeliveryRecord = {
+      schema: "pi-workflows.human-decision-delivery.v1",
+      attemptId: "attempt-a",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      channel: "pi",
+      state: "confirmed",
+      createdAt: "2026-08-19T00:00:00.000Z",
+    };
+    await expect(store.recordDelivery(request, "bad/channel", delivery)).rejects.toThrow(/channel/);
+    await expect(
+      store.recordDelivery(request, "pi", { ...delivery, attemptId: "bad/attempt" }),
+    ).rejects.toThrow(/attempt/);
+    expect(await store.listDeliveries(request.decisionId, "pi")).toEqual([]);
+    const settlement: HumanDecisionSettlementRecord = {
+      schema: "pi-workflows.human-decision-settlement.v1",
+      attemptId: "bad/attempt",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      channel: "pi",
+      state: "confirmed",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      finishedAt: "2026-08-19T00:00:01.000Z",
+    };
+    await expect(store.recordSettlement(request.decisionId, "pi", settlement)).rejects.toThrow(
+      /attempt/,
+    );
+  });
+
+  it("rebuilds cancellation detail and refuses to cancel an accepted decision", async () => {
+    const cancelledStore = new HumanDecisionStore(
+      await makeTempDir("human-decision-cancel-recovery"),
+    );
+    const request = makeRequest();
+    await cancelledStore.cancel(request, "cancelled");
+    await fs.unlink(path.join(cancelledStore.decisionDir(request.decisionId), "cancelled.json"));
+    expect(await cancelledStore.readCancellation(request.decisionId)).toMatchObject({
+      reason: "cancelled",
+    });
+
+    const acceptedStore = new HumanDecisionStore(
+      await makeTempDir("human-decision-cancel-accepted"),
+    );
+    await acceptedStore.accept(request, submission(request, "continue", "accepted"));
+    await expect(acceptedStore.cancel(request, "cancelled")).rejects.toThrow(/cannot be cancelled/);
   });
 
   it("records one immutable continuation identity", async () => {

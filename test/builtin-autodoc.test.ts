@@ -11,6 +11,59 @@ async function run(executor: ScriptedExecutor, input: unknown) {
 }
 
 describe("built-in autodoc", () => {
+  it("rejects malformed input and agent contracts", async () => {
+    const parse = autodocWorkflow.input;
+    if (parse === undefined) throw new Error("missing autodoc input parser");
+    expect(() => parse(null)).toThrow(/object/);
+    expect(() => parse({ task: "" })).toThrow(/non-empty/);
+    expect(() => parse({ task: "demo", documents: "bad" })).toThrow(/array/);
+
+    const validate = async (nodeId: string, value: unknown) => {
+      const node = autodocWorkflow.nodes[nodeId];
+      if (node?.nodeType !== "agent" || node.validate === undefined) {
+        throw new Error(`${nodeId} is not validated`);
+      }
+      return await node.validate(value, {
+        input: { task: "demo", plan: {} },
+        outputs: {},
+        results: {},
+        state: { steps: [] },
+        signal: new AbortController().signal,
+      } as never);
+    };
+    await expect(validate("locatePlan", { route: "other" })).rejects.toThrow(/route/);
+    await expect(
+      validate("locatePlan", { route: "found", sources: [], reason: "reason", evidence: null }),
+    ).rejects.toThrow(/include the selected plan/);
+    await expect(
+      validate("locatePlan", {
+        route: "blocked",
+        sources: [3],
+        reason: "reason",
+        evidence: null,
+      }),
+    ).rejects.toThrow(/strings/);
+    await expect(
+      validate("inspectDocumentation", {
+        route: "current",
+        files: "bad",
+        reason: "reason",
+        evidence: null,
+      }),
+    ).rejects.toThrow(/array/);
+    await expect(
+      validate("inspectDocumentation", {
+        route: "current",
+        files: [],
+        digests: { file: 3 },
+        reason: "reason",
+        evidence: null,
+      }),
+    ).rejects.toThrow(/values/);
+    await expect(validate("updateDocumentation", { updated: false })).rejects.toThrow(/updated/);
+    await expect(validate("verifyDocumentation", { passed: "yes" })).rejects.toThrow(/boolean/);
+  });
+
   it("adopts current canonical documentation without a write step", async () => {
     const executor = new ScriptedExecutor().respond("inspectDocumentation", {
       output: {

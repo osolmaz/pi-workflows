@@ -37,6 +37,58 @@ async function runChoice(response: HumanDecisionResponse) {
 }
 
 describe("plan-approval workflow", () => {
+  it("rejects malformed input and missing continuation receipts", async () => {
+    const parse = planApprovalWorkflow.input;
+    if (parse === undefined) throw new Error("missing plan approval input parser");
+    expect(() => parse(null)).toThrow(/object/);
+    expect(() => parse({ task: "demo" })).toThrow(/requires a plan/);
+    expect(() =>
+      parse({ task: "demo", plan: {}, planDigest: "digest", audience: "operator", revision: 0 }),
+    ).toThrow(/positive integer/);
+    expect(() => parse({ task: "", plan: {}, planDigest: "digest", audience: "operator" })).toThrow(
+      /task/,
+    );
+
+    const continued = planApprovalWorkflow.nodes.continued;
+    if (continued?.nodeType !== "compute") throw new Error("continued is not compute");
+    await expect(
+      Promise.resolve().then(() =>
+        continued.run({
+          input: { task: "demo", plan: {}, planDigest: "digest", audience: "operator" },
+          outputs: {},
+          results: {},
+          state: { steps: [] },
+          signal: new AbortController().signal,
+        } as never),
+      ),
+    ).rejects.toThrow(/accepted decision/);
+
+    const replan = planApprovalWorkflow.nodes.replan;
+    if (replan?.nodeType !== "compute") throw new Error("replan is not compute");
+    await expect(
+      Promise.resolve().then(() =>
+        replan.run({
+          input: { task: "demo", plan: {}, planDigest: "digest", audience: "operator" },
+          outputs: { approve: { choice: "replan", input: {} } },
+          results: {},
+          state: {
+            steps: [],
+            humanDecision: {
+              schema: "pi-workflows.human-decision-receipt.v1",
+              decisionId: "decision",
+              requestDigest: `sha256:${"a".repeat(64)}`,
+              nodeId: "approve",
+              response: { choice: "replan" },
+              acceptedAt: "2026-08-19T00:00:00.000Z",
+              answerDigest: `sha256:${"b".repeat(64)}`,
+            },
+          },
+          signal: new AbortController().signal,
+        } as never),
+      ),
+    ).rejects.toThrow(/missing exact instructions/);
+  });
+
   it("returns continue with the accepted decision receipt", async () => {
     const result = await runChoice({ choice: "continue" });
     expect(result.state.finalOutput).toMatchObject({

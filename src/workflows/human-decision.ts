@@ -614,9 +614,9 @@ function assertId(value: string, label: string): void {
 }
 
 function assertJsonValue(value: unknown, label: string): void {
-  const encoded = JSON.stringify(value);
-  if (encoded === undefined) throw new Error(`${label} must be JSON-serializable`);
   try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error("undefined JSON value");
     JSON.parse(encoded);
   } catch {
     throw new Error(`${label} must be JSON-serializable`);
