@@ -312,7 +312,7 @@ describe("monitor human repair approval", () => {
         approval: { audience: "operator", maxReplans: 3 },
       },
     });
-    const firstDigest = (first.state.finalOutput as { body?: { planDigest?: string } }).body
+    const firstDigest = (first.state.finalOutput as { subject?: { planDigest?: string } }).subject
       ?.planDigest;
     const exact = "  use the smaller repair\nkeep this exact  ";
     const replanned = await answer(store, executor, resolved.definition, first.state.runId, {
@@ -322,7 +322,7 @@ describe("monitor human repair approval", () => {
     expect(replanned.state.status).toBe("waiting");
     expect(replanned.state.waitingOn).toBe("approval/approve");
     expect(
-      (replanned.state.finalOutput as { body?: { planDigest?: string } }).body?.planDigest,
+      (replanned.state.finalOutput as { subject?: { planDigest?: string } }).subject?.planDigest,
     ).not.toBe(firstDigest);
     const frameRequests = executor.requests.filter(
       (request) => request.contract.nodeId === "initialDesign/frame",

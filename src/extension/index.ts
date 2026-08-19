@@ -6,6 +6,7 @@ import { builtinWorkflowCatalog } from "../builtins/catalog.js";
 import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
+import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import {
   ClaimLostError,
@@ -156,10 +157,13 @@ type ActiveRun = {
 };
 
 function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
+  const schema =
+    value !== null && typeof value === "object"
+      ? (value as { schema?: unknown }).schema
+      : undefined;
   if (
-    value === null ||
-    typeof value !== "object" ||
-    (value as { schema?: unknown }).schema !== "pi-workflows.human-decision-request.v1"
+    schema !== "pi-workflows.human-decision-request.v1" &&
+    schema !== "pi-workflows.human-decision-request.v2"
   ) {
     return null;
   }
@@ -836,7 +840,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         const channel = telegramDecisionChannels.get(channelId);
         if (channel !== undefined) {
           available = true;
-          queueMicrotask(() => void channel.deliver(pendingDecision));
+          queueMicrotask(() => void channel.deliver(humanDecisionChannelRequest(pendingDecision)));
         }
       }
       if (!available) {
@@ -1755,7 +1759,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     });
     activePiDecisionChannels.set(request.decisionId, channel);
     try {
-      await channel.deliver(request);
+      await channel.deliver(humanDecisionChannelRequest(request));
     } catch (error) {
       notify(ctx, `Could not answer human decision: ${errorMessage(error)}`, "error");
     } finally {
@@ -1838,7 +1842,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         const channels = audienceChannels(decisionChannelConfig, request.audience);
         for (const channelId of channels) {
           const channel = telegramDecisionChannels.get(channelId);
-          if (channel !== undefined) await channel.deliver(request);
+          if (channel !== undefined) await channel.deliver(humanDecisionChannelRequest(request));
         }
         if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
           lastWaitingRunId = request.runId;

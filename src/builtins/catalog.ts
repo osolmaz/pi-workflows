@@ -8,11 +8,11 @@ import planApprovalWorkflow from "./plan-approval.workflow.js";
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "autoplan", revision: "1", definition: autoplanWorkflow },
   { id: "autodoc", revision: "1", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "3", definition: autoimplementWorkflow },
-  { id: "plan-approval", revision: "1", definition: planApprovalWorkflow },
+  { id: "autoimplement", revision: "4", definition: autoimplementWorkflow },
+  { id: "plan-approval", revision: "2", definition: planApprovalWorkflow },
   {
     id: "monitor",
-    revision: "6",
+    revision: "7",
     definition: monitorWorkflow,
     legacySources: [
       {

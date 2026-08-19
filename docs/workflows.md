@@ -289,11 +289,19 @@ const choices = defineHumanChoices({
 humanDecision({
   audience: "operator",
   choices,
-  request: ({ outputs }) => ({ title: "Approve plan", body: outputs.plan }),
+  request: ({ outputs }) => ({
+    title: "Approve plan",
+    subject: outputs.plan,
+    presentation: {
+      schema: "pi-workflows.decision-presentation.v1",
+      summary: "Review the implementation plan.",
+      blocks: [{ kind: "paragraph", text: "The plan is ready for approval." }],
+    },
+  }),
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The first valid verified human answer wins. A continuation preserves the original workflow input and exposes the accepted answer as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices.
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, and input prompts. The first valid verified human answer wins. A continuation preserves the original workflow input and exposes the accepted answer as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
 
 The model-facing workflow tool cannot answer a protected human decision. Pi interactive UI and configured external channels use a host-owned answer path. Ordinary checkpoints keep the existing `/workflow answer` behavior.
 

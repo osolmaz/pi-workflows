@@ -37,6 +37,39 @@ async function runChoice(response: HumanDecisionResponse) {
 }
 
 describe("plan-approval workflow", () => {
+  it("stores the typed plan separately from its readable presentation", async () => {
+    const runs = await makeTempDir("plan-approval-presentation");
+    const store = new WorkflowRunStore(runs);
+    const parent = await new WorkflowEngine({ store, executor: new ScriptedExecutor() }).run(
+      planApprovalWorkflow,
+      {
+        task: "implement readable decisions",
+        plan: {
+          summary: "Show the operator readable text.",
+          steps: [
+            {
+              change: "Separate subject and presentation",
+              verification: "Run the decision tests",
+            },
+          ],
+          boundaries: ["Do not change Pi core"],
+        },
+        planDigest: `sha256:${"a".repeat(64)}`,
+        audience: "operator",
+      },
+      { runId: "approval-presentation" },
+    );
+    const request = parent.state.finalOutput as HumanDecisionRequest;
+    expect(request.schema).toBe("pi-workflows.human-decision-request.v2");
+    if (request.schema !== "pi-workflows.human-decision-request.v2") {
+      throw new Error("expected v2 plan approval request");
+    }
+    expect(request.subject).toMatchObject({ task: "implement readable decisions" });
+    expect(request.presentation.summary).toBe("Show the operator readable text.");
+    expect(JSON.stringify(request.presentation)).toContain("Separate subject and presentation");
+    expect(JSON.stringify(request.presentation)).not.toContain('"steps"');
+  });
+
   it("rejects malformed input and missing continuation receipts", async () => {
     const parse = planApprovalWorkflow.input;
     if (parse === undefined) throw new Error("missing plan approval input parser");
@@ -94,7 +127,10 @@ describe("plan-approval workflow", () => {
     expect(result.state.finalOutput).toMatchObject({
       status: "continue",
       plan: { steps: ["one"] },
-      decision: { response: { choice: "continue" } },
+      decision: {
+        schema: "pi-workflows.human-decision-receipt.v2",
+        response: { choice: "continue" },
+      },
     });
   });
 

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/decision-presentation-v1.schema.json",
+  "title": "Pi Workflows decision presentation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "summary", "blocks"],
+  "properties": {
+    "schema": { "const": "pi-workflows.decision-presentation.v1" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 16000 },
+    "blocks": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "text"],
+            "properties": {
+              "kind": { "const": "paragraph" },
+              "text": { "type": "string", "minLength": 1, "maxLength": 16000 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "title"],
+            "properties": {
+              "kind": { "const": "section" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 16000 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "items"],
+            "properties": {
+              "kind": { "const": "bullets" },
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": { "type": "string", "minLength": 1, "maxLength": 16000 }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "items"],
+            "properties": {
+              "kind": { "const": "fields" },
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["label", "value"],
+                  "properties": {
+                    "label": { "type": "string", "minLength": 1, "maxLength": 16000 },
+                    "value": { "type": "string", "minLength": 1, "maxLength": 16000 }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "text"],
+            "properties": {
+              "kind": { "const": "preformatted" },
+              "text": { "type": "string", "minLength": 1, "maxLength": 16000 }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

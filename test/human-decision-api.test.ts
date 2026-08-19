@@ -9,7 +9,7 @@ import {
   validateHumanDecisionResponse,
   validateHumanDecisionSubmission,
 } from "../src/workflows/human-decision.js";
-import type { HumanDecisionRequest } from "../src/workflows/types.js";
+import type { HumanDecisionPrompt, HumanDecisionRequest } from "../src/workflows/types.js";
 
 const choices = defineHumanChoices({
   continue: choice({ label: "Continue" }),
@@ -37,6 +37,12 @@ function request(): HumanDecisionRequest {
 }
 
 describe("human decision authoring", () => {
+  it("requires an explicit presentation for a new structured subject", () => {
+    // @ts-expect-error structured subjects cannot use an implicit channel renderer
+    const invalid: HumanDecisionPrompt = { title: "Approve", subject: { plan: "a" } };
+    expect(invalid).toHaveProperty("subject");
+  });
+
   it("stays a checkpoint and builds exhaustive choice routing", () => {
     const gate = humanDecision({
       audience: "operator",

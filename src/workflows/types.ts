@@ -192,12 +192,66 @@ export type HumanDecisionChoice = {
 
 export type HumanDecisionChoiceMap = Record<string, HumanDecisionChoice>;
 
-export type HumanDecisionPrompt = {
+export type DecisionPresentationParagraph = {
+  kind: "paragraph";
+  text: string;
+};
+
+export type DecisionPresentationSection = {
+  kind: "section";
+  title: string;
+};
+
+export type DecisionPresentationBullets = {
+  kind: "bullets";
+  items: string[];
+};
+
+export type DecisionPresentationFields = {
+  kind: "fields";
+  items: Array<{ label: string; value: string }>;
+};
+
+export type DecisionPresentationPreformatted = {
+  kind: "preformatted";
+  text: string;
+};
+
+export type DecisionPresentationBlock =
+  | DecisionPresentationParagraph
+  | DecisionPresentationSection
+  | DecisionPresentationBullets
+  | DecisionPresentationFields
+  | DecisionPresentationPreformatted;
+
+export type DecisionPresentation = {
+  schema: "pi-workflows.decision-presentation.v1";
+  summary: string;
+  blocks: DecisionPresentationBlock[];
+};
+
+export type LegacyHumanDecisionPrompt = {
   title: string;
   body: unknown;
+  subject?: never;
+  presentation?: never;
+  revision?: never;
   /** Optional absolute expiry. An expired request cannot accept an answer. */
   expiresAt?: string;
 };
+
+export type PresentedHumanDecisionPrompt<TSubject = unknown> = {
+  title: string;
+  subject: TSubject;
+  presentation: DecisionPresentation;
+  body?: never;
+  /** Positive revision of the decision subject and presentation. Defaults to 1. */
+  revision?: number;
+  /** Optional absolute expiry. An expired request cannot accept an answer. */
+  expiresAt?: string;
+};
+
+export type HumanDecisionPrompt = LegacyHumanDecisionPrompt | PresentedHumanDecisionPrompt;
 
 export type HumanDecisionAudience =
   | string
@@ -209,8 +263,7 @@ export type HumanDecisionNodeContract = {
   request: (context: WorkflowNodeContext) => MaybePromise<HumanDecisionPrompt>;
 };
 
-export type HumanDecisionRequest = {
-  schema: "pi-workflows.human-decision-request.v1";
+type HumanDecisionRequestCommon = {
   decisionId: string;
   requestDigest: string;
   runId: string;
@@ -219,10 +272,37 @@ export type HumanDecisionRequest = {
   attemptId: string;
   audience: string;
   title: string;
-  body: unknown;
   choices: HumanDecisionChoiceMap;
   createdAt: string;
   expiresAt?: string;
+};
+
+export type HumanDecisionRequestV1 = HumanDecisionRequestCommon & {
+  schema: "pi-workflows.human-decision-request.v1";
+  body: unknown;
+};
+
+export type HumanDecisionRequestV2 = HumanDecisionRequestCommon & {
+  schema: "pi-workflows.human-decision-request.v2";
+  subject: unknown;
+  presentation: DecisionPresentation;
+  revision: number;
+  subjectDigest: string;
+  presentationDigest: string;
+};
+
+export type HumanDecisionRequest = HumanDecisionRequestV1 | HumanDecisionRequestV2;
+
+/**
+ * Complete operator-facing request passed to a decision channel. It excludes
+ * the canonical subject and legacy body by design.
+ */
+export type HumanDecisionChannelRequest = HumanDecisionRequestCommon & {
+  schema: "pi-workflows.human-decision-channel-request.v1";
+  sourceSchema: HumanDecisionRequest["schema"];
+  presentation: DecisionPresentation;
+  presentationDigest: string;
+  revision: number;
 };
 
 export type HumanDecisionResponse = {
@@ -243,8 +323,7 @@ export type HumanDecisionSubmission = HumanDecisionResponse & {
   idempotencyKey: string;
 };
 
-export type AcceptedHumanDecision = {
-  schema: "pi-workflows.human-decision-accepted.v1";
+type AcceptedHumanDecisionCommon = {
   decisionId: string;
   requestDigest: string;
   response: HumanDecisionResponse;
@@ -254,8 +333,20 @@ export type AcceptedHumanDecision = {
   answerDigest: string;
 };
 
-export type HumanDecisionReceipt = {
-  schema: "pi-workflows.human-decision-receipt.v1";
+export type AcceptedHumanDecisionV1 = AcceptedHumanDecisionCommon & {
+  schema: "pi-workflows.human-decision-accepted.v1";
+};
+
+export type AcceptedHumanDecisionV2 = AcceptedHumanDecisionCommon & {
+  schema: "pi-workflows.human-decision-accepted.v2";
+  subjectDigest: string;
+  presentationDigest: string;
+  revision: number;
+};
+
+export type AcceptedHumanDecision = AcceptedHumanDecisionV1 | AcceptedHumanDecisionV2;
+
+type HumanDecisionReceiptCommon = {
   decisionId: string;
   requestDigest: string;
   nodeId: string;
@@ -264,7 +355,20 @@ export type HumanDecisionReceipt = {
   answerDigest: string;
 };
 
-export type HumanDecisionDeliveryRecord = {
+export type HumanDecisionReceiptV1 = HumanDecisionReceiptCommon & {
+  schema: "pi-workflows.human-decision-receipt.v1";
+};
+
+export type HumanDecisionReceiptV2 = HumanDecisionReceiptCommon & {
+  schema: "pi-workflows.human-decision-receipt.v2";
+  subjectDigest: string;
+  presentationDigest: string;
+  revision: number;
+};
+
+export type HumanDecisionReceipt = HumanDecisionReceiptV1 | HumanDecisionReceiptV2;
+
+export type HumanDecisionDeliveryRecordV1 = {
   schema: "pi-workflows.human-decision-delivery.v1";
   attemptId: string;
   decisionId: string;
@@ -276,6 +380,29 @@ export type HumanDecisionDeliveryRecord = {
   messageCount?: number;
   errorCode?: string;
 };
+
+export type HumanDecisionDeliveryRecordV2 = {
+  schema: "pi-workflows.human-decision-delivery.v2";
+  attemptId: string;
+  decisionId: string;
+  requestDigest: string;
+  presentationDigest: string;
+  channel: string;
+  phase: "intent" | "part" | "complete";
+  state: "intent" | "confirmed" | "failed" | "unknown";
+  createdAt: string;
+  finishedAt?: string;
+  recipientIndex?: number;
+  partIndex?: number;
+  partCount?: number;
+  contentDigest?: string;
+  messageCount?: number;
+  errorCode?: string;
+};
+
+export type HumanDecisionDeliveryRecord =
+  | HumanDecisionDeliveryRecordV1
+  | HumanDecisionDeliveryRecordV2;
 
 export type HumanDecisionSettlementRecord = {
   schema: "pi-workflows.human-decision-settlement.v1";

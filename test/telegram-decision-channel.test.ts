@@ -4,11 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   TelegramDecisionChannel,
   loadDecisionChannelConfig,
+  renderDecisionText,
+  renderTelegramParts,
   verifyTelegramTokenFile,
   writeDecisionChannelProfile,
   type HumanDecisionChannelAnswer,
   type TelegramFetch,
 } from "../src/extension/decision-channels.js";
+import { humanDecisionChannelRequest } from "../src/workflows/decision-presentation.js";
 import {
   HumanDecisionStore,
   choice,
@@ -19,24 +22,57 @@ import {
 import { makeTempDir } from "./helpers.js";
 
 function request() {
-  return createHumanDecisionRequest({
-    runId: "run-a",
-    workflowName: "workflow-a",
-    nodeId: "approve",
-    attemptId: "attempt-a",
-    contract: {
-      audience: "operator",
-      choices: defineHumanChoices({
-        continue: choice({ label: "Continue" }),
-        replan: choice({
-          label: "Replan",
-          input: textInput({ name: "instructions", prompt: "What should change?" }),
+  return humanDecisionChannelRequest(
+    createHumanDecisionRequest({
+      runId: "run-a",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-a",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({
+          continue: choice({ label: "Continue" }),
+          replan: choice({
+            label: "Replan",
+            input: textInput({ name: "instructions", prompt: "What should change?" }),
+          }),
         }),
-      }),
-    },
-    prompt: { title: "Approve", body: { plan: "a" } },
-    createdAt: "2026-08-19T00:00:00.000Z",
-  });
+      },
+      prompt: { title: "Approve", body: { plan: "a" } },
+      createdAt: "2026-08-19T00:00:00.000Z",
+    }),
+  );
+}
+
+function presentedRequest(text: string) {
+  return humanDecisionChannelRequest(
+    createHumanDecisionRequest({
+      runId: "run-readable",
+      workflowName: "workflow-readable",
+      nodeId: "approve",
+      attemptId: "attempt-readable",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({
+          continue: choice({ label: "Continue" }),
+          replan: choice({
+            label: "Replan",
+            input: textInput({ name: "instructions", prompt: "What should change?" }),
+          }),
+        }),
+      },
+      prompt: {
+        title: "Approve readable plan",
+        subject: { privateMachineField: "not-for-display" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Review this readable plan.",
+          blocks: [{ kind: "paragraph", text }],
+        },
+      },
+      createdAt: "2026-08-19T00:00:00.000Z",
+    }),
+  );
 }
 
 function fakeBot() {
@@ -95,6 +131,42 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("Telegram decision presentation", () => {
+  it("renders readable text without exposing the canonical subject", () => {
+    const rendered = renderDecisionText(presentedRequest("Apply the safe change."));
+    expect(rendered).toContain("Review this readable plan.");
+    expect(rendered).toContain("Apply the safe change.");
+    expect(rendered).toContain("What should change?");
+    expect(rendered).not.toContain("privateMachineField");
+    expect(rendered).not.toContain("not-for-display");
+    expect(rendered).not.toContain('{"');
+  });
+
+  it("splits complete long Unicode content without truncation", () => {
+    const content = Array.from({ length: 7_000 }, (_, index) =>
+      index % 71 === 0 ? "\n" : "🙂",
+    ).join("");
+    const decision = presentedRequest(content);
+    const parts = renderTelegramParts(decision);
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.length).toBeLessThanOrEqual(20);
+    expect(parts.every((part) => part.length <= 4_096)).toBe(true);
+    expect(parts.some((part) => part.includes("…"))).toBe(false);
+    expect(parts.at(-1)).toContain("Choices");
+    expect(parts.at(-1)).toContain("What should change?");
+    const deliveredBodies = parts
+      .map((part) => part.replace(/^Part \d+\/\d+\nDecision [a-f0-9]+\n\n/u, ""))
+      .join("");
+    expect([...deliveredBodies].filter((character) => character === "🙂")).toHaveLength(
+      [...content].filter((character) => character === "🙂").length,
+    );
+    for (const part of parts) {
+      const lastCodeUnit = part.charCodeAt(part.length - 1);
+      expect(lastCodeUnit < 0xd800 || lastCodeUnit > 0xdbff).toBe(true);
+    }
+  });
+});
+
 describe("TelegramDecisionChannel", () => {
   it("rejects invalid profile, token, and allowlist construction", async () => {
     const configDir = await makeTempDir("telegram-constructor-config");
@@ -117,6 +189,35 @@ describe("TelegramDecisionChannel", () => {
       /numeric/,
     );
   });
+  it("records every multipart message and puts controls only on the final part", async () => {
+    const runs = await makeTempDir("telegram-multipart-runs");
+    const bot = fakeBot();
+    const adapter = await channel({ fetchFn: bot.fetchFn, runs });
+    const decision = presentedRequest("Readable line.\n".repeat(700));
+    const expectedParts = renderTelegramParts(decision);
+    expect((await adapter.deliver(decision)).status).toBe("confirmed");
+    const sends = bot.calls.filter((call) => call.method === "sendMessage");
+    expect(sends.map((call) => call.payload.text)).toEqual(expectedParts);
+    expect(sends.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
+    expect(sends.at(-1)?.payload.reply_markup).toBeDefined();
+    const records = await new HumanDecisionStore(runs).listDeliveries(
+      decision.decisionId,
+      "telegram-approval",
+    );
+    expect(
+      records.filter(
+        (record) =>
+          record.schema === "pi-workflows.human-decision-delivery.v2" &&
+          record.phase === "part" &&
+          record.state === "confirmed",
+      ),
+    ).toHaveLength(expectedParts.length);
+    expect(records.some((record) => record.state === "unknown")).toBe(false);
+    expect(JSON.stringify(records)).not.toContain("-200");
+    expect(JSON.stringify(records)).not.toContain("message_id");
+    await adapter.stop();
+  });
+
   it("binds callbacks and preserves exact ForceReply text", async () => {
     const answers: HumanDecisionChannelAnswer[] = [];
     const bot = fakeBot();
@@ -553,7 +654,6 @@ describe("TelegramDecisionChannel", () => {
     const configDir = await makeTempDir("telegram-intent-config");
     const decision = request();
     const store = new HumanDecisionStore(runs);
-    await store.createRequest(decision);
     await store.recordDelivery(decision, "telegram-approval", {
       schema: "pi-workflows.human-decision-delivery.v1",
       attemptId: "attempt-before-crash",

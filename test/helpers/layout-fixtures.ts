@@ -104,8 +104,10 @@ function humanDecisionFixture(): LayoutFixture {
     status: "waiting",
     waitingOn: "second",
     finalOutput: {
-      schema: "pi-workflows.human-decision-request.v1",
+      schema: "pi-workflows.human-decision-request.v2",
       audience: "reviewer",
+      presentation: { summary: "Review the readable plan." },
+      presentationDigest: `sha256:${"c".repeat(64)}`,
     },
     humanDecision: {
       schema: "pi-workflows.human-decision-receipt.v1",
@@ -135,7 +137,7 @@ function humanDecisionFixture(): LayoutFixture {
         startedAt: "2026-01-01T00:00:02.000Z",
         finishedAt: "2026-01-01T00:00:03.000Z",
         prompt: null,
-        output: { schema: "pi-workflows.human-decision-request.v1" },
+        output: { schema: "pi-workflows.human-decision-request.v2" },
       },
     ],
   };

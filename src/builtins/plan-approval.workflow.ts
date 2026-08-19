@@ -7,6 +7,7 @@ import {
   textInput,
 } from "../workflows/human-decision.js";
 import type { HumanDecisionReceipt, HumanDecisionResponse } from "../workflows/types.js";
+import { presentPlan } from "./plan-presentation.js";
 
 export type PlanApprovalInput = {
   task: string;
@@ -119,14 +120,22 @@ export const planApprovalWorkflow = defineWorkflow({
       choices: planChoices,
       request: ({ input }) => {
         const request = input as PlanApprovalInput;
+        const revision = request.revision ?? 1;
         return {
           title: "Approve the implementation plan",
-          body: {
+          subject: {
             task: request.task,
             plan: request.plan,
             planDigest: request.planDigest,
-            revision: request.revision ?? 1,
+            revision,
           },
+          presentation: presentPlan({
+            task: request.task,
+            plan: request.plan,
+            planDigest: request.planDigest,
+            revision,
+          }),
+          revision,
         };
       },
     }),

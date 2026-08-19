@@ -51,6 +51,8 @@ type SentMessage = {
 type WidgetComponent = {
   render: (width: number) => string[];
   invalidate: () => void;
+  handleInput?: (data: string) => void;
+  dispose?: () => void;
 };
 
 type WidgetTheme = {
@@ -82,6 +84,14 @@ type FakeContext = {
     setWidget: (key: string, content: string[] | WidgetFactory | undefined) => void;
     setStatus: (key: string, text: string | undefined) => void;
     select: (title: string, options: string[]) => Promise<string | undefined>;
+    custom: <T>(
+      factory: (
+        tui: { requestRender: () => void },
+        theme: WidgetTheme,
+        keybindings: Record<string, never>,
+        done: (result: T) => void,
+      ) => WidgetComponent | Promise<WidgetComponent>,
+    ) => Promise<T>;
     input: (title: string, initial?: string) => Promise<string | undefined>;
   };
 };
@@ -139,6 +149,34 @@ function makeHarness(options: {
       setWidget: (_key, content) => widgets.push(content),
       setStatus: (_key, text) => statuses.push(text),
       select: async (title, choices) => await options.select?.(title, choices),
+      custom: async <T>(
+        factory: (
+          tui: { requestRender: () => void },
+          theme: WidgetTheme,
+          keybindings: Record<string, never>,
+          done: (result: T) => void,
+        ) => WidgetComponent | Promise<WidgetComponent>,
+      ) =>
+        await new Promise<T>((resolve, reject) => {
+          void Promise.resolve(factory({ requestRender() {} }, TEST_THEME, {}, resolve))
+            .then(async (component) => {
+              const selected = await options.select?.("Human decision", []);
+              if (selected === undefined) {
+                component.handleInput?.("\u001b");
+                return;
+              }
+              for (let index = 0; index < 50; index += 1) {
+                const rendered = component.render(120).map(stripAnsi);
+                if (rendered.some((line) => line.trimStart().startsWith(`› ${selected}`))) {
+                  component.handleInput?.("\r");
+                  return;
+                }
+                component.handleInput?.("\u001b[B");
+              }
+              throw new Error(`Could not select human decision choice ${selected}`);
+            })
+            .catch(reject);
+        }),
       input: async (title, initial) => await options.input?.(title, initial),
     },
   };

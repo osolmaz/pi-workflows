@@ -2,6 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  digestCanonical,
+  normalizeDecisionPresentation,
+  validateHumanDecisionRequestIntegrity,
+} from "./decision-presentation.js";
 import { checkpoint } from "./definition.js";
 import type {
   AcceptedHumanDecision,
@@ -10,6 +15,7 @@ import type {
   HumanDecisionAudience,
   HumanDecisionCancellationRecord,
   HumanDecisionChoiceMap,
+  HumanDecisionChannelRequest,
   HumanDecisionContinuationRecord,
   HumanDecisionDeliveryRecord,
   HumanDecisionPrompt,
@@ -134,33 +140,81 @@ export function createHumanDecisionRequest(input: {
 }): HumanDecisionRequest {
   validateChoices(input.contract.choices);
   const title = requireString(input.prompt.title, "Human decision title");
-  assertJsonValue(input.prompt.body, "Human decision body");
   const expiresAt = validateExpiry(input.prompt.expiresAt, input.createdAt);
-  const basis = {
-    schema: "pi-workflows.human-decision-request.v1",
+  const common = {
     runId: input.runId,
     workflowName: input.workflowName,
     nodeId: input.nodeId,
     attemptId: input.attemptId,
     audience: requireSimpleId(input.contract.audience, "Human decision audience"),
     title,
-    body: input.prompt.body,
     choices: input.contract.choices,
     ...(expiresAt !== undefined ? { expiresAt } : {}),
   } as const;
+  const presented =
+    Object.hasOwn(input.prompt, "subject") || Object.hasOwn(input.prompt, "presentation");
+  if (presented) {
+    validatePresentedText(title, "Human decision title");
+    validatePresentedChoices(input.contract.choices);
+    if (Object.hasOwn(input.prompt, "body")) {
+      throw new Error("Presented human decision requests must not contain a legacy body");
+    }
+    if (!Object.hasOwn(input.prompt, "subject") || !Object.hasOwn(input.prompt, "presentation")) {
+      throw new Error("Presented human decision requests require subject and presentation");
+    }
+    const prompt = input.prompt as Extract<HumanDecisionPrompt, { subject: unknown }>;
+    assertJsonValue(prompt.subject, "Human decision subject");
+    const presentation = normalizeDecisionPresentation(prompt.presentation);
+    const revision = prompt.revision ?? 1;
+    if (!Number.isInteger(revision) || revision < 1) {
+      throw new Error("Human decision revision must be a positive integer");
+    }
+    const basis = {
+      schema: "pi-workflows.human-decision-request.v2" as const,
+      ...common,
+      subject: prompt.subject,
+      presentation,
+      revision,
+    };
+    const subjectDigest = digestCanonical(prompt.subject);
+    const presentationDigest = digestCanonical(presentation);
+    const requestDigest = digestCanonical(basis);
+    const decisionId = decisionIdFor(input, requestDigest);
+    return {
+      ...basis,
+      decisionId,
+      requestDigest,
+      subjectDigest,
+      presentationDigest,
+      createdAt: input.createdAt ?? new Date().toISOString(),
+    };
+  }
+  const prompt = input.prompt as Extract<HumanDecisionPrompt, { body: unknown }>;
+  assertJsonValue(prompt.body, "Human decision body");
+  const basis = {
+    schema: "pi-workflows.human-decision-request.v1" as const,
+    ...common,
+    body: prompt.body,
+  };
   const requestDigest = digest(basis);
-  const decisionId = `decision-${digestHex({
+  return {
+    ...basis,
+    decisionId: decisionIdFor(input, requestDigest),
+    requestDigest,
+    createdAt: input.createdAt ?? new Date().toISOString(),
+  };
+}
+
+function decisionIdFor(
+  input: Pick<Parameters<typeof createHumanDecisionRequest>[0], "runId" | "nodeId" | "attemptId">,
+  requestDigest: string,
+): string {
+  return `decision-${digestHex({
     runId: input.runId,
     nodeId: input.nodeId,
     attemptId: input.attemptId,
     requestDigest,
   }).slice(0, 40)}`;
-  return {
-    ...basis,
-    decisionId,
-    requestDigest,
-    createdAt: input.createdAt ?? new Date().toISOString(),
-  };
 }
 
 export function validateHumanDecisionResponse(
@@ -241,10 +295,23 @@ type HumanDecisionResolution =
   | {
       schema: "pi-workflows.human-decision-resolution.v1";
       outcome: "accepted";
-      decision: AcceptedHumanDecision;
+      decision: Extract<
+        AcceptedHumanDecision,
+        { schema: "pi-workflows.human-decision-accepted.v1" }
+      >;
     }
   | {
-      schema: "pi-workflows.human-decision-resolution.v1";
+      schema: "pi-workflows.human-decision-resolution.v2";
+      outcome: "accepted";
+      decision: Extract<
+        AcceptedHumanDecision,
+        { schema: "pi-workflows.human-decision-accepted.v2" }
+      >;
+    }
+  | {
+      schema:
+        | "pi-workflows.human-decision-resolution.v1"
+        | "pi-workflows.human-decision-resolution.v2";
       outcome: "cancelled";
       cancellation: HumanDecisionCancellationRecord;
     };
@@ -262,6 +329,7 @@ export class HumanDecisionStore {
   }
 
   async createRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
+    validateHumanDecisionRequestIntegrity(request);
     return await writeImmutableJson(
       path.join(this.decisionDir(request.decisionId), "request.json"),
       request,
@@ -269,13 +337,14 @@ export class HumanDecisionStore {
   }
 
   async readRequest(decisionId: string): Promise<HumanDecisionRequest | null> {
-    return (await readJson(
+    const request = (await readJson(
       path.join(this.decisionDir(decisionId), "request.json"),
     )) as HumanDecisionRequest | null;
+    return request === null ? null : validateHumanDecisionRequestIntegrity(request);
   }
 
   async recordDelivery(
-    request: HumanDecisionRequest,
+    request: HumanDecisionRequest | HumanDecisionChannelRequest,
     channel: string,
     value: HumanDecisionDeliveryRecord,
   ): Promise<"created" | "adopted"> {
@@ -297,6 +366,7 @@ export class HumanDecisionStore {
     request: HumanDecisionRequest,
     submission: HumanDecisionSubmission,
   ): Promise<HumanDecisionAcceptance> {
+    validateHumanDecisionRequestIntegrity(request);
     const cancellation = await this.readCancellation(request.decisionId);
     if (cancellation !== null) {
       throw new Error(`Human decision request was ${cancellation.reason}`);
@@ -338,8 +408,7 @@ export class HumanDecisionStore {
       attemptedAt = requireString(existingAttempt.attemptedAt, "answer attempt time");
     }
     const response = validateHumanDecisionResponse(request, normalized);
-    const decision: AcceptedHumanDecision = {
-      schema: "pi-workflows.human-decision-accepted.v1",
+    const commonDecision = {
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       response,
@@ -348,12 +417,25 @@ export class HumanDecisionStore {
       acceptedAt: attemptedAt,
       answerDigest: digest({ response, source: normalized.source }),
     };
+    const decision: AcceptedHumanDecision =
+      request.schema === "pi-workflows.human-decision-request.v2"
+        ? {
+            schema: "pi-workflows.human-decision-accepted.v2",
+            ...commonDecision,
+            subjectDigest: request.subjectDigest,
+            presentationDigest: request.presentationDigest,
+            revision: request.revision,
+          }
+        : { schema: "pi-workflows.human-decision-accepted.v1", ...commonDecision };
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution: HumanDecisionResolution = {
-      schema: "pi-workflows.human-decision-resolution.v1",
-      outcome: "accepted",
+    const resolution = {
+      schema:
+        decision.schema === "pi-workflows.human-decision-accepted.v2"
+          ? ("pi-workflows.human-decision-resolution.v2" as const)
+          : ("pi-workflows.human-decision-resolution.v1" as const),
+      outcome: "accepted" as const,
       decision,
-    };
+    } as HumanDecisionResolution;
     const result = await writeImmutableJson(resolutionPath, resolution, false);
     const winner =
       result === "created"
@@ -422,6 +504,7 @@ export class HumanDecisionStore {
     request: HumanDecisionRequest,
     reason: HumanDecisionCancellationRecord["reason"],
   ): Promise<"created" | "adopted"> {
+    validateHumanDecisionRequestIntegrity(request);
     if ((await this.readAccepted(request.decisionId)) !== null) {
       throw new Error("Accepted human decision cannot be cancelled");
     }
@@ -435,7 +518,10 @@ export class HumanDecisionStore {
     };
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
     const resolution: HumanDecisionResolution = {
-      schema: "pi-workflows.human-decision-resolution.v1",
+      schema:
+        request.schema === "pi-workflows.human-decision-request.v2"
+          ? "pi-workflows.human-decision-resolution.v2"
+          : "pi-workflows.human-decision-resolution.v1",
       outcome: "cancelled",
       cancellation: record,
     };
@@ -551,6 +637,26 @@ function sortJson(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function validatePresentedChoices(choices: HumanDecisionChoiceMap): void {
+  for (const [key, definition] of Object.entries(choices)) {
+    validatePresentedText(definition.label, `Human decision choice ${key} label`);
+    if (definition.input !== undefined) {
+      validatePresentedText(definition.input.prompt, `Human decision choice ${key} input prompt`);
+    }
+  }
+}
+
+function validatePresentedText(value: string, label: string): void {
+  if (
+    [...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code <= 31 || code === 127;
+    })
+  ) {
+    throw new Error(`${label} contains a control character`);
+  }
 }
 
 function validateChoices(choices: HumanDecisionChoiceMap): void {

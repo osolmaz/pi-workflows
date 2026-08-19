@@ -311,10 +311,29 @@ fn human_decision_detail(state: &RunState, node_id: &str, node: Option<&Value>) 
             .map(sanitize_text)
             .collect::<Vec<_>>()
             .join(" / ");
+        let summary = state
+            .final_output
+            .as_ref()
+            .and_then(|request| request.pointer("/presentation/summary"))
+            .and_then(Value::as_str)
+            .map(sanitize_text);
+        let fingerprint = state
+            .final_output
+            .as_ref()
+            .and_then(|request| request.get("presentationDigest"))
+            .and_then(Value::as_str)
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .map(|digest| digest.chars().take(12).collect::<String>());
         return Some(format!(
-            "human decision · {} · {}",
+            "human decision · {}{} · {}{}",
             sanitize_text(audience),
-            labels
+            summary
+                .map(|value| format!(" · {value}"))
+                .unwrap_or_default(),
+            labels,
+            fingerprint
+                .map(|value| format!(" · {value}"))
+                .unwrap_or_default()
         ));
     }
     state

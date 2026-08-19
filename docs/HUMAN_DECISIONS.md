@@ -4,10 +4,9 @@ Pi Workflows needs a reusable way to stop at a proposal and wait for a person. T
 
 This document defines that behavior. The implementation is tracked in the [human decision gates plan](plans/2026-08-19-human-decision-gates-plan.md).
 
-The current request contract can render a structured `body` as JSON. The planned
-[human decision presentation contract](HUMAN_DECISION_PRESENTATIONS.md) separates
-canonical subject data from the complete readable message shown in Pi and
-Telegram. Its [implementation plan](plans/2026-08-19-human-decision-presentations-plan.md)
+The [human decision presentation contract](HUMAN_DECISION_PRESENTATIONS.md)
+separates canonical subject data from the complete readable message shown in Pi
+and Telegram. Its [implementation plan](plans/2026-08-19-human-decision-presentations-plan.md)
 preserves v1 records without rewriting them.
 
 ## Goals
@@ -63,7 +62,15 @@ export default defineWorkflow({
       choices: planChoices,
       request: ({ outputs }) => ({
         title: "Approve the implementation plan",
-        body: outputs.propose,
+        subject: outputs.propose,
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Review the implementation plan.",
+          blocks: [
+            { kind: "section", title: "Changes" },
+            { kind: "paragraph", text: "Implement the proposed changes." },
+          ],
+        },
       }),
     }),
     implement: agent({ prompt: "Implement the approved proposal." }),
@@ -117,18 +124,24 @@ This distinction preserves old workflow definitions and run bundles.
 
 ## Request and response contracts
 
-A decision request contains:
+A new decision request contains:
 
 - a decision ID;
 - the waiting run, node, and attempt IDs;
-- a title and body;
+- a short title;
+- a canonical structured subject;
+- a normalized human-readable presentation;
+- separate subject and presentation digests;
+- a positive decision revision;
 - the logical audience;
 - the complete choice contract;
 - the canonical request digest;
 - an optional expiry rule; and
 - the creation time.
 
-The body is JSON so a channel can render plain text, structured fields, or a summary without parsing prose. Each choice has a stable ID and may have no input or one validated input contract. The first release supports plain text input. Later input types can use the same choice contract.
+The presentation is an explicit display allowlist. A channel does not receive the subject and cannot infer operator text from it. The request digest binds the subject, visible presentation, title, revision, choices, and input prompts. Each choice has a stable ID and may have no input or one validated text input contract.
+
+The former `body` form remains available for existing workflow definitions. It creates a v1 request and uses a deterministic readable compatibility formatter. V1 request bytes and digests do not change.
 
 A submitted response contains:
 
@@ -307,6 +320,8 @@ Recovery follows these rules:
 
 - missing channel deliveries can be attempted;
 - confirmed deliveries are adopted;
+- Telegram records intent and confirmed evidence for every multipart message;
+- Telegram resumes only when the next part is provably unsent;
 - ambiguous Telegram sends are not retried automatically;
 - duplicate channel updates are harmless;
 - stale responses are rejected;
@@ -320,7 +335,7 @@ A decision with no available channel remains waiting and reports the configurati
 
 ## Compatibility
 
-Ordinary checkpoints, their continuation input behavior, and existing run bundles remain unchanged. The new decision files and state fields are additive. Older viewers ignore them. Updated viewers label a human decision as a checkpoint and show its pending or accepted choice without showing private channel configuration.
+Ordinary checkpoints, their continuation input behavior, and existing run bundles remain unchanged. V2 requests, accepted records, receipts, resolutions, and multipart delivery records are additive. Older viewers ignore them. Updated viewers label a human decision as a checkpoint, show the readable presentation and its fingerprint, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
 
 The engine remains independent from Pi and Telegram. Core code owns decision contracts, validation, durable acceptance, and continuation. The Pi extension owns UI and channel lifecycle. The Telegram adapter owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
 

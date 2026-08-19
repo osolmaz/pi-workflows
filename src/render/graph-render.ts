@@ -306,12 +306,20 @@ function renderCellText(
     elapsed = formatDuration(durationMs);
   }
   const human = node?.humanDecision;
-  const waitingRequest =
+  const waitingSchema =
     state.waitingOn === nodeId &&
     state.finalOutput !== null &&
-    typeof state.finalOutput === "object" &&
-    (state.finalOutput as { schema?: unknown }).schema === "pi-workflows.human-decision-request.v1"
-      ? (state.finalOutput as { audience?: unknown })
+    typeof state.finalOutput === "object"
+      ? (state.finalOutput as { schema?: unknown }).schema
+      : undefined;
+  const waitingRequest =
+    waitingSchema === "pi-workflows.human-decision-request.v1" ||
+    waitingSchema === "pi-workflows.human-decision-request.v2"
+      ? (state.finalOutput as {
+          audience?: unknown;
+          presentationDigest?: unknown;
+          presentation?: { summary?: unknown };
+        })
       : undefined;
   const selected =
     human !== undefined &&
@@ -323,11 +331,13 @@ function renderCellText(
     human === undefined
       ? undefined
       : state.waitingOn === nodeId
-        ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)} · ${Object.values(
+        ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)}${typeof waitingRequest?.presentation?.summary === "string" ? ` · ${sanitizeText(waitingRequest.presentation.summary)}` : ""} · ${Object.values(
             human.choices,
           )
             .map((choice) => sanitizeText(choice.label))
-            .join(" / ")}`
+            .join(
+              " / ",
+            )}${typeof waitingRequest?.presentationDigest === "string" ? ` · ${waitingRequest.presentationDigest.slice(7, 19)}` : ""}`
         : selected !== undefined
           ? `human: ${sanitizeText(selected.label)}`
           : undefined;

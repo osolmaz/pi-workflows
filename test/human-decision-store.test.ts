@@ -65,6 +65,54 @@ describe("HumanDecisionStore", () => {
     expect((await fs.readdir(directory)).some((name) => name.endsWith(".tmp"))).toBe(false);
   });
 
+  it("records v2 subject and presentation evidence on the accepted answer", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-v2-accepted"));
+    const request = createHumanDecisionRequest({
+      runId: "run-v2",
+      workflowName: "workflow-v2",
+      nodeId: "approve",
+      attemptId: "attempt-v2",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: {
+        title: "Approve",
+        subject: { action: "implement" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Implement the approved change.",
+          blocks: [],
+        },
+      },
+      createdAt: "2026-08-19T00:00:00.000Z",
+    });
+    if (request.schema !== "pi-workflows.human-decision-request.v2") {
+      throw new Error("expected v2 request");
+    }
+    await store.createRequest(request);
+    const accepted = await store.accept(request, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "person", eventId: "event-v2" },
+      idempotencyKey: "event-v2",
+    });
+    expect(accepted.decision).toMatchObject({
+      schema: "pi-workflows.human-decision-accepted.v2",
+      subjectDigest: request.subjectDigest,
+      presentationDigest: request.presentationDigest,
+      revision: 1,
+    });
+    const resolution = JSON.parse(
+      await fs.readFile(
+        path.join(store.decisionDir(request.decisionId), "resolution.json"),
+        "utf8",
+      ),
+    ) as { schema: string };
+    expect(resolution.schema).toBe("pi-workflows.human-decision-resolution.v2");
+  });
+
   it("accepts one concurrent answer and rejects the conflicting answer", async () => {
     const store = new HumanDecisionStore(await makeTempDir("human-decision-race"));
     const request = makeRequest();

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-resolution-v2.schema.json",
+  "title": "Pi Workflows human decision resolution v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "outcome", "decision"],
+      "properties": {
+        "schema": { "const": "pi-workflows.human-decision-resolution.v2" },
+        "outcome": { "const": "accepted" },
+        "decision": { "$ref": "human-decision-accepted-v2.schema.json" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "outcome", "cancellation"],
+      "properties": {
+        "schema": { "const": "pi-workflows.human-decision-resolution.v2" },
+        "outcome": { "const": "cancelled" },
+        "cancellation": { "$ref": "human-decision-cancellation-v1.schema.json" }
+      }
+    }
+  ]
+}

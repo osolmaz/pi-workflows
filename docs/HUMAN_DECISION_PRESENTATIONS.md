@@ -1,7 +1,8 @@
 # Human decision presentations
 
-This contract is planned. The current human decision request uses `body` and can display a
-structured body as JSON. This specification defines the replacement contract.
+This contract is implemented. New human decision requests separate their canonical
+subject from the complete readable message shown to an operator. Historical requests
+that use `body` remain compatible through a deterministic readable formatter.
 The implementation plan is in
 [the human decision presentations plan](plans/2026-08-19-human-decision-presentations-plan.md).
 

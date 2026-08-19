@@ -299,18 +299,29 @@ function nodeRuntimeSegments(
   if (state.waitingOn === nodeId) {
     const human = snapshot.nodes[nodeId]?.humanDecision;
     if (human !== undefined) {
+      const request =
+        state.finalOutput !== null && typeof state.finalOutput === "object"
+          ? (state.finalOutput as {
+              schema?: unknown;
+              audience?: unknown;
+              presentationDigest?: unknown;
+              presentation?: { summary?: unknown };
+            })
+          : undefined;
       const requestAudience =
-        state.finalOutput !== null &&
-        typeof state.finalOutput === "object" &&
-        (state.finalOutput as { schema?: unknown }).schema ===
-          "pi-workflows.human-decision-request.v1" &&
-        typeof (state.finalOutput as { audience?: unknown }).audience === "string"
-          ? (state.finalOutput as { audience: string }).audience
+        (request?.schema === "pi-workflows.human-decision-request.v1" ||
+          request?.schema === "pi-workflows.human-decision-request.v2") &&
+        typeof request.audience === "string"
+          ? request.audience
           : human.audience;
       segments.push(
-        `human decision · ${sanitizeText(requestAudience)} · ${Object.values(human.choices)
+        `human decision · ${sanitizeText(requestAudience)}${typeof request?.presentation?.summary === "string" ? ` · ${sanitizeText(request.presentation.summary)}` : ""} · ${Object.values(
+          human.choices,
+        )
           .map((choice) => sanitizeText(choice.label))
-          .join(" / ")}`,
+          .join(
+            " / ",
+          )}${typeof request?.presentationDigest === "string" ? ` · ${request.presentationDigest.slice(7, 19)}` : ""}`,
       );
     } else {
       const summary = snapshot.nodes[nodeId]?.summary;

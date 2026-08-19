@@ -412,7 +412,8 @@ export class WorkflowEngine {
       }
       const request = parent.state.finalOutput as HumanDecisionRequest;
       if (
-        request?.schema !== "pi-workflows.human-decision-request.v1" ||
+        (request?.schema !== "pi-workflows.human-decision-request.v1" &&
+          request?.schema !== "pi-workflows.human-decision-request.v2") ||
         request.decisionId !== options.humanDecision.decisionId ||
         request.requestDigest !== options.humanDecision.requestDigest
       ) {
@@ -458,8 +459,7 @@ export class WorkflowEngine {
       parent.runDir,
     )) as WorkflowRunState["steps"];
     if (humanContract !== undefined && options.humanDecision !== undefined) {
-      state.humanDecision = {
-        schema: "pi-workflows.human-decision-receipt.v1",
+      const receipt = {
         decisionId: options.humanDecision.decisionId,
         requestDigest: options.humanDecision.requestDigest,
         nodeId: acceptedNodeId ?? waitingNodeId,
@@ -467,6 +467,16 @@ export class WorkflowEngine {
         acceptedAt: options.humanDecision.acceptedAt,
         answerDigest: options.humanDecision.answerDigest,
       };
+      state.humanDecision =
+        options.humanDecision.schema === "pi-workflows.human-decision-accepted.v2"
+          ? {
+              schema: "pi-workflows.human-decision-receipt.v2",
+              ...receipt,
+              subjectDigest: options.humanDecision.subjectDigest,
+              presentationDigest: options.humanDecision.presentationDigest,
+              revision: options.humanDecision.revision,
+            }
+          : { schema: "pi-workflows.human-decision-receipt.v1", ...receipt };
       state.outputs[waitingNodeId] = acceptedResponse;
       const priorResult = state.results[waitingNodeId];
       if (priorResult === undefined) {

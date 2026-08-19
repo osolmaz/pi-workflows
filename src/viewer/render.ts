@@ -3,12 +3,21 @@ import { formatDuration, runElapsedMs } from "../render/format.js";
 import { renderGraphLines } from "../render/graph-render.js";
 import { decodeValueWith } from "../workflows/artifacts.js";
 import {
+  decisionDocumentSegments,
+  decisionPresentationFingerprint,
+  humanDecisionChannelRequest,
+} from "../workflows/decision-presentation.js";
+import {
   formatProgressLine,
   progressRecordsFromTrace,
   progressTracksFromRecords,
 } from "../workflows/progress.js";
 import type { LoadedRunBundle } from "../workflows/store.js";
-import type { WorkflowRunStatus, WorkflowStepRecord } from "../workflows/types.js";
+import type {
+  HumanDecisionRequest,
+  WorkflowRunStatus,
+  WorkflowStepRecord,
+} from "../workflows/types.js";
 
 export { formatDuration, runElapsedMs };
 
@@ -133,22 +142,18 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
   } else if (state.waitingOn === nodeId) {
     glyph = ansi.yellow("⏸");
     const human = bundle.snapshot?.nodes[nodeId]?.humanDecision;
-    const requestAudience =
-      state.finalOutput !== null &&
-      typeof state.finalOutput === "object" &&
-      (state.finalOutput as { schema?: unknown }).schema ===
-        "pi-workflows.human-decision-request.v1" &&
-      typeof (state.finalOutput as { audience?: unknown }).audience === "string"
-        ? (state.finalOutput as { audience: string }).audience
-        : human?.audience;
+    const request = humanDecisionRequest(state.finalOutput);
+    const requestAudience = request?.audience ?? human?.audience;
     suffix = ansi.yellow(
       human === undefined
         ? " waiting"
-        : ` waiting for human · ${sanitizeText(requestAudience ?? "operator")} · ${Object.values(
+        : ` waiting for human · ${sanitizeText(requestAudience ?? "operator")}${request?.schema === "pi-workflows.human-decision-request.v2" ? ` · ${sanitizeText(request.presentation.summary)}` : ""} · ${Object.values(
             human.choices,
           )
             .map((choice) => sanitizeText(choice.label))
-            .join(" / ")}`,
+            .join(
+              " / ",
+            )}${request?.schema === "pi-workflows.human-decision-request.v2" ? ` · ${request.presentationDigest.slice(7, 19)}` : ""}`,
     );
   } else if (result) {
     glyph = result.outcome === "ok" ? ansi.green("✓") : ansi.red("✗");
@@ -168,6 +173,20 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
 /** Pretty-printed JSON body of the selected step for the inspector pane. */
 function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
   const lines: string[] = [];
+  const request = step.error === undefined ? humanDecisionRequest(step.output) : null;
+  if (request !== null) {
+    const channelRequest = humanDecisionChannelRequest(request);
+    for (const segment of decisionDocumentSegments(channelRequest)) {
+      for (const raw of segment.text.split("\n")) {
+        lines.push(fitWidth(`  ${sanitizeText(raw)}`, width));
+      }
+      lines.push("");
+    }
+    lines.push(
+      fitWidth(ansi.dim(`  decision ${decisionPresentationFingerprint(channelRequest)}`), width),
+    );
+    return lines;
+  }
   const body = step.error !== undefined ? step.error : withArtifactPlaceholders(step.output);
   const rendered =
     typeof body === "string" && step.error !== undefined ? body : JSON.stringify(body, null, 2);
@@ -186,6 +205,15 @@ function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
     lines.push(fitWidth(ansi.dim(`  ${sanitizeText(receipt)}`), width));
   }
   return lines;
+}
+
+function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
+  if (value === null || typeof value !== "object") return null;
+  const schema = (value as { schema?: unknown }).schema;
+  return schema === "pi-workflows.human-decision-request.v1" ||
+    schema === "pi-workflows.human-decision-request.v2"
+    ? (value as HumanDecisionRequest)
+    : null;
 }
 
 /**

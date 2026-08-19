@@ -8,6 +8,11 @@ import {
   runElapsedMs,
 } from "../src/viewer/render.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import {
+  choice,
+  createHumanDecisionRequest,
+  defineHumanChoices,
+} from "../src/workflows/human-decision.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import type { LoadedRunBundle } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
@@ -304,6 +309,67 @@ describe("renderRunDetailLines", () => {
     expect(renderRunDetailLines(bundle, viewport, NOW, maxDetailScroll(bundle, viewport))).toEqual(
       renderRunDetailLines(bundle, viewport, NOW, 10_000),
     );
+  });
+});
+
+describe("human decision presentation rendering", () => {
+  it("shows readable v2 content instead of the canonical subject JSON", () => {
+    const request = createHumanDecisionRequest({
+      runId: "run-1",
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "decision-attempt",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: {
+        title: "Approve readable output",
+        subject: { hiddenMachineValue: "do-not-show" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Review the readable output.",
+          blocks: [{ kind: "paragraph", text: "Apply the safe change." }],
+        },
+      },
+      createdAt: "2026-08-19T00:00:00.000Z",
+    });
+    const bundle = makeBundle({
+      status: "waiting",
+      waitingOn: "one",
+      finalOutput: request,
+      results: {
+        one: {
+          attemptId: "decision-attempt",
+          nodeId: "one",
+          nodeType: "checkpoint",
+          outcome: "ok",
+          startedAt: "2026-08-19T00:00:00.000Z",
+          finishedAt: "2026-08-19T00:00:01.000Z",
+          durationMs: 1_000,
+          output: request,
+        },
+      },
+      steps: [
+        {
+          attemptId: "decision-attempt",
+          nodeId: "one",
+          nodeType: "checkpoint",
+          outcome: "ok",
+          startedAt: "2026-08-19T00:00:00.000Z",
+          finishedAt: "2026-08-19T00:00:01.000Z",
+          prompt: null,
+          output: request,
+        },
+      ],
+    });
+    const text = renderRunDetailLines(bundle, { width: 100, height: 100 }, NOW)
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("Review the readable output.");
+    expect(text).toContain("Apply the safe change.");
+    expect(text).not.toContain("hiddenMachineValue");
+    expect(text).not.toContain("do-not-show");
   });
 });
 

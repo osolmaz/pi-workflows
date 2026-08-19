@@ -346,8 +346,9 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   verified without another reviewer round. A five-minute CI wait routes to
   additional useful local testing. New evidence can route through autoplan
   and autodoc before implementation resumes.
-- `human-decision` shows a reusable verified-human gate with plain choices and
-  exact replan text.
+- `human-decision` shows a reusable verified-human gate with a structured
+  machine subject, a separate readable operator presentation, plain choices,
+  and exact replan text.
 - `approved-plan` composes autoplan, autodoc, and the reusable plan-approval
   workflow without copying their internal nodes.
 - `autoresearch` runs an iterative feature-search loop in the style of

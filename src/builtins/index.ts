@@ -22,6 +22,7 @@ export {
   type MonitorInput,
   type MonitorRepairPolicy,
 } from "./monitor.workflow.js";
+export { presentPlan } from "./plan-presentation.js";
 export {
   planApprovalWorkflow,
   type PlanApprovalContinue,

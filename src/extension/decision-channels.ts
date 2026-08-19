@@ -3,19 +3,28 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import Database from "better-sqlite3";
+import {
+  MAX_PRESENTATION_TRANSPORT_PARTS,
+  decisionDocumentSegments,
+  decisionPresentationFingerprint,
+  digestCanonical,
+} from "../workflows/decision-presentation.js";
 import { HumanDecisionStore, createHumanDecisionAttemptId } from "../workflows/human-decision.js";
 import type {
   AcceptedHumanDecision,
   HumanDecisionAnswerSource,
   HumanDecisionCancellationRecord,
+  HumanDecisionChannelRequest,
   HumanDecisionDeliveryRecord,
-  HumanDecisionRequest,
   HumanDecisionResponse,
   HumanDecisionSettlementRecord,
 } from "../workflows/types.js";
 
 const TELEGRAM_TEXT_LIMIT = 4_096;
+const PI_PRESENTATION_WINDOW_LINES = 18;
 const DEFAULT_API_BASE = "https://api.telegram.org";
 const LEASE_TTL_MS = 60_000;
 const LEASE_RETRY_MS = 5_000;
@@ -25,7 +34,7 @@ const NUMERIC_ID = /^-?[0-9]+$/;
 const SIMPLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
 export type HumanDecisionChannelAnswer = {
-  request: HumanDecisionRequest;
+  request: HumanDecisionChannelRequest;
   response: HumanDecisionResponse;
   source: HumanDecisionAnswerSource;
   idempotencyKey: string;
@@ -43,7 +52,7 @@ export type SettledHumanDecision = AcceptedHumanDecision | HumanDecisionCancella
 export interface HumanDecisionChannel {
   readonly id: string;
   start(): Promise<void>;
-  deliver(request: HumanDecisionRequest): Promise<HumanDecisionDeliveryResult>;
+  deliver(request: HumanDecisionChannelRequest): Promise<HumanDecisionDeliveryResult>;
   settle(decision: SettledHumanDecision): Promise<void>;
   stop(): Promise<void>;
 }
@@ -79,18 +88,7 @@ export type TelegramFetch = (
   init?: RequestInit,
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
-export type PiDecisionUi = {
-  select(
-    title: string,
-    options: string[],
-    dialogOptions?: { signal?: AbortSignal },
-  ): Promise<string | undefined>;
-  input(
-    title: string,
-    initial?: string,
-    dialogOptions?: { signal?: AbortSignal },
-  ): Promise<string | undefined>;
-};
+export type PiDecisionUi = Pick<ExtensionContext["ui"], "custom" | "input">;
 
 export function decisionConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.PI_WORKFLOWS_CONFIG_DIR ?? path.join(os.homedir(), ".config", "pi-workflows");
@@ -155,46 +153,109 @@ export class PiDecisionChannel implements HumanDecisionChannel {
     this.promptAbort?.abort();
   }
 
-  async deliver(request: HumanDecisionRequest): Promise<HumanDecisionDeliveryResult> {
+  async deliver(request: HumanDecisionChannelRequest): Promise<HumanDecisionDeliveryResult> {
     const attemptId = createHumanDecisionAttemptId();
     const createdAt = new Date().toISOString();
     const controller = new AbortController();
     this.promptAbort = controller;
     try {
-      await this.options.store.recordDelivery(request, this.id, {
-        schema: "pi-workflows.human-decision-delivery.v1",
-        attemptId,
-        decisionId: request.decisionId,
-        requestDigest: request.requestDigest,
-        channel: this.id,
-        state: "intent",
-        createdAt,
-      });
-      const entries = Object.entries(request.choices);
-      const selectedLabel = await this.options.ui.select(
-        request.title,
-        entries.map(([, definition]) => definition.label),
-        { signal: controller.signal },
+      await this.options.store.recordDelivery(
+        request,
+        this.id,
+        v2DeliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt),
       );
-      if (selectedLabel === undefined) {
+      const entries = Object.entries(request.choices);
+      const selectedChoice = await this.options.ui.custom<string | undefined>(
+        (tui, theme, _keybindings, done) => {
+          let choiceIndex = 0;
+          let scroll = 0;
+          let settled = false;
+          const finish = (value: string | undefined) => {
+            if (settled) return;
+            settled = true;
+            done(value);
+          };
+          const abort = () => finish(undefined);
+          controller.signal.addEventListener("abort", abort, { once: true });
+          return {
+            render(width: number): string[] {
+              const content = renderPiPresentationLines(request, Math.max(20, width), theme);
+              const maxScroll = Math.max(0, content.length - PI_PRESENTATION_WINDOW_LINES);
+              scroll = Math.min(scroll, maxScroll);
+              const visible = content.slice(scroll, scroll + PI_PRESENTATION_WINDOW_LINES);
+              const lines = [...visible];
+              if (content.length > PI_PRESENTATION_WINDOW_LINES) {
+                lines.push(
+                  theme.fg(
+                    "dim",
+                    `Decision text ${scroll + 1}-${Math.min(content.length, scroll + PI_PRESENTATION_WINDOW_LINES)}/${content.length} · PgUp/PgDn scroll`,
+                  ),
+                );
+              }
+              lines.push("");
+              for (const [index, [, definition]] of entries.entries()) {
+                const marker = index === choiceIndex ? "›" : " ";
+                lines.push(
+                  ...wrapTextWithAnsi(
+                    `${theme.fg(index === choiceIndex ? "accent" : "text", `${marker} ${definition.label}`)}`,
+                    Math.max(1, width),
+                  ),
+                );
+                if (definition.input !== undefined) {
+                  lines.push(
+                    ...wrapTextWithAnsi(
+                      theme.fg("dim", `    ${definition.input.prompt}`),
+                      Math.max(1, width),
+                    ),
+                  );
+                }
+              }
+              lines.push("");
+              lines.push(theme.fg("dim", "↑/↓ choose · Enter confirm · Esc cancel"));
+              return lines;
+            },
+            invalidate() {},
+            handleInput(data: string): void {
+              if (matchesKey(data, Key.escape)) finish(undefined);
+              else if (matchesKey(data, Key.enter)) finish(entries[choiceIndex]?.[0]);
+              else if (matchesKey(data, Key.up)) choiceIndex = Math.max(0, choiceIndex - 1);
+              else if (matchesKey(data, Key.down)) {
+                choiceIndex = Math.min(entries.length - 1, choiceIndex + 1);
+              } else if (matchesKey(data, Key.pageUp)) {
+                scroll = Math.max(0, scroll - PI_PRESENTATION_WINDOW_LINES);
+              } else if (matchesKey(data, Key.pageDown)) {
+                scroll += PI_PRESENTATION_WINDOW_LINES;
+              } else return;
+              tui.requestRender();
+            },
+            dispose(): void {
+              controller.signal.removeEventListener("abort", abort);
+            },
+          };
+        },
+      );
+      if (selectedChoice === undefined) {
         const errorCode = controller.signal.aborted
           ? "pi_selection_settled_elsewhere"
           : "pi_selection_cancelled";
-        const record = deliveryRecord(
+        await this.options.store.recordDelivery(
           request,
           this.id,
-          `${attemptId}-cancelled`,
-          "failed",
-          createdAt,
-          { errorCode },
+          v2DeliveryRecord(
+            request,
+            this.id,
+            `${attemptId}-cancelled`,
+            "complete",
+            "failed",
+            createdAt,
+            { errorCode },
+          ),
         );
-        await this.options.store.recordDelivery(request, this.id, record);
         return { status: "failed", channel: this.id, attemptId, errorCode };
       }
-      const selected = entries.find(([, definition]) => definition.label === selectedLabel);
-      if (selected === undefined) throw new Error("Pi decision selection is not in the request");
-      const [choiceId, definition] = selected;
-      let response: HumanDecisionResponse = { choice: choiceId };
+      const definition = request.choices[selectedChoice];
+      if (definition === undefined) throw new Error("Pi decision selection is not in the request");
+      let response: HumanDecisionResponse = { choice: selectedChoice };
       if (definition.input !== undefined) {
         const text = await this.options.ui.input(definition.input.prompt, "", {
           signal: controller.signal,
@@ -203,18 +264,22 @@ export class PiDecisionChannel implements HumanDecisionChannel {
           const errorCode = controller.signal.aborted
             ? "pi_input_settled_elsewhere"
             : "pi_input_cancelled";
-          const record = deliveryRecord(
+          await this.options.store.recordDelivery(
             request,
             this.id,
-            `${attemptId}-cancelled`,
-            "failed",
-            createdAt,
-            { errorCode },
+            v2DeliveryRecord(
+              request,
+              this.id,
+              `${attemptId}-cancelled`,
+              "complete",
+              "failed",
+              createdAt,
+              { errorCode },
+            ),
           );
-          await this.options.store.recordDelivery(request, this.id, record);
           return { status: "failed", channel: this.id, attemptId, errorCode };
         }
-        response = { choice: choiceId, input: { [definition.input.name]: text } };
+        response = { choice: selectedChoice, input: { [definition.input.name]: text } };
       }
       const eventId = createHumanDecisionAttemptId();
       await this.options.onAnswer({
@@ -226,7 +291,15 @@ export class PiDecisionChannel implements HumanDecisionChannel {
       await this.options.store.recordDelivery(
         request,
         this.id,
-        deliveryRecord(request, this.id, `${attemptId}-confirmed`, "confirmed", createdAt),
+        v2DeliveryRecord(
+          request,
+          this.id,
+          `${attemptId}-confirmed`,
+          "complete",
+          "confirmed",
+          createdAt,
+          { messageCount: 1 },
+        ),
       );
       return { status: "confirmed", channel: this.id, attemptId };
     } finally {
@@ -272,7 +345,7 @@ type TelegramProfile = {
 };
 
 type CallbackBinding = {
-  request: HumanDecisionRequest;
+  request: HumanDecisionChannelRequest;
   choice: string;
 };
 
@@ -284,6 +357,13 @@ type ReplyBinding = CallbackBinding & {
 type CallbackRow = { request_json: string; choice_id: string };
 type ReplyRow = { request_json: string; choice_id: string; chat_id: string; message_id: string };
 type MessageRow = { chat_id: string; message_id: string };
+type MessagePartRow = {
+  recipient_index: number;
+  part_index: number;
+  content_digest: string;
+  chat_id: string;
+  message_id: string;
+};
 type OffsetRow = { next_offset: number };
 
 class TelegramProjection {
@@ -330,6 +410,16 @@ class TelegramProjection {
         chat_id TEXT NOT NULL,
         message_id TEXT NOT NULL,
         PRIMARY KEY (profile, decision_id, chat_id, message_id)
+      );
+      CREATE TABLE IF NOT EXISTS message_parts (
+        profile TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        recipient_index INTEGER NOT NULL,
+        part_index INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        PRIMARY KEY (profile, decision_id, recipient_index, part_index)
       );
     `);
   }
@@ -401,7 +491,10 @@ class TelegramProjection {
       .get(this.profile, token) as CallbackRow | undefined;
     return row === undefined
       ? undefined
-      : { request: JSON.parse(row.request_json) as HumanDecisionRequest, choice: row.choice_id };
+      : {
+          request: JSON.parse(row.request_json) as HumanDecisionChannelRequest,
+          choice: row.choice_id,
+        };
   }
 
   putReply(binding: ReplyBinding): void {
@@ -427,7 +520,7 @@ class TelegramProjection {
     return row === undefined
       ? undefined
       : {
-          request: JSON.parse(row.request_json) as HumanDecisionRequest,
+          request: JSON.parse(row.request_json) as HumanDecisionChannelRequest,
           choice: row.choice_id,
           chatId: row.chat_id,
           promptMessageId: row.message_id,
@@ -454,6 +547,33 @@ class TelegramProjection {
         "SELECT chat_id, message_id FROM messages WHERE profile = ? AND decision_id = ? ORDER BY chat_id, message_id",
       )
       .all(this.profile, decisionId) as MessageRow[];
+  }
+
+  putMessagePart(
+    decisionId: string,
+    recipientIndex: number,
+    partIndex: number,
+    contentDigest: string,
+    chatId: string,
+    messageId: string,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO message_parts(profile, decision_id, recipient_index, part_index, content_digest, chat_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile, decision_id, recipient_index, part_index) DO UPDATE SET content_digest = excluded.content_digest, chat_id = excluded.chat_id, message_id = excluded.message_id",
+      )
+      .run(this.profile, decisionId, recipientIndex, partIndex, contentDigest, chatId, messageId);
+  }
+
+  messagePart(
+    decisionId: string,
+    recipientIndex: number,
+    partIndex: number,
+  ): MessagePartRow | undefined {
+    return this.db
+      .prepare(
+        "SELECT recipient_index, part_index, content_digest, chat_id, message_id FROM message_parts WHERE profile = ? AND decision_id = ? AND recipient_index = ? AND part_index = ?",
+      )
+      .get(this.profile, decisionId, recipientIndex, partIndex) as MessagePartRow | undefined;
   }
 }
 
@@ -531,10 +651,12 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     this.projection.close();
   }
 
-  async deliver(request: HumanDecisionRequest): Promise<HumanDecisionDeliveryResult> {
+  async deliver(request: HumanDecisionChannelRequest): Promise<HumanDecisionDeliveryResult> {
     const channelPath = this.channelPath();
+    const parts = renderTelegramParts(request);
+    const partDigests = parts.map((part) => digestCanonical(part));
     const prior = await this.store.listDeliveries(request.decisionId, channelPath);
-    if (prior.some((record) => record.state === "confirmed")) {
+    if (prior.some(isCompleteDelivery)) {
       this.registerCallbacks(request);
       return { status: "confirmed", channel: this.id, attemptId: "adopted" };
     }
@@ -547,10 +669,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         errorCode: "ambiguous_delivery_not_retried",
       };
     }
-    if (
-      prior.some((record) => record.state === "intent") &&
-      !prior.some((record) => record.state === "failed")
-    ) {
+    if (hasUnsettledDeliveryIntent(prior)) {
       this.registerCallbacks(request);
       return {
         status: "unknown",
@@ -562,52 +681,157 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
 
     const attemptId = createHumanDecisionAttemptId();
     const createdAt = new Date().toISOString();
-    await this.store.recordDelivery(request, channelPath, {
-      schema: "pi-workflows.human-decision-delivery.v1",
-      attemptId,
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      channel: this.id,
-      state: "intent",
-      createdAt,
-    });
+    await this.store.recordDelivery(
+      request,
+      channelPath,
+      v2DeliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt, {
+        partCount: parts.length,
+      }),
+    );
     const keyboard = this.registerCallbacks(request);
-    try {
-      const deliveredChats = new Set(
-        this.projection.messages(request.decisionId).map((message) => message.chat_id),
-      );
-      let messageCount = deliveredChats.size;
-      for (const chatId of this.profile.allowedChatIds) {
-        if (deliveredChats.has(chatId)) continue;
-        const result = await this.call("sendMessage", {
-          chat_id: chatId,
-          text: renderTelegramRequest(request),
-          reply_markup: { inline_keyboard: keyboard },
-        });
-        const messageId = telegramMessageId(result);
-        this.projection.putMessage(request.decisionId, chatId, messageId);
-        messageCount += 1;
+    const recipients = [...this.profile.allowedChatIds].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    for (const [recipientOffset, chatId] of recipients.entries()) {
+      const recipientIndex = recipientOffset + 1;
+      for (const [partOffset, text] of parts.entries()) {
+        const partIndex = partOffset + 1;
+        const contentDigest = partDigests[partOffset]!;
+        const projected = this.projection.messagePart(
+          request.decisionId,
+          recipientIndex,
+          partIndex,
+        );
+        const confirmed = prior.some(
+          (record) =>
+            record.schema === "pi-workflows.human-decision-delivery.v2" &&
+            record.phase === "part" &&
+            record.state === "confirmed" &&
+            record.recipientIndex === recipientIndex &&
+            record.partIndex === partIndex &&
+            record.partCount === parts.length &&
+            record.contentDigest === contentDigest,
+        );
+        if (
+          confirmed &&
+          projected?.content_digest === contentDigest &&
+          projected.chat_id === chatId
+        ) {
+          continue;
+        }
+        if (confirmed || projected !== undefined) {
+          const errorCode = "telegram_part_evidence_mismatch";
+          await this.store.recordDelivery(
+            request,
+            channelPath,
+            v2DeliveryRecord(
+              request,
+              this.id,
+              `${attemptId}-r${recipientIndex}-p${partIndex}-unknown`,
+              "part",
+              "unknown",
+              createdAt,
+              { recipientIndex, partIndex, partCount: parts.length, contentDigest, errorCode },
+            ),
+          );
+          return { status: "unknown", channel: this.id, attemptId, errorCode };
+        }
+        const partAttemptId = `${attemptId}-r${recipientIndex}-p${partIndex}`;
+        await this.store.recordDelivery(
+          request,
+          channelPath,
+          v2DeliveryRecord(
+            request,
+            this.id,
+            `${partAttemptId}-intent`,
+            "part",
+            "intent",
+            createdAt,
+            { recipientIndex, partIndex, partCount: parts.length, contentDigest },
+          ),
+        );
+        try {
+          const result = await this.call("sendMessage", {
+            chat_id: chatId,
+            text,
+            ...(partIndex === parts.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+          });
+          const messageId = telegramMessageId(result);
+          this.projection.putMessage(request.decisionId, chatId, messageId);
+          this.projection.putMessagePart(
+            request.decisionId,
+            recipientIndex,
+            partIndex,
+            contentDigest,
+            chatId,
+            messageId,
+          );
+          await this.store.recordDelivery(
+            request,
+            channelPath,
+            v2DeliveryRecord(
+              request,
+              this.id,
+              `${partAttemptId}-confirmed`,
+              "part",
+              "confirmed",
+              createdAt,
+              { recipientIndex, partIndex, partCount: parts.length, contentDigest },
+            ),
+          );
+        } catch (error) {
+          const callError = normalizeCallError(error);
+          const state = callError.ambiguous ? "unknown" : "failed";
+          await this.store.recordDelivery(
+            request,
+            channelPath,
+            v2DeliveryRecord(
+              request,
+              this.id,
+              `${partAttemptId}-${state}`,
+              "part",
+              state,
+              createdAt,
+              {
+                recipientIndex,
+                partIndex,
+                partCount: parts.length,
+                contentDigest,
+                errorCode: callError.code,
+              },
+            ),
+          );
+          await this.store.recordDelivery(
+            request,
+            channelPath,
+            v2DeliveryRecord(
+              request,
+              this.id,
+              `${attemptId}-${state}`,
+              "complete",
+              state,
+              createdAt,
+              { partCount: parts.length, errorCode: callError.code },
+            ),
+          );
+          return { status: state, channel: this.id, attemptId, errorCode: callError.code };
+        }
       }
-      await this.store.recordDelivery(
-        request,
-        channelPath,
-        deliveryRecord(request, this.id, `${attemptId}-confirmed`, "confirmed", createdAt, {
-          messageCount,
-        }),
-      );
-      return { status: "confirmed", channel: this.id, attemptId };
-    } catch (error) {
-      const callError = normalizeCallError(error);
-      const state = callError.ambiguous ? "unknown" : "failed";
-      await this.store.recordDelivery(
-        request,
-        channelPath,
-        deliveryRecord(request, this.id, `${attemptId}-${state}`, state, createdAt, {
-          errorCode: callError.code,
-        }),
-      );
-      return { status: state, channel: this.id, attemptId, errorCode: callError.code };
     }
+    await this.store.recordDelivery(
+      request,
+      channelPath,
+      v2DeliveryRecord(
+        request,
+        this.id,
+        `${attemptId}-confirmed`,
+        "complete",
+        "confirmed",
+        createdAt,
+        { partCount: parts.length, messageCount: parts.length * recipients.length },
+      ),
+    );
+    return { status: "confirmed", channel: this.id, attemptId };
   }
 
   async settle(decision: SettledHumanDecision): Promise<void> {
@@ -720,7 +944,9 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     this.projection.deleteReply(chatId, replyId);
   }
 
-  private registerCallbacks(request: HumanDecisionRequest): Array<Array<Record<string, string>>> {
+  private registerCallbacks(
+    request: HumanDecisionChannelRequest,
+  ): Array<Array<Record<string, string>>> {
     return Object.entries(request.choices).map(([choiceId, definition]) => {
       const token = callbackToken(request.decisionId, request.requestDigest, choiceId);
       this.projection.putCallback(token, { request, choice: choiceId });
@@ -736,7 +962,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     return this.profile.allowedUserIds.has(userId) && this.profile.allowedChatIds.has(chatId);
   }
 
-  private isStale(request: HumanDecisionRequest): boolean {
+  private isStale(request: HumanDecisionChannelRequest): boolean {
     return request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now();
   }
 
@@ -1008,34 +1234,209 @@ function parseCredentialConfig(value: unknown): DecisionCredentialConfig {
   return { schema: "pi-workflows.credentials.v1", telegram };
 }
 
-function deliveryRecord(
-  request: HumanDecisionRequest,
+type DeliveryV2 = Extract<
+  HumanDecisionDeliveryRecord,
+  { schema: "pi-workflows.human-decision-delivery.v2" }
+>;
+
+type DeliveryV2Extra = Partial<
+  Pick<
+    DeliveryV2,
+    "recipientIndex" | "partIndex" | "partCount" | "contentDigest" | "messageCount" | "errorCode"
+  >
+>;
+
+function v2DeliveryRecord(
+  request: HumanDecisionChannelRequest,
   channel: string,
   attemptId: string,
-  state: HumanDecisionDeliveryRecord["state"],
+  phase: DeliveryV2["phase"],
+  state: DeliveryV2["state"],
   createdAt: string,
-  extra: Pick<HumanDecisionDeliveryRecord, "messageCount" | "errorCode"> = {},
-): HumanDecisionDeliveryRecord {
+  extra: DeliveryV2Extra = {},
+): DeliveryV2 {
   return {
-    schema: "pi-workflows.human-decision-delivery.v1",
+    schema: "pi-workflows.human-decision-delivery.v2",
     attemptId,
     decisionId: request.decisionId,
     requestDigest: request.requestDigest,
+    presentationDigest: request.presentationDigest,
     channel,
+    phase,
     state,
     createdAt,
-    finishedAt: new Date().toISOString(),
+    ...(state === "intent" ? {} : { finishedAt: new Date().toISOString() }),
     ...extra,
   };
 }
 
-function renderTelegramRequest(request: HumanDecisionRequest): string {
-  const body =
-    typeof request.body === "string" ? request.body : JSON.stringify(request.body, null, 2);
-  const suffix = "\n\nReply with a button below.";
-  const available = Math.max(0, TELEGRAM_TEXT_LIMIT - request.title.length - suffix.length - 2);
-  const clipped = body.length <= available ? body : `${body.slice(0, Math.max(0, available - 1))}…`;
-  return `${request.title}\n\n${clipped}${suffix}`;
+function isCompleteDelivery(record: HumanDecisionDeliveryRecord): boolean {
+  return (
+    record.state === "confirmed" &&
+    (record.schema === "pi-workflows.human-decision-delivery.v1" || record.phase === "complete")
+  );
+}
+
+function hasUnsettledDeliveryIntent(records: HumanDecisionDeliveryRecord[]): boolean {
+  const hasLegacyIntent = records.some(
+    (record) =>
+      record.schema === "pi-workflows.human-decision-delivery.v1" && record.state === "intent",
+  );
+  if (
+    hasLegacyIntent &&
+    !records.some(
+      (record) =>
+        record.schema === "pi-workflows.human-decision-delivery.v1" && record.state !== "intent",
+    )
+  ) {
+    return true;
+  }
+  return records.some((record) => {
+    if (
+      record.schema !== "pi-workflows.human-decision-delivery.v2" ||
+      record.phase !== "part" ||
+      record.state !== "intent"
+    ) {
+      return false;
+    }
+    return !records.some(
+      (other) =>
+        other.schema === "pi-workflows.human-decision-delivery.v2" &&
+        other.phase === "part" &&
+        other.state !== "intent" &&
+        other.recipientIndex === record.recipientIndex &&
+        other.partIndex === record.partIndex &&
+        other.contentDigest === record.contentDigest,
+    );
+  });
+}
+
+export function renderDecisionText(request: HumanDecisionChannelRequest): string {
+  const content = decisionDocumentSegments(request)
+    .map((segment) => operatorSafeText(segment.text))
+    .join("\n\n");
+  return `${content}\n\nDecision ${decisionPresentationFingerprint(request)}`;
+}
+
+export function renderTelegramParts(
+  request: HumanDecisionChannelRequest,
+  textLimit = TELEGRAM_TEXT_LIMIT,
+): string[] {
+  const fingerprint = decisionPresentationFingerprint(request);
+  const maximumHeader = telegramPartHeader(
+    MAX_PRESENTATION_TRANSPORT_PARTS,
+    MAX_PRESENTATION_TRANSPORT_PARTS,
+    fingerprint,
+  );
+  const capacity = textLimit - maximumHeader.length;
+  if (capacity < 1)
+    throw new Error("Telegram decision text limit is too small for its part header");
+  const bodyParts = packDecisionSegments(
+    decisionDocumentSegments(request).map((segment) => operatorSafeText(segment.text)),
+    capacity,
+  );
+  if (bodyParts.length > MAX_PRESENTATION_TRANSPORT_PARTS) {
+    throw new Error(
+      `Decision presentation renders as ${bodyParts.length} Telegram parts; limit is ${MAX_PRESENTATION_TRANSPORT_PARTS}`,
+    );
+  }
+  return bodyParts.map((body, index) => {
+    const text = `${telegramPartHeader(index + 1, bodyParts.length, fingerprint)}${body}`;
+    if (text.length > textLimit) {
+      throw new Error(
+        `Telegram decision part ${index + 1} exceeds the ${textLimit} character limit`,
+      );
+    }
+    return text;
+  });
+}
+
+function renderPiPresentationLines(
+  request: HumanDecisionChannelRequest,
+  width: number,
+  theme: Theme,
+): string[] {
+  const lines: string[] = [];
+  for (const segment of decisionDocumentSegments(request).filter(
+    (candidate) => candidate.kind !== "choices",
+  )) {
+    const text = operatorSafeText(segment.text);
+    const styled =
+      segment.kind === "title"
+        ? theme.fg("accent", theme.bold(text))
+        : segment.kind === "section"
+          ? theme.fg("text", theme.bold(text))
+          : segment.kind === "preformatted"
+            ? theme.fg("muted", text)
+            : theme.fg("text", text);
+    for (const rawLine of styled.split("\n")) {
+      lines.push(...wrapTextWithAnsi(rawLine.length === 0 ? " " : rawLine, Math.max(1, width)));
+    }
+    lines.push("");
+  }
+  lines.push(theme.fg("dim", `Decision ${decisionPresentationFingerprint(request)}`));
+  return lines;
+}
+
+function telegramPartHeader(part: number, total: number, fingerprint: string): string {
+  return `Part ${part}/${total}\nDecision ${fingerprint}\n\n`;
+}
+
+function packDecisionSegments(segments: string[], capacity: number): string[] {
+  const parts: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current.length === 0) return;
+    parts.push(current);
+    current = "";
+  };
+  for (const segment of segments) {
+    const pieces = splitTransportText(segment, capacity);
+    for (const piece of pieces) {
+      const candidate = current.length === 0 ? piece : `${current}\n\n${piece}`;
+      if (candidate.length <= capacity) {
+        current = candidate;
+      } else {
+        flush();
+        current = piece;
+      }
+    }
+  }
+  flush();
+  return parts.length === 0 ? ["Decision"] : parts;
+}
+
+function splitTransportText(value: string, capacity: number): string[] {
+  const parts: string[] = [];
+  let remaining = value;
+  while (remaining.length > capacity) {
+    let end = codePointBoundary(remaining, capacity);
+    const newline = remaining.lastIndexOf("\n", end);
+    if (newline > 0) end = newline;
+    parts.push(remaining.slice(0, end));
+    remaining = remaining.slice(end);
+  }
+  if (remaining.length > 0) parts.push(remaining);
+  return parts;
+}
+
+function codePointBoundary(value: string, limit: number): number {
+  let end = Math.min(limit, value.length);
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff && end < value.length) end -= 1;
+  return Math.max(1, end);
+}
+
+function operatorSafeText(value: string): string {
+  return value
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("")
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 8 || (code >= 11 && code <= 31) || code === 127 ? "�" : character;
+    })
+    .join("");
 }
 
 function callbackToken(decisionId: string, requestDigest: string, choice: string): string {
