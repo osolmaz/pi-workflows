@@ -262,6 +262,9 @@ Current v1 requests remain immutable.
 - A v1 string body becomes one readable paragraph at delivery time.
 - A v1 object body uses a deterministic compatibility formatter. It converts
   stable key order into readable labels and fields with sections and lists.
+- An oversized v1 body remains answerable. The formatter keeps a bounded readable
+  prefix and adds an explicit omission notice with the full body digest and size.
+  It never hides omitted content behind an ellipsis.
 - The compatibility formatter reads only the historical `body`, which was
   already the display field. It never reads a new structured subject.
 - V1 request bytes and digests do not change.

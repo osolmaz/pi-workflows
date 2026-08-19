@@ -122,14 +122,11 @@ export function legacyDecisionPresentation(body: unknown): DecisionPresentation 
   } else {
     appendLegacyValue(blocks, body, undefined);
   }
-  return normalizeDecisionPresentation({
-    schema: "pi-workflows.decision-presentation.v1",
-    summary:
-      typeof body === "string"
-        ? "Review the decision message below."
-        : "Review the decision details below.",
-    blocks,
-  });
+  const summary =
+    typeof body === "string"
+      ? "Review the decision message below."
+      : "Review the decision details below.";
+  return normalizeDecisionPresentation(boundLegacyPresentation(summary, blocks, body));
 }
 
 export function decisionDocumentSegments(
@@ -254,16 +251,83 @@ function normalizeString(value: unknown, label: string): string {
   return text;
 }
 
+function boundLegacyPresentation(
+  summary: string,
+  blocks: DecisionPresentationBlock[],
+  body: unknown,
+): DecisionPresentation {
+  const candidate: DecisionPresentation = {
+    schema: "pi-workflows.decision-presentation.v1",
+    summary,
+    blocks,
+  };
+  if (
+    blocks.length <= MAX_PRESENTATION_BLOCKS &&
+    blocks.every(legacyBlockFitsSchema) &&
+    presentationCodeUnits(candidate) <= MAX_PRESENTATION_CODE_UNITS
+  ) {
+    return candidate;
+  }
+  const originalCodeUnits = canonicalJson(body).length;
+  const omission = `Some legacy decision content is not shown because it exceeds the readable presentation limit. Inspect the durable v1 request before answering. Body digest: ${digestCanonical(body)}. Original body: ${originalCodeUnits} UTF-16 code units. Generated blocks: ${blocks.length}.`;
+  const budget = MAX_PRESENTATION_CODE_UNITS - summary.length - omission.length;
+  const kept: DecisionPresentationBlock[] = [];
+  let used = 0;
+  let omitted = false;
+  for (const block of blocks) {
+    const units = presentationBlockCodeUnits(block);
+    if (
+      kept.length >= MAX_PRESENTATION_BLOCKS ||
+      !legacyBlockFitsSchema(block) ||
+      used + units > budget
+    ) {
+      omitted = true;
+      continue;
+    }
+    kept.push(block);
+    used += units;
+  }
+  if (omitted) {
+    if (kept.length >= MAX_PRESENTATION_BLOCKS) kept.pop();
+    kept.push({ kind: "paragraph", text: omission });
+  }
+  return {
+    schema: "pi-workflows.decision-presentation.v1",
+    summary,
+    blocks: kept,
+  };
+}
+
+function legacyBlockFitsSchema(block: DecisionPresentationBlock): boolean {
+  if (block.kind === "paragraph" || block.kind === "preformatted") {
+    return block.text.length <= MAX_PRESENTATION_STRING_CODE_UNITS;
+  }
+  if (block.kind === "section") {
+    return block.title.length <= MAX_PRESENTATION_STRING_CODE_UNITS;
+  }
+  if (block.kind === "bullets") {
+    return block.items.every((item) => item.length <= MAX_PRESENTATION_STRING_CODE_UNITS);
+  }
+  return block.items.every(
+    (item) =>
+      item.label.length <= MAX_PRESENTATION_STRING_CODE_UNITS &&
+      item.value.length <= MAX_PRESENTATION_STRING_CODE_UNITS,
+  );
+}
+
+function presentationBlockCodeUnits(block: DecisionPresentationBlock): number {
+  if (block.kind === "paragraph" || block.kind === "preformatted") return block.text.length;
+  if (block.kind === "section") return block.title.length;
+  if (block.kind === "bullets") {
+    return block.items.reduce((sum, item) => sum + item.length, 0);
+  }
+  return block.items.reduce((sum, item) => sum + item.label.length + item.value.length, 0);
+}
+
 function presentationCodeUnits(presentation: DecisionPresentation): number {
   let total = presentation.summary.length;
   for (const block of presentation.blocks) {
-    if (block.kind === "paragraph" || block.kind === "preformatted") total += block.text.length;
-    else if (block.kind === "section") total += block.title.length;
-    else if (block.kind === "bullets") {
-      total += block.items.reduce((sum, item) => sum + item.length, 0);
-    } else {
-      total += block.items.reduce((sum, item) => sum + item.label.length + item.value.length, 0);
-    }
+    total += presentationBlockCodeUnits(block);
   }
   return total;
 }

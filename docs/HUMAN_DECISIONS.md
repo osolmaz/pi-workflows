@@ -141,7 +141,7 @@ A new decision request contains:
 
 The presentation is an explicit display allowlist. A channel does not receive the subject and cannot infer operator text from it. The request digest binds the subject, visible presentation, title, revision, choices, and input prompts. Each choice has a stable ID and may have no input or one validated text input contract.
 
-The former `body` form remains available for existing workflow definitions. It creates a v1 request and uses a deterministic readable compatibility formatter. V1 request bytes and digests do not change.
+The former `body` form remains available for existing workflow definitions. It creates a v1 request and uses a deterministic readable compatibility formatter. Oversized historical bodies receive a bounded readable prefix and an explicit omission notice with the full body digest and size. V1 request bytes and digests do not change.
 
 A submitted response contains:
 

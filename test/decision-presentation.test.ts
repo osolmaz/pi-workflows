@@ -137,6 +137,21 @@ describe("decision presentations", () => {
     expect(JSON.stringify(channel)).not.toContain('"plan":"a"');
   });
 
+  it("keeps oversized historical requests answerable with an explicit omission notice", () => {
+    const largeText = "legacy line\n".repeat(8_000);
+    const large = legacyDecisionPresentation(largeText);
+    expect(large.blocks.length).toBeLessThanOrEqual(MAX_PRESENTATION_BLOCKS);
+    expect(JSON.stringify(large)).toContain("Some legacy decision content is not shown");
+    expect(JSON.stringify(large)).toContain("Body digest: sha256:");
+    const manyFields = legacyDecisionPresentation(
+      Object.fromEntries(
+        Array.from({ length: 400 }, (_, index) => [`field-${index}`, { value: index }]),
+      ),
+    );
+    expect(manyFields.blocks.length).toBeLessThanOrEqual(MAX_PRESENTATION_BLOCKS);
+    expect(JSON.stringify(manyFields)).toContain("Some legacy decision content is not shown");
+  });
+
   it("formats historical object bodies as readable sections and fields", () => {
     const legacy = legacyDecisionPresentation({
       planDigest: "sha256:abc",

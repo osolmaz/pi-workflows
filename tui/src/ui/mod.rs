@@ -2067,6 +2067,19 @@ fn push_detail_line(
     }
 }
 
+fn resolved_detail_value(
+    value: &Value,
+    bundle_dir: Option<&std::path::Path>,
+    remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
+) -> Value {
+    match bundle_dir {
+        Some(dir) => {
+            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
+        }
+        None => resolve_remote_artifacts(value, remote_artifacts),
+    }
+}
+
 fn push_value_lines(
     lines: &mut Vec<Line<'static>>,
     label: &str,
@@ -2076,12 +2089,7 @@ fn push_value_lines(
     width: usize,
     palette: &Palette,
 ) {
-    let decoded = match bundle_dir {
-        Some(dir) => {
-            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
-        }
-        None => resolve_remote_artifacts(value, remote_artifacts),
-    };
+    let decoded = resolved_detail_value(value, bundle_dir, remote_artifacts);
     let rendered = match decoded {
         Value::String(text) => text,
         other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
@@ -2098,6 +2106,113 @@ fn push_value_lines(
     if rendered.is_empty() {
         push_detail_line(lines, label, "—", width, palette);
     }
+}
+
+fn push_human_decision_presentation(
+    lines: &mut Vec<Line<'static>>,
+    value: &Value,
+    bundle_dir: Option<&std::path::Path>,
+    remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
+    width: usize,
+    palette: &Palette,
+) -> bool {
+    let decoded = resolved_detail_value(value, bundle_dir, remote_artifacts);
+    if decoded.get("schema").and_then(Value::as_str)
+        != Some("pi-workflows.human-decision-request.v2")
+    {
+        return false;
+    }
+    let Some(presentation) = decoded.get("presentation") else {
+        push_detail_line(
+            lines,
+            "decision",
+            "Invalid readable presentation",
+            width,
+            palette,
+        );
+        return true;
+    };
+    if let Some(title) = decoded.get("title").and_then(Value::as_str) {
+        push_detail_line(lines, "decision", title, width, palette);
+    }
+    if let Some(summary) = presentation.get("summary").and_then(Value::as_str) {
+        push_detail_line(lines, "summary", summary, width, palette);
+    }
+    if let Some(blocks) = presentation.get("blocks").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("kind").and_then(Value::as_str) {
+                Some("section") => {
+                    if let Some(title) = block.get("title").and_then(Value::as_str) {
+                        push_detail_line(lines, "section", title, width, palette);
+                    }
+                }
+                Some("paragraph") => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        push_detail_line(lines, "details", text, width, palette);
+                    }
+                }
+                Some("preformatted") => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        for (index, logical_line) in text.lines().enumerate() {
+                            push_detail_line(
+                                lines,
+                                if index == 0 { "text" } else { "" },
+                                logical_line,
+                                width,
+                                palette,
+                            );
+                        }
+                    }
+                }
+                Some("bullets") => {
+                    if let Some(items) = block.get("items").and_then(Value::as_array) {
+                        for item in items.iter().filter_map(Value::as_str) {
+                            push_detail_line(lines, "", &format!("• {item}"), width, palette);
+                        }
+                    }
+                }
+                Some("fields") => {
+                    if let Some(items) = block.get("items").and_then(Value::as_array) {
+                        for item in items {
+                            if let (Some(label), Some(value)) = (
+                                item.get("label").and_then(Value::as_str),
+                                item.get("value").and_then(Value::as_str),
+                            ) {
+                                push_detail_line(lines, label, value, width, palette);
+                            }
+                        }
+                    }
+                }
+                _ => push_detail_line(
+                    lines,
+                    "decision",
+                    "Unsupported presentation block",
+                    width,
+                    palette,
+                ),
+            }
+        }
+    }
+    if let Some(choices) = decoded.get("choices").and_then(Value::as_object) {
+        for choice in choices.values() {
+            if let Some(label) = choice.get("label").and_then(Value::as_str) {
+                push_detail_line(lines, "choice", label, width, palette);
+            }
+            if let Some(prompt) = choice.pointer("/input/prompt").and_then(Value::as_str) {
+                push_detail_line(lines, "input", prompt, width, palette);
+            }
+        }
+    }
+    if let Some(digest) = decoded.get("presentationDigest").and_then(Value::as_str) {
+        push_detail_line(lines, "presentation", digest, width, palette);
+    }
+    if let Some(digest) = decoded.get("subjectDigest").and_then(Value::as_str) {
+        push_detail_line(lines, "subject", digest, width, palette);
+    }
+    if let Some(revision) = decoded.get("revision").and_then(Value::as_u64) {
+        push_detail_line(lines, "revision", &revision.to_string(), width, palette);
+    }
+    true
 }
 
 fn steps_lines(
@@ -2169,15 +2284,24 @@ fn steps_lines(
                     palette,
                 );
             }
-            push_value_lines(
+            if !push_human_decision_presentation(
                 &mut lines,
-                "output",
                 &step.output,
                 data.bundle_dir,
                 &data.remote_artifacts,
                 width,
                 palette,
-            );
+            ) {
+                push_value_lines(
+                    &mut lines,
+                    "output",
+                    &step.output,
+                    data.bundle_dir,
+                    &data.remote_artifacts,
+                    width,
+                    palette,
+                );
+            }
             if let Some(action) = &step.action {
                 push_detail_line(
                     &mut lines,
@@ -2793,10 +2917,11 @@ mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
         current_progress_epoch, graph_position_label, inspector_height_for_drag,
-        inspector_tab_label, inspector_tab_layout, progress_rates, resolve_remote_artifacts,
-        resolved_inspector_height, sidebar_width_for_drag, temporal_through_seq,
-        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
-        Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        inspector_tab_label, inspector_tab_layout, progress_rates,
+        push_human_decision_presentation, resolve_remote_artifacts, resolved_inspector_height,
+        sidebar_width_for_drag, temporal_through_seq, trace_events_for_scope,
+        valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds, Palette, Rect, StepRecord,
+        TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2955,6 +3080,52 @@ mod tests {
             resolve_remote_artifacts(&value, &artifacts),
             json!({"nested": "body"})
         );
+    }
+
+    #[test]
+    fn v2_decision_inspector_shows_presentation_without_subject() {
+        let request = json!({
+            "schema": "pi-workflows.human-decision-request.v2",
+            "title": "Approve readable plan",
+            "subject": { "hiddenMachineValue": "do-not-show" },
+            "subjectDigest": format!("sha256:{}", "a".repeat(64)),
+            "presentationDigest": format!("sha256:{}", "b".repeat(64)),
+            "revision": 2,
+            "presentation": {
+                "summary": "Review the readable plan.",
+                "blocks": [
+                    { "kind": "section", "title": "Changes" },
+                    { "kind": "bullets", "items": ["Apply the safe change."] }
+                ]
+            },
+            "choices": {
+                "continue": { "label": "Continue" },
+                "replan": {
+                    "label": "Replan",
+                    "input": { "prompt": "What should change?" }
+                }
+            }
+        });
+        let mut lines = Vec::new();
+        assert!(push_human_decision_presentation(
+            &mut lines,
+            &request,
+            None,
+            &HashMap::new(),
+            100,
+            &Palette::catppuccin(),
+        ));
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Review the readable plan."));
+        assert!(rendered.contains("Apply the safe change."));
+        assert!(rendered.contains("What should change?"));
+        assert!(!rendered.contains("hiddenMachineValue"));
+        assert!(!rendered.contains("do-not-show"));
     }
 
     #[test]
