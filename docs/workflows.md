@@ -417,7 +417,7 @@ The built-in `autoplan` workflow selects a practical in-scope solution and write
 
 The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autoplan, documents the revised plan, and asks again through a new plan digest.
 
-Autoimplement writes and runs the exact Pi Reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
+Autoimplement writes and runs the exact pi-reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
 
 A model-generated blocker from implementation or a safe later stage does not end autoimplement by itself. A separate blocker-challenge agent checks the task, approved plan, current result, evidence, scope, authority, earlier attempts, and practical alternatives. It confirms a blocker only when the blocker exists now, is outside the granted authority, has no safe path forward, has an empty next action, and includes concrete evidence and checked alternatives. A rejected blocker must name the next practical action and routes through the existing redesign workflow before implementation and verification continue.
 

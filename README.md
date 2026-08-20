@@ -356,7 +356,7 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   a detailed implementation plan, using the ideal end state as guidance rather
   than an out-of-scope requirement.
 - `autoimplement` finds a clear existing plan, documents it when needed,
-  implements and verifies it, writes and runs the exact Pi Reviewer command,
+  implements and verifies it, writes and runs the exact pi-reviewer command,
   tracks P0 through P2, handles PR comments and CI, and
   finalizes the PR. P0 and P1 fixes require another review. P2-only work is
   verified without another reviewer round. A five-minute CI wait routes to

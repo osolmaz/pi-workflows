@@ -1,6 +1,6 @@
 ---
 name: autoimplement
-description: Use when the user asks to implement a plan end-to-end, test it, run Pi Reviewer against the base branch in a loop until no P0/P1 issues remain, and make sure CI/CD is green before finishing.
+description: Use when the user asks to implement a plan end-to-end, test it, run pi-reviewer against the base branch in a loop until no P0/P1 issues remain, and make sure CI/CD is green before finishing.
 compatibility: Requires pi-workflows and the built-in autoimplement workflow.
 ---
 
@@ -26,16 +26,16 @@ Outside Pi, or when the workflow is unavailable, do the following in the order t
    - Do not put mutation testing on the critical path unless repository policy explicitly requires it; keep the mutation test scripts available.
 
 3. Push your latest commits before running review so the review is always against the current PR head.
-   - Run Pi Reviewer with its configured defaults against the base branch: `pi-reviewer --base <branch_name>`. The model and thinking level come from the reviewer's own config, not from this skill.
-   - Use a 10 minute timeout on the tool call available to the model, not the shell `timeout` program. If Pi Reviewer takes more than 10 minutes, kill it.
-   - Do not silently fall back to `codex review` when Pi Reviewer is unavailable; stop and report the missing command or configuration.
+   - Run pi-reviewer with its configured defaults against the base branch: `pi-reviewer --base <branch_name>`. The model and thinking level come from the reviewer's own config, not from this skill.
+   - Use a 10 minute timeout on the tool call available to the model, not the shell `timeout` program. If pi-reviewer takes more than 10 minutes, kill it.
+   - Do not silently fall back to `codex review` when pi-reviewer is unavailable; stop and report the missing command or configuration.
    - Record every review round with separate P0, P1, P2, and lower findings.
-   - Run Pi Reviewer in a loop and address any P0 or P1 issues until there are none left.
-   - If a round reports only P2 or lower findings, address valid proportionate P2 findings, verify and push them, then move to the next stage without running Pi Reviewer again solely because of that P2 work.
+   - Run pi-reviewer in a loop and address any P0 or P1 issues until there are none left.
+   - If a round reports only P2 or lower findings, address valid proportionate P2 findings, verify and push them, then move to the next stage without running pi-reviewer again solely because of that P2 work.
    - Ignore issues about supporting legacy behavior unless the plan requires compatibility.
-   - Look at CI only after Pi Reviewer passes, meaning the last completed run found no issues or only P2 or lower issues.
+   - Look at CI only after pi-reviewer passes, meaning the last completed run found no issues or only P2 or lower issues.
 
-4. Pi Reviewer reports findings locally and does not post them to the pull request.
+4. pi-reviewer reports findings locally and does not post them to the pull request.
    - Separately check existing inline review comments and PR issue comments, and address valid comments.
    - Ignore irrelevant comments and stale comments from before the latest commit unless they still apply.
    - Reply to and resolve each comment either way.

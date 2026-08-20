@@ -433,7 +433,7 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 git diff --check
 ```
 
-Run Pi Reviewer against the base branch and fix all valid P0 and P1 findings before release work.
+Run pi-reviewer against the base branch and fix all valid P0 and P1 findings before release work.
 
 Package publication and OnurPi adoption are separate tasks. Do not edit an installed `node_modules`
 copy as the implementation source.

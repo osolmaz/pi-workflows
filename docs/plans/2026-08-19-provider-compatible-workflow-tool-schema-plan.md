@@ -41,5 +41,5 @@ Fix the workflow tool schema so strict OpenAI-compatible providers accept it wit
 - The strict local endpoint accepts both workflow tool schemas.
 - Runtime parsing rejects malformed calls before execution.
 - `npm run check`, `npm run test:e2e`, Rust tests, Slophammer checks, and `git diff --check` pass.
-- Pi Reviewer reports no P0 or P1 findings.
+- pi-reviewer reports no P0 or P1 findings.
 - PR #33 CI passes before merge.

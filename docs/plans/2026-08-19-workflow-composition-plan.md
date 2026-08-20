@@ -56,7 +56,7 @@ The package will ship `autoplan`, `autoimplement`, and `monitor` as compatible b
 - Track P0, P1, and P2 review findings by round.
 - Rerun review only after P0 or P1 work.
 - Permit P2 work without another reviewer round.
-- Generate, validate, execute, and correct exact Pi Reviewer commands.
+- Generate, validate, execute, and correct exact pi-reviewer commands.
 - Track PR comments, CI, merge, and final PR reporting.
 - Bound one CI watch to five minutes.
 - Route a long CI wait to useful local testing before checking CI again.
@@ -71,7 +71,7 @@ The package will ship `autoplan`, `autoimplement`, and `monitor` as compatible b
 - Do not permit recursive include graphs.
 - Do not add unrestricted model-selected node names.
 - Do not let monitor mutate a target without explicit authorization.
-- Do not replace Pi Reviewer with another reviewer after an invocation failure.
+- Do not replace pi-reviewer with another reviewer after an invocation failure.
 - Do not merge before required gates pass or an allowed unrelated failure is recorded.
 - Do not rewrite existing terminal run bundles.
 
@@ -214,7 +214,7 @@ CI
 
 The structured plan input is optional because the plan can already exist in conversation context or canonical documentation. Its absence never authorizes initial autoplan. Autoimplement blocks when no clear plan exists, skips autodoc for current documentation, and records every evidence-driven revision through autodoc before continuing.
 
-The workflow will collect all review rounds in its final output. It will never rerun Pi Reviewer solely because P2 work changed files.
+The workflow will collect all review rounds in its final output. It will never rerun pi-reviewer solely because P2 work changed files.
 
 ### 8. Monitor repair
 
@@ -278,7 +278,7 @@ npx -y @simpledoc/simpledoc check
 git diff --check
 ```
 
-Run Pi Reviewer against the pushed branch. Fix every P0 and P1 finding and rerun it. P2-only changes do not require another reviewer run unless they expose a new P0 or P1 concern. Check PR comments and CI after review passes.
+Run pi-reviewer against the pushed branch. Fix every P0 and P1 finding and rerun it. P2-only changes do not require another reviewer run unless they expose a new P0 or P1 concern. Check PR comments and CI after review passes.
 
 ## Release
 

@@ -61,7 +61,7 @@ The `workflow` tool description remains the small always-available call contract
 4. Add tests that validate declared paths, required frontmatter, unique skill names, and packed files.
 5. Update README installation and configuration examples, including independent resource filtering.
 6. Pack the package and start the real Pi runtime from that artifact. Verify that `/skill:pi-workflows` and `/skill:monitor` are discovered with the extension, then verify that package filtering can hide the monitor skill without hiding the extension.
-7. Run all repository checks and Pi Reviewer, merge, release `0.7.0`, and verify npm contents.
+7. Run all repository checks and pi-reviewer, merge, release `0.7.0`, and verify npm contents.
 8. Pin `0.7.0` in OnurPi, forward the dependency's skills, and run OnurPi checks.
 9. Remove `agents/skills/monitor` from Tools, run the sync script, and verify that the installed skill now comes from the pi-workflows package only.
 
@@ -73,7 +73,7 @@ The `workflow` tool description remains the small always-available call contract
 - The model can use the `workflow` tool from the new skill without larger workflow step messages.
 - npm contains the two `SKILL.md` files and their referenced documentation.
 - Tools contains no monitor skill source or synced duplicate.
-- Local checks, real-Pi end-to-end tests, Pi Reviewer, and CI pass.
+- Local checks, real-Pi end-to-end tests, pi-reviewer, and CI pass.
 
 ## Verification
 

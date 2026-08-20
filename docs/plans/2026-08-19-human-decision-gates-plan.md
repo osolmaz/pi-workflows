@@ -281,7 +281,7 @@ npx -y @simpledoc/simpledoc check
 git diff --check
 ```
 
-Run Pi Reviewer against the pushed branch. Fix every P0 and P1 finding and rerun it. Address valid P2 findings, but do not rerun review solely because of a P2-only change. Open or update a pull request and leave it unmerged unless merge is separately authorized.
+Run pi-reviewer against the pushed branch. Fix every P0 and P1 finding and rerun it. Address valid P2 findings, but do not rerun review solely because of a P2-only change. Open or update a pull request and leave it unmerged unless merge is separately authorized.
 
 ## Release
 

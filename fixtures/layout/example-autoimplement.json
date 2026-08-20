@@ -76,7 +76,7 @@
       "runReview": {
         "nodeType": "action",
         "timeoutMs": 610000,
-        "statusDetail": "running Pi Reviewer",
+        "statusDetail": "running pi-reviewer",
         "actionExecution": "shell"
       },
       "repairReviewCommand": {
@@ -9396,7 +9396,7 @@
         "                                                                              │      │      │      │      │      │      │      │ ◇ failed                             │      │      │      │      │      │      │                                                                                │ │ │",
         "                                                                              │      │      │      │      │      │      │      │ ◇ timed_out                          │      │      │      │      │      │      │                                                                                │ │ │",
         "                                                                              │      │      │      │      │      │      │      │                                      │      │      │      │      │      │      │                                                                                │ │ │",
-        "                                                                              │      │      │      │      │      │      │      │ … running Pi Reviewer                │      │      │      │      │      │      │                                                                                │ │ │",
+        "                                                                              │      │      │      │      │      │      │      │ … running pi-reviewer                │      │      │      │      │      │      │                                                                                │ │ │",
         "                                                                              │      │      │      │      │      │      │      └──────────────────────────────────────┘      │      │      │      │      │      │                                                                                │ │ │",
         "                                                                       ┌──────┘      ├──────┘      ├──────┘      ├──────┘      ┌─── timed_out ─┼─┘ └──── ok ─────┐           │      └──────┤      └──────┤      └──────┐                                                                         │ │ │",
         "                                                                       │      ┌──────┤      ┌──────┤      ┌──────┤      ┌──────┼───────────────┘ failed          │           │             ├──────┐      ├──────┐      │                                                                         │ │ │",

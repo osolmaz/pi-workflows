@@ -872,7 +872,7 @@ export const autoimplementWorkflow = defineWorkflow({
         const published = outputs.publish as Record<string, unknown>;
         const request = input as AutoimplementInput;
         return [
-          "Write the exact Pi Reviewer command for the pushed branch.",
+          "Write the exact pi-reviewer command for the pushed branch.",
           "The executable must be pi-reviewer. Use its configured model and thinking settings.",
           "Use the repository base branch and an absolute repository working directory.",
           "Set timeoutMs to at most 600000.",
@@ -884,7 +884,7 @@ export const autoimplementWorkflow = defineWorkflow({
       validate: parseReviewerCommand,
     }),
     runReview: shell({
-      statusDetail: "running Pi Reviewer",
+      statusDetail: "running pi-reviewer",
       timeoutMs: TEN_MINUTES_MS + 10_000,
       exec: (context) =>
         commandExecution(
@@ -896,9 +896,9 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: (context) => {
         const failed = context.results.runReview;
         return [
-          "The Pi Reviewer invocation failed. Diagnose the exact command, arguments, base branch, working directory, and error.",
+          "The pi-reviewer invocation failed. Diagnose the exact command, arguments, base branch, working directory, and error.",
           "Write a corrected pi-reviewer command. Do not substitute codex review or another reviewer.",
-          "If Pi Reviewer or its configuration is missing, report that through the same command shape only when another valid invocation exists; otherwise the next assessment must block.",
+          "If pi-reviewer or its configuration is missing, report that through the same command shape only when another valid invocation exists; otherwise the next assessment must block.",
           `Failed result: ${JSON.stringify(failed)}`,
         ].join("\n");
       },
@@ -925,7 +925,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: (context) => {
         const result = latestOutput<ShellActionResult>(context, ["runReview"]);
         return [
-          "Assess the completed Pi Reviewer invocation.",
+          "Assess the completed pi-reviewer invocation.",
           "Set invocationSucceeded false only when the reviewer did not produce a valid review.",
           "Record each finding under P0, P1, P2, or lower. Mark each finding as design or implementation.",
           "Do not promote P2 findings to P1 merely to force another review round.",
@@ -952,7 +952,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: ({ outputs }) =>
         [
           "Address valid P2 findings from the last review when the improvement is proportionate and in scope.",
-          "Do not rerun Pi Reviewer solely because P2 work changes files. Verification will run once, then the workflow continues.",
+          "Do not rerun pi-reviewer solely because P2 work changes files. Verification will run once, then the workflow continues.",
           `Review: ${JSON.stringify(outputs.assessReview)}`,
         ].join("\n"),
       expectedOutput: `{ "addressed": ["P2 change"], "skipped": [{ "finding": "finding", "reason": "why" }] }`,
@@ -964,7 +964,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: () =>
         [
           "Run focused verification for the P2 changes and push the verified result.",
-          "Do not run Pi Reviewer again because the previous round had no P0 or P1 findings.",
+          "Do not run pi-reviewer again because the previous round had no P0 or P1 findings.",
           "Report exact commands and outcomes.",
         ].join("\n"),
       expectedOutput: `{ "passed": true | false, "commands": [{ "command": "command", "outcome": "result" }], "pushed": true }`,
