@@ -1,7 +1,7 @@
 # pi-workflows
 
 <p align="center">
-  <img src="assets/cover.svg" alt="pi-workflows: a TypeScript workflow graph goes in, a live multi-step agent run comes out" width="880">
+  <img src="assets/cover.svg" alt="pi-workflows: a representative multi-step workflow graph with plan, implement, verify, review, a fix loop, and a clean finish" width="880">
 </p>
 
 pi-workflows is a workflow extension for the [pi coding agent](https://pi.dev).
