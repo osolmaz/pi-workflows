@@ -109,7 +109,11 @@ export async function runCommandBatch(
       const result = await runItem(item, signal);
       results[index] = result;
       completed += 1;
-      await options.onItemSettled?.(result, completed, total);
+      try {
+        await options.onItemSettled?.(result, completed, total);
+      } catch {
+        // Completion callbacks are observational and cannot change batch execution.
+      }
     }
   };
 

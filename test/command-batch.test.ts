@@ -153,6 +153,25 @@ describe("runCommandBatch", () => {
     ]);
   });
 
+  it("keeps settlement callback failures observational", async () => {
+    const cwd = await makeTempDir("command-batch-callback-failure");
+    const result = await runCommandBatch(
+      {
+        items: [item("one", cwd), item("two", cwd)],
+        maxConcurrency: 1,
+      },
+      {
+        onItemSettled: () => {
+          throw new Error("update unavailable");
+        },
+      },
+    );
+    expect(result).toMatchObject({
+      completed: 2,
+      items: [{ outcome: "succeeded" }, { outcome: "succeeded" }],
+    });
+  });
+
   it("replays a whole unaccepted read-only batch after interruption", async () => {
     const cwd = await makeTempDir("command-batch-replay");
     const log = path.join(cwd, "runs.log");

@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { MAX_COMMAND_BATCH_ITEMS, type CommandBatchItem } from "../workflows/command-batch.js";
+import {
+  MAX_COMMAND_BATCH_ITEMS,
+  validateCommandBatchRequest,
+  type CommandBatchItem,
+} from "../workflows/command-batch.js";
 
 export const REVIEW_TIMEOUT_MS = 10 * 60_000;
 export const CI_WATCH_TIMEOUT_MS = 5 * 60_000;
@@ -141,8 +145,9 @@ export function parseVerificationCommandPlan(value: unknown): VerificationComman
     validateVerificationCommand(command, index);
     return command;
   });
+  const validated = validateCommandBatchRequest({ items: commands, maxConcurrency: 1 });
   return {
-    commands,
+    commands: validated.items,
     untested: stringArray(result.untested ?? [], "verification untested"),
   };
 }

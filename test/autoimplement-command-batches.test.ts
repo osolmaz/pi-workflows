@@ -110,6 +110,21 @@ describe("autoimplement command batch contracts", () => {
         }),
       ).toThrow(/not allowed/);
     }
+    expect(() =>
+      parseVerificationCommandPlan({
+        commands: [command("verify", first), command("verify", second)],
+      }),
+    ).toThrow(/duplicated/);
+    expect(() =>
+      parseVerificationCommandPlan({ commands: [command("invalid id", first)] }),
+    ).toThrow(/id is invalid/);
+    expect(() =>
+      parseVerificationCommandPlan({
+        commands: Array.from({ length: 65 }, (_, index) =>
+          command(`verify-${index}`, path.join(first, String(index))),
+        ),
+      }),
+    ).toThrow(/at most 64/);
   });
 
   it("normalizes per-PR CI state and validates pending watch commands", async () => {
