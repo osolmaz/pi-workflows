@@ -26,31 +26,69 @@ function item(
 }
 
 describe("command batch validation", () => {
-  it("normalizes valid requests and accepts an empty batch", () => {
+  it("normalizes valid requests and accepts an empty batch", async () => {
     expect(validateCommandBatchRequest({ items: [], maxConcurrency: 2 })).toEqual({
       items: [],
       maxConcurrency: 2,
     });
+    await expect(runCommandBatch({ items: [], maxConcurrency: 2 })).resolves.toEqual({
+      schema: "pi-workflows.command-batch-result.v1",
+      items: [],
+      completed: 0,
+      total: 0,
+    });
   });
 
-  it("rejects duplicate ids, relative paths, unsupported fields, and invalid limits", async () => {
+  it("rejects malformed requests, items, and limits", async () => {
     const cwd = await makeTempDir("command-batch-validation");
     const valid = item("one", cwd);
+    for (const request of [null, [], "bad"]) {
+      expect(() => validateCommandBatchRequest(request)).toThrow(/must be an object/);
+    }
+    expect(() =>
+      validateCommandBatchRequest({ items: [], maxConcurrency: 1, unknown: true }),
+    ).toThrow(/unknown is not supported/);
+    expect(() => validateCommandBatchRequest({ items: "bad", maxConcurrency: 1 })).toThrow(
+      /must be an array/,
+    );
+    expect(() =>
+      validateCommandBatchRequest({
+        items: Array.from({ length: 65 }, () => valid),
+        maxConcurrency: 1,
+      }),
+    ).toThrow(/at most 64/);
     expect(() =>
       validateCommandBatchRequest({ items: [valid, { ...valid }], maxConcurrency: 1 }),
     ).toThrow(/duplicated/);
-    expect(() =>
-      validateCommandBatchRequest({ items: [{ ...valid, cwd: "relative" }], maxConcurrency: 1 }),
-    ).toThrow(/absolute/);
+    expect(() => validateCommandBatchRequest({ items: [null], maxConcurrency: 1 })).toThrow(
+      /must be an object/,
+    );
+    for (const bad of [
+      { ...valid, id: "" },
+      { ...valid, id: "invalid id" },
+      { ...valid, command: "" },
+      { ...valid, args: "bad" },
+      { ...valid, args: [1] },
+      { ...valid, cwd: "" },
+      { ...valid, cwd: "relative" },
+      { ...valid, timeoutMs: 0 },
+      { ...valid, timeoutMs: 3_600_001 },
+      { ...valid, maxOutputChars: 0 },
+      { ...valid, maxOutputChars: 1_000_001 },
+    ]) {
+      expect(() => validateCommandBatchRequest({ items: [bad], maxConcurrency: 1 })).toThrow();
+    }
     expect(() =>
       validateCommandBatchRequest({
         items: [{ ...valid, shell: true }],
         maxConcurrency: 1,
       }),
     ).toThrow(/shell is not supported/);
-    expect(() => validateCommandBatchRequest({ items: [valid], maxConcurrency: 0 })).toThrow(
-      /maxConcurrency/,
-    );
+    for (const maxConcurrency of [0, 9, 1.5, "1"]) {
+      expect(() => validateCommandBatchRequest({ items: [valid], maxConcurrency })).toThrow(
+        /maxConcurrency/,
+      );
+    }
   });
 });
 
@@ -192,6 +230,20 @@ describe("runCommandBatch", () => {
       "two",
       "two",
     ]);
+  });
+
+  it("returns cancelled results without starting work when already aborted", async () => {
+    const cwd = await makeTempDir("command-batch-pre-abort");
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runCommandBatch(
+      { items: [item("one", cwd)], maxConcurrency: 1 },
+      { signal: controller.signal },
+    );
+    expect(result).toMatchObject({
+      completed: 0,
+      items: [{ id: "one", outcome: "cancelled", durationMs: 0 }],
+    });
   });
 
   it("stops active work and does not start queued commands after abort", async () => {

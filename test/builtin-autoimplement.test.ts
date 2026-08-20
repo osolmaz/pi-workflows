@@ -340,6 +340,104 @@ describe("built-in autoimplement", () => {
         reviewContext,
       ),
     ).resolves.toMatchObject({ route: "command_error" });
+    await expect(
+      validate("assessReview", { repositories: "bad", reason: "bad" }, reviewContext),
+    ).rejects.toThrow("must be an array");
+    await expect(
+      validate(
+        "assessReview",
+        {
+          repositories: [
+            {
+              id: "unexpected",
+              invocationSucceeded: true,
+              p0: [],
+              p1: [],
+              p2: [],
+              lower: [],
+              reason: "bad",
+            },
+          ],
+          reason: "bad",
+        },
+        reviewContext,
+      ),
+    ).rejects.toThrow("was not in the batch");
+    await expect(
+      validate(
+        "assessReview",
+        {
+          repositories: [
+            {
+              id: normalizedPublished.id,
+              invocationSucceeded: true,
+              p0: "bad",
+              p1: [],
+              p2: [],
+              lower: [],
+              reason: "bad",
+            },
+          ],
+          reason: "bad",
+        },
+        reviewContext,
+      ),
+    ).rejects.toThrow("p0 must be an array");
+    await expect(
+      validate("assessReview", { repositories: [], reason: "bad" }, reviewContext),
+    ).rejects.toThrow("missing repository ids");
+
+    const selectReview = autoimplementWorkflow.nodes.selectReviewCommands;
+    if (selectReview?.nodeType !== "compute") {
+      throw new Error("selectReviewCommands must be a compute node");
+    }
+    const reviewedRepository = {
+      ...normalizedPublished,
+      invocationSucceeded: true,
+    };
+    const reviewSelectionContext = (overrides: Record<string, unknown>) =>
+      ({
+        input: { task: "demo", plan: {} },
+        outputs: {},
+        results: {},
+        state: { steps: [] },
+        signal: new AbortController().signal,
+        ...overrides,
+      }) as never;
+    expect(
+      await selectReview.run(
+        reviewSelectionContext({
+          outputs: { publish: { repositories: [normalizedPublished] } },
+          state: {
+            steps: [
+              {
+                nodeId: "assessReview",
+                outcome: "ok",
+                output: { repositories: [reviewedRepository] },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({ route: "reuse", repositories: [] });
+    expect(
+      await selectReview.run(
+        reviewSelectionContext({
+          outputs: { publish: { repositories: [normalizedPublished] } },
+          state: {
+            steps: [
+              {
+                nodeId: "assessReview",
+                outcome: "ok",
+                output: {
+                  repositories: [{ ...reviewedRepository, invocationSucceeded: false }],
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({ route: "run", repositories: [normalizedPublished] });
 
     await expect(
       validate("repairReviewCommand", { route: "blocked", reason: "reviewer missing" }),
@@ -361,6 +459,22 @@ describe("built-in autoimplement", () => {
         },
       ),
     ).rejects.toThrow();
+    await expect(
+      validate("inspectCi", ciInspection("green", "wrong-head"), {
+        outputs: { publish: { repositories: [normalizedPublished] } },
+      }),
+    ).rejects.toThrow("does not match the published repository and head");
+    const additionalPublished = {
+      ...normalizedPublished,
+      id: repositoryId(path.join(repository, "additional")),
+      repository: path.join(repository, "additional"),
+      pr: "https://example.test/pr/additional",
+    };
+    await expect(
+      validate("inspectCi", ciInspection("green"), {
+        outputs: { publish: { repositories: [normalizedPublished, additionalPublished] } },
+      }),
+    ).rejects.toThrow("missing repository ids");
 
     const refreshedPublished = {
       ...normalizedPublished,
@@ -389,11 +503,72 @@ describe("built-in autoimplement", () => {
         { outputs: { publish: { repositories: [normalizedPublished] } } },
       ),
     ).rejects.toThrow("repositories");
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: "yes",
+          pushed: true,
+          repositories: [{ ...refreshedPublished, pushed: true }],
+        },
+        { outputs: { publish: { repositories: [normalizedPublished] } } },
+      ),
+    ).rejects.toThrow("passed must be a boolean");
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: true,
+          pushed: false,
+          repositories: [{ ...refreshedPublished, pushed: true }],
+        },
+        { outputs: { publish: { repositories: [normalizedPublished] } } },
+      ),
+    ).rejects.toThrow("pushed must be true");
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: true,
+          pushed: true,
+          repositories: [{ ...refreshedPublished, branch: "other", pushed: true }],
+        },
+        { outputs: { publish: { repositories: [normalizedPublished] } } },
+      ),
+    ).rejects.toThrow("does not match publication");
+    const secondPublished = {
+      ...normalizedPublished,
+      id: repositoryId(path.join(repository, "second")),
+      repository: path.join(repository, "second"),
+      pr: "https://example.test/pr/2",
+    };
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: true,
+          pushed: true,
+          repositories: [{ ...refreshedPublished, pushed: true }],
+        },
+        {
+          outputs: {
+            publish: { repositories: [normalizedPublished, secondPublished] },
+          },
+        },
+      ),
+    ).rejects.toThrow("missing repository ids");
 
     const pendingInspection = ciInspection("pending");
+    const trackedInspection = {
+      ...pendingInspection,
+      targets: pendingInspection.targets.map((target) => ({
+        ...target,
+        id: normalizedPublished.id,
+      })),
+    };
     const trackedContext = {
       outputs: {
-        inspectCi: pendingInspection,
+        inspectCi: trackedInspection,
         trackCi: {
           route: "assess",
           batch: { items: [{ id: normalizedPublished.id }] },
@@ -439,6 +614,89 @@ describe("built-in autoimplement", () => {
         trackedContext,
       ),
     ).resolves.toMatchObject({ route: "pending", targets: [{ id: normalizedPublished.id }] });
+    await expect(
+      validate(
+        "assessTrackedCi",
+        { route: "pending", reason: "pending", targets: "bad" },
+        trackedContext,
+      ),
+    ).rejects.toThrow("targets must be an array");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "pending",
+          reason: "pending",
+          targets: [
+            { id: normalizedPublished.id, route: "pending", reason: "pending" },
+            { id: normalizedPublished.id, route: "pending", reason: "pending" },
+          ],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("duplicated");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "pending",
+          reason: "pending",
+          targets: [{ id: "unexpected", route: "pending", reason: "pending" }],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("unexpected: unexpected");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "pending",
+          reason: "pending",
+          targets: [{ id: normalizedPublished.id, route: "unknown", reason: "unknown" }],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("route is invalid");
+    for (const route of ["green", "failed", "unavailable"] as const) {
+      await expect(
+        validate(
+          "assessTrackedCi",
+          {
+            route,
+            reason: route,
+            targets: [{ id: normalizedPublished.id, route, reason: route }],
+          },
+          trackedContext,
+        ),
+      ).resolves.toMatchObject({ route, relatedFailures: [], unrelatedFailures: [] });
+    }
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "pending",
+          reason: "pending",
+          targets: [
+            { id: normalizedPublished.id, route: "pending", reason: "pending" },
+            { id: "unexpected", route: "pending", reason: "pending" },
+          ],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("unexpected: unexpected");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "green",
+          reason: "green",
+          targets: [{ id: normalizedPublished.id, route: "green", reason: "green" }],
+          relatedFailures: "bad",
+          unrelatedFailures: [],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("relatedFailures must be an array");
 
     await expect(
       validate("planVerification", {
@@ -455,6 +713,38 @@ describe("built-in autoimplement", () => {
         untested: [],
       }),
     ).rejects.toThrow("not allowed");
+    const safeVerification = {
+      commands: [
+        {
+          id: "verify",
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('ok')"],
+          cwd: repository,
+          timeoutMs: 1_000,
+          maxOutputChars: 1_000,
+        },
+      ],
+      untested: [],
+    };
+    await expect(
+      validate("planVerification", safeVerification, {
+        input: { task: "demo", plan: {}, repository },
+        outputs: { implement: { repositories: "bad" } },
+      }),
+    ).resolves.toMatchObject({ commands: [{ id: "verify" }] });
+    await expect(
+      validate(
+        "planVerification",
+        {
+          ...safeVerification,
+          commands: [{ ...safeVerification.commands[0]!, cwd: path.join(repository, "other") }],
+        },
+        {
+          input: { task: "demo", plan: {}, repository },
+          outputs: { implement: { repositories: [repository] } },
+        },
+      ),
+    ).rejects.toThrow("was not reported by implementation");
     await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
     ).rejects.toThrow("one of retry, blocked");

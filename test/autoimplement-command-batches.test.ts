@@ -2,6 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseAutoimplementConcurrency,
+  parseCiCommand,
   parseCiInspectionBatch,
   parsePublishedRepositories,
   parseVerificationCommandPlan,
@@ -45,6 +46,21 @@ describe("autoimplement command batch contracts", () => {
       repository: path.resolve(repository),
       headRevision: "abc123",
     });
+    expect(
+      parsePublishedRepositories({
+        repositories: [
+          {
+            repository,
+            branch: "feat/demo",
+            baseBranch: "main",
+            headRevision: "abc123",
+            pr: "https://example.test/pr/1",
+            pushed: true,
+            dependencyFingerprint: "sha256:dependency",
+          },
+        ],
+      }).repositories[0],
+    ).toMatchObject({ dependencyFingerprint: "sha256:dependency" });
     expect(reviewerCommand(parsed.repositories[0]!)).toEqual({
       id: repositoryId(repository),
       command: "pi-reviewer",
@@ -71,6 +87,23 @@ describe("autoimplement command batch contracts", () => {
     expect(() =>
       parsePublishedRepositories({ repositories: [{ ...record, pushed: false }] }),
     ).toThrow(/pushed must be true/);
+    expect(() => parsePublishedRepositories({ repositories: [] })).toThrow(/non-empty/);
+    expect(() =>
+      parsePublishedRepositories({
+        repositories: Array.from({ length: 65 }, (_, index) => ({
+          ...record,
+          repository: path.join(repository, String(index)),
+        })),
+      }),
+    ).toThrow(/at most 64/);
+    expect(() =>
+      parsePublishedRepositories({ repositories: [{ ...record, repository: "relative" }] }),
+    ).toThrow(/absolute/);
+    expect(() =>
+      parsePublishedRepositories({
+        repositories: [{ ...record, dependencyFingerprint: 1 }],
+      }),
+    ).toThrow(/non-empty string/);
   });
 
   it("accepts independent verification and rejects duplicate cwd or mutation commands", async () => {
@@ -90,6 +123,7 @@ describe("autoimplement command batch contracts", () => {
         untested: [],
       }),
     ).toMatchObject({ commands: [{ id: "one" }, { id: "two" }] });
+    expect(() => parseVerificationCommandPlan({ commands: [] })).toThrow(/non-empty/);
     expect(() =>
       parseVerificationCommandPlan({ commands: [command("one", first), command("two", first)] }),
     ).toThrow(/distinct working directories/);
@@ -152,6 +186,33 @@ describe("autoimplement command batch contracts", () => {
       ],
     });
     expect(parsed).toMatchObject({ route: "pending", targets: [{ id, route: "pending" }] });
+    for (const route of ["green", "failed", "unavailable"] as const) {
+      expect(
+        parseCiInspectionBatch({
+          targets: [
+            {
+              repository,
+              headRevision: "abc123",
+              pr: "https://example.test/pr/1",
+              route,
+              reason: route,
+            },
+          ],
+        }).route,
+      ).toBe(route);
+    }
+    expect(() => parseCiInspectionBatch({ targets: [] })).toThrow(/non-empty/);
+    expect(() =>
+      parseCiInspectionBatch({
+        targets: Array.from({ length: 65 }, (_, index) => ({
+          repository: path.join(repository, String(index)),
+          headRevision: "abc123",
+          pr: `https://example.test/pr/${index}`,
+          route: "green",
+          reason: "green",
+        })),
+      }),
+    ).toThrow(/at most 64/);
     expect(() =>
       parseCiInspectionBatch({
         targets: [
@@ -159,18 +220,55 @@ describe("autoimplement command batch contracts", () => {
             repository,
             headRevision: "abc123",
             pr: "https://example.test/pr/1",
-            route: "pending",
-            reason: "running",
-            trackingCommand: {
-              id,
-              command: "gh",
-              args: ["pr", "merge"],
-              cwd: repository,
-              timeoutMs: 1,
-            },
+            route: "green",
+            reason: "green",
+          },
+          {
+            repository,
+            headRevision: "abc123",
+            pr: "https://example.test/pr/1",
+            route: "green",
+            reason: "green",
           },
         ],
       }),
-    ).toThrow(/not allowed/);
+    ).toThrow(/duplicated/);
+    expect(() =>
+      parseCiInspectionBatch({
+        targets: [
+          {
+            repository,
+            headRevision: "abc123",
+            pr: "https://example.test/pr/1",
+            route: "unknown",
+            reason: "unknown",
+          },
+        ],
+      }),
+    ).toThrow(/route is invalid/);
+    const command = {
+      id,
+      command: "gh",
+      args: ["pr", "checks", "--watch"],
+      cwd: repository,
+      timeoutMs: 300_000,
+      maxOutputChars: 100_000,
+    };
+    expect(
+      parseCiCommand({ ...command, args: ["run", "watch", "123"] }, id, repository),
+    ).toMatchObject({
+      args: ["run", "watch", "123"],
+    });
+    for (const invalid of [
+      { ...command, id: "wrong" },
+      { ...command, command: "git" },
+      { ...command, args: "bad" },
+      { ...command, cwd: path.join(repository, "other") },
+      { ...command, timeoutMs: 0 },
+      { ...command, maxOutputChars: 0 },
+      { ...command, args: ["pr", "merge"] },
+    ]) {
+      expect(() => parseCiCommand(invalid, id, repository)).toThrow();
+    }
   });
 });
