@@ -289,6 +289,9 @@ export class WorkflowHost {
         },
       },
     });
+    if (!store.markWorkflowRunRunning({ runId, claimToken })) {
+      throw new ClaimLostError(runId);
+    }
     const parkEngine = () => engine.park();
     this.parkedEngines.push(parkEngine);
 

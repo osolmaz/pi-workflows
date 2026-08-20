@@ -11,7 +11,7 @@ const inputSchema = Type.Unknown({
   description: "Checkpoint answer for answer; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
-  description: "Run id; optional for status and answer",
+  description: "Run id; optional for status, cancel, and answer",
 });
 const stepSchema = Type.String({
   description: "Workflow step id; required when action is update or submit",
@@ -50,7 +50,10 @@ export const WorkflowActionSchemas = {
   ),
   pause: Type.Object({ action: Type.Literal("pause") }, noExtraProperties),
   resume: Type.Object({ action: Type.Literal("resume") }, noExtraProperties),
-  cancel: Type.Object({ action: Type.Literal("cancel") }, noExtraProperties),
+  cancel: Type.Object(
+    { action: Type.Literal("cancel"), runId: Type.Optional(runIdSchema) },
+    noExtraProperties,
+  ),
   answer: Type.Object(
     {
       action: Type.Literal("answer"),

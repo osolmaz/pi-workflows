@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { makeTempDir } from "./helpers.js";
@@ -37,6 +39,42 @@ function enqueue(store: SqliteControllerStore, runId = "run-1") {
 }
 
 describe("workflow run queue", () => {
+  it("rejects an incompatible older alpha layout without changing it", async () => {
+    const dir = await makeTempDir("pi-run-queue-old-alpha");
+    const databasePath = path.join(dir, "state", "controller.sqlite");
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    const raw = new Database(databasePath);
+    raw.exec(`
+      CREATE TABLE schema_info (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        schema_id TEXT NOT NULL
+      );
+      INSERT INTO schema_info (singleton, schema_id)
+      VALUES (1, 'pi-workflows.controller-store.v1');
+      CREATE TABLE workflow_run_queue (
+        run_id TEXT PRIMARY KEY,
+        workflow_ref TEXT NOT NULL,
+        workflow_path TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    raw.close();
+
+    expect(() => new SqliteControllerStore(databasePath)).toThrow(
+      /incompatible alpha layout.*reset the project controller store/,
+    );
+    const unchanged = new Database(databasePath, { readonly: true });
+    try {
+      const columns = unchanged.pragma("table_info(workflow_run_queue)") as { name: string }[];
+      expect(columns.map((column) => column.name)).not.toContain("workflow_source_json");
+    } finally {
+      unchanged.close();
+    }
+  });
+
   it("inserts and claims a run atomically", async () => {
     const store = await makeStore();
     const record = enqueue(store);
@@ -44,7 +82,7 @@ describe("workflow run queue", () => {
       runId: "run-1",
       workflowName: "summarize",
       input: { task: "hello" },
-      status: "claimed",
+      status: "starting",
       runnerId: "runner-a",
       claimToken: "token-a",
       affinityRunnerId: "runner-a",
@@ -62,6 +100,118 @@ describe("workflow run queue", () => {
         now: T0,
       }),
     ).toBeUndefined();
+  });
+
+  it("persists a prepared run before activation and releases the reservation on failure", async () => {
+    const store = await makeStore();
+    const prepared = store.reserveWorkflowRun({
+      runId: "prepared-1",
+      workflowName: "summarize",
+      workflowSourceRef: "/project/.pi/workflows/summarize.workflow.ts",
+      workflowSource: { kind: "file", path: "/project/summarize.workflow.ts", hash: "abc" },
+      definitionDigest: "sha256:abc",
+      input: { secretMarker: "private-input" },
+      launchOptions: { presentation: false },
+      runnerId: "runner-a",
+      originSessionId: "session-a",
+      now: T0,
+    });
+    expect(prepared).toMatchObject({
+      runId: "prepared-1",
+      status: "queued",
+      originSessionId: "session-a",
+      definitionDigest: "sha256:abc",
+      launchOptions: { presentation: false },
+    });
+    expect(store.findSessionReservation("session-a")?.runId).toBe("prepared-1");
+
+    const claimed = store.claimWorkflowRun({
+      runId: "prepared-1",
+      runnerId: "runner-a",
+      claimToken: "claim-a",
+      leaseMs: 1_000,
+      now: T1,
+    });
+    expect(claimed?.status).toBe("starting");
+    expect(
+      store.failWorkflowRun({
+        runId: "prepared-1",
+        claimToken: "claim-a",
+        errorCode: "workflow_not_found",
+        errorMessage: "Workflow source is missing",
+        now: T2,
+      }),
+    ).toBe(true);
+    expect(store.getWorkflowRun("prepared-1")).toMatchObject({
+      status: "failed",
+      input: null,
+      launchOptions: {},
+      errorCode: "workflow_not_found",
+      errorMessage: "Workflow source is missing",
+      finishedAt: T2,
+    });
+    expect(store.findSessionReservation("session-a")).toBeUndefined();
+  });
+
+  it("keeps an unactivated starting run out of detached host recovery", async () => {
+    const store = await makeStore();
+    store.reserveWorkflowRun({
+      runId: "prepared-1",
+      workflowName: "summarize",
+      workflowSourceRef: "/project/summarize.workflow.ts",
+      workflowSource: { kind: "file", path: "/project/summarize.workflow.ts", hash: "abc" },
+      definitionDigest: "sha256:abc",
+      input: {},
+      runnerId: "runner-a",
+      originSessionId: "session-a",
+      now: T0,
+    });
+    store.claimWorkflowRun({
+      runId: "prepared-1",
+      runnerId: "runner-a",
+      claimToken: "claim-a",
+      leaseMs: 1_000,
+      now: T0,
+    });
+
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "detached-host",
+        claimToken: "host-claim",
+        leaseMs: 1_000,
+        now: T2,
+      }),
+    ).toBeUndefined();
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "session-runner",
+        claimToken: "session-claim",
+        leaseMs: 1_000,
+        sessionId: "session-a",
+        now: T2,
+      })?.runId,
+    ).toBe("prepared-1");
+  });
+
+  it("cancels a prepared run and permits another session reservation", async () => {
+    const store = await makeStore();
+    const reserve = (runId: string) =>
+      store.reserveWorkflowRun({
+        runId,
+        workflowName: "summarize",
+        workflowSourceRef: "/project/summarize.workflow.ts",
+        workflowSource: { kind: "file", path: "/project/summarize.workflow.ts", hash: "abc" },
+        definitionDigest: "sha256:abc",
+        input: {},
+        runnerId: "runner-a",
+        originSessionId: "session-a",
+        now: T0,
+      });
+    reserve("prepared-1");
+    expect(() => reserve("prepared-2")).toThrow(/UNIQUE constraint/);
+    expect(store.cancelWorkflowRun({ runId: "prepared-1", now: T1 })).toBe(true);
+    expect(store.getWorkflowRun("prepared-1")?.status).toBe("cancelled");
+    expect(reserve("prepared-2").status).toBe("queued");
   });
 
   it("restricts session-bound runs to their origin session", async () => {
@@ -235,7 +385,7 @@ describe("workflow run queue", () => {
     ).toBe(true);
     expect(store.getWorkflowRun(record.runId)).toMatchObject({
       workflowSourceRef: "builtin:summarize",
-      status: "claimed",
+      status: "starting",
       runnerId: "migration",
       claimToken: "migration-token",
     });
@@ -393,7 +543,7 @@ describe("workflow run queue", () => {
     });
     expect(claimed).toMatchObject({
       runId: "run-1",
-      status: "claimed",
+      status: "starting",
       runnerId: "runner-b",
       claimToken: "token-b",
     });

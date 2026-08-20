@@ -556,6 +556,13 @@ possible. Defaults worth knowing:
   held without nudges and the engine pauses at the next boundary. Node
   timeouts keep ticking while held, so a long-abandoned step still times out.
   `/workflow resume` re-delivers the pending step prompt.
+- A model-started workflow is persisted as `queued` with its final run ID before the start tool
+  returns. Activation waits for the initiating agent turn to settle, then moves through `starting`
+  and `running`. `workflow status` and `workflow cancel` accept the run ID before a run bundle
+  exists.
+- If deferred activation fails, the queue stores a bounded safe error, releases the session
+  reservation, and sends one follow-up turn to the initiating model. The model can correct the
+  cause and make a new explicit start call. Pi Workflows does not retry blindly.
 - `/workflow cancel` aborts the current node and marks the run `cancelled`.
   When no run is live but the widget still shows a parked or finished run,
   the same command clears the widget.

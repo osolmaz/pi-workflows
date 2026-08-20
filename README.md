@@ -129,6 +129,11 @@ Then, from any pi conversation:
 /workflow echo summarize this repository
 ```
 
+A model-started workflow is saved before the tool reports it as queued. The returned run ID works
+with `workflow status` and `workflow cancel` before execution starts. Pi Workflows waits for the
+current agent turn to settle before activation. If activation fails, it saves the failure and sends
+one follow-up turn so the model can correct the cause and start a new run.
+
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
 lets the current step finish and then holds the run before the next node. This
 is useful when you want to interject in the conversation mid-workflow.

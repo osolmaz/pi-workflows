@@ -23,6 +23,7 @@ describe("workflow tool input", () => {
     { action: "pause" },
     { action: "resume" },
     { action: "cancel" },
+    { action: "cancel", runId: "run-1" },
     { action: "answer", input: { approved: true } },
     { action: "answer", input: null, runId: "run-1" },
     { action: "update", step: "check", attempt: "try-1", update },

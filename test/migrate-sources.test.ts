@@ -228,7 +228,7 @@ describe("migrateLegacyWorkflowSources", () => {
     const result = await migrateLegacyWorkflowSources({ catalog: catalog(), store, queue });
 
     expect(result.blocked).toEqual([]);
-    expect(queue.getWorkflowRun("live-owner-run")?.status).toBe("claimed");
+    expect(queue.getWorkflowRun("live-owner-run")?.status).toBe("starting");
     queue.close();
   });
 

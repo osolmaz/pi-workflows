@@ -164,6 +164,16 @@ export default defineWorkflow({
 });
 `;
 
+const DURABLE_LAUNCH_WORKFLOW = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "durable-launch-e2e",
+  startAt: "finish",
+  nodes: { finish: compute({ run: ({ input }) => ({ input, recovered: true }) }) },
+  edges: [],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -290,6 +300,32 @@ async function waitForCondition(
   }
 }
 
+async function waitForQueueRecord(
+  controllerFile: string,
+  predicate: (record: ReturnType<SqliteControllerStore["getWorkflowRun"]>) => boolean,
+  onTimeout: () => string,
+  timeoutMs = 15_000,
+): Promise<NonNullable<ReturnType<SqliteControllerStore["getWorkflowRun"]>>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    try {
+      const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+      try {
+        const record = store
+          .listWorkflowRuns()
+          .find((candidate) => candidate.workflowName === "durable-launch-e2e");
+        if (predicate(record)) return record as NonNullable<typeof record>;
+      } finally {
+        store.close();
+      }
+    } catch {
+      // The queue file may not exist yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for workflow queue state.\n${onTimeout()}`);
+}
+
 async function waitForRunState(
   runsDir: string,
   predicate: (state: WorkflowRunState) => boolean,
@@ -335,6 +371,21 @@ describe.sequential("pi-workflows end to end", () => {
       ({ lastUserText, lastRole }) => {
         if (lastUserText.includes("Presentation instructions:")) {
           return { kind: "text", text: "Implemented the boring, proven design." };
+        }
+        if (
+          lastRole === "user" &&
+          (lastUserText === "Start the durable launch fixture now." ||
+            lastUserText === "Start the repaired durable launch fixture now.")
+        ) {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "start",
+              workflow: "durable-launch-e2e",
+              input: { task: lastUserText },
+            },
+          };
         }
         if (lastRole === "user" && lastUserText === "Start the built-in monitor now.") {
           return {
@@ -513,6 +564,11 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "durable-launch-e2e.workflow.ts"),
+      DURABLE_LAUNCH_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "human-decision-e2e.workflow.ts"),
       HUMAN_DECISION_E2E_WORKFLOW,
       "utf8",
@@ -583,6 +639,68 @@ describe.sequential("pi-workflows end to end", () => {
     await pi?.stop();
     await mock?.close();
   });
+
+  it("persists a model-started run, reports deferred failure, and accepts a corrected start", async () => {
+    const workflowFile = path.join(
+      projectDir,
+      ".pi",
+      "workflows",
+      "durable-launch-e2e.workflow.ts",
+    );
+    const requestsBeforeLaunch = mock.requests.length;
+    pi.send({
+      id: "durable-launch-broken",
+      type: "prompt",
+      message: "Start the durable launch fixture now.",
+    });
+
+    const queued = await waitForQueueRecord(
+      controllerFile,
+      (record) => record?.status === "queued",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await fs.unlink(workflowFile);
+    const failed = await waitForQueueRecord(
+      controllerFile,
+      (record) => record?.runId === queued.runId && record.status === "failed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(failed.errorMessage).toContain("workflow");
+
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("failed to start")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () => mock.requests.length >= requestsBeforeLaunch + 3,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+
+    await fs.writeFile(workflowFile, DURABLE_LAUNCH_WORKFLOW, "utf8");
+    pi.send({
+      id: "durable-launch-repaired",
+      type: "prompt",
+      message: "Start the repaired durable launch fixture now.",
+    });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "durable-launch-e2e" && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(state.input).toEqual({ task: "Start the repaired durable launch fixture now." });
+
+    const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+    try {
+      const records = store
+        .listWorkflowRuns()
+        .filter((record) => record.workflowName === "durable-launch-e2e");
+      expect(records.map((record) => record.status).sort()).toEqual(["done", "failed"]);
+      expect(records[0]?.runId).not.toBe(records[1]?.runId);
+    } finally {
+      store.close();
+    }
+  }, 60_000);
 
   it("runs a directly imported child in one real Pi workflow run", async () => {
     pi.send({

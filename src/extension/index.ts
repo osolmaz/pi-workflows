@@ -1,11 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
-import { projectControllerStorePath, SqliteControllerStore } from "../controllers/index.js";
+import {
+  projectControllerStorePath,
+  SqliteControllerStore,
+  type WorkflowRunQueueRecord,
+} from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
+import { compositionMetadata } from "../workflows/composition.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import {
@@ -170,6 +175,12 @@ function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
   return value as HumanDecisionRequest;
 }
 
+type PreparedLaunchOptions = {
+  presentation?: boolean;
+  parentRunId?: string;
+  humanDecision?: AcceptedHumanDecision;
+};
+
 type StartRunOptions = {
   runId?: string;
   childKey?: string;
@@ -186,6 +197,49 @@ type StartRunOptions = {
   /** An existing queue claim token, when the caller already claimed the run. */
   claimToken?: string;
 };
+
+function definitionDigest(snapshot: WorkflowDefinitionSnapshot): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+}
+
+function launchSourceIdentity(workflow: WorkflowDefinition, root: unknown): unknown {
+  return {
+    root,
+    mounted: compositionMetadata(workflow)?.sources ?? [],
+  };
+}
+
+function preparedLaunchOptions(options: StartRunOptions): PreparedLaunchOptions {
+  return {
+    ...(options.presentation !== undefined ? { presentation: options.presentation } : {}),
+    ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+    ...(options.humanDecision !== undefined ? { humanDecision: options.humanDecision } : {}),
+  };
+}
+
+function parsePreparedLaunchOptions(value: unknown): PreparedLaunchOptions {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Stored workflow launch options are invalid");
+  }
+  return value as PreparedLaunchOptions;
+}
+
+function safeLaunchError(error: unknown): { code: string; message: string } {
+  const raw = errorMessage(error)
+    .replace(/Bearer\s+\S+/giu, "Bearer [redacted]")
+    .replace(/(token|api[_-]?key|secret|password)(\s*[:=]\s*)\S+/giu, "$1$2[redacted]")
+    .replaceAll("\n", " ")
+    .trim();
+  const code = /not found|cannot find|unknown workflow/iu.test(raw)
+    ? "workflow_not_found"
+    : /source changed|source mismatch/iu.test(raw)
+      ? "source_changed"
+      : /invalid|must be/iu.test(raw)
+        ? "workflow_invalid"
+        : "activation_failed";
+  const message = raw.length <= 500 ? raw : `${raw.slice(0, 480)}… [error truncated]`;
+  return { code, message: message || "The deferred workflow could not start" };
+}
 
 export type ParsedWorkflowArgs =
   | { kind: "list" }
@@ -343,6 +397,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   // Run events remain an audit feed and never enter a conversation.
   let syncArmed = false;
   let runSyncTimer: ReturnType<typeof setInterval> | null = null;
+  let activationRecovery: ((ctx: ExtensionContext) => void) | undefined;
   let decisionRecoveryTimer: ReturnType<typeof setInterval> | null = null;
   let decisionRecoveryActive = false;
 
@@ -377,6 +432,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   const runSyncPass = (ctx: ExtensionContext): void => {
     if (runQueueStore === null || !syncArmed) return;
     try {
+      activationRecovery?.(ctx);
       const sessionId = ctx.sessionManager.getSessionId();
       const alreadyDelivered = deliveredNotificationIds(ctx);
       const claimToken = randomUUID();
@@ -397,7 +453,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
                 kind: notification.kind,
               },
             },
-            { triggerTurn: false },
+            notification.kind === "launch_failure"
+              ? { triggerTurn: true, deliverAs: "followUp" }
+              : { triggerTurn: false },
           );
           alreadyDelivered.add(notification.notificationId);
         }
@@ -425,12 +483,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let systemTurnAbort: AgentStepContract | null = null;
   let suppressWorkflowAssistantTail = false;
   let lastExpiredAttempt: { contract: AgentStepContract; reason: string } | null = null;
-  let pendingToolLaunch: {
-    ctx: ExtensionContext;
-    ref: string;
-    input: unknown;
-    options?: StartRunOptions;
-  } | null = null;
   // The interactive run currently parked at a checkpoint, if any.
   let lastWaitingRunId: string | null = null;
   let widgetTimer: NodeJS.Timeout | null = null;
@@ -927,7 +979,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
             workflowSource.kind === "builtin"
               ? `builtin:${workflowSource.id}`
               : workflowSource.path,
+          workflowSource: launchSourceIdentity(workflow, workflowSource),
+          definitionDigest: definitionDigest(snapshot),
           input,
+          launchOptions: preparedLaunchOptions(options),
           runnerId,
           claimToken: token,
           leaseMs: RUN_CLAIM_LEASE_MS,
@@ -1063,6 +1118,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ...(options.resume === true ? { resume: true } : {}),
       ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
     };
+    if (
+      queueStore !== null &&
+      claimToken !== undefined &&
+      !queueStore.markWorkflowRunRunning({ runId, claimToken })
+    ) {
+      throw new ClaimLostError(runId);
+    }
     activeRun = run;
     if (queueStore !== null && claimToken !== undefined) {
       const store = queueStore;
@@ -1224,8 +1286,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
           : bundle.state.workflowSource.kind === "builtin"
             ? `builtin:${bundle.state.workflowSource.id}`
             : bundle.state.workflowSource.path;
+      const launchOptions = parsePreparedLaunchOptions(claimed.launchOptions);
       started = await startRun(ctx, sourceRef, claimed.input, {
-        resume: true,
+        ...launchOptions,
+        resume: bundle !== null,
         runId: claimed.runId,
         claimToken,
       });
@@ -1412,8 +1476,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
     return null;
   };
 
-  const cancelWorkflowControl = async (ctx: ExtensionContext): Promise<WorkflowControlResult> => {
-    if (activeRun) {
+  const cancelWorkflowControl = async (
+    ctx: ExtensionContext,
+    requestedRunId?: string,
+  ): Promise<WorkflowControlResult> => {
+    if (activeRun && (requestedRunId === undefined || requestedRunId === activeRun.runId)) {
       const workflowName = activeRun.workflowName;
       const runId = activeRun.runId;
       activeRun.engine.cancel();
@@ -1422,12 +1489,35 @@ export default function piWorkflows(pi: ExtensionAPI) {
         details: { action: "cancel", workflowName, runId },
       };
     }
-    if (pendingToolLaunch !== null) {
-      const ref = pendingToolLaunch.ref;
-      pendingToolLaunch = null;
+    const queue = ensureRunQueueStore(ctx.cwd);
+    const queued =
+      requestedRunId === undefined
+        ? queue.findSessionReservation(ctx.sessionManager.getSessionId())
+        : queue.getWorkflowRun(requestedRunId);
+    if (
+      queued !== undefined &&
+      ["queued", "starting"].includes(queued.status) &&
+      (queued.originSessionId === null ||
+        queued.originSessionId === ctx.sessionManager.getSessionId())
+    ) {
+      if (!queue.cancelWorkflowRun({ runId: queued.runId })) {
+        throw new Error(
+          `Workflow ${queued.runId} could not be cancelled because its state changed.`,
+        );
+      }
+      recordRunEvent({
+        runId: queued.runId,
+        workflowRef: queued.workflowName,
+        type: "cancelled",
+      });
       return {
-        message: `Cancelled the queued workflow launch for ${ref}.`,
-        details: { action: "cancel", workflow: ref, queued: false },
+        message: `Cancelled queued workflow ${queued.workflowName} (run ${queued.runId}).`,
+        details: {
+          action: "cancel",
+          workflow: queued.workflowName,
+          runId: queued.runId,
+          queued: false,
+        },
       };
     }
     if (widgetSource) {
@@ -1538,6 +1628,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
     };
   };
 
+  const workflowLaunchStatus = (record: WorkflowRunQueueRecord): WorkflowControlResult => ({
+    message: `Workflow ${record.workflowName} is ${record.status} (run ${record.runId}).`,
+    details: {
+      action: "status",
+      active: ["starting", "running"].includes(record.status),
+      queued: record.status === "queued",
+      workflowName: record.workflowName,
+      runId: record.runId,
+      status: record.status,
+      ...(record.errorCode === null ? {} : { errorCode: record.errorCode }),
+      ...(record.errorMessage === null ? {} : { error: record.errorMessage }),
+    },
+    ...(["failed", "cancelled"].includes(record.status) ? { level: "warning" as const } : {}),
+  });
+
   const statusWorkflowControl = async (
     ctx: ExtensionContext,
     runId?: string,
@@ -1545,7 +1650,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (runId !== undefined) {
       const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
       if (bundle === null) {
-        throw new Error(`Workflow run not found: ${runId}`);
+        const launch = ensureRunQueueStore(ctx.cwd).getWorkflowRun(runId);
+        if (launch === undefined) throw new Error(`Workflow run not found: ${runId}`);
+        return workflowLaunchStatus(launch);
       }
       const { state } = bundle;
       return {
@@ -1554,11 +1661,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
       };
     }
     const state = activeRun?.lastState ?? widgetSource?.state;
-    if ((state === undefined || state === null) && pendingToolLaunch !== null) {
-      return {
-        message: `Workflow ${pendingToolLaunch.ref} is queued until the current turn finishes.`,
-        details: { active: false, queued: true, workflow: pendingToolLaunch.ref },
-      };
+    if (state === undefined || state === null) {
+      const queued = ensureRunQueueStore(ctx.cwd).findSessionReservation(
+        ctx.sessionManager.getSessionId(),
+      );
+      if (queued !== undefined) return workflowLaunchStatus(queued);
     }
     if (state === undefined || state === null) {
       return {
@@ -1903,8 +2010,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (activeRun !== null) {
       throw new Error(`A workflow is already running: ${activeRun.workflowName}.`);
     }
-    if (pendingToolLaunch !== null) {
-      throw new Error("A workflow launch is already waiting for the current turn to finish.");
+    const reserved = ensureRunQueueStore(ctx.cwd).findSessionReservation(
+      ctx.sessionManager.getSessionId(),
+    );
+    if (reserved !== undefined) {
+      throw new Error(
+        `Workflow ${reserved.workflowName} is already ${reserved.status} (run ${reserved.runId}).`,
+      );
     }
     if (presentationPending !== null) {
       throw new Error("The previous workflow result is still being presented.");
@@ -1930,34 +2042,158 @@ export default function piWorkflows(pi: ExtensionAPI) {
         `A workflow is already running: ${activeRun.workflowName}. Cancel it before starting another.`,
       );
     }
-    if (pendingToolLaunch !== null) {
-      throw new Error("A workflow launch is already waiting for the current turn to finish.");
+    const queue = ensureRunQueueStore(ctx.cwd);
+    const existing = queue.findSessionReservation(ctx.sessionManager.getSessionId());
+    if (existing !== undefined) {
+      throw new Error(
+        `Workflow ${existing.workflowName} is already ${existing.status} (run ${existing.runId}).`,
+      );
     }
     if (presentationPending !== null) {
       throw new Error("The previous workflow result is still being presented.");
     }
-    const reservation = { ctx, ref, input, options };
-    pendingToolLaunch = reservation;
-    try {
-      const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
-      const workflow = resolved.definition;
-      if (pendingToolLaunch !== reservation) {
-        throw new Error("The queued workflow launch was cancelled before validation finished.");
+    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
+    const workflow = resolved.definition;
+    const workflowSource = resolved.source;
+    if (options.parentRunId !== undefined) {
+      const parent = await readRunBundle(new WorkflowRunStore().runDirFor(options.parentRunId));
+      if (parent === null || parent.state.status !== "waiting") {
+        throw new Error(`Workflow run ${options.parentRunId} is not waiting at a checkpoint`);
       }
-      return {
-        message: `Workflow ${workflow.name} will start after this turn finishes.`,
-        details: {
-          action: "start",
-          workflow: workflow.name,
-          source: resolved.source,
-          queued: true,
-        },
-      };
+      if (
+        parent.state.workflowSource !== undefined &&
+        !isDeepStrictEqual(parent.state.workflowSource, workflowSource)
+      ) {
+        throw new Error(
+          `Workflow source changed since run ${options.parentRunId} started; revert the edit to answer its checkpoint`,
+        );
+      }
+    }
+    const snapshot = createDefinitionSnapshot(workflow);
+    const runId = createRunId(workflow.name);
+    try {
+      queue.reserveWorkflowRun({
+        runId,
+        workflowName: workflow.name,
+        workflowSourceRef:
+          workflowSource.kind === "builtin" ? `builtin:${workflowSource.id}` : workflowSource.path,
+        workflowSource: launchSourceIdentity(workflow, workflowSource),
+        definitionDigest: definitionDigest(snapshot),
+        input,
+        launchOptions: preparedLaunchOptions(options),
+        runnerId,
+        originSessionId: ctx.sessionManager.getSessionId(),
+        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+      });
     } catch (error) {
-      if (pendingToolLaunch === reservation) {
-        pendingToolLaunch = null;
+      const reserved = queue.findSessionReservation(ctx.sessionManager.getSessionId());
+      if (reserved !== undefined) {
+        throw new Error(
+          `A workflow launch is already waiting: ${reserved.workflowName} (run ${reserved.runId}).`,
+          { cause: error },
+        );
       }
       throw error;
+    }
+    recordRunEvent({
+      runId,
+      workflowRef: workflow.name,
+      type: "queued",
+      payload: options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId },
+    });
+    syncArmed = true;
+    return {
+      message: `Workflow ${workflow.name} queued (run ${runId}).`,
+      details: {
+        action: "start",
+        workflow: workflow.name,
+        runId,
+        source: workflowSource,
+        queued: true,
+      },
+    };
+  };
+
+  const activatePreparedLaunch = async (
+    ctx: ExtensionContext,
+    prepared: WorkflowRunQueueRecord,
+  ): Promise<boolean> => {
+    const queue = ensureRunQueueStore(ctx.cwd);
+    const claimToken = randomUUID();
+    const claimed = queue.claimWorkflowRun({
+      runId: prepared.runId,
+      runnerId,
+      claimToken,
+      leaseMs: RUN_CLAIM_LEASE_MS,
+    });
+    if (claimed === undefined) return false;
+    try {
+      const resolved = await resolveWorkflowRef(
+        claimed.workflowSourceRef,
+        { cwd: ctx.cwd },
+        builtinWorkflowCatalog,
+      );
+      const snapshot = createDefinitionSnapshot(resolved.definition);
+      if (
+        !isDeepStrictEqual(
+          launchSourceIdentity(resolved.definition, resolved.source),
+          claimed.workflowSource,
+        ) ||
+        definitionDigest(snapshot) !== claimed.definitionDigest
+      ) {
+        throw new Error("Workflow source changed after the launch was queued");
+      }
+      const launchOptions = parsePreparedLaunchOptions(claimed.launchOptions);
+      const started = await startRun(ctx, claimed.workflowSourceRef, claimed.input, {
+        ...launchOptions,
+        runId: claimed.runId,
+        claimToken,
+      });
+      if (started === undefined) throw new Error("The queued workflow could not start");
+      if (launchOptions.parentRunId !== undefined) lastWaitingRunId = null;
+      return true;
+    } catch (error) {
+      const safe = safeLaunchError(error);
+      queue.failWorkflowRun({
+        runId: claimed.runId,
+        claimToken,
+        errorCode: safe.code,
+        errorMessage: safe.message,
+      });
+      recordRunEvent({
+        runId: claimed.runId,
+        workflowRef: claimed.workflowName,
+        type: "launch_failed",
+        payload: { errorCode: safe.code, error: safe.message },
+      });
+      const content = `Workflow ${claimed.workflowName} failed to start (run ${claimed.runId}): ${safe.message}. Inspect the error and call workflow start again only after you correct the cause.`;
+      try {
+        queue.enqueueWorkflowNotification({
+          runId: claimed.runId,
+          nodeId: "$launch",
+          attemptId: claimed.runId,
+          notificationIndex: 1,
+          targetSessionId: claimed.originSessionId ?? ctx.sessionManager.getSessionId(),
+          kind: "launch_failure",
+          content,
+          notificationId: `launch-failure:${claimed.runId}`,
+        });
+      } catch {
+        // A deterministic notification id makes duplicate insertion harmless.
+      }
+      notify(ctx, content, "error");
+      runSyncPass(ctx);
+      return false;
+    }
+  };
+
+  activationRecovery = (ctx) => {
+    if (activeRun !== null) return;
+    const prepared = ensureRunQueueStore(ctx.cwd).findSessionReservation(
+      ctx.sessionManager.getSessionId(),
+    );
+    if (prepared !== undefined && ["queued", "starting"].includes(prepared.status)) {
+      void activatePreparedLaunch(ctx, prepared).catch(() => undefined);
     }
   };
 
@@ -2218,7 +2454,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           control = resumeWorkflowControl(ctx);
           break;
         case "cancel":
-          control = await cancelWorkflowControl(ctx);
+          control = await cancelWorkflowControl(ctx, params.runId);
           break;
         case "answer": {
           const waiting = await resolveWaitingWorkflow(ctx, params.runId);
@@ -2348,7 +2584,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
       notify(ctx, `Could not recover human decisions: ${errorMessage(error)}`, "warning");
     }
     try {
-      await resumeParkedRun(ctx);
+      const prepared = ensureRunQueueStore(ctx.cwd).findSessionReservation(
+        ctx.sessionManager.getSessionId(),
+      );
+      if (prepared !== undefined && ["queued", "starting"].includes(prepared.status)) {
+        await activatePreparedLaunch(ctx, prepared);
+      } else {
+        await resumeParkedRun(ctx);
+      }
     } catch (error) {
       notify(ctx, `Could not resume a parked workflow: ${errorMessage(error)}`, "warning");
     }
@@ -2443,20 +2686,23 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    if (activeRun === null && pendingToolLaunch !== null) {
-      const launch = pendingToolLaunch;
-      pendingToolLaunch = null;
+    if (activeRun === null) {
       try {
-        const runId = await startRun(launch.ctx, launch.ref, launch.input, launch.options);
-        if (runId === undefined) {
-          notify(launch.ctx, "The queued workflow could not start.", "error");
-        } else if (launch.options?.parentRunId !== undefined) {
-          lastWaitingRunId = null;
+        const prepared = ensureRunQueueStore(ctx.cwd).findSessionReservation(
+          ctx.sessionManager.getSessionId(),
+        );
+        if (prepared !== undefined && ["queued", "starting"].includes(prepared.status)) {
+          await activatePreparedLaunch(ctx, prepared);
+          return;
         }
       } catch (error) {
-        notify(launch.ctx, `Could not start queued workflow: ${errorMessage(error)}`, "error");
+        notify(
+          ctx,
+          `Could not activate a queued workflow: ${safeLaunchError(error).message}`,
+          "warning",
+        );
+        return;
       }
-      return;
     }
     const run = activeRun;
     if (!run) {
@@ -2486,7 +2732,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await run?.recorder?.stop().catch(() => undefined);
     await run?.completion?.catch(() => undefined);
     activeRun = null;
-    pendingToolLaunch = null;
     lastWaitingRunId = null;
     if (runSyncTimer !== null) {
       clearInterval(runSyncTimer);

@@ -83,20 +83,36 @@ type WorkflowRow = {
   error: string | null;
 };
 
+export type WorkflowRunLaunchStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "parked"
+  | "done"
+  | "failed"
+  | "cancelled";
+
 type WorkflowRunQueueRow = {
   run_id: string;
   workflow_ref: string;
   workflow_path: string;
+  workflow_source_json: string;
+  definition_digest: string;
   input_json: string;
-  status: "claimed" | "parked" | "done";
+  launch_options_json: string;
+  status: WorkflowRunLaunchStatus;
   runner_id: string | null;
   claim_token: string | null;
   claim_expires_at: number | null;
   affinity_runner_id: string | null;
   origin_session_id: string | null;
   parent_run_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
   created_at: string;
   updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 /** A user-started workflow run tracked by the durable run queue. */
@@ -106,8 +122,11 @@ export type WorkflowRunQueueRecord = {
   workflowName: string;
   /** Canonical source reference used to reopen the run. */
   workflowSourceRef: string;
+  workflowSource: unknown;
+  definitionDigest: string;
   input: unknown;
-  status: "claimed" | "parked" | "done";
+  launchOptions: unknown;
+  status: WorkflowRunLaunchStatus;
   runnerId: string | null;
   claimToken: string | null;
   claimExpiresAt: string | null;
@@ -115,8 +134,12 @@ export type WorkflowRunQueueRecord = {
   /** Pi session that owns delivery and interactive execution, or null for detached runs. */
   originSessionId: string | null;
   parentRunId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 
 type WorkflowNotificationRow = {
@@ -126,7 +149,7 @@ type WorkflowNotificationRow = {
   attempt_id: string;
   notification_index: number;
   target_session_id: string;
-  kind: "progress" | "final";
+  kind: "progress" | "final" | "launch_failure";
   content: string;
   created_at: string;
   delivery_claim_token: string | null;
@@ -141,7 +164,7 @@ export type WorkflowNotificationRecord = {
   attemptId: string;
   notificationIndex: number;
   targetSessionId: string;
-  kind: "progress" | "final";
+  kind: "progress" | "final" | "launch_failure";
   content: string;
   createdAt: string;
   deliveryClaimExpiresAt: string | null;
@@ -799,21 +822,57 @@ export class SqliteControllerStore implements ControllerStore {
       if (row === undefined) {
         throw new Error("Controller store has no schema identifier");
       }
-      return;
+    } else {
+      const existingQueue = this.database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_run_queue'")
+        .get();
+      if (existingQueue !== undefined) this.assertAlphaSchemaLayout();
+      this.transaction(() => {
+        this.database
+          .prepare("INSERT OR IGNORE INTO schema_info (singleton, schema_id) VALUES (1, ?)")
+          .run(CONTROLLER_STORE_SCHEMA);
+        this.database.exec(SCHEMA_SQL);
+      });
     }
-    this.transaction(() => {
-      this.database
-        .prepare("INSERT OR IGNORE INTO schema_info (singleton, schema_id) VALUES (1, ?)")
-        .run(CONTROLLER_STORE_SCHEMA);
-      this.database.exec(SCHEMA_SQL);
-      const queueColumns = this.database.pragma("table_info(workflow_run_queue)") as {
-        name: string;
-      }[];
-      if (!queueColumns.some((column) => column.name === "origin_session_id")) {
-        this.database.exec("ALTER TABLE workflow_run_queue ADD COLUMN origin_session_id TEXT");
-      }
-      this.database.exec("DROP TABLE IF EXISTS session_watermarks");
-    });
+    this.assertAlphaSchemaLayout();
+  }
+
+  private assertAlphaSchemaLayout(): void {
+    const requiredQueueColumns = new Set([
+      "run_id",
+      "workflow_ref",
+      "workflow_path",
+      "workflow_source_json",
+      "definition_digest",
+      "input_json",
+      "launch_options_json",
+      "status",
+      "runner_id",
+      "claim_token",
+      "claim_expires_at",
+      "affinity_runner_id",
+      "origin_session_id",
+      "parent_run_id",
+      "error_code",
+      "error_message",
+      "created_at",
+      "updated_at",
+      "started_at",
+      "finished_at",
+    ]);
+    const actual = new Set(
+      (
+        this.database.pragma("table_info(workflow_run_queue)") as {
+          name: string;
+        }[]
+      ).map((column) => column.name),
+    );
+    const missing = [...requiredQueueColumns].filter((column) => !actual.has(column));
+    if (missing.length > 0) {
+      throw new Error(
+        "Controller store uses an incompatible alpha layout. Preserve needed run bundles, then reset the project controller store.",
+      );
+    }
   }
 
   private transaction<T>(task: () => T): T {
@@ -901,15 +960,68 @@ export class SqliteControllerStore implements ControllerStore {
     return workflow;
   }
 
-  /**
-   * Insert a user-started run and claim it in one statement, so the
-   * originating runner owns the run from birth (origin affinity).
-   */
+  /** Reserve a user-started run before the initiating agent turn settles. */
+  reserveWorkflowRun(options: {
+    runId: string;
+    workflowName: string;
+    workflowSourceRef: string;
+    workflowSource: unknown;
+    definitionDigest: string;
+    input: unknown;
+    launchOptions?: unknown;
+    runnerId: string;
+    originSessionId: string;
+    parentRunId?: string;
+    now?: string;
+  }): WorkflowRunQueueRecord {
+    validateRunId(options.runId);
+    validateKey(options.workflowName, "workflow name");
+    validateKey(options.workflowSourceRef, "workflow source ref");
+    validateKey(options.definitionDigest, "workflow definition digest");
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.originSessionId, "origin session id");
+    const inputJson = canonicalJson(options.input ?? null, "workflow run input");
+    const sourceJson = canonicalJson(options.workflowSource, "workflow run source");
+    const launchJson = canonicalJson(options.launchOptions ?? {}, "workflow launch options");
+    validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
+    validateJsonSize(sourceJson, "Workflow run source", MAX_EVENT_BYTES);
+    validateJsonSize(launchJson, "Workflow launch options", MAX_EVENT_BYTES);
+    const now = validTimestamp(options.now);
+    this.database
+      .prepare(
+        `INSERT INTO workflow_run_queue (
+          run_id, workflow_ref, workflow_path, workflow_source_json, definition_digest,
+          input_json, launch_options_json, status, runner_id, claim_token, claim_expires_at,
+          affinity_runner_id, origin_session_id, parent_run_id, error_code, error_message,
+          created_at, updated_at, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`,
+      )
+      .run(
+        options.runId,
+        options.workflowName,
+        options.workflowSourceRef,
+        sourceJson,
+        options.definitionDigest,
+        inputJson,
+        launchJson,
+        options.runnerId,
+        options.originSessionId,
+        options.parentRunId ?? null,
+        now,
+        now,
+      );
+    return this.requireWorkflowRun(options.runId);
+  }
+
+  /** Insert a run that will start immediately outside a live model turn. */
   enqueueWorkflowRun(options: {
     runId: string;
     workflowName: string;
     workflowSourceRef: string;
+    workflowSource?: unknown;
+    definitionDigest?: string;
     input: unknown;
+    launchOptions?: unknown;
     runnerId: string;
     claimToken: string;
     leaseMs: number;
@@ -928,28 +1040,38 @@ export class SqliteControllerStore implements ControllerStore {
       validateKey(options.originSessionId, "origin session id");
     }
     const inputJson = canonicalJson(options.input ?? null, "workflow run input");
+    const sourceJson = canonicalJson(
+      options.workflowSource ?? { ref: options.workflowSourceRef },
+      "workflow run source",
+    );
+    const launchJson = canonicalJson(options.launchOptions ?? {}, "workflow launch options");
     validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
     const now = validTimestamp(options.now);
     const expiresAt = epoch(now) + options.leaseMs;
     this.database
       .prepare(
         `INSERT INTO workflow_run_queue (
-          run_id, workflow_ref, workflow_path, input_json, status,
-          runner_id, claim_token, claim_expires_at, affinity_runner_id,
-          origin_session_id, parent_run_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          run_id, workflow_ref, workflow_path, workflow_source_json, definition_digest,
+          input_json, launch_options_json, status, runner_id, claim_token, claim_expires_at,
+          affinity_runner_id, origin_session_id, parent_run_id, error_code, error_message,
+          created_at, updated_at, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)`,
       )
       .run(
         options.runId,
         options.workflowName,
         options.workflowSourceRef,
+        sourceJson,
+        options.definitionDigest ?? "unavailable",
         inputJson,
+        launchJson,
         options.runnerId,
         options.claimToken,
         expiresAt,
         options.affinityRunnerId ?? options.runnerId,
         options.originSessionId ?? null,
         options.parentRunId ?? null,
+        now,
         now,
         now,
       );
@@ -976,6 +1098,58 @@ export class SqliteControllerStore implements ControllerStore {
             .prepare("SELECT * FROM workflow_run_queue WHERE status = ? ORDER BY created_at")
             .all(options.status) as WorkflowRunQueueRow[]);
     return rows.map(workflowRunFromRow);
+  }
+
+  findSessionReservation(sessionId: string): WorkflowRunQueueRecord | undefined {
+    validateKey(sessionId, "session id");
+    const row = this.database
+      .prepare(
+        `SELECT * FROM workflow_run_queue
+         WHERE origin_session_id = ? AND status IN ('queued', 'starting', 'running')
+         ORDER BY created_at LIMIT 1`,
+      )
+      .get(sessionId) as WorkflowRunQueueRow | undefined;
+    return row === undefined ? undefined : workflowRunFromRow(row);
+  }
+
+  claimWorkflowRun(options: {
+    runId: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): WorkflowRunQueueRecord | undefined {
+    validateRunId(options.runId);
+    validateKey(options.runnerId, "runner id");
+    validateKey(options.claimToken, "claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    const expiresAt = nowMs + options.leaseMs;
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue
+         SET status = 'starting', runner_id = ?, claim_token = ?, claim_expires_at = ?,
+             started_at = COALESCE(started_at, ?), updated_at = ?
+         WHERE run_id = ? AND (
+           status IN ('queued', 'parked')
+           OR (status = 'starting' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+         )`,
+      )
+      .run(options.runnerId, options.claimToken, expiresAt, now, now, options.runId, nowMs);
+    return result.changes === 1 ? this.requireWorkflowRun(options.runId) : undefined;
+  }
+
+  markWorkflowRunRunning(options: { runId: string; claimToken: string; now?: string }): boolean {
+    validateRunId(options.runId);
+    const now = validTimestamp(options.now);
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue SET status = 'running', updated_at = ?
+         WHERE run_id = ? AND claim_token = ? AND status = 'starting'`,
+      )
+      .run(now, options.runId, options.claimToken);
+    return result.changes === 1;
   }
 
   /**
@@ -1008,11 +1182,11 @@ export class SqliteControllerStore implements ControllerStore {
       excluded.length === 0 ? "" : `AND run_id NOT IN (${excluded.map(() => "?").join(", ")})`;
     const sessionFilter =
       options.sessionId === undefined
-        ? ""
+        ? "AND status != 'queued' AND (status != 'starting' OR origin_session_id IS NULL)"
         : "AND (origin_session_id IS NULL OR origin_session_id = ?)";
     const claimable = `(
-      status = 'parked'
-      OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+      status IN ('queued', 'parked')
+      OR (status IN ('starting', 'running') AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
     )`;
     return this.transaction(() => {
       const candidate = this.database
@@ -1036,14 +1210,14 @@ export class SqliteControllerStore implements ControllerStore {
       const result = this.database
         .prepare(
           `UPDATE workflow_run_queue
-           SET status = 'claimed', runner_id = ?, claim_token = ?,
-               claim_expires_at = ?, updated_at = ?
+           SET status = 'starting', runner_id = ?, claim_token = ?,
+               claim_expires_at = ?, started_at = COALESCE(started_at, ?), updated_at = ?
            WHERE run_id = ? AND (
-             status = 'parked'
-             OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
+             status IN ('queued', 'parked')
+             OR (status IN ('starting', 'running') AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
            )`,
         )
-        .run(options.runnerId, options.claimToken, expiresAt, now, candidate.run_id, nowMs);
+        .run(options.runnerId, options.claimToken, expiresAt, now, now, candidate.run_id, nowMs);
       return result.changes === 1 ? this.requireWorkflowRun(candidate.run_id) : undefined;
     });
   }
@@ -1062,7 +1236,7 @@ export class SqliteControllerStore implements ControllerStore {
     const result = this.database
       .prepare(
         `UPDATE workflow_run_queue SET claim_expires_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'
+         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')
            AND claim_expires_at > ?`,
       )
       .run(expiresAt, options.runId, options.claimToken, nowMs);
@@ -1076,7 +1250,7 @@ export class SqliteControllerStore implements ControllerStore {
     const row = this.database
       .prepare(
         `SELECT 1 AS live FROM workflow_run_queue
-         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'
+         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')
            AND claim_expires_at > ?`,
       )
       .get(options.runId, options.claimToken, nowMs);
@@ -1092,9 +1266,65 @@ export class SqliteControllerStore implements ControllerStore {
         `UPDATE workflow_run_queue
          SET status = 'parked', runner_id = NULL, claim_token = NULL,
              claim_expires_at = NULL, updated_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'`,
+         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')`,
       )
       .run(now, options.runId, options.claimToken);
+    return result.changes === 1;
+  }
+
+  failWorkflowRun(options: {
+    runId: string;
+    claimToken?: string;
+    errorCode: string;
+    errorMessage: string;
+    now?: string;
+  }): boolean {
+    validateRunId(options.runId);
+    validateKey(options.errorCode, "workflow launch error code");
+    const message = options.errorMessage.trim();
+    if (message.length === 0 || Buffer.byteLength(message) > 2_048) {
+      throw new Error("Workflow launch error message must be between 1 and 2048 bytes");
+    }
+    const now = validTimestamp(options.now);
+    const claimFilter = options.claimToken === undefined ? "" : "AND claim_token = ?";
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue
+         SET status = 'failed', runner_id = NULL, claim_token = NULL,
+             claim_expires_at = NULL, parent_run_id = NULL, input_json = 'null',
+             launch_options_json = '{}', error_code = ?, error_message = ?,
+             finished_at = ?, updated_at = ?
+         WHERE run_id = ? AND status IN ('queued', 'starting', 'running') ${claimFilter}`,
+      )
+      .run(
+        options.errorCode,
+        message,
+        now,
+        now,
+        options.runId,
+        ...(options.claimToken === undefined ? [] : [options.claimToken]),
+      );
+    return result.changes === 1;
+  }
+
+  cancelWorkflowRun(options: { runId: string; claimToken?: string; now?: string }): boolean {
+    validateRunId(options.runId);
+    const now = validTimestamp(options.now);
+    const claimFilter = options.claimToken === undefined ? "" : "AND claim_token = ?";
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_run_queue
+         SET status = 'cancelled', runner_id = NULL, claim_token = NULL,
+             claim_expires_at = NULL, input_json = 'null', launch_options_json = '{}',
+             finished_at = ?, updated_at = ?
+         WHERE run_id = ? AND status IN ('queued', 'starting') ${claimFilter}`,
+      )
+      .run(
+        now,
+        now,
+        options.runId,
+        ...(options.claimToken === undefined ? [] : [options.claimToken]),
+      );
     return result.changes === 1;
   }
 
@@ -1119,10 +1349,11 @@ export class SqliteControllerStore implements ControllerStore {
       .prepare(
         `UPDATE workflow_run_queue
          SET status = 'done', runner_id = NULL, claim_token = NULL,
-             claim_expires_at = NULL, updated_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status = 'claimed'`,
+             claim_expires_at = NULL, input_json = 'null', launch_options_json = '{}',
+             finished_at = ?, updated_at = ?
+         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')`,
       )
-      .run(now, options.runId, options.claimToken);
+      .run(now, now, options.runId, options.claimToken);
     return result.changes === 1;
   }
 
@@ -1149,26 +1380,28 @@ export class SqliteControllerStore implements ControllerStore {
       const row = this.database
         .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
         .get(options.runId) as WorkflowRunQueueRow | undefined;
-      if (row === undefined || row.status === "done") return false;
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) {
+        return false;
+      }
       if (row.workflow_path === options.workflowSourceRef && row.status === "parked") {
         return "unchanged";
       }
       const claimable =
         row.status === "parked" ||
-        (row.status === "claimed" &&
+        (row.status === "starting" &&
           row.claim_token === options.claimToken &&
           row.claim_expires_at !== null &&
           row.claim_expires_at > nowMs) ||
-        (row.status === "claimed" &&
+        (row.status === "starting" &&
           row.claim_expires_at !== null &&
           row.claim_expires_at <= nowMs);
       if (!claimable) return false;
       const result = this.database
         .prepare(
           `UPDATE workflow_run_queue
-           SET workflow_ref = ?, workflow_path = ?, status = 'claimed', runner_id = ?,
+           SET workflow_ref = ?, workflow_path = ?, status = 'starting', runner_id = ?,
                claim_token = ?, claim_expires_at = ?, updated_at = ?
-           WHERE run_id = ? AND status != 'done'`,
+           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
         )
         .run(
           options.workflowName,
@@ -1208,26 +1441,28 @@ export class SqliteControllerStore implements ControllerStore {
       const row = this.database
         .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
         .get(options.runId) as WorkflowRunQueueRow | undefined;
-      if (row === undefined || row.status === "done") return false;
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) {
+        return false;
+      }
       const sourceMatches =
         row.workflow_path === options.oldWorkflowPath ||
         row.workflow_path === options.workflowSourceRef;
       const claimable =
         row.status === "parked" ||
-        (row.status === "claimed" &&
+        (row.status === "starting" &&
           row.claim_token === options.claimToken &&
           row.claim_expires_at !== null &&
           row.claim_expires_at > nowMs) ||
-        (row.status === "claimed" &&
+        (row.status === "starting" &&
           row.claim_expires_at !== null &&
           row.claim_expires_at <= nowMs);
       if (!sourceMatches || !claimable) return false;
       const result = this.database
         .prepare(
           `UPDATE workflow_run_queue
-           SET workflow_ref = ?, workflow_path = ?, status = 'claimed', runner_id = ?,
+           SET workflow_ref = ?, workflow_path = ?, status = 'starting', runner_id = ?,
                claim_token = ?, claim_expires_at = ?, updated_at = ?
-           WHERE run_id = ? AND status != 'done'`,
+           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
         )
         .run(
           options.workflowName,
@@ -1297,7 +1532,7 @@ export class SqliteControllerStore implements ControllerStore {
     attemptId: string;
     notificationIndex: number;
     targetSessionId: string;
-    kind: "progress" | "final";
+    kind: "progress" | "final" | "launch_failure";
     content: string;
     notificationId?: string;
     now?: string;
@@ -1483,19 +1718,31 @@ const SCHEMA_SQL = `
     run_id TEXT PRIMARY KEY,
     workflow_ref TEXT NOT NULL,
     workflow_path TEXT NOT NULL,
+    workflow_source_json TEXT NOT NULL,
+    definition_digest TEXT NOT NULL,
     input_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('claimed', 'parked', 'done')),
+    launch_options_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+      status IN ('queued', 'starting', 'running', 'parked', 'done', 'failed', 'cancelled')
+    ),
     runner_id TEXT,
     claim_token TEXT,
     claim_expires_at INTEGER,
     affinity_runner_id TEXT,
     origin_session_id TEXT,
     parent_run_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
   );
   CREATE INDEX IF NOT EXISTS workflow_run_queue_claimable
     ON workflow_run_queue(status, claim_expires_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_queue_session_reservation
+    ON workflow_run_queue(origin_session_id)
+    WHERE origin_session_id IS NOT NULL AND status IN ('queued', 'starting', 'running');
   -- A checkpointed parent admits exactly one continuation run, across
   -- sessions and processes.
   CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_queue_parent
@@ -1519,7 +1766,7 @@ const SCHEMA_SQL = `
     attempt_id TEXT NOT NULL,
     notification_index INTEGER NOT NULL CHECK (notification_index > 0),
     target_session_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final')),
+    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final', 'launch_failure')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
     delivery_claim_token TEXT,
@@ -1643,7 +1890,10 @@ function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
     runId: row.run_id,
     workflowName: row.workflow_ref,
     workflowSourceRef: row.workflow_path,
+    workflowSource: parseStoredJson(row.workflow_source_json, "workflow run source"),
+    definitionDigest: row.definition_digest,
     input: parseStoredJson(row.input_json, "workflow run input"),
+    launchOptions: parseStoredJson(row.launch_options_json, "workflow launch options"),
     status: row.status,
     runnerId: row.runner_id,
     claimToken: row.claim_token,
@@ -1651,8 +1901,12 @@ function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
     affinityRunnerId: row.affinity_runner_id,
     originSessionId: row.origin_session_id,
     parentRunId: row.parent_run_id,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
   };
 }
 

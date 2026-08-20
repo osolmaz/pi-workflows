@@ -24,7 +24,11 @@ export type LegacySourceMigrationQueue = {
     leaseMs: number;
   }): boolean;
   parkWorkflowRun(options: { runId: string; claimToken: string }): boolean;
-  getWorkflowRun(runId: string): { status: "claimed" | "parked" | "done" } | undefined;
+  getWorkflowRun(runId: string):
+    | {
+        status: "queued" | "starting" | "running" | "parked" | "done" | "failed" | "cancelled";
+      }
+    | undefined;
   setWorkflowRunOriginSession?(runId: string, originSessionId: string): boolean;
 };
 

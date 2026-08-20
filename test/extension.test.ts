@@ -224,10 +224,7 @@ function makeHarness(options: {
         message,
         ...(messageOptions === undefined ? {} : { options: messageOptions }),
       });
-      if (
-        message.customType === "pi-workflows-agent-step" &&
-        messageOptions?.triggerTurn === true
-      ) {
+      if (messageOptions?.triggerTurn === true) {
         idle = false;
         queueMicrotask(() => options.respond(message.content, tool as RegisteredTool));
       }
@@ -924,7 +921,7 @@ describe("pi-workflows extension", () => {
     }
   });
 
-  it("reserves one model-started workflow while it validates", async () => {
+  it("reserves one model-started workflow after validation", async () => {
     const cwd = await makeTempDir("pi-workflows-tool-start-reservation");
     await writeEchoWorkflow(cwd);
     const harness = makeHarness({ cwd, respond: () => {} });
@@ -951,12 +948,194 @@ describe("pi-workflows extension", () => {
     const cancelled = await harness.tool.execute("cancel-pending", { action: "cancel" });
     expect(cancelled.details).toMatchObject({ action: "cancel", workflow: "mini", queued: false });
 
-    const validating = harness.tool.execute("start-cancelled", {
+    const queuedAgain = await harness.tool.execute("start-cancelled", {
       action: "start",
       workflow: "mini",
     });
-    await harness.tool.execute("cancel-validating", { action: "cancel" });
-    await expect(validating).rejects.toThrow(/cancelled before validation finished/);
+    await expect(
+      harness.tool.execute("cancel-validating", {
+        action: "cancel",
+        runId: queuedAgain.details.runId as string,
+      }),
+    ).resolves.toMatchObject({ details: { queued: false } });
+  });
+
+  it("recovers a prepared run after the initiating Pi session restarts", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-launch-restart");
+    const runsDir = await makeTempDir("pi-workflows-tool-launch-restart-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const first = makeHarness({ cwd, sessionId: "restart-session", respond: () => {} });
+      const queued = await first.tool.execute("start-before-restart", {
+        action: "start",
+        workflow: "mini",
+      });
+      const runId = queued.details.runId;
+      expect(typeof runId).toBe("string");
+      const queueFile = projectControllerStorePath(cwd);
+      const queue = new SqliteControllerStore(queueFile);
+      try {
+        expect(
+          queue.claimWorkflowRun({
+            runId: runId as string,
+            runnerId: "stopped-runner",
+            claimToken: "stopped-claim",
+            leaseMs: 60_000,
+          })?.status,
+        ).toBe("starting");
+      } finally {
+        queue.close();
+      }
+      await first.emitAsync("session_shutdown");
+
+      const second = makeHarness({ cwd, sessionId: "restart-session", respond: () => {} });
+      await second.emitAsync("session_start");
+      const { default: Database } = await import("better-sqlite3");
+      const raw = new Database(queueFile);
+      raw.prepare("UPDATE workflow_run_queue SET claim_expires_at = 1 WHERE run_id = ?").run(runId);
+      raw.close();
+      await waitFor(
+        () =>
+          second.sentMessages.some(
+            (entry) => entry.message.customType === "pi-workflows-agent-step",
+          ),
+        10_000,
+      );
+      const status = await second.tool.execute("status-after-restart", {
+        action: "status",
+        runId: runId as string,
+      });
+      expect(status.details).toMatchObject({ runId, status: "running" });
+      await second.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects a queued launch when an included workflow source changes", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-launch-include");
+    const workflowDir = path.join(cwd, ".pi", "workflows");
+    await fs.mkdir(workflowDir, { recursive: true });
+    const childPath = path.join(workflowDir, "launch-child.workflow.ts");
+    await fs.writeFile(
+      childPath,
+      `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "launch-child",
+  input: (value) => value,
+  startAt: "work",
+  exits: { ready: { from: "work" } },
+  nodes: { work: compute({ run: () => ({ version: 1 }) }) },
+  edges: [],
+});
+`,
+    );
+    await fs.writeFile(
+      path.join(workflowDir, "launch-parent.workflow.ts"),
+      `import { compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
+import child from "./launch-child.workflow.ts";
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "launch-parent",
+  startAt: "start",
+  includes: { child: includeWorkflow(child, { input: ({ outputs }) => outputs.start }) },
+  nodes: {
+    start: compute({ run: ({ input }) => input }),
+    finish: compute({ run: ({ outputs }) => outputs.child }),
+  },
+  edges: [
+    { from: "start", to: "child" },
+    { from: "child.ready", to: "finish" },
+  ],
+});
+`,
+    );
+    const harness = makeHarness({ cwd, respond: () => {} });
+    await harness.emitAsync("session_start");
+    const queued = await harness.tool.execute("start-included", {
+      action: "start",
+      workflow: "launch-parent",
+    });
+    await fs.writeFile(
+      childPath,
+      (await fs.readFile(childPath, "utf8")).replace("version: 1", "version: 2"),
+    );
+    await harness.emitAsync("agent_settled");
+    const status = await harness.tool.execute("status-included", {
+      action: "status",
+      runId: queued.details.runId as string,
+    });
+    expect(status.details).toMatchObject({ status: "failed", errorCode: "source_changed" });
+  });
+
+  it("reports a deferred launch failure and lets the model start a corrected run", async () => {
+    const cwd = await makeTempDir("pi-workflows-tool-launch-recovery");
+    const runsDir = await makeTempDir("pi-workflows-tool-launch-recovery-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+
+      const queued = await harness.tool.execute("start-broken", {
+        action: "start",
+        workflow: "mini",
+        input: { task: "first" },
+      });
+      expect(queued.details).toMatchObject({ action: "start", queued: true });
+      const firstRunId = queued.details.runId;
+      expect(typeof firstRunId).toBe("string");
+      await fs.unlink(path.join(cwd, ".pi", "workflows", "mini.workflow.ts"));
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) =>
+            entry.message.customType === "pi-workflows-notification" &&
+            entry.message.details?.kind === "launch_failure",
+        ),
+      );
+      const failureMessages = harness.sentMessages.filter(
+        (entry) => entry.message.details?.kind === "launch_failure",
+      );
+      expect(failureMessages).toHaveLength(1);
+      expect(failureMessages[0]).toMatchObject({
+        options: { triggerTurn: true, deliverAs: "followUp" },
+        message: { content: expect.stringContaining("failed to start") },
+      });
+
+      const failed = await harness.tool.execute("status-failed-launch", {
+        action: "status",
+        runId: firstRunId as string,
+      });
+      expect(failed.details).toMatchObject({
+        runId: firstRunId,
+        status: "failed",
+        errorCode: "activation_failed",
+      });
+
+      await writeEchoWorkflow(cwd);
+      const corrected = await harness.tool.execute("start-corrected", {
+        action: "start",
+        workflow: "mini",
+        input: { task: "second" },
+      });
+      expect(corrected.details.runId).not.toBe(firstRunId);
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-agent-step",
+        ),
+      );
+      await harness.emitAsync("agent_settled");
+      expect(
+        harness.sentMessages.filter((entry) => entry.message.details?.kind === "launch_failure"),
+      ).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("bounds failed-run errors returned by workflow status", async () => {
@@ -1780,12 +1959,12 @@ export default defineWorkflow({
       const command = harness.commands.get("workflow");
       await command?.handler("slow", harness.ctx);
 
-      // Wait for the run to be claimed and the node to be in flight.
+      // Wait for the run to be running and the node to be in flight.
       const queueFile = projectControllerStorePath(cwd);
       await waitFor(() => {
         const reader = new SqliteControllerStore(queueFile, { readOnly: true });
         try {
-          return reader.listWorkflowRuns()[0]?.status === "claimed";
+          return reader.listWorkflowRuns()[0]?.status === "running";
         } finally {
           reader.close();
         }
@@ -1861,7 +2040,7 @@ export default defineWorkflow({
         expect(rows.every((row) => row.status === "done")).toBe(true);
         const [parent, child] = rows;
         expect(child?.parentRunId).toBe(parent?.runId);
-        expect(child?.input).toEqual({ approved: true });
+        expect(child?.input).toBeNull();
       } finally {
         queue.close();
       }
@@ -2277,7 +2456,7 @@ export default defineWorkflow({
       await waitFor(() => {
         const reader = new SqliteControllerStore(queueFile, { readOnly: true });
         try {
-          return reader.listWorkflowRuns()[0]?.status === "claimed";
+          return reader.listWorkflowRuns()[0]?.status === "running";
         } finally {
           reader.close();
         }
@@ -2287,11 +2466,11 @@ export default defineWorkflow({
       const { default: Database } = await import("better-sqlite3");
       const raw = new Database(queueFile);
       raw
-        .prepare("UPDATE workflow_run_queue SET claim_expires_at = 1 WHERE status = 'claimed'")
+        .prepare("UPDATE workflow_run_queue SET claim_expires_at = 1 WHERE status = 'running'")
         .run();
       raw
         .prepare(
-          "UPDATE workflow_run_queue SET runner_id = 'other', claim_token = 'other-token', claim_expires_at = 9999999999999 WHERE status = 'claimed'",
+          "UPDATE workflow_run_queue SET runner_id = 'other', claim_token = 'other-token', claim_expires_at = 9999999999999 WHERE status = 'running'",
         )
         .run();
       raw.close();
@@ -2508,7 +2687,7 @@ export default defineWorkflow({
         // The fallback continued the second (unanswered) parent.
         const parents = rows.filter((row) => row.parentRunId === null);
         expect(continuations[1]?.parentRunId).toBe(parents[1]?.runId);
-        expect(continuations[1]?.input).toEqual({ round: 2 });
+        expect(continuations[1]?.input).toBeNull();
       } finally {
         queue.close();
       }
@@ -2620,7 +2799,7 @@ export default defineWorkflow({
         const raw = new Database(queueFile);
         raw
           .prepare(
-            "UPDATE workflow_run_queue SET status = 'claimed', runner_id = 'dead-runner', claim_token = 'stale-token', claim_expires_at = 1 WHERE run_id = ?",
+            "UPDATE workflow_run_queue SET status = 'running', runner_id = 'dead-runner', claim_token = 'stale-token', claim_expires_at = 1 WHERE run_id = ?",
           )
           .run(runId);
         raw.close();
