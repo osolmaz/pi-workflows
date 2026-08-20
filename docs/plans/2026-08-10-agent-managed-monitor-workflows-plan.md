@@ -10,7 +10,7 @@ status: implemented
 
 The user should be able to tell an agent, "Monitor this every 30 minutes," and have the agent start the right workflow. The user must not write controller records or JSON. The existing `workflow` model tool should manage workflows instead of serving only as a step-submission tool.
 
-A monitor is one Pi Workflows graph. It checks the target, reports a meaningful change, sleeps for the requested interval with the existing shell node, and loops. This plan does not use controllers, Unified Exec, a new wait node, or a second scheduler.
+A monitor is one pi-workflows graph. It checks the target, reports a meaningful change, sleeps for the requested interval with the existing shell node, and loops. This plan does not use controllers, Unified Exec, a new wait node, or a second scheduler.
 
 ## Shipped design
 
@@ -84,11 +84,11 @@ The `list` result identifies `monitor` as a built-in workflow and gives a short 
 
 ## Built-in monitor workflow
 
-Ship `monitor` as a built-in workflow in the Pi Workflows package. Built-ins have the lowest discovery precedence:
+Ship `monitor` as a built-in workflow in the pi-workflows package. Built-ins have the lowest discovery precedence:
 
 1. Project workflows under `.pi/workflows/`
 2. Global workflows under `~/.pi/agent/workflows/`
-3. Workflows bundled with Pi Workflows
+3. Workflows bundled with pi-workflows
 
 A project or global `monitor.workflow.ts` can therefore replace the default. The built-in remains a real workflow file so run bundles can record its path and source hash with the existing rules.
 
@@ -112,13 +112,13 @@ prepare -> guard -> check
                     | stop and report -> report-final -> finish
 ```
 
-`prepare` validates and normalizes the input. `guard` enforces `maxChecks`. `check` is an agent node that performs one observation and returns a validated route, a bounded observation, and an optional report. The next `check` can read the previous accepted `check` output, which Pi Workflows already keeps for looped nodes.
+`prepare` validates and normalizes the input. `guard` enforces `maxChecks`. `check` is an agent node that performs one observation and returns a validated route, a bounded observation, and an optional report. The next `check` can read the previous accepted `check` output, which pi-workflows already keeps for looped nodes.
 
 The report nodes write a normal assistant message and then submit an acknowledgement. Keeping reporting after accepted check output prevents the agent from showing a report before the structured result passes validation. The final presentation reports why the monitor stopped without repeating a report that the user already saw.
 
-The sleep node uses the existing Pi Workflows shell action to launch the current Node executable with a timer. Set the node timeout above the largest supported interval because the engine default is 15 minutes. Set the shell execution timeout above the requested wait by a small fixed margin. Cancellation aborts the timer process immediately.
+The sleep node uses the existing pi-workflows shell action to launch the current Node executable with a timer. Set the node timeout above the largest supported interval because the engine default is 15 minutes. Set the shell execution timeout above the requested wait by a small fixed margin. Cancellation aborts the timer process immediately.
 
-If the Pi TUI or standalone workflow host stops during sleep, Pi Workflows parks the run and kills the shell child. Resuming the run starts that sleep node again from the beginning. This is existing workflow behavior and is acceptable for this feature. No special timer persistence is added.
+If the Pi TUI or standalone workflow host stops during sleep, pi-workflows parks the run and kills the shell child. Resuming the run starts that sleep node again from the beginning. This is existing workflow behavior and is acceptable for this feature. No special timer persistence is added.
 
 The workflow uses a high but finite `maxSteps` value as a second safety guard. Check and report values have explicit size limits so a long run cannot grow its bundle without bound.
 
@@ -133,7 +133,7 @@ Make the feature in `osolmaz/pi-workflows`:
 - Add the built-in monitor workflow and focused tests.
 - Update `README.md` and `docs/workflows.md`.
 
-After the upstream change is complete, update the pinned Pi Workflows commit in OnurPi's thin `packages/workflows` wrapper. Do not add a new OnurPi extension or copy a monitor file into live global state.
+After the upstream change is complete, update the pinned pi-workflows commit in OnurPi's thin `packages/workflows` wrapper. Do not add a new OnurPi extension or copy a monitor file into live global state.
 
 ## State and API impact
 
@@ -141,7 +141,7 @@ After the upstream change is complete, update the pinned Pi Workflows commit in 
 - **Other persistent data:** No new data model. The feature uses existing run bundles and the existing workflow run queue.
 - **Pi internals:** None.
 - **Pi public API:** `registerTool`, `registerCommand`, `sendUserMessage`, and documented agent and session lifecycle events.
-- **Pi Workflows API:** The workflow definition and run-state models do not change. The model-facing `workflow` tool contract changes, and discovery gains a lowest-priority built-in source.
+- **pi-workflows API:** The workflow definition and run-state models do not change. The model-facing `workflow` tool contract changes, and discovery gains a lowest-priority built-in source.
 
 ## Non-goals
 
@@ -179,6 +179,6 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 npx -y @simpledoc/simpledoc check
 ```
 
-Test the extension from the Pi Workflows checkout with `pi -e src/extension/index.ts`. Use a short test interval in a controlled fixture, then perform one manual 30-minute monitor run to confirm that the configured node timeout does not stop it. Test plain-language startup with the normal model, then test list, status, pause, resume, cancel, and checkpoint answer actions.
+Test the extension from the pi-workflows checkout with `pi -e src/extension/index.ts`. Use a short test interval in a controlled fixture, then perform one manual 30-minute monitor run to confirm that the configured node timeout does not stop it. Test plain-language startup with the normal model, then test list, status, pause, resume, cancel, and checkpoint answer actions.
 
 After updating OnurPi, run its full checks and start Pi with the installed OnurPi package. Confirm that the model sees one `workflow` tool, discovers `monitor`, and can start it from a plain-language request.

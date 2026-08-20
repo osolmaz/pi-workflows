@@ -8,7 +8,7 @@ status: implemented
 
 # Controller runtime plan
 
-Pi Workflows needs a controller mode for automation that spans repeated events, external state changes, and process restarts. The design in [CONTROLLERS.md](../CONTROLLERS.md) follows the Kubernetes controller pattern. Durable resources hold desired and observed state, events enqueue resource keys, and each reconciliation reads current facts before acting.
+pi-workflows needs a controller mode for automation that spans repeated events, external state changes, and process restarts. The design in [CONTROLLERS.md](../CONTROLLERS.md) follows the Kubernetes controller pattern. Durable resources hold desired and observed state, events enqueue resource keys, and each reconciliation reads current facts before acting.
 
 The implementation keeps the graph engine focused on finite jobs. Controllers start and observe workflows through a child-run interface. Workflow graphs keep their finite execution model.
 

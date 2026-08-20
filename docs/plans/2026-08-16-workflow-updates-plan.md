@@ -10,7 +10,7 @@ This plan implements the contracts in [WORKFLOW_UPDATES.md](../WORKFLOW_UPDATES.
 
 ## Outcome
 
-Pi Workflows will let a running agent, function action, shell action, or claimed runner publish durable structured updates without completing a node. Progress will be one optional update type with shared estimation and presentation helpers.
+pi-workflows will let a running agent, function action, shell action, or claimed runner publish durable structured updates without completing a node. Progress will be one optional update type with shared estimation and presentation helpers.
 
 The built-in monitor will report every accepted check, support optional progress tracks, show live timing in the widget, and deliver notifications without starting an assistant turn.
 
@@ -18,7 +18,7 @@ Interactive agent steps will keep their full model prompts while appearing as co
 
 ## Scope
 
-### Pi Workflows engine
+### pi-workflows engine
 
 - Add public update types and the action context that publishes them.
 - Add fenced update publication to the engine and run store.
@@ -456,7 +456,7 @@ Run package and real-Pi checks again after updating OnurPi. Run the tools skill 
 - The built-in monitor reports every accepted check and has no quiet path.
 - The monitor discloses its finite safety ceiling.
 - TypeScript and Rust viewers agree on replayed progress.
-- All required checks pass in Pi Workflows and OnurPi.
+- All required checks pass in pi-workflows and OnurPi.
 - The published package, OnurPi pin, monitor skill source, and installed Pi copy agree.
 
 ## Risks and controls

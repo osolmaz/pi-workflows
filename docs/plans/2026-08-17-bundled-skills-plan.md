@@ -1,12 +1,12 @@
 ---
-title: Bundle Pi Workflows skills with the extension
+title: Bundle pi-workflows skills with the extension
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-17
 ---
 
-# Bundle Pi Workflows skills with the extension
+# Bundle pi-workflows skills with the extension
 
-Pi Workflows should be the single source of truth for instructions that teach an agent how to use its extension and built-in workflows. Installing the Pi package should discover those skills with the extension, while Pi's normal package filters let users disable either resource type or an individual skill.
+pi-workflows should be the single source of truth for instructions that teach an agent how to use its extension and built-in workflows. Installing the Pi package should discover those skills with the extension, while Pi's normal package filters let users disable either resource type or an individual skill.
 
 ## Outcome
 
@@ -63,7 +63,7 @@ The `workflow` tool description remains the small always-available call contract
 6. Pack the package and start the real Pi runtime from that artifact. Verify that `/skill:pi-workflows` and `/skill:monitor` are discovered with the extension, then verify that package filtering can hide the monitor skill without hiding the extension.
 7. Run all repository checks and Pi Reviewer, merge, release `0.7.0`, and verify npm contents.
 8. Pin `0.7.0` in OnurPi, forward the dependency's skills, and run OnurPi checks.
-9. Remove `agents/skills/monitor` from Tools, run the sync script, and verify that the installed skill now comes from the Pi Workflows package only.
+9. Remove `agents/skills/monitor` from Tools, run the sync script, and verify that the installed skill now comes from the pi-workflows package only.
 
 ## Acceptance criteria
 

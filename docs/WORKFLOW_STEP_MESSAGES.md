@@ -1,6 +1,6 @@
 # Workflow step messages
 
-This specification defines how Pi Workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded.
+This specification defines how pi-workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded.
 
 This contract is implemented for the release after `0.5.3`.
 
@@ -8,7 +8,7 @@ This contract is implemented for the release after `0.5.3`.
 
 Agent-step prompts contain the task, workflow identity, attempt identity, output shape, and submission rules. This information is required by the model, but showing it as a large user message makes the conversation hard to read.
 
-Pi Workflows will send the same prompt as a custom Pi message. A custom renderer will show a compact summary by default and the full content when expanded.
+pi-workflows will send the same prompt as a custom Pi message. A custom renderer will show a compact summary by default and the full content when expanded.
 
 This is a presentation change. It does not add a workflow primitive, change graph execution, or change the step completion contract.
 
@@ -85,7 +85,7 @@ The expanded card shows:
 - expected output
 - full model prompt
 
-Expansion uses Pi's existing custom-message expansion state and keys. Pi Workflows does not add another toggle or store separate expansion state.
+Expansion uses Pi's existing custom-message expansion state and keys. pi-workflows does not add another toggle or store separate expansion state.
 
 ## Reminders and resumes
 
@@ -105,9 +105,9 @@ The two message types must not share delivery code that can accidentally change 
 
 New interactive step deliveries replace `sendUserMessage` with `sendMessage`. Existing session entries remain readable and are not rewritten.
 
-The custom message is a normal documented Pi session message. Pi Workflows adds no Pi session schema, private entry type, or separate persistent store. Run bundles keep the existing full prompt and structured step contract, so this change does not alter the run-bundle schema.
+The custom message is a normal documented Pi session message. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. Run bundles keep the existing full prompt and structured step contract, so this change does not alter the run-bundle schema.
 
-If the renderer is unavailable, Pi still retains the custom message content. Pi Workflows does not add a fallback path that sends a duplicate user message.
+If the renderer is unavailable, Pi still retains the custom message content. pi-workflows does not add a fallback path that sends a duplicate user message.
 
 ## Public API boundary
 

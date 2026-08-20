@@ -9,14 +9,14 @@ date: 2026-08-20
 ## Goal
 
 A successful `workflow start` call must create a real queued workflow before it returns. The model
-must receive the final run ID, and Pi Workflows must start that run only after the current agent turn
+must receive the final run ID, and pi-workflows must start that run only after the current agent turn
 settles.
 
-If startup then fails, Pi Workflows must save the failure and start one new model turn with an
+If startup then fails, pi-workflows must save the failure and start one new model turn with an
 actionable error. The model can correct the request and call `workflow start` again. A failed launch
 must release the session reservation so the corrected run can start.
 
-This change stays inside Pi Workflows. It uses the existing project-scoped SQLite controller store
+This change stays inside pi-workflows. It uses the existing project-scoped SQLite controller store
 and documented Pi extension APIs. It does not change Pi, add a service, or add another database.
 
 ## Current failure
@@ -39,7 +39,7 @@ the workflow had started.
 
 Use a durable prepared run and one model-visible failure follow-up.
 
-During the `workflow start` tool call, Pi Workflows will:
+During the `workflow start` tool call, pi-workflows will:
 
 1. Resolve and validate the workflow and all available start conditions.
 2. Allocate the final run ID.
@@ -47,7 +47,7 @@ During the `workflow start` tool call, Pi Workflows will:
 4. Reserve the initiating Pi session.
 5. Return the run ID and say that the workflow is queued.
 
-After the current agent turn settles, Pi Workflows will:
+After the current agent turn settles, pi-workflows will:
 
 1. Claim the queued record.
 2. Change it to `starting`.
@@ -55,7 +55,7 @@ After the current agent turn settles, Pi Workflows will:
 4. Change the record to `running`.
 5. Release the engine to run the first node.
 
-If startup fails, Pi Workflows will:
+If startup fails, pi-workflows will:
 
 1. Change the record to `failed`.
 2. Save a bounded safe error.
@@ -66,11 +66,11 @@ If startup fails, Pi Workflows will:
 
 The new model turn will contain the failed run ID and an actionable error. The model can fix the
 workflow reference, input, source, or local condition and call `workflow start` again. Each retry is
-an explicit model action with a new run ID. Pi Workflows does not perform a blind automatic retry.
+an explicit model action with a new run ID. pi-workflows does not perform a blind automatic retry.
 
 ## Alpha compatibility contract
 
-Pi Workflows is in alpha. Change the current storage and tool contracts in place.
+pi-workflows is in alpha. Change the current storage and tool contracts in place.
 
 - Keep `pi-workflows.controller-store.v1`.
 - Keep existing run-bundle schema identifiers.
@@ -80,7 +80,7 @@ Pi Workflows is in alpha. Change the current storage and tool contracts in place
 - Change the SQLite table definitions and TypeScript types directly.
 - Remove the superseded status values and launch path in the same change.
 
-An existing controller store with the old alpha table layout is incompatible. On open, Pi Workflows
+An existing controller store with the old alpha table layout is incompatible. On open, pi-workflows
 must verify the required table columns and status contract. If the layout is old, it must stop with a
 clear instruction to preserve any needed run evidence and reset the project-scoped controller store.
 It must not silently reinterpret or delete old state.
@@ -150,7 +150,7 @@ Inspect the error and call workflow start again only after you correct the cause
 The message does not contain raw workflow input, prompt text, credentials, request headers, or a
 stack trace.
 
-The failure notification has a deterministic ID derived from the run ID. Pi Workflows records its
+The failure notification has a deterministic ID derived from the run ID. pi-workflows records its
 delivery in the existing notification outbox. Before a delivery retry, it checks the native Pi
 session for that notification ID. This prevents a duplicate after a crash between session append and
 outbox acknowledgement.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-request-v2.schema.json",
-  "title": "Pi Workflows human decision request v2",
+  "title": "pi-workflows human decision request v2",
   "type": "object",
   "additionalProperties": false,
   "required": [

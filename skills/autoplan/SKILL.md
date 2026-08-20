@@ -1,7 +1,7 @@
 ---
 name: autoplan
 description: Use when the user asks to devise, choose, or plan the most elegant long-term production-ready solution, compare it with the ideal end state, and produce the best practical in-scope implementation plan without asking the user to resolve the gap.
-compatibility: Requires Pi Workflows and the built-in autoplan workflow.
+compatibility: Requires pi-workflows and the built-in autoplan workflow.
 ---
 
 # Autoplan

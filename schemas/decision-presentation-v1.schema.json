@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/osolmaz/pi-workflows/schemas/decision-presentation-v1.schema.json",
-  "title": "Pi Workflows decision presentation v1",
+  "title": "pi-workflows decision presentation v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "summary", "blocks"],

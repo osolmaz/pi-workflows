@@ -105,13 +105,13 @@ export async function loadDecisionChannelConfig(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  await requirePrivateFile(channelPath, "Pi Workflows channel profile");
+  await requirePrivateFile(channelPath, "pi-workflows channel profile");
   const channels = parseChannelConfig(channelsRaw);
   const profileNames = Object.keys(channels.telegramProfiles ?? {});
   if (profileNames.length === 0) return { channels, credentials: {}, configDir };
 
   const credentialPath = path.join(configDir, "credentials.json");
-  await requirePrivateFile(credentialPath, "Pi Workflows credential profile");
+  await requirePrivateFile(credentialPath, "pi-workflows credential profile");
   const credentialConfig = parseCredentialConfig(
     JSON.parse(await fsp.readFile(credentialPath, "utf8")),
   );
@@ -1163,9 +1163,9 @@ export async function writeDecisionChannelProfile(options: {
 }
 
 function parseChannelConfig(value: unknown): DecisionChannelConfig {
-  const config = record(value, "Pi Workflows channel config");
+  const config = record(value, "pi-workflows channel config");
   if (config.schema !== "pi-workflows.channels.v1") {
-    throw new Error("Pi Workflows channel config schema is invalid");
+    throw new Error("pi-workflows channel config schema is invalid");
   }
   const telegramProfiles: NonNullable<DecisionChannelConfig["telegramProfiles"]> = {};
   if (config.telegramProfiles !== undefined) {
@@ -1191,7 +1191,7 @@ function parseChannelConfig(value: unknown): DecisionChannelConfig {
       };
     }
   }
-  const audiencesRaw = record(config.audiences, "Pi Workflows audiences");
+  const audiencesRaw = record(config.audiences, "pi-workflows audiences");
   const audiences: DecisionChannelConfig["audiences"] = {};
   for (const [name, raw] of Object.entries(audiencesRaw)) {
     requireSimpleId(name, "Decision audience");
@@ -1219,9 +1219,9 @@ function parseChannelConfig(value: unknown): DecisionChannelConfig {
 }
 
 function parseCredentialConfig(value: unknown): DecisionCredentialConfig {
-  const config = record(value, "Pi Workflows credential config");
+  const config = record(value, "pi-workflows credential config");
   if (config.schema !== "pi-workflows.credentials.v1") {
-    throw new Error("Pi Workflows credential config schema is invalid");
+    throw new Error("pi-workflows credential config schema is invalid");
   }
   const telegram: DecisionCredentialConfig["telegram"] = {};
   for (const [name, raw] of Object.entries(record(config.telegram, "Telegram credentials"))) {

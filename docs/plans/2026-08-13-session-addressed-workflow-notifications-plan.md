@@ -6,7 +6,7 @@ date: 2026-08-13
 
 # Route workflow reports to their starting session
 
-Pi Workflows must not send one workflow's report into an unrelated conversation. A workflow started in one Pi session must report only to that session, even when another session or the standalone host executes part of the run.
+pi-workflows must not send one workflow's report into an unrelated conversation. A workflow started in one Pi session must report only to that session, even when another session or the standalone host executes part of the run.
 
 ## Requirements
 

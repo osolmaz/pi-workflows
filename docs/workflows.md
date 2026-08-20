@@ -13,9 +13,9 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 
 1. `.pi/workflows/` in the project (highest precedence on name collisions)
 2. `~/.pi/agent/workflows/` globally
-3. Workflows built into Pi Workflows
+3. Workflows built into pi-workflows
 
-Pi Workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
+pi-workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
 `plan-approval`, and `monitor` workflows. `autoplan` is the current name for the
 planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
@@ -445,9 +445,9 @@ The first check runs immediately. Omit `repair` for observation-only monitoring.
 runtime queues that report as a workflow notification with `triggerTurn:
 false`, so it does not cause an assistant reply. A check can also provide
 independent progress tracks. The regular Pi model running the check observes
-the target and submits those facts. Pi Workflows validates the counts and
+the target and submits those facts. pi-workflows validates the counts and
 calculates rates, confidence, and ETA deterministically. The target does not
-need a Pi Workflows dependency or reporting protocol.
+need a pi-workflows dependency or reporting protocol.
 
 Intervals must be whole minutes from 1 through 1,440. When `stopWhen` is
 omitted, the monitor stops only after an explicit user request. `maxChecks`
@@ -562,7 +562,7 @@ possible. Defaults worth knowing:
   exists.
 - If deferred activation fails, the queue stores a bounded safe error, releases the session
   reservation, and sends one follow-up turn to the initiating model. The model can correct the
-  cause and make a new explicit start call. Pi Workflows does not retry blindly.
+  cause and make a new explicit start call. pi-workflows does not retry blindly.
 - `/workflow cancel` aborts the current node and marks the run `cancelled`.
   When no run is live but the widget still shows a parked or finished run,
   the same command clears the widget.

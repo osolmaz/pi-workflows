@@ -1,10 +1,10 @@
 # Controller runtime specification
 
-Pi Workflows runs finite TypeScript graphs. A graph starts with an input, follows explicit edges, and ends with a result or checkpoint. This works well for one bounded task.
+pi-workflows runs finite TypeScript graphs. A graph starts with an input, follows explicit edges, and ends with a result or checkpoint. This works well for one bounded task.
 
 Long-running automation has a different job. It must keep comparing a requested state with the current state of another system. Events can arrive more than once, processes can stop between an external request and its local receipt, and the external state can change while work is running.
 
-This specification adds a Kubernetes-style controller runtime to Pi Workflows. The controller runtime sits beside the graph engine. Controllers manage durable resources, while workflows remain finite jobs that a controller can start and observe.
+This specification adds a Kubernetes-style controller runtime to pi-workflows. The controller runtime sits beside the graph engine. Controllers manage durable resources, while workflows remain finite jobs that a controller can start and observe.
 
 The design follows the Kubernetes [controller pattern](https://kubernetes.io/docs/concepts/architecture/controller/), its [`spec` and `status` split](https://kubernetes.io/docs/concepts/overview/working-with-objects/), and the [idempotent reconciliation guidance](https://book.kubebuilder.io/reference/good-practices).
 

@@ -8,7 +8,7 @@ status: implemented
 
 # Always-on workflows plan
 
-Pi Workflows should feel the same whether the user watches a run or walks away from it. In the user's words: "I might start a workflow locally in Pi then I wait for it to complete. All the while I am looking at the screen and I'm not closing the Pi window. When the workflow ends I just want to be able to continue the same Pi session like normal with a session up to date with what happened in the workflow." And: "I just want to interact by starting a workflow, closing it, and then coming back and then still being able to continue it when I open it up. It's syncing continuously or something."
+pi-workflows should feel the same whether the user watches a run or walks away from it. In the user's words: "I might start a workflow locally in Pi then I wait for it to complete. All the while I am looking at the screen and I'm not closing the Pi window. When the workflow ends I just want to be able to continue the same Pi session like normal with a session up to date with what happened in the workflow." And: "I just want to interact by starting a workflow, closing it, and then coming back and then still being able to continue it when I open it up. It's syncing continuously or something."
 
 These are not two modes. The user asked for "both in a single unified system." This plan makes the Pi window irrelevant to execution: closing or opening the window is a change in observation, not in the run. The work stays on one machine, uses the merged controller runtime as its foundation, and does not modify Pi core.
 

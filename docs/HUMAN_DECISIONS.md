@@ -1,6 +1,6 @@
 # Human decisions
 
-Pi Workflows needs a reusable way to stop at a proposal and wait for a person. The same decision must appear in Pi and Telegram, and either channel must be able to continue the run. Workflows must be able to offer plain choices, choices that collect text, and choices that route back to planning.
+pi-workflows needs a reusable way to stop at a proposal and wait for a person. The same decision must appear in Pi and Telegram, and either channel must be able to continue the run. Workflows must be able to offer plain choices, choices that collect text, and choices that route back to planning.
 
 This document defines that behavior. The implementation is tracked in the [human decision gates plan](plans/2026-08-19-human-decision-gates-plan.md).
 
@@ -197,7 +197,7 @@ Private configuration maps the audience to channels:
 
 The workflow never receives a bot token, user ID, chat ID, Telegram message ID, or Pi session detail. Channel profiles are private host configuration and are excluded from run presentation.
 
-Pi Workflows keeps credential references in a separate private file. A Telegram credential points to an existing absolute mode-`0600` token file:
+pi-workflows keeps credential references in a separate private file. A Telegram credential points to an existing absolute mode-`0600` token file:
 
 ```json
 {
@@ -254,11 +254,11 @@ The adapter does not infer a choice from ordinary chat text. Callback payloads c
 
 Telegram permits one long-polling consumer for a bot profile. Active Pi processes use a shared lease so one process owns polling and the others use the same private channel state. The lease owner can accept a verified reply, but only the Pi session that owns the waiting run creates its continuation. Active sessions inspect the durable accepted-answer fence and recover their own continuation. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
 
-The Bot API does not provide an idempotency key for `sendMessage`. Pi Workflows therefore writes a delivery intent before sending and never blindly retries an ambiguous send. A timed-out send is recorded as `unknown`; Pi remains available and an operator can request another delivery. This avoids automatic duplicate messages while keeping decision acceptance exactly once.
+The Bot API does not provide an idempotency key for `sendMessage`. pi-workflows therefore writes a delivery intent before sending and never blindly retries an ambiguous send. A timed-out send is recorded as `unknown`; Pi remains available and an operator can request another delivery. This avoids automatic duplicate messages while keeping decision acceptance exactly once.
 
 ## Durable decision records
 
-Decision records live next to workflow run bundles under the Pi Workflows state root. They are additive and linked by run ID. A decision directory contains immutable records for:
+Decision records live next to workflow run bundles under the pi-workflows state root. They are additive and linked by run ID. A decision directory contains immutable records for:
 
 - the request;
 - channel delivery intents and results;
@@ -276,7 +276,7 @@ SQLite may index pending decisions and channel leases, but immutable decision fi
 
 ## Planning workflow composition
 
-Pi Workflows keeps solution choice, documentation, and implementation in separate built-ins:
+pi-workflows keeps solution choice, documentation, and implementation in separate built-ins:
 
 - `autoplan` chooses a solution or revises one after new evidence.
 - `autodoc` records an already selected solution in the canonical specification and implementation plan. It does not choose a solution or implement it.
@@ -290,7 +290,7 @@ If later implementation, verification, review, comments, or CI evidence invalida
 
 ## Reusable plan approval workflow
 
-Pi Workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its input contains the documented plan, plan digest, audience, and display summary. It has three named exits:
+pi-workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its input contains the documented plan, plan digest, audience, and display summary. It has three named exits:
 
 - `continue`, with the approval receipt;
 - `stop`, with the stop receipt; and
@@ -345,7 +345,7 @@ The engine remains independent from Pi and Telegram. Core code owns decision con
 - **Other persistent data:** additive decision records, a rebuildable private channel index, and private channel configuration.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle and UI methods only.
-- **Public Pi Workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.
+- **Public pi-workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.
 
 ## Verification requirements
 

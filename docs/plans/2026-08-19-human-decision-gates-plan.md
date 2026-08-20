@@ -6,9 +6,9 @@ date: 2026-08-19
 
 # Add reusable human decision gates
 
-Pi Workflows must let any workflow stop after a proposal, ask the operator in Pi and Telegram, and continue from a verified human choice. A `replan` choice must collect the operator's exact alternative text, send it back to planning, and present the revised plan for another decision.
+pi-workflows must let any workflow stop after a proposal, ask the operator in Pi and Telegram, and continue from a verified human choice. A `replan` choice must collect the operator's exact alternative text, send it back to planning, and present the revised plan for another decision.
 
-The canonical behavior and public contracts are in [Human decisions](../HUMAN_DECISIONS.md). This plan covers the practical implementation in Pi Workflows without changing Pi core or adding a persistent operating-system service.
+The canonical behavior and public contracts are in [Human decisions](../HUMAN_DECISIONS.md). This plan covers the practical implementation in pi-workflows without changing Pi core or adding a persistent operating-system service.
 
 ## Outcome
 
@@ -62,7 +62,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Add a Telegram channel using the Bot API and private profiles.
 - Add named audience resolution and private channel configuration.
 - Add a setup command that writes private configuration with mode `600`, references an existing mode-`0600` token file, and verifies the Telegram bot without reading the token into a prompt or printing it.
-- Keep Telegram optional. Pi Workflows must start and run normal workflows without Telegram configuration.
+- Keep Telegram optional. pi-workflows must start and run normal workflows without Telegram configuration.
 - Use one leased long-poll owner per Telegram profile across active Pi processes.
 
 ### Documentation and display
@@ -293,4 +293,4 @@ This work adds compatible public APIs and additive persisted records. Release it
 - **Other persistent data:** additive decision records, a rebuildable private channel index, and private channel configuration.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle plus command and UI methods only.
-- **Public Pi Workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.
+- **Public pi-workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.

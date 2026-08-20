@@ -12,7 +12,7 @@ The canonical workflow behavior is in [Workflow authoring reference](../workflow
 
 ## Outcome
 
-Add one independent `challengeBlocker` agent node to the built-in autoimplement workflow. Use only existing public Pi Workflows primitives. Keep the graph explicit and reuse the existing redesign include and terminal blocked result.
+Add one independent `challengeBlocker` agent node to the built-in autoimplement workflow. Use only existing public pi-workflows primitives. Keep the graph explicit and reuse the existing redesign include and terminal blocked result.
 
 The challenge asks these questions in plain terms:
 
@@ -120,7 +120,7 @@ Review the final diff for missing blocker routes, accidental unbounded loops, an
 ## Boundaries
 
 - Preserve current run-bundle schemas unless a schema change is required. Do not add a persistence layer.
-- Use existing public Pi Workflows primitives only. Do not change Pi core.
+- Use existing public pi-workflows primitives only. Do not change Pi core.
 - Keep explicit human and protected authorization boundaries intact.
 - Use a hard cutover. Do not retain a legacy blocker route.
 - Preserve unrelated work and do not modify other repositories.
@@ -135,4 +135,4 @@ Review the final diff for missing blocker routes, accidental unbounded loops, an
 - **Other persistent data:** none beyond the existing run bundle records for normal node outputs.
 - **Pi internals:** none.
 - **Public Pi API:** existing documented extension APIs only.
-- **Public Pi Workflows API:** existing agent, compute, edge, and included-workflow primitives only.
+- **Public pi-workflows API:** existing agent, compute, edge, and included-workflow primitives only.

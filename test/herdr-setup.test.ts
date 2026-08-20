@@ -42,7 +42,7 @@ async function makePackage(label = "pi-workflows-herdr-sync", version = "0.11.0"
     path.join(root, "herdr-plugin.toml"),
     [
       `id = "${HERDR_PLUGIN_ID}"`,
-      'name = "Pi Workflows"',
+      'name = "pi-workflows"',
       `version = "${version}"`,
       'min_herdr_version = "0.7.0"',
       'platforms = ["linux", "macos"]',
@@ -336,7 +336,7 @@ describe("syncHerdrPlugin", () => {
       path.join(wrongName, "package.json"),
       `${JSON.stringify({ name: "other", version: "0.11.0" })}\n`,
     );
-    expect(() => syncHerdrPlugin(wrongName, () => reply())).toThrow("Unexpected Pi Workflows");
+    expect(() => syncHerdrPlugin(wrongName, () => reply())).toThrow("Unexpected pi-workflows");
 
     const missingVersion = await makePackage("pi-workflows-missing-version");
     await fs.writeFile(

@@ -1,7 +1,7 @@
 ---
 name: autodoc
 description: Use when an existing selected solution or clear implementation plan must be recorded or updated in canonical documentation before implementation, including choosing the right repository and applying SimpleDoc conventions.
-compatibility: Requires Pi Workflows and the built-in autodoc workflow.
+compatibility: Requires pi-workflows and the built-in autodoc workflow.
 ---
 
 # Autodoc

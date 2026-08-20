@@ -8,7 +8,7 @@ date: 2026-08-18
 
 ## Purpose
 
-When Pi Workflows runs inside Herdr, show a shortcut that opens the current run in `piw`. The integration must belong to Pi Workflows and ship as one package, repository, version, and release. The same repository must also qualify for Herdr's public plugin marketplace.
+When pi-workflows runs inside Herdr, show a shortcut that opens the current run in `piw`. The integration must belong to pi-workflows and ship as one package, repository, version, and release. The same repository must also qualify for Herdr's public plugin marketplace.
 
 ## Requirements
 

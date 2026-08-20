@@ -1,7 +1,7 @@
 ---
 name: autoimplement
 description: Use when the user asks to implement a plan end-to-end, test it, run Pi Reviewer against the base branch in a loop until no P0/P1 issues remain, and make sure CI/CD is green before finishing.
-compatibility: Requires Pi Workflows and the built-in autoimplement workflow.
+compatibility: Requires pi-workflows and the built-in autoimplement workflow.
 ---
 
 Use the built-in `autoimplement` Pi Workflow when it is available. At top level, list workflows, then start `autoimplement` once with the task, existing plan, repository, scope, constraints, base branch, and merge policy from the conversation. Set `merge: true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set it to false. Do not manually duplicate stages already owned by the workflow.

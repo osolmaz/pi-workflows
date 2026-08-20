@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/osolmaz/pi-workflows/schemas/human-decision-accepted-v1.schema.json",
-  "title": "Pi Workflows accepted human decision v1",
+  "title": "pi-workflows accepted human decision v1",
   "type": "object",
   "additionalProperties": false,
   "required": [

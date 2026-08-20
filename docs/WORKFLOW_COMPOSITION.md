@@ -1,6 +1,6 @@
 # Workflow composition
 
-Pi Workflows can include one workflow inside another without copying nodes, prompts, or routing logic. The included workflow still runs on its own. The parent supplies input and connects the included workflow's named exits to later parent steps.
+pi-workflows can include one workflow inside another without copying nodes, prompts, or routing logic. The included workflow still runs on its own. The parent supplies input and connects the included workflow's named exits to later parent steps.
 
 Composition keeps one run, trace, pause state, cancellation state, and final presentation. Controllers remain the correct tool for independent or indefinitely reconciled child runs.
 
@@ -306,7 +306,7 @@ This is a compatible public API addition under the project's pre-1.0 policy. It 
 - **Other persistent data:** additive source and mount data, definition digests, and include events in existing run bundles.
 - **Pi internals:** none.
 - **Public Pi API:** existing extension APIs only.
-- **Public Pi Workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, and `defineWorkflowRegistry()`.
+- **Public pi-workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, and `defineWorkflowRegistry()`.
 
 ## Required tests
 

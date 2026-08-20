@@ -66,7 +66,7 @@ If identity or revision cannot be proved, leave the run unchanged and report a c
 
 ## Scope and non-goals
 
-This changes Pi Workflows only. It uses no Pi internals and changes no Pi session entry. It updates Pi Workflows run bundles and controller queue records as described above.
+This changes pi-workflows only. It uses no Pi internals and changes no Pi session entry. It updates pi-workflows run bundles and controller queue records as described above.
 
 It does not add runtime compatibility readers, aliases, dual-write fields, or a permanent migration service. It does not hot-reload package-provided built-ins. A package update takes effect after Pi reload or restart.
 

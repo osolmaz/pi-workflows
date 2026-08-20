@@ -23,7 +23,7 @@ Repository rules:
 
 ## Alpha compatibility policy
 
-Pi Workflows is in alpha. Until the repository explicitly leaves alpha:
+pi-workflows is in alpha. Until the repository explicitly leaves alpha:
 
 - Do not preserve backward compatibility unless the user explicitly requires it for a task.
 - Change persisted schemas and public contracts in place. Keep their current version identifiers.

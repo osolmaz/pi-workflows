@@ -6,7 +6,7 @@ date: 2026-08-19
 
 # Add typed workflow composition and automatic repair
 
-Pi Workflows needs reusable nested workflows with normal TypeScript imports. Monitor must be able to devise and implement a repair when mutation is authorized. Autoimplement must move back to solution design when new evidence invalidates its plan, correct failed reviewer commands, track P0, P1, and P2 findings, and use long CI waits for additional local testing.
+pi-workflows needs reusable nested workflows with normal TypeScript imports. Monitor must be able to devise and implement a repair when mutation is authorized. Autoimplement must move back to solution design when new evidence invalidates its plan, correct failed reviewer commands, track P0, P1, and P2 findings, and use long CI waits for additional local testing.
 
 The canonical behavior is in [Workflow composition](../WORKFLOW_COMPOSITION.md).
 
@@ -305,4 +305,4 @@ The package and Rust viewer version is `0.10.0`.
 - **Other persistent data:** additive mount, source, digest, review, and CI evidence in existing run bundles.
 - **Pi internals:** none.
 - **Public Pi API:** existing documented extension APIs only.
-- **Public Pi Workflows API:** generic input and exits, direct and dynamic `includeWorkflow()`, and `defineWorkflowRegistry()`.
+- **Public pi-workflows API:** generic input and exits, direct and dynamic `includeWorkflow()`, and `defineWorkflowRegistry()`.

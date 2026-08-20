@@ -6,7 +6,7 @@ date: 2026-08-19
 
 # Add readable human decision presentations
 
-Pi Workflows currently sends a structured human decision body to Telegram with
+pi-workflows currently sends a structured human decision body to Telegram with
 `JSON.stringify()`. A plan approval therefore reaches the operator as machine
 JSON. Pi also shows only the decision title in its basic selection prompt.
 

@@ -1,7 +1,7 @@
 ---
 name: monitor
 description: Use when the user asks to monitor, watch, track, or periodically check a running command, remote Job, CI run, deployment, publication, or other long-running objective. Starts the built-in Pi monitor workflow immediately in the current session and drives the objective autonomously, including routine recovery, until verified completion or a material blocker.
-compatibility: Requires Pi Workflows and the built-in monitor workflow.
+compatibility: Requires pi-workflows and the built-in monitor workflow.
 ---
 
 # Monitor
@@ -115,7 +115,7 @@ Submit observed facts. The workflow computes rates, confidence, remaining work, 
 
 For several concurrent processes, publish one stable track per process. The Pi widget and viewers show them separately and keep each ETA independent.
 
-Keep the monitored target independent of Pi Workflows. Do not require a target Job or application to import Pi Workflows, emit a Pi schema, write a Pi progress file, expose a Pi endpoint, create a progress store, or add a progress reader command solely for monitoring. Do not add provider-specific clients or credentials to Pi Workflows. Target-specific observation belongs in the check task and is performed by the regular Pi model with already authorized tools.
+Keep the monitored target independent of pi-workflows. Do not require a target Job or application to import pi-workflows, emit a Pi schema, write a Pi progress file, expose a Pi endpoint, create a progress store, or add a progress reader command solely for monitoring. Do not add provider-specific clients or credentials to pi-workflows. Target-specific observation belongs in the check task and is performed by the regular Pi model with already authorized tools.
 
 Before proposing a new progress API, transport, schema, or persistence layer, prove that the model cannot observe the needed facts and publish them through the existing `workflow update` and `submit` path. If the target does not expose enough facts for ETA, report `ETA unavailable`. Application telemetry changes require separate scope and should expose normal operational facts rather than a Pi-specific protocol.
 

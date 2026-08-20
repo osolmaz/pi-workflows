@@ -1,6 +1,6 @@
 # Workflow updates
 
-This specification defines durable, non-terminal updates from running Pi Workflows nodes. An update reports current state without finishing a node or choosing a graph route.
+This specification defines durable, non-terminal updates from running pi-workflows nodes. An update reports current state without finishing a node or choosing a graph route.
 
 ## Minimal examples
 
@@ -54,7 +54,7 @@ The `update` tool action does not complete the agent step. The agent still calls
 
 ## Place in the workflow model
 
-Pi Workflows keeps its current node primitives:
+pi-workflows keeps its current node primitives:
 
 - `agent` for model judgment and language work
 - `compute` for pure local calculation
@@ -80,7 +80,7 @@ A node's final result remains the only value that completes the node and control
 
 For monitoring, the regular Pi model running the workflow step observes the external target and publishes progress with the existing `workflow` tool. This is the intended adapter boundary. Deterministic runtime code validates, persists, estimates, and renders the submitted data.
 
-External Jobs and applications do not need a Pi Workflows dependency or reporting protocol. Provider-specific observation stays in the agent task and its authorized tools. If the target does not expose enough facts, the model publishes only what is known and leaves ETA unavailable.
+External Jobs and applications do not need a pi-workflows dependency or reporting protocol. Provider-specific observation stays in the agent task and its authorized tools. If the target does not expose enough facts, the model publishes only what is known and leaves ETA unavailable.
 
 Do not add a transport, endpoint, store, schema, or provider integration when the regular Pi model can observe the target and use `workflow update` or `submit`.
 
@@ -333,7 +333,7 @@ Fields:
 
 A progress object is a full snapshot for its key. Omitted optional fields clear their previous values. Publishers mark finished tracks with a terminal status instead of deleting them.
 
-The reserved key `overall` represents an explicit aggregate supplied by the workflow. Pi Workflows never combines unrelated tracks automatically. Without `overall`, displays list independent tracks.
+The reserved key `overall` represents an explicit aggregate supplied by the workflow. pi-workflows never combines unrelated tracks automatically. Without `overall`, displays list independent tracks.
 
 Unknown fields in `pi-workflows.progress.v1` are validation errors.
 
@@ -355,7 +355,7 @@ A measured ETA requires a known total and at least two usable samples in the cur
 
 The median interval rate is the central estimate. The 25th and 75th percentile rates form the ETA range. The faster rate gives the lower remaining-time bound and the slower rate gives the upper bound. One usable interval has low confidence. With two through four intervals, a ratio of interquartile range to median no greater than 0.5 gives medium confidence; a wider spread gives low confidence. With five or more intervals, a ratio no greater than 0.25 gives high confidence, a ratio through 0.5 gives medium confidence, and a wider spread gives low confidence. A non-positive median makes ETA unavailable. A non-positive lower rate removes the upper time bound, so the formatter shows the central ETA with low confidence instead of a closed range.
 
-A fresh `sourceEstimatedFinishAt` takes priority over a measured ETA and is labelled as a source estimate. It is fresh when it comes from the latest track update, is later than the matching `sourceUpdatedAt` or runtime receipt time, and has not passed. When `sourceUpdatedAt` is absent, the runtime receipt time is the source time. A passed source estimate is expired and does not override a measured estimate. Pi Workflows does not ask a model to invent an ETA. When the target supplies no usable estimate and the samples cannot support one, the formatter says `ETA unavailable` and states the reason.
+A fresh `sourceEstimatedFinishAt` takes priority over a measured ETA and is labelled as a source estimate. It is fresh when it comes from the latest track update, is later than the matching `sourceUpdatedAt` or runtime receipt time, and has not passed. When `sourceUpdatedAt` is absent, the runtime receipt time is the source time. A passed source estimate is expired and does not override a measured estimate. pi-workflows does not ask a model to invent an ETA. When the target supplies no usable estimate and the samples cannot support one, the formatter says `ETA unavailable` and states the reason.
 
 For `waiting` or `blocked` tracks, measured ETA is paused and the display reports the current state. A source estimate may still be shown when the target reports one. For terminal tracks, remaining work and ETA are omitted.
 

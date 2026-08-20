@@ -6,9 +6,9 @@ date: 2026-08-20
 
 # Keep the Herdr plugin linked after package updates
 
-Pi Workflows ships its Herdr plugin inside the npm package. Herdr records the package's absolute path. npm can move an installed package between nested and hoisted `node_modules` directories during an update, which leaves Herdr linked to a path that no longer exists.
+pi-workflows ships its Herdr plugin inside the npm package. Herdr records the package's absolute path. npm can move an installed package between nested and hoisted `node_modules` directories during an update, which leaves Herdr linked to a path that no longer exists.
 
-Pi Workflows will own one explicit command that finds its own package and repairs this link. OnurPi will call that command after it installs an exact reviewed Pi Workflows release. OnurPi will not contain Herdr paths, manifests, or link-repair rules.
+pi-workflows will own one explicit command that finds its own package and repairs this link. OnurPi will call that command after it installs an exact reviewed pi-workflows release. OnurPi will not contain Herdr paths, manifests, or link-repair rules.
 
 ## Outcome
 
@@ -24,7 +24,7 @@ The command validates the bundled package before it changes Herdr. It then creat
 
 ## Scope
 
-### Pi Workflows
+### pi-workflows
 
 - Resolve the installed package root from the running CLI.
 - Validate `package.json`, `herdr-plugin.toml`, and the bundled viewer before changing Herdr.
@@ -37,9 +37,9 @@ The command validates the bundled package before it changes Herdr. It then creat
 
 ### OnurPi
 
-- Keep the Pi Workflows dependency pinned to an exact reviewed release.
+- Keep the pi-workflows dependency pinned to an exact reviewed release.
 - Invoke the local `pi-workflows herdr sync --json` command from an explicit TypeScript sync script after dependency installation.
-- Accept the versioned result and keep Herdr-specific behavior in Pi Workflows.
+- Accept the versioned result and keep Herdr-specific behavior in pi-workflows.
 - Keep package installation free of `postinstall` side effects.
 
 ## Non-goals
@@ -66,19 +66,19 @@ The JSON result uses schema `pi-workflows.herdr-sync.v1` and contains:
 
 A missing Herdr executable returns `unavailable` with exit code zero because Herdr is an optional integration. Every other failure returns a nonzero exit code and does not claim success.
 
-The command preflights the new package before unlinking an old registration. Herdr currently exposes separate unlink and link commands, so replacement cannot be atomic. If replacement fails, Pi Workflows makes one restore attempt only when the previous package root still passes the same validation. It then reports the state found by a fresh Herdr query.
+The command preflights the new package before unlinking an old registration. Herdr currently exposes separate unlink and link commands, so replacement cannot be atomic. If replacement fails, pi-workflows makes one restore attempt only when the previous package root still passes the same validation. It then reports the state found by a fresh Herdr query.
 
 Concurrent sync commands converge on the same target. After a failed or ambiguous mutation, the command queries Herdr and adopts the result only when another process already reached the exact expected state. It does not repeat the same mutation blindly.
 
 ## Compatibility
 
-Existing `herdr setup` callers use the same implementation. Other Pi Workflows CLI commands do not change. The npm package remains the only source of the plugin manifest and viewer.
+Existing `herdr setup` callers use the same implementation. Other pi-workflows CLI commands do not change. The npm package remains the only source of the plugin manifest and viewer.
 
 OnurPi adds only invocation timing and result handling. It does not parse the Herdr manifest or issue link commands.
 
 ## Verification
 
-### Pi Workflows
+### pi-workflows
 
 - Test first link, unchanged link, disabled link, moved package path, stale path, and version update.
 - Test missing Herdr, malformed manifests, malformed plugin records, command failures, post-action mismatches, and bounded restore behavior.
@@ -95,7 +95,7 @@ OnurPi adds only invocation timing and result handling. It does not parse the He
 
 ### Adoption
 
-After a separately approved Pi Workflows release, update OnurPi to that exact version and run:
+After a separately approved pi-workflows release, update OnurPi to that exact version and run:
 
 ```bash
 npm run workflows:sync

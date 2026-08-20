@@ -1,12 +1,12 @@
 ---
 name: pi-workflows
-description: Use when creating, reviewing, debugging, starting, inspecting, or controlling Pi Workflows; authoring .workflow.ts files; using the workflow tool; handling workflow step contracts, checkpoints, updates, or progress; or deciding how a task should compose workflow primitives.
-compatibility: Requires the Pi Workflows extension.
+description: Use when creating, reviewing, debugging, starting, inspecting, or controlling pi-workflows; authoring .workflow.ts files; using the workflow tool; handling workflow step contracts, checkpoints, updates, or progress; or deciding how a task should compose workflow primitives.
+compatibility: Requires the pi-workflows extension.
 ---
 
-# Pi Workflows
+# pi-workflows
 
-Use Pi Workflows for durable multi-step work that needs explicit routing, retries, checkpoints, scheduled waits, or progress. Keep simple one-turn work outside a workflow.
+Use pi-workflows for durable multi-step work that needs explicit routing, retries, checkpoints, scheduled waits, or progress. Keep simple one-turn work outside a workflow.
 
 The `workflow` tool schema is the authority for call shapes. A workflow step message is the authority for its current step id, attempt id, and expected output. Do not guess these values from an earlier attempt.
 

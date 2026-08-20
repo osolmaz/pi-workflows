@@ -1,6 +1,6 @@
 # Design philosophy
 
-Pi Workflows should stay small and easy to combine. A small set of clear, general parts should support many kinds of work.
+pi-workflows should stay small and easy to combine. A small set of clear, general parts should support many kinds of work.
 
 ## Primary rule
 
