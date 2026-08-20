@@ -1,5 +1,9 @@
 # pi-workflows
 
+<p align="center">
+  <img src="assets/cover.svg" alt="pi-workflows: a TypeScript workflow graph goes in, a live multi-step agent run comes out" width="880">
+</p>
+
 pi-workflows is a workflow extension for the [pi coding agent](https://pi.dev).
 It lets you define multi-step agent workflows as TypeScript graphs, trigger
 them at any point in a pi conversation with `/workflow`, and watch them run
@@ -76,14 +80,14 @@ or run it in place with `npx tsx src/viewer/cli.ts`.
 
 ## Herdr integration
 
-Pi Workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
-`piw` and Pi Workflows, synchronize the bundled plugin:
+pi-workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
+`piw` and pi-workflows, synchronize the bundled plugin:
 
 ```bash
 pi-workflows herdr sync
 ```
 
-Run the same command after a Pi Workflows update. It finds the package that
+Run the same command after a pi-workflows update. It finds the package that
 provides the running CLI and repairs a Herdr link when npm moved that package.
 `pi-workflows herdr setup` remains an alias for existing installations. Use
 `--json` for versioned machine-readable output. The [Herdr plugin sync
@@ -94,7 +98,7 @@ When Pi runs inside Herdr, a workflow widget shows `Ctrl+Shift+R piw`. When the 
 The shortcut opens the exact run bundle and lets you choose a split, tab, or new
 workspace. `/piw` opens the same menu, and `/piw right`, `/piw below`, `/piw
 left`, `/piw above`, `/piw tab`, or `/piw workspace` selects a placement
-directly. If a viewer for that run already exists, Pi Workflows focuses it
+directly. If a viewer for that run already exists, pi-workflows focuses it
 instead of opening a duplicate.
 
 The plugin uses Herdr's public pane APIs and runs no service or polling loop. It
@@ -130,7 +134,7 @@ Then, from any pi conversation:
 ```
 
 A model-started workflow is saved before the tool reports it as queued. The returned run ID works
-with `workflow status` and `workflow cancel` before execution starts. Pi Workflows waits for the
+with `workflow status` and `workflow cancel` before execution starts. pi-workflows waits for the
 current agent turn to settle before activation. If activation fails, it saves the failure and sends
 one follow-up turn so the model can correct the cause and start a new run.
 
@@ -191,7 +195,7 @@ The model can use the same `workflow` tool to list, start, inspect, pause,
 resume, cancel, and answer workflows. Step contracts use the tool's `submit`
 action. Slash commands and model actions share one lifecycle implementation.
 
-Pi Workflows includes a `monitor` workflow for plain-language requests such as:
+pi-workflows includes a `monitor` workflow for plain-language requests such as:
 
 > Monitor PR 123 every 30 minutes. Report failed checks. Stop when it is merged or closed.
 
