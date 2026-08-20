@@ -549,6 +549,124 @@ function currentPublishedRepositories(context: WorkflowNodeContext): PublishedRe
   return latestOutput<PublishedRepositories>(context, ["verifyP2", "publish"]);
 }
 
+type DeliveryRepositoryResult = {
+  repository: string;
+  pr: string;
+  merged: boolean;
+  reportComment: string;
+  reason: string;
+};
+
+function parseDeliveryRepository(value: unknown, index: number): DeliveryRepositoryResult {
+  const result = requireRecord(value, `delivery repositories[${index}]`);
+  const repository = requireString(result.repository, `delivery repositories[${index}].repository`);
+  if (!path.isAbsolute(repository)) {
+    throw new Error(`delivery repositories[${index}].repository must be absolute`);
+  }
+  if (typeof result.merged !== "boolean") {
+    throw new Error(`delivery repositories[${index}].merged must be a boolean`);
+  }
+  return {
+    repository: path.resolve(repository),
+    pr: requireString(result.pr, `delivery repositories[${index}].pr`),
+    merged: result.merged,
+    reportComment: requireString(
+      result.reportComment,
+      `delivery repositories[${index}].reportComment`,
+    ),
+    reason: requireString(result.reason, `delivery repositories[${index}].reason`),
+  };
+}
+
+function parseDeliveryResult(
+  value: unknown,
+  context: WorkflowNodeContext,
+): Record<string, unknown> {
+  const result = requireRecord(value, "delivery result");
+  if (result.status !== "completed" && result.status !== "blocked") {
+    throw new Error("delivery status must be completed or blocked");
+  }
+  const request = context.input as AutoimplementInput;
+  if (request.merge !== true && result.merged === true) {
+    throw new Error("delivery cannot merge without explicit merge: true");
+  }
+  if (result.status === "blocked") return result;
+  if (typeof result.merged !== "boolean") {
+    throw new Error("completed delivery merged must be a boolean");
+  }
+  const pr = requireString(result.pr, "completed delivery pr");
+  const reportComment = requireString(result.reportComment, "completed delivery reportComment");
+  const reason = requireString(result.reason, "completed delivery reason");
+  const published = currentPublishedRepositories(context).repositories;
+  let repositories: DeliveryRepositoryResult[];
+  if (result.repositories === undefined) {
+    if (published.length !== 1) {
+      throw new Error("completed delivery repositories must cover every published repository");
+    }
+    const only = published[0];
+    if (only === undefined) throw new Error("completed delivery has no published repository");
+    repositories = [
+      {
+        repository: path.resolve(only.repository),
+        pr,
+        merged: result.merged,
+        reportComment,
+        reason,
+      },
+    ];
+  } else {
+    if (!Array.isArray(result.repositories)) {
+      throw new Error("completed delivery repositories must be an array");
+    }
+    repositories = result.repositories.map(parseDeliveryRepository);
+  }
+  const actual = new Map<string, DeliveryRepositoryResult>();
+  for (const repository of repositories) {
+    if (actual.has(repository.repository)) {
+      throw new Error(`completed delivery repository is duplicated: ${repository.repository}`);
+    }
+    actual.set(repository.repository, repository);
+  }
+  const mergeExpected = request.merge === true;
+  for (const expected of published) {
+    const repository = actual.get(path.resolve(expected.repository));
+    if (repository === undefined || repository.pr !== expected.pr) {
+      throw new Error(
+        `completed delivery does not match published repository and PR: ${expected.repository}`,
+      );
+    }
+    if (repository.merged !== mergeExpected) {
+      throw new Error(
+        `completed delivery merge result does not match merge policy: ${expected.repository}`,
+      );
+    }
+    actual.delete(repository.repository);
+  }
+  if (actual.size > 0) {
+    throw new Error(
+      `completed delivery contains unpublished repositories: ${[...actual.keys()].join(", ")}`,
+    );
+  }
+  const firstPublished = published[0];
+  const first =
+    firstPublished === undefined
+      ? undefined
+      : repositories.find(
+          (repository) => repository.repository === path.resolve(firstPublished.repository),
+        );
+  if (
+    first === undefined ||
+    first.pr !== pr ||
+    first.merged !== result.merged ||
+    first.reportComment !== reportComment
+  ) {
+    throw new Error(
+      "completed delivery top-level compatibility fields must match the first result",
+    );
+  }
+  return { status: "completed", merged: result.merged, pr, reportComment, reason, repositories };
+}
+
 function parseP2Verification(
   value: unknown,
   context: WorkflowNodeContext,
@@ -1386,17 +1504,7 @@ export const autoimplementWorkflow = defineWorkflow({
         ].join("\n");
       },
       expectedOutput: `{ "status": "completed" | "blocked", "merged": true | false, "pr": "first PR URL", "reportComment": "first report URL or summary", "reason": "aggregate result", "repositories": [{ "repository": "/absolute/repository", "pr": "URL", "merged": true | false, "reportComment": "URL or summary", "reason": "result" }] }`,
-      validate: (value, context) => {
-        const result = requireRecord(value, "delivery result");
-        if (result.status !== "completed" && result.status !== "blocked") {
-          throw new Error("delivery status must be completed or blocked");
-        }
-        const request = context.input as AutoimplementInput;
-        if (request.merge !== true && result.merged === true) {
-          throw new Error("delivery cannot merge without explicit merge: true");
-        }
-        return result;
-      },
+      validate: parseDeliveryResult,
     }),
     blocked: compute({
       run: (context) => {

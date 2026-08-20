@@ -955,6 +955,60 @@ describe("built-in autoimplement", () => {
         makeContext({ input: { task: "demo", merge: false } }),
       ),
     ).toThrow("explicit merge: true");
+    expect(
+      delivery.validate?.(
+        {
+          status: "completed",
+          merged: false,
+          pr: "https://example.test/pr/1",
+          reportComment: "done",
+          reason: "ready",
+        },
+        makeContext({
+          input: { task: "demo", merge: false },
+          outputs: { publish: published() },
+        }),
+      ),
+    ).toMatchObject({ repositories: [{ repository, merged: false }] });
+
+    const secondRepository = path.join(path.dirname(repository), "second-repository");
+    const multiPublication = {
+      repositories: [
+        ...published().repositories,
+        {
+          repository: secondRepository,
+          branch: "feat/second",
+          baseBranch: "main",
+          headRevision: "def456",
+          pr: "https://example.test/pr/2",
+          pushed: true,
+        },
+      ],
+    };
+    expect(() =>
+      delivery.validate?.(
+        {
+          status: "completed",
+          merged: false,
+          pr: "https://example.test/pr/1",
+          reportComment: "done",
+          reason: "ready",
+          repositories: [
+            {
+              repository,
+              pr: "https://example.test/pr/1",
+              merged: false,
+              reportComment: "done",
+              reason: "ready",
+            },
+          ],
+        },
+        makeContext({
+          input: { task: "demo", merge: false },
+          outputs: { publish: multiPublication },
+        }),
+      ),
+    ).toThrow("does not match published repository and PR");
   });
 
   it("challenges the Bob artifact mismatch and continues through redesign", async () => {
@@ -1495,7 +1549,22 @@ describe("built-in autoimplement", () => {
           pr: "https://example.test/pr/1",
           reportComment: "done",
           reason: "ready",
-          repositories: [],
+          repositories: [
+            {
+              repository,
+              pr: "https://example.test/pr/1",
+              merged: false,
+              reportComment: "done",
+              reason: "ready",
+            },
+            {
+              repository: secondRepository,
+              pr: "https://example.test/pr/2",
+              merged: false,
+              reportComment: "done for second repository",
+              reason: "ready",
+            },
+          ],
         },
       });
     const engine = new WorkflowEngine({
