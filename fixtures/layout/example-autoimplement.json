@@ -110,7 +110,7 @@
         "nodeType": "agent",
         "timeoutMs": 1800000,
         "statusDetail": "verifying P2 changes",
-        "expectedOutput": "{ \"passed\": true | false, \"commands\": [{ \"command\": \"command\", \"outcome\": \"result\" }], \"pushed\": true }"
+        "expectedOutput": "{ \"passed\": true | false, \"commands\": [{ \"command\": \"command\", \"outcome\": \"result\" }], \"pushed\": true, \"repositories\": [{ \"repository\": \"/absolute/repository\", \"branch\": \"branch\", \"baseBranch\": \"base\", \"headRevision\": \"current pushed revision\", \"pr\": \"URL\", \"pushed\": true, \"dependencyFingerprint\": \"optional fingerprint\" }] }"
       },
       "inspectComments": {
         "nodeType": "agent",

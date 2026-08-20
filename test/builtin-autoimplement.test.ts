@@ -361,6 +361,85 @@ describe("built-in autoimplement", () => {
         },
       ),
     ).rejects.toThrow();
+
+    const refreshedPublished = {
+      ...normalizedPublished,
+      headRevision: "def456",
+    };
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: true,
+          commands: [{ command: "npm test", outcome: "passed" }],
+          pushed: true,
+          repositories: [{ ...refreshedPublished, pushed: true }],
+        },
+        { outputs: { publish: { repositories: [normalizedPublished] } } },
+      ),
+    ).resolves.toMatchObject({ repositories: [{ headRevision: "def456" }] });
+    await expect(
+      validate(
+        "verifyP2",
+        {
+          passed: true,
+          commands: [],
+          pushed: true,
+        },
+        { outputs: { publish: { repositories: [normalizedPublished] } } },
+      ),
+    ).rejects.toThrow("repositories");
+
+    const pendingInspection = ciInspection("pending");
+    const trackedContext = {
+      outputs: {
+        inspectCi: pendingInspection,
+        trackCi: {
+          route: "assess",
+          batch: { items: [{ id: normalizedPublished.id }] },
+        },
+      },
+    };
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "green",
+          reason: "green",
+          targets: [],
+          relatedFailures: [],
+          unrelatedFailures: [],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("exactly cover watched ids");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "green",
+          reason: "green",
+          targets: [{ id: normalizedPublished.id, route: "pending", reason: "still pending" }],
+          relatedFailures: [],
+          unrelatedFailures: [],
+        },
+        trackedContext,
+      ),
+    ).rejects.toThrow("route must be pending");
+    await expect(
+      validate(
+        "assessTrackedCi",
+        {
+          route: "pending",
+          reason: "still pending",
+          targets: [{ id: normalizedPublished.id, route: "pending", reason: "still pending" }],
+          relatedFailures: [],
+          unrelatedFailures: [],
+        },
+        trackedContext,
+      ),
+    ).resolves.toMatchObject({ route: "pending", targets: [{ id: normalizedPublished.id }] });
+
     await expect(
       validate("planVerification", {
         commands: [
@@ -870,12 +949,13 @@ describe("built-in autoimplement", () => {
           passed: true,
           commands: [{ command: "npm test", outcome: "passed" }],
           pushed: true,
+          repositories: published("def456").repositories,
         },
       })
       .respond("inspectComments", {
         output: { route: "ci", summary: "no actionable comments", evidence: [] },
       })
-      .respond("inspectCi", { output: ciInspection("green") })
+      .respond("inspectCi", { output: ciInspection("green", "def456") })
       .respond("finalizeDelivery", {
         output: {
           status: "completed",

@@ -138,6 +138,13 @@ function requireString(value: unknown, label: string): string {
   return value.trim();
 }
 
+function requireStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${label} must be an array of strings`);
+  }
+  return [...value] as string[];
+}
+
 function boundedChallengeItems(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.length > MAX_CHALLENGE_ITEMS) {
     throw new Error(`${label} must be an array with at most ${MAX_CHALLENGE_ITEMS} items`);
@@ -538,12 +545,54 @@ function parseVerificationForContext(
   return plan;
 }
 
+function currentPublishedRepositories(context: WorkflowNodeContext): PublishedRepositories {
+  return latestOutput<PublishedRepositories>(context, ["verifyP2", "publish"]);
+}
+
+function parseP2Verification(
+  value: unknown,
+  context: WorkflowNodeContext,
+): Record<string, unknown> {
+  const result = requireRecord(value, "P2 verification");
+  if (typeof result.passed !== "boolean") {
+    throw new Error("P2 verification passed must be a boolean");
+  }
+  if (result.pushed !== true) {
+    throw new Error("P2 verification pushed must be true");
+  }
+  const refreshed = parsePublishedRepositories(result);
+  const previous = latestOutput<PublishedRepositories>(context, ["publish"]);
+  const expected = new Map(
+    previous.repositories.map((repository) => [repository.id, repository] as const),
+  );
+  for (const repository of refreshed.repositories) {
+    const prior = expected.get(repository.id);
+    if (
+      prior === undefined ||
+      prior.repository !== repository.repository ||
+      prior.branch !== repository.branch ||
+      prior.baseBranch !== repository.baseBranch ||
+      prior.pr !== repository.pr ||
+      prior.dependencyFingerprint !== repository.dependencyFingerprint
+    ) {
+      throw new Error(`P2 verification repository does not match publication: ${repository.id}`);
+    }
+    expected.delete(repository.id);
+  }
+  if (expected.size > 0) {
+    throw new Error(
+      `P2 verification is missing repository ids: ${[...expected.keys()].join(", ")}`,
+    );
+  }
+  return { ...result, repositories: refreshed.repositories };
+}
+
 function parseCiInspectionForPublished(
   value: unknown,
   context: WorkflowNodeContext,
 ): CiInspectionBatch {
   const inspected = parseCiInspectionBatch(value);
-  const published = latestOutput<PublishedRepositories>(context, ["publish"]);
+  const published = currentPublishedRepositories(context);
   const expected = new Map(
     published.repositories.map((repository) => [repository.id, repository] as const),
   );
@@ -565,6 +614,72 @@ function parseCiInspectionForPublished(
     throw new Error(`CI inspection is missing repository ids: ${[...expected.keys()].join(", ")}`);
   }
   return inspected;
+}
+
+function parseTrackedCiAssessment(
+  value: unknown,
+  context: WorkflowNodeContext,
+): Record<string, unknown> & { route: CiInspectionBatch["route"] } {
+  const result = requireRecord(value, "tracked CI assessment");
+  const inspected = latestOutput<CiInspectionBatch>(context, ["inspectCi"]);
+  const execution = latestOutput<BatchExecution>(context, ["trackCi"]);
+  const expectedIds = execution.batch.items.map((item) => item.id);
+  if (!Array.isArray(result.targets)) {
+    throw new Error("tracked CI assessment targets must be an array");
+  }
+  const seen = new Set<string>();
+  const targets = result.targets.map((entry, index) => {
+    const target = requireRecord(entry, `tracked CI assessment targets[${index}]`);
+    const id = requireString(target.id, `tracked CI assessment targets[${index}].id`);
+    if (seen.has(id)) throw new Error(`tracked CI assessment target is duplicated: ${id}`);
+    seen.add(id);
+    if (
+      target.route !== "green" &&
+      target.route !== "failed" &&
+      target.route !== "pending" &&
+      target.route !== "unavailable"
+    ) {
+      throw new Error(`tracked CI assessment targets[${index}].route is invalid`);
+    }
+    return {
+      id,
+      route: target.route,
+      reason: requireString(target.reason, `tracked CI assessment targets[${index}].reason`),
+    };
+  });
+  const missing = expectedIds.filter((id) => !seen.has(id));
+  const unexpected = [...seen].filter((id) => !expectedIds.includes(id));
+  if (missing.length > 0 || unexpected.length > 0 || targets.length !== expectedIds.length) {
+    throw new Error(
+      `tracked CI assessment targets must exactly cover watched ids; missing: ${missing.join(", ") || "none"}; unexpected: ${unexpected.join(", ") || "none"}`,
+    );
+  }
+  const trackedRoutes = new Map(targets.map((target) => [target.id, target.route] as const));
+  const routes = inspected.targets.map((target) => trackedRoutes.get(target.id) ?? target.route);
+  const route = routes.includes("failed")
+    ? "failed"
+    : routes.includes("pending")
+      ? "pending"
+      : routes.includes("unavailable")
+        ? "unavailable"
+        : "green";
+  if (result.route !== route) {
+    throw new Error(`tracked CI assessment route must be ${route}`);
+  }
+  return {
+    ...result,
+    route,
+    reason: requireString(result.reason, "tracked CI assessment reason"),
+    targets,
+    relatedFailures: requireStringArray(
+      result.relatedFailures ?? [],
+      "tracked CI assessment relatedFailures",
+    ),
+    unrelatedFailures: requireStringArray(
+      result.unrelatedFailures ?? [],
+      "tracked CI assessment unrelatedFailures",
+    ),
+  };
 }
 
 function selectReviewCommands(context: WorkflowNodeContext): ReviewCommandSelection {
@@ -1132,10 +1247,11 @@ export const autoimplementWorkflow = defineWorkflow({
         [
           "Run focused verification for the P2 changes and push the verified result.",
           "Do not run pi-reviewer again because the previous round had no P0 or P1 findings.",
+          "Re-observe every published PR after the push and return its current repository, branch, base branch, head revision, PR URL, pushed status, and unchanged dependency fingerprint.",
           "Report exact commands and outcomes.",
         ].join("\n"),
-      expectedOutput: `{ "passed": true | false, "commands": [{ "command": "command", "outcome": "result" }], "pushed": true }`,
-      validate: (value) => requireRecord(value, "P2 verification"),
+      expectedOutput: `{ "passed": true | false, "commands": [{ "command": "command", "outcome": "result" }], "pushed": true, "repositories": [{ "repository": "/absolute/repository", "branch": "branch", "baseBranch": "base", "headRevision": "current pushed revision", "pr": "URL", "pushed": true, "dependencyFingerprint": "optional fingerprint" }] }`,
+      validate: parseP2Verification,
     }),
     inspectComments: agent({
       timeoutMs: 20 * 60_000,
@@ -1145,7 +1261,7 @@ export const autoimplementWorkflow = defineWorkflow({
           "Inspect current inline review comments and PR issue comments for every published pull request.",
           "Handle pull requests one at a time. Reply to and resolve every comment. Ignore stale or irrelevant comments only after explaining why.",
           "Choose redesign for a valid design issue, fix for a local code issue, ci when no actionable comment remains on any PR, or blocked for an external blocker.",
-          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
+          `Published repositories: ${JSON.stringify(currentPublishedRepositories(context))}`,
         ].join("\n"),
       expectedOutput: `{ "route": "redesign" | "fix" | "ci" | "blocked", "summary": "comment status", "evidence": ["comment or response"] }`,
       validate: (value) =>
@@ -1161,7 +1277,7 @@ export const autoimplementWorkflow = defineWorkflow({
           "Choose green, failed, pending, or unavailable for each target.",
           "When pending, provide an exact supported gh pr checks --watch or gh run watch command with the repository id, absolute repository cwd, timeoutMs at most 300000, and maxOutputChars at most 1000000.",
           "Separate failures caused by this change from unrelated failures. Do not invent an ETA.",
-          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
+          `Published repositories: ${JSON.stringify(currentPublishedRepositories(context))}`,
         ].join("\n"),
       expectedOutput: `{ "targets": [{ "repository": "/absolute/repository", "headRevision": "revision", "pr": "URL", "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "relatedFailures": ["failure"], "unrelatedFailures": ["failure"], "trackingCommand": { "id": "repository-id", "command": "gh", "args": ["pr", "checks", "--watch"], "cwd": "/absolute/repository", "timeoutMs": 300000, "maxOutputChars": 1000000 } }] }`,
       validate: parseCiInspectionForPublished,
@@ -1219,12 +1335,7 @@ export const autoimplementWorkflow = defineWorkflow({
         ].join("\n");
       },
       expectedOutput: `{ "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "targets": [{ "id": "repository-id", "route": "green" | "failed" | "pending" | "unavailable", "reason": "status" }], "relatedFailures": ["failure"], "unrelatedFailures": ["failure"] }`,
-      validate: (value) =>
-        parseRoute(
-          value,
-          ["green", "failed", "pending", "unavailable"] as const,
-          "tracked CI assessment",
-        ),
+      validate: parseTrackedCiAssessment,
     }),
     opportunisticTest: agent({
       timeoutMs: 30 * 60_000,
@@ -1268,7 +1379,7 @@ export const autoimplementWorkflow = defineWorkflow({
           "Post a final report with the implementation summary and exact validation commands on every PR.",
           "Keep the existing top-level merged, pr, reportComment, and reason fields. For several PRs, use the first PR for the top-level compatibility fields and include every result under repositories.",
           "Return blocked instead of claiming completion when a required merge or report action fails.",
-          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
+          `Published repositories: ${JSON.stringify(currentPublishedRepositories(context))}`,
         ].join("\n");
       },
       expectedOutput: `{ "status": "completed" | "blocked", "merged": true | false, "pr": "first PR URL", "reportComment": "first report URL or summary", "reason": "aggregate result", "repositories": [{ "repository": "/absolute/repository", "pr": "URL", "merged": true | false, "reportComment": "URL or summary", "reason": "result" }] }`,
