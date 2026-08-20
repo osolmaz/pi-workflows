@@ -103,6 +103,13 @@ describe("autoimplement command batch contracts", () => {
         commands: [{ ...command("bad", first), command: "npm", args: ["publish"] }],
       }),
     ).toThrow(/mutation or publication/);
+    for (const wrapper of ["dash", "cmd.exe", "C:\\Windows\\System32\\PowerShell.exe"]) {
+      expect(() =>
+        parseVerificationCommandPlan({
+          commands: [{ ...command("wrapper", first), command: wrapper, args: ["-c", "git push"] }],
+        }),
+      ).toThrow(/not allowed/);
+    }
   });
 
   it("normalizes per-PR CI state and validates pending watch commands", async () => {

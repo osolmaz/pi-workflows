@@ -1303,7 +1303,10 @@ export const autoimplementWorkflow = defineWorkflow({
           concurrency(context).ciWatch,
         );
         const needsRepair = batch.items.some(
-          (item) => item.outcome === "failed" || item.stdoutTruncated || item.stderrTruncated,
+          (item) =>
+            (item.outcome === "failed" && item.exitCode === null) ||
+            item.stdoutTruncated ||
+            item.stderrTruncated,
         );
         return { route: needsRepair ? "repair" : "assess", batch };
       },

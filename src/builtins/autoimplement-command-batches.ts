@@ -264,8 +264,28 @@ function parseCommandItem(
 }
 
 function validateVerificationCommand(command: CommandBatchItem, index: number): void {
-  const forbiddenCommands = new Set(["bash", "sh", "zsh", "fish", "git", "gh", "rm"]);
-  if (forbiddenCommands.has(path.basename(command.command))) {
+  const forbiddenCommands = new Set([
+    "ash",
+    "bash",
+    "cmd",
+    "cmd.exe",
+    "csh",
+    "dash",
+    "fish",
+    "gh",
+    "git",
+    "ksh",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "rm",
+    "sh",
+    "tcsh",
+    "zsh",
+  ]);
+  const executable = path.win32.basename(path.basename(command.command)).toLowerCase();
+  if (forbiddenCommands.has(executable)) {
     throw new Error(`verification commands[${index}].command is not allowed`);
   }
   const joined = command.args.join(" ").toLowerCase();

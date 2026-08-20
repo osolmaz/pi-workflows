@@ -592,6 +592,20 @@ describe("built-in autoimplement", () => {
       ),
     ).toMatchObject({ route: "assess", batch: { items: [{ id: repositoryId(repository) }] } });
 
+    await installCommand("gh", "printf '%s\\n' 'checks failed'; exit 1");
+    expect(
+      await track.run(
+        makeContext({
+          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
+          outputs: { inspectCi: { route: "pending", ...pending } },
+          publishUpdate: async () => ({ updateId: "u2", seq: 2, at: "now", type: "x", key: "y" }),
+        }),
+      ),
+    ).toMatchObject({
+      route: "assess",
+      batch: { items: [{ outcome: "failed", exitCode: 1 }] },
+    });
+
     const review = autoimplementWorkflow.nodes.runReview;
     if (review?.nodeType !== "action" || !("run" in review)) {
       throw new Error("runReview must be a function action");
