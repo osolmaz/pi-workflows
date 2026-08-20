@@ -397,11 +397,12 @@ function commandBatchTimeoutMs(commands: CommandBatchItem[], maxConcurrency: num
   return waves * longestItem + 10_000;
 }
 
-function batchNeedsRepair(result: CommandBatchResult): boolean {
+function reviewBatchNeedsRepair(result: CommandBatchResult): boolean {
   return result.items.some(
     (item) =>
-      item.outcome === "failed" ||
       item.outcome === "timedOut" ||
+      item.outcome === "cancelled" ||
+      (item.outcome === "failed" && item.exitCode === null) ||
       item.stdoutTruncated ||
       item.stderrTruncated,
   );
@@ -1300,7 +1301,7 @@ export const autoimplementWorkflow = defineWorkflow({
           selected.commands,
           concurrency(context).reviewer,
         );
-        return { route: batchNeedsRepair(batch) ? "repair" : "assess", batch };
+        return { route: reviewBatchNeedsRepair(batch) ? "repair" : "assess", batch };
       },
     }),
     repairReviewCommand: agent({

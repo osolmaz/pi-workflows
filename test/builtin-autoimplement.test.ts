@@ -900,6 +900,7 @@ describe("built-in autoimplement", () => {
     if (review?.nodeType !== "action" || !("run" in review)) {
       throw new Error("runReview must be a function action");
     }
+    await installCommand("pi-reviewer", "printf '%s\\n' 'P1 finding'; exit 1");
     expect(
       await review.run(
         makeContext({
@@ -932,7 +933,10 @@ describe("built-in autoimplement", () => {
           publishUpdate: async () => ({ updateId: "u1", seq: 1, at: "now", type: "x", key: "y" }),
         }),
       ),
-    ).toMatchObject({ route: "assess", batch: { items: [{ outcome: "succeeded" }] } });
+    ).toMatchObject({
+      route: "assess",
+      batch: { items: [{ outcome: "failed", exitCode: 1, stdout: "P1 finding\n" }] },
+    });
 
     const delivery = autoimplementWorkflow.nodes.finalizeDelivery;
     if (delivery?.nodeType !== "agent") throw new Error("finalizeDelivery must be agent");
@@ -1440,7 +1444,26 @@ describe("built-in autoimplement", () => {
       .respond("repairReviewCommand", {
         output: { route: "retry", reason: "reviewer configuration repaired" },
       })
-      .respond("assessReview", { output: cleanReview() })
+      .respond(
+        "assessReview",
+        {
+          output: {
+            repositories: [
+              {
+                id: repositoryId(repository),
+                invocationSucceeded: false,
+                p0: [],
+                p1: [],
+                p2: [],
+                lower: [],
+                reason: "The reviewer exited without a valid review.",
+              },
+            ],
+            reason: "The first invocation did not produce a valid review.",
+          },
+        },
+        { output: cleanReview() },
+      )
       .respond("inspectComments", {
         output: { route: "ci", summary: "clear", evidence: [] },
       })
