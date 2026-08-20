@@ -746,6 +746,14 @@ describe("built-in autoimplement", () => {
       ),
     ).rejects.toThrow("was not reported by implementation");
     await expect(
+      validate("planVerification", safeVerification, {
+        input: { task: "demo", plan: {}, repository },
+        outputs: {
+          implement: { repositories: [repository, path.join(repository, "second")] },
+        },
+      }),
+    ).rejects.toThrow("missing reported repositories");
+    await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
     ).rejects.toThrow("one of retry, blocked");
     await expect(validate("repairCiCommand", { route: "unknown", reason: "bad" })).rejects.toThrow(

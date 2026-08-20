@@ -537,11 +537,15 @@ function parseVerificationForContext(
     ),
   );
   for (const command of plan.commands) {
-    if (!roots.has(path.resolve(command.cwd))) {
+    const cwd = path.resolve(command.cwd);
+    if (!roots.delete(cwd)) {
       throw new Error(
         `verification command cwd was not reported by implementation: ${command.cwd}`,
       );
     }
+  }
+  if (roots.size > 0) {
+    throw new Error(`verification plan is missing reported repositories: ${[...roots].join(", ")}`);
   }
   return plan;
 }
