@@ -75,6 +75,21 @@ export {
 } from "./loader.js";
 export { renderShellCommand, runShellAction } from "./shell.js";
 export {
+  COMMAND_BATCH_RESULT_SCHEMA,
+  MAX_COMMAND_BATCH_CONCURRENCY,
+  MAX_COMMAND_BATCH_ITEMS,
+  MAX_COMMAND_BATCH_OUTPUT_CHARS,
+  MAX_COMMAND_BATCH_TIMEOUT_MS,
+  runCommandBatch,
+  validateCommandBatchRequest,
+  type CommandBatchItem,
+  type CommandBatchItemOutcome,
+  type CommandBatchItemResult,
+  type CommandBatchRequest,
+  type CommandBatchResult,
+  type RunCommandBatchOptions,
+} from "./command-batch.js";
+export {
   estimateProgress,
   formatProgressLine,
   formatProgressReport,

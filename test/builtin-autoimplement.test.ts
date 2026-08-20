@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -33,18 +34,75 @@ function documentedPlan(plan: unknown) {
   };
 }
 
-function cleanReview() {
+function published(
+  headRevision = "abc123",
+  branch = "feat/demo",
+  pr = "https://example.test/pr/1",
+) {
   return {
-    invocationSucceeded: true,
-    p0: [],
-    p1: [],
-    p2: [],
-    lower: [],
+    repositories: [
+      {
+        repository,
+        branch,
+        baseBranch: "main",
+        headRevision,
+        pr,
+        pushed: true,
+      },
+    ],
+  };
+}
+
+function cleanReview(headRevision = "abc123") {
+  return {
+    repositories: [
+      {
+        id: repositoryId(repository),
+        invocationSucceeded: true,
+        p0: [],
+        p1: [],
+        p2: [],
+        lower: [],
+        reason: `No findings for ${headRevision}.`,
+      },
+    ],
     reason: "No P0, P1, or P2 findings.",
   };
 }
 
-function commonExecutor(reviewerCwd = repository): ScriptedExecutor {
+function ciInspection(
+  route: "green" | "failed" | "pending" | "unavailable",
+  headRevision = "abc123",
+  pr = "https://example.test/pr/1",
+) {
+  return {
+    targets: [
+      {
+        repository,
+        headRevision,
+        pr,
+        route,
+        reason: route,
+        relatedFailures: [],
+        unrelatedFailures: [],
+        ...(route === "pending"
+          ? {
+              trackingCommand: {
+                id: repositoryId(repository),
+                command: "gh",
+                args: ["pr", "checks", "--watch"],
+                cwd: repository,
+                timeoutMs: 300_000,
+                maxOutputChars: 1_000_000,
+              },
+            }
+          : {}),
+      },
+    ],
+  };
+}
+
+function commonExecutor(publication: unknown = published()): ScriptedExecutor {
   return new ScriptedExecutor()
     .respond("implement", {
       output: {
@@ -58,10 +116,25 @@ function commonExecutor(reviewerCwd = repository): ScriptedExecutor {
     .respond("classifyImplementation", {
       output: { route: "verify", summary: "ready", evidence: "implementation complete" },
     })
+    .respond("planVerification", {
+      output: {
+        commands: [
+          {
+            id: "verify",
+            command: process.execPath,
+            args: ["-e", "process.stdout.write('passed')"],
+            cwd: repository,
+            timeoutMs: 60_000,
+            maxOutputChars: 100_000,
+          },
+        ],
+        untested: [],
+      },
+    })
     .respond("verify", {
       output: {
         passed: true,
-        commands: [{ command: "npm test", outcome: "passed" }],
+        commands: [{ command: "node verification", outcome: "passed" }],
         failures: [],
         untested: [],
       },
@@ -69,16 +142,7 @@ function commonExecutor(reviewerCwd = repository): ScriptedExecutor {
     .respond("classifyVerification", {
       output: { route: "publish", summary: "checks passed", evidence: "npm test" },
     })
-    .respond("publish", {
-      output: {
-        branch: "feat/demo",
-        baseBranch: "main",
-        headRevision: "abc123",
-        pr: "https://example.test/pr/1",
-        pushed: true,
-      },
-    })
-    .respond("authorReviewCommand", { output: reviewerCommand(reviewerCwd) });
+    .respond("publish", { output: publication });
 }
 
 function continueChallenge(reason: string, nextAction: string) {
@@ -200,7 +264,11 @@ describe("built-in autoimplement", () => {
       }),
     ).toThrow("does not match");
 
-    const validate = async (nodeId: string, output: unknown) => {
+    const validate = async (
+      nodeId: string,
+      output: unknown,
+      overrides: Record<string, unknown> = {},
+    ) => {
       const node = autoimplementWorkflow.nodes[nodeId];
       if (node?.nodeType !== "agent" || node.validate === undefined) {
         throw new Error(`${nodeId} must be a validated agent node`);
@@ -211,39 +279,67 @@ describe("built-in autoimplement", () => {
         results: {},
         state: { steps: [] },
         signal: new AbortController().signal,
+        ...overrides,
       } as never);
     };
 
+    const normalizedPublished = {
+      id: repositoryId(repository),
+      repository,
+      branch: "feat/demo",
+      baseBranch: "main",
+      headRevision: "abc123",
+      pr: "https://example.test/pr/1",
+    };
+    const reviewSelection = {
+      route: "run",
+      repositories: [normalizedPublished],
+      commands: [reviewerCommand()],
+    };
+    const reviewContext = {
+      outputs: { selectReviewCommands: reviewSelection },
+      state: { steps: [{ nodeId: "selectReviewCommands", output: reviewSelection }] },
+    };
     await expect(
-      validate("assessReview", {
-        invocationSucceeded: true,
-        p0: [{ kind: "design", summary: "P0 design" }],
-        p1: [{ kind: "implementation", summary: "P1 code" }],
-        p2: [{ kind: "implementation", summary: "P2 code" }],
-        lower: [{ kind: "implementation", summary: "lower" }],
-        reason: "findings",
-      }),
+      validate(
+        "assessReview",
+        {
+          repositories: [
+            {
+              id: normalizedPublished.id,
+              invocationSucceeded: true,
+              p0: [{ kind: "design", summary: "P0 design" }],
+              p1: [{ kind: "implementation", summary: "P1 code" }],
+              p2: [{ kind: "implementation", summary: "P2 code" }],
+              lower: [{ kind: "implementation", summary: "lower" }],
+              reason: "findings",
+            },
+          ],
+          reason: "findings",
+        },
+        reviewContext,
+      ),
     ).resolves.toMatchObject({ route: "critical", p0: [{ severity: "P0" }] });
     await expect(
-      validate("assessReview", {
-        invocationSucceeded: false,
-        p0: [],
-        p1: [],
-        p2: [],
-        lower: [],
-        reason: "invalid invocation",
-      }),
+      validate(
+        "assessReview",
+        {
+          repositories: [
+            {
+              id: normalizedPublished.id,
+              invocationSucceeded: false,
+              p0: [],
+              p1: [],
+              p2: [],
+              lower: [],
+              reason: "invalid invocation",
+            },
+          ],
+          reason: "invalid invocation",
+        },
+        reviewContext,
+      ),
     ).resolves.toMatchObject({ route: "command_error" });
-    await expect(
-      validate("assessReview", {
-        invocationSucceeded: true,
-        p0: [{ kind: "unknown", summary: "bad" }],
-        p1: [],
-        p2: [],
-        lower: [],
-        reason: "bad",
-      }),
-    ).rejects.toThrow("kind");
 
     await expect(
       validate("repairReviewCommand", { route: "blocked", reason: "reviewer missing" }),
@@ -252,97 +348,40 @@ describe("built-in autoimplement", () => {
       validate("repairCiCommand", { route: "blocked", reason: "CI unavailable" }),
     ).resolves.toMatchObject({ route: "blocked" });
     await expect(
-      validate("inspectCi", {
-        route: "pending",
-        reason: "running",
-        relatedFailures: [],
-        unrelatedFailures: [],
-        trackingCommand: {
-          command: "gh",
-          args: ["pr", "checks", "--watch"],
-          cwd: repository,
-          timeoutMs: 300_000,
+      validate("inspectCi", ciInspection("pending"), {
+        outputs: { publish: { repositories: [normalizedPublished] } },
+      }),
+    ).resolves.toMatchObject({ route: "pending", targets: [{ route: "pending" }] });
+    await expect(
+      validate(
+        "inspectCi",
+        { targets: [{ repository, route: "pending" }] },
+        {
+          outputs: { publish: { repositories: [normalizedPublished] } },
         },
-      }),
-    ).resolves.toMatchObject({ route: "pending", trackingCommand: { command: "gh" } });
+      ),
+    ).rejects.toThrow();
     await expect(
-      validate("inspectCi", {
-        route: "pending",
-        reason: "running",
-        relatedFailures: [],
-        unrelatedFailures: [],
-      }),
-    ).rejects.toThrow("must be an object");
-    await expect(
-      validate("authorReviewCommand", {
-        command: "codex",
-        args: ["review"],
-        cwd: repository,
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("pi-reviewer");
-    await expect(
-      validate("authorReviewCommand", {
-        command: "pi-reviewer",
-        args: "--base main",
-        cwd: repository,
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("array of strings");
-    await expect(
-      validate("authorReviewCommand", {
-        command: "pi-reviewer",
-        args: ["--base", 3],
-        cwd: repository,
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("array of strings");
-    await expect(
-      validate("authorReviewCommand", {
-        command: "pi-reviewer",
-        args: ["--base"],
-        cwd: repository,
-        timeoutMs: 1,
+      validate("planVerification", {
+        commands: [
+          {
+            id: "unsafe",
+            command: "bash",
+            args: ["-c", "npm test"],
+            cwd: repository,
+            timeoutMs: 1_000,
+            maxOutputChars: 1_000,
+          },
+        ],
+        untested: [],
       }),
     ).rejects.toThrow("not allowed");
     await expect(
-      validate("authorReviewCommand", {
-        command: "pi-reviewer",
-        args: ["--base", "main"],
-        cwd: "relative",
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("absolute");
-    for (const timeoutMs of [0, 600_001, 1.5, "600000"]) {
-      await expect(
-        validate("authorReviewCommand", {
-          command: "pi-reviewer",
-          args: ["--base", "main"],
-          cwd: repository,
-          timeoutMs,
-        }),
-      ).rejects.toThrow("timeoutMs");
-    }
-    await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
-    ).rejects.toThrow("retry or blocked");
+    ).rejects.toThrow("one of retry, blocked");
     await expect(validate("repairCiCommand", { route: "unknown", reason: "bad" })).rejects.toThrow(
-      "retry or blocked",
+      "one of retry, blocked",
     );
-    await expect(
-      validate("inspectCi", {
-        route: "pending",
-        reason: "running",
-        relatedFailures: [],
-        unrelatedFailures: [],
-        trackingCommand: {
-          command: "gh",
-          args: ["run", "watch", "123"],
-          cwd: repository,
-          timeoutMs: 300_000,
-        },
-      }),
-    ).resolves.toMatchObject({ trackingCommand: { args: ["run", "watch", "123"] } });
     await expect(
       validate("challengeBlocker", continueChallenge("rollout is authorized", "deploy safely")),
     ).resolves.toMatchObject({ route: "continue", canProceed: true });
@@ -460,50 +499,70 @@ describe("built-in autoimplement", () => {
     });
 
     const track = autoimplementWorkflow.nodes.trackCi;
-    if (track?.nodeType !== "action" || !("exec" in track)) {
-      throw new Error("trackCi must be shell action");
+    if (track?.nodeType !== "action" || !("run" in track)) {
+      throw new Error("trackCi must be a function action");
     }
-    const command = {
-      command: "gh",
-      args: ["pr", "checks", "--watch"],
-      cwd: repository,
-      timeoutMs: 300_000,
-    };
+    const pending = ciInspection("pending");
     expect(
-      await track.exec(
+      await track.run(
         makeContext({
-          state: { steps: [{ nodeId: "inspectCi", output: { trackingCommand: command } }] },
+          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
+          outputs: { inspectCi: { route: "pending", ...pending } },
+          publishUpdate: async () => ({ updateId: "u1", seq: 1, at: "now", type: "x", key: "y" }),
         }),
       ),
-    ).toMatchObject(command);
-    expect(
-      await track.exec(
-        makeContext({
-          state: {
-            steps: [
-              { nodeId: "inspectCi", output: { trackingCommand: command } },
-              { nodeId: "repairCiCommand", output: { route: "retry", ...command } },
-            ],
-          },
-        }),
-      ),
-    ).toMatchObject(command);
-    expect(() => track.exec(makeContext())).toThrow("No CI tracking command");
+    ).toMatchObject({ route: "assess", batch: { items: [{ id: repositoryId(repository) }] } });
 
     const review = autoimplementWorkflow.nodes.runReview;
-    if (review?.nodeType !== "action" || !("exec" in review)) {
-      throw new Error("runReview must be shell action");
+    if (review?.nodeType !== "action" || !("run" in review)) {
+      throw new Error("runReview must be a function action");
     }
-    expect(() => review.exec(makeContext())).toThrow("No output found");
+    expect(
+      await review.run(
+        makeContext({
+          input: { task: "demo", concurrency: { reviewer: 1, ciWatch: 1, verification: 1 } },
+          outputs: {
+            selectReviewCommands: {
+              route: "run",
+              repositories: [
+                {
+                  id: repositoryId(repository),
+                  repository,
+                  branch: "feat/demo",
+                  baseBranch: "main",
+                  headRevision: "abc123",
+                  pr: "https://example.test/pr/1",
+                },
+              ],
+              commands: [
+                {
+                  id: repositoryId(repository),
+                  command: "pi-reviewer",
+                  args: ["--base", "main"],
+                  cwd: repository,
+                  timeoutMs: 600_000,
+                  maxOutputChars: 1_000_000,
+                },
+              ],
+            },
+          },
+          publishUpdate: async () => ({ updateId: "u1", seq: 1, at: "now", type: "x", key: "y" }),
+        }),
+      ),
+    ).toMatchObject({ route: "assess", batch: { items: [{ outcome: "succeeded" }] } });
 
     const delivery = autoimplementWorkflow.nodes.finalizeDelivery;
     if (delivery?.nodeType !== "agent") throw new Error("finalizeDelivery must be agent");
-    expect(await delivery.prompt(makeContext({ input: { task: "demo", merge: false } }))).toContain(
-      "without merging",
-    );
-    expect(await delivery.prompt(makeContext({ input: { task: "demo", merge: true } }))).toContain(
-      "Merge the verified PR",
-    );
+    expect(
+      await delivery.prompt(
+        makeContext({ input: { task: "demo", merge: false }, outputs: { publish: published() } }),
+      ),
+    ).toContain("without merging");
+    expect(
+      await delivery.prompt(
+        makeContext({ input: { task: "demo", merge: true }, outputs: { publish: published() } }),
+      ),
+    ).toContain("merge each");
     expect(() => delivery.validate?.({ status: "invalid" }, makeContext())).toThrow(
       "delivery status",
     );
@@ -555,6 +614,21 @@ describe("built-in autoimplement", () => {
           "Revise the rollout plan and deploy the supported artifact with rollback ready.",
         ),
       })
+      .respond("planVerification", {
+        output: {
+          commands: [
+            {
+              id: "verify-cutover",
+              command: process.execPath,
+              args: ["-e", "process.stdout.write('passed')"],
+              cwd: repository,
+              timeoutMs: 60_000,
+              maxOutputChars: 100_000,
+            },
+          ],
+          untested: [],
+        },
+      })
       .respond("verify", {
         output: {
           passed: true,
@@ -567,21 +641,14 @@ describe("built-in autoimplement", () => {
         output: { route: "publish", summary: "verified", evidence: "npm test" },
       })
       .respond("publish", {
-        output: {
-          branch: "feat/cutover",
-          baseBranch: "main",
-          headRevision: "cutover123",
-          pr: "https://example.test/pr/2",
-          pushed: true,
-        },
+        output: published("cutover123", "feat/cutover", "https://example.test/pr/2"),
       })
-      .respond("authorReviewCommand", { output: reviewerCommand() })
-      .respond("assessReview", { output: cleanReview() })
+      .respond("assessReview", { output: cleanReview("cutover123") })
       .respond("inspectComments", {
         output: { route: "ci", summary: "clear", evidence: [] },
       })
       .respond("inspectCi", {
-        output: { route: "green", reason: "green", relatedFailures: [], unrelatedFailures: [] },
+        output: ciInspection("green", "cutover123", "https://example.test/pr/2"),
       })
       .respond("finalizeDelivery", {
         output: {
@@ -781,11 +848,17 @@ describe("built-in autoimplement", () => {
     const executor = commonExecutor()
       .respond("assessReview", {
         output: {
-          invocationSucceeded: true,
-          p0: [],
-          p1: [],
-          p2: [{ kind: "implementation", summary: "simplify one branch" }],
-          lower: [],
+          repositories: [
+            {
+              id: repositoryId(repository),
+              invocationSucceeded: true,
+              p0: [],
+              p1: [],
+              p2: [{ kind: "implementation", summary: "simplify one branch" }],
+              lower: [],
+              reason: "One P2 finding.",
+            },
+          ],
           reason: "One P2 finding.",
         },
       })
@@ -802,14 +875,7 @@ describe("built-in autoimplement", () => {
       .respond("inspectComments", {
         output: { route: "ci", summary: "no actionable comments", evidence: [] },
       })
-      .respond("inspectCi", {
-        output: {
-          route: "green",
-          reason: "all checks passed",
-          relatedFailures: [],
-          unrelatedFailures: [],
-        },
-      })
+      .respond("inspectCi", { output: ciInspection("green") })
       .respond("finalizeDelivery", {
         output: {
           status: "completed",
@@ -835,9 +901,7 @@ describe("built-in autoimplement", () => {
     expect(
       executor.requests.filter((request) => request.contract.nodeId === "assessReview"),
     ).toHaveLength(1);
-    expect(
-      executor.requests.filter((request) => request.contract.nodeId === "authorReviewCommand"),
-    ).toHaveLength(1);
+    expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(1);
     expect(state.steps.map((step) => step.nodeId)).toContain("verifyP2");
     expect(
       executor.requests.some((request) => request.contract.nodeId === "challengeBlocker"),
@@ -873,49 +937,32 @@ describe("built-in autoimplement", () => {
         { output: { route: "publish", summary: "passed", evidence: "first" } },
         { output: { route: "publish", summary: "passed", evidence: "second" } },
       )
-      .respond(
-        "publish",
-        {
-          output: {
-            branch: "feat/demo",
-            baseBranch: "main",
-            headRevision: "one",
-            pr: "https://example.test/pr/1",
-            pushed: true,
-          },
-        },
-        {
-          output: {
-            branch: "feat/demo",
-            baseBranch: "main",
-            headRevision: "two",
-            pr: "https://example.test/pr/1",
-            pushed: true,
-          },
-        },
-      )
-      .respond("authorReviewCommand", { output: reviewerCommand() }, { output: reviewerCommand() })
+      .respond("publish", { output: published("one") }, { output: published("two") })
       .respond(
         "assessReview",
         {
           output: {
-            invocationSucceeded: true,
-            p0: [],
-            p1: [{ kind: "implementation", summary: "fix race" }],
-            p2: [],
-            lower: [],
+            repositories: [
+              {
+                id: repositoryId(repository),
+                invocationSucceeded: true,
+                p0: [],
+                p1: [{ kind: "implementation", summary: "fix race" }],
+                p2: [],
+                lower: [],
+                reason: "One P1.",
+              },
+            ],
             reason: "One P1.",
           },
         },
-        { output: cleanReview() },
+        { output: cleanReview("two") },
       )
       .respond("fix", { output: { fixed: "fixed race", files: ["src/change.ts"] } })
       .respond("inspectComments", {
         output: { route: "ci", summary: "clear", evidence: [] },
       })
-      .respond("inspectCi", {
-        output: { route: "green", reason: "green", relatedFailures: [], unrelatedFailures: [] },
-      })
+      .respond("inspectCi", { output: ciInspection("green", "one") })
       .respond("finalizeDelivery", {
         output: {
           status: "completed",
@@ -937,7 +984,7 @@ describe("built-in autoimplement", () => {
       merge: true,
     });
 
-    expect(state.status).toBe("completed");
+    expect(state.status, state.error).toBe("completed");
     expect(
       executor.requests.filter((request) => request.contract.nodeId === "assessReview"),
     ).toHaveLength(2);
@@ -945,18 +992,21 @@ describe("built-in autoimplement", () => {
     expect(result.reviewRounds).toHaveLength(2);
   });
 
-  it("asks for a corrected reviewer command after an invocation failure", async () => {
-    const executor = commonExecutor("/missing-review-cwd")
+  it("asks for repaired reviewer prerequisites after an invocation failure", async () => {
+    const marker = path.join(commandDir, "reviewer-retried");
+    await installCommand(
+      "pi-reviewer",
+      `if [ ! -f ${JSON.stringify(marker)} ]; then touch ${JSON.stringify(marker)}; exit 1; fi\nprintf '%s\\n' "review complete"`,
+    );
+    const executor = commonExecutor()
       .respond("repairReviewCommand", {
-        output: { route: "retry", ...reviewerCommand(), reason: "corrected cwd" },
+        output: { route: "retry", reason: "reviewer configuration repaired" },
       })
       .respond("assessReview", { output: cleanReview() })
       .respond("inspectComments", {
         output: { route: "ci", summary: "clear", evidence: [] },
       })
-      .respond("inspectCi", {
-        output: { route: "green", reason: "green", relatedFailures: [], unrelatedFailures: [] },
-      })
+      .respond("inspectCi", { output: ciInspection("green") })
       .respond("finalizeDelivery", {
         output: {
           status: "completed",
@@ -985,18 +1035,124 @@ describe("built-in autoimplement", () => {
     expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(2);
   });
 
-  it("routes a five-minute CI timeout to opportunistic tests", () => {
+  it("runs independent repository reviews in a bounded parallel batch", async () => {
+    const secondRepository = await makeTempDir("pi-workflows-autoimplement-second-repo");
+    const eventsPath = path.join(commandDir, "review-events.log");
+    await installCommand(
+      "pi-reviewer",
+      `printf 'start %s\\n' "$PWD" >> ${JSON.stringify(eventsPath)}\nsleep 0.15\nprintf 'end %s\\n' "$PWD" >> ${JSON.stringify(eventsPath)}\nprintf '%s\\n' "review complete"`,
+    );
+    const publication = {
+      repositories: [
+        {
+          repository,
+          branch: "feat/demo",
+          baseBranch: "main",
+          headRevision: "head-one",
+          pr: "https://example.test/pr/1",
+          pushed: true,
+        },
+        {
+          repository: secondRepository,
+          branch: "feat/demo-two",
+          baseBranch: "main",
+          headRevision: "head-two",
+          pr: "https://example.test/pr/2",
+          pushed: true,
+        },
+      ],
+    };
+    const executor = commonExecutor(publication)
+      .respond("assessReview", {
+        output: {
+          repositories: [repository, secondRepository].map((cwd) => ({
+            id: repositoryId(cwd),
+            invocationSucceeded: true,
+            p0: [],
+            p1: [],
+            p2: [],
+            lower: [],
+            reason: "clean",
+          })),
+          reason: "Both reviews are clean.",
+        },
+      })
+      .respond("inspectComments", {
+        output: { route: "ci", summary: "clear", evidence: [] },
+      })
+      .respond("inspectCi", {
+        output: {
+          targets: [
+            {
+              repository,
+              headRevision: "head-one",
+              pr: "https://example.test/pr/1",
+              route: "green",
+              reason: "green",
+              relatedFailures: [],
+              unrelatedFailures: [],
+            },
+            {
+              repository: secondRepository,
+              headRevision: "head-two",
+              pr: "https://example.test/pr/2",
+              route: "green",
+              reason: "green",
+              relatedFailures: [],
+              unrelatedFailures: [],
+            },
+          ],
+        },
+      })
+      .respond("finalizeDelivery", {
+        output: {
+          status: "completed",
+          merged: false,
+          pr: "https://example.test/pr/1",
+          reportComment: "done",
+          reason: "ready",
+          repositories: [],
+        },
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-parallel-review"),
+    });
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "implement in two repositories",
+      ...documentedPlan({ steps: ["change both repositories"] }),
+      repository,
+      concurrency: { reviewer: 2 },
+      merge: false,
+    });
+    expect(state.status, state.error).toBe("completed");
+    const events = (await fs.readFile(eventsPath, "utf8")).trim().split("\n");
+    let active = 0;
+    let maximum = 0;
+    for (const event of events) {
+      active += event.startsWith("start ") ? 1 : -1;
+      maximum = Math.max(maximum, active);
+    }
+    expect(maximum).toBe(2);
+    expect(active).toBe(0);
+    expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(1);
+    const updates = state.updates?.filter((update) => update.type === "command-batch.item") ?? [];
+    expect(updates).toHaveLength(3);
+    expect(
+      updates.every((update) => !("stdout" in update.data) && !("stderr" in update.data)),
+    ).toBe(true);
+  });
+
+  it("routes completed CI batches through per-PR assessment", () => {
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     const track = compiled.nodes.trackCi;
     const edge = compiled.edges.find((candidate) => candidate.from === "trackCi");
-    expect(track?.timeoutMs).toBe(FIVE_MINUTES_FOR_TEST + 10_000);
+    expect(track?.nodeType).toBe("action");
     expect(edge).toMatchObject({
       switch: {
-        on: "$result.outcome",
-        cases: { timed_out: "opportunisticTest" },
+        on: "$.route",
+        cases: { assess: "assessTrackedCi", repair: "repairCiCommand" },
       },
     });
   });
 });
-
-const FIVE_MINUTES_FOR_TEST = 5 * 60_000;

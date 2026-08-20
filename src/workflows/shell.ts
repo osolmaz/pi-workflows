@@ -26,6 +26,16 @@ export function renderShellCommand(command: string, args: string[]): string {
   return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
 }
 
+export function shellOutputTruncation(result: ShellActionResult): {
+  stdout: boolean;
+  stderr: boolean;
+} {
+  return {
+    stdout: result.stdout.endsWith(TRUNCATION_MARKER),
+    stderr: result.stderr.endsWith(TRUNCATION_MARKER),
+  };
+}
+
 function shellFailure(
   spec: ShellActionExecution,
   args: string[],

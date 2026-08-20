@@ -174,6 +174,33 @@ export default defineWorkflow({
 });
 `;
 
+const COMMAND_BATCH_E2E_WORKFLOW = `import { action, compute, defineWorkflow, runCommandBatch } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "command-batch-e2e",
+  startAt: "prepare",
+  nodes: {
+    prepare: compute({
+      run: ({ input }) => ({
+        maxConcurrency: 2,
+        items: ["first", "second"].map((id) => ({
+          id,
+          command: process.execPath,
+          args: ["-e", "process.stdout.write(" + JSON.stringify(id) + ")"],
+          cwd: input.cwd,
+          timeoutMs: 10000,
+          maxOutputChars: 10000,
+        })),
+      }),
+    }),
+    run: action({
+      run: async (context) => await runCommandBatch(context.outputs.prepare, { signal: context.signal }),
+    }),
+  },
+  edges: [{ from: "prepare", to: "run" }],
+});
+`;
+
 const E2E_WORKFLOW = `import { agent, decision, decisionEdge, defineWorkflow, shell } from "@osolmaz/pi-workflows";
 
 const choices = ["y", "n"] as const;
@@ -569,6 +596,11 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "command-batch-e2e.workflow.ts"),
+      COMMAND_BATCH_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "human-decision-e2e.workflow.ts"),
       HUMAN_DECISION_E2E_WORKFLOW,
       "utf8",
@@ -639,6 +671,27 @@ describe.sequential("pi-workflows end to end", () => {
     await pi?.stop();
     await mock?.close();
   });
+
+  it("runs a bounded command batch in a real Pi workflow", async () => {
+    pi.send({
+      id: "command-batch-e2e",
+      type: "prompt",
+      message: `/workflow command-batch-e2e --input-json ${JSON.stringify({ cwd: projectDir })}`,
+    });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "command-batch-e2e" && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(state.finalOutput).toMatchObject({
+      schema: "pi-workflows.command-batch-result.v1",
+      items: [
+        { id: "first", outcome: "succeeded", stdout: "first" },
+        { id: "second", outcome: "succeeded", stdout: "second" },
+      ],
+    });
+  }, 30_000);
 
   it("persists a model-started run, reports deferred failure, and accepts a corrected start", async () => {
     const workflowFile = path.join(

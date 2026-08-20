@@ -76,6 +76,29 @@ Updates do not:
 
 A node's final result remains the only value that completes the node and controls routing.
 
+## Command batch updates
+
+A bounded command-batch action can publish one metadata update when an item settles:
+
+```json
+{
+  "type": "command-batch.item",
+  "key": "review/4f2a9c1d",
+  "data": {
+    "schema": "pi-workflows.command-batch-item.v1",
+    "batchKind": "review",
+    "itemId": "4f2a9c1d",
+    "outcome": "succeeded",
+    "completed": 2,
+    "total": 4
+  }
+}
+```
+
+`batchKind` identifies `review`, `ciWatch`, or `verification`. `outcome` is `succeeded`, `failed`, `timedOut`, or `cancelled`. `completed` and `total` are observed command counts. The key stays stable for one batch item.
+
+These updates do not contain stdout, stderr, command environments, credentials, or private provider data. The accepted action output contains command receipts and controls workflow routing. A command-batch update cannot satisfy review, CI, or verification. If an unaccepted batch runs again after interruption, its earlier updates remain diagnostic records only.
+
 ## Model-mediated observation
 
 For monitoring, the regular Pi model running the workflow step observes the external target and publishes progress with the existing `workflow` tool. This is the intended adapter boundary. Deterministic runtime code validates, persists, estimates, and renders the submitted data.

@@ -13,9 +13,9 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 
 1. `.pi/workflows/` in the project (highest precedence on name collisions)
 2. `~/.pi/agent/workflows/` globally
-3. Workflows built into pi-workflows
+3. Workflows built into Pi Workflows
 
-pi-workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
+Pi Workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
 `plan-approval`, and `monitor` workflows. `autoplan` is the current name for the
 planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
@@ -417,7 +417,13 @@ The built-in `autoplan` workflow selects a practical in-scope solution and write
 
 The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autoplan, documents the revised plan, and asks again through a new plan digest.
 
-Autoimplement writes and runs the exact pi-reviewer command. It records P0 through P2 by review round. P0 or P1 work requires another review. P2-only work can be addressed and verified without another reviewer run. CI tracking commands are also explicit. One CI watch lasts at most five minutes, after which the model runs more useful local tests before checking CI again.
+Autoimplement runs independent commands through bounded command batches. A batch is an ordinary function action that calls the public `runCommandBatch` helper. Each command has a stable ID, executable, arguments, absolute working directory, timeout, and output limit. Results stay separate and return in input order. One command uses the same path with concurrency one.
+
+Autoimplement uses batches for pi-reviewer, pending CI watches, and local verification commands from independent repositories. It keeps model turns, fixes, pushes, comment changes, merges, and releases in their existing order. Reviewer commands are tied to the repository, base branch, pushed head, and relevant dependency fingerprint. A later review round includes only repositories whose head or dependency fingerprint changed. P0 or P1 work still requires another review. P2-only work can be addressed and verified without another reviewer run only because of that P2 work.
+
+Autoimplement inspects every pull request before it waits for CI. It batches only supported pending `gh pr checks --watch` or `gh run watch` commands. One watch lasts at most five minutes. A failed or timed-out watch affects only its pull request. When checks remain pending, the model runs more useful local tests before checking CI again. Autoimplement does not invent an ETA.
+
+The action abort signal stops active command process groups and prevents queued commands from starting. Accepted outputs use the existing trace and artifacts. An interrupted unaccepted batch runs again because batch commands are read-only or isolated local checks. Progress updates contain metadata only and never control routing. Truncated reviewer or CI output cannot count as clean. See [Run independent commands in bounded batches](plans/2026-08-20-bounded-command-batches-plan.md) for the complete contract and implementation plan.
 
 A model-generated blocker from implementation or a safe later stage does not end autoimplement by itself. A separate blocker-challenge agent checks the task, approved plan, current result, evidence, scope, authority, earlier attempts, and practical alternatives. It confirms a blocker only when the blocker exists now, is outside the granted authority, has no safe path forward, has an empty next action, and includes concrete evidence and checked alternatives. A rejected blocker must name the next practical action and routes through the existing redesign workflow before implementation and verification continue.
 
@@ -445,9 +451,9 @@ The first check runs immediately. Omit `repair` for observation-only monitoring.
 runtime queues that report as a workflow notification with `triggerTurn:
 false`, so it does not cause an assistant reply. A check can also provide
 independent progress tracks. The regular Pi model running the check observes
-the target and submits those facts. pi-workflows validates the counts and
+the target and submits those facts. Pi Workflows validates the counts and
 calculates rates, confidence, and ETA deterministically. The target does not
-need a pi-workflows dependency or reporting protocol.
+need a Pi Workflows dependency or reporting protocol.
 
 Intervals must be whole minutes from 1 through 1,440. When `stopWhen` is
 omitted, the monitor stops only after an explicit user request. `maxChecks`
@@ -562,7 +568,7 @@ possible. Defaults worth knowing:
   exists.
 - If deferred activation fails, the queue stores a bounded safe error, releases the session
   reservation, and sends one follow-up turn to the initiating model. The model can correct the
-  cause and make a new explicit start call. pi-workflows does not retry blindly.
+  cause and make a new explicit start call. Pi Workflows does not retry blindly.
 - `/workflow cancel` aborts the current node and marks the run `cancelled`.
   When no run is live but the widget still shows a parked or finished run,
   the same command clears the widget.

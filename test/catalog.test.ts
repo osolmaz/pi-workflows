@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import { BuiltinWorkflowCatalog } from "../src/workflows/catalog.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 
@@ -12,6 +13,10 @@ function fixture(name = "fixture") {
 }
 
 describe("BuiltinWorkflowCatalog", () => {
+  it("ships autoimplement at revision 5", () => {
+    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("5");
+  });
+
   it("resolves a stable built-in source without reading a file", () => {
     const definition = fixture();
     const catalog = new BuiltinWorkflowCatalog([{ id: "fixture", revision: "r1", definition }]);

@@ -17,6 +17,7 @@ export {
   type AutoimplementInput,
   type ExistingPlanDiscovery,
 } from "./autoimplement.workflow.js";
+export type { AutoimplementConcurrency } from "./autoimplement-command-batches.js";
 export {
   default as monitorWorkflow,
   type MonitorInput,

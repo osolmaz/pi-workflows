@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { resolveWorkflowRef } from "../src/workflows/loader.js";
@@ -94,6 +95,21 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
     .respond("implementation/classifyImplementation", {
       output: { route: "verify", summary: "ready", evidence: "change" },
     })
+    .respond("implementation/planVerification", {
+      output: {
+        commands: [
+          {
+            id: "verify",
+            command: process.execPath,
+            args: ["-e", "process.stdout.write('passed')"],
+            cwd: repository,
+            timeoutMs: 60_000,
+            maxOutputChars: 100_000,
+          },
+        ],
+        untested: [],
+      },
+    })
     .respond("implementation/verify", {
       output: {
         passed: true,
@@ -107,28 +123,31 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
     })
     .respond("implementation/publish", {
       output: {
-        branch: "feat/fix",
-        baseBranch: "main",
-        headRevision: "revision-two",
-        pr: "https://example.test/pr/2",
-        pushed: true,
-      },
-    })
-    .respond("implementation/authorReviewCommand", {
-      output: {
-        command: "pi-reviewer",
-        args: ["--base", "main"],
-        cwd: repository,
-        timeoutMs: 600_000,
+        repositories: [
+          {
+            repository,
+            branch: "feat/fix",
+            baseBranch: "main",
+            headRevision: "revision-two",
+            pr: "https://example.test/pr/2",
+            pushed: true,
+          },
+        ],
       },
     })
     .respond("implementation/assessReview", {
       output: {
-        invocationSucceeded: true,
-        p0: [],
-        p1: [],
-        p2: [],
-        lower: [],
+        repositories: [
+          {
+            id: repositoryId(repository),
+            invocationSucceeded: true,
+            p0: [],
+            p1: [],
+            p2: [],
+            lower: [],
+            reason: "clean",
+          },
+        ],
         reason: "clean",
       },
     })
@@ -136,7 +155,19 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
       output: { route: "ci", summary: "clear", evidence: [] },
     })
     .respond("implementation/inspectCi", {
-      output: { route: "green", reason: "green", relatedFailures: [], unrelatedFailures: [] },
+      output: {
+        targets: [
+          {
+            repository,
+            headRevision: "revision-two",
+            pr: "https://example.test/pr/2",
+            route: "green",
+            reason: "green",
+            relatedFailures: [],
+            unrelatedFailures: [],
+          },
+        ],
+      },
     })
     .respond("implementation/finalizeDelivery", {
       output: {

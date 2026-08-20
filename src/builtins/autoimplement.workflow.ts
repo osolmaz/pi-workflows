@@ -1,19 +1,32 @@
 import path from "node:path";
 import {
+  runCommandBatch,
+  type CommandBatchItem,
+  type CommandBatchResult,
+} from "../workflows/command-batch.js";
+import {
+  action,
   agent,
   compute,
   defineWorkflow,
   includeWorkflow,
   includedResult,
-  shell,
 } from "../workflows/definition.js";
 import { digest } from "../workflows/human-decision.js";
-import type {
-  ShellActionExecution,
-  ShellActionResult,
-  WorkflowNodeContext,
-} from "../workflows/types.js";
+import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
+import {
+  parseAutoimplementConcurrency,
+  parseCiInspectionBatch,
+  parsePublishedRepositories,
+  parseVerificationCommandPlan,
+  reviewerCommand,
+  type AutoimplementConcurrency,
+  type CiInspectionBatch,
+  type PublishedRepositories,
+  type PublishedRepository,
+  type VerificationCommandPlan,
+} from "./autoimplement-command-batches.js";
 import autoplanWorkflow, { type AutoplanInput } from "./autoplan.workflow.js";
 import planApprovalWorkflow, { type PlanApprovalInput } from "./plan-approval.workflow.js";
 
@@ -35,6 +48,7 @@ export type AutoimplementInput = {
     audience: string;
     maxReplans: number;
   };
+  concurrency?: Partial<AutoimplementConcurrency>;
 };
 
 export type ExistingPlanDiscovery = {
@@ -46,17 +60,24 @@ export type ExistingPlanDiscovery = {
   evidence: unknown;
 };
 
-type StructuredCommand = {
-  command: string;
-  args: string[];
-  cwd: string;
-  timeoutMs: number;
-};
-
 type ReviewFinding = {
   severity: "P0" | "P1" | "P2" | "lower";
   kind: "design" | "implementation";
   summary: string;
+};
+
+type RepositoryReviewAssessment = {
+  id: string;
+  repository: string;
+  baseBranch: string;
+  headRevision: string;
+  dependencyFingerprint?: string;
+  invocationSucceeded: boolean;
+  p0: ReviewFinding[];
+  p1: ReviewFinding[];
+  p2: ReviewFinding[];
+  lower: ReviewFinding[];
+  reason: string;
 };
 
 type ReviewAssessment = {
@@ -67,6 +88,7 @@ type ReviewAssessment = {
   p2: ReviewFinding[];
   lower: ReviewFinding[];
   reason: string;
+  repositories?: RepositoryReviewAssessment[];
 };
 
 export type AutoimplementCompleted = {
@@ -98,8 +120,6 @@ type BlockerChallenge = {
   evidence: string[];
 };
 
-const FIVE_MINUTES_MS = 5 * 60_000;
-const TEN_MINUTES_MS = 10 * 60_000;
 const MAX_BLOCKER_CHALLENGES = 3;
 const MAX_CHALLENGE_ITEMS = 5;
 const MAX_CHALLENGE_TEXT = 500;
@@ -233,6 +253,7 @@ function parseInput(value: unknown): AutoimplementInput {
       documents: [...raw.documents] as string[],
     };
   }
+  const concurrency = parseAutoimplementConcurrency(input.concurrency);
   let approval: AutoimplementInput["approval"];
   if (input.approval !== undefined) {
     const raw = requireRecord(input.approval, "autoimplement approval");
@@ -264,6 +285,7 @@ function parseInput(value: unknown): AutoimplementInput {
     ...(documents !== undefined ? { documents: [...documents] as string[] } : {}),
     ...(documentation !== undefined ? { documentation } : {}),
     ...(approval !== undefined ? { approval } : {}),
+    concurrency,
   };
 }
 
@@ -312,70 +334,70 @@ function parseRoute<T extends string>(
   return { ...record, route: record.route as T };
 }
 
-function parseCommand(
-  value: unknown,
-  options: {
-    command: string;
-    maxTimeoutMs: number;
-    validateArgs: (args: string[]) => boolean;
-    label: string;
-  },
-): StructuredCommand {
-  const command = requireRecord(value, options.label);
-  if (command.command !== options.command) {
-    throw new Error(`${options.label} command must be ${options.command}`);
-  }
-  if (!Array.isArray(command.args) || command.args.some((arg) => typeof arg !== "string")) {
-    throw new Error(`${options.label} args must be an array of strings`);
-  }
-  const args = [...command.args] as string[];
-  if (!options.validateArgs(args)) throw new Error(`${options.label} args are not allowed`);
-  const cwd = requireString(command.cwd, `${options.label} cwd`);
-  if (!path.isAbsolute(cwd)) throw new Error(`${options.label} cwd must be absolute`);
-  const timeoutMs = command.timeoutMs;
-  if (
-    typeof timeoutMs !== "number" ||
-    !Number.isInteger(timeoutMs) ||
-    timeoutMs <= 0 ||
-    timeoutMs > options.maxTimeoutMs
-  ) {
-    throw new Error(`${options.label} timeoutMs must be at most ${options.maxTimeoutMs}`);
-  }
-  return { command: options.command, args, cwd, timeoutMs };
+type ReviewCommandSelection = {
+  route: "run" | "reuse";
+  repositories: PublishedRepository[];
+  commands: CommandBatchItem[];
+};
+
+type BatchExecution = {
+  route: "assess" | "repair";
+  batch: CommandBatchResult;
+};
+
+function concurrency(context: WorkflowNodeContext): AutoimplementConcurrency {
+  return parseAutoimplementConcurrency((context.input as AutoimplementInput).concurrency);
 }
 
-function parseReviewerCommand(value: unknown): StructuredCommand {
-  return parseCommand(value, {
-    command: "pi-reviewer",
-    maxTimeoutMs: TEN_MINUTES_MS,
-    label: "reviewer command",
-    validateArgs: (args) => {
-      const base = args.indexOf("--base");
-      return base >= 0 && typeof args[base + 1] === "string" && args[base + 1]!.length > 0;
+async function runAutoimplementBatch(
+  context: WorkflowActionContext,
+  kind: "review" | "ciWatch" | "verification",
+  commands: CommandBatchItem[],
+  maxConcurrency: number,
+): Promise<CommandBatchResult> {
+  return await runCommandBatch(
+    { items: commands, maxConcurrency: Math.min(maxConcurrency, Math.max(1, commands.length)) },
+    {
+      signal: context.signal,
+      onItemSettled: async (result, completed, total) => {
+        if (context.signal.aborted) return;
+        try {
+          await context.publishUpdate({
+            type: "command-batch.item",
+            key: `${kind}/${result.id}`,
+            data: {
+              schema: "pi-workflows.command-batch-item.v1",
+              batchKind: kind,
+              itemId: result.id,
+              outcome: result.outcome,
+              completed,
+              total,
+            },
+          });
+        } catch (error) {
+          if (!context.signal.aborted) throw error;
+        }
+      },
     },
-  });
+  );
 }
 
-function parseCiCommand(value: unknown): StructuredCommand {
-  return parseCommand(value, {
-    command: "gh",
-    maxTimeoutMs: FIVE_MINUTES_MS,
-    label: "CI tracking command",
-    validateArgs: (args) =>
-      (args[0] === "pr" && args[1] === "checks" && args.includes("--watch")) ||
-      (args[0] === "run" && args[1] === "watch"),
-  });
+function commandBatchTimeoutMs(commands: CommandBatchItem[], maxConcurrency: number): number {
+  if (commands.length === 0) return 10_000;
+  const concurrency = Math.min(maxConcurrency, commands.length);
+  const waves = Math.ceil(commands.length / concurrency);
+  const longestItem = Math.max(...commands.map((command) => command.timeoutMs));
+  return waves * longestItem + 10_000;
 }
 
-function commandExecution(command: StructuredCommand): ShellActionExecution {
-  return {
-    command: command.command,
-    args: command.args,
-    cwd: command.cwd,
-    timeoutMs: command.timeoutMs,
-    allowNonZeroExit: true,
-    maxOutputChars: 1_000_000,
-  };
+function batchNeedsRepair(result: CommandBatchResult): boolean {
+  return result.items.some(
+    (item) =>
+      item.outcome === "failed" ||
+      item.outcome === "timedOut" ||
+      item.stdoutTruncated ||
+      item.stderrTruncated,
+  );
 }
 
 function latestOutput<T>(context: WorkflowNodeContext, nodeIds: string[]): T {
@@ -383,20 +405,10 @@ function latestOutput<T>(context: WorkflowNodeContext, nodeIds: string[]): T {
     const step = context.state.steps[index];
     if (step && nodeIds.includes(step.nodeId)) return step.output as T;
   }
-  throw new Error(`No output found for ${nodeIds.join(" or ")}`);
-}
-
-function latestCiCommand(context: WorkflowNodeContext): StructuredCommand {
-  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
-    const step = context.state.steps[index];
-    if (!step) continue;
-    if (step.nodeId === "repairCiCommand") return step.output as StructuredCommand;
-    if (step.nodeId === "inspectCi") {
-      const output = step.output as { trackingCommand?: StructuredCommand };
-      if (output.trackingCommand !== undefined) return output.trackingCommand;
-    }
+  for (const nodeId of nodeIds) {
+    if (context.outputs[nodeId] !== undefined) return context.outputs[nodeId] as T;
   }
-  throw new Error("No CI tracking command is available");
+  throw new Error(`No output found for ${nodeIds.join(" or ")}`);
 }
 
 function currentPlan(context: WorkflowNodeContext): unknown {
@@ -501,18 +513,126 @@ function parseFinding(value: unknown, severity: ReviewFinding["severity"]): Revi
   };
 }
 
-function parseReviewAssessment(value: unknown): ReviewAssessment {
-  const review = requireRecord(value, "review assessment");
-  const parseList = (key: "p0" | "p1" | "p2" | "lower", severity: ReviewFinding["severity"]) => {
-    const raw = review[key];
-    if (!Array.isArray(raw)) throw new Error(`review ${key} must be an array`);
-    return raw.map((item) => parseFinding(item, severity));
+function parseVerificationForContext(
+  value: unknown,
+  context: WorkflowNodeContext,
+): VerificationCommandPlan {
+  const plan = parseVerificationCommandPlan(value);
+  const implementation = latestOutput<Record<string, unknown>>(context, ["implement"]);
+  const reported = Array.isArray(implementation.repositories)
+    ? implementation.repositories.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  const request = context.input as AutoimplementInput;
+  const roots = new Set(
+    (reported.length > 0 ? reported : [request.repository ?? process.cwd()]).map((entry) =>
+      path.resolve(entry),
+    ),
+  );
+  for (const command of plan.commands) {
+    if (!roots.has(path.resolve(command.cwd))) {
+      throw new Error(
+        `verification command cwd was not reported by implementation: ${command.cwd}`,
+      );
+    }
+  }
+  return plan;
+}
+
+function parseCiInspectionForPublished(
+  value: unknown,
+  context: WorkflowNodeContext,
+): CiInspectionBatch {
+  const inspected = parseCiInspectionBatch(value);
+  const published = latestOutput<PublishedRepositories>(context, ["publish"]);
+  const expected = new Map(
+    published.repositories.map((repository) => [repository.id, repository] as const),
+  );
+  for (const target of inspected.targets) {
+    const repository = expected.get(target.id);
+    if (
+      repository === undefined ||
+      repository.repository !== target.repository ||
+      repository.headRevision !== target.headRevision ||
+      repository.pr !== target.pr
+    ) {
+      throw new Error(
+        `CI target does not match the published repository and head: ${target.id} (${JSON.stringify({ target, repository })})`,
+      );
+    }
+    expected.delete(target.id);
+  }
+  if (expected.size > 0) {
+    throw new Error(`CI inspection is missing repository ids: ${[...expected.keys()].join(", ")}`);
+  }
+  return inspected;
+}
+
+function selectReviewCommands(context: WorkflowNodeContext): ReviewCommandSelection {
+  const published = latestOutput<PublishedRepositories>(context, ["publish"]);
+  const reviewed = reviewRounds(context).flatMap((round) => round.repositories ?? []);
+  const repositories = published.repositories.filter(
+    (repository) =>
+      !reviewed.some(
+        (entry) =>
+          entry.id === repository.id &&
+          entry.headRevision === repository.headRevision &&
+          entry.dependencyFingerprint === repository.dependencyFingerprint &&
+          entry.invocationSucceeded,
+      ),
+  );
+  return {
+    route: repositories.length === 0 ? "reuse" : "run",
+    repositories,
+    commands: repositories.map(reviewerCommand),
   };
-  const p0 = parseList("p0", "P0");
-  const p1 = parseList("p1", "P1");
-  const p2 = parseList("p2", "P2");
-  const lower = parseList("lower", "lower");
-  const invocationSucceeded = review.invocationSucceeded === true;
+}
+
+function parseReviewAssessment(value: unknown, context: WorkflowNodeContext): ReviewAssessment {
+  const review = requireRecord(value, "review assessment");
+  if (!Array.isArray(review.repositories)) {
+    throw new Error("review repositories must be an array");
+  }
+  const selected = latestOutput<ReviewCommandSelection>(context, ["selectReviewCommands"]);
+  const expected = new Map(selected.repositories.map((repository) => [repository.id, repository]));
+  const repositories = review.repositories.map((value, index) => {
+    const raw = requireRecord(value, `review repositories[${index}]`);
+    const id = requireString(raw.id, `review repositories[${index}].id`);
+    const published = expected.get(id);
+    if (published === undefined)
+      throw new Error(`review repository id was not in the batch: ${id}`);
+    expected.delete(id);
+    const parseList = (key: "p0" | "p1" | "p2" | "lower", severity: ReviewFinding["severity"]) => {
+      const list = raw[key];
+      if (!Array.isArray(list))
+        throw new Error(`review repositories[${index}].${key} must be an array`);
+      return list.map((item) => parseFinding(item, severity));
+    };
+    return {
+      id,
+      repository: published.repository,
+      baseBranch: published.baseBranch,
+      headRevision: published.headRevision,
+      ...(published.dependencyFingerprint !== undefined
+        ? { dependencyFingerprint: published.dependencyFingerprint }
+        : {}),
+      invocationSucceeded: raw.invocationSucceeded === true,
+      p0: parseList("p0", "P0"),
+      p1: parseList("p1", "P1"),
+      p2: parseList("p2", "P2"),
+      lower: parseList("lower", "lower"),
+      reason: requireString(raw.reason, `review repositories[${index}].reason`),
+    } satisfies RepositoryReviewAssessment;
+  });
+  if (expected.size > 0) {
+    throw new Error(
+      `review assessment is missing repository ids: ${[...expected.keys()].join(", ")}`,
+    );
+  }
+  const p0 = repositories.flatMap((entry) => entry.p0);
+  const p1 = repositories.flatMap((entry) => entry.p1);
+  const p2 = repositories.flatMap((entry) => entry.p2);
+  const lower = repositories.flatMap((entry) => entry.lower);
+  const invocationSucceeded = repositories.every((entry) => entry.invocationSucceeded);
   const route = !invocationSucceeded
     ? "command_error"
     : p0.length + p1.length > 0
@@ -528,6 +648,7 @@ function parseReviewAssessment(value: unknown): ReviewAssessment {
     p2,
     lower,
     reason: requireString(review.reason, "review reason"),
+    repositories,
   };
 }
 
@@ -535,6 +656,35 @@ function reviewRounds(context: WorkflowNodeContext): ReviewAssessment[] {
   return context.state.steps
     .filter((step) => step.nodeId === "assessReview" && step.outcome === "ok")
     .map((step) => step.output as ReviewAssessment);
+}
+
+function reviewRoundsForOutput(context: WorkflowNodeContext): ReviewAssessment[] {
+  const rounds = reviewRounds(context);
+  const repositoryIds = new Set(
+    rounds.flatMap((round) => (round.repositories ?? []).map((repository) => repository.id)),
+  );
+  if (repositoryIds.size > 1) return rounds;
+  return rounds.map(({ repositories: _repositories, ...round }) => round);
+}
+
+function ciForOutput(context: WorkflowNodeContext): unknown {
+  const result = latestOutput<Record<string, unknown>>(context, ["assessTrackedCi", "inspectCi"]);
+  const targets = result.targets;
+  if (!Array.isArray(targets) || targets.length !== 1) return result;
+  const { targets: _targets, ...aggregate } = result;
+  if (result.route === "green" || result.route === "failed" || result.route === "unavailable") {
+    const target = targets[0];
+    if (target !== null && typeof target === "object" && !Array.isArray(target)) {
+      const record = target as Record<string, unknown>;
+      return {
+        ...aggregate,
+        reason: aggregate.reason ?? record.reason,
+        relatedFailures: aggregate.relatedFailures ?? record.relatedFailures ?? [],
+        unrelatedFailures: aggregate.unrelatedFailures ?? record.unrelatedFailures ?? [],
+      };
+    }
+  }
+  return aggregate;
 }
 
 function latestBlockedReason(context: WorkflowNodeContext): { reason: string; evidence: unknown } {
@@ -735,10 +885,11 @@ export const autoimplementWorkflow = defineWorkflow({
           `Constraints: ${JSON.stringify(request.constraints ?? [])}`,
           "Follow repository instructions and use the most elegant long-term production-ready implementation without unnecessary work.",
           "If implementation exposes a new design or scope problem, report it precisely instead of forcing the old plan.",
+          "Report every changed repository as an absolute path so independent verification can be bounded safely.",
           "Do not merge yet.",
         ].join("\n");
       },
-      expectedOutput: `{ "status": "implemented" | "issue" | "blocked", "summary": "work completed or issue", "files": ["changed file"], "issueKind": "design" | "implementation" | null, "evidence": "new evidence" }`,
+      expectedOutput: `{ "status": "implemented" | "issue" | "blocked", "summary": "work completed or issue", "files": ["changed file"], "repositories": ["absolute repository path changed"], "issueKind": "design" | "implementation" | null, "evidence": "new evidence" }`,
       validate: (value) => requireRecord(value, "implementation result"),
     }),
     classifyImplementation: agent({
@@ -805,15 +956,46 @@ export const autoimplementWorkflow = defineWorkflow({
       expectedOutput: `{ "route": "continue" | "blocked", "blockingNow": true | false, "outsideAuthority": true | false, "canProceed": true | false, "reason": "concise reason", "nextAction": "practical action or empty when blocked", "alternativesChecked": ["checked alternative"], "evidence": ["concrete evidence"] }`,
       validate: parseBlockerChallenge,
     }),
-    verify: agent({
-      timeoutMs: 45 * 60_000,
-      statusDetail: "verifying",
+    planVerification: agent({
+      timeoutMs: 15 * 60_000,
+      statusDetail: "planning independent verification commands",
       prompt: () =>
         [
-          "Verify the implementation thoroughly.",
-          "Run required tests, formatting, lint, type checks, builds, and useful local smoke tests.",
-          "Do not put optional mutation testing on the critical path.",
-          "State exactly what ran, what passed, what failed, and what still needs remote verification.",
+          "Select the required local verification commands for the implementation.",
+          "Return one command per independent repository working directory.",
+          "Use exact executables and argument arrays without shell wrappers, environment overrides, stdin, Git or GitHub mutations, package publication, deployment, merge, or release commands.",
+          "Use absolute repository paths, explicit timeouts no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
+          "List checks that cannot run locally under untested.",
+        ].join("\n"),
+      expectedOutput: `{ "commands": [{ "id": "stable-id", "command": "npm", "args": ["run", "check"], "cwd": "/absolute/repository", "timeoutMs": 2700000, "maxOutputChars": 1000000 }], "untested": ["remaining check"] }`,
+      validate: parseVerificationForContext,
+    }),
+    runVerification: action({
+      timeoutMs: (context) => {
+        const plan = latestOutput<VerificationCommandPlan>(context, ["planVerification"]);
+        return commandBatchTimeoutMs(plan.commands, concurrency(context).verification);
+      },
+      statusDetail: "running independent verification commands",
+      run: async (context) => {
+        const plan = latestOutput<VerificationCommandPlan>(context, ["planVerification"]);
+        return await runAutoimplementBatch(
+          context,
+          "verification",
+          plan.commands,
+          concurrency(context).verification,
+        );
+      },
+    }),
+    verify: agent({
+      timeoutMs: 20 * 60_000,
+      statusDetail: "assessing verification",
+      prompt: (context) =>
+        [
+          "Assess the completed local verification commands.",
+          "Set passed true only when every required command succeeded without truncated output.",
+          "Report exact command outcomes, failures, and checks that still need remote verification.",
+          `Command plan: ${JSON.stringify(latestOutput(context, ["planVerification"]))}`,
+          `Command results: ${JSON.stringify(latestOutput(context, ["runVerification"]))}`,
         ].join("\n"),
       expectedOutput: `{ "passed": true | false, "commands": [{ "command": "exact command", "outcome": "result" }], "failures": ["failure"], "untested": ["remaining check"] }`,
       validate: (value) => requireRecord(value, "verification result"),
@@ -859,80 +1041,65 @@ export const autoimplementWorkflow = defineWorkflow({
           "Commit and push the verified implementation before review.",
           "Use the existing implementation-plan PR when one exists. Otherwise open a PR and use the pr-description skill for its body.",
           "Inspect the complete public diff before every push or PR mutation.",
-          `Requested base branch: ${request.baseBranch ?? "discover the repository default branch"}.`,
+          "Report every repository that received a pushed pull request with its absolute repository path, branch, base branch, pushed head revision, and PR URL.",
+          "Include dependencyFingerprint only when a declared dependency result is relevant to review reuse.",
+          `Requested base branch: ${request.baseBranch ?? "discover each repository default branch"}.`,
           "Do not merge yet.",
         ].join("\n");
       },
-      expectedOutput: `{ "branch": "branch", "baseBranch": "base", "headRevision": "revision", "pr": "URL", "pushed": true }`,
-      validate: (value) => requireRecord(value, "publication result"),
+      expectedOutput: `{ "repositories": [{ "repository": "/absolute/repository", "branch": "branch", "baseBranch": "base", "headRevision": "revision", "pr": "URL", "pushed": true, "dependencyFingerprint": "optional digest" }] }`,
+      validate: parsePublishedRepositories,
     }),
-    authorReviewCommand: agent({
-      statusDetail: "writing reviewer command",
-      prompt: ({ outputs, input }) => {
-        const published = outputs.publish as Record<string, unknown>;
-        const request = input as AutoimplementInput;
-        return [
-          "Write the exact pi-reviewer command for the pushed branch.",
-          "The executable must be pi-reviewer. Use its configured model and thinking settings.",
-          "Use the repository base branch and an absolute repository working directory.",
-          "Set timeoutMs to at most 600000.",
-          `Published branch: ${JSON.stringify(published)}`,
-          `Repository hint: ${request.repository ?? "current repository"}`,
-        ].join("\n");
+    selectReviewCommands: compute({
+      run: selectReviewCommands,
+    }),
+    runReview: action({
+      statusDetail: "running pi-reviewer commands",
+      timeoutMs: (context) => {
+        const selected = latestOutput<ReviewCommandSelection>(context, ["selectReviewCommands"]);
+        return commandBatchTimeoutMs(selected.commands, concurrency(context).reviewer);
       },
-      expectedOutput: `{ "command": "pi-reviewer", "args": ["--base", "main"], "cwd": "/absolute/repository", "timeoutMs": 600000 }`,
-      validate: parseReviewerCommand,
-    }),
-    runReview: shell({
-      statusDetail: "running pi-reviewer",
-      timeoutMs: TEN_MINUTES_MS + 10_000,
-      exec: (context) =>
-        commandExecution(
-          latestOutput<StructuredCommand>(context, ["authorReviewCommand", "repairReviewCommand"]),
-        ),
+      run: async (context): Promise<BatchExecution> => {
+        const selected = latestOutput<ReviewCommandSelection>(context, ["selectReviewCommands"]);
+        const batch = await runAutoimplementBatch(
+          context,
+          "review",
+          selected.commands,
+          concurrency(context).reviewer,
+        );
+        return { route: batchNeedsRepair(batch) ? "repair" : "assess", batch };
+      },
     }),
     repairReviewCommand: agent({
-      statusDetail: "correcting reviewer command",
-      prompt: (context) => {
-        const failed = context.results.runReview;
-        return [
-          "The pi-reviewer invocation failed. Diagnose the exact command, arguments, base branch, working directory, and error.",
-          "Write a corrected pi-reviewer command. Do not substitute codex review or another reviewer.",
-          "If pi-reviewer or its configuration is missing, report that through the same command shape only when another valid invocation exists; otherwise the next assessment must block.",
-          `Failed result: ${JSON.stringify(failed)}`,
-        ].join("\n");
-      },
-      expectedOutput: `{ "route": "retry" | "blocked", "command": "pi-reviewer", "args": ["--base", "main"], "cwd": "/absolute/repository", "timeoutMs": 600000, "reason": "diagnosis" }`,
-      validate: (value) => {
-        const result = requireRecord(value, "reviewer command repair");
-        if (result.route === "blocked") {
-          return {
-            route: "blocked",
-            reason: requireString(result.reason, "reviewer command blocker"),
-          };
-        }
-        if (result.route !== "retry")
-          throw new Error("reviewer command repair route must be retry or blocked");
-        return {
-          route: "retry",
-          ...parseReviewerCommand(result),
-          reason: requireString(result.reason, "reviewer command repair reason"),
-        };
-      },
+      statusDetail: "repairing reviewer prerequisites",
+      prompt: (context) =>
+        [
+          "One or more pi-reviewer commands failed, timed out, or returned truncated output.",
+          "Diagnose and fix only local reviewer prerequisites or configuration that are in scope.",
+          "Do not change the deterministic executable, base branch, or repository command shape, and do not substitute another reviewer.",
+          "Choose retry only when the same commands can now produce complete reviews. Choose blocked when pi-reviewer or required configuration remains unavailable.",
+          `Failed batch: ${JSON.stringify(context.outputs.runReview)}`,
+        ].join("\n"),
+      expectedOutput: `{ "route": "retry" | "blocked", "reason": "diagnosis and action" }`,
+      validate: (value) =>
+        parseRoute(value, ["retry", "blocked"] as const, "reviewer command repair"),
     }),
     assessReview: agent({
       statusDetail: "assessing reviewer findings",
       prompt: (context) => {
-        const result = latestOutput<ShellActionResult>(context, ["runReview"]);
+        const selected = latestOutput<ReviewCommandSelection>(context, ["selectReviewCommands"]);
+        const execution = latestOutput<BatchExecution>(context, ["runReview"]);
         return [
-          "Assess the completed pi-reviewer invocation.",
-          "Set invocationSucceeded false only when the reviewer did not produce a valid review.",
-          "Record each finding under P0, P1, P2, or lower. Mark each finding as design or implementation.",
+          "Assess each completed pi-reviewer result separately.",
+          "Return one repository entry for every selected command, using the exact repository id.",
+          "Set invocationSucceeded false when a complete valid review was not produced.",
+          "Record every finding under P0, P1, P2, or lower and mark it as design or implementation.",
           "Do not promote P2 findings to P1 merely to force another review round.",
-          `Reviewer result: ${JSON.stringify(result)}`,
+          `Selected repositories: ${JSON.stringify(selected.repositories)}`,
+          `Reviewer results: ${JSON.stringify(execution.batch)}`,
         ].join("\n");
       },
-      expectedOutput: `{ "invocationSucceeded": true | false, "p0": [{ "kind": "design" | "implementation", "summary": "finding" }], "p1": [], "p2": [], "lower": [], "reason": "assessment" }`,
+      expectedOutput: `{ "repositories": [{ "id": "repository-id", "invocationSucceeded": true | false, "p0": [{ "kind": "design" | "implementation", "summary": "finding" }], "p1": [], "p2": [], "lower": [], "reason": "assessment" }], "reason": "batch assessment" }`,
       validate: parseReviewAssessment,
     }),
     triageReview: compute({
@@ -973,11 +1140,12 @@ export const autoimplementWorkflow = defineWorkflow({
     inspectComments: agent({
       timeoutMs: 20 * 60_000,
       statusDetail: "checking PR comments",
-      prompt: () =>
+      prompt: (context) =>
         [
-          "Inspect current inline review comments and PR issue comments.",
-          "Reply to and resolve every comment. Ignore stale or irrelevant comments only after explaining why.",
-          "Choose redesign for a valid design issue, fix for a local code issue, ci when no actionable comment remains, or blocked for an external blocker.",
+          "Inspect current inline review comments and PR issue comments for every published pull request.",
+          "Handle pull requests one at a time. Reply to and resolve every comment. Ignore stale or irrelevant comments only after explaining why.",
+          "Choose redesign for a valid design issue, fix for a local code issue, ci when no actionable comment remains on any PR, or blocked for an external blocker.",
+          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
         ].join("\n"),
       expectedOutput: `{ "route": "redesign" | "fix" | "ci" | "blocked", "summary": "comment status", "evidence": ["comment or response"] }`,
       validate: (value) =>
@@ -986,65 +1154,71 @@ export const autoimplementWorkflow = defineWorkflow({
     inspectCi: agent({
       timeoutMs: 10 * 60_000,
       statusDetail: "checking CI",
-      prompt: () =>
-        [
-          "Inspect CI once without waiting for completion.",
-          "Choose green, failed, pending, or unavailable.",
-          "When pending, provide an exact gh command that tracks this PR or run and set timeoutMs to at most 300000.",
-          "Separate failures caused by this change from unrelated failures.",
-        ].join("\n"),
-      expectedOutput: `{ "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "relatedFailures": ["failure"], "unrelatedFailures": ["failure"], "trackingCommand": { "command": "gh", "args": ["pr", "checks", "--watch"], "cwd": "/absolute/repository", "timeoutMs": 300000 } (required when pending) }`,
-      validate: (value) => {
-        const result = parseRoute(
-          value,
-          ["green", "failed", "pending", "unavailable"] as const,
-          "CI inspection",
-        );
-        if (result.route === "pending")
-          result.trackingCommand = parseCiCommand(result.trackingCommand);
-        return result;
-      },
-    }),
-    trackCi: shell({
-      statusDetail: "tracking CI for at most five minutes",
-      timeoutMs: FIVE_MINUTES_MS + 10_000,
-      exec: (context) => commandExecution(latestCiCommand(context)),
-    }),
-    repairCiCommand: agent({
-      statusDetail: "correcting CI tracking command",
       prompt: (context) =>
         [
-          "The CI tracking command failed before it could provide a useful status.",
-          "Write a corrected gh pr checks --watch or gh run watch command for the same PR or run.",
-          "Use an absolute repository path and a timeout no longer than five minutes.",
-          `Failure: ${JSON.stringify(context.results.trackCi)}`,
+          "Inspect every published pull request once without waiting for completion.",
+          "Return one target per repository and current PR head.",
+          "Choose green, failed, pending, or unavailable for each target.",
+          "When pending, provide an exact supported gh pr checks --watch or gh run watch command with the repository id, absolute repository cwd, timeoutMs at most 300000, and maxOutputChars at most 1000000.",
+          "Separate failures caused by this change from unrelated failures. Do not invent an ETA.",
+          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
         ].join("\n"),
-      expectedOutput: `{ "route": "retry" | "blocked", "command": "gh", "args": ["pr", "checks", "--watch"], "cwd": "/absolute/repository", "timeoutMs": 300000, "reason": "diagnosis" }`,
-      validate: (value) => {
-        const result = requireRecord(value, "CI command repair");
-        if (result.route === "blocked") {
-          return { route: "blocked", reason: requireString(result.reason, "CI command blocker") };
-        }
-        if (result.route !== "retry")
-          throw new Error("CI command repair route must be retry or blocked");
-        return {
-          route: "retry",
-          ...parseCiCommand(result),
-          reason: requireString(result.reason, "CI command repair reason"),
-        };
+      expectedOutput: `{ "targets": [{ "repository": "/absolute/repository", "headRevision": "revision", "pr": "URL", "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "relatedFailures": ["failure"], "unrelatedFailures": ["failure"], "trackingCommand": { "id": "repository-id", "command": "gh", "args": ["pr", "checks", "--watch"], "cwd": "/absolute/repository", "timeoutMs": 300000, "maxOutputChars": 1000000 } }] }`,
+      validate: parseCiInspectionForPublished,
+    }),
+    trackCi: action({
+      statusDetail: "tracking pending CI commands",
+      timeoutMs: (context) => {
+        const inspected = latestOutput<CiInspectionBatch>(context, ["inspectCi"]);
+        const commands = inspected.targets.flatMap((target) =>
+          target.trackingCommand === undefined ? [] : [target.trackingCommand],
+        );
+        return commandBatchTimeoutMs(commands, concurrency(context).ciWatch);
       },
+      run: async (context): Promise<BatchExecution> => {
+        const inspected = latestOutput<CiInspectionBatch>(context, ["inspectCi"]);
+        const commands = inspected.targets.flatMap((target) =>
+          target.trackingCommand === undefined ? [] : [target.trackingCommand],
+        );
+        const batch = await runAutoimplementBatch(
+          context,
+          "ciWatch",
+          commands,
+          concurrency(context).ciWatch,
+        );
+        const needsRepair = batch.items.some(
+          (item) => item.outcome === "failed" || item.stdoutTruncated || item.stderrTruncated,
+        );
+        return { route: needsRepair ? "repair" : "assess", batch };
+      },
+    }),
+    repairCiCommand: agent({
+      statusDetail: "repairing CI watch prerequisites",
+      prompt: (context) =>
+        [
+          "One or more supported CI watch commands failed or returned truncated output.",
+          "Diagnose and fix only local gh prerequisites or authentication that are already authorized.",
+          "Do not change the PR identity or substitute another command form.",
+          "Choose retry only when the same validated commands can now provide useful status. Choose blocked otherwise.",
+          `Failure: ${JSON.stringify(context.outputs.trackCi)}`,
+        ].join("\n"),
+      expectedOutput: `{ "route": "retry" | "blocked", "reason": "diagnosis" }`,
+      validate: (value) => parseRoute(value, ["retry", "blocked"] as const, "CI command repair"),
     }),
     assessTrackedCi: agent({
       statusDetail: "assessing tracked CI",
       prompt: (context) => {
-        const result = latestOutput<ShellActionResult>(context, ["trackCi"]);
+        const inspected = latestOutput<CiInspectionBatch>(context, ["inspectCi"]);
+        const execution = latestOutput<BatchExecution>(context, ["trackCi"]);
         return [
-          "Assess the CI tracking result without starting another wait.",
-          "Choose green, failed, pending, or unavailable and separate related from unrelated failures.",
-          `Tracking result: ${JSON.stringify(result)}`,
+          "Assess every CI watch result without starting another wait.",
+          "Return one target result for every watched PR and an aggregate route of green, failed, pending, or unavailable.",
+          "A timed-out watch normally remains pending. Separate related from unrelated failures. Do not invent an ETA.",
+          `Initial inspection: ${JSON.stringify(inspected)}`,
+          `Tracking results: ${JSON.stringify(execution.batch)}`,
         ].join("\n");
       },
-      expectedOutput: `{ "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "relatedFailures": ["failure"], "unrelatedFailures": ["failure"] }`,
+      expectedOutput: `{ "route": "green" | "failed" | "pending" | "unavailable", "reason": "status", "targets": [{ "id": "repository-id", "route": "green" | "failed" | "pending" | "unavailable", "reason": "status" }], "relatedFailures": ["failure"], "unrelatedFailures": ["failure"] }`,
       validate: (value) =>
         parseRoute(
           value,
@@ -1083,19 +1257,21 @@ export const autoimplementWorkflow = defineWorkflow({
     }),
     finalizeDelivery: agent({
       timeoutMs: 30 * 60_000,
-      statusDetail: "finalizing PR",
-      prompt: ({ input }) => {
-        const request = input as AutoimplementInput;
+      statusDetail: "finalizing PRs",
+      prompt: (context) => {
+        const request = context.input as AutoimplementInput;
         return [
           request.merge === false
-            ? "Leave the verified PR ready without merging because input disabled merge."
-            : "Merge the verified PR unless repository policy or explicit user instructions prohibit it.",
-          "Use the repository's required merge method.",
-          "Post a final PR report with the implementation summary and exact validation commands.",
+            ? "Leave every verified PR ready without merging because input disabled merge."
+            : "Handle verified PRs one at a time and merge each unless repository policy or explicit user instructions prohibit it.",
+          "Use each repository's required merge method.",
+          "Post a final report with the implementation summary and exact validation commands on every PR.",
+          "Keep the existing top-level merged, pr, reportComment, and reason fields. For several PRs, use the first PR for the top-level compatibility fields and include every result under repositories.",
           "Return blocked instead of claiming completion when a required merge or report action fails.",
+          `Published repositories: ${JSON.stringify(latestOutput(context, ["publish"]))}`,
         ].join("\n");
       },
-      expectedOutput: `{ "status": "completed" | "blocked", "merged": true | false, "pr": "URL", "reportComment": "URL or summary", "reason": "result" }`,
+      expectedOutput: `{ "status": "completed" | "blocked", "merged": true | false, "pr": "first PR URL", "reportComment": "first report URL or summary", "reason": "aggregate result", "repositories": [{ "repository": "/absolute/repository", "pr": "URL", "merged": true | false, "reportComment": "URL or summary", "reason": "result" }] }`,
       validate: (value, context) => {
         const result = requireRecord(value, "delivery result");
         if (result.status !== "completed" && result.status !== "blocked") {
@@ -1127,11 +1303,11 @@ export const autoimplementWorkflow = defineWorkflow({
           status: "completed",
           task: request.task,
           plan: currentPlan(context),
-          implementation: context.outputs.implement,
-          verification: context.outputs.verifyP2 ?? context.outputs.verify,
-          reviewRounds: reviewRounds(context),
-          ci: context.outputs.assessTrackedCi ?? context.outputs.inspectCi,
-          delivery: context.outputs.finalizeDelivery,
+          implementation: latestOutput(context, ["implement"]),
+          verification: latestOutput(context, ["verifyP2", "verify"]),
+          reviewRounds: reviewRoundsForOutput(context),
+          ci: ciForOutput(context),
+          delivery: latestOutput(context, ["finalizeDelivery"]),
         } satisfies AutoimplementCompleted;
       },
     }),
@@ -1180,7 +1356,7 @@ export const autoimplementWorkflow = defineWorkflow({
       switch: {
         on: "$.route",
         cases: {
-          verify: "verify",
+          verify: "planVerification",
           redesign: "redesign",
           fix: "fix",
           blocked: "challengeBlockerGuard",
@@ -1195,6 +1371,8 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "challengeBlocker",
       switch: { on: "$.route", cases: { continue: "redesign", blocked: "blocked" } },
     },
+    { from: "planVerification", to: "runVerification" },
+    { from: "runVerification", to: "verify" },
     { from: "verify", to: "classifyVerification" },
     {
       from: "classifyVerification",
@@ -1208,19 +1386,15 @@ export const autoimplementWorkflow = defineWorkflow({
         },
       },
     },
-    { from: "fix", to: "verify" },
-    { from: "publish", to: "authorReviewCommand" },
-    { from: "authorReviewCommand", to: "runReview" },
+    { from: "fix", to: "planVerification" },
+    { from: "publish", to: "selectReviewCommands" },
+    {
+      from: "selectReviewCommands",
+      switch: { on: "$.route", cases: { run: "runReview", reuse: "inspectComments" } },
+    },
     {
       from: "runReview",
-      switch: {
-        on: "$result.outcome",
-        cases: {
-          ok: "assessReview",
-          failed: "repairReviewCommand",
-          timed_out: "repairReviewCommand",
-        },
-      },
+      switch: { on: "$.route", cases: { assess: "assessReview", repair: "repairReviewCommand" } },
     },
     {
       from: "repairReviewCommand",
@@ -1276,10 +1450,7 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "trackCi",
-      switch: {
-        on: "$result.outcome",
-        cases: { ok: "assessTrackedCi", failed: "repairCiCommand", timed_out: "opportunisticTest" },
-      },
+      switch: { on: "$.route", cases: { assess: "assessTrackedCi", repair: "repairCiCommand" } },
     },
     {
       from: "repairCiCommand",
