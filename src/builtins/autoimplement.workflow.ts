@@ -223,12 +223,17 @@ function parseTimeoutFallback(value: unknown, context: WorkflowNodeContext): Tim
     );
   }
 
-  latestTimedOutStep(context);
+  const timedOut = latestTimedOutStep(context);
   if (route === "verify" && !hasAcceptedOutput(context, ["implement"])) {
     throw new Error("timeout fallback cannot route to verification without implementation output");
   }
-  if (route === "review" && !hasAcceptedOutput(context, ["publish", "verifyP2"])) {
-    throw new Error("timeout fallback cannot route to review without publication output");
+  if (route === "review") {
+    if (timedOut.nodeId === "publish") {
+      throw new Error("timeout fallback must retry a timed-out publish before review");
+    }
+    if (!hasAcceptedOutput(context, ["publish", "verifyP2"])) {
+      throw new Error("timeout fallback cannot route to review without publication output");
+    }
   }
   if (route === "ci") {
     const comments = context.outputs.inspectComments as { route?: unknown } | undefined;
@@ -258,7 +263,7 @@ function timeoutFallbackTarget(context: WorkflowNodeContext): { route: string } 
       ci: "inspectCi",
       deliver: "finalizeDelivery",
       replan: "redesign",
-      blocked: "challengeBlockerGuard",
+      blocked: "blocked",
     };
     return { route: routes[fallback.route] };
   }
@@ -271,17 +276,20 @@ function timeoutFallbackGuard(context: WorkflowNodeContext) {
     (step) => step.nodeId === "timeoutFallback" && step.outcome === "ok",
   ).length;
   if (attempts >= MAX_TIMEOUT_FALLBACKS) {
+    const timeouts = context.state.steps
+      .filter((step) => step.outcome === "timed_out" && isTimeoutFallbackSource(step.nodeId))
+      .map((step) => ({
+        nodeId: step.nodeId,
+        attemptId: step.attemptId,
+        error: step.error,
+      }));
     return {
       route: "blocked",
       reason: `Autoimplement reached the ${MAX_TIMEOUT_FALLBACKS}-fallback timeout safety limit.`,
       evidence: {
         attempts,
         limit: MAX_TIMEOUT_FALLBACKS,
-        latestTimeout: {
-          nodeId: timeout.nodeId,
-          attemptId: timeout.attemptId,
-          error: timeout.error,
-        },
+        timeouts,
       },
     };
   }
@@ -1809,7 +1817,7 @@ export const autoimplementWorkflow = defineWorkflow({
           finalizeDelivery: "finalizeDelivery",
           selectReviewCommands: "selectReviewCommands",
           redesign: "redesign",
-          challengeBlockerGuard: "challengeBlockerGuard",
+          blocked: "blocked",
         },
       },
     },

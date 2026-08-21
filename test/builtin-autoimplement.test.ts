@@ -1771,6 +1771,73 @@ describe("built-in autoimplement", () => {
     expect((state.finalOutput as { status: string }).status).toBe("blocked");
     expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(3);
     expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(4);
+    expect(state.finalOutput).toMatchObject({
+      evidence: {
+        evidence: {
+          attempts: 3,
+          limit: 3,
+          timeouts: [
+            { nodeId: "implement", error: "Timed out after 10ms" },
+            { nodeId: "implement", error: "Timed out after 10ms" },
+            { nodeId: "implement", error: "Timed out after 10ms" },
+            { nodeId: "implement", error: "Timed out after 10ms" },
+          ],
+        },
+      },
+    });
+  });
+
+  it("keeps a fallback blocked result terminal and rejects stale review state", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("implement", { hang: true })
+      .respond("timeoutFallback", {
+        output: {
+          route: "blocked",
+          reason: "No safe route exists.",
+          evidence: ["Repository inspection found an unresolved conflict."],
+        },
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-blocked"),
+    });
+
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      merge: false,
+    });
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ status: "blocked", reason: "No safe route exists." });
+    expect(
+      executor.requests.some((request) => request.contract.nodeId === "challengeBlocker"),
+    ).toBe(false);
+
+    const fallback = autoimplementWorkflow.nodes.timeoutFallback;
+    if (fallback?.nodeType !== "agent" || fallback.validate === undefined) {
+      throw new Error("timeoutFallback must be a validated agent node");
+    }
+    await expect(
+      Promise.resolve().then(() =>
+        fallback.validate?.(
+          {
+            route: "review",
+            reason: "A prior P2 publication exists.",
+            evidence: ["The old PR is open."],
+          },
+          {
+            input: { task: "demo", plan: {} },
+            outputs: { verifyP2: published("old-head") },
+            results: {},
+            state: {
+              steps: [{ nodeId: "publish", outcome: "timed_out" }],
+            },
+          } as never,
+        ),
+      ),
+    ).rejects.toThrow("must retry a timed-out publish before review");
   });
 
   it("keeps failed implementation and cancellation out of timeout fallback", async () => {
@@ -1809,6 +1876,9 @@ describe("built-in autoimplement", () => {
   it("uses the eight-hour implementation timeout and shared outcome routes", () => {
     expect(autoimplementWorkflow.nodes.implement?.timeoutMs).toBe(8 * 60 * 60_000);
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
+    expect(
+      compiled.edges.find((candidate) => candidate.from === "routeTimeoutFallback"),
+    ).toMatchObject({ switch: { cases: { blocked: "blocked" } } });
     for (const nodeId of [
       "implement",
       "planVerification",
