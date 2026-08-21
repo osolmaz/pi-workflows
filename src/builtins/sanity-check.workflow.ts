@@ -198,7 +198,7 @@ export async function collectContributionEvidence(
     "working-diff",
     "untracked",
   ] as const) {
-    requiredResult(evidence.items, id);
+    successfulResult(evidence.items, id);
   }
   const pr = resultFor(evidence.items, "pull-request");
   return {
@@ -474,12 +474,17 @@ function requiredOutput(items: CommandBatchItemResult[], id: string): string {
 }
 
 function requiredResult(items: CommandBatchItemResult[], id: string): CommandBatchItemResult {
+  const result = successfulResult(items, id);
+  if (result.stdoutTruncated) {
+    throw new Error(`Contribution evidence ${id} exceeded its output limit`);
+  }
+  return result;
+}
+
+function successfulResult(items: CommandBatchItemResult[], id: string): CommandBatchItemResult {
   const result = resultFor(items, id);
   if (result.outcome !== "succeeded") {
     throw new Error(`Could not collect contribution evidence (${id}: ${result.outcome})`);
-  }
-  if (result.stdoutTruncated) {
-    throw new Error(`Contribution evidence ${id} exceeded its output limit`);
   }
   return result;
 }

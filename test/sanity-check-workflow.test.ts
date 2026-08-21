@@ -176,7 +176,11 @@ describe("sanity-check workflow", () => {
       await execFileAsync("git", ["add", "sample.txt"], { cwd: dir });
       await execFileAsync("git", ["commit", "-q", "-m", "base"], { cwd: dir });
       const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: dir });
-      await fs.writeFile(path.join(dir, "sample.txt"), "base\nworking\n", "utf8");
+      await fs.writeFile(
+        path.join(dir, "sample.txt"),
+        `base\n${"working\n".repeat(2_000)}`,
+        "utf8",
+      );
 
       const result = await collectContributionEvidence(
         { mode: "serial", baseRef: stdout.trim() },
@@ -187,6 +191,7 @@ describe("sanity-check workflow", () => {
       expect(result.baseRef).toBe(stdout.trim());
       expect(result.committed.diff.text).toBe("");
       expect(result.workingTree.diff.text).toContain("+working");
+      expect(result.workingTree.diff.truncated).toBe(true);
       expect(result.workingTree.status.text).toContain("sample.txt");
       expect(result.pullRequest.available).toBe(false);
     } finally {
