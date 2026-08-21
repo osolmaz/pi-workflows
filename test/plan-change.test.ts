@@ -50,6 +50,10 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
 }
 
 describe("plan-change workflow", () => {
+  it("budgets enough graph steps for the supported 20-replan limit", () => {
+    expect(planChangeWorkflow.maxSteps).toBeGreaterThanOrEqual(300);
+  });
+
   it("rejects unknown input fields before applying approval defaults", async () => {
     const engine = new WorkflowEngine({
       outputRoot: await makeTempDir("plan-change-invalid"),

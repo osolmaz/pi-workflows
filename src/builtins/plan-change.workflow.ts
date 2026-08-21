@@ -177,7 +177,7 @@ export const planChangeWorkflow = defineWorkflow({
   name: "plan-change",
   input: parseInput,
   startAt: "start",
-  maxSteps: 80,
+  maxSteps: 400,
   includes: {
     design: includeWorkflow(autoplanWorkflow, {
       input: ({ input, outputs }): AutoplanInput => {

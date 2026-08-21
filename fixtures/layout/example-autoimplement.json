@@ -1182,7 +1182,7 @@
             "ready": "redesign/__piw_exit_ready",
             "blocked": "redesign/__piw_exit_blocked"
           },
-          "maxSteps": 80
+          "maxSteps": 400
         },
         {
           "mountPath": ["redesign", "approval"],
