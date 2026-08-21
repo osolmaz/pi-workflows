@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import { projectControllerStorePath, SqliteControllerStore } from "../src/controllers/index.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
@@ -278,6 +279,56 @@ export default defineWorkflow({
         expect(queue.getWorkflowRun("edited-run")?.status).toBe("parked");
         const bundle = await readRunBundle(runDir);
         expect(bundle?.state.status).toBe("running");
+      } finally {
+        await host.stop();
+        queue.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("fails an unavailable built-in revision with restart guidance", async () => {
+    const cwd = await makeTempDir("pi-host-project");
+    const runsDir = await makeTempDir("pi-host-runs");
+    const controllerDir = await makeTempDir("pi-host-controllers");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    vi.stubEnv("PI_WORKFLOWS_CONTROLLER_DIR", controllerDir);
+    try {
+      const entry = builtinWorkflowCatalog.get("sanity-check");
+      if (entry === undefined) throw new Error("missing Sanity Check built-in");
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.enqueueWorkflowRun({
+        runId: "old-sanity-check",
+        workflowName: entry.definition.name,
+        workflowSourceRef: entry.ref,
+        input: {},
+        runnerId: "session-a",
+        claimToken: "token-a",
+        leaseMs: 60_000,
+      });
+      queue.parkWorkflowRun({ runId: "old-sanity-check", claimToken: "token-a" });
+      const runStore = new WorkflowRunStore(runsDir);
+      const state = {
+        ...runningState("old-sanity-check"),
+        workflowName: entry.definition.name,
+        workflowSource: { kind: "builtin" as const, id: entry.id, revision: "1" },
+      };
+      const runDir = await runStore.initializeRunBundle(entry.definition, state);
+      const logs: string[] = [];
+      const host = new WorkflowHost({ cwd, claimPollMs: 25, onLog: (line) => logs.push(line) });
+      await host.start();
+      try {
+        await waitFor(() => queue.getWorkflowRun("old-sanity-check")?.status === "done");
+        const bundle = await readRunBundle(runDir);
+        expect(bundle?.state.status).toBe("failed");
+        expect(bundle?.state.error).toContain(
+          "cancel run old-sanity-check, then start sanity-check again",
+        );
+        expect(queue.listRunEventsAfter(0).at(-1)).toMatchObject({ type: "failed" });
+        expect(logs).toContainEqual(
+          expect.stringContaining("cancel run old-sanity-check, then start sanity-check again"),
+        );
       } finally {
         await host.stop();
         queue.close();

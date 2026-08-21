@@ -18,6 +18,7 @@ import { compositionMetadata } from "../workflows/composition.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import {
+  BuiltinWorkflowRevisionChangedError,
   ClaimLostError,
   errorMessage,
   isClaimLostError,
@@ -49,6 +50,7 @@ import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunResult,
   WorkflowRunState,
+  WorkflowSource,
   WorkflowUpdateRecord,
 } from "../workflows/types.js";
 import {
@@ -231,6 +233,29 @@ function launchSourceIdentity(workflow: WorkflowDefinition, root: unknown): unkn
     root,
     mounted: compositionMetadata(workflow)?.sources ?? [],
   };
+}
+
+function continuationSourceChangedError(
+  runId: string,
+  previous: WorkflowSource,
+  current: WorkflowSource,
+): Error {
+  if (
+    previous.kind === "builtin" &&
+    current.kind === "builtin" &&
+    previous.id === current.id &&
+    previous.revision !== current.revision
+  ) {
+    return new BuiltinWorkflowRevisionChangedError({
+      runId,
+      workflowId: current.id,
+      previousRevision: previous.revision,
+      currentRevision: current.revision,
+    });
+  }
+  return new Error(
+    `Workflow source changed since run ${runId} started; revert the edit to answer its checkpoint`,
+  );
 }
 
 function preparedLaunchOptions(options: StartRunOptions): PreparedLaunchOptions {
@@ -1206,8 +1231,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
         parent.state.workflowSource !== undefined &&
         !isDeepStrictEqual(parent.state.workflowSource, workflowSource)
       ) {
-        throw new Error(
-          `Workflow source changed since run ${options.parentRunId} started; revert the edit to answer its checkpoint`,
+        throw continuationSourceChangedError(
+          options.parentRunId,
+          parent.state.workflowSource,
+          workflowSource,
         );
       }
     }
@@ -2361,8 +2388,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
         parent.state.workflowSource !== undefined &&
         !isDeepStrictEqual(parent.state.workflowSource, workflowSource)
       ) {
-        throw new Error(
-          `Workflow source changed since run ${options.parentRunId} started; revert the edit to answer its checkpoint`,
+        throw continuationSourceChangedError(
+          options.parentRunId,
+          parent.state.workflowSource,
+          workflowSource,
         );
       }
     }

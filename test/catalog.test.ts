@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
 import { BuiltinWorkflowCatalog } from "../src/workflows/catalog.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { BuiltinWorkflowRevisionChangedError } from "../src/workflows/errors.js";
 
 function fixture(name = "fixture") {
   return defineWorkflow({
@@ -28,13 +29,16 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(catalog.get("fixture")?.ref).toBe("builtin:fixture");
   });
 
-  it("rejects changed revisions and duplicate identities", () => {
+  it("rejects changed revisions with restart guidance and duplicate identities", () => {
     const definition = fixture();
     const catalog = new BuiltinWorkflowCatalog([{ id: "fixture", revision: "r1", definition }]);
 
-    expect(() => catalog.resolve({ kind: "builtin", id: "fixture", revision: "r2" })).toThrow(
-      /Workflow source changed/,
-    );
+    expect(() =>
+      catalog.resolve({ kind: "builtin", id: "fixture", revision: "r2" }, "old-run"),
+    ).toThrow(BuiltinWorkflowRevisionChangedError);
+    expect(() =>
+      catalog.resolve({ kind: "builtin", id: "fixture", revision: "r2" }, "old-run"),
+    ).toThrow(/cancel run old-run, then start fixture again/);
     expect(
       () =>
         new BuiltinWorkflowCatalog([

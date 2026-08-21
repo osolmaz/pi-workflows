@@ -56,6 +56,30 @@ export class WorkflowSourceChangedError extends Error {
   }
 }
 
+/** A built-in revision is unavailable, so its incompatible run must restart. */
+export class BuiltinWorkflowRevisionChangedError extends Error {
+  readonly runId: string;
+  readonly workflowId: string;
+  readonly previousRevision: string;
+  readonly currentRevision: string;
+
+  constructor(options: {
+    runId: string;
+    workflowId: string;
+    previousRevision: string;
+    currentRevision: string;
+  }) {
+    super(
+      `Built-in workflow ${options.workflowId} revision ${options.previousRevision} cannot resume run ${options.runId} with installed revision ${options.currentRevision}; cancel run ${options.runId}, then start ${options.workflowId} again`,
+    );
+    this.name = "BuiltinWorkflowRevisionChangedError";
+    this.runId = options.runId;
+    this.workflowId = options.workflowId;
+    this.previousRevision = options.previousRevision;
+    this.currentRevision = options.currentRevision;
+  }
+}
+
 export function isClaimLostError(error: unknown): error is ClaimLostError {
   return error instanceof ClaimLostError;
 }

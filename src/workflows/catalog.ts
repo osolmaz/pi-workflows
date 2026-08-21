@@ -1,5 +1,5 @@
 import { isWorkflowDefinition } from "./definition.js";
-import { WorkflowSourceChangedError } from "./errors.js";
+import { BuiltinWorkflowRevisionChangedError } from "./errors.js";
 import type { WorkflowDefinition, WorkflowSource } from "./types.js";
 
 const BUILTIN_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
@@ -102,7 +102,12 @@ export class BuiltinWorkflowCatalog {
       throw new Error(`Unknown built-in workflow: ${source.id}`);
     }
     if (entry.revision !== source.revision) {
-      throw new WorkflowSourceChangedError(runId);
+      throw new BuiltinWorkflowRevisionChangedError({
+        runId,
+        workflowId: entry.id,
+        previousRevision: source.revision,
+        currentRevision: entry.revision,
+      });
     }
     return entry.definition;
   }
