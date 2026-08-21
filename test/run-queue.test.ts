@@ -349,6 +349,161 @@ describe("workflow run queue", () => {
     ).toBe(false);
   });
 
+  it("stores and resolves deferred turn intents exactly once", async () => {
+    const store = await makeStore();
+    const fallbackFacts = {
+      schema: "pi-workflows.deferred-turn-facts.v1" as const,
+      workflowName: "autoimplement",
+      runId: "run-1",
+      observedState: "interrupted",
+      cause: "agentCancelled" as const,
+      nodeId: "implement",
+      attemptId: "attempt-1",
+      reason: "cancelled",
+      handoff: false,
+    };
+    const first = store.ensureWorkflowTurnIntent({
+      intentId: "intent-1",
+      sourceEventId: "event-1",
+      runId: "run-1",
+      workflowRef: "autoimplement",
+      targetSessionId: "session-a",
+      cause: "agentCancelled",
+      nodeId: "implement",
+      attemptId: "attempt-1",
+      fallbackFacts,
+      now: T0,
+    });
+    expect(
+      store.ensureWorkflowTurnIntent({
+        intentId: "intent-1",
+        sourceEventId: "event-1",
+        runId: "run-1",
+        workflowRef: "autoimplement",
+        targetSessionId: "session-a",
+        cause: "agentCancelled",
+        nodeId: "implement",
+        attemptId: "attempt-1",
+        fallbackFacts,
+        now: T1,
+      }),
+    ).toEqual(first);
+    expect(() =>
+      store.ensureWorkflowTurnIntent({
+        intentId: "intent-1",
+        sourceEventId: "different-event",
+        runId: "run-1",
+        workflowRef: "autoimplement",
+        targetSessionId: "session-a",
+        cause: "agentCancelled",
+        fallbackFacts,
+        now: T1,
+      }),
+    ).toThrow(/identity conflict/);
+    expect(
+      store.claimEligibleWorkflowTurnIntents({
+        targetSessionId: "session-a",
+        claimToken: "claim-a",
+        leaseMs: 1_000,
+        now: T0,
+      }),
+    ).toEqual([]);
+    expect(
+      store.makeWorkflowTurnIntentEligible({
+        intentId: "intent-1",
+        fallbackFacts: { ...fallbackFacts, observedState: "cancelled" },
+        now: T1,
+      }),
+    ).toBe(true);
+    expect(
+      store.claimWorkflowTurnIntent({
+        intentId: "intent-1",
+        targetSessionId: "session-a",
+        claimToken: "natural-claim",
+        leaseMs: 1_000,
+        now: T1,
+      })?.eligibleAt,
+    ).toBe(T1);
+    expect(
+      store.resolveWorkflowTurnIntent({
+        intentId: "intent-1",
+        targetSessionId: "session-a",
+        claimToken: "wrong-claim",
+        resolution: "workflowPrompt",
+        messageId: "message-1",
+        now: T2,
+      }),
+    ).toBe(false);
+    expect(
+      store.resolveWorkflowTurnIntent({
+        intentId: "intent-1",
+        targetSessionId: "session-a",
+        claimToken: "natural-claim",
+        resolution: "workflowPrompt",
+        messageId: "message-1",
+        now: T2,
+      }),
+    ).toBe(true);
+    expect(store.getWorkflowTurnIntent("intent-1")).toMatchObject({
+      resolvedAt: T2,
+      resolution: "workflowPrompt",
+      resolutionMessageId: "message-1",
+    });
+    expect(
+      store.claimEligibleWorkflowTurnIntents({
+        targetSessionId: "session-a",
+        claimToken: "fallback-claim",
+        leaseMs: 1_000,
+        now: T3,
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects pending legacy launch-failure notifications", async () => {
+    const dir = await makeTempDir("pi-run-queue-legacy-launch");
+    const databasePath = path.join(dir, "state", "controller.sqlite");
+    const store = new SqliteControllerStore(databasePath);
+    store.close();
+    const raw = new Database(databasePath);
+    raw.pragma("ignore_check_constraints = ON");
+    raw
+      .prepare(
+        `INSERT INTO workflow_notifications (
+          notification_id, run_id, node_id, attempt_id, notification_index,
+          target_session_id, kind, content, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "legacy-launch",
+        "run-1",
+        "$launch",
+        "run-1",
+        1,
+        "session-a",
+        "launch_failure",
+        "failed",
+        T0,
+      );
+    raw.exec("DROP TABLE workflow_turn_intents");
+    raw.close();
+
+    expect(() => new SqliteControllerStore(databasePath)).toThrow(
+      /pending alpha launch-failure notifications.*reset the project controller store/,
+    );
+    const unchanged = new Database(databasePath, { readonly: true });
+    try {
+      expect(
+        unchanged
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_turn_intents'",
+          )
+          .get(),
+      ).toBeUndefined();
+    } finally {
+      unchanged.close();
+    }
+  });
+
   it("rejects duplicate run ids and unsafe inputs", async () => {
     const store = await makeStore();
     enqueue(store);

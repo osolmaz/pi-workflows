@@ -6,6 +6,8 @@ date: 2026-08-20
 
 # Make deferred workflow launches durable
 
+The launch queue and activation contract in this plan remain current. [Deferred workflow turns](DEFERRED_TURNS.md) replaces the launch-specific failure-notification mechanism with the general successor-turn intent contract.
+
 ## Goal
 
 A successful `workflow start` call must create a real queued workflow before it returns. The model
@@ -60,9 +62,8 @@ If startup fails, pi-workflows will:
 1. Change the record to `failed`.
 2. Save a bounded safe error.
 3. Release the session reservation.
-4. Queue one durable failure notification for the owning Pi session.
-5. Send that notification through `pi.sendMessage` with `triggerTurn: true` and
-   `deliverAs: "followUp"`.
+4. Create one eligible deferred-turn intent for the owning Pi session.
+5. Resolve that intent with one factual follow-up after settlement.
 
 The new model turn will contain the failed run ID and an actionable error. The model can fix the
 workflow reference, input, source, or local condition and call `workflow start` again. Each retry is
@@ -150,10 +151,7 @@ Inspect the error and call workflow start again only after you correct the cause
 The message does not contain raw workflow input, prompt text, credentials, request headers, or a
 stack trace.
 
-The failure notification has a deterministic ID derived from the run ID. pi-workflows records its
-delivery in the existing notification outbox. Before a delivery retry, it checks the native Pi
-session for that notification ID. This prevents a duplicate after a crash between session append and
-outbox acknowledgement.
+The turn intent has a deterministic ID derived from the session, run, and launch event. Pi Workflows records it in `workflow_turn_intents`. Before a delivery retry, it checks the Pi session branch for the intent ID. This prevents a duplicate after a crash between session append and intent resolution.
 
 A failed launch releases the one-workflow session reservation before it sends the follow-up. The
 model can therefore call `workflow start` during the new turn. If that launch also fails, the same
@@ -217,9 +215,7 @@ and `running` state its meaning directly.
 Clear private queue input when the launch becomes `running`, `failed`, or `cancelled`. The normal run
 bundle owns input after the engine starts.
 
-Extend the existing `workflow_notifications` table in place so a notification can be run-level.
-Add `launch_failure` to its kind contract and allow node and attempt identity to be absent for a
-run-level notification. Reuse its delivery claim, lease, and delivered timestamp.
+Keep `workflow_notifications` limited to passive `progress` and `final` reports. A launch failure creates an eligible row in `workflow_turn_intents`; it does not add a run-level notification kind.
 
 The project-scoped controller store remains private local state. Tests must verify restrictive file
 and directory permissions.
@@ -384,8 +380,8 @@ Add or update these tests:
 10. Cancellation before claim, during `starting`, and before executor release.
 11. Source change between preparation and activation.
 12. Safe error redaction and byte bounds.
-13. One durable launch-failure notification.
-14. Crash before session append, after append, and before outbox acknowledgement.
+13. One durable launch-failure turn intent.
+14. Crash before session append, after append, and before intent resolution.
 15. Failed reservation release followed by a corrected model start.
 16. Repeated model correction attempts with one active reservation at a time.
 17. Status for every launch and run state.
@@ -411,7 +407,7 @@ or external service.
 - The start tool never reports success without a committed queued record and final run ID.
 - The model can correct synchronous start errors in the same turn.
 - A deferred startup failure always becomes durable before notification.
-- One failure notification starts one new model turn.
+- One launch-failure intent starts one new model turn.
 - The model can correct the cause and start a new run.
 - Failed and cancelled launches release the session reservation.
 - No two runs activate for one reservation.

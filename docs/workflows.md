@@ -502,9 +502,10 @@ use the same card and keep the active attempt id.
 
 Headless RPC execution receives the same complete prompt without TUI metadata.
 Workflow notifications use a separate message type with `triggerTurn: false`,
-so a notification does not start an assistant response. See
-[WORKFLOW_STEP_MESSAGES.md](WORKFLOW_STEP_MESSAGES.md) for the message contract
-and renderer rules.
+so a notification does not start an assistant response. Deferred successor turns
+use an internal turn-intent contract instead of the notification outbox. See
+[WORKFLOW_STEP_MESSAGES.md](WORKFLOW_STEP_MESSAGES.md) for the step-message contract
+and [Deferred workflow turns](DEFERRED_TURNS.md) for the successor-turn contract.
 
 ## Result presentation
 
@@ -527,9 +528,11 @@ After the final run state has been persisted, the Pi extension sends the
 presentation instructions and bounded final result to the model as a hidden
 follow-up message. The next visible message is a normal assistant response.
 Returning `undefined`, returning an empty string, or omitting
-`presentationPrompt` produces no follow-up. Failed, timed-out, and cancelled
-runs are never presented; the extension reports their persisted status and
-error directly. Async prompt builders have 30 seconds to finish and receive an
+`presentationPrompt` produces no presentation. Failed, timed-out, and cancelled
+runs are never presented. When one of those outcomes would otherwise strand an
+agent after a workflow-caused turn abort or asynchronous crash, the extension
+uses the deferred-turn contract to send one factual fallback after settlement.
+Async prompt builders have 30 seconds to finish and receive an
 `AbortSignal` that fires on timeout, session shutdown, or when a new workflow
 or normal user turn starts; stale presentations are discarded. Once a presentation message has
 been queued, another workflow cannot start until that assistant response
@@ -567,13 +570,17 @@ possible. Defaults worth knowing:
   and `running`. `workflow status` and `workflow cancel` accept the run ID before a run bundle
   exists.
 - If deferred activation fails, the queue stores a bounded safe error, releases the session
-  reservation, and sends one follow-up turn to the initiating model. The model can correct the
-  cause and make a new explicit start call. Pi Workflows does not retry blindly.
-- `/workflow cancel` aborts the current node and marks the run `cancelled`.
-  When no run is live but the widget still shows a parked or finished run,
-  the same command clears the widget.
+  reservation, and creates one deferred-turn intent for the initiating session. A workflow that
+  reports `started` and then crashes before its first prompt follows the same path. The model gets
+  one factual follow-up after settlement and can make a new explicit start call. Pi Workflows does
+  not retry blindly.
+- An agent-issued `workflow cancel` aborts the current node and the current Pi turn, then creates
+  one deferred-turn intent. The next natural workflow message resolves it when possible; otherwise
+  one factual fallback starts after settlement. Direct `/workflow cancel` remains quiet because it
+  is explicit user control. When no run is live but the widget still shows a parked or finished run,
+  the command clears the widget.
 - One workflow runs per session at a time.
-- After the workflow tool accepts an agent-step submission, the extension removes any assistant tail text from the rest of that agent run. The next workflow message or notification is the visible continuation. Explicit final presentation remains a separate opt-in response.
+- After the workflow tool accepts an agent-step submission, the extension removes any assistant tail text from the rest of that agent run. The next workflow message is the visible continuation. A deferred intent makes a workflow prompt, presentation, and factual fallback compete to provide one successor turn, so an abort cannot produce two continuation turns.
 - Agent nudges: if the model ends its turn without submitting the pending
   step, it gets a reminder, twice by default, then the step fails.
 

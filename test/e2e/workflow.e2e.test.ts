@@ -174,6 +174,36 @@ export default defineWorkflow({
 });
 `;
 
+const POST_START_CRASH_E2E_WORKFLOW = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "post-start-crash-e2e",
+  startAt: "validate",
+  nodes: {
+    validate: compute({
+      run: ({ input }) => {
+        const scope = input && typeof input === "object" ? input.scope : undefined;
+        if (typeof scope !== "string" || scope.trim().length === 0) {
+          throw new Error("scope must be a non-empty string");
+        }
+        return { scope };
+      },
+    }),
+  },
+  edges: [],
+});
+`;
+
+const SELF_CANCEL_E2E_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "self-cancel-e2e",
+  startAt: "work",
+  nodes: { work: agent({ prompt: () => "Cancel this workflow now." }) },
+  edges: [],
+});
+`;
+
 const COMMAND_BATCH_E2E_WORKFLOW = `import { action, compute, defineWorkflow, runCommandBatch } from "@osolmaz/pi-workflows";
 
 export default defineWorkflow({
@@ -399,6 +429,12 @@ describe.sequential("pi-workflows end to end", () => {
         if (lastUserText.includes("Presentation instructions:")) {
           return { kind: "text", text: "Implemented the boring, proven design." };
         }
+        if (lastUserText.includes("Workflow post-start-crash-e2e ended with state failed")) {
+          return { kind: "text", text: "Post-start crash observed." };
+        }
+        if (lastUserText.includes("Workflow self-cancel-e2e ended with state cancelled")) {
+          return { kind: "text", text: "Self-cancellation observed." };
+        }
         if (
           lastRole === "user" &&
           (lastUserText === "Start the durable launch fixture now." ||
@@ -412,6 +448,20 @@ describe.sequential("pi-workflows end to end", () => {
               workflow: "durable-launch-e2e",
               input: { task: lastUserText },
             },
+          };
+        }
+        if (lastRole === "user" && lastUserText === "Start the post-start crash fixture now.") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: { action: "start", workflow: "post-start-crash-e2e", input: {} },
+          };
+        }
+        if (lastRole === "user" && lastUserText === "Start the self-cancel fixture now.") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: { action: "start", workflow: "self-cancel-e2e", input: {} },
           };
         }
         if (lastRole === "user" && lastUserText === "Start the built-in monitor now.") {
@@ -507,6 +557,12 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const selfCancelStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: self-cancel-e2e, step: work, attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (selfCancelStepMatch) {
+          return { kind: "tool", toolName: "workflow", args: { action: "cancel" } };
+        }
         const monitorStepMatch = lastUserText.match(
           /workflow step contract \(workflow: monitor, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
         );
@@ -593,6 +649,16 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "durable-launch-e2e.workflow.ts"),
       DURABLE_LAUNCH_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "post-start-crash-e2e.workflow.ts"),
+      POST_START_CRASH_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "self-cancel-e2e.workflow.ts"),
+      SELF_CANCEL_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -750,6 +816,127 @@ describe.sequential("pi-workflows end to end", () => {
         .filter((record) => record.workflowName === "durable-launch-e2e");
       expect(records.map((record) => record.status).sort()).toEqual(["done", "failed"]);
       expect(records[0]?.runId).not.toBe(records[1]?.runId);
+      expect(
+        store
+          .listWorkflowTurnIntents({ limit: 100 })
+          .filter((intent) => intent.runId === queued.runId),
+      ).toMatchObject([{ cause: "launchFailed", resolution: "fallback" }]);
+    } finally {
+      store.close();
+    }
+  }, 60_000);
+
+  it("starts one later turn after a post-start runtime crash", async () => {
+    const requestsBefore = mock.requests.length;
+    const settledBefore = pi.stdoutLines.filter((line) =>
+      line.includes('"type":"agent_settled"'),
+    ).length;
+    pi.send({
+      id: "post-start-crash",
+      type: "prompt",
+      message: "Start the post-start crash fixture now.",
+    });
+
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "post-start-crash-e2e" && candidate.status === "failed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(state.error).toContain("scope must be a non-empty string");
+    await waitForCondition(
+      () => {
+        const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+        try {
+          return store
+            .listWorkflowTurnIntents({ runId: state.runId })
+            .some((intent) => intent.cause === "failed" && intent.resolution === "fallback");
+        } finally {
+          store.close();
+        }
+      },
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () => mock.requests.length >= requestsBefore + 3,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("Post-start crash observed.")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () =>
+        pi.stdoutLines.filter((line) => line.includes('"type":"agent_settled"')).length >=
+        settledBefore + 2,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+    try {
+      expect(store.listWorkflowTurnIntents({ runId: state.runId })).toMatchObject([
+        { cause: "failed", resolution: "fallback", resolvedAt: expect.any(String) },
+      ]);
+    } finally {
+      store.close();
+    }
+  }, 60_000);
+
+  it("starts one later turn after an agent cancels its own workflow", async () => {
+    const requestsBefore = mock.requests.length;
+    const settledBefore = pi.stdoutLines.filter((line) =>
+      line.includes('"type":"agent_settled"'),
+    ).length;
+    pi.send({
+      id: "self-cancel",
+      type: "prompt",
+      message: "Start the self-cancel fixture now.",
+    });
+
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "self-cancel-e2e" && candidate.status === "cancelled",
+      () =>
+        `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}\n${mock.requests
+          .slice(-5)
+          .map((request) => contentText(request.messages.at(-1)?.content))
+          .join("\n---\n")}`,
+      15_000,
+    );
+    await waitForCondition(
+      () => {
+        const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+        try {
+          return store
+            .listWorkflowTurnIntents({ runId: state.runId })
+            .some(
+              (intent) => intent.cause === "agentCancelled" && intent.resolution === "fallback",
+            );
+        } finally {
+          store.close();
+        }
+      },
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () => mock.requests.length >= requestsBefore + 4,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("Self-cancellation observed.")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForCondition(
+      () =>
+        pi.stdoutLines.filter((line) => line.includes('"type":"agent_settled"')).length >=
+        settledBefore + 3,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    const store = new SqliteControllerStore(controllerFile, { readOnly: true });
+    try {
+      expect(store.listWorkflowTurnIntents({ runId: state.runId })).toMatchObject([
+        { cause: "agentCancelled", resolution: "fallback", resolvedAt: expect.any(String) },
+      ]);
     } finally {
       store.close();
     }

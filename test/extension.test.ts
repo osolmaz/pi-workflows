@@ -883,6 +883,65 @@ describe("pi-workflows extension", () => {
     }
   });
 
+  it("gives an agent one later turn after it cancels its active workflow", async () => {
+    const cwd = await makeTempDir("pi-workflows-self-cancel");
+    const runsDir = await makeTempDir("pi-workflows-self-cancel-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      await writeEchoWorkflow(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      await harness.tool.execute("start-self-cancel", {
+        action: "start",
+        workflow: "mini",
+      });
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-agent-step",
+        ),
+      );
+
+      const cancelled = await harness.tool.execute("cancel-self", { action: "cancel" });
+      expect(cancelled.content[0]?.text).toContain("Cancelling workflow mini");
+      await waitFor(() => harness.abortCalls === 1);
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("Workflow mini cancelled")),
+      );
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
+
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+      const fallback = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+      );
+      expect(fallback).toMatchObject({
+        options: { triggerTurn: true, deliverAs: "followUp" },
+        message: {
+          content: expect.stringContaining("state cancelled"),
+          details: expect.objectContaining({ cause: "agentCancelled" }),
+        },
+      });
+      await harness.emitAsync("agent_settled");
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("bounds and paginates workflow lists returned to the model", async () => {
     const cwd = await makeTempDir("pi-workflows-tool-list");
     vi.stubEnv("HOME", await makeTempDir("pi-workflows-tool-list-home"));
@@ -1092,18 +1151,19 @@ export default defineWorkflow({
       await harness.emitAsync("agent_settled");
       await waitFor(() =>
         harness.sentMessages.some(
-          (entry) =>
-            entry.message.customType === "pi-workflows-notification" &&
-            entry.message.details?.kind === "launch_failure",
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
         ),
       );
       const failureMessages = harness.sentMessages.filter(
-        (entry) => entry.message.details?.kind === "launch_failure",
+        (entry) => entry.message.customType === "pi-workflows-deferred-turn",
       );
       expect(failureMessages).toHaveLength(1);
       expect(failureMessages[0]).toMatchObject({
         options: { triggerTurn: true, deliverAs: "followUp" },
-        message: { content: expect.stringContaining("failed to start") },
+        message: {
+          content: expect.stringContaining("failed to start"),
+          details: expect.objectContaining({ cause: "launchFailed" }),
+        },
       });
 
       const failed = await harness.tool.execute("status-failed-launch", {
@@ -1131,7 +1191,85 @@ export default defineWorkflow({
       );
       await harness.emitAsync("agent_settled");
       expect(
-        harness.sentMessages.filter((entry) => entry.message.details?.kind === "launch_failure"),
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("starts a later turn when a successfully queued workflow crashes before its first prompt", async () => {
+    const cwd = await makeTempDir("pi-workflows-post-start-crash");
+    const runsDir = await makeTempDir("pi-workflows-post-start-crash-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "crash.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "crash",
+  startAt: "validate",
+  nodes: {
+    validate: compute({
+      run: ({ input }) => {
+        const scope = input && typeof input === "object" ? input.scope : undefined;
+        if (typeof scope !== "string" || scope.trim().length === 0) {
+          throw new Error("scope must be a non-empty string");
+        }
+        return { scope };
+      },
+    }),
+  },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+
+      const queued = await harness.tool.execute("start-crash", {
+        action: "start",
+        workflow: "crash",
+        input: {},
+      });
+      expect(queued.details).toMatchObject({ action: "start", queued: true });
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.notifications.some((note) => note.includes("scope must be a non-empty string")),
+      );
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+      const fallback = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+      );
+      expect(fallback).toMatchObject({
+        options: { triggerTurn: true, deliverAs: "followUp" },
+        message: {
+          content: expect.stringContaining("scope must be a non-empty string"),
+          details: expect.objectContaining({ cause: "failed" }),
+        },
+      });
+      await harness.emitAsync("agent_settled");
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
       ).toHaveLength(1);
     } finally {
       vi.unstubAllEnvs();
@@ -1429,7 +1567,7 @@ export default defineWorkflow({
       const harness = makeHarness({
         cwd,
         respond: (prompt) => {
-          contract = stepFromPrompt(prompt);
+          contract = stepFromPrompt(prompt) ?? contract;
         },
       });
 
@@ -1453,6 +1591,17 @@ export default defineWorkflow({
           (entry) => entry.message.customType === "pi-workflows-agent-step",
         ),
       ).toHaveLength(1);
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(1);
 
       const capturedContract = contract as unknown as {
         step: string;
@@ -1469,6 +1618,134 @@ export default defineWorkflow({
           output: { too: "late" },
         }),
       ).rejects.toThrow(/timed out; its output is no longer accepted/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("uses the next recovery prompt instead of a timeout fallback", async () => {
+    const cwd = await makeTempDir("pi-workflows-timeout-recovery");
+    const runsDir = await makeTempDir("pi-workflows-timeout-recovery-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "timeout-recovery.workflow.ts"),
+        `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "timeout-recovery",
+  startAt: "wait",
+  nodes: {
+    wait: agent({ prompt: () => "Wait.", timeoutMs: 30 }),
+    recover: agent({ prompt: () => "Inspect the timed-out work." }),
+  },
+  edges: [
+    { from: "wait", switch: { on: "$result.outcome", cases: { timed_out: "recover" } } },
+  ],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("timeout-recovery", harness.ctx);
+      await waitFor(() => harness.abortCalls === 1);
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some((entry) =>
+          entry.message.content.includes("Inspect the timed-out work."),
+        ),
+      );
+      const recovery = harness.sentMessages.find((entry) =>
+        entry.message.content.includes("Inspect the timed-out work."),
+      );
+      expect(recovery).toMatchObject({
+        message: {
+          customType: "pi-workflows-agent-step",
+          details: expect.objectContaining({ turnIntentId: expect.any(String) }),
+        },
+        options: { triggerTurn: true },
+      });
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
+      const store = new SqliteControllerStore(projectControllerStorePath(cwd), { readOnly: true });
+      try {
+        expect(store.listWorkflowTurnIntents()).toMatchObject([
+          { resolution: "workflowPrompt", resolvedAt: expect.any(String) },
+        ]);
+      } finally {
+        store.close();
+      }
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("uses a completed presentation instead of a timeout fallback", async () => {
+    const cwd = await makeTempDir("pi-workflows-timeout-presentation");
+    const runsDir = await makeTempDir("pi-workflows-timeout-presentation-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "timeout-presentation.workflow.ts"),
+        `import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "timeout-presentation",
+  presentationPrompt: "Explain that recovery completed.",
+  startAt: "wait",
+  nodes: {
+    wait: agent({ prompt: () => "Wait.", timeoutMs: 30 }),
+    recover: compute({ run: () => ({ recovered: true }) }),
+  },
+  edges: [
+    { from: "wait", switch: { on: "$result.outcome", cases: { timed_out: "recover" } } },
+  ],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+
+      await harness.command.handler("timeout-presentation", harness.ctx);
+      await waitFor(() => harness.abortCalls === 1);
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      );
+      const presentation = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-presentation",
+      );
+      expect(presentation).toMatchObject({
+        message: {
+          content: expect.stringContaining("Explain that recovery completed."),
+          details: expect.objectContaining({ turnIntentId: expect.any(String) }),
+        },
+        options: { triggerTurn: true, deliverAs: "followUp" },
+      });
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
+      const store = new SqliteControllerStore(projectControllerStorePath(cwd), { readOnly: true });
+      try {
+        expect(store.listWorkflowTurnIntents()).toMatchObject([
+          { resolution: "presentation", resolvedAt: expect.any(String) },
+        ]);
+      } finally {
+        store.close();
+      }
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1495,8 +1772,14 @@ export default defineWorkflow({
       harness.setIdle(false);
 
       await waitFor(() => harness.notifications.some((note) => note.includes("timed_out")));
+      await harness.emitAsync("agent_settled");
 
       expect(harness.abortCalls).toBe(0);
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -2415,6 +2698,12 @@ export default defineWorkflow({
       expect(harness.notifications.at(-1)).toContain("is not paused");
       await workflow?.handler("cancel", harness.ctx);
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
+      await harness.emitAsync("agent_settled");
+      expect(
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
       await harness.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();

@@ -12,6 +12,7 @@ export type WorkflowAgentStepMessageDetails = {
   kind: PromptDeliveryKind;
   contract: AgentStepContract;
   presentation?: AgentStepPresentation;
+  turnIntentId?: string;
 };
 
 type WorkflowAgentStepMessage = {

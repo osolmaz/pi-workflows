@@ -34,6 +34,7 @@ const MAX_KEY_LENGTH = 512;
 const MAX_ERROR_LENGTH = 8_192;
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_RESOURCE_VALUE_BYTES = 1024 * 1024;
+const TURN_INTENT_FACTS_SCHEMA = "pi-workflows.deferred-turn-facts.v1";
 
 type ResourceRow = {
   controller: string;
@@ -149,7 +150,7 @@ type WorkflowNotificationRow = {
   attempt_id: string;
   notification_index: number;
   target_session_id: string;
-  kind: "progress" | "final" | "launch_failure";
+  kind: string;
   content: string;
   created_at: string;
   delivery_claim_token: string | null;
@@ -164,11 +165,70 @@ export type WorkflowNotificationRecord = {
   attemptId: string;
   notificationIndex: number;
   targetSessionId: string;
-  kind: "progress" | "final" | "launch_failure";
+  kind: "progress" | "final";
   content: string;
   createdAt: string;
   deliveryClaimExpiresAt: string | null;
   deliveredAt: string | null;
+};
+
+export type WorkflowTurnIntentCause =
+  | "agentCancelled"
+  | "timedOut"
+  | "failed"
+  | "launchFailed"
+  | "controllerInterrupted"
+  | "claimLost";
+
+export type WorkflowTurnIntentResolution = "workflowPrompt" | "presentation" | "fallback";
+
+export type WorkflowTurnIntentFacts = JsonObject & {
+  schema: typeof TURN_INTENT_FACTS_SCHEMA;
+  workflowName: string;
+  runId: string;
+  observedState: string;
+  cause: WorkflowTurnIntentCause;
+  nodeId: string | null;
+  attemptId: string | null;
+  reason: string | null;
+  handoff: boolean;
+};
+
+type WorkflowTurnIntentRow = {
+  intent_id: string;
+  source_event_id: string;
+  run_id: string;
+  workflow_ref: string;
+  target_session_id: string;
+  cause: string;
+  node_id: string | null;
+  attempt_id: string | null;
+  fallback_facts_json: string;
+  requested_at: string;
+  eligible_at: string | null;
+  resolved_at: string | null;
+  resolution: string | null;
+  resolution_message_id: string | null;
+  delivery_claim_token: string | null;
+  delivery_claim_expires_at: number | null;
+};
+
+export type WorkflowTurnIntentRecord = {
+  intentId: string;
+  sourceEventId: string;
+  runId: string;
+  workflowRef: string;
+  targetSessionId: string;
+  cause: WorkflowTurnIntentCause;
+  nodeId: string | null;
+  attemptId: string | null;
+  fallbackFacts: WorkflowTurnIntentFacts;
+  requestedAt: string;
+  eligibleAt: string | null;
+  resolvedAt: string | null;
+  resolution: WorkflowTurnIntentResolution | null;
+  resolutionMessageId: string | null;
+  deliveryClaimExpiresAt: string | null;
 };
 
 type RunEventRow = {
@@ -826,7 +886,10 @@ export class SqliteControllerStore implements ControllerStore {
       const existingQueue = this.database
         .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_run_queue'")
         .get();
-      if (existingQueue !== undefined) this.assertAlphaSchemaLayout();
+      if (existingQueue !== undefined) {
+        this.assertAlphaSchemaLayout(false);
+        this.assertNoLegacyPendingLaunchNotifications();
+      }
       this.transaction(() => {
         this.database
           .prepare("INSERT OR IGNORE INTO schema_info (singleton, schema_id) VALUES (1, ?)")
@@ -834,10 +897,11 @@ export class SqliteControllerStore implements ControllerStore {
         this.database.exec(SCHEMA_SQL);
       });
     }
-    this.assertAlphaSchemaLayout();
+    this.assertAlphaSchemaLayout(true);
+    this.assertNoLegacyPendingLaunchNotifications();
   }
 
-  private assertAlphaSchemaLayout(): void {
+  private assertAlphaSchemaLayout(requireTurnIntents: boolean): void {
     const requiredQueueColumns = new Set([
       "run_id",
       "workflow_ref",
@@ -871,6 +935,64 @@ export class SqliteControllerStore implements ControllerStore {
     if (missing.length > 0) {
       throw new Error(
         "Controller store uses an incompatible alpha layout. Preserve needed run bundles, then reset the project controller store.",
+      );
+    }
+    if (!requireTurnIntents) return;
+    const requiredIntentColumns = new Set([
+      "intent_id",
+      "source_event_id",
+      "run_id",
+      "workflow_ref",
+      "target_session_id",
+      "cause",
+      "node_id",
+      "attempt_id",
+      "fallback_facts_json",
+      "requested_at",
+      "eligible_at",
+      "resolved_at",
+      "resolution",
+      "resolution_message_id",
+      "delivery_claim_token",
+      "delivery_claim_expires_at",
+    ]);
+    const intentColumns = new Set(
+      (
+        this.database.pragma("table_info(workflow_turn_intents)") as {
+          name: string;
+        }[]
+      ).map((column) => column.name),
+    );
+    const missingIntentColumns = [...requiredIntentColumns].filter(
+      (column) => !intentColumns.has(column),
+    );
+    if (missingIntentColumns.length > 0) {
+      throw new Error(
+        "Controller store uses an incompatible alpha turn-intent layout. Preserve needed run bundles, then reset the project controller store.",
+      );
+    }
+  }
+
+  private assertNoLegacyPendingLaunchNotifications(): void {
+    const notificationTable = this.database
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_notifications'",
+      )
+      .get();
+    if (notificationTable === undefined) {
+      throw new Error(
+        "Controller store uses an incompatible alpha notification layout. Preserve needed run bundles, then reset the project controller store.",
+      );
+    }
+    const legacy = this.database
+      .prepare(
+        `SELECT 1 FROM workflow_notifications
+         WHERE kind = 'launch_failure' AND delivered_at IS NULL LIMIT 1`,
+      )
+      .get();
+    if (legacy !== undefined) {
+      throw new Error(
+        "Controller store contains pending alpha launch-failure notifications. Preserve needed run bundles, then reset the project controller store.",
       );
     }
   }
@@ -1526,13 +1648,294 @@ export class SqliteControllerStore implements ControllerStore {
     }));
   }
 
+  ensureWorkflowTurnIntent(options: {
+    intentId: string;
+    sourceEventId: string;
+    runId: string;
+    workflowRef: string;
+    targetSessionId: string;
+    cause: WorkflowTurnIntentCause;
+    nodeId?: string | null;
+    attemptId?: string | null;
+    fallbackFacts: WorkflowTurnIntentFacts;
+    eligible?: boolean;
+    now?: string;
+  }): WorkflowTurnIntentRecord {
+    validateKey(options.intentId, "workflow turn intent id");
+    validateKey(options.sourceEventId, "workflow turn source event id");
+    validateRunId(options.runId);
+    validateKey(options.workflowRef, "workflow turn workflow ref");
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    validateWorkflowTurnIntentCause(options.cause);
+    const nodeId = options.nodeId ?? null;
+    const attemptId = options.attemptId ?? null;
+    if (nodeId !== null) validateKey(nodeId, "workflow turn node id");
+    if (attemptId !== null) validateKey(attemptId, "workflow turn attempt id");
+    const factsJson = workflowTurnIntentFactsJson(options.fallbackFacts);
+    const now = validTimestamp(options.now);
+    const eligibleAt = options.eligible === true ? now : null;
+    this.database
+      .prepare(
+        `INSERT INTO workflow_turn_intents (
+          intent_id, source_event_id, run_id, workflow_ref, target_session_id,
+          cause, node_id, attempt_id, fallback_facts_json, requested_at, eligible_at,
+          resolved_at, resolution, resolution_message_id,
+          delivery_claim_token, delivery_claim_expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+        ON CONFLICT(intent_id) DO NOTHING`,
+      )
+      .run(
+        options.intentId,
+        options.sourceEventId,
+        options.runId,
+        options.workflowRef,
+        options.targetSessionId,
+        options.cause,
+        nodeId,
+        attemptId,
+        factsJson,
+        now,
+        eligibleAt,
+      );
+    const existing = this.getWorkflowTurnIntent(options.intentId);
+    if (existing === undefined) {
+      throw new Error(`Workflow turn intent was not stored: ${options.intentId}`);
+    }
+    if (
+      existing.sourceEventId !== options.sourceEventId ||
+      existing.runId !== options.runId ||
+      existing.workflowRef !== options.workflowRef ||
+      existing.targetSessionId !== options.targetSessionId ||
+      existing.cause !== options.cause ||
+      existing.nodeId !== nodeId ||
+      existing.attemptId !== attemptId
+    ) {
+      throw new Error(`Workflow turn intent identity conflict: ${options.intentId}`);
+    }
+    return existing;
+  }
+
+  getWorkflowTurnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
+    validateKey(intentId, "workflow turn intent id");
+    const row = this.database
+      .prepare("SELECT * FROM workflow_turn_intents WHERE intent_id = ?")
+      .get(intentId) as WorkflowTurnIntentRow | undefined;
+    return row === undefined ? undefined : workflowTurnIntentFromRow(row);
+  }
+
+  findPendingWorkflowTurnIntent(options: {
+    runId: string;
+    targetSessionId: string;
+  }): WorkflowTurnIntentRecord | undefined {
+    validateRunId(options.runId);
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    const row = this.database
+      .prepare(
+        `SELECT * FROM workflow_turn_intents
+         WHERE run_id = ? AND target_session_id = ? AND resolved_at IS NULL
+         ORDER BY requested_at DESC, intent_id DESC LIMIT 1`,
+      )
+      .get(options.runId, options.targetSessionId) as WorkflowTurnIntentRow | undefined;
+    return row === undefined ? undefined : workflowTurnIntentFromRow(row);
+  }
+
+  claimWorkflowTurnIntent(options: {
+    intentId: string;
+    targetSessionId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): WorkflowTurnIntentRecord | undefined {
+    validateKey(options.intentId, "workflow turn intent id");
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    validateKey(options.claimToken, "workflow turn claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const nowMs = epoch(validTimestamp(options.now));
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_turn_intents
+         SET delivery_claim_token = ?, delivery_claim_expires_at = ?
+         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
+           AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
+      )
+      .run(
+        options.claimToken,
+        nowMs + options.leaseMs,
+        options.intentId,
+        options.targetSessionId,
+        nowMs,
+      );
+    if (result.changes !== 1) return undefined;
+    const row = this.database
+      .prepare("SELECT * FROM workflow_turn_intents WHERE intent_id = ?")
+      .get(options.intentId) as WorkflowTurnIntentRow;
+    return workflowTurnIntentFromRow(row);
+  }
+
+  claimEligibleWorkflowTurnIntents(options: {
+    targetSessionId: string;
+    claimToken: string;
+    leaseMs: number;
+    limit?: number;
+    now?: string;
+  }): WorkflowTurnIntentRecord[] {
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    validateKey(options.claimToken, "workflow turn claim token");
+    validateDuration(options.leaseMs, "leaseMs");
+    const limit = options.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new Error("Workflow turn intent limit must be an integer from 1 through 100");
+    }
+    const now = validTimestamp(options.now);
+    const nowMs = epoch(now);
+    return this.transaction(() => {
+      const ids = this.database
+        .prepare(
+          `SELECT intent_id FROM workflow_turn_intents
+           WHERE target_session_id = ? AND resolved_at IS NULL AND eligible_at IS NOT NULL
+             AND eligible_at <= ?
+             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)
+           ORDER BY eligible_at, intent_id LIMIT ?`,
+        )
+        .all(options.targetSessionId, now, nowMs, limit) as { intent_id: string }[];
+      if (ids.length === 0) return [];
+      const placeholders = ids.map(() => "?").join(", ");
+      this.database
+        .prepare(
+          `UPDATE workflow_turn_intents
+           SET delivery_claim_token = ?, delivery_claim_expires_at = ?
+           WHERE intent_id IN (${placeholders}) AND resolved_at IS NULL
+             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
+        )
+        .run(
+          options.claimToken,
+          nowMs + options.leaseMs,
+          ...ids.map((row) => row.intent_id),
+          nowMs,
+        );
+      const rows = this.database
+        .prepare(
+          `SELECT * FROM workflow_turn_intents WHERE delivery_claim_token = ?
+           ORDER BY eligible_at, intent_id`,
+        )
+        .all(options.claimToken) as WorkflowTurnIntentRow[];
+      return rows.map(workflowTurnIntentFromRow);
+    });
+  }
+
+  makeWorkflowTurnIntentEligible(options: {
+    intentId: string;
+    fallbackFacts: WorkflowTurnIntentFacts;
+    now?: string;
+  }): boolean {
+    validateKey(options.intentId, "workflow turn intent id");
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_turn_intents
+         SET fallback_facts_json = ?, eligible_at = COALESCE(eligible_at, ?)
+         WHERE intent_id = ? AND resolved_at IS NULL`,
+      )
+      .run(
+        workflowTurnIntentFactsJson(options.fallbackFacts),
+        validTimestamp(options.now),
+        options.intentId,
+      );
+    return result.changes === 1;
+  }
+
+  resolveWorkflowTurnIntent(options: {
+    intentId: string;
+    targetSessionId: string;
+    claimToken: string;
+    resolution: WorkflowTurnIntentResolution;
+    messageId: string;
+    now?: string;
+  }): boolean {
+    validateKey(options.intentId, "workflow turn intent id");
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    validateKey(options.claimToken, "workflow turn claim token");
+    validateWorkflowTurnIntentResolution(options.resolution);
+    validateKey(options.messageId, "workflow turn resolution message id");
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_turn_intents
+         SET resolved_at = ?, resolution = ?, resolution_message_id = ?,
+             delivery_claim_token = NULL, delivery_claim_expires_at = NULL
+         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
+           AND delivery_claim_token = ?`,
+      )
+      .run(
+        validTimestamp(options.now),
+        options.resolution,
+        options.messageId,
+        options.intentId,
+        options.targetSessionId,
+        options.claimToken,
+      );
+    return result.changes === 1;
+  }
+
+  releaseWorkflowTurnIntentClaim(options: {
+    intentId: string;
+    targetSessionId: string;
+    claimToken: string;
+  }): boolean {
+    validateKey(options.intentId, "workflow turn intent id");
+    validateKey(options.targetSessionId, "workflow turn target session id");
+    validateKey(options.claimToken, "workflow turn claim token");
+    const result = this.database
+      .prepare(
+        `UPDATE workflow_turn_intents
+         SET delivery_claim_token = NULL, delivery_claim_expires_at = NULL
+         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
+           AND delivery_claim_token = ?`,
+      )
+      .run(options.intentId, options.targetSessionId, options.claimToken);
+    return result.changes === 1;
+  }
+
+  listWorkflowTurnIntents(
+    options: {
+      targetSessionId?: string;
+      runId?: string;
+      limit?: number;
+    } = {},
+  ): WorkflowTurnIntentRecord[] {
+    if (options.targetSessionId !== undefined) {
+      validateKey(options.targetSessionId, "workflow turn target session id");
+    }
+    if (options.runId !== undefined) validateRunId(options.runId);
+    const limit = options.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new Error("Workflow turn intent limit must be an integer from 1 through 100");
+    }
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+    if (options.targetSessionId !== undefined) {
+      clauses.push("target_session_id = ?");
+      values.push(options.targetSessionId);
+    }
+    if (options.runId !== undefined) {
+      clauses.push("run_id = ?");
+      values.push(options.runId);
+    }
+    const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM workflow_turn_intents ${where}
+         ORDER BY requested_at DESC, intent_id DESC LIMIT ?`,
+      )
+      .all(...values, limit) as WorkflowTurnIntentRow[];
+    return rows.map(workflowTurnIntentFromRow);
+  }
+
   enqueueWorkflowNotification(options: {
     runId: string;
     nodeId: string;
     attemptId: string;
     notificationIndex: number;
     targetSessionId: string;
-    kind: "progress" | "final" | "launch_failure";
+    kind: "progress" | "final";
     content: string;
     notificationId?: string;
     now?: string;
@@ -1766,7 +2169,7 @@ const SCHEMA_SQL = `
     attempt_id TEXT NOT NULL,
     notification_index INTEGER NOT NULL CHECK (notification_index > 0),
     target_session_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final', 'launch_failure')),
+    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
     delivery_claim_token TEXT,
@@ -1777,6 +2180,40 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS workflow_notifications_pending
     ON workflow_notifications(target_session_id, delivery_claim_expires_at, created_at)
     WHERE delivered_at IS NULL;
+
+  CREATE TABLE IF NOT EXISTS workflow_turn_intents (
+    intent_id TEXT PRIMARY KEY,
+    source_event_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    workflow_ref TEXT NOT NULL,
+    target_session_id TEXT NOT NULL,
+    cause TEXT NOT NULL CHECK (
+      cause IN ('agentCancelled', 'timedOut', 'failed', 'launchFailed',
+                'controllerInterrupted', 'claimLost')
+    ),
+    node_id TEXT,
+    attempt_id TEXT,
+    fallback_facts_json TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    eligible_at TEXT,
+    resolved_at TEXT,
+    resolution TEXT CHECK (resolution IN ('workflowPrompt', 'presentation', 'fallback')),
+    resolution_message_id TEXT,
+    delivery_claim_token TEXT,
+    delivery_claim_expires_at INTEGER,
+    CHECK (
+      (resolved_at IS NULL AND resolution IS NULL AND resolution_message_id IS NULL) OR
+      (resolved_at IS NOT NULL AND resolution IS NOT NULL AND resolution_message_id IS NOT NULL)
+    )
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS workflow_turn_intents_one_pending_run
+    ON workflow_turn_intents(run_id, target_session_id) WHERE resolved_at IS NULL;
+  CREATE INDEX IF NOT EXISTS workflow_turn_intents_pending_run
+    ON workflow_turn_intents(run_id, target_session_id, requested_at)
+    WHERE resolved_at IS NULL;
+  CREATE INDEX IF NOT EXISTS workflow_turn_intents_eligible_session
+    ON workflow_turn_intents(target_session_id, eligible_at, intent_id)
+    WHERE resolved_at IS NULL AND eligible_at IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS effects (
     effect_key TEXT NOT NULL,
@@ -1868,7 +2305,56 @@ function workflowFromRow(row: WorkflowRow): ChildWorkflowRecord {
   };
 }
 
+function workflowTurnIntentFromRow(row: WorkflowTurnIntentRow): WorkflowTurnIntentRecord {
+  const cause = validateWorkflowTurnIntentCause(row.cause);
+  const resolution =
+    row.resolution === null ? null : validateWorkflowTurnIntentResolution(row.resolution);
+  const fallbackFacts = parseStoredJson<unknown>(
+    row.fallback_facts_json,
+    "workflow turn intent facts",
+  );
+  validateWorkflowTurnIntentFacts(fallbackFacts);
+  validateKey(row.intent_id, "workflow turn intent id");
+  validateKey(row.source_event_id, "workflow turn source event id");
+  validateRunId(row.run_id);
+  validateKey(row.workflow_ref, "workflow turn workflow ref");
+  validateKey(row.target_session_id, "workflow turn target session id");
+  validTimestamp(row.requested_at);
+  if (row.eligible_at !== null) validTimestamp(row.eligible_at);
+  if (row.resolved_at !== null) validTimestamp(row.resolved_at);
+  const allResolutionFieldsNull =
+    row.resolved_at === null && row.resolution === null && row.resolution_message_id === null;
+  const allResolutionFieldsSet =
+    row.resolved_at !== null && row.resolution !== null && row.resolution_message_id !== null;
+  if (!allResolutionFieldsNull && !allResolutionFieldsSet) {
+    throw new Error(`Workflow turn intent ${row.intent_id} has inconsistent resolution fields`);
+  }
+  return {
+    intentId: row.intent_id,
+    sourceEventId: row.source_event_id,
+    runId: row.run_id,
+    workflowRef: row.workflow_ref,
+    targetSessionId: row.target_session_id,
+    cause,
+    nodeId: row.node_id,
+    attemptId: row.attempt_id,
+    fallbackFacts,
+    requestedAt: row.requested_at,
+    eligibleAt: row.eligible_at,
+    resolvedAt: row.resolved_at,
+    resolution,
+    resolutionMessageId: row.resolution_message_id,
+    deliveryClaimExpiresAt:
+      row.delivery_claim_expires_at === null ? null : iso(row.delivery_claim_expires_at),
+  };
+}
+
 function workflowNotificationFromRow(row: WorkflowNotificationRow): WorkflowNotificationRecord {
+  if (row.kind !== "progress" && row.kind !== "final") {
+    throw new Error(
+      "Controller store contains an incompatible pending alpha workflow notification. Preserve needed run bundles, then reset the project controller store.",
+    );
+  }
   return {
     notificationId: row.notification_id,
     runId: row.run_id,
@@ -1883,6 +2369,93 @@ function workflowNotificationFromRow(row: WorkflowNotificationRow): WorkflowNoti
       row.delivery_claim_expires_at === null ? null : iso(row.delivery_claim_expires_at),
     deliveredAt: row.delivered_at,
   };
+}
+
+function workflowTurnIntentFactsJson(facts: WorkflowTurnIntentFacts): string {
+  validateWorkflowTurnIntentFacts(facts);
+  const json = canonicalJson(facts, "workflow turn intent facts");
+  validateJsonSize(json, "Workflow turn intent facts", MAX_EVENT_BYTES);
+  return json;
+}
+
+function validateWorkflowTurnIntentFacts(facts: unknown): asserts facts is WorkflowTurnIntentFacts {
+  if (facts === null || typeof facts !== "object" || Array.isArray(facts)) {
+    throw new Error("Workflow turn intent facts must be an object");
+  }
+  const candidate = facts as Record<string, unknown>;
+  if (candidate.schema !== TURN_INTENT_FACTS_SCHEMA) {
+    throw new Error(`Workflow turn intent facts schema must be ${TURN_INTENT_FACTS_SCHEMA}`);
+  }
+  const allowedKeys = new Set([
+    "schema",
+    "workflowName",
+    "runId",
+    "observedState",
+    "cause",
+    "nodeId",
+    "attemptId",
+    "reason",
+    "handoff",
+  ]);
+  for (const key of Object.keys(candidate)) {
+    if (!allowedKeys.has(key)) throw new Error(`Unknown workflow turn intent facts field: ${key}`);
+  }
+  if (typeof candidate.workflowName !== "string") {
+    throw new Error("Workflow turn intent workflowName must be a string");
+  }
+  if (typeof candidate.runId !== "string") {
+    throw new Error("Workflow turn intent runId must be a string");
+  }
+  if (typeof candidate.observedState !== "string") {
+    throw new Error("Workflow turn intent observedState must be a string");
+  }
+  if (typeof candidate.cause !== "string") {
+    throw new Error("Workflow turn intent cause must be a string");
+  }
+  validateKey(candidate.workflowName, "workflow turn facts workflow name");
+  validateRunId(candidate.runId);
+  validateKey(candidate.observedState, "workflow turn facts observed state");
+  validateWorkflowTurnIntentCause(candidate.cause);
+  if (candidate.nodeId !== null && typeof candidate.nodeId !== "string") {
+    throw new Error("Workflow turn intent nodeId must be a string or null");
+  }
+  if (candidate.attemptId !== null && typeof candidate.attemptId !== "string") {
+    throw new Error("Workflow turn intent attemptId must be a string or null");
+  }
+  if (candidate.reason !== null && typeof candidate.reason !== "string") {
+    throw new Error("Workflow turn intent reason must be a string or null");
+  }
+  if (candidate.nodeId !== null) validateKey(candidate.nodeId, "workflow turn facts node id");
+  if (candidate.attemptId !== null) {
+    validateKey(candidate.attemptId, "workflow turn facts attempt id");
+  }
+  if (candidate.reason !== null && candidate.reason.length > MAX_ERROR_LENGTH) {
+    throw new Error(`Workflow turn intent reason must be at most ${MAX_ERROR_LENGTH} characters`);
+  }
+  if (typeof candidate.handoff !== "boolean") {
+    throw new Error("Workflow turn intent handoff must be a boolean");
+  }
+}
+
+function validateWorkflowTurnIntentCause(value: string): WorkflowTurnIntentCause {
+  if (
+    value !== "agentCancelled" &&
+    value !== "timedOut" &&
+    value !== "failed" &&
+    value !== "launchFailed" &&
+    value !== "controllerInterrupted" &&
+    value !== "claimLost"
+  ) {
+    throw new Error(`Invalid workflow turn intent cause: ${value}`);
+  }
+  return value;
+}
+
+function validateWorkflowTurnIntentResolution(value: string): WorkflowTurnIntentResolution {
+  if (value !== "workflowPrompt" && value !== "presentation" && value !== "fallback") {
+    throw new Error(`Invalid workflow turn intent resolution: ${value}`);
+  }
+  return value;
 }
 
 function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {

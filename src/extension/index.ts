@@ -8,6 +8,10 @@ import {
   SqliteControllerStore,
   type WorkflowRunQueueRecord,
 } from "../controllers/index.js";
+import type {
+  WorkflowTurnIntentCause,
+  WorkflowTurnIntentResolution,
+} from "../controllers/sqlite.js";
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { compositionMetadata } from "../workflows/composition.js";
@@ -63,6 +67,19 @@ import {
   type HumanDecisionChannelAnswer,
   type SettledHumanDecision,
 } from "./decision-channels.js";
+import {
+  DeferredTurnCoordinator,
+  type BranchIntentResolution,
+} from "./deferred-turn-coordinator.js";
+import {
+  buildDeferredTurnContent,
+  createDeferredTurnDescriptor,
+  DEFERRED_TURN_MESSAGE_TYPE,
+  deferredTurnMessageDetails,
+  deferredTurnMessageId,
+  deferredTurnSourceEventId,
+  type DeferredTurnDescriptor,
+} from "./deferred-turn.js";
 import { ConversationStepExecutor } from "./executor.js";
 import {
   HerdrWorkflowViewer,
@@ -108,8 +125,10 @@ const RUN_CLAIM_LEASE_MS = 30_000;
 const RUN_CLAIM_RENEW_MS = 10_000;
 const RUN_SYNC_POLL_MS = 3_000;
 const NOTIFICATION_DELIVERY_LEASE_MS = 30_000;
+const TURN_INTENT_DELIVERY_LEASE_MS = 30_000;
 const WIDGET_KEY = "pi-workflows";
 const PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
+const PRESENTATION_MESSAGE_SCHEMA = "pi-workflows.presentation-message.v1";
 const FINAL_WIDGET_TTL_MS = 60_000;
 const WIDGET_SCROLL_STEP = 3;
 const MAX_PRESENTATION_RESULT_CHARS = 50_000;
@@ -138,6 +157,12 @@ type PresentationPromptBuilder = Exclude<
   string | undefined
 >;
 
+type AbortProvenance = {
+  cause: WorkflowTurnIntentCause;
+  descriptor?: DeferredTurnDescriptor;
+  storageError?: string;
+};
+
 type ActiveRun = {
   runId: string;
   workflowName: string;
@@ -153,6 +178,9 @@ type ActiveRun = {
   onFinish?: (result: WorkflowSchedulerResult) => void;
   completion?: Promise<void>;
   interruptionRequested?: boolean;
+  pendingAbortCause?: WorkflowTurnIntentCause | undefined;
+  abortProvenance?: AbortProvenance | undefined;
+  suppressTurnIntent?: boolean | undefined;
   claimToken?: string | undefined;
   renewTimer?: ReturnType<typeof setInterval> | undefined;
   /** True for runs this session resumed from the queue. */
@@ -400,6 +428,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let activationRecovery: ((ctx: ExtensionContext) => void) | undefined;
   let decisionRecoveryTimer: ReturnType<typeof setInterval> | null = null;
   let decisionRecoveryActive = false;
+  let turnCoordinator: DeferredTurnCoordinator;
 
   const recordRunEvent = (event: {
     runId: string;
@@ -453,9 +482,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
                 kind: notification.kind,
               },
             },
-            notification.kind === "launch_failure"
-              ? { triggerTurn: true, deliverAs: "followUp" }
-              : { triggerTurn: false },
+            { triggerTurn: false },
           );
           alreadyDelivered.add(notification.notificationId);
         }
@@ -465,6 +492,25 @@ export default function piWorkflows(pi: ExtensionAPI) {
           claimToken,
         });
       }
+      const idle = ctx.isIdle() && systemTurnAbort === null && !sessionClosed && !runHeld();
+      turnCoordinator.flushNatural(idle);
+      turnCoordinator.deliverFallbacks(
+        {
+          targetSessionId: sessionId,
+          send: (intent) => {
+            pi.sendMessage(
+              {
+                customType: DEFERRED_TURN_MESSAGE_TYPE,
+                content: buildDeferredTurnContent(intent),
+                display: true,
+                details: deferredTurnMessageDetails(intent),
+              },
+              { triggerTurn: true, deliverAs: "followUp" },
+            );
+          },
+        },
+        idle,
+      );
     } catch {
       // Delivery retries on the next poll. It never affects workflow execution.
     }
@@ -480,7 +526,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     runSyncTimer.unref?.();
   };
   let activeRun: ActiveRun | null = null;
-  let systemTurnAbort: AgentStepContract | null = null;
+  let systemTurnAbort: { contract: AgentStepContract; intentId?: string } | null = null;
   let suppressWorkflowAssistantTail = false;
   let lastExpiredAttempt: { contract: AgentStepContract; reason: string } | null = null;
   // The interactive run currently parked at a checkpoint, if any.
@@ -500,6 +546,30 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let presentationPending: number | null = null;
   let controllerHost: PiControllerHost | undefined;
   let controllerContext: ExtensionContext | null = null;
+
+  const branchIntentResolution = (intentId: string): BranchIntentResolution | null => {
+    if (controllerContext === null) return null;
+    for (const entry of controllerContext.sessionManager.getBranch()) {
+      if (entry.type !== "custom_message") continue;
+      const details = entry.details;
+      if (details === null || typeof details !== "object" || Array.isArray(details)) continue;
+      if ((details as { turnIntentId?: unknown }).turnIntentId !== intentId) continue;
+      let resolution: WorkflowTurnIntentResolution | null = null;
+      if (entry.customType === WORKFLOW_AGENT_STEP_MESSAGE_TYPE) resolution = "workflowPrompt";
+      if (entry.customType === PRESENTATION_MESSAGE_TYPE) resolution = "presentation";
+      if (entry.customType === DEFERRED_TURN_MESSAGE_TYPE) resolution = "fallback";
+      if (resolution !== null) {
+        return { resolution, messageId: deferredTurnMessageId(intentId, resolution) };
+      }
+    }
+    return null;
+  };
+
+  turnCoordinator = new DeferredTurnCoordinator({
+    store: () => runQueueStore,
+    branchResolution: branchIntentResolution,
+    leaseMs: TURN_INTENT_DELIVERY_LEASE_MS,
+  });
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -541,6 +611,125 @@ export default function piWorkflows(pi: ExtensionAPI) {
   /** True when the run is held for the user (escape or /workflow pause). */
   const runHeld = (): boolean =>
     activeRun !== null && (activeRun.engine.pauseRequested || activeRun.executor.held);
+
+  const originSessionId = (ctx: ExtensionContext, runId: string): string =>
+    ensureRunQueueStore(ctx.cwd).getWorkflowRun(runId)?.originSessionId ??
+    ctx.sessionManager.getSessionId();
+
+  const storeTurnDescriptor = (
+    ctx: ExtensionContext,
+    descriptor: DeferredTurnDescriptor,
+    eligible: boolean,
+  ): void => {
+    ensureRunQueueStore(ctx.cwd).ensureWorkflowTurnIntent({ ...descriptor, eligible });
+  };
+
+  const ensureAbortTurnIntent = (
+    ctx: ExtensionContext,
+    run: ActiveRun,
+    cause: WorkflowTurnIntentCause,
+    contract: AgentStepContract,
+    reason: unknown,
+  ): DeferredTurnDescriptor => {
+    if (run.abortProvenance?.descriptor !== undefined) {
+      return run.abortProvenance.descriptor;
+    }
+    const descriptor = createDeferredTurnDescriptor({
+      runId: run.runId,
+      workflowName: run.workflowName,
+      targetSessionId: originSessionId(ctx, run.runId),
+      cause,
+      sourceEventId: deferredTurnSourceEventId({
+        runId: run.runId,
+        cause,
+        nodeId: contract.nodeId,
+        attemptId: contract.attemptId,
+        source: "agent-step-abort",
+      }),
+      observedState: cause === "claimLost" ? "handedOff" : "interrupted",
+      nodeId: contract.nodeId,
+      attemptId: contract.attemptId,
+      reason: errorMessage(reason),
+      handoff: cause === "claimLost",
+    });
+    run.abortProvenance = { cause, descriptor };
+    try {
+      storeTurnDescriptor(ctx, descriptor, false);
+    } catch (error) {
+      run.abortProvenance.storageError = errorMessage(error);
+    }
+    return descriptor;
+  };
+
+  const makeRunTurnIntentEligible = (
+    ctx: ExtensionContext,
+    run: ActiveRun,
+    observedState: string,
+    reason?: string,
+  ): void => {
+    if (
+      sessionClosed ||
+      run.suppressTurnIntent === true ||
+      (run.childKey !== undefined && run.abortProvenance === undefined) ||
+      run.abortProvenance?.cause === "claimLost"
+    ) {
+      return;
+    }
+    const cause =
+      run.abortProvenance?.cause ?? (observedState === "timed_out" ? "timedOut" : "failed");
+    if (observedState === "cancelled" && run.abortProvenance === undefined) return;
+    const previous = run.abortProvenance?.descriptor;
+    const sourceEventId =
+      previous?.sourceEventId ??
+      deferredTurnSourceEventId({
+        runId: run.runId,
+        cause,
+        nodeId: "$terminal",
+        source: "terminal",
+      });
+    const descriptor = createDeferredTurnDescriptor({
+      runId: run.runId,
+      workflowName: run.workflowName,
+      targetSessionId: originSessionId(ctx, run.runId),
+      cause,
+      sourceEventId,
+      observedState,
+      nodeId: previous?.nodeId ?? "$terminal",
+      attemptId: previous?.attemptId ?? null,
+      reason: reason ?? null,
+      handoff: false,
+    });
+    run.abortProvenance = {
+      cause,
+      descriptor,
+      ...(run.abortProvenance?.storageError === undefined
+        ? {}
+        : { storageError: run.abortProvenance.storageError }),
+    };
+    try {
+      storeTurnDescriptor(ctx, descriptor, false);
+      ensureRunQueueStore(ctx.cwd).makeWorkflowTurnIntentEligible({
+        intentId: descriptor.intentId,
+        fallbackFacts: descriptor.fallbackFacts,
+      });
+      delete run.abortProvenance.storageError;
+      syncArmed = true;
+    } catch (error) {
+      const message = errorMessage(error);
+      run.abortProvenance.storageError = message;
+      recordRunEvent({
+        runId: run.runId,
+        workflowRef: run.workflowName,
+        type: "turn_intent_failed",
+        payload: { error: message },
+      });
+      notify(
+        ctx,
+        `Workflow ${run.workflowName} ended, but Pi Workflows could not preserve its successor turn: ${message}`,
+        "warning",
+      );
+    }
+  };
 
   const footerStatus = (state: WorkflowRunState): string => {
     const label = runHeld() || state.paused ? "paused" : state.status;
@@ -742,24 +931,41 @@ export default function piWorkflows(pi: ExtensionAPI) {
         typeof run.presentationPrompt === "function"
           ? await resolvePresentationPrompt(run.presentationPrompt, state, abort.signal)
           : run.presentationPrompt;
-      if (
-        sessionClosed ||
-        run.generation !== runGeneration ||
-        abort.signal.aborted ||
-        instructions === undefined ||
-        instructions.trim().length === 0
-      ) {
+      if (sessionClosed || run.generation !== runGeneration || abort.signal.aborted) {
         return;
       }
-      presentationPending = run.generation;
-      suppressWorkflowAssistantTail = false;
-      pi.sendMessage(
+      if (instructions === undefined || instructions.trim().length === 0) {
+        if (run.abortProvenance !== undefined) {
+          makeRunTurnIntentEligible(ctx, run, state.status, "No result presentation was available");
+        }
+        return;
+      }
+      turnCoordinator.sendNatural(
         {
-          customType: PRESENTATION_MESSAGE_TYPE,
-          content: buildPresentationMessage(instructions, state),
-          display: false,
+          runId: run.runId,
+          targetSessionId: originSessionId(ctx, run.runId),
+          resolution: "presentation",
+          send: (turnIntentId) => {
+            presentationPending = run.generation;
+            suppressWorkflowAssistantTail = false;
+            pi.sendMessage(
+              {
+                customType: PRESENTATION_MESSAGE_TYPE,
+                content: buildPresentationMessage(instructions, state),
+                display: false,
+                details: {
+                  schema: PRESENTATION_MESSAGE_SCHEMA,
+                  ...(turnIntentId === undefined ? {} : { turnIntentId }),
+                },
+              },
+              {
+                deliverAs: turnIntentId === undefined ? "steer" : "followUp",
+                triggerTurn: true,
+              },
+            );
+          },
         },
-        { deliverAs: "steer", triggerTurn: true },
+        ctx.isIdle() && systemTurnAbort === null,
       );
     } catch (error) {
       if (presentationPending === run.generation) {
@@ -777,6 +983,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
           ? `timed out after ${PRESENTATION_TIMEOUT_MS}ms`
           : errorMessage(error);
       notify(ctx, `Could not present workflow result: ${message}`, "warning");
+      if (run.abortProvenance !== undefined) {
+        makeRunTurnIntentEligible(ctx, run, state.status, message);
+      }
     } finally {
       clearTimeout(timer);
       if (presentationAbort === abort) {
@@ -829,6 +1038,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
       clearWidget(ctx);
       return;
     }
+    if (run.abortProvenance?.cause === "claimLost") {
+      await run.recorder?.stop().catch(() => undefined);
+      releaseClaim(run, "lost");
+      recordRunEvent({
+        runId: run.runId,
+        workflowRef: run.workflowName,
+        type: "claim_lost",
+      });
+      stopWidgetTicker();
+      clearWidget(ctx);
+      notify(
+        ctx,
+        `Workflow ${run.workflowName} continues under another runner (run ${run.runId}).`,
+      );
+      return;
+    }
     releaseClaim(run, "done");
     recordRunEvent({
       runId: run.runId,
@@ -879,6 +1104,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
       run.onFinish?.(childResult);
     } catch (error) {
       notify(ctx, `Could not record child workflow completion: ${errorMessage(error)}`, "warning");
+    }
+    if (state.status === "failed" || state.status === "timed_out" || state.status === "cancelled") {
+      makeRunTurnIntentEligible(ctx, run, state.status, state.error);
+    } else if (
+      run.abortProvenance !== undefined &&
+      run.presentationPrompt === undefined &&
+      (state.status === "completed" || state.status === "waiting")
+    ) {
+      makeRunTurnIntentEligible(ctx, run, state.status, state.error);
     }
     void presentRun(ctx, run, state);
     if (pendingDecision !== null && state.status === "waiting") {
@@ -1011,23 +1245,34 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
     const executor = new ConversationStepExecutor({
       sendPrompt: ({ prompt, contract, presentation, kind, streaming }) => {
-        const details: WorkflowAgentStepMessageDetails = {
-          schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
-          kind,
-          contract,
-          ...(presentation !== undefined ? { presentation } : {}),
-        };
-        pi.sendMessage(
+        turnCoordinator.sendNatural(
           {
-            customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
-            content: prompt,
-            display: true,
-            details,
+            runId,
+            targetSessionId: originSessionId(ctx, runId),
+            resolution: "workflowPrompt",
+            send: (turnIntentId) => {
+              const details: WorkflowAgentStepMessageDetails = {
+                schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
+                kind,
+                contract,
+                ...(presentation !== undefined ? { presentation } : {}),
+                ...(turnIntentId === undefined ? {} : { turnIntentId }),
+              };
+              pi.sendMessage(
+                {
+                  customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+                  content: prompt,
+                  display: true,
+                  details,
+                },
+                {
+                  triggerTurn: true,
+                  deliverAs: streaming ? "steer" : "followUp",
+                },
+              );
+            },
           },
-          {
-            triggerTurn: true,
-            deliverAs: streaming ? "steer" : "followUp",
-          },
+          ctx.isIdle() && systemTurnAbort === null,
         );
       },
       onAbort: (contract, reason) => {
@@ -1036,7 +1281,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
           reason: reason instanceof TimeoutError ? "timed out" : `ended: ${errorMessage(reason)}`,
         };
         if (!executor.held && !ctx.isIdle()) {
-          systemTurnAbort = contract;
+          const cause = reason instanceof TimeoutError ? "timedOut" : run.pendingAbortCause;
+          const descriptor =
+            cause === undefined
+              ? undefined
+              : ensureAbortTurnIntent(ctx, run, cause, contract, reason);
+          run.pendingAbortCause = undefined;
+          systemTurnAbort = {
+            contract,
+            ...(descriptor === undefined ? {} : { intentId: descriptor.intentId }),
+          };
           ctx.abort();
         }
       },
@@ -1137,6 +1391,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           if (
             !store.renewWorkflowRunClaim({ runId, claimToken: token, leaseMs: RUN_CLAIM_LEASE_MS })
           ) {
+            run.pendingAbortCause = "claimLost";
             run.engine.cancel();
           }
         } catch {
@@ -1239,6 +1494,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
         }
         if (terminalStatus !== undefined) {
           recordRunEvent({ runId, workflowRef: workflow.name, type: terminalStatus, payload: {} });
+          if (
+            terminalStatus === "failed" ||
+            terminalStatus === "timed_out" ||
+            terminalStatus === "cancelled"
+          ) {
+            makeRunTurnIntentEligible(ctx, run, terminalStatus, message);
+          }
           notify(ctx, `Workflow ${workflow.name} ${terminalStatus} (run ${runId}).`);
           return;
         }
@@ -1248,6 +1510,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           type: "failed",
           payload: { error: message },
         });
+        makeRunTurnIntentEligible(ctx, run, "failed", message);
         try {
           run.onFinish?.({ state: "failed", runId, error: message });
         } catch {
@@ -1478,11 +1741,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   const cancelWorkflowControl = async (
     ctx: ExtensionContext,
+    origin: "agent" | "user",
     requestedRunId?: string,
   ): Promise<WorkflowControlResult> => {
     if (activeRun && (requestedRunId === undefined || requestedRunId === activeRun.runId)) {
       const workflowName = activeRun.workflowName;
       const runId = activeRun.runId;
+      activeRun.pendingAbortCause = origin === "agent" ? "agentCancelled" : undefined;
+      activeRun.suppressTurnIntent = origin === "user";
       activeRun.engine.cancel();
       return {
         message: `Cancelling workflow ${workflowName}…`,
@@ -1581,6 +1847,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         },
       };
     }
+    activeRun.suppressTurnIntent = true;
     activeRun.engine.pause();
     renderWidget(ctx);
     return {
@@ -1614,6 +1881,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         level: "warning",
       };
     }
+    activeRun.suppressTurnIntent = false;
     activeRun.engine.resume();
     activeRun.executor.release();
     renderWidget(ctx);
@@ -2167,19 +2435,31 @@ export default function piWorkflows(pi: ExtensionAPI) {
         payload: { errorCode: safe.code, error: safe.message },
       });
       const content = `Workflow ${claimed.workflowName} failed to start (run ${claimed.runId}): ${safe.message}. Inspect the error and call workflow start again only after you correct the cause.`;
-      try {
-        queue.enqueueWorkflowNotification({
+      const cause = "launchFailed" as const;
+      const descriptor = createDeferredTurnDescriptor({
+        runId: claimed.runId,
+        workflowName: claimed.workflowName,
+        targetSessionId: claimed.originSessionId ?? ctx.sessionManager.getSessionId(),
+        cause,
+        sourceEventId: deferredTurnSourceEventId({
           runId: claimed.runId,
+          cause,
           nodeId: "$launch",
-          attemptId: claimed.runId,
-          notificationIndex: 1,
-          targetSessionId: claimed.originSessionId ?? ctx.sessionManager.getSessionId(),
-          kind: "launch_failure",
-          content,
-          notificationId: `launch-failure:${claimed.runId}`,
-        });
-      } catch {
-        // A deterministic notification id makes duplicate insertion harmless.
+          source: "queued-launch",
+        }),
+        observedState: "failedToStart",
+        nodeId: "$launch",
+        reason: safe.message,
+      });
+      try {
+        storeTurnDescriptor(ctx, descriptor, true);
+        syncArmed = true;
+      } catch (intentError) {
+        notify(
+          ctx,
+          `Workflow ${claimed.workflowName} failed to start, but Pi Workflows could not preserve its successor turn: ${errorMessage(intentError)}`,
+          "warning",
+        );
       }
       notify(ctx, content, "error");
       runSyncPass(ctx);
@@ -2244,7 +2524,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (parsed.kind === "cancel") {
-        const result = await cancelWorkflowControl(ctx);
+        const result = await cancelWorkflowControl(ctx, "user");
         notify(ctx, result.message, result.level);
         return;
       }
@@ -2412,6 +2692,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           case "stop":
             if (activeRun?.childKey !== undefined) {
               activeRun.interruptionRequested = true;
+              activeRun.pendingAbortCause = "controllerInterrupted";
               activeRun.engine.cancel();
             }
             await host.stop();
@@ -2454,7 +2735,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           control = resumeWorkflowControl(ctx);
           break;
         case "cancel":
-          control = await cancelWorkflowControl(ctx, params.runId);
+          control = await cancelWorkflowControl(ctx, "agent", params.runId);
           break;
         case "answer": {
           const waiting = await resolveWaitingWorkflow(ctx, params.runId);
@@ -2636,6 +2917,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (!aborted || runHeld()) {
       return;
     }
+    run.suppressTurnIntent = true;
     run.engine.pause();
     run.executor.hold();
     renderWidget(ctx);
@@ -2686,6 +2968,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    systemTurnAbort = null;
     if (activeRun === null) {
       try {
         const prepared = ensureRunQueueStore(ctx.cwd).findSessionReservation(
@@ -2704,15 +2987,20 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
     }
+    const flushedNatural = turnCoordinator.flushNatural(
+      ctx.isIdle() && !sessionClosed && !runHeld(),
+    );
     const run = activeRun;
     if (!run) {
       presentationPending = null;
+      runSyncPass(ctx);
       return;
     }
     await run.recorder?.synchronize(ctx).catch(() => undefined);
     run.recorder?.settleAttempt();
     run.executor.setStreaming(false);
-    run.executor.handleAgentSettled();
+    if (flushedNatural === 0) run.executor.handleAgentSettled();
+    runSyncPass(ctx);
   });
 
   pi.on("session_shutdown", async () => {
@@ -2720,8 +3008,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
     herdrProbeGeneration += 1;
     systemTurnAbort = null;
     suppressWorkflowAssistantTail = false;
+    turnCoordinator.clearDeferred();
     supersedePresentation();
     const run = activeRun;
+    if (run !== null) run.suppressTurnIntent = true;
     if (run !== null && run.claimToken !== undefined) {
       // Queued interactive runs park: no terminal event, no recorded partial
       // attempt, and the claim releases so another runner can resume.
