@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   parsePiJsonOutput,
+  resolvePiInvocation,
   runIsolatedReviewSessions,
 } from "../src/builtins/sanity-check-session.js";
 import sanityCheckWorkflow, {
@@ -86,6 +87,8 @@ function fakePiScript(body: string): string {
 describe("sanity-check workflow", () => {
   it("defaults to serial mode and validates input", () => {
     expect(parseSanityCheckInput(undefined)).toEqual({ mode: "serial" });
+    expect(parseSanityCheckInput(null)).toEqual({ mode: "serial" });
+    expect(parseSanityCheckInput({})).toEqual({ mode: "serial" });
     expect(parseSanityCheckInput({ baseRef: "origin/main" })).toEqual({
       mode: "serial",
       baseRef: "origin/main",
@@ -96,6 +99,7 @@ describe("sanity-check workflow", () => {
     });
     expect(() => parseSanityCheckInput({ mode: "fast" })).toThrow(/serial or parallel/);
     expect(() => parseSanityCheckInput({ baseRef: "--output=x" })).toThrow(/plain Git reference/);
+    expect(() => parseSanityCheckInput({ baseRef: 42 })).toThrow(/non-empty string/);
     expect(() => parseSanityCheckInput({ extra: true })).toThrow(/not supported/);
   });
 
@@ -157,6 +161,22 @@ describe("sanity-check workflow", () => {
         ["necessity"],
       ),
     ).toThrow(/requires evidence/);
+    expect(
+      parseReviewOutput(
+        {
+          ...review(["necessity"]),
+          areas: [
+            {
+              ...areaResult("necessity"),
+              assessment: "unclear",
+              evidence: [],
+              alternative: "Ask for the missing requirement.",
+            },
+          ],
+        },
+        ["necessity"],
+      ).areas[0],
+    ).toMatchObject({ assessment: "unclear", alternative: "Ask for the missing requirement." });
 
     for (const verdict of ["keep", "simplify", "refactor", "drop", "needs_evidence"] as const) {
       expect(parseSanityCheckResult(finalResult(verdict)).verdict).toBe(verdict);
@@ -164,6 +184,28 @@ describe("sanity-check workflow", () => {
     expect(() => parseSanityCheckResult({ ...finalResult("keep"), verdict: "approve" })).toThrow(
       /verdict/,
     );
+    expect(() => parseReviewOutput(null, areas)).toThrow(/must be an object/);
+    expect(() =>
+      parseReviewOutput(
+        { ...review(["necessity"]), areas: [{ ...areaResult("necessity"), area: "bad" }] },
+        ["necessity"],
+      ),
+    ).toThrow(/area is invalid/);
+    expect(() =>
+      parseReviewOutput(
+        {
+          ...review(["necessity"]),
+          areas: [{ ...areaResult("necessity"), assessment: "maybe" }],
+        },
+        ["necessity"],
+      ),
+    ).toThrow(/assessment must be/);
+    expect(() => parseReviewOutput({ ...review(), questions: "none" }, areas)).toThrow(
+      /must be an array/,
+    );
+    expect(() =>
+      parseReviewOutput({ ...review(), unknowns: Array.from({ length: 41 }, () => "x") }, areas),
+    ).toThrow(/at most 40/);
   });
 
   it("formats a bounded final report with evidence and no presentation turn", () => {
@@ -171,6 +213,23 @@ describe("sanity-check workflow", () => {
     const report = formatSanityCheckReport(result);
     expect(report).toContain("Sanity Check: keep");
     expect(report).toContain("src/a.ts :: feature");
+    const detailed = formatSanityCheckReport({
+      ...result,
+      findings: [
+        { ...result.findings[0]!, alternative: "Use the existing helper." },
+        ...result.findings.slice(1),
+      ],
+      requiredChanges: ["Add the missing test."],
+      questionsForContributor: ["Which user needs this?"],
+      unknowns: ["Product intent is not recorded."],
+    });
+    expect(detailed).toContain("Alternative: Use the existing helper.");
+    expect(detailed).toContain("Required changes:");
+    expect(detailed).toContain("Questions for the contributor:");
+    expect(detailed).toContain("Unknowns:");
+    expect(formatSanityCheckReport({ ...result, summary: "x".repeat(20_000) })).toContain(
+      "[report truncated]",
+    );
     expect(sanityCheckWorkflow.presentationPrompt).toBeUndefined();
     expect(sanityCheckWorkflow.nodes.report).toMatchObject({ nodeType: "notify", kind: "final" });
     expect(sanityCheckWorkflow.edges).toEqual([
@@ -224,6 +283,69 @@ describe("sanity-check workflow", () => {
 });
 
 describe("isolated sanity-check sessions", () => {
+  it("validates request identities and prompt bounds before spawning", async () => {
+    const signal = new AbortController().signal;
+    await expect(runIsolatedReviewSessions([], process.cwd(), signal)).resolves.toEqual({});
+    await expect(
+      runIsolatedReviewSessions([{ id: "bad id", prompt: "x" }], process.cwd(), signal),
+    ).rejects.toThrow(/Invalid isolated review id/);
+    await expect(
+      runIsolatedReviewSessions(
+        [
+          { id: "same", prompt: "x" },
+          { id: "same", prompt: "y" },
+        ],
+        process.cwd(),
+        signal,
+      ),
+    ).rejects.toThrow(/Duplicate isolated review id/);
+    await expect(
+      runIsolatedReviewSessions(
+        [{ id: "large", prompt: "x".repeat(96_001) }],
+        process.cwd(),
+        signal,
+      ),
+    ).rejects.toThrow(/exceeds 96000 characters/);
+    expect(resolvePiInvocation()).toEqual({ command: "pi", prefixArgs: [] });
+
+    const originalArgv = [...process.argv];
+    try {
+      process.argv.splice(
+        0,
+        process.argv.length,
+        "node",
+        "/tmp/pi",
+        "--offline",
+        "--provider",
+        "mock",
+        "--model",
+        "mock-model",
+        "--thinking",
+        "high",
+        "--ignored",
+      );
+      expect(resolvePiInvocation()).toEqual({
+        command: process.execPath,
+        prefixArgs: [
+          "/tmp/pi",
+          "--offline",
+          "--provider",
+          "mock",
+          "--model",
+          "mock-model",
+          "--thinking",
+          "high",
+        ],
+      });
+      process.argv.splice(0, process.argv.length, "node", "/tmp/pi", "--provider");
+      expect(resolvePiInvocation()).toEqual({ command: process.execPath, prefixArgs: ["/tmp/pi"] });
+      process.argv.splice(0, process.argv.length, "node", "/$bunfs/root/pi");
+      expect(resolvePiInvocation()).toEqual({ command: "pi", prefixArgs: [] });
+    } finally {
+      process.argv.splice(0, process.argv.length, ...originalArgv);
+    }
+  });
+
   it("parses the final assistant JSON and rejects missing or failed output", () => {
     const output = `${JSON.stringify({
       type: "message_end",
@@ -234,6 +356,30 @@ describe("isolated sanity-check sessions", () => {
       },
     })}\n`;
     expect(parsePiJsonOutput(output)).toEqual({ answer: 42 });
+    expect(
+      parsePiJsonOutput(
+        [
+          JSON.stringify({ type: "message_end", message: null }),
+          JSON.stringify({ type: "message_end", message: [] }),
+          JSON.stringify({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [{ type: "image" }, { type: "text", text: '{"answer":41}' }],
+              stopReason: "stop",
+            },
+          }),
+        ].join("\n"),
+      ),
+    ).toEqual({ answer: 41 });
+    expect(
+      parsePiJsonOutput(
+        `${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: '{"answer":43}', stopReason: "stop" },
+        })}\n`,
+      ),
+    ).toEqual({ answer: 43 });
     expect(() => parsePiJsonOutput("noise\n")).toThrow(/no assistant JSON/);
     expect(() =>
       parsePiJsonOutput(
@@ -243,6 +389,14 @@ describe("isolated sanity-check sessions", () => {
         })}\n`,
       ),
     ).toThrow(/provider failed/);
+    expect(() =>
+      parsePiJsonOutput(
+        `${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "aborted" },
+        })}\n`,
+      ),
+    ).toThrow(/stopped with aborted/);
   });
 
   it("starts temporary read-only sessions and removes their prompt files", async () => {
@@ -275,6 +429,46 @@ describe("isolated sanity-check sessions", () => {
     const promptArg = first.args.find((arg) => arg.startsWith("@"));
     expect(promptArg).toBeDefined();
     await expect(fs.stat((promptArg as string).slice(1))).rejects.toThrow();
+  });
+
+  it("fails clearly for child process and output errors", async () => {
+    await expect(
+      runIsolatedReviewSessions(
+        [{ id: "failed", prompt: "fail" }],
+        process.cwd(),
+        new AbortController().signal,
+        {
+          invocation: {
+            command: process.execPath,
+            prefixArgs: ["-e", "process.stderr.write('failed'); process.exit(2)", "--"],
+          },
+        },
+      ),
+    ).rejects.toThrow(/failed/);
+
+    const verbose = "process.stdout.write('x'.repeat(1000));";
+    await expect(
+      runIsolatedReviewSessions(
+        [{ id: "verbose", prompt: "verbose" }],
+        process.cwd(),
+        new AbortController().signal,
+        {
+          invocation: { command: process.execPath, prefixArgs: ["-e", verbose, "--"] },
+          maxOutputChars: 100,
+        },
+      ),
+    ).rejects.toThrow(/exceeded its output limit/);
+
+    const invalid =
+      "process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'not JSON'}],stopReason:'stop'}})+'\\n');";
+    await expect(
+      runIsolatedReviewSessions(
+        [{ id: "invalid", prompt: "invalid" }],
+        process.cwd(),
+        new AbortController().signal,
+        { invocation: { command: process.execPath, prefixArgs: ["-e", invalid, "--"] } },
+      ),
+    ).rejects.toThrow(/invalid output/);
   });
 
   it("fails clearly when a child times out", async () => {

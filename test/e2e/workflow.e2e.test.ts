@@ -377,6 +377,7 @@ async function waitForQueueRecord(
   predicate: (record: ReturnType<SqliteControllerStore["getWorkflowRun"]>) => boolean,
   onTimeout: () => string,
   timeoutMs = 15_000,
+  workflowName = "durable-launch-e2e",
 ): Promise<NonNullable<ReturnType<SqliteControllerStore["getWorkflowRun"]>>> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
@@ -385,7 +386,7 @@ async function waitForQueueRecord(
       try {
         const record = store
           .listWorkflowRuns()
-          .find((candidate) => candidate.workflowName === "durable-launch-e2e");
+          .find((candidate) => candidate.workflowName === workflowName);
         if (predicate(record)) return record as NonNullable<typeof record>;
       } finally {
         store.close();
@@ -849,36 +850,14 @@ describe.sequential("pi-workflows end to end", () => {
         { id: "second", outcome: "succeeded", stdout: "second" },
       ],
     });
+    await waitForQueueRecord(
+      controllerFile,
+      (record) => record?.status === "done",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      15_000,
+      "command-batch-e2e",
+    );
   }, 30_000);
-
-  it("runs the built-in sanity check in isolated read-only Pi sessions", async () => {
-    const requestsBefore = mock.requests.length;
-    pi.send({
-      id: "sanity-check-e2e",
-      type: "prompt",
-      message: `/workflow sanity-check --input-json ${JSON.stringify({ baseRef: "HEAD" })}`,
-    });
-    const { state } = await waitForRunState(
-      runsDir,
-      (candidate) =>
-        candidate.workflowName === "sanity-check" &&
-        ["completed", "failed", "cancelled"].includes(candidate.status),
-      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
-    );
-    expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "1" });
-    expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
-    expect(state.outputs.review).toHaveLength(1);
-    await waitForCondition(
-      () => mock.requests.length >= requestsBefore + 2,
-      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
-    );
-    expect(mock.requests.length).toBe(requestsBefore + 2);
-    await waitForCondition(
-      () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
-      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
-    );
-  }, 60_000);
 
   it("persists a model-started run, reports deferred failure, and accepts a corrected start", async () => {
     const workflowFile = path.join(
@@ -1786,4 +1765,33 @@ export default function captureFailureExtension(pi: unknown) {
     expect(finished.finalOutput).toEqual({ finished: "host did it" });
     void runDir;
   }, 90_000);
+
+  it("runs the built-in sanity check in isolated read-only Pi sessions", async () => {
+    const requestsBefore = mock.requests.length;
+    pi.send({
+      id: "sanity-check-e2e",
+      type: "prompt",
+      message: `/workflow sanity-check --input-json ${JSON.stringify({ baseRef: "HEAD" })}`,
+    });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "sanity-check" &&
+        ["completed", "failed", "cancelled"].includes(candidate.status),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(state.status, state.error).toBe("completed");
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "1" });
+    expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
+    expect(state.outputs.review).toHaveLength(1);
+    await waitForCondition(
+      () => mock.requests.length >= requestsBefore + 2,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(mock.requests.length).toBe(requestsBefore + 2);
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+  }, 60_000);
 });
