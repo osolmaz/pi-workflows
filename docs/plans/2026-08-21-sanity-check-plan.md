@@ -31,7 +31,7 @@ The workflow accepts a review mode and the base reference needed to inspect the 
 }
 ```
 
-`mode` is `serial` or `parallel`. The current repository and checked-out branch are the contribution under review. Pull request intent, linked issue context, and acceptance criteria are collected when they are available. The workflow also supports a local contribution with no pull request metadata.
+`mode` is `serial` or `parallel`. The current repository and checked-out branch are the contribution under review. When `baseRef` is omitted, the workflow tries the remote default branch, the current branch upstream, and the first parent, then uses `HEAD` for a working-tree-only review. Pull request intent, linked issue context, and acceptance criteria are collected when they are available. The workflow also supports a local contribution with no pull request metadata.
 
 ## Evidence
 
@@ -115,7 +115,7 @@ The review nodes are function actions. The isolated runner starts Pi in non-inte
 --tools read,grep,find,ls
 ```
 
-Serial mode starts one combined review and then one verification session. Parallel mode starts the four focused reviews concurrently, waits for all of them, and then starts one verification session. Cancellation and timeout stop every affected child process. Output and error text are bounded.
+Serial mode starts one combined review and then one verification session. Parallel mode starts the four focused reviews concurrently, waits for all of them, and then starts one verification session. Cancellation and timeout stop every affected child process. Output and error text are bounded. Serialized evidence and review results are also bounded before prompt construction, with an explicit truncation marker when the full input does not fit.
 
 The workflow validates its input and every model result. A missing child result, failed child process, malformed result, cancellation, or timeout fails the active action with a clear bounded error.
 

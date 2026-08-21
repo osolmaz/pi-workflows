@@ -12,6 +12,10 @@ const MAX_STRING_CHARS = 4_000;
 const MAX_SUMMARY_CHARS = 8_000;
 const MAX_ITEMS = 40;
 const REPORT_CHARS = 12_000;
+const REVIEW_EVIDENCE_CHARS = 60_000;
+const VERIFICATION_EVIDENCE_CHARS = 32_000;
+const VERIFICATION_REVIEWS_CHARS = 48_000;
+const INPUT_TRUNCATION_MARKER = "\n...[input truncated]";
 
 const reviewAreas = ["necessity", "duplication", "contracts", "scope_tests"] as const;
 export type SanityCheckArea = (typeof reviewAreas)[number];
@@ -111,13 +115,22 @@ export async function collectContributionEvidence(
     ...(config.baseRef === undefined
       ? [
           command(
-            "base",
+            "base-origin",
             "git",
             ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
             cwd,
             10_000,
             4_000,
           ),
+          command(
+            "base-upstream",
+            "git",
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd,
+            10_000,
+            4_000,
+          ),
+          command("base-parent", "git", ["rev-parse", "HEAD^"], cwd, 10_000, 4_000),
         ]
       : []),
   ];
@@ -127,7 +140,7 @@ export async function collectContributionEvidence(
   );
   const repository = requiredOutput(setup.items, "repository");
   const headRevision = requiredOutput(setup.items, "head");
-  const baseRef = config.baseRef ?? requiredOutput(setup.items, "base");
+  const baseRef = config.baseRef ?? resolveDefaultBase(setup.items, headRevision);
   const range = `${baseRef}...HEAD`;
   const items = [
     command("committed-stat", "git", ["diff", "--stat", range, "--"], repository, 20_000, 4_000),
@@ -369,7 +382,7 @@ function reviewPrompt(areas: readonly SanityCheckArea[], evidence: ContributionE
     '{"areas":[{"area":"necessity|duplication|contracts|scope_tests","assessment":"pass|concern|unclear","summary":"text","evidence":[{"path":"file or source","symbol":"symbol or section","detail":"what it proves"}],"alternative":"optional smaller design"}],"acceptanceCase":"strongest case for accepting the design","questions":["question"],"unknowns":["unknown"]}',
     "Return exactly one area entry for every requested area and no others.",
     "Collected evidence:",
-    JSON.stringify(evidence),
+    boundedJson(evidence, REVIEW_EVIDENCE_CHARS),
   ].join("\n\n");
 }
 
@@ -382,9 +395,9 @@ function verificationPrompt(evidence: ContributionEvidence, reviews: SanityCheck
     "Return only JSON with this shape:",
     '{"verdict":"keep|simplify|refactor|drop|needs_evidence","summary":"text","findings":[{"area":"necessity|duplication|contracts|scope_tests","assessment":"pass|concern|unclear","summary":"text","evidence":[{"path":"file or source","symbol":"symbol or section","detail":"what it proves"}],"alternative":"optional smaller design"}],"requiredChanges":["change"],"questionsForContributor":["question"],"unknowns":["unknown"]}',
     "Collected evidence:",
-    JSON.stringify(evidence),
+    boundedJson(evidence, VERIFICATION_EVIDENCE_CHARS),
     "Review results:",
-    JSON.stringify(reviews),
+    boundedJson(reviews, VERIFICATION_REVIEWS_CHARS),
   ].join("\n\n");
 }
 
@@ -456,6 +469,22 @@ function assertExactAreas(
   if (actual.length !== expected.length) {
     throw new Error(`${label} contains an unrequested area`);
   }
+}
+
+function resolveDefaultBase(items: CommandBatchItemResult[], headRevision: string): string {
+  for (const id of ["base-origin", "base-upstream", "base-parent"]) {
+    const result = resultFor(items, id);
+    if (result.outcome === "succeeded" && !result.stdoutTruncated && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
+  }
+  return headRevision;
+}
+
+function boundedJson(value: unknown, maximum: number): string {
+  const serialized = JSON.stringify(value);
+  if (serialized.length <= maximum) return serialized;
+  return `${serialized.slice(0, maximum - INPUT_TRUNCATION_MARKER.length)}${INPUT_TRUNCATION_MARKER}`;
 }
 
 function command(

@@ -114,6 +114,21 @@ describe("sanity-check workflow", () => {
     }
   });
 
+  it("bounds serialized evidence and review results below the session prompt limit", () => {
+    const largeEvidence: ContributionEvidence = {
+      ...evidence(),
+      pullRequest: { available: true, data: { body: "x".repeat(200_000) } },
+    };
+    const reviewRequest = buildReviewRequests("serial", largeEvidence)[0];
+    expect(reviewRequest?.prompt.length).toBeLessThan(96_000);
+    expect(reviewRequest?.prompt).toContain("[input truncated]");
+
+    const largeReview = { ...review(), acceptanceCase: "x".repeat(200_000) };
+    const verification = buildVerificationRequest(largeEvidence, [largeReview]);
+    expect(verification.prompt.length).toBeLessThan(96_000);
+    expect(verification.prompt).toContain("[input truncated]");
+  });
+
   it("builds one verification session that removes unsupported claims", () => {
     const request = buildVerificationRequest(evidence(), [review()]);
     expect(request.id).toBe("verification");
@@ -194,6 +209,14 @@ describe("sanity-check workflow", () => {
       expect(result.workingTree.diff.truncated).toBe(true);
       expect(result.workingTree.status.text).toContain("sample.txt");
       expect(result.pullRequest.available).toBe(false);
+
+      const defaultBase = await collectContributionEvidence(
+        { mode: "serial" },
+        dir,
+        new AbortController().signal,
+      );
+      expect(defaultBase.baseRef).toBe(stdout.trim());
+      expect(defaultBase.workingTree.diff.truncated).toBe(true);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
