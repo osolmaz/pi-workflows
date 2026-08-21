@@ -25,7 +25,7 @@ describe("bundled workflow skills", () => {
   it.each(["autodoc", "autoimplement", "autoplan"])(
     "routes %s through its built-in workflow",
     (name) => {
-      expect(skill(name)).toContain(`built-in \`${name}\` Pi Workflow`);
+      expect(skill(name)).toContain(`built-in \`${name}\` workflow`);
     },
   );
 

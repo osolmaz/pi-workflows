@@ -4,9 +4,54 @@ description: Use when the user asks to implement a plan end-to-end, test it, run
 compatibility: Requires Pi Workflows and the built-in autoimplement workflow.
 ---
 
-Use the built-in `autoimplement` Pi Workflow when it is available. At top level, list workflows, then start `autoimplement` once with the task, existing plan, repository, scope, constraints, base branch, merge policy, and any explicit command concurrency limits from the conversation. Set `merge: true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set it to false. Do not manually duplicate stages already owned by the workflow.
+# Autoimplement
 
-Autoimplement runs independent pi-reviewer commands, pending CI watches, and local verification commands from separate repositories in bounded batches. It keeps model turns, fixes, pushes, comment changes, merges, and releases ordered. One repository uses the same batch path with concurrency one.
+## Start the workflow
+
+Use the built-in `autoimplement` workflow when it is available. At top level, list workflows, build the complete input, and start `autoimplement` once. Do not start with a partial input and repair it in later turns.
+
+Build the input as follows:
+
+- `task`: Preserve the user's requested end state.
+- `plan`: Pass the selected plan or the full contents of its canonical plan document. Do not devise a new initial plan.
+- `repository`: Use the absolute path of the repository that owns the work.
+- `scope`: Always include a concrete authority statement. Name every allowed repository and the allowed edit, test, commit, push, pull-request, merge, and release actions. Carry forward exclusions from the conversation. A repository path alone is not a scope.
+- `constraints`: Include all applicable user and repository constraints. Use an empty array when none apply.
+- `baseBranch`: Use the requested base or the repository default branch.
+- `merge`: Set `true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set `false`.
+- `documents`: Include known canonical plan or specification paths. Use an empty array when none are known.
+- `concurrency`: Include it only when the conversation gives explicit limits.
+
+When one repository is clearly named, derive the scope without asking the user to restate it. A safe derived scope permits only work needed for the task in that repository, including local verification and normal branch and pull-request publication. It excludes unrelated repositories, merge, release, deployment, credentials, and policy changes unless those actions are explicitly authorized.
+
+Replace the example values below with facts from the conversation, then make one start call:
+
+```json
+{
+  "action": "start",
+  "workflow": "autoimplement",
+  "input": {
+    "task": "Implement the selected timeout fallback plan end to end.",
+    "plan": {
+      "canonicalDocument": "docs/plans/timeout-fallback-plan.md",
+      "summary": "Add a bounded timeout fallback.",
+      "requirements": [
+        "Route supported timeouts to one read-only fallback.",
+        "Keep cancellation terminal."
+      ],
+      "verification": ["npm run check", "npm run test:e2e"]
+    },
+    "repository": "/absolute/path/to/repository",
+    "scope": "Only /absolute/path/to/repository. May edit and test task-related files, create commits, push the task branch, and open or update its pull request. Must not modify other repositories, merge, release, deploy, change credentials, or change repository policy.",
+    "constraints": ["Preserve immediate cancellation.", "Keep deferred-turn work separate."],
+    "baseBranch": "main",
+    "merge": false,
+    "documents": ["docs/plans/timeout-fallback-plan.md"]
+  }
+}
+```
+
+Do not manually duplicate stages already owned by the workflow. Autoimplement runs independent pi-reviewer commands, pending CI watches, and local verification commands from separate repositories in bounded batches. It keeps model turns, fixes, pushes, comment changes, merges, and releases ordered. One repository uses the same batch path with concurrency one.
 
 When this skill is loaded inside an active workflow step, do not start another workflow. Complete the current step contract with the available tools.
 

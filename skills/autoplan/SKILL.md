@@ -6,7 +6,31 @@ compatibility: Requires pi-workflows and the built-in autoplan workflow.
 
 # Autoplan
 
-Use the built-in `autoplan` Pi Workflow when it is available. At top level, list workflows, then start `autoplan` once with the problem, authorized scope, constraints, previous plan, and new evidence from the conversation.
+## Start the workflow
+
+Use the built-in `autoplan` workflow when it is available. At top level, list workflows, build the complete input, and start `autoplan` once.
+
+Build the input as follows:
+
+- `problem`: State the decision or implementation-planning problem and its observable end state.
+- `scope`: Name the repositories, systems, and interfaces that may change. State important exclusions. Derive an unambiguous repository-local scope without asking the user to restate it.
+- `constraints`: Preserve all user, repository, safety, compatibility, cost, and authority limits. Use an empty array when none apply.
+- `previousPlan`: Include it only when revising an existing plan.
+- `newEvidence`: Include it only when evidence caused the revision request.
+
+Replace the example values below with facts from the conversation, then make one start call:
+
+```json
+{
+  "action": "start",
+  "workflow": "autoplan",
+  "input": {
+    "problem": "Choose a production-ready timeout fallback and write its implementation plan.",
+    "scope": "Only /absolute/path/to/repository. Plan changes to its public workflow API, built-in workflow, tests, and documentation. Exclude Pi core, external services, credentials, releases, and unrelated repositories.",
+    "constraints": ["Keep cancellation terminal.", "Use only documented public interfaces."]
+  }
+}
+```
 
 When this skill is loaded inside an active workflow step, do not start another workflow. Complete the current step contract.
 

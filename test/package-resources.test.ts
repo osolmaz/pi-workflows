@@ -101,6 +101,39 @@ describe("Pi package resources", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  it("ships one-shot start contracts for built-in workflow skills", async () => {
+    const expectedWorkflows = ["autodoc", "autoimplement", "autoplan", "monitor"] as const;
+
+    for (const workflow of expectedWorkflows) {
+      const markdown = await fs.readFile(path.join(skillsRoot, workflow, "SKILL.md"), "utf8");
+      const exampleMatch = /```json\n([\s\S]*?)\n```/u.exec(markdown);
+      const exampleText = exampleMatch?.[1];
+      if (exampleText === undefined) {
+        throw new Error(`${workflow} skill has no JSON start example.`);
+      }
+      const example = JSON.parse(exampleText) as {
+        action?: unknown;
+        workflow?: unknown;
+        input?: Record<string, unknown>;
+      };
+
+      expect(markdown).toContain("## Start the workflow");
+      expect(markdown.toLowerCase()).toContain("build the complete input");
+      expect(example.action).toBe("start");
+      expect(example.workflow).toBe(workflow);
+      expect(example.input).toBeTypeOf("object");
+    }
+
+    const autoimplement = await fs.readFile(
+      path.join(skillsRoot, "autoimplement", "SKILL.md"),
+      "utf8",
+    );
+    expect(autoimplement).toContain('"repository": "/absolute/path/to/repository"');
+    expect(autoimplement).toContain('"scope": "Only /absolute/path/to/repository.');
+    expect(autoimplement).toContain('"merge": false');
+    expect(autoimplement).toContain('"constraints": [');
+  });
+
   it("keeps routine work moving without inventing paid-compute approval", async () => {
     const markdown = await fs.readFile(path.join(skillsRoot, "monitor", "SKILL.md"), "utf8");
 

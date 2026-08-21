@@ -6,7 +6,38 @@ compatibility: Requires pi-workflows and the built-in autodoc workflow.
 
 # Autodoc
 
-Use the built-in `autodoc` Pi Workflow when it is available. At top level, list workflows, then start `autodoc` once with the task, existing plan, repository, known documents, and evidence from the conversation. Do not manually duplicate stages owned by the workflow.
+## Start the workflow
+
+Use the built-in `autodoc` workflow when it is available. At top level, list workflows, build the complete input, and start `autodoc` once. Do not manually duplicate stages owned by the workflow.
+
+Build the input as follows:
+
+- `task`: State what selected plan must be recorded and that this run is documentation-only.
+- `plan`: Pass the complete selected plan. Autodoc does not devise or improve it.
+- `repository`: Use the absolute path of the repository that owns the canonical documentation.
+- `documents`: Include every known canonical specification or plan candidate. Use an empty array when none is known.
+- `evidence`: Include implementation evidence or current-document evidence when it affects whether documentation is current.
+
+Replace the example values below with facts from the conversation, then make one start call:
+
+```json
+{
+  "action": "start",
+  "workflow": "autodoc",
+  "input": {
+    "task": "Record the selected timeout fallback plan without implementing it.",
+    "plan": {
+      "summary": "Add one bounded read-only timeout fallback.",
+      "requirements": ["Keep cancellation terminal."]
+    },
+    "repository": "/absolute/path/to/repository",
+    "documents": ["docs/plans/timeout-fallback-plan.md"],
+    "evidence": {
+      "currentBehavior": "A timeout ends the run."
+    }
+  }
+}
+```
 
 When this skill is loaded inside an active workflow step, do not start another workflow. Complete the current step contract.
 

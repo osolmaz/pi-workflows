@@ -22,7 +22,21 @@ Use the smallest applicable action:
 - `update` publishes a non-completing durable update for the active step attempt.
 - `submit` completes the active agent step with its required output.
 
-Use `start` only once for one requested run. Do not build a manual polling loop around a workflow that already schedules its own work. Use the `monitor` skill for monitoring requests.
+Use `start` only once for one requested run. Before starting, load the matching workflow skill when one exists and build its complete input. Include scope, authority, constraints, identifiers, and finish criteria required by that skill. Do not start with placeholders that still need user or model repair.
+
+For a workflow without a specialized skill, inspect its input contract and make one complete call. For example:
+
+```json
+{
+  "action": "start",
+  "workflow": "examples/workflows/echo.workflow.ts",
+  "input": {
+    "task": "Summarize this repository in one sentence."
+  }
+}
+```
+
+Do not build a manual polling loop around a workflow that already schedules its own work. Use the `monitor` skill for monitoring requests.
 
 ## Complete agent steps
 

@@ -10,9 +10,9 @@ Use the built-in Pi `monitor` workflow as an autopilot for the requested objecti
 
 A monitor request authorizes routine, bounded work needed to preserve and finish the stated objective, subject to the conversation and repository approval boundaries. Apply other skills as safety and operating instructions. Do not turn their normal checks into new approval requests when the monitored objective and an existing approval already cover the action. Monitoring does not authorize changing the objective, method, model, data source, production selection, or other consequential contract.
 
-## Prepare and start without delay
+## Start the workflow without delay
 
-As soon as the user invokes this skill:
+Build the complete input and start the workflow in the same turn. As soon as the user invokes this skill:
 
 1. Read the current conversation, active plan, repository instructions, and applicable compute, runtime, credential, deployment, or publication skills.
 2. Preserve the exact objective, immutable execution contract, current identifiers, durable progress, cost already spent, approval ceilings, finish criteria, and known recovery rules in the workflow input. Write or update a durable plan or incident note first only when the work needs one for safe continuation.
@@ -30,6 +30,36 @@ Derive the workflow input from the full conversation:
 - `everyMinutes`: Use the user's interval when present. Use `30` when the user gives no interval. The built-in workflow accepts intervals from 1 minute through 24 hours.
 - `stopWhen`: Infer verified completion from the full conversation. Describe completion of the complete objective, not only the end of one physical process. Also name material blockers that require human intervention.
 - `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work.
+
+Replace the example values below with facts from the conversation, then make one start call:
+
+```json
+{
+  "action": "start",
+  "workflow": "monitor",
+  "input": {
+    "task": "Monitor GitHub Actions run 123456 in owner/repository. Inspect the run and its artifacts, retry only transient status reads, and report each check. Do not change code or repository state.",
+    "everyMinutes": 5,
+    "stopWhen": "Stop when run 123456 completes and its required artifacts are verified, or when a material external blocker prevents truthful verification.",
+    "checkTimeoutMinutes": 10
+  }
+}
+```
+
+For authorized repair, add a complete `repair` object instead of leaving mutation authority implicit:
+
+```json
+{
+  "repair": {
+    "authorized": true,
+    "repository": "/absolute/path/to/repository",
+    "scope": "Only /absolute/path/to/repository. May diagnose and fix failures related to the monitored objective, test, commit, push, and update its pull request. Must not modify other repositories, merge, release, deploy, change credentials, or change repository policy.",
+    "constraints": ["Keep the monitored objective and method unchanged."],
+    "baseBranch": "main",
+    "merge": false
+  }
+}
+```
 
 When the conversation gives no clear finish criterion, set `stopWhen` to `Stop only when the user explicitly asks to stop.` Do not use that fallback when a broader implementation, repair, publication, or deployment objective is clear from context.
 
@@ -60,23 +90,7 @@ When the paid action remains within the approved method, hardware, concurrency, 
 
 The monitor may use a credential only when the conversation or repository has already authorized that credential's source, destination, and purpose. It may reuse that authorization for retries and replacement attempts under the same objective. It must not discover unrelated credentials, broaden scopes, copy credentials to a new store, or print secret values.
 
-## Start the workflow
-
-Start the built-in workflow in the current session with this shape:
-
-```text
-workflow({
-  action: "start",
-  workflow: "monitor",
-  input: {
-    task: "<complete objective, contract, recovery authority, and verification task>",
-    everyMinutes: 30,
-    stopWhen: "<derived finish criterion or explicit-user-stop fallback>"
-  }
-})
-```
-
-Use the user-supplied interval instead of `30` when present. Add `maxChecks` only when the user explicitly supplies that limit. Do not send `reportWhen`; the current monitor reports every accepted check.
+Use the user-supplied interval instead of the example value when present. Add `maxChecks` only when the user explicitly supplies that limit. Do not send `reportWhen`; the current monitor reports every accepted check.
 
 Do not start a second monitor for the same objective while one is active. Update or replace the run only when the objective or contract changes. A replacement must preserve the previous accepted observation and durable recovery state.
 
