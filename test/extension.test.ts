@@ -4,6 +4,10 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { projectControllerStorePath } from "../src/controllers/store.js";
+import {
+  createDeferredTurnDescriptor,
+  deferredTurnSourceEventId,
+} from "../src/extension/deferred-turn.js";
 import piWorkflows from "../src/extension/index.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
@@ -1271,6 +1275,101 @@ export default defineWorkflow({
           (entry) => entry.message.customType === "pi-workflows-deferred-turn",
         ),
       ).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reuses a pending claim-loss intent when the new runner fails terminally", async () => {
+    const cwd = await makeTempDir("pi-workflows-claim-loss-terminal");
+    const runsDir = await makeTempDir("pi-workflows-claim-loss-terminal-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    try {
+      const dir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "claim-transfer.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "claim-transfer",
+  startAt: "fail",
+  nodes: { fail: compute({ run: () => { throw new Error("new runner failed"); } }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, sessionId: "session-a", respond: () => {} });
+      await harness.emitAsync("session_start");
+      const queued = await harness.tool.execute("start-claim-transfer", {
+        action: "start",
+        workflow: "claim-transfer",
+      });
+      const runId = queued.details.runId as string;
+      const sourceEventId = deferredTurnSourceEventId({
+        runId,
+        cause: "claimLost",
+        nodeId: "work",
+        attemptId: "attempt-1",
+        source: "agent-step-abort",
+      });
+      const descriptor = createDeferredTurnDescriptor({
+        runId,
+        workflowName: "claim-transfer",
+        targetSessionId: "session-a",
+        cause: "claimLost",
+        sourceEventId,
+        observedState: "handedOff",
+        nodeId: "work",
+        attemptId: "attempt-1",
+        reason: "claim transferred",
+        handoff: true,
+      });
+      const queue = new SqliteControllerStore(projectControllerStorePath(cwd));
+      queue.ensureWorkflowTurnIntent({ ...descriptor, eligible: false });
+      queue.close();
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() => harness.notifications.some((note) => note.includes("new runner failed")));
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+
+      const fallback = harness.sentMessages.find(
+        (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+      );
+      expect(fallback).toMatchObject({
+        options: { triggerTurn: true, deliverAs: "followUp" },
+        message: {
+          content: expect.stringContaining("ended with state failed"),
+          details: expect.objectContaining({
+            cause: "claimLost",
+            turnIntentId: descriptor.intentId,
+          }),
+        },
+      });
+      expect(fallback?.message.content).not.toContain("handed to another runner");
+
+      const reader = new SqliteControllerStore(projectControllerStorePath(cwd), {
+        readOnly: true,
+      });
+      try {
+        expect(reader.listWorkflowTurnIntents({ runId })).toEqual([
+          expect.objectContaining({
+            intentId: descriptor.intentId,
+            resolution: "fallback",
+            fallbackFacts: expect.objectContaining({
+              observedState: "failed",
+              handoff: false,
+            }),
+          }),
+        ]);
+      } finally {
+        reader.close();
+      }
     } finally {
       vi.unstubAllEnvs();
     }

@@ -670,16 +670,36 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (
       sessionClosed ||
       run.suppressTurnIntent === true ||
-      (run.childKey !== undefined && run.abortProvenance === undefined) ||
       run.abortProvenance?.cause === "claimLost"
     ) {
       return;
     }
+    const targetSessionId = originSessionId(ctx, run.runId);
+    const pending = ensureRunQueueStore(ctx.cwd).findPendingWorkflowTurnIntent({
+      runId: run.runId,
+      targetSessionId,
+    });
+    if (
+      run.childKey !== undefined &&
+      run.abortProvenance === undefined &&
+      pending?.cause !== "claimLost"
+    ) {
+      return;
+    }
     const cause =
-      run.abortProvenance?.cause ?? (observedState === "timed_out" ? "timedOut" : "failed");
-    if (observedState === "cancelled" && run.abortProvenance === undefined) return;
+      pending?.cause ??
+      run.abortProvenance?.cause ??
+      (observedState === "timed_out" ? "timedOut" : "failed");
+    if (
+      observedState === "cancelled" &&
+      run.abortProvenance === undefined &&
+      pending === undefined
+    ) {
+      return;
+    }
     const previous = run.abortProvenance?.descriptor;
     const sourceEventId =
+      pending?.sourceEventId ??
       previous?.sourceEventId ??
       deferredTurnSourceEventId({
         runId: run.runId,
@@ -689,13 +709,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
       });
     const descriptor = createDeferredTurnDescriptor({
       runId: run.runId,
-      workflowName: run.workflowName,
-      targetSessionId: originSessionId(ctx, run.runId),
+      workflowName: pending?.workflowRef ?? run.workflowName,
+      targetSessionId,
       cause,
       sourceEventId,
       observedState,
-      nodeId: previous?.nodeId ?? "$terminal",
-      attemptId: previous?.attemptId ?? null,
+      nodeId: pending?.nodeId ?? previous?.nodeId ?? "$terminal",
+      attemptId: pending?.attemptId ?? previous?.attemptId ?? null,
       reason: reason ?? null,
       handoff: false,
     });
