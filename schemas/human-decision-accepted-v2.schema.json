@@ -12,8 +12,7 @@
     "presentationDigest",
     "revision",
     "response",
-    "source",
-    "idempotencyKey",
+    "provenance",
     "acceptedAt",
     "answerDigest"
   ],
@@ -33,6 +32,7 @@
         "input": { "type": "object", "additionalProperties": { "type": "string" } }
       }
     },
+    "provenance": { "enum": ["human", "timeout"] },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -46,5 +46,11 @@
     "idempotencyKey": { "type": "string" },
     "acceptedAt": { "type": "string", "format": "date-time" },
     "answerDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "provenance": { "const": "human" } } },
+      "then": { "required": ["source", "idempotencyKey"] }
+    }
+  ]
 }

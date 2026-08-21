@@ -24,6 +24,8 @@ import type {
   HumanDecisionSettlementRecord,
   HumanDecisionSubmission,
   HumanDecisionTextInput,
+  HumanDecisionTimeout,
+  ResolvedHumanDecision,
   WorkflowNodeCommon,
   WorkflowNodeContext,
 } from "./types.js";
@@ -43,6 +45,14 @@ export type HumanDecisionDefinition<TChoices extends HumanDecisionChoiceMap> =
     audience: HumanDecisionAudience;
     choices: TChoices;
     request: (context: WorkflowNodeContext) => HumanDecisionPrompt | Promise<HumanDecisionPrompt>;
+    onTimeout?:
+      | { afterMs: number; response: HumanDecisionResponseFor<TChoices> }
+      | ((
+          context: WorkflowNodeContext,
+        ) =>
+          | { afterMs: number; response: HumanDecisionResponseFor<TChoices> }
+          | undefined
+          | Promise<{ afterMs: number; response: HumanDecisionResponseFor<TChoices> } | undefined>);
   };
 
 export type HumanDecisionResponseFor<TChoices extends HumanDecisionChoiceMap> = {
@@ -98,11 +108,25 @@ export function humanDecision<const TChoices extends HumanDecisionChoiceMap>(
   if (typeof definition.request !== "function") {
     throw new Error("Human decision request must be a function");
   }
-  const { choices, request, ...common } = definition;
+  const { choices, request, onTimeout, ...common } = definition;
+  if (
+    onTimeout !== undefined &&
+    typeof onTimeout !== "function" &&
+    (typeof onTimeout.afterMs !== "number" ||
+      !Number.isFinite(onTimeout.afterMs) ||
+      onTimeout.afterMs <= 0)
+  ) {
+    throw new Error("Human decision onTimeout afterMs must be a finite positive number");
+  }
   return checkpoint({
     ...common,
     summary: typeof audience === "string" ? `human decision for ${audience}` : "human decision",
-    humanDecision: { audience, choices, request },
+    humanDecision: {
+      audience,
+      choices,
+      request,
+      ...(onTimeout !== undefined ? { onTimeout } : {}),
+    },
   }) as CheckpointNodeDefinition & { readonly __humanChoices?: TChoices };
 }
 
@@ -136,11 +160,31 @@ export function createHumanDecisionRequest(input: {
   attemptId: string;
   contract: { audience: string; choices: HumanDecisionChoiceMap };
   prompt: HumanDecisionPrompt;
+  timeout?: HumanDecisionTimeout;
   createdAt?: string;
 }): HumanDecisionRequest {
   validateChoices(input.contract.choices);
+  const createdAt = input.createdAt ?? new Date().toISOString();
   const title = requireString(input.prompt.title, "Human decision title");
-  const expiresAt = validateExpiry(input.prompt.expiresAt, input.createdAt);
+  if (input.timeout !== undefined && input.prompt.expiresAt !== undefined) {
+    throw new Error("Human decision request cannot combine expiresAt with onTimeout");
+  }
+  if (
+    input.timeout !== undefined &&
+    (typeof input.timeout.afterMs !== "number" ||
+      !Number.isFinite(input.timeout.afterMs) ||
+      input.timeout.afterMs <= 0)
+  ) {
+    throw new Error("Human decision onTimeout afterMs must be a finite positive number");
+  }
+  const defaultResponse =
+    input.timeout === undefined
+      ? undefined
+      : validateResponseForChoices(input.contract.choices, input.timeout.response);
+  const expiresAt =
+    input.timeout === undefined
+      ? validateExpiry(input.prompt.expiresAt, createdAt)
+      : new Date(Date.parse(createdAt) + input.timeout.afterMs).toISOString();
   const common = {
     runId: input.runId,
     workflowName: input.workflowName,
@@ -150,6 +194,7 @@ export function createHumanDecisionRequest(input: {
     title,
     choices: input.contract.choices,
     ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(defaultResponse !== undefined ? { defaultResponse } : {}),
   } as const;
   const presented =
     Object.hasOwn(input.prompt, "subject") || Object.hasOwn(input.prompt, "presentation");
@@ -186,7 +231,7 @@ export function createHumanDecisionRequest(input: {
       requestDigest,
       subjectDigest,
       presentationDigest,
-      createdAt: input.createdAt ?? new Date().toISOString(),
+      createdAt,
     };
   }
   const prompt = input.prompt as Extract<HumanDecisionPrompt, { body: unknown }>;
@@ -201,7 +246,7 @@ export function createHumanDecisionRequest(input: {
     ...basis,
     decisionId: decisionIdFor(input, requestDigest),
     requestDigest,
-    createdAt: input.createdAt ?? new Date().toISOString(),
+    createdAt,
   };
 }
 
@@ -221,12 +266,19 @@ export function validateHumanDecisionResponse(
   request: HumanDecisionRequest,
   value: unknown,
 ): HumanDecisionResponse {
+  return validateResponseForChoices(request.choices, value);
+}
+
+function validateResponseForChoices(
+  choices: HumanDecisionChoiceMap,
+  value: unknown,
+): HumanDecisionResponse {
   const response = requireRecord(value, "Human decision response");
   const selected = response.choice;
-  if (typeof selected !== "string" || !Object.hasOwn(request.choices, selected)) {
+  if (typeof selected !== "string" || !Object.hasOwn(choices, selected)) {
     throw new Error(`Human decision choice ${JSON.stringify(selected)} is not available`);
   }
-  const selectedChoice = request.choices[selected];
+  const selectedChoice = choices[selected];
   if (!selectedChoice) throw new Error("Human decision choice contract is missing");
   if (selectedChoice.input === undefined) {
     if (response.input !== undefined) {
@@ -288,15 +340,15 @@ export function humanDecisionStateRoot(runsRoot: string): string {
 }
 
 export type HumanDecisionAcceptance =
-  | { status: "accepted" | "adopted"; decision: AcceptedHumanDecision }
-  | { status: "conflict"; decision: AcceptedHumanDecision };
+  | { status: "accepted" | "adopted"; decision: ResolvedHumanDecision }
+  | { status: "conflict"; decision: ResolvedHumanDecision };
 
 type HumanDecisionResolution =
   | {
       schema: "pi-workflows.human-decision-resolution.v1";
       outcome: "accepted";
       decision: Extract<
-        AcceptedHumanDecision,
+        ResolvedHumanDecision,
         { schema: "pi-workflows.human-decision-accepted.v1" }
       >;
     }
@@ -304,7 +356,7 @@ type HumanDecisionResolution =
       schema: "pi-workflows.human-decision-resolution.v2";
       outcome: "accepted";
       decision: Extract<
-        AcceptedHumanDecision,
+        ResolvedHumanDecision,
         { schema: "pi-workflows.human-decision-accepted.v2" }
       >;
     }
@@ -412,6 +464,7 @@ export class HumanDecisionStore {
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       response,
+      provenance: "human" as const,
       source: normalized.source,
       idempotencyKey: normalized.idempotencyKey,
       acceptedAt: attemptedAt,
@@ -442,6 +495,10 @@ export class HumanDecisionStore {
         ? resolution
         : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
     if (winner === null) throw new Error("Human decision resolution became unreadable");
+    const winningCancellation = await this.readCancellation(request.decisionId);
+    if (winningCancellation !== null) {
+      throw new Error(`Human decision request was ${winningCancellation.reason}`);
+    }
     if (winner.outcome === "cancelled") {
       throw new Error(`Human decision request was ${winner.cancellation.reason}`);
     }
@@ -455,6 +512,7 @@ export class HumanDecisionStore {
       return { status: "adopted", decision: existing };
     }
     if (
+      existing.provenance === "human" &&
       existing.idempotencyKey === decision.idempotencyKey &&
       canonicalJson(existing.response) === canonicalJson(decision.response) &&
       canonicalJson(existing.source) === canonicalJson(decision.source)
@@ -462,6 +520,73 @@ export class HumanDecisionStore {
       return { status: "adopted", decision: existing };
     }
     return { status: "conflict", decision: existing };
+  }
+
+  async resolveTimeout(
+    request: HumanDecisionRequest,
+    now = new Date(),
+  ): Promise<HumanDecisionAcceptance> {
+    validateHumanDecisionRequestIntegrity(request);
+    if (request.expiresAt === undefined || request.defaultResponse === undefined) {
+      throw new Error("Human decision request has no timeout default");
+    }
+    if (Date.parse(request.expiresAt) > now.getTime()) {
+      throw new Error("Human decision timeout default is not eligible yet");
+    }
+    const response = validateHumanDecisionResponse(request, request.defaultResponse);
+    const commonDecision = {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      response,
+      provenance: "timeout" as const,
+      acceptedAt: now.toISOString(),
+      answerDigest: digest({
+        provenance: "timeout",
+        requestDigest: request.requestDigest,
+        response,
+      }),
+    };
+    const decision: ResolvedHumanDecision =
+      request.schema === "pi-workflows.human-decision-request.v2"
+        ? {
+            schema: "pi-workflows.human-decision-accepted.v2",
+            ...commonDecision,
+            subjectDigest: request.subjectDigest,
+            presentationDigest: request.presentationDigest,
+            revision: request.revision,
+          }
+        : { schema: "pi-workflows.human-decision-accepted.v1", ...commonDecision };
+    const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
+    const resolution = {
+      schema:
+        decision.schema === "pi-workflows.human-decision-accepted.v2"
+          ? ("pi-workflows.human-decision-resolution.v2" as const)
+          : ("pi-workflows.human-decision-resolution.v1" as const),
+      outcome: "accepted" as const,
+      decision,
+    } as HumanDecisionResolution;
+    const result = await writeImmutableJson(resolutionPath, resolution, false);
+    const winner =
+      result === "created"
+        ? resolution
+        : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
+    if (winner === null) throw new Error("Human decision resolution became unreadable");
+    const winningCancellation = await this.readCancellation(request.decisionId);
+    if (winningCancellation !== null) {
+      throw new Error(`Human decision request was ${winningCancellation.reason}`);
+    }
+    if (winner.outcome === "cancelled") {
+      throw new Error(`Human decision request was ${winner.cancellation.reason}`);
+    }
+    const existing = winner.decision;
+    await writeImmutableJson(
+      path.join(this.decisionDir(request.decisionId), "accepted.json"),
+      existing,
+    );
+    if (result === "created") return { status: "accepted", decision: existing };
+    return canonicalJson(existing) === canonicalJson(decision)
+      ? { status: "adopted", decision: existing }
+      : { status: "conflict", decision: existing };
   }
 
   async listDeliveries(
@@ -505,8 +630,8 @@ export class HumanDecisionStore {
     reason: HumanDecisionCancellationRecord["reason"],
   ): Promise<"created" | "adopted"> {
     validateHumanDecisionRequestIntegrity(request);
-    if ((await this.readAccepted(request.decisionId)) !== null) {
-      throw new Error("Accepted human decision cannot be cancelled");
+    if ((await this.readResolved(request.decisionId)) !== null) {
+      throw new Error("Resolved human decision cannot be cancelled");
     }
     const filePath = path.join(this.decisionDir(request.decisionId), "cancelled.json");
     const record: HumanDecisionCancellationRecord = {
@@ -516,6 +641,7 @@ export class HumanDecisionStore {
       cancelledAt: new Date().toISOString(),
       reason,
     };
+    const cancellationWrite = await writeImmutableJson(filePath, record, false);
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
     const resolution: HumanDecisionResolution = {
       schema:
@@ -531,9 +657,7 @@ export class HumanDecisionStore {
         ? resolution
         : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
     if (winner === null) throw new Error("Human decision resolution became unreadable");
-    if (winner.outcome === "accepted") {
-      throw new Error("Accepted human decision cannot be cancelled");
-    }
+    if (winner.outcome === "accepted") return cancellationWrite;
     const existing = winner.cancellation;
     if (
       existing.decisionId !== request.decisionId ||
@@ -562,10 +686,12 @@ export class HumanDecisionStore {
     return resolution.cancellation;
   }
 
-  async readAccepted(decisionId: string): Promise<AcceptedHumanDecision | null> {
+  async readResolved(decisionId: string): Promise<ResolvedHumanDecision | null> {
+    const cancellation = await readJson(path.join(this.decisionDir(decisionId), "cancelled.json"));
+    if (cancellation !== null) return null;
     const stored = (await readJson(
       path.join(this.decisionDir(decisionId), "accepted.json"),
-    )) as AcceptedHumanDecision | null;
+    )) as ResolvedHumanDecision | null;
     if (stored !== null) return stored;
     const resolution = (await readJson(
       path.join(this.decisionDir(decisionId), "resolution.json"),

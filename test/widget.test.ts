@@ -208,6 +208,7 @@ describe("human decision widget", () => {
       results: { approve: makeResult("approve", "ok", { nodeType: "checkpoint" }) },
       humanDecision: {
         schema: "pi-workflows.human-decision-receipt.v1",
+        provenance: "human",
         decisionId: "decision-a",
         requestDigest: `sha256:${"a".repeat(64)}`,
         nodeId: "approve",

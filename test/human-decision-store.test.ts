@@ -100,6 +100,7 @@ describe("HumanDecisionStore", () => {
     });
     expect(accepted.decision).toMatchObject({
       schema: "pi-workflows.human-decision-accepted.v2",
+      provenance: "human",
       subjectDigest: request.subjectDigest,
       presentationDigest: request.presentationDigest,
       revision: 1,
@@ -123,7 +124,7 @@ describe("HumanDecisionStore", () => {
     ]);
     expect(results.filter((result) => result.status === "accepted")).toHaveLength(1);
     expect(results.filter((result) => result.status === "conflict")).toHaveLength(1);
-    const accepted = await store.readAccepted(request.decisionId);
+    const accepted = await store.readResolved(request.decisionId);
     expect(accepted?.response.choice).toBe(
       results.find((result) => result.status === "accepted")?.decision.response.choice,
     );
@@ -183,7 +184,7 @@ describe("HumanDecisionStore", () => {
     const request = makeRequest();
     const accepted = await store.accept(request, submission(request, "continue", "recover"));
     await fs.unlink(path.join(store.decisionDir(request.decisionId), "accepted.json"));
-    expect(await store.readAccepted(request.decisionId)).toEqual(accepted.decision);
+    expect(await store.readResolved(request.decisionId)).toEqual(accepted.decision);
   });
 
   it("resolves concurrent answer and cancellation with one atomic winner", async () => {
@@ -194,7 +195,7 @@ describe("HumanDecisionStore", () => {
       store.accept(request, submission(request, "continue", "race-answer")),
       store.cancel(request, "cancelled"),
     ]);
-    const accepted = await store.readAccepted(request.decisionId);
+    const accepted = await store.readResolved(request.decisionId);
     const cancelled = await store.readCancellation(request.decisionId);
     expect(Number(accepted !== null) + Number(cancelled !== null)).toBe(1);
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
@@ -258,6 +259,97 @@ describe("HumanDecisionStore", () => {
     await expect(acceptedStore.cancel(request, "cancelled")).rejects.toThrow(/cannot be cancelled/);
   });
 
+  it("resolves one durable timeout response without a human actor", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout"));
+    const request = createHumanDecisionRequest({
+      runId: "run-timeout",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-timeout",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: { title: "Approve", body: { plan: "a" } },
+      timeout: { afterMs: 600_000, response: { choice: "continue" } },
+      createdAt: "2099-01-01T00:00:00.000Z",
+    });
+    await store.createRequest(request);
+    await expect(
+      store.resolveTimeout(request, new Date("2099-01-01T00:09:59.999Z")),
+    ).rejects.toThrow(/not eligible/);
+    const result = await store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z"));
+    expect(result.decision).toEqual(
+      expect.objectContaining({
+        provenance: "timeout",
+        response: { choice: "continue" },
+        acceptedAt: "2099-01-01T00:10:00.000Z",
+      }),
+    );
+    expect(result.decision).not.toHaveProperty("source");
+    expect(await store.readResolved(request.decisionId)).toEqual(result.decision);
+  });
+
+  it("lets one valid human or timeout resolution win", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout-race"));
+    const request = createHumanDecisionRequest({
+      runId: "run-race",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-race",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: { title: "Approve", body: {} },
+      timeout: { afterMs: 600_000, response: { choice: "continue" } },
+      createdAt: "2099-01-01T00:00:00.000Z",
+    });
+    await store.createRequest(request);
+    const [human, timeout] = await Promise.all([
+      store.accept(request, {
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        choice: "continue",
+        source: { channel: "pi", actorId: "person", eventId: "race-human" },
+        idempotencyKey: "race-human",
+      }),
+      store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
+    ]);
+    expect([human.status, timeout.status].filter((status) => status === "accepted")).toHaveLength(
+      1,
+    );
+    expect(await store.readResolved(request.decisionId)).toEqual(
+      human.status === "accepted" ? human.decision : timeout.decision,
+    );
+  });
+
+  it("keeps cancellation terminal when it races with a timeout default", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout-cancel"));
+    const request = createHumanDecisionRequest({
+      runId: "run-cancel-race",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-cancel-race",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: { title: "Approve", body: {} },
+      timeout: { afterMs: 600_000, response: { choice: "continue" } },
+      createdAt: "2099-01-01T00:00:00.000Z",
+    });
+    await store.createRequest(request);
+    await Promise.allSettled([
+      store.cancel(request, "cancelled"),
+      store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
+    ]);
+    expect(await store.readCancellation(request.decisionId)).toMatchObject({
+      reason: "cancelled",
+    });
+    expect(await store.readResolved(request.decisionId)).toBeNull();
+  });
+
   it("records one immutable continuation identity", async () => {
     const store = new HumanDecisionStore(await makeTempDir("human-decision-continuation"));
     const request = makeRequest();
@@ -265,6 +357,7 @@ describe("HumanDecisionStore", () => {
       schema: "pi-workflows.human-decision-continuation.v1" as const,
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
+      provenance: "human" as const,
       parentRunId: request.runId,
       runId: "continuation-a",
       createdAt: "2026-08-19T00:01:00.000Z",

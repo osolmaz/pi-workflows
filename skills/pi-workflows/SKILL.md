@@ -71,7 +71,8 @@ Follow these rules:
 - Give included workflows named exits, map their input explicitly, and keep parent edges out of child internals.
 - Keep `compute` pure. Put external effects in agent, function-action, or shell-action nodes.
 - Use structured node outputs for routing.
-- Use an ordinary checkpoint for external continuation data that the model may submit. Use `humanDecision()` for a verified human choice, and use the included `plan-approval` workflow for standard continue, stop, and exact-text replan routing.
+- Use an ordinary checkpoint for external continuation data that the model may submit. Use `humanDecision()` for a verified human choice. Use its typed `onTimeout` policy only when the workflow may supply a named automatic response after a durable deadline. A timeout response is recorded as policy provenance, not as a human answer.
+- Use the shared internal plan-change workflow for Autoplan, Autodoc, plan approval, and bounded exact-text replanning. Do not copy that sequence into Autoimplement, Monitor, or another workflow.
 - Set explicit step and command timeouts.
 - Bound ordinary loops with `maxSteps` or another clear finish rule.
 - Use a controller instead of a workflow for indefinite resource reconciliation.

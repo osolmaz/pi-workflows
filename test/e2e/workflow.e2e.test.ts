@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { controllerProjectScope } from "../../src/controllers/store.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
+import { listRunBundles } from "../../src/workflows/store.js";
 import type {
   WorkflowRunState,
   WorkflowSessionEntryRecord,
@@ -176,6 +177,26 @@ export default defineWorkflow({
     choices,
     cases: { continue: "continued", stop: "stopped" },
   })],
+});
+`;
+
+const HUMAN_TIMEOUT_E2E_WORKFLOW = `import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge } from "@osolmaz/pi-workflows";
+
+const choices = defineHumanChoices({ continue: choice({ label: "Continue" }) });
+
+export default defineWorkflow({
+  name: "human-timeout-e2e",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({
+      audience: "operator",
+      choices,
+      onTimeout: { afterMs: 50, response: { choice: "continue" } },
+      request: ({ input }) => ({ title: "Approve", body: input }),
+    }),
+    continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+  },
+  edges: [humanDecisionEdge({ from: "approve", choices, cases: { continue: "continued" } })],
 });
 `;
 
@@ -749,6 +770,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "human-decision-e2e.workflow.ts"),
       HUMAN_DECISION_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "human-timeout-e2e.workflow.ts"),
+      HUMAN_TIMEOUT_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -1477,9 +1503,49 @@ describe.sequential("pi-workflows end to end", () => {
     });
     expect(continued.state.humanDecision).toMatchObject({
       schema: "pi-workflows.human-decision-receipt.v1",
+      provenance: "human",
       response: { choice: "continue" },
     });
     expect(continued.state.humanDecision).not.toHaveProperty("source");
+  });
+
+  it("continues a timed human decision through the real Pi recovery loop", async () => {
+    pi.send({
+      id: "human-timeout-1",
+      type: "prompt",
+      message: '/workflow human-timeout-e2e --input-json {"original":true}',
+    });
+    const continued = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "human-timeout-e2e" &&
+        candidate.parentRunId !== undefined &&
+        candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.join("\n")}`,
+    );
+    expect(continued.state.finalOutput).toEqual({
+      input: { original: true },
+      answer: { choice: "continue" },
+    });
+    expect(continued.state.humanDecision).toMatchObject({
+      provenance: "timeout",
+      response: { choice: "continue" },
+    });
+    const parent = (await listRunBundles(runsDir)).find(
+      (bundle) => bundle.state.runId === continued.state.parentRunId,
+    );
+    expect(parent?.state.finalOutput).toMatchObject({
+      defaultResponse: { choice: "continue" },
+    });
+    const snapshot = JSON.parse(
+      await fs.readFile(path.join(parent!.runDir, "workflow.json"), "utf8"),
+    ) as {
+      nodes: { approve?: { humanDecision?: { onTimeout?: unknown } } };
+    };
+    expect(snapshot.nodes.approve?.humanDecision?.onTimeout).toEqual({
+      afterMs: 50,
+      response: { choice: "continue" },
+    });
   });
 
   it("starts the built-in monitor from the model-facing workflow tool", async () => {
@@ -1495,7 +1561,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "7" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "8" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

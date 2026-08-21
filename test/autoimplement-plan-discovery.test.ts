@@ -1,15 +1,14 @@
 import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { HumanDecisionStore, digest } from "../src/workflows/human-decision.js";
-import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { HumanDecisionRequest } from "../src/workflows/types.js";
+import { digest } from "../src/workflows/human-decision.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 function documentedPlan(plan: unknown) {
   return {
     plan,
     documentation: { status: "current" as const, planDigest: digest(plan), documents: [] },
+    approval: { mode: "skip" as const },
   };
 }
 
@@ -152,33 +151,16 @@ describe("autoimplement existing-plan startup", () => {
     expect(state.steps.some((step) => step.nodeId.startsWith("redesign/"))).toBe(false);
   });
 
-  it("uses optional plan approval before implementation", async () => {
+  it("does not gate an existing plan even when later plan changes require approval", async () => {
     const executor = blockedImplementation(new ScriptedExecutor());
-    const store = new WorkflowRunStore(await makeTempDir("autoimplement-approval"));
     const plan = { summary: "explicit", steps: ["implement"] };
-    const first = await new WorkflowEngine({ executor, store }).run(autoimplementWorkflow, {
-      task: "implement approved plan",
+    const { state } = await run(executor, {
+      task: "implement selected plan",
       ...documentedPlan(plan),
-      approval: { audience: "operator", maxReplans: 3 },
+      approval: { mode: "required" },
     });
-    expect(first.state.status).toBe("waiting");
-    expect(first.state.waitingOn).toBe("approval/approve");
-    expect(first.state.steps.some((step) => step.nodeId === "implement")).toBe(false);
-    const request = first.state.finalOutput as HumanDecisionRequest;
-    const accepted = await new HumanDecisionStore(store.outputRoot).accept(request, {
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      choice: "continue",
-      source: { channel: "pi", actorId: "person", eventId: "event" },
-      idempotencyKey: "event",
-    });
-    const continued = await new WorkflowEngine({ executor, store }).continueRun(
-      autoimplementWorkflow,
-      first.state.runId,
-      {},
-      { humanDecision: accepted.decision },
-    );
-    expect(continued.state.steps.some((step) => step.nodeId === "implement")).toBe(true);
+    expect(state.steps.some((step) => step.nodeId === "implement")).toBe(true);
+    expect(state.steps.some((step) => step.nodeId.includes("approval/approve"))).toBe(false);
   });
 
   it("documents every evidence-driven redesign before implementation resumes", async () => {
@@ -216,7 +198,7 @@ describe("autoimplement existing-plan startup", () => {
         },
         { output: { route: "blocked", summary: "done", evidence: "done" } },
       )
-      .respond("redesign/frame", {
+      .respond("redesign/design/frame", {
         output: {
           problem: "API mismatch",
           success: ["works"],
@@ -226,13 +208,13 @@ describe("autoimplement existing-plan startup", () => {
           controlBoundary: "repository",
         },
       })
-      .respond("redesign/propose", {
+      .respond("redesign/design/propose", {
         output: { solution: "revised", rationale: "in scope", parts: ["code"], tradeoffs: [] },
       })
-      .respond("redesign/ideal", {
+      .respond("redesign/design/ideal", {
         output: { ideal: "revised", outsideDependencies: [], additionalValue: [] },
       })
-      .respond("redesign/choose", {
+      .respond("redesign/design/choose", {
         output: {
           status: "ready",
           selected: "revised",
@@ -242,8 +224,8 @@ describe("autoimplement existing-plan startup", () => {
           compromises: [],
         },
       })
-      .respond("redesign/plan", { output: revised })
-      .respond("documentation/inspectDocumentation", {
+      .respond("redesign/design/plan", { output: revised })
+      .respond("redesign/documentation/inspectDocumentation", {
         output: {
           route: "update",
           files: ["docs/plans/plan.md"],
@@ -251,14 +233,14 @@ describe("autoimplement existing-plan startup", () => {
           evidence: "new plan digest",
         },
       })
-      .respond("documentation/updateDocumentation", {
+      .respond("redesign/documentation/updateDocumentation", {
         output: {
           updated: true,
           files: ["docs/plans/plan.md"],
           summary: "Recorded the revised plan.",
         },
       })
-      .respond("documentation/verifyDocumentation", {
+      .respond("redesign/documentation/verifyDocumentation", {
         output: { passed: true, commands: [], failures: [] },
       });
     const oldPlan = { summary: "old", steps: ["old"] };
@@ -267,8 +249,8 @@ describe("autoimplement existing-plan startup", () => {
       ...documentedPlan(oldPlan),
     });
     const steps = state.steps.map((step) => step.nodeId);
-    const redesigned = steps.indexOf("redesign/plan");
-    const documented = steps.indexOf("documentation/finalize");
+    const redesigned = steps.indexOf("redesign/design/plan");
+    const documented = steps.indexOf("redesign/documentation/finalize");
     const implementations = steps
       .map((step, index) => ({ step, index }))
       .filter((entry) => entry.step === "implement");

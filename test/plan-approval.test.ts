@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
-import planApprovalWorkflow from "../src/builtins/plan-approval.workflow.js";
+import planApprovalWorkflow, {
+  parsePlanApprovalPolicy,
+} from "../src/builtins/plan-approval.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+
+const planDigest = `sha256:${"a".repeat(64)}`;
 
 async function runChoice(response: HumanDecisionResponse) {
   const runs = await makeTempDir("plan-approval");
@@ -15,8 +19,8 @@ async function runChoice(response: HumanDecisionResponse) {
     {
       task: "implement feature",
       plan: { steps: ["one"] },
-      planDigest: `sha256:${"a".repeat(64)}`,
-      audience: "operator",
+      planDigest,
+      approval: { mode: "required", audience: "operator" },
     },
     { runId: `approval-${response.choice}` },
   );
@@ -37,6 +41,28 @@ async function runChoice(response: HumanDecisionResponse) {
 }
 
 describe("plan-approval workflow", () => {
+  it("defaults to a ten-minute autonomous operator policy", () => {
+    expect(parsePlanApprovalPolicy(undefined)).toEqual({
+      mode: "auto",
+      audience: "operator",
+      timeoutMinutes: 10,
+      maxReplans: 3,
+    });
+    expect(parsePlanApprovalPolicy({ mode: "required" })).toEqual({
+      mode: "required",
+      audience: "operator",
+      maxReplans: 3,
+    });
+    expect(parsePlanApprovalPolicy({ mode: "skip" })).toEqual({
+      mode: "skip",
+      audience: "operator",
+      maxReplans: 3,
+    });
+    expect(() => parsePlanApprovalPolicy({ mode: "required", timeoutMinutes: 10 })).toThrow(
+      /only in auto mode/,
+    );
+  });
+
   it("stores the typed plan separately from its readable presentation", async () => {
     const runs = await makeTempDir("plan-approval-presentation");
     const store = new WorkflowRunStore(runs);
@@ -54,72 +80,109 @@ describe("plan-approval workflow", () => {
           ],
           boundaries: ["Do not change Pi core"],
         },
-        planDigest: `sha256:${"a".repeat(64)}`,
-        audience: "operator",
+        planDigest,
+        approval: { mode: "required" },
       },
       { runId: "approval-presentation" },
     );
     const request = parent.state.finalOutput as HumanDecisionRequest;
     expect(request.schema).toBe("pi-workflows.human-decision-request.v2");
-    if (request.schema !== "pi-workflows.human-decision-request.v2") {
-      throw new Error("expected v2 plan approval request");
-    }
-    expect(request.subject).toMatchObject({ task: "implement readable decisions" });
+    if (request.schema !== "pi-workflows.human-decision-request.v2") return;
+    expect(request.subject).toMatchObject({
+      task: "implement readable decisions",
+      planDigest,
+      revision: 1,
+    });
+    expect(JSON.stringify(request.presentation)).toContain("Do not change Pi core");
     expect(request.presentation.summary).toBe("Show the operator readable text.");
-    expect(JSON.stringify(request.presentation)).toContain("Separate subject and presentation");
-    expect(JSON.stringify(request.presentation)).not.toContain('"steps"');
+    expect(request.expiresAt).toBeUndefined();
+  });
+
+  it("uses a durable timeout response in auto mode", async () => {
+    const runs = await makeTempDir("plan-approval-timeout");
+    const store = new WorkflowRunStore(runs);
+    const makeEngine = () => new WorkflowEngine({ store, executor: new ScriptedExecutor() });
+    const parent = await makeEngine().run(
+      planApprovalWorkflow,
+      { task: "demo", plan: { step: 1 }, planDigest },
+      { runId: "approval-timeout" },
+    );
+    const request = parent.state.finalOutput as HumanDecisionRequest;
+    expect(request.defaultResponse).toEqual({ choice: "continue" });
+    expect(Date.parse(request.expiresAt ?? "") - Date.parse(request.createdAt)).toBe(600_000);
+
+    const resolved = await new HumanDecisionStore(runs).resolveTimeout(
+      request,
+      new Date(request.expiresAt!),
+    );
+    expect(resolved.decision).toMatchObject({
+      provenance: "timeout",
+      response: { choice: "continue" },
+    });
+    const continuation = await makeEngine().continueRun(
+      planApprovalWorkflow,
+      parent.state.runId,
+      {},
+      { humanDecision: resolved.decision },
+    );
+    expect(continuation.state.finalOutput).toMatchObject({
+      status: "continue",
+      resolution: {
+        provenance: "timeout",
+        decision: { provenance: "timeout", response: { choice: "continue" } },
+      },
+    });
+  });
+
+  it("continues immediately without a decision in skip mode", async () => {
+    const result = await new WorkflowEngine({
+      store: new WorkflowRunStore(await makeTempDir("plan-approval-skip")),
+      executor: new ScriptedExecutor(),
+    }).run(planApprovalWorkflow, {
+      task: "demo",
+      plan: { step: 1 },
+      planDigest,
+      approval: { mode: "skip" },
+      revision: 2,
+    });
+    expect(result.state.status).toBe("completed");
+    expect(result.state.finalOutput).toMatchObject({
+      status: "continue",
+      resolution: { provenance: "skipped", revision: 2 },
+    });
   });
 
   it("rejects malformed input and missing continuation receipts", async () => {
-    const parse = planApprovalWorkflow.input;
-    if (parse === undefined) throw new Error("missing plan approval input parser");
-    expect(() => parse(null)).toThrow(/object/);
-    expect(() => parse({ task: "demo" })).toThrow(/requires a plan/);
-    expect(() =>
-      parse({ task: "demo", plan: {}, planDigest: "digest", audience: "operator", revision: 0 }),
-    ).toThrow(/positive integer/);
-    expect(() => parse({ task: "", plan: {}, planDigest: "digest", audience: "operator" })).toThrow(
-      /task/,
-    );
+    await expect(
+      new WorkflowEngine({
+        store: new WorkflowRunStore(await makeTempDir("plan-approval-invalid")),
+        executor: new ScriptedExecutor(),
+      }).run(planApprovalWorkflow, {
+        task: "demo",
+        plan: {},
+        planDigest: "digest",
+        revision: 0,
+      }),
+    ).rejects.toThrow(/positive integer/);
 
     const continued = planApprovalWorkflow.nodes.continued;
     if (continued?.nodeType !== "compute") throw new Error("continued is not compute");
     await expect(
       Promise.resolve().then(() =>
         continued.run({
-          input: { task: "demo", plan: {}, planDigest: "digest", audience: "operator" },
+          input: {
+            task: "demo",
+            plan: {},
+            planDigest: "digest",
+            approval: parsePlanApprovalPolicy({ mode: "required" }),
+          },
           outputs: {},
           results: {},
           state: { steps: [] },
           signal: new AbortController().signal,
         } as never),
       ),
-    ).rejects.toThrow(/accepted decision/);
-
-    const replan = planApprovalWorkflow.nodes.replan;
-    if (replan?.nodeType !== "compute") throw new Error("replan is not compute");
-    await expect(
-      Promise.resolve().then(() =>
-        replan.run({
-          input: { task: "demo", plan: {}, planDigest: "digest", audience: "operator" },
-          outputs: { approve: { choice: "replan", input: {} } },
-          results: {},
-          state: {
-            steps: [],
-            humanDecision: {
-              schema: "pi-workflows.human-decision-receipt.v1",
-              decisionId: "decision",
-              requestDigest: `sha256:${"a".repeat(64)}`,
-              nodeId: "approve",
-              response: { choice: "replan" },
-              acceptedAt: "2026-08-19T00:00:00.000Z",
-              answerDigest: `sha256:${"b".repeat(64)}`,
-            },
-          },
-          signal: new AbortController().signal,
-        } as never),
-      ),
-    ).rejects.toThrow(/missing exact instructions/);
+    ).rejects.toThrow(/receipt is missing/);
   });
 
   it("returns continue with the accepted decision receipt", async () => {
@@ -127,9 +190,13 @@ describe("plan-approval workflow", () => {
     expect(result.state.finalOutput).toMatchObject({
       status: "continue",
       plan: { steps: ["one"] },
-      decision: {
-        schema: "pi-workflows.human-decision-receipt.v2",
-        response: { choice: "continue" },
+      resolution: {
+        provenance: "human",
+        decision: {
+          schema: "pi-workflows.human-decision-receipt.v2",
+          provenance: "human",
+          response: { choice: "continue" },
+        },
       },
     });
   });
@@ -138,7 +205,7 @@ describe("plan-approval workflow", () => {
     const result = await runChoice({ choice: "stop" });
     expect(result.state.finalOutput).toMatchObject({
       status: "stop",
-      decision: { response: { choice: "stop" } },
+      resolution: { provenance: "human", decision: { response: { choice: "stop" } } },
     });
   });
 
@@ -148,7 +215,10 @@ describe("plan-approval workflow", () => {
     expect(result.state.finalOutput).toMatchObject({
       status: "replan",
       instructions,
-      decision: { response: { choice: "replan", input: { instructions } } },
+      resolution: {
+        provenance: "human",
+        decision: { response: { choice: "replan", input: { instructions } } },
+      },
     });
   });
 });

@@ -64,6 +64,16 @@
       }
     },
     "createdAt": { "type": "string", "format": "date-time" },
-    "expiresAt": { "type": "string", "format": "date-time" }
-  }
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "defaultResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["choice"],
+      "properties": {
+        "choice": { "type": "string" },
+        "input": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    }
+  },
+  "dependentRequired": { "defaultResponse": ["expiresAt"] }
 }

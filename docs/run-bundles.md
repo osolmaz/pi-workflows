@@ -40,18 +40,18 @@ Human decision records use a separate additive directory next to `runs/` so a wa
     request.json
     deliveries/<channel>/<attempt-id>.json
     answers/<attempt-id>.json
-    resolution.json # atomic accepted-or-cancelled fence
-    accepted.json
-    cancelled.json   # present only when a pending request is cancelled or expires
+    resolution.json # atomic resolved-or-cancelled fence
+    accepted.json    # human or timeout response with explicit provenance
+    cancelled.json   # terminal cancellation tombstone
     settlements/<channel>/<attempt-id>.json
     continuation.json
 ```
 
-The request links to the waiting run, node, attempt, workflow source, and canonical request digest. A v2 request stores the canonical subject and a separate normalized operator presentation. Its subject, presentation, revision, choices, and input prompts are bound to the request digest. V2 accepted records and redacted continuation receipts preserve the subject and presentation digests. Final records use no-replace creation and adopt only identical retries. `resolution.json` is the first accepted-or-cancelled fence. It materializes either `accepted.json` or the mutually exclusive `cancelled.json`; a crash can rebuild that detail from the resolution. `continuation.json` binds an accepted answer to one deterministic continuation run. Delivery and settlement records cannot change the accepted answer.
+The request links to the waiting run, node, attempt, workflow source, and canonical request digest. A v2 request stores the canonical subject and a separate normalized operator presentation. Its subject, presentation, revision, choices, input prompts, optional deadline, and optional automatic response are bound to the request digest. Accepted records and redacted continuation receipts preserve the subject and presentation digests and state `human` or `timeout` provenance. A timeout record has no human source. Final records use no-replace creation and adopt only identical retries. `resolution.json` is the first resolved-or-cancelled fence. It materializes either `accepted.json` or `cancelled.json`; a crash can rebuild that detail from the resolution. A cancellation tombstone prevents later automatic continuation. `continuation.json` binds one resolved response and its provenance to one deterministic continuation run. Delivery and settlement records cannot change the result.
 
 Telegram multipart delivery uses additive v2 delivery records for the overall intent, each part, and completion. Part records contain only recipient indexes, part indexes, counts, and content digests. Telegram chat and message IDs remain in the private disposable channel projection and never enter run or decision bundles. An ambiguous part remains unknown and is not retried blindly.
 
-A human-decision continuation preserves the parent's original workflow input and replaces the carried checkpoint output with the accepted typed response for routing. Its `humanDecision` state is a redacted receipt. A v2 receipt includes the subject digest, presentation digest, and revision, but not the subject itself. Verified actor, channel, event, and idempotency provenance remains in the private sibling decision records and is not copied into the run bundle. Ordinary checkpoint continuations keep using the answer as the continuation input. Existing bundles without human decision data remain valid. V1 requests and their original digests are never rewritten.
+A human-decision continuation preserves the parent's original workflow input and replaces the carried checkpoint output with the resolved typed response for routing. Its `humanDecision` state is a redacted receipt with `human` or `timeout` provenance. A v2 receipt includes the subject digest, presentation digest, and revision, but not the subject itself. Verified human actor, channel, event, and idempotency details remain in the private sibling decision records and are not copied into the run bundle. Ordinary checkpoint continuations keep using the answer as the continuation input. This alpha contract changes current v1 and v2 field sets in place; old active definitions refuse resume instead of using a compatibility path.
 
 Run ids are `<UTC timestamp>-<workflow slug>-<8 hex chars>`, so lexical order
 is chronological order.
@@ -185,7 +185,7 @@ validators are not serialized. Each node keeps only its metadata (`nodeType`,
 `timeoutMs`, `statusDetail`, `expectedOutput`, `summary`, `actionExecution`),
 and edges are copied verbatim. A fixed `timeoutMs: null` is preserved and means
 that the node has no wall-clock deadline. Timeout callbacks remain omitted.
-Included nodes also record `mountPath`, `localNodeId`, and internal entry or exit status. The top-level `composition.mounts` list records every mount, entry, named exit, and child step limit. The snapshot is what lets viewers draw all nodes, including ones that have not run yet. It is immutable after run start.
+A human-decision snapshot records fixed `onTimeout` duration and response values. A dynamic timeout callback is omitted and marked as dynamic. Included nodes also record `mountPath`, `localNodeId`, and internal entry or exit status. The top-level `composition.mounts` list records every mount, entry, named exit, and child step limit. The snapshot is what lets viewers draw all nodes, including ones that have not run yet. It is immutable after run start.
 
 ## Resume and repair
 

@@ -14,7 +14,7 @@ import {
 } from "../workflows/decision-presentation.js";
 import { HumanDecisionStore, createHumanDecisionAttemptId } from "../workflows/human-decision.js";
 import type {
-  AcceptedHumanDecision,
+  ResolvedHumanDecision,
   HumanDecisionAnswerSource,
   HumanDecisionCancellationRecord,
   HumanDecisionChannelRequest,
@@ -47,7 +47,7 @@ export type HumanDecisionDeliveryResult = {
   errorCode?: string;
 };
 
-export type SettledHumanDecision = AcceptedHumanDecision | HumanDecisionCancellationRecord;
+export type SettledHumanDecision = ResolvedHumanDecision | HumanDecisionCancellationRecord;
 
 export interface HumanDecisionChannel {
   readonly id: string;

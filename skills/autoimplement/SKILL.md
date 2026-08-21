@@ -20,6 +20,7 @@ Build the input as follows:
 - `baseBranch`: Use the requested base or the repository default branch.
 - `merge`: Set `true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set `false`.
 - `documents`: Include known canonical plan or specification paths. Use an empty array when none are known.
+- `approval`: Omit it for the default behavior: ask on each new plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` when the user says to block on plan changes. Use `{ "mode": "skip" }` when the user says to continue without asking about plan changes.
 - `concurrency`: Include it only when the conversation gives explicit limits.
 
 When one repository is clearly named, derive the scope without asking the user to restate it. A safe derived scope permits only work needed for the task in that repository, including local verification and normal branch and pull-request publication. It excludes unrelated repositories, merge, release, deployment, credentials, and policy changes unless those actions are explicitly authorized.
@@ -50,6 +51,32 @@ Replace the example values below with facts from the conversation, then make one
   }
 }
 ```
+
+### Plan-change decisions
+
+The workflow gates only plans that it creates or changes after the run starts. A supplied or discovered existing plan does not receive another decision.
+
+Use required approval when the user says to block on plan changes:
+
+```json
+{
+  "approval": {
+    "mode": "required"
+  }
+}
+```
+
+Skip plan decisions when the user says to accept every new plan immediately:
+
+```json
+{
+  "approval": {
+    "mode": "skip"
+  }
+}
+```
+
+Omit `approval` for autonomous mode. It asks the `operator` audience and continues with the exact presented plan after 10 minutes without an accepted answer. The workflow owns this decision. The model must not answer the protected decision through the workflow tool.
 
 Do not manually duplicate stages already owned by the workflow. Autoimplement runs independent pi-reviewer commands, pending CI watches, and local verification commands from separate repositories in bounded batches. It keeps model turns, fixes, pushes, comment changes, merges, and releases ordered. One repository uses the same batch path with concurrency one.
 

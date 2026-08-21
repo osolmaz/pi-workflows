@@ -139,6 +139,13 @@ describe("Pi package resources", () => {
     expect(autoimplement).toContain('"scope": "Only /absolute/path/to/repository.');
     expect(autoimplement).toContain('"merge": false');
     expect(autoimplement).toContain('"constraints": [');
+    expect(autoimplement).toContain('"mode": "required"');
+    expect(autoimplement).toContain('"mode": "skip"');
+
+    const monitor = await fs.readFile(path.join(skillsRoot, "monitor", "SKILL.md"), "utf8");
+    expect(monitor).toContain('"mode": "required"');
+    expect(monitor).toContain('"mode": "skip"');
+    expect(monitor).toContain("continues with the exact presented plan after 10 minutes");
   });
 
   it("keeps routine work moving without inventing paid-compute approval", async () => {

@@ -27,8 +27,8 @@ import {
   type PublishedRepository,
   type VerificationCommandPlan,
 } from "./autoimplement-command-batches.js";
-import autoplanWorkflow, { type AutoplanInput } from "./autoplan.workflow.js";
-import planApprovalWorkflow, { type PlanApprovalInput } from "./plan-approval.workflow.js";
+import { parsePlanApprovalPolicy, type PlanApprovalPolicy } from "./plan-approval.workflow.js";
+import planChangeWorkflow, { type NormalizedPlanChangeInput } from "./plan-change.workflow.js";
 
 export type AutoimplementInput = {
   task: string;
@@ -44,10 +44,7 @@ export type AutoimplementInput = {
     planDigest: string;
     documents: string[];
   };
-  approval?: {
-    audience: string;
-    maxReplans: number;
-  };
+  approval?: PlanApprovalPolicy;
   concurrency?: Partial<AutoimplementConcurrency>;
 };
 
@@ -465,22 +462,7 @@ function parseInput(value: unknown): AutoimplementInput {
     };
   }
   const concurrency = parseAutoimplementConcurrency(input.concurrency);
-  let approval: AutoimplementInput["approval"];
-  if (input.approval !== undefined) {
-    const raw = requireRecord(input.approval, "autoimplement approval");
-    const maxReplans = raw.maxReplans ?? 3;
-    if (
-      !Number.isInteger(maxReplans) ||
-      (maxReplans as number) < 1 ||
-      (maxReplans as number) > 20
-    ) {
-      throw new Error("autoimplement approval maxReplans must be from 1 through 20");
-    }
-    approval = {
-      audience: requireString(raw.audience, "autoimplement approval audience"),
-      maxReplans: maxReplans as number,
-    };
-  }
+  const approval = parsePlanApprovalPolicy(input.approval);
   return {
     task: requireString(input.task, "autoimplement task"),
     ...(input.plan !== undefined ? { plan: input.plan } : {}),
@@ -495,7 +477,7 @@ function parseInput(value: unknown): AutoimplementInput {
     merge: input.merge === true,
     ...(documents !== undefined ? { documents: [...documents] as string[] } : {}),
     ...(documentation !== undefined ? { documentation } : {}),
-    ...(approval !== undefined ? { approval } : {}),
+    approval,
     concurrency,
   };
 }
@@ -637,20 +619,6 @@ function currentPlan(context: WorkflowNodeContext): unknown {
   return (context.input as AutoimplementInput).plan;
 }
 
-function currentPlanDigest(context: WorkflowNodeContext): string {
-  const adopted = context.outputs.adoptPlan as { planDigest?: unknown } | undefined;
-  if (typeof adopted?.planDigest === "string") return adopted.planDigest;
-  const documented = context.outputs.documentation as
-    | { exit?: string; output?: { planDigest?: unknown } }
-    | undefined;
-  if (documented?.exit === "ready" && typeof documented.output?.planDigest === "string") {
-    return documented.output.planDigest;
-  }
-  const plan = currentPlan(context);
-  if (plan === undefined) throw new Error("autoimplement does not have a selected plan");
-  return digest(plan);
-}
-
 function blockerChallenges(context: WorkflowNodeContext): BlockerChallenge[] {
   return context.state.steps
     .filter((step) => step.nodeId === "challengeBlocker" && step.outcome === "ok")
@@ -688,16 +656,6 @@ function recentWorkflowAttempts(context: WorkflowNodeContext): unknown[] {
 }
 
 function latestIssue(context: WorkflowNodeContext): unknown {
-  const approval = context.outputs.approval as
-    | { exit?: string; output?: { instructions?: unknown } }
-    | undefined;
-  if (approval?.exit === "replan" && typeof approval.output?.instructions === "string") {
-    return {
-      source: "human-replan",
-      instructions: approval.output.instructions,
-      priorPlanDigest: currentPlanDigest(context),
-    };
-  }
   const ids = [
     "challengeBlocker",
     "classifyImplementation",
@@ -1145,11 +1103,10 @@ function latestBlockedReason(context: WorkflowNodeContext): { reason: string; ev
     "classifyImplementation",
     "classifyVerification",
     "triageReview",
-    "replanGuard",
+    "redesign",
     "adoptPlan",
     "findPlan",
     "documentation",
-    "approval",
   ];
   for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
     const step = context.state.steps[index];
@@ -1191,37 +1148,18 @@ export const autoimplementWorkflow = defineWorkflow({
         };
       },
     }),
-    approval: includeWorkflow(planApprovalWorkflow, {
-      input: (context): PlanApprovalInput => {
+    redesign: includeWorkflow(planChangeWorkflow, {
+      input: (context): NormalizedPlanChangeInput => {
         const request = context.input as AutoimplementInput;
-        if (request.approval === undefined) {
-          throw new Error("autoimplement approval was entered without an approval policy");
-        }
-        const plan = currentPlan(context);
-        if (plan === undefined) throw new Error("autoimplement approval is missing a plan");
-        const revisions = context.state.steps.filter(
-          (step) => step.nodeId === "approval/approve",
-        ).length;
         return {
           task: request.task,
-          plan,
-          planDigest: currentPlanDigest(context),
-          audience: request.approval.audience,
-          revision: revisions + 1,
-        };
-      },
-    }),
-    redesign: includeWorkflow({
-      workflow: "autoplan",
-      contract: autoplanWorkflow,
-      input: (context): AutoplanInput => {
-        const request = context.input as AutoimplementInput;
-        return {
-          problem: request.task,
           ...(request.scope !== undefined ? { scope: request.scope } : {}),
           ...(request.constraints !== undefined ? { constraints: request.constraints } : {}),
+          ...(request.repository !== undefined ? { repository: request.repository } : {}),
+          documents: request.documents ?? request.documentation?.documents ?? [],
           ...(currentPlan(context) !== undefined ? { previousPlan: currentPlan(context) } : {}),
           newEvidence: latestIssue(context),
+          approval: parsePlanApprovalPolicy(request.approval),
         };
       },
     }),
@@ -1285,38 +1223,15 @@ export const autoimplementWorkflow = defineWorkflow({
     }),
     adoptPlan: compute({
       run: ({ outputs }) => {
-        const result = includedResult(autoplanWorkflow, outputs.redesign);
+        const result = includedResult(planChangeWorkflow, outputs.redesign);
         if (result.exit !== "ready") throw new Error("redesign did not return a ready plan");
         return {
-          route: result.output.changed ? "document" : "blocked",
           plan: result.output.plan,
           planDigest: result.output.planDigest,
-          changed: result.output.changed,
-          reason: result.output.changed
-            ? "The plan changed in response to new evidence and must be documented."
-            : "Redesign returned the same plan for the same unresolved evidence.",
+          documents: result.output.documents,
+          approval: result.output.approval,
+          reason: "The changed plan was documented and passed its approval policy.",
         };
-      },
-    }),
-    maybeApproval: compute({
-      run: ({ input }) => ({
-        route: (input as AutoimplementInput).approval === undefined ? "implement" : "approve",
-      }),
-    }),
-    replanGuard: compute({
-      run: (context) => {
-        const request = context.input as AutoimplementInput;
-        const limit = request.approval?.maxReplans ?? 3;
-        const replans = context.state.steps.filter(
-          (step) => step.nodeId === "approval/replan",
-        ).length;
-        return replans > limit
-          ? {
-              route: "blocked",
-              reason: `Plan approval reached the ${limit}-replan safety limit.`,
-              evidence: context.outputs.approval,
-            }
-          : { route: "redesign", replans, limit };
       },
     }),
     timeoutFallbackGuard: compute({
@@ -1808,7 +1723,7 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "prepare",
       switch: {
         on: "$.route",
-        cases: { find: "findPlan", document: "documentation", ready: "maybeApproval" },
+        cases: { find: "findPlan", document: "documentation", ready: "implement" },
       },
     },
     {
@@ -1819,28 +1734,14 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "routeFoundPlan",
       switch: {
         on: "$.route",
-        cases: { ready: "maybeApproval", document: "documentation", blocked: "blocked" },
+        cases: { ready: "implement", document: "documentation", blocked: "blocked" },
       },
     },
     { from: "redesign.ready", to: "adoptPlan" },
     { from: "redesign.blocked", to: "blocked" },
-    {
-      from: "adoptPlan",
-      switch: { on: "$.route", cases: { document: "documentation", blocked: "blocked" } },
-    },
-    { from: "documentation.ready", to: "maybeApproval" },
+    { from: "adoptPlan", to: "implement" },
+    { from: "documentation.ready", to: "implement" },
     { from: "documentation.blocked", to: "blocked" },
-    {
-      from: "maybeApproval",
-      switch: { on: "$.route", cases: { approve: "approval", implement: "implement" } },
-    },
-    { from: "approval.continue", to: "implement" },
-    { from: "approval.stop", to: "blocked" },
-    { from: "approval.replan", to: "replanGuard" },
-    {
-      from: "replanGuard",
-      switch: { on: "$.route", cases: { redesign: "redesign", blocked: "blocked" } },
-    },
     {
       from: "timeoutFallbackGuard",
       switch: { on: "$.route", cases: { recover: "timeoutFallback", blocked: "blocked" } },

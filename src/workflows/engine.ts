@@ -32,7 +32,7 @@ import {
   readRunBundle,
 } from "./store.js";
 import type {
-  AcceptedHumanDecision,
+  ResolvedHumanDecision,
   AgentNodeDefinition,
   AgentStepExecutor,
   ActionNodeDefinition,
@@ -377,7 +377,7 @@ export class WorkflowEngine {
       workflowSource?: WorkflowSource;
       runId?: string;
       force?: boolean;
-      humanDecision?: AcceptedHumanDecision;
+      humanDecision?: ResolvedHumanDecision;
     } = {},
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
@@ -419,7 +419,7 @@ export class WorkflowEngine {
       ) {
         throw new Error("Accepted human decision does not match the waiting request");
       }
-      const durableDecision = await new HumanDecisionStore(this.store.outputRoot).readAccepted(
+      const durableDecision = await new HumanDecisionStore(this.store.outputRoot).readResolved(
         request.decisionId,
       );
       if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
@@ -464,6 +464,7 @@ export class WorkflowEngine {
         requestDigest: options.humanDecision.requestDigest,
         nodeId: acceptedNodeId ?? waitingNodeId,
         response: options.humanDecision.response,
+        provenance: options.humanDecision.provenance,
         acceptedAt: options.humanDecision.acceptedAt,
         answerDigest: options.humanDecision.answerDigest,
       };
@@ -1317,6 +1318,10 @@ async function runCheckpointNode(
       typeof node.humanDecision.audience === "function"
         ? await node.humanDecision.audience(context)
         : node.humanDecision.audience;
+    const timeout =
+      typeof node.humanDecision.onTimeout === "function"
+        ? await node.humanDecision.onTimeout(context)
+        : node.humanDecision.onTimeout;
     const request = createHumanDecisionRequest({
       runId: context.state.runId,
       workflowName: execution.workflowName,
@@ -1324,6 +1329,7 @@ async function runCheckpointNode(
       attemptId: execution.attemptId,
       contract: { audience, choices: node.humanDecision.choices },
       prompt,
+      ...(timeout !== undefined ? { timeout } : {}),
     });
     await new HumanDecisionStore(execution.store.outputRoot).createRequest(request);
     return { output: request, promptText: null };

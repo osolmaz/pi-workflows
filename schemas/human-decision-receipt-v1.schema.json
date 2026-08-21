@@ -10,6 +10,7 @@
     "requestDigest",
     "nodeId",
     "response",
+    "provenance",
     "acceptedAt",
     "answerDigest"
   ],
@@ -27,6 +28,7 @@
         "input": { "type": "object", "additionalProperties": { "type": "string" } }
       }
     },
+    "provenance": { "enum": ["human", "timeout"] },
     "acceptedAt": { "type": "string", "format": "date-time" },
     "answerDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
   }

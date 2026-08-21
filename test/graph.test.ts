@@ -190,6 +190,7 @@ describe("renderGraphLines", () => {
       },
       humanDecision: {
         schema: "pi-workflows.human-decision-receipt.v1",
+        provenance: "human",
         decisionId: "decision-first",
         requestDigest: `sha256:${"a".repeat(64)}`,
         nodeId: "first",

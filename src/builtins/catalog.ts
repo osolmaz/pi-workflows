@@ -9,12 +9,12 @@ import sanityCheckWorkflow from "./sanity-check.workflow.js";
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "autoplan", revision: "1", definition: autoplanWorkflow },
   { id: "autodoc", revision: "1", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "6", definition: autoimplementWorkflow },
-  { id: "plan-approval", revision: "2", definition: planApprovalWorkflow },
+  { id: "autoimplement", revision: "7", definition: autoimplementWorkflow },
+  { id: "plan-approval", revision: "3", definition: planApprovalWorkflow },
   { id: "sanity-check", revision: "1", definition: sanityCheckWorkflow },
   {
     id: "monitor",
-    revision: "7",
+    revision: "8",
     definition: monitorWorkflow,
     legacySources: [
       {

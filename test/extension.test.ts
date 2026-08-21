@@ -367,7 +367,7 @@ export default defineWorkflow({
   );
 }
 
-async function writeHumanDecisionWorkflow(cwd: string): Promise<void> {
+async function writeHumanDecisionWorkflow(cwd: string, timeoutMs?: number): Promise<void> {
   const dir = path.join(cwd, ".pi", "workflows");
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(
@@ -381,7 +381,7 @@ export default defineWorkflow({
   name: "human",
   startAt: "approve",
   nodes: {
-    approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", body: input }) }),
+    approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", body: input }), ${timeoutMs === undefined ? "" : `onTimeout: { afterMs: ${timeoutMs}, response: { choice: "continue" } },`} }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
     replanned: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
   },
@@ -649,6 +649,41 @@ describe("pi-workflows extension", () => {
     expect(continuations[0]?.state.finalOutput).toMatchObject({
       answer: { choice: "continue" },
     });
+  });
+
+  it("recovers a timeout default into one continuation without a configured channel", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-timeout");
+    const runsDir = await makeTempDir("pi-workflows-human-timeout-runs");
+    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", runsDir);
+    await writeHumanDecisionWorkflow(cwd, 50);
+    const harness = makeHarness({ cwd, mode: "rpc", respond: () => {}, sessionId: "session-a" });
+    await harness.emitAsync("session_start", {});
+    await harness.command.handler(
+      'human --input-json {"task":"approve","original":true}',
+      harness.ctx,
+    );
+    await waitFor(async () => {
+      const bundles = await listRunBundles(runsDir);
+      return bundles.some(
+        (bundle) => bundle.state.parentRunId !== undefined && bundle.state.status === "completed",
+      );
+    });
+    const bundles = await listRunBundles(runsDir);
+    const parent = bundles.find((bundle) => bundle.state.status === "waiting");
+    const completed = bundles.find((bundle) => bundle.state.parentRunId === parent?.state.runId);
+    expect(completed?.state.finalOutput).toEqual({
+      input: { task: "approve", original: true },
+      answer: { choice: "continue" },
+    });
+    expect(completed?.state.humanDecision).toMatchObject({
+      provenance: "timeout",
+      response: { choice: "continue" },
+    });
+    const request = parent?.state.finalOutput as HumanDecisionRequest | undefined;
+    if (request === undefined) throw new Error("missing timeout decision request");
+    await expect(
+      new HumanDecisionStore(runsDir).readContinuation(request.decisionId),
+    ).resolves.toMatchObject({ provenance: "timeout", parentRunId: parent?.state.runId });
   });
 
   it("shows the native Herdr shortcut and opens the exact run bundle in piw", async () => {

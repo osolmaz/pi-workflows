@@ -243,7 +243,7 @@ describe("built-in monitor workflow", () => {
     ).toThrow("duplicated");
   });
 
-  it("mounts outer design and validates the explicit repair policy", () => {
+  it("mounts the shared plan change and validates the repair approval policy", () => {
     expect(prepareMonitorInput(input()).repair).toBeUndefined();
     expect(
       prepareMonitorInput(
@@ -255,7 +255,7 @@ describe("built-in monitor workflow", () => {
             repository: "/repo",
             baseBranch: "main",
             merge: false,
-            approval: { audience: "operator", maxReplans: 4 },
+            approval: { mode: "required", audience: "operator", maxReplans: 4 },
           },
         }),
       ),
@@ -267,7 +267,7 @@ describe("built-in monitor workflow", () => {
         repository: "/repo",
         baseBranch: "main",
         merge: false,
-        approval: { audience: "operator", maxReplans: 4 },
+        approval: { mode: "required", audience: "operator", maxReplans: 4 },
       },
     });
     expect(() => prepareMonitorInput(input({ repair: { authorized: false } }))).toThrow(
@@ -284,15 +284,20 @@ describe("built-in monitor workflow", () => {
     ).toThrow("boolean");
     expect(() =>
       prepareMonitorInput(
-        input({ repair: { authorized: true, approval: { audience: "operator", maxReplans: 0 } } }),
+        input({ repair: { authorized: true, approval: { mode: "auto", maxReplans: 0 } } }),
       ),
     ).toThrow("maxReplans");
-    expect(Object.keys(monitor.includes ?? {})).toEqual([
-      "initialDesign",
-      "documentation",
-      "approval",
-      "implementation",
-    ]);
+    expect(prepareMonitorInput(input({ repair: { authorized: true } }))).toMatchObject({
+      repair: {
+        approval: {
+          mode: "auto",
+          audience: "operator",
+          timeoutMinutes: 10,
+          maxReplans: 3,
+        },
+      },
+    });
+    expect(Object.keys(monitor.includes ?? {})).toEqual(["planChange", "implementation"]);
   });
 
   it("has no presentation prompt, report acknowledgement, or quiet routing", () => {

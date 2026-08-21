@@ -283,6 +283,7 @@ describe("PiDecisionChannel", () => {
     await promptReady;
     const accepted = {
       schema: "pi-workflows.human-decision-accepted.v1" as const,
+      provenance: "human" as const,
       decisionId: decision.decisionId,
       requestDigest: decision.requestDigest,
       response: { choice: "continue" },

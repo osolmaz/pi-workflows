@@ -60,6 +60,10 @@ export default defineWorkflow({
     approve: humanDecision({
       audience: "operator",
       choices: planChoices,
+      onTimeout: {
+        afterMs: 10 * 60_000,
+        response: { choice: "continue" },
+      },
       request: ({ outputs }) => ({
         title: "Approve the implementation plan",
         subject: outputs.propose,
@@ -106,6 +110,8 @@ type PlanDecision =
 
 `humanDecisionEdge()` requires one destination for every choice. A missing or extra case is a TypeScript error. Runtime validation applies the same choice and input contract before an answer can win.
 
+`onTimeout` is optional. It supplies a positive duration and a response that satisfies the same choice contract. The request stores the resulting absolute deadline and validated response. When no human answer wins before the deadline, the decision recovery owner applies that response with `timeout` provenance. Omitting `onTimeout` keeps an indefinite wait. A request cannot combine `onTimeout` with a separate `expiresAt` value.
+
 ## Checkpoint behavior
 
 A human decision still has `nodeType: "checkpoint"`. The helper adds a human decision contract to that checkpoint.
@@ -136,10 +142,10 @@ A new decision request contains:
 - the logical audience;
 - the complete choice contract;
 - the canonical request digest;
-- an optional expiry rule; and
+- an optional absolute deadline and automatic response; and
 - the creation time.
 
-The presentation is an explicit display allowlist. A channel does not receive the subject and cannot infer operator text from it. The request digest binds the subject, visible presentation, title, revision, choices, and input prompts. Each choice has a stable ID and may have no input or one validated text input contract.
+The presentation is an explicit display allowlist. A channel does not receive the subject and cannot infer operator text from it. The request digest binds the subject, visible presentation, title, revision, choices, input prompts, deadline, and automatic response. Each choice has a stable ID and may have no input or one validated text input contract.
 
 The former `body` form remains available for existing workflow definitions. It creates a v1 request and uses a deterministic readable compatibility formatter. Oversized historical bodies receive a bounded readable prefix and an explicit omission notice with the full body digest and size. V1 request bytes and digests do not change.
 
@@ -268,9 +274,9 @@ Decision records live next to workflow run bundles under the pi-workflows state 
 - channel settlement results; and
 - the continuation request and result.
 
-The resolution record uses a no-replace create. The first valid acceptance, cancellation, or expiry writer wins. Acceptance then materializes the matching accepted-answer detail. Cancellation or expiry materializes cancellation detail. A retry with the same response and idempotency key adopts the existing answer. A conflicting answer receives an `already decided` result.
+The resolution record uses a no-replace create. A valid human answer or eligible timeout response claims the same immutable resolution. The saved result includes `human` or `timeout` provenance. A timeout result has no human actor or channel identity. Cancellation writes a terminal tombstone that takes precedence over automatic continuation. A retry adopts the existing matching result. A conflicting or late answer receives an `already decided` result.
 
-The continuation run ID is derived from the accepted decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after answer acceptance cannot run the next workflow step twice. The continuation run carries a redacted receipt with the decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Actor, channel, event, and idempotency provenance stays only in the private decision records and never enters the run bundle or model context.
+The continuation run ID is derived from the decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after resolution cannot run the next workflow step twice. The continuation record and redacted receipt carry the resolution provenance, decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Human actor, channel, event, and idempotency details stay only in the private decision records and never enter the run bundle or model context.
 
 SQLite may index pending decisions and channel leases, but immutable decision files remain the source of truth. The index is disposable and rebuildable.
 
@@ -286,33 +292,19 @@ pi-workflows keeps solution choice, documentation, and implementation in separat
 
 `autoimplement` first finds the clear existing plan in its input, the conversation, or referenced canonical documents. It blocks when no clear plan exists. A caller can bypass discovery and autodoc only by supplying both the explicit plan and a `documentation` receipt whose plan digest matches it. A plan without that current-document evidence enters autodoc so the canonical documents are inspected and adopted or updated. The absence of a structured `plan` input never authorizes `autoplan`.
 
-If later implementation, verification, review, comments, or CI evidence invalidates the plan, autoimplement runs `autoplan`, sends the revised plan through `autodoc`, and then resumes implementation. An optional approval policy inserts `plan-approval` after the revised documentation.
+If later implementation, verification, review, comments, or CI evidence invalidates the plan, Autoimplement enters the shared plan-change workflow. That workflow runs Autoplan, Autodoc, plan approval, and bounded exact-text replanning. Monitor uses the same workflow for each new repair plan and passes the selected plan into Autoimplement without a second decision.
 
 ## Reusable plan approval workflow
 
-pi-workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its input contains the documented plan, plan digest, audience, and display summary. It has three named exits:
+pi-workflows ships a typed `plan-approval` workflow built on `humanDecision()`. Its policy has three modes:
 
-- `continue`, with the approval receipt;
-- `stop`, with the stop receipt; and
-- `replan`, with the exact instructions and receipt.
+- `auto` asks the configured audience and continues after the configured deadline. It defaults to audience `operator` and 10 minutes.
+- `required` waits for an explicit human answer.
+- `skip` creates no human decision and continues immediately.
 
-A parent can include it without copying prompts or channel handling:
+The workflow has `continue`, `stop`, and exact-text `replan` exits. Continue reports `human`, `timeout`, or `skipped` provenance. Stop and replan always require a human answer.
 
-```typescript
-includes: {
-  approval: includeWorkflow(planApproval, {
-    input: ({ outputs }) => ({
-      plan: outputs.devise.plan,
-      planDigest: outputs.devise.planDigest,
-      audience: "operator",
-    }),
-  }),
-},
-```
-
-A `replan` exit returns to `autoplan` with the previous plan and the exact human instructions as new evidence. The revised plan passes through `autodoc`, receives a new digest, and enters a new approval decision. Step limits bound repeated replanning.
-
-Monitor repair composes `autoplan`, `autodoc`, optional `plan-approval`, `autoimplement`, and a fresh target check. Autoimplement can mount the same approval workflow after evidence-driven redesign. Existing behavior stays unchanged when no approval policy is present.
+The internal plan-change workflow composes Autoplan, Autodoc, and plan approval once. It owns the replan count, plan digest, and positive revision. Autoimplement and Monitor include this workflow instead of copying approval routes. A plan supplied by the caller or already selected by Monitor bypasses another decision. Only a changed plan digest enters the gate.
 
 ## Recovery and cancellation
 
@@ -325,27 +317,27 @@ Recovery follows these rules:
 - ambiguous Telegram sends are not retried automatically;
 - duplicate channel updates are harmless;
 - stale responses are rejected;
-- one accepted response creates one continuation;
-- the winning channel dismisses any pending Pi dialog;
+- one human or timeout response creates one continuation;
+- the winning human answer or timeout policy dismisses any pending Pi dialog;
 - confirmed channel settlement is adopted without another remote call;
 - failed channel settlement has a bounded retry count and cannot create an unbounded record loop; and
 - cancellation resolves the owned waiting decision from durable state, even after restart, closes pending views, and prevents a later answer from continuing the run.
 
-A decision with no available channel remains waiting and reports the configuration problem. It does not silently continue or choose a default.
+A required decision with no available channel remains waiting and reports the configuration problem. An automatic decision does not need a channel to apply its saved response after the deadline. A skipped plan policy creates no decision.
 
 ## Compatibility
 
-Ordinary checkpoints, their continuation input behavior, and existing run bundles remain unchanged. V2 requests, accepted records, receipts, resolutions, and multipart delivery records are additive. Older viewers ignore them. Updated viewers label a human decision as a checkpoint, show the readable presentation and its fingerprint, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
+This alpha change updates the current request, accepted-result, receipt, resolution, continuation, and snapshot contracts in place. Old active runs refuse resume through normal source and definition identity checks. There is no compatibility reader, migration, dual path, or new schema generation. Updated viewers label a human decision as a checkpoint, show its deadline and automatic action when present, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
 
 The engine remains independent from Pi and Telegram. Core code owns decision contracts, validation, durable acceptance, and continuation. The Pi extension owns UI and channel lifecycle. The Telegram adapter owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
 
 ## Contract impact
 
 - **Session state:** Pi records normal workflow messages and interactive decision results.
-- **Other persistent data:** additive decision records, a rebuildable private channel index, and private channel configuration.
+- **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. The private channel index remains rebuildable.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle and UI methods only.
-- **Public pi-workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.
+- **Public pi-workflows API:** typed human choices, `humanDecision().onTimeout`, `humanDecisionEdge()`, the channel interface, the plan approval policy, and the shared plan-change workflow.
 
 ## Verification requirements
 

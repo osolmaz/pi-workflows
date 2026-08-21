@@ -23,6 +23,12 @@ export {
   type MonitorInput,
   type MonitorRepairPolicy,
 } from "./monitor.workflow.js";
+export {
+  planChangeWorkflow,
+  type PlanChangeBlocked,
+  type PlanChangeInput,
+  type PlanChangeReady,
+} from "./plan-change.workflow.js";
 export { presentPlan } from "./plan-presentation.js";
 export {
   sanityCheckWorkflow,
@@ -38,8 +44,13 @@ export {
 } from "./sanity-check.workflow.js";
 export {
   planApprovalWorkflow,
+  parsePlanApprovalPolicy,
   type PlanApprovalContinue,
   type PlanApprovalInput,
+  type PlanApprovalMode,
+  type PlanApprovalPolicy,
   type PlanApprovalReplan,
+  type PlanApprovalResolution,
   type PlanApprovalStop,
+  type ResolvedPlanApprovalPolicy,
 } from "./plan-approval.workflow.js";

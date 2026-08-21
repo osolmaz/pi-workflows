@@ -39,7 +39,7 @@ function stopCheck() {
 function repairExecutor(secondCheck: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
     .respond("check", { output: repairCheck() }, { output: secondCheck })
-    .respond("initialDesign/frame", {
+    .respond("planChange/design/frame", {
       output: {
         problem: "test failure",
         success: ["test passes"],
@@ -49,13 +49,13 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
         controlBoundary: "repo",
       },
     })
-    .respond("initialDesign/propose", {
+    .respond("planChange/design/propose", {
       output: { solution: "fix code", rationale: "owned", parts: ["code"], tradeoffs: [] },
     })
-    .respond("initialDesign/ideal", {
+    .respond("planChange/design/ideal", {
       output: { ideal: "correct code", outsideDependencies: [], additionalValue: [] },
     })
-    .respond("initialDesign/choose", {
+    .respond("planChange/design/choose", {
       output: {
         status: "ready",
         selected: "fix code",
@@ -65,7 +65,7 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
         compromises: [],
       },
     })
-    .respond("initialDesign/plan", {
+    .respond("planChange/design/plan", {
       output: {
         summary: "fix test",
         steps: [{ change: "fix", where: "src", verification: "test-a" }],
@@ -75,7 +75,7 @@ function repairExecutor(secondCheck: unknown): ScriptedExecutor {
         boundaries: [],
       },
     })
-    .respond("documentation/inspectDocumentation", {
+    .respond("planChange/documentation/inspectDocumentation", {
       output: {
         route: "current",
         files: ["docs/spec.md", "docs/plans/plan.md"],
@@ -219,13 +219,19 @@ describe("monitor automatic repair", () => {
         task: "Monitor and repair test-a",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: { authorized: true, scope: "current repository", repository, merge: true },
+        repair: {
+          authorized: true,
+          scope: "current repository",
+          repository,
+          merge: true,
+          approval: { mode: "skip" },
+        },
       },
       { workflowSource: resolved.source },
     );
 
     expect(state.status).toBe("completed");
-    expect(state.steps.map((step) => step.nodeId)).toContain("initialDesign/frame");
+    expect(state.steps.map((step) => step.nodeId)).toContain("planChange/design/frame");
     expect(state.steps.map((step) => step.nodeId)).toContain("implementation/implement");
     expect(state.steps.filter((step) => step.nodeId === "check")).toHaveLength(2);
     expect(notifications.map((item) => item.content)).toEqual([
@@ -233,13 +239,16 @@ describe("monitor automatic repair", () => {
       "The repair is verified.",
     ]);
     expect(state.workflowSources?.map((item) => item.mountPath.join("/"))).toEqual([
-      "approval",
-      "documentation",
       "implementation",
-      "implementation/approval",
       "implementation/documentation",
       "implementation/redesign",
-      "initialDesign",
+      "implementation/redesign/approval",
+      "implementation/redesign/design",
+      "implementation/redesign/documentation",
+      "planChange",
+      "planChange/approval",
+      "planChange/design",
+      "planChange/documentation",
     ]);
     expect(state.definitionDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
@@ -268,7 +277,13 @@ describe("monitor automatic repair", () => {
         task: "Monitor and repair test-a",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: { authorized: true, scope: "current repository", repository, merge: true },
+        repair: {
+          authorized: true,
+          scope: "current repository",
+          repository,
+          merge: true,
+          approval: { mode: "skip" },
+        },
       },
       { workflowSource: resolved.source },
     );

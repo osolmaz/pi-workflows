@@ -41,6 +41,7 @@ import {
 } from "../workflows/store.js";
 import type {
   AcceptedHumanDecision,
+  ResolvedHumanDecision,
   AgentStepContract,
   HumanDecisionRequest,
   HumanDecisionSubmission,
@@ -206,7 +207,7 @@ function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
 type PreparedLaunchOptions = {
   presentation?: boolean;
   parentRunId?: string;
-  humanDecision?: AcceptedHumanDecision;
+  humanDecision?: ResolvedHumanDecision;
 };
 
 type StartRunOptions = {
@@ -218,8 +219,8 @@ type StartRunOptions = {
   signal?: AbortSignal;
   /** Continue a checkpointed run: input becomes the legacy answer payload. */
   parentRunId?: string;
-  /** Accepted verified-human answer for a protected decision continuation. */
-  humanDecision?: AcceptedHumanDecision;
+  /** Durable human or timeout response for a protected decision continuation. */
+  humanDecision?: ResolvedHumanDecision;
   /** Resume a parked run at its stopped node instead of starting fresh. */
   resume?: boolean;
   /** An existing queue claim token, when the caller already claimed the run. */
@@ -2061,7 +2062,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       };
       const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
       const acceptance = await store.accept(request, submission);
-      if (acceptance.status === "conflict") {
+      if (acceptance.status === "conflict" || acceptance.decision.provenance !== "human") {
         throw new Error("That human decision was already answered differently.");
       }
       accepted = acceptance.decision;
@@ -2093,6 +2094,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         schema: "pi-workflows.human-decision-continuation.v1",
         decisionId: request.decisionId,
         requestDigest: request.requestDigest,
+        provenance: accepted.provenance,
         parentRunId: waiting.parentRunId,
         runId: continuationRunId,
         createdAt: accepted.acceptedAt,
@@ -2218,60 +2220,72 @@ export default function piWorkflows(pi: ExtensionAPI) {
         queueRecord !== undefined &&
         (queueRecord.originSessionId === null ||
           queueRecord.originSessionId === ctx.sessionManager.getSessionId());
-      const accepted = await store.readAccepted(request.decisionId);
-      if (accepted === null) {
+      let resolved = await store.readResolved(request.decisionId);
+      if (resolved === null) {
         let cancellation = await store.readCancellation(request.decisionId);
-        if (
-          cancellation === null &&
-          request.expiresAt !== undefined &&
-          Date.parse(request.expiresAt) <= Date.now()
-        ) {
-          await store.cancel(request, "expired");
-          cancellation = await store.readCancellation(request.decisionId);
+        const expired =
+          request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now();
+        if (cancellation === null && expired) {
+          if (request.defaultResponse === undefined) {
+            await store.cancel(request, "expired");
+            cancellation = await store.readCancellation(request.decisionId);
+          } else {
+            try {
+              resolved = (await store.resolveTimeout(request)).decision;
+            } catch {
+              cancellation = await store.readCancellation(request.decisionId);
+              resolved = await store.readResolved(request.decisionId);
+            }
+          }
         }
         if (cancellation !== null) {
           await settleHumanDecisionChannels(cancellation);
           continue;
         }
-        if (!deliverPending || !ownedBySession) continue;
-        const channels = audienceChannels(decisionChannelConfig, request.audience);
-        for (const channelId of channels) {
-          const channel = telegramDecisionChannels.get(channelId);
-          if (channel !== undefined) await channel.deliver(humanDecisionChannelRequest(request));
+        if (resolved === null) {
+          if (!deliverPending || !ownedBySession) continue;
+          const channels = audienceChannels(decisionChannelConfig, request.audience);
+          for (const channelId of channels) {
+            const channel = telegramDecisionChannels.get(channelId);
+            if (channel !== undefined) await channel.deliver(humanDecisionChannelRequest(request));
+          }
+          if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
+            lastWaitingRunId = request.runId;
+            queueMicrotask(() => void promptHumanDecision(ctx, request));
+          }
+          continue;
         }
-        if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
-          lastWaitingRunId = request.runId;
-          queueMicrotask(() => void promptHumanDecision(ctx, request));
-        }
-        continue;
       }
 
       if (!ownedBySession) continue;
+      const currentParent = await readRunBundle(runStore.runDirFor(request.runId));
+      if (currentParent === null || currentParent.state.status !== "waiting") continue;
       const runId = `continuation-${request.decisionId.slice("decision-".length)}`;
       const continuation = (await store.readContinuation(request.decisionId)) ?? {
         schema: "pi-workflows.human-decision-continuation.v1" as const,
         decisionId: request.decisionId,
         requestDigest: request.requestDigest,
+        provenance: resolved.provenance,
         parentRunId: request.runId,
         runId,
-        createdAt: accepted.acceptedAt,
+        createdAt: resolved.acceptedAt,
       };
       await store.recordContinuation(request.decisionId, continuation);
       const existing = await readRunBundle(runStore.runDirFor(continuation.runId));
       if (existing === null && activeRun === null) {
-        if (parent.state.workflowSource === undefined) continue;
+        if (currentParent.state.workflowSource === undefined) continue;
         const workflowRef =
-          parent.state.workflowSource.kind === "builtin"
-            ? `builtin:${parent.state.workflowSource.id}`
-            : parent.state.workflowSource.path;
-        await startRun(ctx, workflowRef, parent.state.input, {
+          currentParent.state.workflowSource.kind === "builtin"
+            ? `builtin:${currentParent.state.workflowSource.id}`
+            : currentParent.state.workflowSource.path;
+        await startRun(ctx, workflowRef, currentParent.state.input, {
           parentRunId: request.runId,
-          humanDecision: accepted,
+          humanDecision: resolved,
           runId: continuation.runId,
           quiet: true,
         });
       }
-      await settleHumanDecisionChannels(accepted);
+      await settleHumanDecisionChannels(resolved);
       if (activeRun !== null) break;
     }
   };

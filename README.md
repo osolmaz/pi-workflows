@@ -366,8 +366,8 @@ example set. Copy any of them into `.pi/workflows/` to use them:
 - `human-decision` shows a reusable verified-human gate with a structured
   machine subject, a separate readable operator presentation, plain choices,
   and exact replan text.
-- `approved-plan` composes autoplan, autodoc, and the reusable plan-approval
-  workflow without copying their internal nodes.
+- `approved-plan` includes the shared plan-change workflow, which composes
+  autoplan, autodoc, the configurable plan decision, and bounded replanning.
 - `autoresearch` runs an iterative feature-search loop in the style of
   [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup
   creates a frozen evaluation harness, one editable feature file, and a

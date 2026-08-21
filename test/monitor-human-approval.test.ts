@@ -42,7 +42,7 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
     Array.from({ length: rounds }, () => ({ output: structuredClone(value) }));
   return executor
     .respond(
-      "initialDesign/frame",
+      "planChange/design/frame",
       ...repeated({
         problem: "test failure",
         success: ["passes"],
@@ -53,15 +53,15 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       }),
     )
     .respond(
-      "initialDesign/propose",
+      "planChange/design/propose",
       ...repeated({ solution: "fix", rationale: "owned", parts: ["code"], tradeoffs: [] }),
     )
     .respond(
-      "initialDesign/ideal",
+      "planChange/design/ideal",
       ...repeated({ ideal: "correct", outsideDependencies: [], additionalValue: [] }),
     )
     .respond(
-      "initialDesign/choose",
+      "planChange/design/choose",
       ...repeated({
         status: "ready",
         selected: "fix",
@@ -72,7 +72,7 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       }),
     )
     .respond(
-      "initialDesign/plan",
+      "planChange/design/plan",
       ...Array.from({ length: rounds }, (_, index) => ({
         output: {
           summary: index === 0 ? "first plan" : "revised plan",
@@ -87,7 +87,7 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       })),
     )
     .respond(
-      "documentation/inspectDocumentation",
+      "planChange/documentation/inspectDocumentation",
       ...repeated({
         route: "current",
         files: ["docs/spec.md", "docs/plans/plan.md"],
@@ -267,7 +267,7 @@ describe("monitor human repair approval", () => {
         authorized: true,
         repository,
         merge: true,
-        approval: { audience: "operator", maxReplans: 3 },
+        approval: { mode: "required", audience: "operator", maxReplans: 3 },
       },
     });
     if (first.state.status !== "waiting") {
@@ -275,7 +275,7 @@ describe("monitor human repair approval", () => {
         `${first.state.error ?? "unknown"}\n${first.state.steps.map((step) => step.nodeId).join("\n")}`,
       );
     }
-    expect(first.state.waitingOn).toBe("approval/approve");
+    expect(first.state.waitingOn).toBe("planChange/approval/approve");
     expect(first.state.steps.some((step) => step.nodeId === "implementation/implement")).toBe(
       false,
     );
@@ -287,6 +287,14 @@ describe("monitor human repair approval", () => {
       true,
     );
     expect(continued.state.steps.filter((step) => step.nodeId === "check")).toHaveLength(2);
+    expect(
+      continued.state.steps.filter((step) => step.nodeId.endsWith("approval/approve")),
+    ).toHaveLength(1);
+    expect(
+      continued.state.steps.some(
+        (step) => step.nodeId === "implementation/redesign/approval/approve",
+      ),
+    ).toBe(false);
   });
 
   it("stops truthfully when the operator rejects the repair", async () => {
@@ -304,7 +312,7 @@ describe("monitor human repair approval", () => {
       repair: {
         authorized: true,
         repository,
-        approval: { audience: "operator", maxReplans: 3 },
+        approval: { mode: "required", audience: "operator", maxReplans: 3 },
       },
     });
     const stopped = await answer(store, executor, resolved.definition, first.state.runId, {
@@ -312,7 +320,7 @@ describe("monitor human repair approval", () => {
     });
     expect(stopped.state.status).toBe("completed");
     expect(stopped.state.finalOutput).toMatchObject({
-      reason: "The operator stopped the proposed repair.",
+      reason: "The operator stopped the proposed plan change.",
     });
     expect(stopped.state.steps.some((step) => step.nodeId === "implementation/implement")).toBe(
       false,
@@ -335,7 +343,7 @@ describe("monitor human repair approval", () => {
         authorized: true,
         repository,
         merge: true,
-        approval: { audience: "operator", maxReplans: 3 },
+        approval: { mode: "required", audience: "operator", maxReplans: 3 },
       },
     });
     const firstDigest = (first.state.finalOutput as { subject?: { planDigest?: string } }).subject
@@ -346,12 +354,12 @@ describe("monitor human repair approval", () => {
       input: { instructions: exact },
     });
     expect(replanned.state.status).toBe("waiting");
-    expect(replanned.state.waitingOn).toBe("approval/approve");
+    expect(replanned.state.waitingOn).toBe("planChange/approval/approve");
     expect(
       (replanned.state.finalOutput as { subject?: { planDigest?: string } }).subject?.planDigest,
     ).not.toBe(firstDigest);
     const frameRequests = executor.requests.filter(
-      (request) => request.contract.nodeId === "initialDesign/frame",
+      (request) => request.contract.nodeId === "planChange/design/frame",
     );
     expect(frameRequests).toHaveLength(2);
     expect(frameRequests[1]?.prompt).toContain(JSON.stringify(exact).slice(1, -1));
@@ -360,7 +368,7 @@ describe("monitor human repair approval", () => {
     });
     expect(completed.state.status).toBe("completed");
     const steps = completed.state.steps.map((step) => step.nodeId);
-    expect(steps.filter((step) => step === "documentation/finalize")).toHaveLength(2);
+    expect(steps.filter((step) => step === "planChange/documentation/finalize")).toHaveLength(2);
     expect(steps).toContain("implementation/implement");
   });
 });

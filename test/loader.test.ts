@@ -130,16 +130,19 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "7" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "8" });
     expect(resolved.definition.name).toBe("monitor");
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
-      "approval",
-      "documentation",
       "implementation",
-      "implementation/approval",
       "implementation/documentation",
       "implementation/redesign",
-      "initialDesign",
+      "implementation/redesign/approval",
+      "implementation/redesign/design",
+      "implementation/redesign/documentation",
+      "planChange",
+      "planChange/approval",
+      "planChange/design",
+      "planChange/documentation",
     ]);
   });
 
@@ -188,7 +191,7 @@ describe("resolveWorkflowRef", () => {
     );
   });
 
-  it("rejects a project override that changes a registered child contract", async () => {
+  it("keeps direct built-in plan-change contracts independent from project overrides", async () => {
     const { cwd, homeDir } = await makeSearchDirs();
     const dir = path.join(cwd, ".pi", "workflows");
     const api = JSON.stringify(path.join(REPO_ROOT, "src", "workflows", "index.ts"));
@@ -200,7 +203,7 @@ describe("resolveWorkflowRef", () => {
 
     await expect(
       resolveWorkflowRef("builtin:monitor", { cwd, homeDir }, builtinWorkflowCatalog),
-    ).rejects.toThrow(/contract mismatch/i);
+    ).resolves.toMatchObject({ definition: { name: "monitor" } });
   });
 
   it("resolves direct paths", async () => {

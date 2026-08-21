@@ -63,6 +63,55 @@ describe("human decision authoring", () => {
     });
   });
 
+  it("accepts a typed timeout response and binds it into the request", () => {
+    const gate = humanDecision({
+      audience: "operator",
+      choices,
+      request: () => ({ title: "Approve", body: {} }),
+      onTimeout: { afterMs: 600_000, response: { choice: "continue" } },
+    });
+    expect(gate.humanDecision?.onTimeout).toEqual({
+      afterMs: 600_000,
+      response: { choice: "continue" },
+    });
+    expect(() =>
+      humanDecision({
+        audience: "operator",
+        choices,
+        request: () => ({ title: "Approve", body: {} }),
+        onTimeout: { afterMs: 0, response: { choice: "continue" } },
+      }),
+    ).toThrow(/finite positive/);
+
+    const timed = createHumanDecisionRequest({
+      runId: "run-a",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-timeout",
+      contract: { audience: "operator", choices },
+      prompt: { title: "Approve", body: {} },
+      timeout: { afterMs: 600_000, response: { choice: "continue" } },
+      createdAt: "2026-08-21T00:00:00.000Z",
+    });
+    expect(timed).toMatchObject({
+      createdAt: "2026-08-21T00:00:00.000Z",
+      expiresAt: "2026-08-21T00:10:00.000Z",
+      defaultResponse: { choice: "continue" },
+    });
+    expect(() =>
+      createHumanDecisionRequest({
+        runId: "run-a",
+        workflowName: "workflow-a",
+        nodeId: "approve",
+        attemptId: "attempt-conflict",
+        contract: { audience: "operator", choices },
+        prompt: { title: "Approve", body: {}, expiresAt: "2026-08-21T00:20:00.000Z" },
+        timeout: { afterMs: 600_000, response: { choice: "continue" } },
+        createdAt: "2026-08-21T00:00:00.000Z",
+      }),
+    ).toThrow(/cannot combine/);
+  });
+
   it("rejects missing and extra runtime routes", () => {
     expect(() =>
       humanDecisionEdge({

@@ -38,7 +38,7 @@ The monitor checks a target, sends one status notification after every accepted 
 
 `repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
 
-`repair.approval` is optional. It contains a logical `audience` and `maxReplans` from 1 through 20. When present, monitor sends the documented repair plan through the reusable human `plan-approval` workflow. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before autoplan and autodoc run again. The model-facing workflow tool cannot approve the gate.
+`repair.approval` uses `auto`, `required`, or `skip` mode. When omitted, Monitor uses `auto` with audience `operator`, a 10-minute timeout, and three allowed replans. Auto mode asks and then continues with the exact plan if no answer is accepted by the deadline. Required mode waits for an explicit human answer. Skip mode asks nothing. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before the shared plan-change workflow runs again. The model-facing workflow tool cannot approve the gate.
 
 `reportWhen` is removed. The monitor always reports after every accepted check.
 
@@ -102,17 +102,11 @@ prepare
       ├─ continue → schedule → sleep → check
       └─ repair → repairGuard
            ├─ blocked → repairBlocked → repairReport → finish
-           └─ initialDesign: autoplan
+           └─ planChange
                 ├─ blocked → repairBlocked
-                └─ documentation: autodoc
+                └─ ready → implementation: autoimplement
                      ├─ blocked → repairBlocked
-                     ├─ no approval → implementation: autoimplement
-                     └─ approval: plan-approval
-                          ├─ stop → repairBlocked
-                          ├─ replan → initialDesign
-                          └─ continue → implementation: autoimplement
-                               ├─ blocked → repairBlocked
-                               └─ completed → check
+                     └─ completed → check
 ```
 
 - `prepare` is a `compute` node that validates and applies input defaults.
@@ -122,7 +116,7 @@ prepare
 - `report` is a `notify` node that queues exactly one report.
 - `decide` is a `compute` node that applies the route and check safety limit.
 - `repairGuard` stops a repeated issue when a completed repair did not change its fingerprint or observed target state.
-- `initialDesign`, `documentation`, optional `approval`, and `implementation` are included workflows. Replan returns exact operator text to initialDesign. Autoimplement can enter nested `autoplan`, then autodoc, when later evidence requires redesign.
+- `planChange` and `implementation` are included workflows. Plan change owns Autoplan, Autodoc, approval policy, and exact-text replanning. Autoimplement receives the selected plan without another decision and enters its own plan-change mount only when later evidence requires a changed plan.
 - `repairBlocked` and `repairReport` preserve a truthful blocked result and user notification.
 - `schedule` is a function `action` that publishes the next-check time.
 - `sleep` is the existing runtime-owned shell wait.

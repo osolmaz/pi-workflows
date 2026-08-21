@@ -70,6 +70,7 @@ export function validateHumanDecisionRequestIntegrity(
     title: request.title,
     choices: request.choices,
     ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+    ...(request.defaultResponse !== undefined ? { defaultResponse: request.defaultResponse } : {}),
     subject: request.subject,
     presentation,
     revision: request.revision,
@@ -112,6 +113,7 @@ export function humanDecisionChannelRequest(
     choices: request.choices,
     createdAt: request.createdAt,
     ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+    ...(request.defaultResponse !== undefined ? { defaultResponse: request.defaultResponse } : {}),
   };
 }
 
@@ -149,6 +151,13 @@ export function decisionDocumentSegments(
     } else {
       segments.push({ kind: block.kind, text: block.text });
     }
+  }
+  if (request.expiresAt !== undefined && request.defaultResponse !== undefined) {
+    const selected = request.choices[request.defaultResponse.choice];
+    segments.push({
+      kind: "paragraph",
+      text: `If no answer is accepted by ${request.expiresAt}, this decision continues automatically with: ${selected?.label ?? request.defaultResponse.choice}.`,
+    });
   }
   const choices = Object.values(request.choices).map((choice) =>
     choice.input === undefined

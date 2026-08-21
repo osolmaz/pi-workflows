@@ -31,6 +31,7 @@ function documentedPlan(plan: unknown) {
   return {
     plan,
     documentation: { status: "current" as const, planDigest: digest(plan), documents: [] },
+    approval: { mode: "skip" as const },
   };
 }
 
@@ -185,7 +186,7 @@ function confirmedChallenge(reason: string) {
 
 function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): ScriptedExecutor {
   return executor
-    .respond("redesign/frame", {
+    .respond("redesign/design/frame", {
       output: {
         problem: "finish the task",
         success: ["work completes"],
@@ -195,7 +196,7 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
         controlBoundary: "authorized repository and rollout",
       },
     })
-    .respond("redesign/propose", {
+    .respond("redesign/design/propose", {
       output: {
         solution: "use the supported path",
         rationale: "it is authorized",
@@ -203,10 +204,10 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
         tradeoffs: [],
       },
     })
-    .respond("redesign/ideal", {
+    .respond("redesign/design/ideal", {
       output: { ideal: "completed work", outsideDependencies: [], additionalValue: [] },
     })
-    .respond("redesign/choose", {
+    .respond("redesign/design/choose", {
       output: {
         status: "ready",
         selected: "use the supported path",
@@ -216,8 +217,8 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
         compromises: [],
       },
     })
-    .respond("redesign/plan", ...plans.map((plan) => ({ output: plan })))
-    .respond("documentation/inspectDocumentation", {
+    .respond("redesign/design/plan", ...plans.map((plan) => ({ output: plan })))
+    .respond("redesign/documentation/inspectDocumentation", {
       output: {
         route: "current",
         files: ["docs/workflows.md"],
@@ -245,7 +246,16 @@ describe("built-in autoimplement", () => {
   it("validates input, reviewer severities, repair commands, and CI tracking", async () => {
     const parseInput = autoimplementWorkflow.input;
     if (parseInput === undefined) throw new Error("autoimplement input parser is missing");
-    expect(await parseInput({ task: "demo" })).toMatchObject({ task: "demo", merge: false });
+    expect(await parseInput({ task: "demo" })).toMatchObject({
+      task: "demo",
+      merge: false,
+      approval: {
+        mode: "auto",
+        audience: "operator",
+        timeoutMinutes: 10,
+        maxReplans: 3,
+      },
+    });
     expect(
       await parseInput({
         task: "demo",
@@ -832,36 +842,32 @@ describe("built-in autoimplement", () => {
         }),
       ),
     ).toMatchObject({
-      problem: "demo",
+      task: "demo",
       scope: "repo",
       constraints: ["safe"],
       previousPlan: { revised: true },
       newEvidence: { route: "redesign", evidence: "new failure" },
+      approval: { mode: "auto", audience: "operator", timeoutMinutes: 10 },
     });
 
     const adopt = autoimplementWorkflow.nodes.adoptPlan;
     if (adopt?.nodeType !== "compute") throw new Error("adoptPlan must be compute");
-    const ready = (changed: boolean) => ({
+    const ready = {
       exit: "ready",
       output: {
         status: "ready",
-        frame: {},
-        proposal: {},
-        ideal: {},
-        selection: {},
         plan: { revised: true },
         planDigest: "sha256:plan",
-        previousPlanDigest: "sha256:old",
-        changed,
+        documents: ["docs/plan.md"],
+        revision: 1,
+        approval: { provenance: "skipped", revision: 1 },
+        documentation: { state: "current", files: ["docs/plan.md"], digests: {}, evidence: null },
       },
-    });
-    expect(await adopt.run(makeContext({ outputs: { redesign: ready(true) } }))).toMatchObject({
-      route: "document",
-      changed: true,
-    });
-    expect(await adopt.run(makeContext({ outputs: { redesign: ready(false) } }))).toMatchObject({
-      route: "blocked",
-      changed: false,
+    };
+    expect(await adopt.run(makeContext({ outputs: { redesign: ready } }))).toMatchObject({
+      plan: { revised: true },
+      planDigest: "sha256:plan",
+      documents: ["docs/plan.md"],
     });
     expect(() =>
       adopt.run(
@@ -1141,10 +1147,10 @@ describe("built-in autoimplement", () => {
       merge: false,
     });
 
-    expect(state.status).toBe("completed");
+    expect(state.status, state.error).toBe("completed");
     expect(state.finalOutput).toMatchObject({ status: "completed" });
     expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
-    expect(state.steps.map((step) => step.nodeId)).toContain("redesign/frame");
+    expect(state.steps.map((step) => step.nodeId)).toContain("redesign/design/frame");
     expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(2);
 
     const challengeRequest = executor.requests.find(
@@ -1161,7 +1167,7 @@ describe("built-in autoimplement", () => {
     expect(challengeRequest?.prompt).toContain("Bob artifact mismatch");
 
     const redesignRequest = executor.requests.find(
-      (request) => request.contract.nodeId === "redesign/frame",
+      (request) => request.contract.nodeId === "redesign/design/frame",
     );
     expect(redesignRequest?.prompt).toContain(
       "Revise the rollout plan and deploy the supported artifact with rollback ready.",
@@ -1296,10 +1302,9 @@ describe("built-in autoimplement", () => {
       switch: { cases: { blocked: "challengeBlockerGuard" } },
     });
 
-    expect(edge("approval.stop")).toMatchObject({ to: "blocked" });
+    expect(Object.hasOwn(autoimplementWorkflow.includes ?? {}, "approval")).toBe(false);
     expect(edge("redesign.blocked")).toMatchObject({ to: "blocked" });
     expect(edge("documentation.blocked")).toMatchObject({ to: "blocked" });
-    expect(edge("replanGuard")).toMatchObject({ switch: { cases: { blocked: "blocked" } } });
     expect(edge("challengeBlocker")).toMatchObject({
       switch: { cases: { continue: "redesign", blocked: "blocked" } },
     });

@@ -265,7 +265,7 @@ monitor
 
 `autoimplement` requires a clear existing plan, but the structured `plan` input is optional because the plan can already be in conversation context or canonical documentation. It blocks when it cannot find a clear plan. It skips autodoc when documentation is current and includes autodoc when documentation is missing or stale. The absence of `input.plan` never routes to initial autoplan.
 
-Autoimplement includes `autoplan` only as evidence-driven `redesign`. When implementation, verification, review, comments, or CI proves that the approach is wrong, the revised plan passes through autodoc before implementation resumes. Local bugs go to a fix step instead.
+Autoimplement includes the shared plan-change workflow only as evidence-driven `redesign`. When implementation, verification, review, comments, or CI proves that the approach is wrong, the shared workflow runs Autoplan, Autodoc, the configured plan decision, and bounded replanning before implementation resumes. Local bugs go to a fix step instead. Existing supplied or discovered plans bypass the decision.
 
 Review rounds record findings at every severity from P0 through P2. P0 or P1 findings require another implementation and review round. A P2-only round can be addressed, but the workflow does not run the reviewer again solely because P2 work changed files.
 
@@ -281,16 +281,17 @@ Monitor remains observation-only unless its input explicitly authorizes mutation
 
 ```text
 check
-  -> initialDesign: autoplan
-  -> documentation: autodoc
-  -> approval: plan-approval when requested
-       -> replan: initialDesign
+  -> planChange
+       -> autoplan
+       -> autodoc
+       -> plan-approval
+            -> replan: autoplan
   -> implementation: autoimplement
-       -> redesign: autoplan -> autodoc when needed
+       -> redesign: planChange when needed
   -> check
 ```
 
-The outer `autoplan` creates the first plan. Autodoc records it before implementation. An optional plan approval gate can continue, stop, or return exact replan instructions to autoplan. The inner redesign mount revises a plan only when new evidence invalidates it and records the revision through autodoc. The monitor checks the target again after implementation and does not trust a repair claim by itself.
+The shared plan-change workflow creates, records, and gates each repair plan. Its default policy asks the `operator` audience and continues after 10 minutes without an answer. Required mode waits for an explicit answer. Skip mode creates no decision. Monitor passes the selected plan into Autoimplement, so Autoimplement does not ask about that digest again. A later Autoimplement redesign uses the same shared workflow for the changed digest. The monitor checks the target again after implementation and does not trust a repair claim by itself.
 
 A protected change to model choice, benchmark method, credentials, hardware, spending authority, or another user decision exits as blocked. The workflow never changes the protected part of the task silently.
 

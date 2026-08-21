@@ -29,7 +29,7 @@ Derive the workflow input from the full conversation:
 - `task`: State the complete objective, the exact current target and stable identifiers, authoritative status sources, durable progress and final-output surfaces, routine actions authorized by the monitor request, other recorded approvals, immutable boundaries, cost and credential rules, and required validation or downstream operations.
 - `everyMinutes`: Use the user's interval when present. Use `30` when the user gives no interval. The built-in workflow accepts intervals from 1 minute through 24 hours.
 - `stopWhen`: Infer verified completion from the full conversation. Describe completion of the complete objective, not only the end of one physical process. Also name material blockers that require human intervention.
-- `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work.
+- `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work. Omit `repair.approval` for the default behavior: ask on each new repair plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` to block on plan changes or `{ "mode": "skip" }` to continue without asking.
 
 Replace the example values below with facts from the conversation, then make one start call:
 
@@ -65,9 +65,37 @@ When the conversation gives no clear finish criterion, set `stopWhen` to `Stop o
 
 Do not invent a finite check count. Omit `maxChecks` unless the user explicitly requests one. The workflow host can apply its own safety upper bound. Disclose that bound if it appears.
 
-When repair is authorized, route a concrete code or design defect through the monitor's composed repair path. Supply the problem, observed evidence, and a stable fingerprint of the issue plus target state. The workflow runs outer `autoplan`, standalone `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign when needed, then checks the target again. Do not copy their prompts into the monitor task.
+When repair is authorized, route a concrete code or design defect through the monitor's shared plan-change path. Supply the problem, observed evidence, and a stable fingerprint of the issue plus target state. The path runs Autoplan, Autodoc, the configured plan decision, and Autoimplement, then checks the target again. Autoimplement does not ask again for the plan selected by Monitor. It uses the same shared path if later evidence requires another plan. Do not copy their prompts into the monitor task.
 
-Add `repair.approval` only when the user requests a human plan decision. Set its named `audience` and a bounded `maxReplans`. A verified continue answer starts implementation. Stop ends the repair truthfully. Replan preserves the exact operator text, sends it back to autoplan, documents the revised plan, and asks again. The model-facing workflow answer tool cannot answer this gate.
+### Repair plan decisions
+
+Omit `repair.approval` for autonomous mode. It asks the `operator` audience and continues with the exact presented plan after 10 minutes without an accepted answer.
+
+Block until the operator answers:
+
+```json
+{
+  "repair": {
+    "approval": {
+      "mode": "required"
+    }
+  }
+}
+```
+
+Continue without asking:
+
+```json
+{
+  "repair": {
+    "approval": {
+      "mode": "skip"
+    }
+  }
+}
+```
+
+`continue` starts implementation. `stop` ends the repair truthfully. `replan` preserves the exact operator text, sends it through the shared plan-change workflow, records the revised plan, and asks again. The model-facing workflow answer tool cannot answer this gate.
 
 ## Keep routine work moving
 

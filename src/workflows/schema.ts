@@ -151,6 +151,23 @@ export function assertValidCheckpointNode(
     if (typeof node.humanDecision.request !== "function") {
       fail(`node ${nodeId} humanDecision request must be a function`);
     }
+    if (
+      node.humanDecision.onTimeout !== undefined &&
+      typeof node.humanDecision.onTimeout !== "function"
+    ) {
+      assertRecord(node.humanDecision.onTimeout, `node ${nodeId} humanDecision onTimeout`);
+      if (
+        typeof node.humanDecision.onTimeout.afterMs !== "number" ||
+        !Number.isFinite(node.humanDecision.onTimeout.afterMs) ||
+        node.humanDecision.onTimeout.afterMs <= 0
+      ) {
+        fail(`node ${nodeId} humanDecision onTimeout afterMs must be a finite positive number`);
+      }
+      assertRecord(
+        node.humanDecision.onTimeout.response,
+        `node ${nodeId} humanDecision onTimeout response`,
+      );
+    }
   }
   assertCommonNodeFields(node, nodeId);
 }

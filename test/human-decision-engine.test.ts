@@ -84,6 +84,7 @@ describe("human decision engine continuation", () => {
     });
     expect(continued.state.humanDecision).toMatchObject({
       schema: "pi-workflows.human-decision-receipt.v1",
+      provenance: "human",
       response: { choice: "continue" },
     });
     expect(continued.state.humanDecision).not.toHaveProperty("source");
@@ -106,6 +107,7 @@ describe("human decision engine continuation", () => {
         {
           humanDecision: {
             schema: "pi-workflows.human-decision-accepted.v1",
+            provenance: "human",
             decisionId: request.decisionId,
             requestDigest: request.requestDigest,
             response: { choice: "continue" },

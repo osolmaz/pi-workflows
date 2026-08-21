@@ -258,10 +258,20 @@ export type HumanDecisionAudience =
   | string
   | ((context: WorkflowNodeContext) => MaybePromise<string>);
 
+export type HumanDecisionTimeout = {
+  afterMs: number;
+  response: HumanDecisionResponse;
+};
+
+export type HumanDecisionTimeoutPolicy =
+  | HumanDecisionTimeout
+  | ((context: WorkflowNodeContext) => MaybePromise<HumanDecisionTimeout | undefined>);
+
 export type HumanDecisionNodeContract = {
   audience: HumanDecisionAudience;
   choices: HumanDecisionChoiceMap;
   request: (context: WorkflowNodeContext) => MaybePromise<HumanDecisionPrompt>;
+  onTimeout?: HumanDecisionTimeoutPolicy;
 };
 
 type HumanDecisionRequestCommon = {
@@ -276,6 +286,7 @@ type HumanDecisionRequestCommon = {
   choices: HumanDecisionChoiceMap;
   createdAt: string;
   expiresAt?: string;
+  defaultResponse?: HumanDecisionResponse;
 };
 
 export type HumanDecisionRequestV1 = HumanDecisionRequestCommon & {
@@ -324,14 +335,23 @@ export type HumanDecisionSubmission = HumanDecisionResponse & {
   idempotencyKey: string;
 };
 
-type AcceptedHumanDecisionCommon = {
+type ResolvedHumanDecisionCommon = {
   decisionId: string;
   requestDigest: string;
   response: HumanDecisionResponse;
-  source: HumanDecisionAnswerSource;
-  idempotencyKey: string;
+  provenance: "human" | "timeout";
   acceptedAt: string;
   answerDigest: string;
+};
+
+type AcceptedHumanDecisionCommon = ResolvedHumanDecisionCommon & {
+  provenance: "human";
+  source: HumanDecisionAnswerSource;
+  idempotencyKey: string;
+};
+
+type DefaultedHumanDecisionCommon = ResolvedHumanDecisionCommon & {
+  provenance: "timeout";
 };
 
 export type AcceptedHumanDecisionV1 = AcceptedHumanDecisionCommon & {
@@ -345,13 +365,27 @@ export type AcceptedHumanDecisionV2 = AcceptedHumanDecisionCommon & {
   revision: number;
 };
 
+export type DefaultedHumanDecisionV1 = DefaultedHumanDecisionCommon & {
+  schema: "pi-workflows.human-decision-accepted.v1";
+};
+
+export type DefaultedHumanDecisionV2 = DefaultedHumanDecisionCommon & {
+  schema: "pi-workflows.human-decision-accepted.v2";
+  subjectDigest: string;
+  presentationDigest: string;
+  revision: number;
+};
+
 export type AcceptedHumanDecision = AcceptedHumanDecisionV1 | AcceptedHumanDecisionV2;
+export type DefaultedHumanDecision = DefaultedHumanDecisionV1 | DefaultedHumanDecisionV2;
+export type ResolvedHumanDecision = AcceptedHumanDecision | DefaultedHumanDecision;
 
 type HumanDecisionReceiptCommon = {
   decisionId: string;
   requestDigest: string;
   nodeId: string;
   response: HumanDecisionResponse;
+  provenance: "human" | "timeout";
   acceptedAt: string;
   answerDigest: string;
 };
@@ -429,6 +463,7 @@ export type HumanDecisionContinuationRecord = {
   schema: "pi-workflows.human-decision-continuation.v1";
   decisionId: string;
   requestDigest: string;
+  provenance: "human" | "timeout";
   parentRunId: string;
   runId: string;
   createdAt: string;
@@ -728,6 +763,8 @@ export type WorkflowNodeSnapshot = {
     audience: string;
     dynamicAudience?: boolean;
     choices: HumanDecisionChoiceMap;
+    onTimeout?: HumanDecisionTimeout;
+    dynamicTimeout?: boolean;
   };
 };
 

@@ -1437,6 +1437,11 @@ function snapshotNode(
         typeof node.humanDecision.audience === "string" ? node.humanDecision.audience : "<dynamic>",
       ...(typeof node.humanDecision.audience === "function" ? { dynamicAudience: true } : {}),
       choices: structuredClone(node.humanDecision.choices),
+      ...(node.humanDecision.onTimeout !== undefined &&
+      typeof node.humanDecision.onTimeout !== "function"
+        ? { onTimeout: structuredClone(node.humanDecision.onTimeout) }
+        : {}),
+      ...(typeof node.humanDecision.onTimeout === "function" ? { dynamicTimeout: true } : {}),
     };
   }
   if (node.nodeType === "action") {

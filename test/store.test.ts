@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { agent, compute, defineWorkflow } from "../src/workflows/definition.js";
+import { choice, defineHumanChoices, humanDecision } from "../src/workflows/human-decision.js";
 import {
   WorkflowRunStore,
   createDefinitionSnapshot,
@@ -547,5 +548,35 @@ describe("createDefinitionSnapshot", () => {
     expect(snapshot.name).toBe("demo");
     expect(snapshot.nodes.one).toEqual({ nodeType: "compute" });
     expect(JSON.stringify(snapshot)).not.toContain("=>");
+  });
+
+  it("records fixed timeout defaults and marks dynamic policies", () => {
+    const choices = defineHumanChoices({ continue: choice({ label: "Continue" }) });
+    const definition = defineWorkflow({
+      name: "decision-snapshot",
+      startAt: "fixed",
+      nodes: {
+        fixed: humanDecision({
+          audience: "operator",
+          choices,
+          request: () => ({ title: "Approve", body: {} }),
+          onTimeout: { afterMs: 600_000, response: { choice: "continue" } },
+        }),
+        dynamic: humanDecision({
+          audience: "operator",
+          choices,
+          request: () => ({ title: "Approve", body: {} }),
+          onTimeout: () => ({ afterMs: 60_000, response: { choice: "continue" } }),
+        }),
+      },
+      edges: [{ from: "fixed", to: "dynamic" }],
+    });
+    const snapshot = createDefinitionSnapshot(definition);
+    expect(snapshot.nodes.fixed?.humanDecision?.onTimeout).toEqual({
+      afterMs: 600_000,
+      response: { choice: "continue" },
+    });
+    expect(snapshot.nodes.dynamic?.humanDecision).toMatchObject({ dynamicTimeout: true });
+    expect(snapshot.nodes.dynamic?.humanDecision?.onTimeout).toBeUndefined();
   });
 });

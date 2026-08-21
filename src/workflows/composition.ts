@@ -480,6 +480,7 @@ function wrapNode(
     case "checkpoint": {
       const human = node.humanDecision;
       const audience = human?.audience;
+      const onTimeout = human?.onTimeout;
       return {
         ...common,
         nodeType: "checkpoint",
@@ -496,6 +497,14 @@ function wrapNode(
                     : audience!,
                 choices: human.choices,
                 request: (context: WorkflowNodeContext) => human.request(project(context)),
+                ...(onTimeout !== undefined
+                  ? {
+                      onTimeout:
+                        typeof onTimeout === "function"
+                          ? (context: WorkflowNodeContext) => onTimeout(project(context))
+                          : onTimeout,
+                    }
+                  : {}),
               },
             }
           : {}),

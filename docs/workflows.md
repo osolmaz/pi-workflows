@@ -291,6 +291,10 @@ const choices = defineHumanChoices({
 humanDecision({
   audience: "operator",
   choices,
+  onTimeout: {
+    afterMs: 10 * 60_000,
+    response: { choice: "continue" },
+  },
   request: ({ outputs }) => ({
     title: "Approve plan",
     subject: outputs.plan,
@@ -303,7 +307,7 @@ humanDecision({
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, and input prompts. The first valid verified human answer wins. A continuation preserves the original workflow input and exposes the accepted answer as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, recovery applies the validated response with `timeout` provenance. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
 
 The model-facing workflow tool cannot answer a protected human decision. Pi interactive UI and configured external channels use a host-owned answer path. Ordinary checkpoints keep the existing `/workflow answer` behavior.
 
@@ -417,7 +421,9 @@ runs.
 
 The built-in `autoplan` workflow selects a practical in-scope solution and writes a detailed plan. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
 
-The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autoplan, documents the revised plan, and asks again through a new plan digest.
+The built-in `plan-approval` workflow offers `continue`, `stop`, and exact-text `replan` exits. Its shared policy uses `auto`, `required`, or `skip` mode. Omitted policy defaults to `auto`: ask audience `operator`, then continue with the exact plan after 10 minutes without an answer. Required mode waits for a human. Skip mode creates no decision. Stop and replan always require a human answer.
+
+The internal plan-change workflow composes Autoplan, Autodoc, plan approval, and bounded replanning. Autoimplement and Monitor use it whenever they create or change a plan. Existing supplied or discovered plans bypass the gate. A plan selected by Monitor enters Autoimplement without another decision for the same digest.
 
 Autoimplement runs independent commands through bounded command batches. A batch is an ordinary function action that calls the public `runCommandBatch` helper. Each command has a stable ID, executable, arguments, absolute working directory, timeout, and output limit. Results stay separate and return in input order. One command uses the same path with concurrency one.
 
@@ -475,7 +481,7 @@ one looping workflow run. Its input is:
 }
 ```
 
-The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through outer `autoplan`, `autodoc`, optional `plan-approval`, `autoimplement`, and internal redesign before the monitor checks the target again. A repeated issue with unchanged target evidence stops as blocked. Add `repair.approval` with a named audience and bounded replan limit only when the operator wants a human decision before implementation.
+The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through the shared plan-change workflow, Autoimplement, and a fresh check. A repeated issue with unchanged target evidence stops as blocked. Omit `repair.approval` for the 10-minute autonomous default. Use `approval.mode: "required"` to wait for an explicit answer or `approval.mode: "skip"` to continue without asking.
 
 `everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:
