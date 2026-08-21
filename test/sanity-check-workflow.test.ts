@@ -310,6 +310,8 @@ describe("isolated sanity-check sessions", () => {
 
     const originalArgv = [...process.argv];
     try {
+      process.argv.splice(0, process.argv.length, "node");
+      expect(resolvePiInvocation()).toEqual({ command: "pi", prefixArgs: [] });
       process.argv.splice(
         0,
         process.argv.length,
@@ -393,6 +395,20 @@ describe("isolated sanity-check sessions", () => {
         })}\n`,
       ),
     ).toEqual({ answer: 43 });
+    expect(() =>
+      parsePiJsonOutput(
+        [
+          JSON.stringify({
+            type: "message_end",
+            message: { role: "user", content: "ignored", stopReason: "stop" },
+          }),
+          JSON.stringify({
+            type: "message_end",
+            message: { role: "assistant", content: "", stopReason: "stop" },
+          }),
+        ].join("\n"),
+      ),
+    ).toThrow(/no assistant JSON/);
     expect(() => parsePiJsonOutput("noise\n")).toThrow(/no assistant JSON/);
     expect(() =>
       parsePiJsonOutput(
