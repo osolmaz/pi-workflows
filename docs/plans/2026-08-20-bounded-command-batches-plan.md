@@ -91,7 +91,7 @@ Review findings stay grouped by repository ID and reviewed head. A later round r
 
 ### CI watches
 
-Autoimplement first inspects every pull request without waiting. It batches only supported pending `gh pr checks --watch` or `gh run watch` commands. Each watch keeps the current five-minute limit. Results are assessed per pull request. A failed or timed-out watch does not hide results for other pull requests.
+Autoimplement first inspects every pull request without waiting. It accepts only supported pending `gh pr checks --watch` or `gh run watch` descriptors, then normalizes each one to `gh pr checks <validated PR URL> --watch`. It rejects repository and pull-request overrides, so a watch result cannot satisfy a different pull request. Each watch keeps the current five-minute limit. Results are assessed per pull request. A failed or timed-out watch does not hide results for other pull requests.
 
 If checks remain pending, autoimplement runs other useful local tests before it inspects CI again. It does not invent an ETA.
 

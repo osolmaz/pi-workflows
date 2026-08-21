@@ -122,7 +122,7 @@
         "nodeType": "agent",
         "timeoutMs": 600000,
         "statusDetail": "checking CI",
-        "expectedOutput": "{ \"targets\": [{ \"repository\": \"/absolute/repository\", \"headRevision\": \"revision\", \"pr\": \"URL\", \"route\": \"green\" | \"failed\" | \"pending\" | \"unavailable\", \"reason\": \"status\", \"relatedFailures\": [\"failure\"], \"unrelatedFailures\": [\"failure\"], \"trackingCommand\": { \"id\": \"repository-id\", \"command\": \"gh\", \"args\": [\"pr\", \"checks\", \"--watch\"], \"cwd\": \"/absolute/repository\", \"timeoutMs\": 300000, \"maxOutputChars\": 1000000 } }] }"
+        "expectedOutput": "{ \"targets\": [{ \"repository\": \"/absolute/repository\", \"headRevision\": \"revision\", \"pr\": \"URL\", \"route\": \"green\" | \"failed\" | \"pending\" | \"unavailable\", \"reason\": \"status\", \"relatedFailures\": [\"failure\"], \"unrelatedFailures\": [\"failure\"], \"trackingCommand\": { \"id\": \"repository-id\", \"command\": \"gh\", \"args\": [\"pr\", \"checks\", \"PR URL\", \"--watch\"], \"cwd\": \"/absolute/repository\", \"timeoutMs\": 300000, \"maxOutputChars\": 1000000 } }] }"
       },
       "trackCi": {
         "nodeType": "action",

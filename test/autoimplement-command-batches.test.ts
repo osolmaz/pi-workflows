@@ -164,12 +164,13 @@ describe("autoimplement command batch contracts", () => {
   it("normalizes per-PR CI state and validates pending watch commands", async () => {
     const repository = await makeTempDir("ci-target");
     const id = repositoryId(repository);
+    const pr = "https://example.test/pr/1";
     const parsed = parseCiInspectionBatch({
       targets: [
         {
           repository,
           headRevision: "abc123",
-          pr: "https://example.test/pr/1",
+          pr,
           route: "pending",
           reason: "running",
           relatedFailures: [],
@@ -185,7 +186,16 @@ describe("autoimplement command batch contracts", () => {
         },
       ],
     });
-    expect(parsed).toMatchObject({ route: "pending", targets: [{ id, route: "pending" }] });
+    expect(parsed).toMatchObject({
+      route: "pending",
+      targets: [
+        {
+          id,
+          route: "pending",
+          trackingCommand: { args: ["pr", "checks", pr, "--watch"] },
+        },
+      ],
+    });
     for (const route of ["green", "failed", "unavailable"] as const) {
       expect(
         parseCiInspectionBatch({
@@ -255,9 +265,14 @@ describe("autoimplement command batch contracts", () => {
       maxOutputChars: 100_000,
     };
     expect(
-      parseCiCommand({ ...command, args: ["run", "watch", "123"] }, id, repository),
+      parseCiCommand({ ...command, args: ["run", "watch", "123"] }, id, repository, pr),
     ).toMatchObject({
-      args: ["run", "watch", "123"],
+      args: ["pr", "checks", pr, "--watch"],
+    });
+    expect(
+      parseCiCommand({ ...command, args: ["pr", "checks", pr, "--watch"] }, id, repository, pr),
+    ).toMatchObject({
+      args: ["pr", "checks", pr, "--watch"],
     });
     for (const invalid of [
       { ...command, id: "wrong" },
@@ -267,8 +282,11 @@ describe("autoimplement command batch contracts", () => {
       { ...command, timeoutMs: 0 },
       { ...command, maxOutputChars: 0 },
       { ...command, args: ["pr", "merge"] },
+      { ...command, args: ["pr", "checks", "https://example.test/pr/2", "--watch"] },
+      { ...command, args: ["pr", "checks", pr, "--watch", "--repo", "other/repo"] },
+      { ...command, args: ["run", "watch", "123", "--repo", "other/repo"] },
     ]) {
-      expect(() => parseCiCommand(invalid, id, repository)).toThrow();
+      expect(() => parseCiCommand(invalid, id, repository, pr)).toThrow();
     }
   });
 });

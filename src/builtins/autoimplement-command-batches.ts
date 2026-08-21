@@ -177,11 +177,12 @@ export function parseCiInspectionBatch(value: unknown): CiInspectionBatch {
     ) {
       throw new Error(`CI targets[${index}].route is invalid`);
     }
+    const pr = requireString(raw.pr, `CI targets[${index}].pr`);
     const target: CiTargetInspection = {
       id,
       repository,
       headRevision: requireString(raw.headRevision, `CI targets[${index}].headRevision`),
-      pr: requireString(raw.pr, `CI targets[${index}].pr`),
+      pr,
       route: raw.route,
       reason: requireString(raw.reason, `CI targets[${index}].reason`),
       relatedFailures: stringArray(
@@ -194,7 +195,7 @@ export function parseCiInspectionBatch(value: unknown): CiInspectionBatch {
       ),
     };
     if (raw.route === "pending") {
-      target.trackingCommand = parseCiCommand(raw.trackingCommand, id, repository);
+      target.trackingCommand = parseCiCommand(raw.trackingCommand, id, repository, pr);
     }
     return target;
   });
@@ -214,7 +215,12 @@ export function parseCiInspectionBatch(value: unknown): CiInspectionBatch {
   };
 }
 
-export function parseCiCommand(value: unknown, id: string, repository: string): CommandBatchItem {
+export function parseCiCommand(
+  value: unknown,
+  id: string,
+  repository: string,
+  pr: string,
+): CommandBatchItem {
   const raw = requireRecord(value, "CI tracking command");
   if (raw.id !== id) throw new Error("CI tracking command id must match the target repository");
   const command = parseCommandItem(raw, "CI tracking command", {
@@ -224,11 +230,22 @@ export function parseCiCommand(value: unknown, id: string, repository: string): 
     maxTimeoutMs: CI_WATCH_TIMEOUT_MS,
   });
   const args = command.args;
-  const allowed =
-    (args[0] === "pr" && args[1] === "checks" && args.includes("--watch")) ||
-    (args[0] === "run" && args[1] === "watch");
-  if (!allowed) throw new Error("CI tracking command args are not allowed");
-  return command;
+  const prWatch =
+    (args.length === 3 && args[0] === "pr" && args[1] === "checks" && args[2] === "--watch") ||
+    (args.length === 4 &&
+      args[0] === "pr" &&
+      args[1] === "checks" &&
+      args[2] === pr &&
+      args[3] === "--watch");
+  const runWatch =
+    args.length === 3 &&
+    args[0] === "run" &&
+    args[1] === "watch" &&
+    /^[1-9]\d*$/.test(args[2] ?? "");
+  if (!prWatch && !runWatch) {
+    throw new Error("CI tracking command args are not allowed for the target PR");
+  }
+  return { ...command, args: ["pr", "checks", pr, "--watch"] };
 }
 
 export function repositoryId(repository: string): string {
