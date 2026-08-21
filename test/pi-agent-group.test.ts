@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createEphemeralCredentialStore,
+  createEphemeralModelStore,
   PiAgentGroupError,
   runPiAgentGroup,
   type PiAgentLifecycleEvent,
@@ -99,6 +101,19 @@ describe("Pi agent groups", () => {
     await expect(runPiAgentGroup([request("one")], { maxConcurrency: 0, signal })).rejects.toThrow(
       /maxConcurrency/,
     );
+    await expect(
+      runPiAgentGroup([{ ...request("control"), role: "bad\u007frole" }], {
+        maxConcurrency: 1,
+        signal,
+      }),
+    ).rejects.toThrow(/control characters/);
+    const reasonlessAbort = { aborted: true, reason: undefined } as AbortSignal;
+    await expect(
+      runPiAgentGroup([request("reasonless")], {
+        maxConcurrency: 1,
+        signal: reasonlessAbort,
+      }),
+    ).rejects.toThrow(/operation cancelled/);
   });
 
   it("returns final results in request order and emits safe lifecycle facts", async () => {
@@ -267,6 +282,13 @@ describe("Pi agent groups", () => {
     expect(events).toContainEqual(
       expect.objectContaining({ id: "queued", state: "cancelled", phase: "cancelled" }),
     );
+    await expect(
+      runPiAgentGroup([request("first-no-progress"), request("queued-no-progress")], {
+        maxConcurrency: 1,
+        signal: new AbortController().signal,
+        sessionFactory: factory,
+      }),
+    ).rejects.toThrow(/first failed/);
   });
 
   it("rejects duplicate tools and invalid limits", async () => {
@@ -489,6 +511,18 @@ describe("Pi agent groups", () => {
         sessionFactory: makeFactory([message("", "aborted")]),
       }),
     ).rejects.toThrow(/provider stopped/);
+    await expect(
+      runPiAgentGroup([request("non-text")], {
+        maxConcurrency: 1,
+        signal: new AbortController().signal,
+        sessionFactory: makeFactory([
+          {
+            type: "message_end",
+            message: { role: "assistant", content: 42, stopReason: "stop" },
+          },
+        ]),
+      }),
+    ).rejects.toThrow(/assistant text is empty/);
   });
 
   it("includes bounded abort diagnostics", async () => {
@@ -635,6 +669,55 @@ describe("Pi agent groups", () => {
     expect(aborted).toBe(true);
   });
 
+  it("normalizes timeout and cancellation failures during session creation", async () => {
+    const timedOutFactory: PiAgentSessionFactory = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      throw "late creation failure";
+    };
+    await expect(
+      runPiAgentGroup([{ ...request("late-timeout"), timeoutMs: 1 }], {
+        maxConcurrency: 1,
+        signal: new AbortController().signal,
+        sessionFactory: timedOutFactory,
+      }),
+    ).rejects.toMatchObject({ code: "timed out" });
+
+    const controller = new AbortController();
+    const cancelledFactory: PiAgentSessionFactory = async () => {
+      controller.abort(new Error("cancel during creation"));
+      throw "creation stopped";
+    };
+    await expect(
+      runPiAgentGroup([request("creation-cancel")], {
+        maxConcurrency: 1,
+        signal: controller.signal,
+        sessionFactory: cancelledFactory,
+      }),
+    ).rejects.toMatchObject({ code: "cancelled" });
+  });
+
+  it("cancels before creating a session when the run clock aborts", async () => {
+    const controller = new AbortController();
+    let created = false;
+    await expect(
+      runPiAgentGroup([request("clock-cancel")], {
+        maxConcurrency: 1,
+        signal: controller.signal,
+        sessionFactory: async () => {
+          created = true;
+          return await successfulFactory()!(request("clock-cancel"), {
+            signal: controller.signal,
+          });
+        },
+        now: () => {
+          controller.abort(new Error("clock cancelled"));
+          return 0;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "cancelled" });
+    expect(created).toBe(false);
+  });
+
   it("does not prompt when a session times out during creation", async () => {
     let prompted = false;
     let aborted = false;
@@ -705,6 +788,123 @@ describe("Pi agent groups", () => {
     expect(updates).toBeLessThanOrEqual(68);
   });
 
+  it("keeps credential and model refresh state in memory", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-credentials");
+    await fs.writeFile(
+      path.join(agentDir, "auth.json"),
+      JSON.stringify({
+        api: { type: "api_key", key: "test-key" },
+        command: { type: "api_key" },
+        oauth: { type: "oauth", refresh: "test-refresh", access: "test-access", expires: 1 },
+      }),
+      "utf8",
+    );
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    try {
+      const controller = new AbortController();
+      const credentials = await createEphemeralCredentialStore(controller.signal);
+      expect(await credentials.list()).toEqual([
+        { providerId: "api", type: "api_key" },
+        { providerId: "command", type: "api_key" },
+        { providerId: "oauth", type: "oauth" },
+      ]);
+      const firstRead = await credentials.read("api");
+      expect(firstRead).toEqual({ type: "api_key", key: "test-key" });
+      if (firstRead?.type === "api_key") firstRead.key = "changed-only-in-copy";
+      expect(await credentials.read("api")).toEqual({ type: "api_key", key: "test-key" });
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const failed = credentials.modify("api", async () => {
+        await gate;
+        throw new Error("refresh failed");
+      });
+      const recovered = credentials.modify("api", async (current) => ({
+        ...(current ?? { type: "api_key" as const }),
+        key: "refreshed-in-memory",
+      }));
+      release();
+      await expect(failed).rejects.toThrow("refresh failed");
+      await expect(recovered).resolves.toEqual({
+        type: "api_key",
+        key: "refreshed-in-memory",
+      });
+      await expect(credentials.modify("api", async () => undefined)).resolves.toEqual({
+        type: "api_key",
+        key: "refreshed-in-memory",
+      });
+      await credentials.delete("api");
+      expect(await credentials.read("api")).toBeUndefined();
+
+      const models = createEphemeralModelStore();
+      expect(await models.read("mock")).toBeUndefined();
+      await models.write("mock", { models: [], checkedAt: 1 });
+      expect(await models.read("mock")).toEqual({ models: [], checkedAt: 1 });
+      await models.delete("mock");
+      expect(await models.read("mock")).toBeUndefined();
+
+      controller.abort(new Error("stop"));
+      await expect(credentials.read("oauth")).rejects.toThrow("stop");
+      await expect(credentials.list()).rejects.toThrow("stop");
+      await expect(credentials.modify("oauth", async (value) => value)).rejects.toThrow("stop");
+      await expect(credentials.delete("oauth")).rejects.toThrow("stop");
+      expect(JSON.parse(await fs.readFile(path.join(agentDir, "auth.json"), "utf8"))).toEqual({
+        api: { type: "api_key", key: "test-key" },
+        command: { type: "api_key" },
+        oauth: { type: "oauth", refresh: "test-refresh", access: "test-access", expires: 1 },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects malformed credential files without exposing their contents", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-invalid-credentials");
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    const invalidValues: unknown[] = [
+      null,
+      [],
+      "PRIVATE_CREDENTIAL_TEXT",
+      { bad: null },
+      { bad: [] },
+      { bad: { type: "api_key", key: 1 } },
+      { bad: { type: "oauth" } },
+      { bad: { type: "oauth", refresh: "r" } },
+      { bad: { type: "oauth", refresh: "r", access: "a" } },
+      { bad: { type: "oauth", refresh: "r", access: "a", expires: "later" } },
+    ];
+    try {
+      for (const invalid of invalidValues) {
+        await fs.writeFile(path.join(agentDir, "auth.json"), JSON.stringify(invalid), "utf8");
+        await expect(createEphemeralCredentialStore(new AbortController().signal)).rejects.toThrow(
+          "Could not load Pi credentials for isolated agents",
+        );
+      }
+      await fs.writeFile(path.join(agentDir, "auth.json"), "PRIVATE_NOT_JSON", "utf8");
+      let message = "";
+      try {
+        await createEphemeralCredentialStore(new AbortController().signal);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe("Could not load Pi credentials for isolated agents");
+      expect(message).not.toContain("PRIVATE_NOT_JSON");
+      await fs.rm(path.join(agentDir, "auth.json"));
+      await expect(
+        createEphemeralCredentialStore(new AbortController().signal),
+      ).resolves.toBeDefined();
+      const cancelled = new AbortController();
+      cancelled.abort(new Error("cancelled before load"));
+      await expect(createEphemeralCredentialStore(cancelled.signal)).rejects.toThrow(
+        "cancelled before load",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("runs the production SDK path with isolated in-memory resources", async () => {
     const mock = await startMockOpenAiServer(() => ({
       kind: "text",
@@ -764,6 +964,19 @@ describe("Pi agent groups", () => {
         model: "mock/mock-model",
         thinkingLevel: "high",
       });
+      await expect(
+        runPiAgentGroup(
+          [
+            {
+              ...request("missing-model"),
+              cwd,
+              tools: ["read"],
+              model: { provider: "mock", id: "missing" },
+            },
+          ],
+          { maxConcurrency: 1, signal: new AbortController().signal },
+        ),
+      ).rejects.toThrow(/has no model/);
       expect(JSON.stringify(mock.requests)).not.toContain("PRIVATE_CONTEXT_MARKER");
       await expect(fs.stat(path.join(agentDir, "sessions"))).rejects.toThrow();
       expect(await fs.readFile(path.join(agentDir, "settings.json"), "utf8")).toBe(settingsBefore);

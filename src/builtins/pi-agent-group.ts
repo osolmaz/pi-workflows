@@ -104,8 +104,8 @@ export async function runPiAgentGroup(
     options.sessionFactory === undefined
       ? await ModelRuntime.create({
           allowModelNetwork: false,
-          credentials: await createInMemoryCredentialStore(options.signal),
-          modelsStore: createInMemoryModelsStore(),
+          credentials: await createEphemeralCredentialStore(options.signal),
+          modelsStore: createEphemeralModelStore(),
         })
       : undefined;
   if (options.signal.aborted) throw cancellationError("group", options.signal.reason);
@@ -159,7 +159,9 @@ type StoredCredential = Exclude<Credential, undefined>;
 type ModelStore = NonNullable<ModelRuntimeCreateOptions["modelsStore"]>;
 type ModelStoreEntry = Awaited<ReturnType<ModelStore["read"]>>;
 
-async function createInMemoryCredentialStore(signal: AbortSignal): Promise<CredentialStore> {
+export async function createEphemeralCredentialStore(
+  signal: AbortSignal,
+): Promise<CredentialStore> {
   signal.throwIfAborted();
   const authPath = path.join(getAgentDir(), "auth.json");
   let source: unknown = {};
@@ -259,7 +261,7 @@ function isMissingFile(error: unknown): boolean {
   );
 }
 
-function createInMemoryModelsStore(): ModelStore {
+export function createEphemeralModelStore(): ModelStore {
   const entries = new Map<string, ModelStoreEntry>();
   return {
     async read(providerId) {
@@ -676,7 +678,7 @@ function operationalText(value: unknown, label: string, max: number): asserts va
   nonEmpty(value, label, max);
   if (
     [...value].some((character) => {
-      const code = character.codePointAt(0) ?? 0;
+      const code = character.codePointAt(0)!;
       return code < 32 || (code >= 127 && code <= 159);
     })
   ) {
