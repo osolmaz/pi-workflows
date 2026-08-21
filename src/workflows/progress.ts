@@ -18,6 +18,7 @@ export type ProgressEstimate = {
   confidence?: ProgressConfidence;
   sourceEstimatedFinishAt?: string;
   unavailableReason?: string;
+  elapsedMs?: number;
 };
 
 export type ProgressSample = {
@@ -42,7 +43,16 @@ export function estimateProgress(
   for (const sample of samples) validateProgressData(sample.data as Record<string, unknown>);
   const latest = samples.at(-1) as ProgressSample;
   const data = latest.data;
-  const base: ProgressEstimate = { key, data, sampleCount: 1 };
+  const firstAt = Date.parse(samples[0]!.at);
+  const endAt = TERMINAL.has(data.status) ? Date.parse(latest.at) : now.getTime();
+  const elapsedMs =
+    Number.isFinite(firstAt) && Number.isFinite(endAt) ? Math.max(0, endAt - firstAt) : undefined;
+  const base: ProgressEstimate = {
+    key,
+    data,
+    sampleCount: 1,
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+  };
   if (TERMINAL.has(data.status)) return base;
   const sourceFinish = validSourceFinish(latest, now);
   if (sourceFinish !== undefined) base.sourceEstimatedFinishAt = sourceFinish;
@@ -212,10 +222,15 @@ export function formatProgressLine(estimate: ProgressEstimate, now = new Date())
         ? `${formatRemaining(estimate.remainingLowMs)}–${formatRemaining(estimate.remainingHighMs)}`
         : formatRemaining(estimate.remainingMedianMs);
     eta = `ETA ${range}`;
-  } else if (!TERMINAL.has(data.status)) {
+  } else if (!TERMINAL.has(data.status) && data.phase === undefined) {
     eta = `ETA unavailable${estimate.unavailableReason ? ` (${estimate.unavailableReason})` : ""}`;
   }
-  return [label, count, eta].filter(Boolean).join("  ");
+  const phase = data.phase === undefined ? "" : sanitizeText(data.phase);
+  const elapsed =
+    data.phase === undefined || estimate.elapsedMs === undefined
+      ? ""
+      : `elapsed ${formatRemaining(estimate.elapsedMs)}`;
+  return [label, count, phase, elapsed, eta].filter(Boolean).join("  ");
 }
 
 export function formatProgressReport(

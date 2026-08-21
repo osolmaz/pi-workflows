@@ -17,7 +17,7 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("8");
     expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("9");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
-    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("1");
+    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("2");
   });
 
   it("resolves a stable built-in source without reading a file", () => {

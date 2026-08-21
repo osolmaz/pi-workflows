@@ -263,6 +263,53 @@ describe("buildWidgetLines", () => {
     expect(view.lines.join("\n")).toContain("Import  50/100 rows  ETA 2m");
   });
 
+  it("prioritizes aggregate, failed, and active agent tracks", () => {
+    const state = makeState({ currentNode: "second" });
+    const tracks = [
+      ["agents/review", "Review agents", "running", "review", 2, 4],
+      ["agents/review/necessity", "Necessity", "completed", "completed", 1, 1],
+      ["agents/review/duplication", "Duplication", "running", "thinking", 0, 1],
+      ["agents/review/contracts", "Contracts", "failed", "failed", 1, 1],
+      ["agents/review/scope_tests", "Scope and tests", "pending", "pending", 0, 1],
+    ] as const;
+    const history = tracks.map(([key, label, status, phase, completed, total], index) => ({
+      updateId: `agent-${index}`,
+      seq: index + 1,
+      at: "2026-01-01T00:00:00.000Z",
+      runId: "r1",
+      nodeId: "review",
+      attemptId: "a1",
+      type: "progress",
+      key,
+      data: {
+        schema: "pi-workflows.progress.v1",
+        label,
+        status,
+        phase,
+        completed,
+        total,
+        unit: "sessions",
+      },
+    }));
+
+    const lines = buildWidgetView(
+      state,
+      snapshot,
+      new Date("2026-01-01T00:00:05.000Z"),
+      null,
+      false,
+      120,
+      undefined,
+      history,
+    ).lines.join("\n");
+    expect(lines).toContain("Review agents");
+    expect(lines).toContain("Contracts");
+    expect(lines).toContain("Duplication");
+    expect(lines).toContain("Scope and tests");
+    expect(lines).not.toContain("Necessity");
+    expect(lines.split("\n").length).toBeLessThanOrEqual(10);
+  });
+
   it("keeps latest tracks that are outside the bounded measured history", () => {
     const overall = {
       updateId: "u1",

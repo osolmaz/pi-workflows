@@ -2,7 +2,7 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { controllerProjectScope } from "../../src/controllers/store.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
@@ -19,6 +19,15 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
+
+async function sessionEntries(agentDirectory: string): Promise<string[]> {
+  return await fs
+    .readdir(path.join(agentDirectory, "sessions"), { recursive: true })
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+}
 
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -1832,8 +1841,137 @@ export default function captureFailureExtension(pi: unknown) {
     void runDir;
   }, 90_000);
 
+  it("runs the SDK-backed sanity check through the standalone host", async () => {
+    const hostProjectDir = await makeTempDir("pi-workflows-host-sanity-project");
+    const hostControllerDir = await makeTempDir("pi-workflows-host-sanity-controllers");
+    const hostRunsDir = await makeTempDir("pi-workflows-host-sanity-runs");
+    const hostAgentDir = await makeTempDir("pi-workflows-host-sanity-agent");
+    await fs.cp(agentDir, hostAgentDir, { recursive: true });
+    await fs.writeFile(path.join(hostProjectDir, "sample.txt"), "sample\n", "utf8");
+    await execFileAsync("git", ["init", "-q"], { cwd: hostProjectDir });
+    await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: hostProjectDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+      cwd: hostProjectDir,
+    });
+    await execFileAsync("git", ["add", "."], { cwd: hostProjectDir });
+    await execFileAsync("git", ["commit", "-q", "-m", "host sanity fixture"], {
+      cwd: hostProjectDir,
+    });
+    const hostControllerFile = path.join(
+      hostControllerDir,
+      "projects",
+      controllerProjectScope(hostProjectDir),
+      "controller.sqlite",
+    );
+    const runId = "host-sanity-e2e-run";
+    const queue = new SqliteControllerStore(hostControllerFile);
+    queue.enqueueWorkflowRun({
+      runId,
+      workflowName: "sanity-check",
+      workflowSourceRef: "builtin:sanity-check",
+      input: { mode: "serial", baseRef: "HEAD" },
+      runnerId: "session-a",
+      claimToken: "token-a",
+      leaseMs: 60_000,
+      originSessionId: "host-sanity-origin",
+    });
+    queue.parkWorkflowRun({ runId, claimToken: "token-a" });
+    queue.close();
+
+    const { WorkflowRunStore, RUN_STATE_SCHEMA } = await import(
+      path.join(REPO_ROOT, "src", "workflows", "store.js")
+    );
+    const { default: sanityCheckWorkflow } = await import(
+      path.join(REPO_ROOT, "src", "builtins", "sanity-check.workflow.js")
+    );
+    const now = new Date().toISOString();
+    const state = {
+      schema: RUN_STATE_SCHEMA,
+      traceSeq: 0,
+      runId,
+      workflowName: "sanity-check",
+      workflowSource: { kind: "builtin" as const, id: "sanity-check", revision: "2" },
+      startedAt: now,
+      updatedAt: now,
+      status: "running" as const,
+      input: { mode: "serial", baseRef: "HEAD" },
+      outputs: {},
+      results: {},
+      steps: [],
+      currentNode: "prepare",
+    };
+    const runStore = new WorkflowRunStore(hostRunsDir);
+    const runDir = await runStore.initializeRunBundle(sanityCheckWorkflow, state);
+    await runStore.writeSnapshot(runDir, state, {
+      scope: "run",
+      type: "run_started",
+      payload: {},
+    });
+    await runStore.writeSnapshot(runDir, state, {
+      scope: "node",
+      type: "node_started",
+      nodeId: "prepare",
+      attemptId: "a1",
+      payload: { nodeType: "compute" },
+    });
+
+    const { WorkflowHost } = await import(path.join(REPO_ROOT, "src", "host", "runner.js"));
+    const logs: string[] = [];
+    const requestsBefore = mock.requests.length;
+    const sessionsBefore = await sessionEntries(hostAgentDir);
+    vi.stubEnv("HOME", hostAgentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", hostAgentDir);
+    const host = new WorkflowHost({
+      cwd: hostProjectDir,
+      storeFile: hostControllerFile,
+      runsDir: hostRunsDir,
+      claimPollMs: 50,
+      env: {
+        PI_CODING_AGENT_DIR: hostAgentDir,
+        PI_WORKFLOWS_RUNS_DIR: hostRunsDir,
+        PI_WORKFLOWS_CONTROLLER_DIR: hostControllerDir,
+      },
+      onLog: (line: string) => logs.push(line),
+    });
+    await host.start();
+    try {
+      await waitForCondition(
+        () => {
+          const reader = new SqliteControllerStore(hostControllerFile, { readOnly: true });
+          try {
+            return reader.getWorkflowRun(runId)?.status === "done";
+          } finally {
+            reader.close();
+          }
+        },
+        () => `expected the host to complete Sanity Check.\nhost logs:\n${logs.join("\n")}`,
+        60_000,
+      );
+    } finally {
+      await host.stop();
+      vi.unstubAllEnvs();
+    }
+
+    const { state: finished } = await waitForRunState(
+      hostRunsDir,
+      (candidate) => candidate.runId === runId && candidate.status !== "running",
+      () => `expected the host Sanity Check run to finish.\nhost logs:\n${logs.join("\n")}`,
+      10_000,
+    );
+    expect(finished.status, finished.error).toBe("completed");
+    expect(finished.workflowSource).toEqual({
+      kind: "builtin",
+      id: "sanity-check",
+      revision: "2",
+    });
+    expect(finished.outputs.verify).toMatchObject({ verdict: "keep" });
+    expect(mock.requests.length).toBe(requestsBefore + 2);
+    expect(await sessionEntries(hostAgentDir)).toEqual(sessionsBefore);
+  }, 90_000);
+
   it("runs the built-in sanity check in isolated read-only Pi sessions", async () => {
     const requestsBefore = mock.requests.length;
+    const sessionsBefore = await sessionEntries(agentDir);
     pi.send({
       id: "sanity-check-e2e",
       type: "prompt",
@@ -1847,14 +1985,28 @@ export default function captureFailureExtension(pi: unknown) {
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
     expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "1" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "2" });
     expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
     expect(state.outputs.review).toHaveLength(1);
+    const progress = (state.updates ?? []).filter((update) => update.type === "progress");
+    expect(progress.map((update) => update.key)).toEqual(
+      expect.arrayContaining([
+        "agents/review",
+        "agents/review/review",
+        "agents/verification",
+        "agents/verification/verification",
+      ]),
+    );
+    expect(progress.find((update) => update.key === "agents/review/review")?.data).toMatchObject({
+      status: "completed",
+      label: expect.stringContaining("mock/mock-model"),
+    });
     await waitForCondition(
       () => mock.requests.length >= requestsBefore + 2,
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
     expect(mock.requests.length).toBe(requestsBefore + 2);
+    expect(await sessionEntries(agentDir)).toEqual(sessionsBefore);
     await waitForCondition(
       () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,

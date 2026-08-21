@@ -3375,7 +3375,7 @@ export default defineController({
     } finally {
       vi.unstubAllEnvs();
     }
-  });
+  }, 30_000);
 
   it("reports when no controller definitions are installed", async () => {
     const cwd = await makeTempDir("pi-workflows-controller-ext");

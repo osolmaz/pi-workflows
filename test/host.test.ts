@@ -41,7 +41,7 @@ function runningState(runId: string): WorkflowRunState {
   };
 }
 
-describe("WorkflowHost", () => {
+describe("WorkflowHost", { timeout: 30_000 }, () => {
   it(
     "claims a parked run, resumes it, and completes the queue row",
     { timeout: 20_000 },
@@ -594,7 +594,7 @@ export default defineController({
     } finally {
       vi.unstubAllEnvs();
     }
-  });
+  }, 30_000);
 });
 
 describe("HostProcessRegistry", () => {

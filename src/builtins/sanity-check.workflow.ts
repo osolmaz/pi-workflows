@@ -4,8 +4,13 @@ import {
   type CommandBatchItemResult,
 } from "../workflows/command-batch.js";
 import { action, compute, defineWorkflow, notify } from "../workflows/definition.js";
-import type { WorkflowActionContext } from "../workflows/types.js";
-import { runIsolatedReviewSessions, type IsolatedReviewRequest } from "./sanity-check-session.js";
+import { extractJsonValue } from "../workflows/json.js";
+import type { WorkflowActionContext, WorkflowProgressStatus } from "../workflows/types.js";
+import {
+  runPiAgentGroup,
+  type PiAgentLifecycleEvent,
+  type PiAgentRequest,
+} from "./pi-agent-group.js";
 
 const REVIEW_TIMEOUT_MS = 20 * 60_000;
 const MAX_STRING_CHARS = 4_000;
@@ -237,21 +242,37 @@ export async function collectContributionEvidence(
   };
 }
 
+type SanityCheckAgentPrompt = Pick<PiAgentRequest, "id" | "role" | "prompt">;
+
 export function buildReviewRequests(
   mode: SanityCheckMode,
   evidence: ContributionEvidence,
-): IsolatedReviewRequest[] {
+): SanityCheckAgentPrompt[] {
   if (mode === "serial") {
-    return [{ id: "review", prompt: reviewPrompt(reviewAreas, evidence) }];
+    return [{ id: "review", role: "Combined review", prompt: reviewPrompt(reviewAreas, evidence) }];
   }
-  return reviewAreas.map((area) => ({ id: area, prompt: reviewPrompt([area], evidence) }));
+  const roles: Record<SanityCheckArea, string> = {
+    necessity: "Necessity",
+    duplication: "Duplication and refactoring",
+    contracts: "Data models and public APIs",
+    scope_tests: "Scope and tests",
+  };
+  return reviewAreas.map((area) => ({
+    id: area,
+    role: roles[area],
+    prompt: reviewPrompt([area], evidence),
+  }));
 }
 
 export function buildVerificationRequest(
   evidence: ContributionEvidence,
   reviews: SanityCheckReview[],
-): IsolatedReviewRequest {
-  return { id: "verification", prompt: verificationPrompt(evidence, reviews) };
+): SanityCheckAgentPrompt {
+  return {
+    id: "verification",
+    role: "Verification",
+    prompt: verificationPrompt(evidence, reviews),
+  };
 }
 
 export function parseReviewOutput(
@@ -321,53 +342,169 @@ async function runReviews(context: WorkflowActionContext): Promise<SanityCheckRe
   const config = context.outputs.prepare as SanityCheckConfig;
   const evidence = context.outputs.collectEvidence as ContributionEvidence;
   const requests = buildReviewRequests(config.mode, evidence);
-  await publishProgress(context, "review", 0, requests.length);
-  const outputs = await runIsolatedReviewSessions(requests, evidence.repository, context.signal, {
-    maxConcurrency: config.mode === "parallel" ? 4 : 1,
-  });
-  const reviews = requests.map((request) =>
-    parseReviewOutput(
-      outputs[request.id],
-      config.mode === "serial" ? reviewAreas : [request.id as SanityCheckArea],
-    ),
-  );
-  await publishProgress(context, "review", requests.length, requests.length);
-  return reviews;
+  const progress = await createAgentProgress(context, "review", requests);
+  try {
+    const results = await runPiAgentGroup(agentRequests(requests, evidence.repository), {
+      maxConcurrency: config.mode === "parallel" ? 4 : 1,
+      signal: context.signal,
+      onLifecycle: progress.onLifecycle,
+    });
+    const reviews = results.map((result, index) =>
+      parseReviewOutput(
+        extractJsonValue(result.text),
+        config.mode === "serial" ? reviewAreas : [requests[index]!.id as SanityCheckArea],
+      ),
+    );
+    await progress.complete();
+    return reviews;
+  } catch (error) {
+    await progress.fail();
+    throw error;
+  }
 }
 
 async function verifyReviews(context: WorkflowActionContext): Promise<SanityCheckResult> {
   const evidence = context.outputs.collectEvidence as ContributionEvidence;
   const reviews = context.outputs.review as SanityCheckReview[];
-  await publishProgress(context, "verification", 0, 1);
-  const outputs = await runIsolatedReviewSessions(
-    [buildVerificationRequest(evidence, reviews)],
-    evidence.repository,
-    context.signal,
-    { maxConcurrency: 1 },
-  );
-  const result = parseSanityCheckResult(outputs.verification);
-  await publishProgress(context, "verification", 1, 1);
-  return result;
+  const requests = [buildVerificationRequest(evidence, reviews)];
+  const progress = await createAgentProgress(context, "verification", requests);
+  try {
+    const [result] = await runPiAgentGroup(agentRequests(requests, evidence.repository), {
+      maxConcurrency: 1,
+      signal: context.signal,
+      onLifecycle: progress.onLifecycle,
+    });
+    const parsed = parseSanityCheckResult(extractJsonValue(result!.text));
+    await progress.complete();
+    return parsed;
+  } catch (error) {
+    await progress.fail();
+    throw error;
+  }
 }
 
-async function publishProgress(
+function agentRequests(requests: SanityCheckAgentPrompt[], cwd: string): PiAgentRequest[] {
+  return requests.map((request) => ({
+    ...request,
+    cwd,
+    tools: ["read", "grep", "find", "ls"],
+    timeoutMs: REVIEW_TIMEOUT_MS,
+  }));
+}
+
+type AgentProgress = {
+  onLifecycle(event: PiAgentLifecycleEvent): Promise<void>;
+  complete(): Promise<void>;
+  fail(): Promise<void>;
+};
+
+async function createAgentProgress(
   context: WorkflowActionContext,
+  group: "review" | "verification",
+  requests: SanityCheckAgentPrompt[],
+): Promise<AgentProgress> {
+  const aggregateKey = `agents/${group}`;
+  const settled = new Set<string>();
+  await safeProgress(context, aggregateKey, "running", group, 0, requests.length);
+  await Promise.all(
+    requests.map(
+      async (request) =>
+        await safeProgress(
+          context,
+          `${aggregateKey}/${request.id}`,
+          "pending",
+          "pending",
+          0,
+          1,
+          request.role,
+        ),
+    ),
+  );
+  let updateWork = Promise.resolve();
+  const enqueue = (update: () => Promise<void>) => {
+    updateWork = updateWork.then(update).catch(() => undefined);
+    return updateWork;
+  };
+  return {
+    async onLifecycle(event) {
+      await enqueue(async () => {
+        const terminal = event.state !== "running";
+        if (terminal) settled.add(event.id);
+        const label = event.model === undefined ? event.role : `${event.role} · ${event.model}`;
+        await safeProgress(
+          context,
+          `${aggregateKey}/${event.id}`,
+          event.state,
+          event.phase,
+          terminal ? 1 : 0,
+          1,
+          label,
+        );
+        if (terminal) {
+          await safeProgress(
+            context,
+            aggregateKey,
+            "running",
+            group,
+            settled.size,
+            requests.length,
+          );
+        }
+      });
+    },
+    async complete() {
+      await enqueue(
+        async () =>
+          await safeProgress(
+            context,
+            aggregateKey,
+            "completed",
+            group,
+            requests.length,
+            requests.length,
+          ),
+      );
+    },
+    async fail() {
+      await enqueue(
+        async () =>
+          await safeProgress(
+            context,
+            aggregateKey,
+            context.signal.aborted ? "cancelled" : "failed",
+            group,
+            settled.size,
+            requests.length,
+          ),
+      );
+    },
+  };
+}
+
+async function safeProgress(
+  context: WorkflowActionContext,
+  key: string,
+  status: WorkflowProgressStatus,
   phase: string,
   completed: number,
   total: number,
+  label?: string,
 ): Promise<void> {
-  await context.publishUpdate({
-    type: "progress",
-    key: phase,
-    data: {
-      schema: "pi-workflows.progress.v1",
-      status: completed === total ? "completed" : "running",
-      phase,
-      completed,
-      total,
-      unit: "sessions",
-    },
-  });
+  await context
+    .publishUpdate({
+      type: "progress",
+      key,
+      data: {
+        schema: "pi-workflows.progress.v1",
+        status,
+        phase,
+        completed,
+        total,
+        unit: "sessions",
+        ...(label !== undefined ? { label: label.slice(0, 200) } : {}),
+      },
+    })
+    .catch(() => undefined);
 }
 
 function reviewPrompt(areas: readonly SanityCheckArea[], evidence: ContributionEvidence): string {

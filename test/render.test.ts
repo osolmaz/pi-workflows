@@ -146,6 +146,26 @@ describe("renderRunDetailLines", () => {
     expect(lines).toContain("3 samples · medium confidence");
   });
 
+  it("renders complete hierarchical agent progress", () => {
+    const bundle = makeBundle();
+    bundle.traceEvents = [
+      agentProgressEvent(2, "agents/review", "Review agents", "review", 1, 4),
+      agentProgressEvent(
+        3,
+        "agents/review/necessity",
+        "Necessity · mock/model",
+        "tool: read",
+        0,
+        1,
+      ),
+    ];
+
+    const text = renderRunDetailLines(bundle, size, NOW).map(stripAnsi).join("\n");
+    expect(text).toContain("Review agents  1/4 sessions  review");
+    expect(text).toContain("  Necessity · mock/model  0/1 sessions  tool: read");
+    expect(text).toContain("elapsed 1m");
+  });
+
   it("renders header, nodes, steps, and final output", () => {
     const bundle = makeBundle({
       status: "completed",
@@ -372,6 +392,39 @@ describe("human decision presentation rendering", () => {
     expect(text).not.toContain("do-not-show");
   });
 });
+
+function agentProgressEvent(
+  seq: number,
+  key: string,
+  label: string,
+  phase: string,
+  completed: number,
+  total: number,
+) {
+  return {
+    seq,
+    at: "2026-07-19T00:00:00.000Z",
+    scope: "node" as const,
+    type: "update_published",
+    runId: "run-1",
+    nodeId: "review",
+    attemptId: "attempt-1",
+    payload: {
+      updateId: `agent-${seq}`,
+      type: "progress",
+      key,
+      data: {
+        schema: "pi-workflows.progress.v1",
+        label,
+        status: "running",
+        phase,
+        completed,
+        total,
+        unit: "sessions",
+      },
+    },
+  };
+}
 
 function progressEvent(seq: number, at: string, completed: number) {
   return {

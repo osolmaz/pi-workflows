@@ -270,12 +270,14 @@ export function renderRunDetailLines(
     lines.push("");
     lines.push(ansi.bold("progress"));
     for (const track of progress) {
-      lines.push(fitWidth(formatProgressLine(track.estimate, now), size.width));
+      const depth = track.key.startsWith("agents/") ? track.key.split("/").length - 2 : 0;
+      const indentation = "  ".repeat(Math.max(0, depth));
+      lines.push(fitWidth(`${indentation}${formatProgressLine(track.estimate, now)}`, size.width));
       const latest = track.samples.at(-1);
       lines.push(
         fitWidth(
           ansi.dim(
-            `  ${track.estimate.sampleCount} samples · ${track.estimate.confidence ?? "no"} confidence · updated ${latest?.at ?? "unknown"}`,
+            `${indentation}  ${track.estimate.sampleCount} samples · ${track.estimate.confidence ?? "no"} confidence · updated ${latest?.at ?? "unknown"}`,
           ),
           size.width,
         ),

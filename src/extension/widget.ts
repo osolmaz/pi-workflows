@@ -162,9 +162,11 @@ function progressLines(
       : progressTracksFromRecords(updateHistory, now).map((track) => track.estimate);
   const projected = mergeProgressEstimates(latestProgressEstimates(state, now), measured ?? []);
   const estimates = mergeProgressEstimates(projected, monitorEstimates(state) ?? []);
-  const lines = prioritizeProgressEstimates(estimates).map((estimate) =>
-    formatProgressLine(estimate, now),
-  );
+  const lines = prioritizeWidgetProgress(prioritizeProgressEstimates(estimates)).map((estimate) => {
+    const indentation =
+      estimate.key.startsWith("agents/") && estimate.key.split("/").length > 2 ? "  " : "";
+    return `${indentation}${formatProgressLine(estimate, now)}`;
+  });
   const schedule = (state.updates ?? []).find(
     (record) => record.type === "monitor.schedule" && record.key === "next-check",
   );
@@ -178,6 +180,24 @@ function progressLines(
     }
   }
   return lines;
+}
+
+function prioritizeWidgetProgress(estimates: ProgressEstimate[]): ProgressEstimate[] {
+  const weight = (estimate: ProgressEstimate) => {
+    if (!estimate.key.startsWith("agents/")) return 0;
+    const child = estimate.key.split("/").length > 2;
+    if (!child) return -4;
+    if (estimate.data.status === "failed" || estimate.data.status === "blocked") return -3;
+    if (
+      estimate.data.status === "running" ||
+      estimate.data.status === "pending" ||
+      estimate.data.status === "waiting"
+    ) {
+      return -2;
+    }
+    return 2;
+  };
+  return [...estimates].sort((left, right) => weight(left) - weight(right));
 }
 
 function monitorEstimates(state: WorkflowRunState): ProgressEstimate[] | undefined {

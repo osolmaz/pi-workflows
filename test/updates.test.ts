@@ -271,6 +271,27 @@ describe("progress estimation", () => {
     expect(line).not.toContain("\n");
   });
 
+  it("shows a safe phase and elapsed time from existing samples", () => {
+    const estimate = estimateProgress(
+      "agents/review/necessity",
+      [
+        {
+          at: "2026-08-16T10:00:00.000Z",
+          data: { ...progress(0, 1), label: "Necessity · mock/model", phase: "starting" },
+        },
+        {
+          at: "2026-08-16T10:00:05.000Z",
+          data: { ...progress(0, 1), label: "Necessity · mock/model", phase: "tool: read" },
+        },
+      ],
+      new Date("2026-08-16T10:00:08.000Z"),
+    );
+    expect(estimate.elapsedMs).toBe(8_000);
+    expect(formatProgressLine(estimate, new Date("2026-08-16T10:00:08.000Z"))).toBe(
+      "Necessity · mock/model  0/1 items  tool: read  elapsed 8s",
+    );
+  });
+
   it("uses recent measured intervals and shows an ETA", () => {
     const estimate = estimateProgress(
       "overall",
