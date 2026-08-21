@@ -9,6 +9,7 @@ import sanityCheckWorkflow, {
   buildVerificationRequest,
   collectContributionEvidence,
   formatSanityCheckReport,
+  parseAgentJsonOutput,
   parseReviewOutput,
   parseSanityCheckInput,
   parseSanityCheckResult,
@@ -72,6 +73,19 @@ function finalResult(verdict: SanityCheckVerdict) {
 }
 
 describe("sanity-check workflow", () => {
+  it("bounds malformed agent output errors without retaining model text", () => {
+    const privateOutput = `PRIVATE_REPOSITORY_TEXT_${"x".repeat(100_000)}`;
+    let error: unknown;
+    try {
+      parseAgentJsonOutput(privateOutput, "necessity");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Sanity Check agent necessity returned invalid JSON");
+    expect((error as Error).message).not.toContain("PRIVATE_REPOSITORY_TEXT");
+  });
+
   it("defaults to serial mode and validates input", () => {
     expect(parseSanityCheckInput(undefined)).toEqual({ mode: "serial" });
     expect(parseSanityCheckInput(null)).toEqual({ mode: "serial" });

@@ -734,7 +734,11 @@ describe("Pi agent groups", () => {
       JSON.stringify({ defaultProvider: "mock", defaultModel: "mock-model" }),
       "utf8",
     );
+    await fs.writeFile(path.join(agentDir, "models-store.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n", "utf8");
     const settingsBefore = await fs.readFile(path.join(agentDir, "settings.json"), "utf8");
+    const modelsStoreBefore = await fs.readFile(path.join(agentDir, "models-store.json"), "utf8");
+    const authBefore = await fs.readFile(path.join(agentDir, "auth.json"), "utf8");
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.stubEnv("HOME", agentDir);
     try {
@@ -763,6 +767,10 @@ describe("Pi agent groups", () => {
       expect(JSON.stringify(mock.requests)).not.toContain("PRIVATE_CONTEXT_MARKER");
       await expect(fs.stat(path.join(agentDir, "sessions"))).rejects.toThrow();
       expect(await fs.readFile(path.join(agentDir, "settings.json"), "utf8")).toBe(settingsBefore);
+      expect(await fs.readFile(path.join(agentDir, "models-store.json"), "utf8")).toBe(
+        modelsStoreBefore,
+      );
+      expect(await fs.readFile(path.join(agentDir, "auth.json"), "utf8")).toBe(authBefore);
     } finally {
       vi.unstubAllEnvs();
       await mock.close();

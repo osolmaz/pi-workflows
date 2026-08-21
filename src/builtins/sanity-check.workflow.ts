@@ -351,7 +351,7 @@ async function runReviews(context: WorkflowActionContext): Promise<SanityCheckRe
     });
     const reviews = results.map((result, index) =>
       parseReviewOutput(
-        extractJsonValue(result.text),
+        parseAgentJsonOutput(result.text, result.id),
         config.mode === "serial" ? reviewAreas : [requests[index]!.id as SanityCheckArea],
       ),
     );
@@ -374,12 +374,20 @@ async function verifyReviews(context: WorkflowActionContext): Promise<SanityChec
       signal: context.signal,
       onLifecycle: progress.onLifecycle,
     });
-    const parsed = parseSanityCheckResult(extractJsonValue(result!.text));
+    const parsed = parseSanityCheckResult(parseAgentJsonOutput(result!.text, result!.id));
     await progress.complete();
     return parsed;
   } catch (error) {
     await progress.fail();
     throw error;
+  }
+}
+
+export function parseAgentJsonOutput(text: string, agentId: string): unknown {
+  try {
+    return extractJsonValue(text);
+  } catch {
+    throw new Error(`Sanity Check agent ${agentId} returned invalid JSON`);
   }
 }
 

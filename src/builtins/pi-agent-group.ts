@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -99,7 +101,13 @@ export async function runPiAgentGroup(
   if (options.signal.aborted) throw cancellationError("group", options.signal.reason);
 
   const modelRuntime =
-    options.sessionFactory === undefined ? await ModelRuntime.create() : undefined;
+    options.sessionFactory === undefined
+      ? await ModelRuntime.create({
+          allowModelNetwork: false,
+          credentials: await createInMemoryCredentialStore(options.signal),
+          modelsStore: createInMemoryModelsStore(),
+        })
+      : undefined;
   if (options.signal.aborted) throw cancellationError("group", options.signal.reason);
   const sessionFactory = options.sessionFactory ?? createSdkSession;
   const internalAbort = new AbortController();
@@ -142,6 +150,128 @@ export async function runPiAgentGroup(
     throw primary.error;
   }
   return results as PiAgentResult[];
+}
+
+type ModelRuntimeCreateOptions = NonNullable<Parameters<typeof ModelRuntime.create>[0]>;
+type CredentialStore = NonNullable<ModelRuntimeCreateOptions["credentials"]>;
+type Credential = Awaited<ReturnType<CredentialStore["read"]>>;
+type StoredCredential = Exclude<Credential, undefined>;
+type ModelStore = NonNullable<ModelRuntimeCreateOptions["modelsStore"]>;
+type ModelStoreEntry = Awaited<ReturnType<ModelStore["read"]>>;
+
+async function createInMemoryCredentialStore(signal: AbortSignal): Promise<CredentialStore> {
+  signal.throwIfAborted();
+  const authPath = path.join(getAgentDir(), "auth.json");
+  let source: unknown = {};
+  try {
+    source = JSON.parse(await fs.readFile(authPath, "utf8"));
+  } catch (error) {
+    if (!isMissingFile(error)) {
+      throw new Error("Could not load Pi credentials for isolated agents");
+    }
+  }
+  const entries = parseCredentialEntries(source);
+  const pending = new Map<string, Promise<Credential>>();
+  const enqueue = (
+    providerId: string,
+    operation: () => Promise<Credential>,
+  ): Promise<Credential> => {
+    const work = (pending.get(providerId) ?? Promise.resolve(undefined))
+      .catch(() => undefined)
+      .then(operation);
+    pending.set(providerId, work);
+    const release = () => {
+      if (pending.get(providerId) === work) pending.delete(providerId);
+    };
+    void work.then(release, release);
+    return work;
+  };
+  return {
+    async read(providerId) {
+      signal.throwIfAborted();
+      return cloneCredential(entries.get(providerId));
+    },
+    async list() {
+      signal.throwIfAborted();
+      return [...entries].map(([providerId, credential]) => ({
+        providerId,
+        type: credential.type,
+      }));
+    },
+    async modify(providerId, update) {
+      return await enqueue(providerId, async () => {
+        signal.throwIfAborted();
+        const current = entries.get(providerId);
+        const next = await update(cloneCredential(current));
+        signal.throwIfAborted();
+        if (next !== undefined) entries.set(providerId, cloneCredential(next)!);
+        return cloneCredential(entries.get(providerId));
+      });
+    },
+    async delete(providerId) {
+      await enqueue(providerId, async () => {
+        signal.throwIfAborted();
+        entries.delete(providerId);
+        return undefined;
+      });
+    },
+  };
+}
+
+function parseCredentialEntries(source: unknown): Map<string, StoredCredential> {
+  if (source === null || typeof source !== "object" || Array.isArray(source)) {
+    throw new Error("Could not load Pi credentials for isolated agents");
+  }
+  const entries = new Map<string, StoredCredential>();
+  for (const [providerId, value] of Object.entries(source)) {
+    if (!isStoredCredential(value)) {
+      throw new Error("Could not load Pi credentials for isolated agents");
+    }
+    entries.set(providerId, cloneCredential(value)!);
+  }
+  return entries;
+}
+
+function isStoredCredential(value: unknown): value is StoredCredential {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const credential = value as Record<string, unknown>;
+  if (credential.type === "api_key") {
+    return credential.key === undefined || typeof credential.key === "string";
+  }
+  return (
+    credential.type === "oauth" &&
+    typeof credential.refresh === "string" &&
+    typeof credential.access === "string" &&
+    typeof credential.expires === "number"
+  );
+}
+
+function cloneCredential(value: StoredCredential | undefined): Credential {
+  return value === undefined ? undefined : structuredClone(value);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+function createInMemoryModelsStore(): ModelStore {
+  const entries = new Map<string, ModelStoreEntry>();
+  return {
+    async read(providerId) {
+      return entries.get(providerId);
+    },
+    async write(providerId, entry) {
+      entries.set(providerId, entry);
+    },
+    async delete(providerId) {
+      entries.delete(providerId);
+    },
+  };
 }
 
 type RunOneOptions = PiAgentGroupOptions & {
