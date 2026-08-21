@@ -1787,7 +1787,7 @@ describe("built-in autoimplement", () => {
     });
   });
 
-  it("keeps a fallback blocked result terminal and rejects stale review state", async () => {
+  it("keeps a fallback blocked result terminal and rejects stale forward routes", async () => {
     const executor = new ScriptedExecutor()
       .respond("implement", { hang: true })
       .respond("timeoutFallback", {
@@ -1824,20 +1824,47 @@ describe("built-in autoimplement", () => {
         fallback.validate?.(
           {
             route: "review",
-            reason: "A prior P2 publication exists.",
+            reason: "A prior publication exists.",
             evidence: ["The old PR is open."],
           },
           {
             input: { task: "demo", plan: {} },
-            outputs: { verifyP2: published("old-head") },
+            outputs: { publish: published("old-head") },
             results: {},
             state: {
-              steps: [{ nodeId: "publish", outcome: "timed_out" }],
+              steps: [
+                { nodeId: "publish", outcome: "ok", output: published("old-head") },
+                { nodeId: "implement", outcome: "timed_out", output: null },
+              ],
             },
           } as never,
         ),
       ),
-    ).rejects.toThrow("must retry a timed-out publish before review");
+    ).rejects.toThrow("route review is not safe after timed-out implement");
+
+    await expect(
+      Promise.resolve().then(() =>
+        fallback.validate?.(
+          {
+            route: "review",
+            reason: "The old PR can be reviewed.",
+            evidence: ["The old PR is open."],
+          },
+          {
+            input: { task: "demo", plan: {} },
+            outputs: { publish: published("old-head") },
+            results: {},
+            state: {
+              steps: [
+                { nodeId: "publish", outcome: "ok", output: published("old-head") },
+                { nodeId: "implement", outcome: "ok", output: { status: "implemented" } },
+                { nodeId: "inspectComments", outcome: "timed_out", output: null },
+              ],
+            },
+          } as never,
+        ),
+      ),
+    ).rejects.toThrow("without a current published head");
   });
 
   it("keeps failed implementation and cancellation out of timeout fallback", async () => {

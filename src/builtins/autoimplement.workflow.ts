@@ -139,8 +139,24 @@ const TIMEOUT_FALLBACK_SOURCES = [
   "finalizeDelivery",
 ] as const;
 
+const WORK_ATTEMPT_NODES = ["implement", "fix", "addressP2"] as const;
+
 type TimeoutFallbackSource = (typeof TIMEOUT_FALLBACK_SOURCES)[number];
 type TimeoutFallbackRoute = "retry" | "verify" | "review" | "ci" | "deliver" | "replan" | "blocked";
+
+const TIMEOUT_FALLBACK_ROUTES: Record<TimeoutFallbackSource, readonly TimeoutFallbackRoute[]> = {
+  implement: ["retry", "replan", "blocked"],
+  planVerification: ["retry", "verify", "replan", "blocked"],
+  verify: ["retry", "verify", "replan", "blocked"],
+  fix: ["retry", "replan", "blocked"],
+  publish: ["retry", "replan", "blocked"],
+  addressP2: ["retry", "replan", "blocked"],
+  verifyP2: ["retry", "replan", "blocked"],
+  inspectComments: ["retry", "review", "ci", "replan", "blocked"],
+  inspectCi: ["retry", "ci", "deliver", "replan", "blocked"],
+  opportunisticTest: ["retry", "ci", "deliver", "replan", "blocked"],
+  finalizeDelivery: ["retry", "deliver", "replan", "blocked"],
+};
 
 type TimeoutFallbackResult = {
   route: TimeoutFallbackRoute;
@@ -194,8 +210,38 @@ function latestTimedOutStep(context: WorkflowNodeContext) {
   throw new Error("No supported timed-out Autoimplement step is available");
 }
 
-function hasAcceptedOutput(context: WorkflowNodeContext, nodeIds: string[]): boolean {
-  return nodeIds.some((nodeId) => context.outputs[nodeId] !== undefined);
+function latestStepIndex(
+  context: WorkflowNodeContext,
+  predicate: (step: WorkflowNodeContext["state"]["steps"][number]) => boolean,
+): number {
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step && predicate(step)) return index;
+  }
+  return -1;
+}
+
+function latestWorkAttemptIndex(context: WorkflowNodeContext): number {
+  return latestStepIndex(context, (step) =>
+    (WORK_ATTEMPT_NODES as readonly string[]).includes(step.nodeId),
+  );
+}
+
+function hasCurrentAcceptedWork(context: WorkflowNodeContext): boolean {
+  const index = latestWorkAttemptIndex(context);
+  return index >= 0 && context.state.steps[index]?.outcome === "ok";
+}
+
+function hasCurrentPublication(context: WorkflowNodeContext): boolean {
+  const workIndex = latestWorkAttemptIndex(context);
+  const publicationIndex = latestStepIndex(context, (step) => {
+    if (step.outcome !== "ok") return false;
+    if (step.nodeId === "publish") return true;
+    if (step.nodeId !== "verifyP2") return false;
+    const output = step.output as { passed?: unknown } | null;
+    return output?.passed === true;
+  });
+  return publicationIndex > workIndex;
 }
 
 function parseTimeoutFallback(value: unknown, context: WorkflowNodeContext): TimeoutFallbackResult {
@@ -224,16 +270,17 @@ function parseTimeoutFallback(value: unknown, context: WorkflowNodeContext): Tim
   }
 
   const timedOut = latestTimedOutStep(context);
-  if (route === "verify" && !hasAcceptedOutput(context, ["implement"])) {
-    throw new Error("timeout fallback cannot route to verification without implementation output");
+  const source = timedOut.nodeId as TimeoutFallbackSource;
+  if (!TIMEOUT_FALLBACK_ROUTES[source].includes(route)) {
+    throw new Error(`timeout fallback route ${route} is not safe after timed-out ${source}`);
   }
-  if (route === "review") {
-    if (timedOut.nodeId === "publish") {
-      throw new Error("timeout fallback must retry a timed-out publish before review");
-    }
-    if (!hasAcceptedOutput(context, ["publish", "verifyP2"])) {
-      throw new Error("timeout fallback cannot route to review without publication output");
-    }
+  if (route === "verify" && !hasCurrentAcceptedWork(context)) {
+    throw new Error("timeout fallback cannot route to verification without current accepted work");
+  }
+  if (["review", "ci", "deliver"].includes(route) && !hasCurrentPublication(context)) {
+    throw new Error(
+      "timeout fallback cannot move past publication without a current published head",
+    );
   }
   if (route === "ci") {
     const comments = context.outputs.inspectComments as { route?: unknown } | undefined;
@@ -1289,6 +1336,7 @@ export const autoimplementWorkflow = defineWorkflow({
           "This is a read-only fallback step. Inspect state, but do not edit files, run mutating commands, commit, push, open or update a pull request, post comments, merge, deploy, or release.",
           "Inspect the current repository worktree, branch, diff, and commits. Inspect the remote branch, pull request, review, CI, merge, and final report when they exist and affect the next route.",
           "Do not assume that the timed-out step failed or completed. Use accepted workflow outputs and durable repository or pull-request state.",
+          "Before any forward route, confirm that its accepted output belongs to the current work attempt and that observed local and remote heads match the accepted publication. Otherwise retry, replan, or block.",
           "Choose retry only when the timed-out stage must run again. Choose verify when accepted implementation output exists and verification is next. Choose review when accepted publication output exists. Choose ci only after comment inspection routed to CI. Choose deliver only after CI is green or classified unrelated. Choose replan when evidence invalidates the approved plan. Choose blocked only when no safe route exists.",
           "Do not skip required implementation, verification, review, CI, authorization, or delivery checks.",
           `Task: ${request.task}`,
