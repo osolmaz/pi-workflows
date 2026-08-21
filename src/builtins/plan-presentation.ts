@@ -1,6 +1,6 @@
 import {
-  legacyDecisionPresentation,
   normalizeDecisionPresentation,
+  valueDecisionPresentation,
 } from "../workflows/decision-presentation.js";
 import type { DecisionPresentation } from "../workflows/types.js";
 
@@ -10,7 +10,7 @@ export function presentPlan(input: {
   planDigest: string;
   revision: number;
 }): DecisionPresentation {
-  const plan = legacyDecisionPresentation(input.plan);
+  const plan = valueDecisionPresentation(input.plan);
   const summary =
     readableSummary(planSummary(input.plan)) ??
     readableSummary(`Review the implementation plan for ${input.task}.`)!;

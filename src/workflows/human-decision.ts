@@ -196,56 +196,32 @@ export function createHumanDecisionRequest(input: {
     ...(expiresAt !== undefined ? { expiresAt } : {}),
     ...(defaultResponse !== undefined ? { defaultResponse } : {}),
   } as const;
-  const presented =
-    Object.hasOwn(input.prompt, "subject") || Object.hasOwn(input.prompt, "presentation");
-  if (presented) {
-    validatePresentedText(title, "Human decision title");
-    validatePresentedChoices(input.contract.choices);
-    if (Object.hasOwn(input.prompt, "body")) {
-      throw new Error("Presented human decision requests must not contain a legacy body");
-    }
-    if (!Object.hasOwn(input.prompt, "subject") || !Object.hasOwn(input.prompt, "presentation")) {
-      throw new Error("Presented human decision requests require subject and presentation");
-    }
-    const prompt = input.prompt as Extract<HumanDecisionPrompt, { subject: unknown }>;
-    assertJsonValue(prompt.subject, "Human decision subject");
-    const presentation = normalizeDecisionPresentation(prompt.presentation);
-    const revision = prompt.revision ?? 1;
-    if (!Number.isInteger(revision) || revision < 1) {
-      throw new Error("Human decision revision must be a positive integer");
-    }
-    const basis = {
-      schema: "pi-workflows.human-decision-request.v2" as const,
-      ...common,
-      subject: prompt.subject,
-      presentation,
-      revision,
-    };
-    const subjectDigest = digestCanonical(prompt.subject);
-    const presentationDigest = digestCanonical(presentation);
-    const requestDigest = digestCanonical(basis);
-    const decisionId = decisionIdFor(input, requestDigest);
-    return {
-      ...basis,
-      decisionId,
-      requestDigest,
-      subjectDigest,
-      presentationDigest,
-      createdAt,
-    };
+  validatePresentedText(title, "Human decision title");
+  validatePresentedChoices(input.contract.choices);
+  const prompt = input.prompt;
+  assertJsonValue(prompt.subject, "Human decision subject");
+  const presentation = normalizeDecisionPresentation(prompt.presentation);
+  const revision = prompt.revision ?? 1;
+  if (!Number.isInteger(revision) || revision < 1) {
+    throw new Error("Human decision revision must be a positive integer");
   }
-  const prompt = input.prompt as Extract<HumanDecisionPrompt, { body: unknown }>;
-  assertJsonValue(prompt.body, "Human decision body");
   const basis = {
     schema: "pi-workflows.human-decision-request.v1" as const,
     ...common,
-    body: prompt.body,
+    subject: prompt.subject,
+    presentation,
+    revision,
   };
-  const requestDigest = digest(basis);
+  const subjectDigest = digestCanonical(prompt.subject);
+  const presentationDigest = digestCanonical(presentation);
+  const requestDigest = digestCanonical(basis);
+  const decisionId = decisionIdFor(input, requestDigest);
   return {
     ...basis,
-    decisionId: decisionIdFor(input, requestDigest),
+    decisionId,
     requestDigest,
+    subjectDigest,
+    presentationDigest,
     createdAt,
   };
 }
@@ -347,26 +323,57 @@ type HumanDecisionResolution =
   | {
       schema: "pi-workflows.human-decision-resolution.v1";
       outcome: "accepted";
-      decision: Extract<
-        ResolvedHumanDecision,
-        { schema: "pi-workflows.human-decision-accepted.v1" }
-      >;
+      decision: ResolvedHumanDecision;
     }
   | {
-      schema: "pi-workflows.human-decision-resolution.v2";
-      outcome: "accepted";
-      decision: Extract<
-        ResolvedHumanDecision,
-        { schema: "pi-workflows.human-decision-accepted.v2" }
-      >;
-    }
-  | {
-      schema:
-        | "pi-workflows.human-decision-resolution.v1"
-        | "pi-workflows.human-decision-resolution.v2";
+      schema: "pi-workflows.human-decision-resolution.v1";
       outcome: "cancelled";
       cancellation: HumanDecisionCancellationRecord;
     };
+
+const INCOMPATIBLE_HUMAN_DECISION_STATE =
+  "Human decision state uses an incompatible alpha contract; reset the affected workflow run and decision state.";
+
+function requireCurrentDecision(value: unknown): ResolvedHumanDecision {
+  const decision = requireRecord(value, "Resolved human decision");
+  if (
+    decision.schema !== "pi-workflows.human-decision-accepted.v1" ||
+    !Object.hasOwn(decision, "subjectDigest") ||
+    !Object.hasOwn(decision, "presentationDigest") ||
+    !Object.hasOwn(decision, "revision")
+  ) {
+    throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
+  }
+  return value as ResolvedHumanDecision;
+}
+
+function requireCurrentResolution(value: unknown): HumanDecisionResolution | null {
+  if (value === null) return null;
+  const resolution = requireRecord(value, "Human decision resolution");
+  if (resolution.schema !== "pi-workflows.human-decision-resolution.v1") {
+    throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
+  }
+  if (resolution.outcome === "accepted") {
+    return {
+      ...resolution,
+      decision: requireCurrentDecision(resolution.decision),
+    } as HumanDecisionResolution;
+  }
+  if (resolution.outcome === "cancelled") return value as HumanDecisionResolution;
+  throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
+}
+
+function requireCurrentDelivery(value: unknown): HumanDecisionDeliveryRecord {
+  const delivery = requireRecord(value, "Human decision delivery");
+  if (
+    delivery.schema !== "pi-workflows.human-decision-delivery.v1" ||
+    !Object.hasOwn(delivery, "presentationDigest") ||
+    !Object.hasOwn(delivery, "phase")
+  ) {
+    throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
+  }
+  return value as HumanDecisionDeliveryRecord;
+}
 
 export class HumanDecisionStore {
   readonly root: string;
@@ -470,25 +477,19 @@ export class HumanDecisionStore {
       acceptedAt: attemptedAt,
       answerDigest: digest({ response, source: normalized.source }),
     };
-    const decision: AcceptedHumanDecision =
-      request.schema === "pi-workflows.human-decision-request.v2"
-        ? {
-            schema: "pi-workflows.human-decision-accepted.v2",
-            ...commonDecision,
-            subjectDigest: request.subjectDigest,
-            presentationDigest: request.presentationDigest,
-            revision: request.revision,
-          }
-        : { schema: "pi-workflows.human-decision-accepted.v1", ...commonDecision };
+    const decision: AcceptedHumanDecision = {
+      schema: "pi-workflows.human-decision-accepted.v1",
+      ...commonDecision,
+      subjectDigest: request.subjectDigest,
+      presentationDigest: request.presentationDigest,
+      revision: request.revision,
+    };
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution = {
-      schema:
-        decision.schema === "pi-workflows.human-decision-accepted.v2"
-          ? ("pi-workflows.human-decision-resolution.v2" as const)
-          : ("pi-workflows.human-decision-resolution.v1" as const),
-      outcome: "accepted" as const,
+    const resolution: HumanDecisionResolution = {
+      schema: "pi-workflows.human-decision-resolution.v1",
+      outcome: "accepted",
       decision,
-    } as HumanDecisionResolution;
+    };
     const result = await writeImmutableJson(resolutionPath, resolution, false);
     const winner =
       result === "created"
@@ -546,25 +547,19 @@ export class HumanDecisionStore {
         response,
       }),
     };
-    const decision: ResolvedHumanDecision =
-      request.schema === "pi-workflows.human-decision-request.v2"
-        ? {
-            schema: "pi-workflows.human-decision-accepted.v2",
-            ...commonDecision,
-            subjectDigest: request.subjectDigest,
-            presentationDigest: request.presentationDigest,
-            revision: request.revision,
-          }
-        : { schema: "pi-workflows.human-decision-accepted.v1", ...commonDecision };
+    const decision: ResolvedHumanDecision = {
+      schema: "pi-workflows.human-decision-accepted.v1",
+      ...commonDecision,
+      subjectDigest: request.subjectDigest,
+      presentationDigest: request.presentationDigest,
+      revision: request.revision,
+    };
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution = {
-      schema:
-        decision.schema === "pi-workflows.human-decision-accepted.v2"
-          ? ("pi-workflows.human-decision-resolution.v2" as const)
-          : ("pi-workflows.human-decision-resolution.v1" as const),
-      outcome: "accepted" as const,
+    const resolution: HumanDecisionResolution = {
+      schema: "pi-workflows.human-decision-resolution.v1",
+      outcome: "accepted",
       decision,
-    } as HumanDecisionResolution;
+    };
     const result = await writeImmutableJson(resolutionPath, resolution, false);
     const winner =
       result === "created"
@@ -595,7 +590,7 @@ export class HumanDecisionStore {
   ): Promise<HumanDecisionDeliveryRecord[]> {
     const safeChannel = requireSimpleId(channel, "Human decision channel");
     const directory = path.join(this.decisionDir(decisionId), "deliveries", safeChannel);
-    return (await readJsonDirectory(directory)) as HumanDecisionDeliveryRecord[];
+    return (await readJsonDirectory(directory)).map(requireCurrentDelivery);
   }
 
   async recordSettlement(
@@ -643,10 +638,7 @@ export class HumanDecisionStore {
     };
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
     const resolution: HumanDecisionResolution = {
-      schema:
-        request.schema === "pi-workflows.human-decision-request.v2"
-          ? "pi-workflows.human-decision-resolution.v2"
-          : "pi-workflows.human-decision-resolution.v1",
+      schema: "pi-workflows.human-decision-resolution.v1",
       outcome: "cancelled",
       cancellation: record,
     };
@@ -676,9 +668,9 @@ export class HumanDecisionStore {
       path.join(this.decisionDir(decisionId), "cancelled.json"),
     )) as HumanDecisionCancellationRecord | null;
     if (stored !== null) return stored;
-    const resolution = (await readJson(
-      path.join(this.decisionDir(decisionId), "resolution.json"),
-    )) as HumanDecisionResolution | null;
+    const resolution = requireCurrentResolution(
+      await readJson(path.join(this.decisionDir(decisionId), "resolution.json")),
+    );
     if (resolution?.outcome !== "cancelled") return null;
     await writeImmutableJson(
       path.join(this.decisionDir(decisionId), "cancelled.json"),
@@ -690,13 +682,11 @@ export class HumanDecisionStore {
   async readResolved(decisionId: string): Promise<ResolvedHumanDecision | null> {
     const cancellation = await readJson(path.join(this.decisionDir(decisionId), "cancelled.json"));
     if (cancellation !== null) return null;
-    const stored = (await readJson(
-      path.join(this.decisionDir(decisionId), "accepted.json"),
-    )) as ResolvedHumanDecision | null;
-    if (stored !== null) return stored;
-    const resolution = (await readJson(
-      path.join(this.decisionDir(decisionId), "resolution.json"),
-    )) as HumanDecisionResolution | null;
+    const stored = await readJson(path.join(this.decisionDir(decisionId), "accepted.json"));
+    if (stored !== null) return requireCurrentDecision(stored);
+    const resolution = requireCurrentResolution(
+      await readJson(path.join(this.decisionDir(decisionId), "resolution.json")),
+    );
     if (resolution?.outcome !== "accepted") return null;
     await writeImmutableJson(
       path.join(this.decisionDir(decisionId), "accepted.json"),

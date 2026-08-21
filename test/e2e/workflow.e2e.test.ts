@@ -167,7 +167,7 @@ export default defineWorkflow({
     approve: humanDecision({
       audience: "operator",
       choices,
-      request: ({ input }) => ({ title: "Approve", body: input }),
+      request: ({ input }) => ({ title: "Approve", subject: input, presentation: { schema: "pi-workflows.decision-presentation.v1", summary: "Review this decision.", blocks: [] } }),
     }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
     stopped: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
@@ -192,7 +192,7 @@ export default defineWorkflow({
       audience: "operator",
       choices,
       onTimeout: { afterMs: 50, response: { choice: "continue" } },
-      request: ({ input }) => ({ title: "Approve", body: input }),
+      request: ({ input }) => ({ title: "Approve", subject: input, presentation: { schema: "pi-workflows.decision-presentation.v1", summary: "Review this decision.", blocks: [] } }),
     }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
   },
@@ -1561,7 +1561,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "8" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "9" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

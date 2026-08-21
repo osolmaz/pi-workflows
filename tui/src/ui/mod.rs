@@ -2118,7 +2118,7 @@ fn push_human_decision_presentation(
 ) -> bool {
     let decoded = resolved_detail_value(value, bundle_dir, remote_artifacts);
     if decoded.get("schema").and_then(Value::as_str)
-        != Some("pi-workflows.human-decision-request.v2")
+        != Some("pi-workflows.human-decision-request.v1")
     {
         return false;
     }
@@ -3085,7 +3085,7 @@ mod tests {
     #[test]
     fn v2_decision_inspector_shows_presentation_without_subject() {
         let request = json!({
-            "schema": "pi-workflows.human-decision-request.v2",
+            "schema": "pi-workflows.human-decision-request.v1",
             "title": "Approve readable plan",
             "subject": { "hiddenMachineValue": "do-not-show" },
             "subjectDigest": format!("sha256:{}", "a".repeat(64)),

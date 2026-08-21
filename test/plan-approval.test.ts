@@ -86,8 +86,8 @@ describe("plan-approval workflow", () => {
       { runId: "approval-presentation" },
     );
     const request = parent.state.finalOutput as HumanDecisionRequest;
-    expect(request.schema).toBe("pi-workflows.human-decision-request.v2");
-    if (request.schema !== "pi-workflows.human-decision-request.v2") return;
+    expect(request.schema).toBe("pi-workflows.human-decision-request.v1");
+    if (request.schema !== "pi-workflows.human-decision-request.v1") return;
     expect(request.subject).toMatchObject({
       task: "implement readable decisions",
       planDigest,
@@ -193,7 +193,7 @@ describe("plan-approval workflow", () => {
       resolution: {
         provenance: "human",
         decision: {
-          schema: "pi-workflows.human-decision-receipt.v2",
+          schema: "pi-workflows.human-decision-receipt.v1",
           provenance: "human",
           response: { choice: "continue" },
         },

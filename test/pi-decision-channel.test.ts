@@ -12,7 +12,7 @@ import {
   defineHumanChoices,
   textInput,
 } from "../src/workflows/human-decision.js";
-import { makeTempDir } from "./helpers.js";
+import { decisionPrompt, makeTempDir } from "./helpers.js";
 
 function decisionUi(
   choice: string | undefined,
@@ -45,7 +45,7 @@ function request() {
           }),
         }),
       },
-      prompt: { title: "Approve", body: {} },
+      prompt: decisionPrompt(),
       createdAt: "2026-08-19T00:00:00.000Z",
     }),
   );
@@ -167,7 +167,7 @@ describe("PiDecisionChannel", () => {
     await channel.deliver(request());
     const rendered = lines.join("\n");
     expect(rendered).toContain("Approve");
-    expect(rendered).toContain("Review the decision details below.");
+    expect(rendered).toContain("Review this decision.");
     expect(rendered).toContain("Decision");
     expect(rendered).toContain("Continue");
     expect(answers[0]?.response).toEqual({ choice: "continue" });
@@ -286,6 +286,9 @@ describe("PiDecisionChannel", () => {
       provenance: "human" as const,
       decisionId: decision.decisionId,
       requestDigest: decision.requestDigest,
+      subjectDigest: `sha256:${"b".repeat(64)}`,
+      presentationDigest: decision.presentationDigest,
+      revision: decision.revision,
       response: { choice: "continue" },
       source: { channel: "telegram:approval", actorId: "person", eventId: "event" },
       idempotencyKey: "event",

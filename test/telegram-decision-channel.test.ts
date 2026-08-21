@@ -19,7 +19,7 @@ import {
   defineHumanChoices,
   textInput,
 } from "../src/workflows/human-decision.js";
-import { makeTempDir } from "./helpers.js";
+import { decisionPrompt, makeTempDir } from "./helpers.js";
 
 function request() {
   return humanDecisionChannelRequest(
@@ -38,7 +38,7 @@ function request() {
           }),
         }),
       },
-      prompt: { title: "Approve", body: { plan: "a" } },
+      prompt: decisionPrompt({ plan: "a" }),
       createdAt: "2026-08-19T00:00:00.000Z",
     }),
   );
@@ -207,7 +207,7 @@ describe("TelegramDecisionChannel", () => {
     expect(
       records.filter(
         (record) =>
-          record.schema === "pi-workflows.human-decision-delivery.v2" &&
+          record.schema === "pi-workflows.human-decision-delivery.v1" &&
           record.phase === "part" &&
           record.state === "confirmed",
       ),
@@ -504,6 +504,9 @@ describe("TelegramDecisionChannel", () => {
       provenance: "human" as const,
       decisionId: decision.decisionId,
       requestDigest: decision.requestDigest,
+      subjectDigest: `sha256:${"b".repeat(64)}`,
+      presentationDigest: decision.presentationDigest,
+      revision: decision.revision,
       response: { choice: "continue" },
       source: { channel: "pi", actorId: "person", eventId: "event" },
       idempotencyKey: "event",
@@ -660,9 +663,15 @@ describe("TelegramDecisionChannel", () => {
       attemptId: "attempt-before-crash",
       decisionId: decision.decisionId,
       requestDigest: decision.requestDigest,
+      presentationDigest: decision.presentationDigest,
       channel: "telegram:approval",
+      phase: "part",
       state: "intent",
       createdAt: "2026-08-19T00:00:00.000Z",
+      recipientIndex: 1,
+      partIndex: 1,
+      partCount: 1,
+      contentDigest: `sha256:${"c".repeat(64)}`,
     });
     let sends = 0;
     const fetchFn: TelegramFetch = async () => {

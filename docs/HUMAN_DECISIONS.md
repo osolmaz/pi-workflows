@@ -124,9 +124,7 @@ When the engine reaches the node, it:
 4. asks the configured channels to deliver it; and
 5. parks the run in `waiting` state.
 
-When a valid answer is accepted, the continuation keeps the workflow's original input. The human answer becomes the checkpoint node's output in the continuation. Existing checkpoints keep their current behavior, where `/workflow answer` supplies the continuation input.
-
-This distinction preserves old workflow definitions and run bundles.
+When a valid answer is accepted, the continuation keeps the workflow's original input. The human answer becomes the checkpoint node's output in the continuation. Ordinary checkpoints keep their current behavior, where `/workflow answer` supplies the continuation input.
 
 ## Request and response contracts
 
@@ -147,7 +145,7 @@ A new decision request contains:
 
 The presentation is an explicit display allowlist. A channel does not receive the subject and cannot infer operator text from it. The request digest binds the subject, visible presentation, title, revision, choices, input prompts, deadline, and automatic response. Each choice has a stable ID and may have no input or one validated text input contract.
 
-The former `body` form remains available for existing workflow definitions. It creates a v1 request and uses a deterministic readable compatibility formatter. Oversized historical bodies receive a bounded readable prefix and an explicit omission notice with the full body digest and size. V1 request bytes and digests do not change.
+Human decisions use only `pi-workflows.human-decision-request.v1`. The former `body` request and all human-decision `v2` records are invalid. This is an alpha hard cutover: old waiting runs and decision state must be reset rather than migrated or reinterpreted.
 
 A submitted response contains:
 

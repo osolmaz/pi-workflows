@@ -1,8 +1,8 @@
 # Human decision presentations
 
-This contract is implemented. New human decision requests separate their canonical
-subject from the complete readable message shown to an operator. Historical requests
-that use `body` remain compatible through a deterministic readable formatter.
+This contract is implemented. Human decision requests separate their canonical
+subject from the complete readable message shown to an operator. Human decisions use
+one v1 contract with no legacy body form or parallel schema version.
 The implementation plan is in
 [the human decision presentations plan](plans/2026-08-19-human-decision-presentations-plan.md).
 
@@ -52,7 +52,7 @@ not see `subject` unless the workflow explicitly copies selected text into
 
 ## Request contract
 
-A new request uses `pi-workflows.human-decision-request.v2`. It contains:
+A request uses `pi-workflows.human-decision-request.v1`. It contains:
 
 | Field                | Required | Meaning                                         |
 | -------------------- | -------- | ----------------------------------------------- |
@@ -255,25 +255,15 @@ It omits absent sections. It never serializes the plan object. `plan-approval`,
 `monitor`, `autoplan`, `autodoc`, and `autoimplement` reuse this presenter where
 they ask a person to approve a plan.
 
-## Compatibility
+## Alpha cutover
 
-Current v1 requests remain immutable.
+The human-decision request, accepted result, receipt, delivery, and resolution use one
+v1 schema family. The current structured subject and explicit presentation contract
+replaced the former body request and parallel v2 records in place.
 
-- A v1 string body becomes one readable paragraph at delivery time.
-- A v1 object body uses a deterministic compatibility formatter. It converts
-  stable key order into readable labels and fields with sections and lists.
-- An oversized v1 body remains answerable. The formatter keeps a bounded readable
-  prefix and adds an explicit omission notice with the full body digest and size.
-  It never hides omitted content behind an ellipsis.
-- The compatibility formatter reads only the historical `body`, which was
-  already the display field. It never reads a new structured subject.
-- V1 request bytes and digests do not change.
-- Pending and accepted v1 decisions continue to use v1 validation and digest
-  rules.
-- New preferred authoring emits v2. The existing body form remains a deprecated
-  compatibility overload until a separate removal is approved.
-
-No migration rewrites run bundles or decision records.
+Old waiting runs and human-decision state are incompatible. The runtime fails with a
+reset instruction instead of reading, migrating, or silently reinterpreting them.
+There is no compatibility reader, dual path, alias, or migration.
 
 ## Privacy and security
 
@@ -311,10 +301,10 @@ npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 npx -y @simpledoc/simpledoc check
 ```
 
-Tests must cover schema validation, canonical digests, readable legacy bodies,
+Tests must cover schema validation, canonical digests, structured-value formatting,
 plan rendering, Pi and Telegram content parity, unsafe text, Unicode, multipart
-delivery, ambiguous sends, recovery, stale answers, viewer output, and proof
-that no channel serializes a subject as JSON.
+delivery, ambiguous sends, recovery, stale answers, viewer output, incompatible-state
+failure, and proof that no channel serializes a subject as JSON.
 
 ## Boundaries
 

@@ -5,8 +5,8 @@ import {
   decisionPresentationDigest,
   digestCanonical,
   humanDecisionChannelRequest,
-  legacyDecisionPresentation,
   normalizeDecisionPresentation,
+  valueDecisionPresentation,
   validateHumanDecisionRequestIntegrity,
 } from "../src/workflows/decision-presentation.js";
 import {
@@ -90,30 +90,16 @@ describe("decision presentations", () => {
     const original = request();
     const changedSubject = request({ subject: { plan: "b" } });
     const changedPresentation = request({ summary: "Review a different change." });
-    expect(original.schema).toBe("pi-workflows.human-decision-request.v2");
-    if (original.schema !== "pi-workflows.human-decision-request.v2") {
-      throw new Error("expected v2 request");
-    }
+    expect(original.schema).toBe("pi-workflows.human-decision-request.v1");
     expect(original.revision).toBe(2);
     expect(original.requestDigest).not.toBe(changedSubject.requestDigest);
     expect(original.requestDigest).not.toBe(changedPresentation.requestDigest);
-    expect(original.subjectDigest).not.toBe(
-      changedSubject.schema === "pi-workflows.human-decision-request.v2"
-        ? changedSubject.subjectDigest
-        : "",
-    );
-    expect(original.presentationDigest).not.toBe(
-      changedPresentation.schema === "pi-workflows.human-decision-request.v2"
-        ? changedPresentation.presentationDigest
-        : "",
-    );
+    expect(original.subjectDigest).not.toBe(changedSubject.subjectDigest);
+    expect(original.presentationDigest).not.toBe(changedPresentation.presentationDigest);
   });
 
   it("rejects a changed durable subject or presentation", () => {
     const original = request();
-    if (original.schema !== "pi-workflows.human-decision-request.v2") {
-      throw new Error("expected v2 request");
-    }
     expect(() =>
       validateHumanDecisionRequestIntegrity({ ...original, subject: { plan: "tampered" } }),
     ).toThrow(/subject digest/);
@@ -137,28 +123,28 @@ describe("decision presentations", () => {
     expect(JSON.stringify(channel)).not.toContain('"plan":"a"');
   });
 
-  it("keeps oversized historical requests answerable with an explicit omission notice", () => {
-    const largeText = "legacy line\n".repeat(8_000);
-    const large = legacyDecisionPresentation(largeText);
+  it("bounds oversized structured values with an explicit omission notice", () => {
+    const largeText = "value line\n".repeat(8_000);
+    const large = valueDecisionPresentation(largeText);
     expect(large.blocks.length).toBeLessThanOrEqual(MAX_PRESENTATION_BLOCKS);
-    expect(JSON.stringify(large)).toContain("Some legacy decision content is not shown");
-    expect(JSON.stringify(large)).toContain("Body digest: sha256:");
-    const manyFields = legacyDecisionPresentation(
+    expect(JSON.stringify(large)).toContain("Some decision content is not shown");
+    expect(JSON.stringify(large)).toContain("Value digest: sha256:");
+    const manyFields = valueDecisionPresentation(
       Object.fromEntries(
         Array.from({ length: 400 }, (_, index) => [`field-${index}`, { value: index }]),
       ),
     );
     expect(manyFields.blocks.length).toBeLessThanOrEqual(MAX_PRESENTATION_BLOCKS);
-    expect(JSON.stringify(manyFields)).toContain("Some legacy decision content is not shown");
+    expect(JSON.stringify(manyFields)).toContain("Some decision content is not shown");
   });
 
-  it("formats historical object bodies as readable sections and fields", () => {
-    const legacy = legacyDecisionPresentation({
+  it("formats structured values as readable sections and fields", () => {
+    const formatted = valueDecisionPresentation({
       planDigest: "sha256:abc",
       steps: ["Change the contract", "Run tests"],
       nested: { enabled: true },
     });
-    const text = JSON.stringify(legacy);
+    const text = JSON.stringify(formatted);
     expect(text).toContain("Plan Digest");
     expect(text).toContain("Change the contract");
     expect(text).toContain("Enabled");

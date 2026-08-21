@@ -162,7 +162,7 @@ export class PiDecisionChannel implements HumanDecisionChannel {
       await this.options.store.recordDelivery(
         request,
         this.id,
-        v2DeliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt),
+        deliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt),
       );
       const entries = Object.entries(request.choices);
       const selectedChoice = await this.options.ui.custom<string | undefined>(
@@ -241,7 +241,7 @@ export class PiDecisionChannel implements HumanDecisionChannel {
         await this.options.store.recordDelivery(
           request,
           this.id,
-          v2DeliveryRecord(
+          deliveryRecord(
             request,
             this.id,
             `${attemptId}-cancelled`,
@@ -267,7 +267,7 @@ export class PiDecisionChannel implements HumanDecisionChannel {
           await this.options.store.recordDelivery(
             request,
             this.id,
-            v2DeliveryRecord(
+            deliveryRecord(
               request,
               this.id,
               `${attemptId}-cancelled`,
@@ -291,7 +291,7 @@ export class PiDecisionChannel implements HumanDecisionChannel {
       await this.options.store.recordDelivery(
         request,
         this.id,
-        v2DeliveryRecord(
+        deliveryRecord(
           request,
           this.id,
           `${attemptId}-confirmed`,
@@ -684,7 +684,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     await this.store.recordDelivery(
       request,
       channelPath,
-      v2DeliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt, {
+      deliveryRecord(request, this.id, attemptId, "intent", "intent", createdAt, {
         partCount: parts.length,
       }),
     );
@@ -704,7 +704,6 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         );
         const confirmed = prior.some(
           (record) =>
-            record.schema === "pi-workflows.human-decision-delivery.v2" &&
             record.phase === "part" &&
             record.state === "confirmed" &&
             record.recipientIndex === recipientIndex &&
@@ -724,7 +723,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
           await this.store.recordDelivery(
             request,
             channelPath,
-            v2DeliveryRecord(
+            deliveryRecord(
               request,
               this.id,
               `${attemptId}-r${recipientIndex}-p${partIndex}-unknown`,
@@ -740,15 +739,12 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         await this.store.recordDelivery(
           request,
           channelPath,
-          v2DeliveryRecord(
-            request,
-            this.id,
-            `${partAttemptId}-intent`,
-            "part",
-            "intent",
-            createdAt,
-            { recipientIndex, partIndex, partCount: parts.length, contentDigest },
-          ),
+          deliveryRecord(request, this.id, `${partAttemptId}-intent`, "part", "intent", createdAt, {
+            recipientIndex,
+            partIndex,
+            partCount: parts.length,
+            contentDigest,
+          }),
         );
         try {
           const result = await this.call("sendMessage", {
@@ -769,7 +765,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
           await this.store.recordDelivery(
             request,
             channelPath,
-            v2DeliveryRecord(
+            deliveryRecord(
               request,
               this.id,
               `${partAttemptId}-confirmed`,
@@ -785,7 +781,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
           await this.store.recordDelivery(
             request,
             channelPath,
-            v2DeliveryRecord(
+            deliveryRecord(
               request,
               this.id,
               `${partAttemptId}-${state}`,
@@ -804,7 +800,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
           await this.store.recordDelivery(
             request,
             channelPath,
-            v2DeliveryRecord(
+            deliveryRecord(
               request,
               this.id,
               `${attemptId}-${state}`,
@@ -821,7 +817,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     await this.store.recordDelivery(
       request,
       channelPath,
-      v2DeliveryRecord(
+      deliveryRecord(
         request,
         this.id,
         `${attemptId}-confirmed`,
@@ -1234,29 +1230,26 @@ function parseCredentialConfig(value: unknown): DecisionCredentialConfig {
   return { schema: "pi-workflows.credentials.v1", telegram };
 }
 
-type DeliveryV2 = Extract<
-  HumanDecisionDeliveryRecord,
-  { schema: "pi-workflows.human-decision-delivery.v2" }
->;
+type DeliveryRecord = HumanDecisionDeliveryRecord;
 
-type DeliveryV2Extra = Partial<
+type DeliveryRecordExtra = Partial<
   Pick<
-    DeliveryV2,
+    DeliveryRecord,
     "recipientIndex" | "partIndex" | "partCount" | "contentDigest" | "messageCount" | "errorCode"
   >
 >;
 
-function v2DeliveryRecord(
+function deliveryRecord(
   request: HumanDecisionChannelRequest,
   channel: string,
   attemptId: string,
-  phase: DeliveryV2["phase"],
-  state: DeliveryV2["state"],
+  phase: DeliveryRecord["phase"],
+  state: DeliveryRecord["state"],
   createdAt: string,
-  extra: DeliveryV2Extra = {},
-): DeliveryV2 {
+  extra: DeliveryRecordExtra = {},
+): DeliveryRecord {
   return {
-    schema: "pi-workflows.human-decision-delivery.v2",
+    schema: "pi-workflows.human-decision-delivery.v1",
     attemptId,
     decisionId: request.decisionId,
     requestDigest: request.requestDigest,
@@ -1271,37 +1264,14 @@ function v2DeliveryRecord(
 }
 
 function isCompleteDelivery(record: HumanDecisionDeliveryRecord): boolean {
-  return (
-    record.state === "confirmed" &&
-    (record.schema === "pi-workflows.human-decision-delivery.v1" || record.phase === "complete")
-  );
+  return record.state === "confirmed" && record.phase === "complete";
 }
 
 function hasUnsettledDeliveryIntent(records: HumanDecisionDeliveryRecord[]): boolean {
-  const hasLegacyIntent = records.some(
-    (record) =>
-      record.schema === "pi-workflows.human-decision-delivery.v1" && record.state === "intent",
-  );
-  if (
-    hasLegacyIntent &&
-    !records.some(
-      (record) =>
-        record.schema === "pi-workflows.human-decision-delivery.v1" && record.state !== "intent",
-    )
-  ) {
-    return true;
-  }
   return records.some((record) => {
-    if (
-      record.schema !== "pi-workflows.human-decision-delivery.v2" ||
-      record.phase !== "part" ||
-      record.state !== "intent"
-    ) {
-      return false;
-    }
+    if (record.phase !== "part" || record.state !== "intent") return false;
     return !records.some(
       (other) =>
-        other.schema === "pi-workflows.human-decision-delivery.v2" &&
         other.phase === "part" &&
         other.state !== "intent" &&
         other.recipientIndex === record.recipientIndex &&

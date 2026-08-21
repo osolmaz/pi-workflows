@@ -309,8 +309,7 @@ function nodeRuntimeSegments(
             })
           : undefined;
       const requestAudience =
-        (request?.schema === "pi-workflows.human-decision-request.v1" ||
-          request?.schema === "pi-workflows.human-decision-request.v2") &&
+        request?.schema === "pi-workflows.human-decision-request.v1" &&
         typeof request.audience === "string"
           ? request.audience
           : human.audience;

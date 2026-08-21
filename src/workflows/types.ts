@@ -231,28 +231,15 @@ export type DecisionPresentation = {
   blocks: DecisionPresentationBlock[];
 };
 
-export type LegacyHumanDecisionPrompt = {
-  title: string;
-  body: unknown;
-  subject?: never;
-  presentation?: never;
-  revision?: never;
-  /** Optional absolute expiry. An expired request cannot accept an answer. */
-  expiresAt?: string;
-};
-
-export type PresentedHumanDecisionPrompt<TSubject = unknown> = {
+export type HumanDecisionPrompt<TSubject = unknown> = {
   title: string;
   subject: TSubject;
   presentation: DecisionPresentation;
-  body?: never;
   /** Positive revision of the decision subject and presentation. Defaults to 1. */
   revision?: number;
   /** Optional absolute expiry. An expired request cannot accept an answer. */
   expiresAt?: string;
 };
-
-export type HumanDecisionPrompt = LegacyHumanDecisionPrompt | PresentedHumanDecisionPrompt;
 
 export type HumanDecisionAudience =
   | string
@@ -289,13 +276,8 @@ type HumanDecisionRequestCommon = {
   defaultResponse?: HumanDecisionResponse;
 };
 
-export type HumanDecisionRequestV1 = HumanDecisionRequestCommon & {
+export type HumanDecisionRequest = HumanDecisionRequestCommon & {
   schema: "pi-workflows.human-decision-request.v1";
-  body: unknown;
-};
-
-export type HumanDecisionRequestV2 = HumanDecisionRequestCommon & {
-  schema: "pi-workflows.human-decision-request.v2";
   subject: unknown;
   presentation: DecisionPresentation;
   revision: number;
@@ -303,11 +285,9 @@ export type HumanDecisionRequestV2 = HumanDecisionRequestCommon & {
   presentationDigest: string;
 };
 
-export type HumanDecisionRequest = HumanDecisionRequestV1 | HumanDecisionRequestV2;
-
 /**
  * Complete operator-facing request passed to a decision channel. It excludes
- * the canonical subject and legacy body by design.
+ * the canonical subject by design.
  */
 export type HumanDecisionChannelRequest = HumanDecisionRequestCommon & {
   schema: "pi-workflows.human-decision-channel-request.v1";
@@ -354,30 +334,19 @@ type DefaultedHumanDecisionCommon = ResolvedHumanDecisionCommon & {
   provenance: "timeout";
 };
 
-export type AcceptedHumanDecisionV1 = AcceptedHumanDecisionCommon & {
+export type AcceptedHumanDecision = AcceptedHumanDecisionCommon & {
   schema: "pi-workflows.human-decision-accepted.v1";
-};
-
-export type AcceptedHumanDecisionV2 = AcceptedHumanDecisionCommon & {
-  schema: "pi-workflows.human-decision-accepted.v2";
   subjectDigest: string;
   presentationDigest: string;
   revision: number;
 };
 
-export type DefaultedHumanDecisionV1 = DefaultedHumanDecisionCommon & {
+export type DefaultedHumanDecision = DefaultedHumanDecisionCommon & {
   schema: "pi-workflows.human-decision-accepted.v1";
-};
-
-export type DefaultedHumanDecisionV2 = DefaultedHumanDecisionCommon & {
-  schema: "pi-workflows.human-decision-accepted.v2";
   subjectDigest: string;
   presentationDigest: string;
   revision: number;
 };
-
-export type AcceptedHumanDecision = AcceptedHumanDecisionV1 | AcceptedHumanDecisionV2;
-export type DefaultedHumanDecision = DefaultedHumanDecisionV1 | DefaultedHumanDecisionV2;
 export type ResolvedHumanDecision = AcceptedHumanDecision | DefaultedHumanDecision;
 
 type HumanDecisionReceiptCommon = {
@@ -390,34 +359,15 @@ type HumanDecisionReceiptCommon = {
   answerDigest: string;
 };
 
-export type HumanDecisionReceiptV1 = HumanDecisionReceiptCommon & {
+export type HumanDecisionReceipt = HumanDecisionReceiptCommon & {
   schema: "pi-workflows.human-decision-receipt.v1";
-};
-
-export type HumanDecisionReceiptV2 = HumanDecisionReceiptCommon & {
-  schema: "pi-workflows.human-decision-receipt.v2";
   subjectDigest: string;
   presentationDigest: string;
   revision: number;
 };
 
-export type HumanDecisionReceipt = HumanDecisionReceiptV1 | HumanDecisionReceiptV2;
-
-export type HumanDecisionDeliveryRecordV1 = {
+export type HumanDecisionDeliveryRecord = {
   schema: "pi-workflows.human-decision-delivery.v1";
-  attemptId: string;
-  decisionId: string;
-  requestDigest: string;
-  channel: string;
-  state: "intent" | "confirmed" | "failed" | "unknown";
-  createdAt: string;
-  finishedAt?: string;
-  messageCount?: number;
-  errorCode?: string;
-};
-
-export type HumanDecisionDeliveryRecordV2 = {
-  schema: "pi-workflows.human-decision-delivery.v2";
   attemptId: string;
   decisionId: string;
   requestDigest: string;
@@ -434,10 +384,6 @@ export type HumanDecisionDeliveryRecordV2 = {
   messageCount?: number;
   errorCode?: string;
 };
-
-export type HumanDecisionDeliveryRecord =
-  | HumanDecisionDeliveryRecordV1
-  | HumanDecisionDeliveryRecordV2;
 
 export type HumanDecisionSettlementRecord = {
   schema: "pi-workflows.human-decision-settlement.v1";

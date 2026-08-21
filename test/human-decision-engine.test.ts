@@ -10,7 +10,7 @@ import {
 } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { decisionPrompt, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const choices = defineHumanChoices({
   continue: choice({ label: "Continue" }),
@@ -24,7 +24,7 @@ const workflow = defineWorkflow({
     approve: humanDecision({
       audience: ({ input }) => (input as { audience: string }).audience,
       choices,
-      request: ({ input }) => ({ title: "Approve", body: input }),
+      request: ({ input }) => decisionPrompt(input),
     }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
     stopped: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
@@ -110,6 +110,9 @@ describe("human decision engine continuation", () => {
             provenance: "human",
             decisionId: request.decisionId,
             requestDigest: request.requestDigest,
+            subjectDigest: request.subjectDigest,
+            presentationDigest: request.presentationDigest,
+            revision: request.revision,
             response: { choice: "continue" },
             source: { channel: "pi", actorId: "forged", eventId: "forged" },
             idempotencyKey: "forged",

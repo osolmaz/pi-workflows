@@ -110,24 +110,52 @@
         "finishedAt": "2026-01-01T00:00:03.000Z",
         "prompt": null,
         "output": {
-          "schema": "pi-workflows.human-decision-request.v2"
+          "schema": "pi-workflows.human-decision-request.v1",
+          "decisionId": "decision-second",
+          "requestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         }
       }
     ],
     "waitingOn": "second",
     "finalOutput": {
-      "schema": "pi-workflows.human-decision-request.v2",
+      "schema": "pi-workflows.human-decision-request.v1",
+      "decisionId": "decision-second",
+      "requestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "subjectDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "presentationDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "runId": "run-human-multigate",
+      "workflowName": "human-multigate",
+      "nodeId": "second",
+      "attemptId": "attempt-second",
       "audience": "reviewer",
-      "presentation": {
-        "summary": "Review the readable plan."
+      "title": "Review the readable plan",
+      "subject": {
+        "plan": "second"
       },
-      "presentationDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      "presentation": {
+        "schema": "pi-workflows.decision-presentation.v1",
+        "summary": "Review the readable plan.",
+        "blocks": []
+      },
+      "revision": 1,
+      "choices": {
+        "continue": {
+          "label": "Continue"
+        },
+        "replan": {
+          "label": "Replan"
+        }
+      },
+      "createdAt": "2026-01-01T00:00:02.000Z"
     },
     "humanDecision": {
       "schema": "pi-workflows.human-decision-receipt.v1",
       "provenance": "human",
       "decisionId": "decision-first",
       "requestDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "subjectDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "presentationDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "revision": 1,
       "nodeId": "first",
       "response": {
         "choice": "continue"

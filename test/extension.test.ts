@@ -10,7 +10,7 @@ import {
 } from "../src/extension/deferred-turn.js";
 import piWorkflows from "../src/extension/index.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
-import { HumanDecisionStore } from "../src/workflows/human-decision.js";
+import { createHumanDecisionRequest, HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { listRunBundles, readRunBundle } from "../src/workflows/store.js";
 import { stripAnsi } from "../src/workflows/text.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
@@ -381,7 +381,7 @@ export default defineWorkflow({
   name: "human",
   startAt: "approve",
   nodes: {
-    approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", body: input }), ${timeoutMs === undefined ? "" : `onTimeout: { afterMs: ${timeoutMs}, response: { choice: "continue" } },`} }),
+    approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", subject: input, presentation: { schema: "pi-workflows.decision-presentation.v1", summary: "Review this decision.", blocks: [] } }), ${timeoutMs === undefined ? "" : `onTimeout: { afterMs: ${timeoutMs}, response: { choice: "continue" } },`} }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
     replanned: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
   },
@@ -601,13 +601,20 @@ describe("pi-workflows extension", () => {
     const request = waiting?.state.finalOutput as HumanDecisionRequest | undefined;
     if (request === undefined) throw new Error("missing human decision request");
     const decisionStore = new HumanDecisionStore(runsDir);
-    const staleRequest: HumanDecisionRequest = {
-      ...request,
-      decisionId: "decision-stale-request",
-      requestDigest: `sha256:${"0".repeat(64)}`,
+    const staleRequest = createHumanDecisionRequest({
+      runId: request.runId,
+      workflowName: request.workflowName,
+      nodeId: request.nodeId,
       attemptId: "stale-attempt",
+      contract: { audience: request.audience, choices: request.choices },
+      prompt: {
+        title: request.title,
+        subject: request.subject,
+        presentation: request.presentation,
+        revision: request.revision,
+      },
       createdAt: "2000-01-01T00:00:00.000Z",
-    };
+    });
     await decisionStore.createRequest(staleRequest);
     await decisionStore.accept(staleRequest, {
       decisionId: staleRequest.decisionId,

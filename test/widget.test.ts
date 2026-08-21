@@ -25,6 +25,7 @@ import type {
   WorkflowRunState,
   WorkflowStepRecord,
 } from "../src/workflows/types.js";
+import { decisionPrompt } from "./helpers.js";
 
 const workflow = defineWorkflow({
   name: "demo",
@@ -181,7 +182,7 @@ describe("human decision widget", () => {
         approve: humanDecision({
           audience: "operator",
           choices: humanChoices,
-          request: () => ({ title: "Approve", body: {} }),
+          request: () => decisionPrompt(),
         }),
       },
       edges: [],
@@ -211,6 +212,9 @@ describe("human decision widget", () => {
         provenance: "human",
         decisionId: "decision-a",
         requestDigest: `sha256:${"a".repeat(64)}`,
+        subjectDigest: `sha256:${"c".repeat(64)}`,
+        presentationDigest: `sha256:${"d".repeat(64)}`,
+        revision: 1,
         nodeId: "approve",
         response: { choice: "continue" },
         acceptedAt: "2026-01-01T00:00:00.000Z",

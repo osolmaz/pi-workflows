@@ -12,7 +12,7 @@ import {
   workflowRunsBaseDir,
 } from "../src/workflows/store.js";
 import type { WorkflowRunState, WorkflowSessionEventRecord } from "../src/workflows/types.js";
-import { makeTempDir } from "./helpers.js";
+import { decisionPrompt, makeTempDir } from "./helpers.js";
 
 function makeState(overrides: Partial<WorkflowRunState> = {}): WorkflowRunState {
   const now = new Date().toISOString();
@@ -559,13 +559,13 @@ describe("createDefinitionSnapshot", () => {
         fixed: humanDecision({
           audience: "operator",
           choices,
-          request: () => ({ title: "Approve", body: {} }),
+          request: () => decisionPrompt(),
           onTimeout: { afterMs: 600_000, response: { choice: "continue" } },
         }),
         dynamic: humanDecision({
           audience: "operator",
           choices,
-          request: () => ({ title: "Approve", body: {} }),
+          request: () => decisionPrompt(),
           onTimeout: () => ({ afterMs: 60_000, response: { choice: "continue" } }),
         }),
       },

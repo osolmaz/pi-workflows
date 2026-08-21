@@ -195,12 +195,7 @@ function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
     value !== null && typeof value === "object"
       ? (value as { schema?: unknown }).schema
       : undefined;
-  if (
-    schema !== "pi-workflows.human-decision-request.v1" &&
-    schema !== "pi-workflows.human-decision-request.v2"
-  ) {
-    return null;
-  }
+  if (schema !== "pi-workflows.human-decision-request.v1") return null;
   return value as HumanDecisionRequest;
 }
 

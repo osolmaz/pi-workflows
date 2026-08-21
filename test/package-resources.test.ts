@@ -44,6 +44,23 @@ async function skillFiles(): Promise<string[]> {
 }
 
 describe("Pi package resources", () => {
+  it("ships one v1 schema for each human-decision record", async () => {
+    const schemaFiles = (await fs.readdir(path.join(repoRoot, "schemas")))
+      .filter((file) =>
+        /^human-decision-(request|accepted|receipt|delivery|resolution)-v\d+\.schema\.json$/u.test(
+          file,
+        ),
+      )
+      .sort();
+    expect(schemaFiles).toEqual([
+      "human-decision-accepted-v1.schema.json",
+      "human-decision-delivery-v1.schema.json",
+      "human-decision-receipt-v1.schema.json",
+      "human-decision-request-v1.schema.json",
+      "human-decision-resolution-v1.schema.json",
+    ]);
+  });
+
   it("publishes the extension and skill directory", async () => {
     const manifest = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as PackageManifest;
 

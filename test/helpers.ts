@@ -5,10 +5,28 @@ import type {
   AgentStepExecutor,
   AgentStepRequest,
   AgentStepSubmission,
+  HumanDecisionPrompt,
 } from "../src/workflows/types.js";
 
 export async function makeTempDir(prefix: string): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
+}
+
+export function decisionPrompt(
+  subject: unknown = {},
+  expiresAt?: string,
+  title = "Approve",
+): HumanDecisionPrompt {
+  return {
+    title,
+    subject,
+    presentation: {
+      schema: "pi-workflows.decision-presentation.v1",
+      summary: "Review this decision.",
+      blocks: [],
+    },
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  };
 }
 
 /** Poll until `predicate` is true, failing after `timeoutMs`. */

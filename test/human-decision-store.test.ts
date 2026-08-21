@@ -13,7 +13,7 @@ import type {
   HumanDecisionSettlementRecord,
   HumanDecisionSubmission,
 } from "../src/workflows/types.js";
-import { makeTempDir } from "./helpers.js";
+import { decisionPrompt, makeTempDir } from "./helpers.js";
 
 function makeRequest() {
   return createHumanDecisionRequest({
@@ -31,7 +31,7 @@ function makeRequest() {
         }),
       }),
     },
-    prompt: { title: "Approve", body: { plan: "a" } },
+    prompt: decisionPrompt({ plan: "a" }),
     createdAt: "2026-08-19T00:00:00.000Z",
   });
 }
@@ -52,6 +52,19 @@ function submission(
 }
 
 describe("HumanDecisionStore", () => {
+  it("rejects superseded human-decision state with reset guidance", async () => {
+    const store = new HumanDecisionStore(await makeTempDir("human-decision-old-state"));
+    const decisionId = "decision-old";
+    await fs.mkdir(store.decisionDir(decisionId), { recursive: true });
+    await fs.writeFile(
+      path.join(store.decisionDir(decisionId), "request.json"),
+      `${JSON.stringify({ schema: "pi-workflows.human-decision-request.v2", decisionId })}\n`,
+    );
+    await expect(store.readRequest(decisionId)).rejects.toThrow(
+      /incompatible alpha contract.*reset/,
+    );
+  });
+
   it("creates immutable requests and adopts identical retries", async () => {
     const runs = await makeTempDir("human-decision-store");
     const store = new HumanDecisionStore(runs);
@@ -87,19 +100,16 @@ describe("HumanDecisionStore", () => {
       },
       createdAt: "2026-08-19T00:00:00.000Z",
     });
-    if (request.schema !== "pi-workflows.human-decision-request.v2") {
-      throw new Error("expected v2 request");
-    }
     await store.createRequest(request);
     const accepted = await store.accept(request, {
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       choice: "continue",
-      source: { channel: "pi", actorId: "person", eventId: "event-v2" },
-      idempotencyKey: "event-v2",
+      source: { channel: "pi", actorId: "person", eventId: "event-v1" },
+      idempotencyKey: "event-v1",
     });
     expect(accepted.decision).toMatchObject({
-      schema: "pi-workflows.human-decision-accepted.v2",
+      schema: "pi-workflows.human-decision-accepted.v1",
       provenance: "human",
       subjectDigest: request.subjectDigest,
       presentationDigest: request.presentationDigest,
@@ -111,7 +121,7 @@ describe("HumanDecisionStore", () => {
         "utf8",
       ),
     ) as { schema: string };
-    expect(resolution.schema).toBe("pi-workflows.human-decision-resolution.v2");
+    expect(resolution.schema).toBe("pi-workflows.human-decision-resolution.v1");
   });
 
   it("accepts one concurrent answer and rejects the conflicting answer", async () => {
@@ -159,12 +169,18 @@ describe("HumanDecisionStore", () => {
     await expect(
       store.accept(request, { ...submission(request, "continue", "stale"), requestDigest: "bad" }),
     ).rejects.toThrow(/stale/);
-    await expect(
-      store.accept(
-        { ...request, expiresAt: "2020-01-01T00:00:00.000Z" },
-        submission({ ...request, expiresAt: "2020-01-01T00:00:00.000Z" }, "continue", "expired"),
-      ),
-    ).rejects.toThrow(/expired/);
+    const expired = createHumanDecisionRequest({
+      runId: "run-expired",
+      workflowName: "workflow-a",
+      nodeId: "approve",
+      attemptId: "attempt-expired",
+      contract: { audience: request.audience, choices: request.choices },
+      prompt: decisionPrompt({ plan: "a" }, "2020-01-01T00:00:00.000Z"),
+      createdAt: "2019-12-31T00:00:00.000Z",
+    });
+    await expect(store.accept(expired, submission(expired, "continue", "expired"))).rejects.toThrow(
+      /expired/,
+    );
   });
 
   it("cancels or expires a pending request and rejects later answers", async () => {
@@ -210,7 +226,9 @@ describe("HumanDecisionStore", () => {
       attemptId: "attempt-a",
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
+      presentationDigest: request.presentationDigest,
       channel: "pi",
+      phase: "complete",
       state: "confirmed",
       createdAt: "2026-08-19T00:00:00.000Z",
     };
@@ -270,7 +288,7 @@ describe("HumanDecisionStore", () => {
         audience: "operator",
         choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
       },
-      prompt: { title: "Approve", body: { plan: "a" } },
+      prompt: decisionPrompt({ plan: "a" }),
       timeout: { afterMs: 600_000, response: { choice: "continue" } },
       createdAt: "2099-01-01T00:00:00.000Z",
     });
@@ -301,7 +319,7 @@ describe("HumanDecisionStore", () => {
         audience: "operator",
         choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
       },
-      prompt: { title: "Approve", body: {} },
+      prompt: decisionPrompt(),
       timeout: { afterMs: 600_000, response: { choice: "continue" } },
       createdAt: "2099-01-01T00:00:00.000Z",
     });
@@ -335,7 +353,7 @@ describe("HumanDecisionStore", () => {
         audience: "operator",
         choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
       },
-      prompt: { title: "Approve", body: {} },
+      prompt: decisionPrompt(),
       timeout: { afterMs: 600_000, response: { choice: "continue" } },
       createdAt: "2099-01-01T00:00:00.000Z",
     });

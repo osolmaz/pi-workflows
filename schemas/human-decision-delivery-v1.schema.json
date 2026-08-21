@@ -9,7 +9,9 @@
     "attemptId",
     "decisionId",
     "requestDigest",
+    "presentationDigest",
     "channel",
+    "phase",
     "state",
     "createdAt"
   ],
@@ -18,10 +20,16 @@
     "attemptId": { "type": "string" },
     "decisionId": { "type": "string" },
     "requestDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "presentationDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "channel": { "type": "string" },
+    "phase": { "enum": ["intent", "part", "complete"] },
     "state": { "enum": ["intent", "confirmed", "failed", "unknown"] },
     "createdAt": { "type": "string", "format": "date-time" },
     "finishedAt": { "type": "string", "format": "date-time" },
+    "recipientIndex": { "type": "integer", "minimum": 1 },
+    "partIndex": { "type": "integer", "minimum": 1 },
+    "partCount": { "type": "integer", "minimum": 1, "maximum": 20 },
+    "contentDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "messageCount": { "type": "integer", "minimum": 0 },
     "errorCode": { "type": "string" }
   }

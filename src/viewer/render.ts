@@ -147,13 +147,13 @@ function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, 
     suffix = ansi.yellow(
       human === undefined
         ? " waiting"
-        : ` waiting for human · ${sanitizeText(requestAudience ?? "operator")}${request?.schema === "pi-workflows.human-decision-request.v2" ? ` · ${sanitizeText(request.presentation.summary)}` : ""} · ${Object.values(
+        : ` waiting for human · ${sanitizeText(requestAudience ?? "operator")}${request === null ? "" : ` · ${sanitizeText(request.presentation.summary)}`} · ${Object.values(
             human.choices,
           )
             .map((choice) => sanitizeText(choice.label))
             .join(
               " / ",
-            )}${request?.schema === "pi-workflows.human-decision-request.v2" ? ` · ${request.presentationDigest.slice(7, 19)}` : ""}`,
+            )}${request === null ? "" : ` · ${request.presentationDigest.slice(7, 19)}`}`,
     );
   } else if (result) {
     glyph = result.outcome === "ok" ? ansi.green("✓") : ansi.red("✗");
@@ -210,8 +210,7 @@ function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
 function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
   if (value === null || typeof value !== "object") return null;
   const schema = (value as { schema?: unknown }).schema;
-  return schema === "pi-workflows.human-decision-request.v1" ||
-    schema === "pi-workflows.human-decision-request.v2"
+  return schema === "pi-workflows.human-decision-request.v1"
     ? (value as HumanDecisionRequest)
     : null;
 }

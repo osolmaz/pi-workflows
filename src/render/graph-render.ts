@@ -313,8 +313,7 @@ function renderCellText(
       ? (state.finalOutput as { schema?: unknown }).schema
       : undefined;
   const waitingRequest =
-    waitingSchema === "pi-workflows.human-decision-request.v1" ||
-    waitingSchema === "pi-workflows.human-decision-request.v2"
+    waitingSchema === "pi-workflows.human-decision-request.v1"
       ? (state.finalOutput as {
           audience?: unknown;
           presentationDigest?: unknown;

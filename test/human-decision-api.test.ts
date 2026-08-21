@@ -19,21 +19,29 @@ const choices = defineHumanChoices({
   }),
 });
 
-function request(): HumanDecisionRequest {
+function prompt(subject: unknown = {}, expiresAt?: string): HumanDecisionPrompt {
   return {
-    schema: "pi-workflows.human-decision-request.v1",
-    decisionId: "decision-a",
-    requestDigest: `sha256:${"a".repeat(64)}`,
+    title: "Approve",
+    subject,
+    presentation: {
+      schema: "pi-workflows.decision-presentation.v1",
+      summary: "Review this decision.",
+      blocks: [],
+    },
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  };
+}
+
+function request(): HumanDecisionRequest {
+  return createHumanDecisionRequest({
     runId: "run-a",
     workflowName: "workflow-a",
     nodeId: "approve",
     attemptId: "attempt-a",
-    audience: "operator",
-    title: "Approve",
-    body: { plan: "a" },
-    choices,
+    contract: { audience: "operator", choices },
+    prompt: prompt({ plan: "a" }),
     createdAt: "2026-08-19T00:00:00.000Z",
-  };
+  });
 }
 
 describe("human decision authoring", () => {
@@ -47,7 +55,7 @@ describe("human decision authoring", () => {
     const gate = humanDecision({
       audience: "operator",
       choices,
-      request: () => ({ title: "Approve", body: {} }),
+      request: () => prompt(),
     });
     expect(gate.nodeType).toBe("checkpoint");
     expect(gate.humanDecision?.choices).toBe(choices);
@@ -67,7 +75,7 @@ describe("human decision authoring", () => {
     const gate = humanDecision({
       audience: "operator",
       choices,
-      request: () => ({ title: "Approve", body: {} }),
+      request: () => prompt(),
       onTimeout: { afterMs: 600_000, response: { choice: "continue" } },
     });
     expect(gate.humanDecision?.onTimeout).toEqual({
@@ -78,7 +86,7 @@ describe("human decision authoring", () => {
       humanDecision({
         audience: "operator",
         choices,
-        request: () => ({ title: "Approve", body: {} }),
+        request: () => prompt(),
         onTimeout: { afterMs: 0, response: { choice: "continue" } },
       }),
     ).toThrow(/finite positive/);
@@ -89,11 +97,15 @@ describe("human decision authoring", () => {
       nodeId: "approve",
       attemptId: "attempt-timeout",
       contract: { audience: "operator", choices },
-      prompt: { title: "Approve", body: {} },
+      prompt: prompt(),
       timeout: { afterMs: 600_000, response: { choice: "continue" } },
       createdAt: "2026-08-21T00:00:00.000Z",
     });
     expect(timed).toMatchObject({
+      schema: "pi-workflows.human-decision-request.v1",
+      subjectDigest: expect.stringMatching(/^sha256:/u),
+      presentationDigest: expect.stringMatching(/^sha256:/u),
+      revision: 1,
       createdAt: "2026-08-21T00:00:00.000Z",
       expiresAt: "2026-08-21T00:10:00.000Z",
       defaultResponse: { choice: "continue" },
@@ -105,7 +117,7 @@ describe("human decision authoring", () => {
         nodeId: "approve",
         attemptId: "attempt-conflict",
         contract: { audience: "operator", choices },
-        prompt: { title: "Approve", body: {}, expiresAt: "2026-08-21T00:20:00.000Z" },
+        prompt: prompt({}, "2026-08-21T00:20:00.000Z"),
         timeout: { afterMs: 600_000, response: { choice: "continue" } },
         createdAt: "2026-08-21T00:00:00.000Z",
       }),
@@ -158,7 +170,7 @@ describe("human decision authoring", () => {
     const gate = humanDecision({
       audience: async ({ input }) => (input as { audience: string }).audience,
       choices,
-      request: () => ({ title: "Approve", body: {} }),
+      request: () => prompt(),
     });
     expect(typeof gate.humanDecision?.audience).toBe("function");
   });
@@ -190,9 +202,9 @@ describe("human decision authoring", () => {
   });
 
   it("rejects invalid request metadata and expiry", () => {
-    expect(() =>
-      humanDecision({ audience: "bad/name", choices, request: () => ({ title: "A", body: {} }) }),
-    ).toThrow(/audience/);
+    expect(() => humanDecision({ audience: "bad/name", choices, request: () => prompt() })).toThrow(
+      /audience/,
+    );
     expect(() => humanDecision({ audience: "operator", choices, request: null as never })).toThrow(
       /request/,
     );
@@ -203,7 +215,7 @@ describe("human decision authoring", () => {
         nodeId: "approve",
         attemptId: "attempt-a",
         contract: { audience: "operator", choices },
-        prompt: { title: "Approve", body: 1n },
+        prompt: prompt(1n),
       }),
     ).toThrow(/JSON-serializable/);
     expect(() =>
@@ -213,7 +225,7 @@ describe("human decision authoring", () => {
         nodeId: "approve",
         attemptId: "attempt-a",
         contract: { audience: "operator", choices },
-        prompt: { title: "Approve", body: {}, expiresAt: "invalid" },
+        prompt: prompt({}, "invalid"),
       }),
     ).toThrow(/expiry/);
     expect(() =>
@@ -223,7 +235,7 @@ describe("human decision authoring", () => {
         nodeId: "approve",
         attemptId: "attempt-a",
         contract: { audience: "operator", choices },
-        prompt: { title: "Approve", body: {}, expiresAt: "2026-01-01T00:00:00.000Z" },
+        prompt: prompt({}, "2026-01-01T00:00:00.000Z"),
         createdAt: "2026-01-02T00:00:00.000Z",
       }),
     ).toThrow(/after creation/);

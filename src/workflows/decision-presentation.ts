@@ -56,7 +56,18 @@ export function decisionPresentationDigest(presentation: DecisionPresentation): 
 export function validateHumanDecisionRequestIntegrity(
   request: HumanDecisionRequest,
 ): HumanDecisionRequest {
-  if (request.schema === "pi-workflows.human-decision-request.v1") return request;
+  if (
+    request.schema !== "pi-workflows.human-decision-request.v1" ||
+    !Object.hasOwn(request, "subject") ||
+    !Object.hasOwn(request, "presentation") ||
+    !Object.hasOwn(request, "subjectDigest") ||
+    !Object.hasOwn(request, "presentationDigest") ||
+    !Object.hasOwn(request, "revision")
+  ) {
+    throw new Error(
+      "Human decision state uses an incompatible alpha contract; reset the affected workflow run and decision state.",
+    );
+  }
   const presentation = normalizeDecisionPresentation(request.presentation);
   const subjectDigest = digestCanonical(request.subject);
   const presentationDigest = digestCanonical(presentation);
@@ -91,10 +102,7 @@ export function humanDecisionChannelRequest(
   request: HumanDecisionRequest,
 ): HumanDecisionChannelRequest {
   validateHumanDecisionRequestIntegrity(request);
-  const presentation =
-    request.schema === "pi-workflows.human-decision-request.v2"
-      ? normalizeDecisionPresentation(request.presentation)
-      : legacyDecisionPresentation(request.body);
+  const presentation = normalizeDecisionPresentation(request.presentation);
   const presentationDigest = decisionPresentationDigest(presentation);
   return {
     schema: "pi-workflows.human-decision-channel-request.v1",
@@ -109,7 +117,7 @@ export function humanDecisionChannelRequest(
     title: request.title,
     presentation,
     presentationDigest,
-    revision: request.schema === "pi-workflows.human-decision-request.v2" ? request.revision : 1,
+    revision: request.revision,
     choices: request.choices,
     createdAt: request.createdAt,
     ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
@@ -117,18 +125,18 @@ export function humanDecisionChannelRequest(
   };
 }
 
-export function legacyDecisionPresentation(body: unknown): DecisionPresentation {
+export function valueDecisionPresentation(value: unknown): DecisionPresentation {
   const blocks: DecisionPresentationBlock[] = [];
-  if (typeof body === "string") {
-    appendLegacyText(blocks, body, "Decision details");
+  if (typeof value === "string") {
+    appendValueText(blocks, value, "Decision details");
   } else {
-    appendLegacyValue(blocks, body, undefined);
+    appendValue(blocks, value, undefined);
   }
   const summary =
-    typeof body === "string"
+    typeof value === "string"
       ? "Review the decision message below."
       : "Review the decision details below.";
-  return normalizeDecisionPresentation(boundLegacyPresentation(summary, blocks, body));
+  return normalizeDecisionPresentation(boundValuePresentation(summary, blocks, value));
 }
 
 export function decisionDocumentSegments(
@@ -260,10 +268,10 @@ function normalizeString(value: unknown, label: string): string {
   return text;
 }
 
-function boundLegacyPresentation(
+function boundValuePresentation(
   summary: string,
   blocks: DecisionPresentationBlock[],
-  body: unknown,
+  value: unknown,
 ): DecisionPresentation {
   const candidate: DecisionPresentation = {
     schema: "pi-workflows.decision-presentation.v1",
@@ -272,13 +280,13 @@ function boundLegacyPresentation(
   };
   if (
     blocks.length <= MAX_PRESENTATION_BLOCKS &&
-    blocks.every(legacyBlockFitsSchema) &&
+    blocks.every(valueBlockFitsSchema) &&
     presentationCodeUnits(candidate) <= MAX_PRESENTATION_CODE_UNITS
   ) {
     return candidate;
   }
-  const originalCodeUnits = canonicalJson(body).length;
-  const omission = `Some legacy decision content is not shown because it exceeds the readable presentation limit. Inspect the durable v1 request before answering. Body digest: ${digestCanonical(body)}. Original body: ${originalCodeUnits} UTF-16 code units. Generated blocks: ${blocks.length}.`;
+  const originalCodeUnits = canonicalJson(value).length;
+  const omission = `Some decision content is not shown because it exceeds the readable presentation limit. Inspect the canonical source value before answering. Value digest: ${digestCanonical(value)}. Original value: ${originalCodeUnits} UTF-16 code units. Generated blocks: ${blocks.length}.`;
   const budget = MAX_PRESENTATION_CODE_UNITS - summary.length - omission.length;
   const kept: DecisionPresentationBlock[] = [];
   let used = 0;
@@ -287,7 +295,7 @@ function boundLegacyPresentation(
     const units = presentationBlockCodeUnits(block);
     if (
       kept.length >= MAX_PRESENTATION_BLOCKS ||
-      !legacyBlockFitsSchema(block) ||
+      !valueBlockFitsSchema(block) ||
       used + units > budget
     ) {
       omitted = true;
@@ -307,7 +315,7 @@ function boundLegacyPresentation(
   };
 }
 
-function legacyBlockFitsSchema(block: DecisionPresentationBlock): boolean {
+function valueBlockFitsSchema(block: DecisionPresentationBlock): boolean {
   if (block.kind === "paragraph" || block.kind === "preformatted") {
     return block.text.length <= MAX_PRESENTATION_STRING_CODE_UNITS;
   }
@@ -341,47 +349,43 @@ function presentationCodeUnits(presentation: DecisionPresentation): number {
   return total;
 }
 
-function appendLegacyValue(
+function appendValue(
   blocks: DecisionPresentationBlock[],
   value: unknown,
   label: string | undefined,
 ): void {
   if (isScalar(value)) {
-    const scalar = legacyScalar(value);
+    const scalar = valueScalar(value);
     if (label === undefined || scalar.length > MAX_PRESENTATION_STRING_CODE_UNITS) {
-      appendLegacyText(
-        blocks,
-        scalar,
-        label === undefined ? "Decision details" : legacyLabel(label),
-      );
+      appendValueText(blocks, scalar, label === undefined ? "Decision details" : valueLabel(label));
     } else {
-      blocks.push({ kind: "fields", items: [{ label: legacyLabel(label), value: scalar }] });
+      blocks.push({ kind: "fields", items: [{ label: valueLabel(label), value: scalar }] });
     }
     return;
   }
   if (Array.isArray(value)) {
-    if (label !== undefined) blocks.push({ kind: "section", title: legacyLabel(label) });
+    if (label !== undefined) blocks.push({ kind: "section", title: valueLabel(label) });
     if (value.length === 0) {
       blocks.push({ kind: "paragraph", text: "None" });
       return;
     }
     if (
       value.every(isScalar) &&
-      value.every((item) => legacyScalar(item).length <= MAX_PRESENTATION_STRING_CODE_UNITS)
+      value.every((item) => valueScalar(item).length <= MAX_PRESENTATION_STRING_CODE_UNITS)
     ) {
-      const items = value.map(legacyScalar);
+      const items = value.map(valueScalar);
       for (let index = 0; index < items.length; index += MAX_PRESENTATION_ITEMS) {
         blocks.push({ kind: "bullets", items: items.slice(index, index + MAX_PRESENTATION_ITEMS) });
       }
       return;
     }
-    value.forEach((item, index) => appendLegacyValue(blocks, item, `Item ${index + 1}`));
+    value.forEach((item, index) => appendValue(blocks, item, `Item ${index + 1}`));
     return;
   }
   const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
     compareKeys(left, right),
   );
-  if (label !== undefined) blocks.push({ kind: "section", title: legacyLabel(label) });
+  if (label !== undefined) blocks.push({ kind: "section", title: valueLabel(label) });
   if (entries.length === 0) {
     blocks.push({ kind: "paragraph", text: "None" });
     return;
@@ -389,34 +393,34 @@ function appendLegacyValue(
   const fields = entries
     .filter(
       ([, child]) =>
-        isScalar(child) && legacyScalar(child).length <= MAX_PRESENTATION_STRING_CODE_UNITS,
+        isScalar(child) && valueScalar(child).length <= MAX_PRESENTATION_STRING_CODE_UNITS,
     )
-    .map(([key, child]) => ({ label: legacyLabel(key), value: legacyScalar(child) }));
+    .map(([key, child]) => ({ label: valueLabel(key), value: valueScalar(child) }));
   for (let index = 0; index < fields.length; index += MAX_PRESENTATION_ITEMS) {
     blocks.push({ kind: "fields", items: fields.slice(index, index + MAX_PRESENTATION_ITEMS) });
   }
   for (const [key, child] of entries.filter(
     ([, child]) =>
-      !isScalar(child) || legacyScalar(child).length > MAX_PRESENTATION_STRING_CODE_UNITS,
+      !isScalar(child) || valueScalar(child).length > MAX_PRESENTATION_STRING_CODE_UNITS,
   )) {
-    appendLegacyValue(blocks, child, key);
+    appendValue(blocks, child, key);
   }
 }
 
-function appendLegacyText(
+function appendValueText(
   blocks: DecisionPresentationBlock[],
   value: string,
   section: string,
 ): void {
-  const text = sanitizeLegacyText(value);
+  const text = sanitizeValueText(value);
   blocks.push({ kind: "section", title: section });
   for (const part of splitByCodeUnits(text, MAX_PRESENTATION_STRING_CODE_UNITS)) {
     blocks.push({ kind: "paragraph", text: part.trim().length === 0 ? "None" : part });
   }
 }
 
-function legacyLabel(value: string): string {
-  const sanitized = sanitizeLegacyText(value)
+function valueLabel(value: string): string {
+  const sanitized = sanitizeValueText(value)
     .replaceAll(/[_-]+/gu, " ")
     .replaceAll(/([a-z0-9])([A-Z])/gu, "$1 $2")
     .replaceAll(/\s+/gu, " ")
@@ -425,13 +429,13 @@ function legacyLabel(value: string): string {
   return `${sanitized[0]!.toUpperCase()}${sanitized.slice(1)}`;
 }
 
-function legacyScalar(value: unknown): string {
+function valueScalar(value: unknown): string {
   if (value === null) return "None";
   if (typeof value === "boolean") return value ? "Yes" : "No";
-  return sanitizeLegacyText(String(value));
+  return sanitizeValueText(String(value));
 }
 
-function sanitizeLegacyText(value: string): string {
+function sanitizeValueText(value: string): string {
   return value
     .replaceAll("\r\n", "\n")
     .replaceAll("\r", "\n")
