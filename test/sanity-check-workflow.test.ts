@@ -421,7 +421,12 @@ describe("isolated sanity-check sessions", () => {
       ],
       process.cwd(),
       new AbortController().signal,
-      { invocation: { command: process.execPath, prefixArgs: ["-e", script, "--"] } },
+      {
+        invocation: { command: process.execPath, prefixArgs: ["-e", script, "--"] },
+        timeoutMs: 10_000,
+        maxOutputChars: 100_000,
+        maxConcurrency: 1,
+      },
     );
     const first = outputs.first as { args: string[] };
     expect(Object.keys(outputs)).toEqual(["first", "second"]);
