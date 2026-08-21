@@ -183,7 +183,9 @@ A serializable snapshot of the graph taken at run start
 (`pi-workflows.definition-snapshot.v1`). Functions such as prompts and
 validators are not serialized. Each node keeps only its metadata (`nodeType`,
 `timeoutMs`, `statusDetail`, `expectedOutput`, `summary`, `actionExecution`),
-and edges are copied verbatim. Included nodes also record `mountPath`, `localNodeId`, and internal entry or exit status. The top-level `composition.mounts` list records every mount, entry, named exit, and child step limit. The snapshot is what lets viewers draw all nodes, including ones that have not run yet. It is immutable after run start.
+and edges are copied verbatim. A fixed `timeoutMs: null` is preserved and means
+that the node has no wall-clock deadline. Timeout callbacks remain omitted.
+Included nodes also record `mountPath`, `localNodeId`, and internal entry or exit status. The top-level `composition.mounts` list records every mount, entry, named exit, and child step limit. The snapshot is what lets viewers draw all nodes, including ones that have not run yet. It is immutable after run start.
 
 ## Resume and repair
 

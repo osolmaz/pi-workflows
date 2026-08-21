@@ -161,11 +161,13 @@ then fails the step. If an agent node times out or the workflow is cancelled,
 the extension also aborts its active Pi turn. The model cannot continue to use
 tools after the engine has closed that attempt.
 
-`timeoutMs` can be a finite positive number or a function of the normal node
-context. A timeout function can use prepared outputs to select a deadline for
-this run. It has 30 seconds to return a value. Computed timeout functions are
-runtime code, so definition snapshots omit them; fixed numeric timeouts remain
-in the snapshot.
+`timeoutMs` can be a finite positive number, `null`, or a function of the normal
+node context that returns either value. Omit it to use the 15-minute engine
+default. Set it to `null` to disable only the wall-clock deadline; cancellation,
+parking, claim loss, shutdown, and the node's abort signal still work. A timeout
+function can use prepared outputs to select a policy for this run. It has 30
+seconds to return. Computed timeout functions are runtime code, so definition
+snapshots omit them. Snapshots keep fixed numbers and fixed `null` values.
 
 ### compute
 
@@ -418,6 +420,17 @@ The built-in `autoplan` workflow selects a practical in-scope solution and write
 The built-in `plan-approval` workflow offers verified human `continue`, `stop`, and exact-text `replan` exits. It is optional. A replan exit returns the unchanged text to autoplan, documents the revised plan, and asks again through a new plan digest.
 
 Autoimplement runs independent commands through bounded command batches. A batch is an ordinary function action that calls the public `runCommandBatch` helper. Each command has a stable ID, executable, arguments, absolute working directory, timeout, and output limit. Results stay separate and return in input order. One command uses the same path with concurrency one.
+
+Autoimplement gives `implement` an eight-hour deadline. When a supported
+long-running agent node times out, one shared read-only fallback inspects the
+current repository, accepted workflow outputs, and relevant pull-request state.
+It then retries the timed-out stage or routes to verification, review, CI,
+delivery, the existing redesign workflow, or blocked. The fallback can run at
+most three times in one Autoimplement run. Its own failure or timeout is
+terminal. Cancellation remains immediate and never enters fallback. A repeated
+effect step first checks what already exists and performs only missing work.
+This graph fallback starts after the timed-out turn ends and is separate from
+successor-turn delivery.
 
 Autoimplement uses batches for pi-reviewer, pending CI watches, and local verification commands from independent repositories. It keeps model turns, fixes, pushes, comment changes, merges, and releases in their existing order. Reviewer commands are tied to the repository, base branch, pushed head, and relevant dependency fingerprint. A later review round includes only repositories whose head or dependency fingerprint changed. P0 or P1 work still requires another review. P2-only work can be addressed and verified without another reviewer run only because of that P2 work.
 

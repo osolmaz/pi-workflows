@@ -71,9 +71,10 @@ export type WorkflowProgressData = {
 export type WorkflowNodeCommon = {
   /**
    * Per-node timeout or a callback that derives it from the run context.
-   * Falls back to the engine default (15 minutes).
+   * Null disables the wall-clock deadline. Omission falls back to the engine
+   * default (15 minutes).
    */
-  timeoutMs?: number | ((context: WorkflowNodeContext) => MaybePromise<number>);
+  timeoutMs?: number | null | ((context: WorkflowNodeContext) => MaybePromise<number | null>);
   /** Short human-readable label shown in the viewer while the node runs. */
   statusDetail?: string;
 };
@@ -715,7 +716,7 @@ export type WorkflowRunState = {
 
 export type WorkflowNodeSnapshot = {
   nodeType: WorkflowNodeDefinition["nodeType"];
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   statusDetail?: string;
   summary?: string;
   expectedOutput?: string;

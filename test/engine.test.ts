@@ -348,6 +348,46 @@ describe("WorkflowEngine", () => {
     expect(state.results.ask?.durationMs).toBeGreaterThanOrEqual(20);
   });
 
+  it("allows a fixed null timeout to outlive the engine default", async () => {
+    const workflow = defineWorkflow({
+      name: "no-timeout",
+      startAt: "ask",
+      nodes: { ask: agent({ prompt: () => "?", timeoutMs: null }) },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("ask", async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const accepted = await request.accept({ completed: true });
+      if (!accepted.ok) throw new Error(accepted.error);
+      return { output: accepted.value };
+    });
+    const { engine } = await makeEngine(executor, { defaultNodeTimeoutMs: 20 });
+
+    const { state } = await engine.run(workflow, {});
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toEqual({ completed: true });
+  });
+
+  it("allows a derived null timeout and keeps cancellation active", async () => {
+    const workflow = defineWorkflow({
+      name: "derived-no-timeout",
+      startAt: "ask",
+      nodes: { ask: agent({ prompt: () => "?", timeoutMs: () => null }) },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("ask", { hang: true });
+    const { engine } = await makeEngine(executor, { defaultNodeTimeoutMs: 20 });
+
+    const runPromise = engine.run(workflow, {});
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    engine.cancel();
+    const { state } = await runPromise;
+
+    expect(state.status).toBe("cancelled");
+    expect(state.results.ask?.outcome).toBe("cancelled");
+  });
+
   it("fails before dispatch when a derived timeout is invalid", async () => {
     const workflow = defineWorkflow({
       name: "bad-derived-timeout",

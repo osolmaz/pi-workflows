@@ -983,9 +983,11 @@ export class WorkflowEngine {
       if (abort.signal.aborted) {
         throw abortError(abort.signal);
       }
-      timer = setTimeout(() => {
-        abort.abort(new TimeoutError(timeoutMs));
-      }, timeoutMs);
+      if (timeoutMs !== null) {
+        timer = setTimeout(() => {
+          abort.abort(new TimeoutError(timeoutMs));
+        }, timeoutMs);
+      }
       this.activeAttempt = { runDir, state, nodeId, attemptId, signal: abort.signal };
       const dispatched = this.dispatchNode(
         workflow,
@@ -1047,8 +1049,9 @@ export class WorkflowEngine {
     node: WorkflowNodeDefinition,
     context: WorkflowNodeContext,
     abort: AbortController,
-  ): Promise<number> {
+  ): Promise<number | null> {
     const configured = node.timeoutMs;
+    if (configured === null) return null;
     if (typeof configured !== "function") {
       return assertValidTimeout(configured ?? this.defaultNodeTimeoutMs);
     }
@@ -1061,7 +1064,7 @@ export class WorkflowEngine {
         Promise.resolve(configured(context)),
         abortRejection(abort.signal),
       ]);
-      return assertValidTimeout(resolved);
+      return resolved === null ? null : assertValidTimeout(resolved);
     } finally {
       clearTimeout(timer);
     }

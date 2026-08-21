@@ -105,6 +105,21 @@ export default defineWorkflow({
 });
 `;
 
+const NO_TIMEOUT_E2E_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "no-timeout-e2e",
+  startAt: "work",
+  nodes: {
+    work: agent({
+      prompt: () => "Complete the no-timeout workflow.",
+      timeoutMs: null,
+    }),
+  },
+  edges: [],
+});
+`;
+
 const COMPOSED_CHILD_WORKFLOW = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
 
 export default defineWorkflow({
@@ -546,6 +561,21 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const noTimeoutStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: no-timeout-e2e, step: work, attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (noTimeoutStepMatch) {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "work",
+              attempt: noTimeoutStepMatch[1] ?? "",
+              output: { completed: true },
+            },
+          };
+        }
         const hostStepMatch = lastUserText.match(
           /workflow step contract \(workflow: host-e2e, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
         );
@@ -618,6 +648,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "timeout-e2e.workflow.ts"),
       TIMEOUT_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "no-timeout-e2e.workflow.ts"),
+      NO_TIMEOUT_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -1133,6 +1168,23 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.results.work?.outcome).toBe("timed_out");
     await expect(fs.stat(timeoutMarker)).rejects.toThrow();
+  }, 90_000);
+
+  it("loads and completes a null-timeout node through the real Pi runtime", async () => {
+    pi.send({ id: "no-timeout-1", type: "prompt", message: "/workflow no-timeout-e2e" });
+
+    const { runDir, state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "no-timeout-e2e" && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.join("\n")}`,
+    );
+    const snapshot = JSON.parse(await fs.readFile(path.join(runDir, "workflow.json"), "utf8")) as {
+      nodes: { work?: { timeoutMs?: number | null } };
+    };
+
+    expect(state.finalOutput).toEqual({ completed: true });
+    expect(snapshot.nodes.work?.timeoutMs).toBeNull();
   }, 90_000);
 
   it("continues a protected human decision through a real Pi command without Telegram", async () => {

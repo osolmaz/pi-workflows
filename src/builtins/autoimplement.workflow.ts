@@ -123,6 +123,30 @@ type BlockerChallenge = {
 const MAX_BLOCKER_CHALLENGES = 3;
 const MAX_CHALLENGE_ITEMS = 5;
 const MAX_CHALLENGE_TEXT = 500;
+const MAX_TIMEOUT_FALLBACKS = 3;
+const MAX_TIMEOUT_FALLBACK_EVIDENCE = 8;
+const TIMEOUT_FALLBACK_SOURCES = [
+  "implement",
+  "planVerification",
+  "verify",
+  "fix",
+  "publish",
+  "addressP2",
+  "verifyP2",
+  "inspectComments",
+  "inspectCi",
+  "opportunisticTest",
+  "finalizeDelivery",
+] as const;
+
+type TimeoutFallbackSource = (typeof TIMEOUT_FALLBACK_SOURCES)[number];
+type TimeoutFallbackRoute = "retry" | "verify" | "review" | "ci" | "deliver" | "replan" | "blocked";
+
+type TimeoutFallbackResult = {
+  route: TimeoutFallbackRoute;
+  reason: string;
+  evidence: string[];
+};
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -156,6 +180,131 @@ function boundedChallengeItems(value: unknown, label: string): string[] {
     }
     return text;
   });
+}
+
+function isTimeoutFallbackSource(nodeId: string): nodeId is TimeoutFallbackSource {
+  return (TIMEOUT_FALLBACK_SOURCES as readonly string[]).includes(nodeId);
+}
+
+function latestTimedOutStep(context: WorkflowNodeContext) {
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step?.outcome === "timed_out" && isTimeoutFallbackSource(step.nodeId)) return step;
+  }
+  throw new Error("No supported timed-out Autoimplement step is available");
+}
+
+function hasAcceptedOutput(context: WorkflowNodeContext, nodeIds: string[]): boolean {
+  return nodeIds.some((nodeId) => context.outputs[nodeId] !== undefined);
+}
+
+function parseTimeoutFallback(value: unknown, context: WorkflowNodeContext): TimeoutFallbackResult {
+  const result = requireRecord(value, "timeout fallback");
+  const routes: TimeoutFallbackRoute[] = [
+    "retry",
+    "verify",
+    "review",
+    "ci",
+    "deliver",
+    "replan",
+    "blocked",
+  ];
+  if (!routes.includes(result.route as TimeoutFallbackRoute)) {
+    throw new Error(`timeout fallback route must be one of ${routes.join(", ")}`);
+  }
+  const route = result.route as TimeoutFallbackRoute;
+  const reason = requireString(result.reason, "timeout fallback reason");
+  const evidence = requireStringArray(result.evidence, "timeout fallback evidence").map(
+    (item, index) => requireString(item, `timeout fallback evidence[${index}]`),
+  );
+  if (evidence.length === 0 || evidence.length > MAX_TIMEOUT_FALLBACK_EVIDENCE) {
+    throw new Error(
+      `timeout fallback evidence must contain 1 through ${MAX_TIMEOUT_FALLBACK_EVIDENCE} items`,
+    );
+  }
+
+  latestTimedOutStep(context);
+  if (route === "verify" && !hasAcceptedOutput(context, ["implement"])) {
+    throw new Error("timeout fallback cannot route to verification without implementation output");
+  }
+  if (route === "review" && !hasAcceptedOutput(context, ["publish", "verifyP2"])) {
+    throw new Error("timeout fallback cannot route to review without publication output");
+  }
+  if (route === "ci") {
+    const comments = context.outputs.inspectComments as { route?: unknown } | undefined;
+    if (comments?.route !== "ci") {
+      throw new Error("timeout fallback cannot route to CI before comment inspection completed");
+    }
+  }
+  if (route === "deliver") {
+    const ci = (context.outputs.assessTrackedCi ?? context.outputs.inspectCi) as
+      | { route?: unknown }
+      | undefined;
+    const classification = context.outputs.classifyCi as { route?: unknown } | undefined;
+    if (ci?.route !== "green" && classification?.route !== "unrelated") {
+      throw new Error("timeout fallback cannot route to delivery before CI is ready");
+    }
+  }
+
+  return { route, reason, evidence };
+}
+
+function timeoutFallbackTarget(context: WorkflowNodeContext): { route: string } {
+  const fallback = context.outputs.timeoutFallback as TimeoutFallbackResult;
+  if (fallback.route !== "retry") {
+    const routes: Record<Exclude<TimeoutFallbackRoute, "retry">, string> = {
+      verify: "planVerification",
+      review: "selectReviewCommands",
+      ci: "inspectCi",
+      deliver: "finalizeDelivery",
+      replan: "redesign",
+      blocked: "challengeBlockerGuard",
+    };
+    return { route: routes[fallback.route] };
+  }
+  return { route: latestTimedOutStep(context).nodeId };
+}
+
+function timeoutFallbackGuard(context: WorkflowNodeContext) {
+  const timeout = latestTimedOutStep(context);
+  const attempts = context.state.steps.filter(
+    (step) => step.nodeId === "timeoutFallback" && step.outcome === "ok",
+  ).length;
+  if (attempts >= MAX_TIMEOUT_FALLBACKS) {
+    return {
+      route: "blocked",
+      reason: `Autoimplement reached the ${MAX_TIMEOUT_FALLBACKS}-fallback timeout safety limit.`,
+      evidence: {
+        attempts,
+        limit: MAX_TIMEOUT_FALLBACKS,
+        latestTimeout: {
+          nodeId: timeout.nodeId,
+          attemptId: timeout.attemptId,
+          error: timeout.error,
+        },
+      },
+    };
+  }
+  return {
+    route: "recover",
+    attempt: attempts + 1,
+    limit: MAX_TIMEOUT_FALLBACKS,
+    timeout: {
+      nodeId: timeout.nodeId,
+      attemptId: timeout.attemptId,
+      error: timeout.error,
+    },
+  };
+}
+
+function throwLatestSupportedFailure(context: WorkflowNodeContext): never {
+  for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
+    const step = context.state.steps[index];
+    if (step?.outcome === "failed" && isTimeoutFallbackSource(step.nodeId)) {
+      throw new Error(step.error ?? `Autoimplement node failed: ${step.nodeId}`);
+    }
+  }
+  throw new Error("No supported failed Autoimplement step is available");
 }
 
 function parseBlockerChallenge(value: unknown): BlockerChallenge {
@@ -464,6 +613,7 @@ function latestBlockerClaim(context: WorkflowNodeContext): unknown {
     "assessTrackedCi",
     "classifyCi",
     "finalizeDelivery",
+    "timeoutFallback",
   ];
   for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
     const step = context.state.steps[index];
@@ -500,6 +650,7 @@ function latestIssue(context: WorkflowNodeContext): unknown {
     "triageReview",
     "inspectComments",
     "classifyCi",
+    "timeoutFallback",
     "adoptPlan",
   ];
   for (let index = context.state.steps.length - 1; index >= 0; index -= 1) {
@@ -927,6 +1078,8 @@ function ciForOutput(context: WorkflowNodeContext): unknown {
 
 function latestBlockedReason(context: WorkflowNodeContext): { reason: string; evidence: unknown } {
   const candidates = [
+    "timeoutFallbackGuard",
+    "timeoutFallback",
     "challengeBlockerGuard",
     "challengeBlocker",
     "finalizeDelivery",
@@ -1111,8 +1264,57 @@ export const autoimplementWorkflow = defineWorkflow({
           : { route: "redesign", replans, limit };
       },
     }),
+    timeoutFallbackGuard: compute({
+      run: timeoutFallbackGuard,
+    }),
+    timeoutFallback: agent({
+      timeoutMs: 30 * 60_000,
+      statusDetail: "choosing a safe timeout fallback",
+      prompt: (context) => {
+        const request = context.input as AutoimplementInput;
+        const guard = context.outputs.timeoutFallbackGuard;
+        const previousFallbacks = context.state.steps
+          .filter((step) => step.nodeId === "timeoutFallback" && step.outcome === "ok")
+          .map((step) => step.output);
+        return [
+          "A bounded Autoimplement agent step timed out. Choose the safest existing workflow stage to run next instead of ending the run blindly.",
+          "This is a read-only fallback step. Inspect state, but do not edit files, run mutating commands, commit, push, open or update a pull request, post comments, merge, deploy, or release.",
+          "Inspect the current repository worktree, branch, diff, and commits. Inspect the remote branch, pull request, review, CI, merge, and final report when they exist and affect the next route.",
+          "Do not assume that the timed-out step failed or completed. Use accepted workflow outputs and durable repository or pull-request state.",
+          "Choose retry only when the timed-out stage must run again. Choose verify when accepted implementation output exists and verification is next. Choose review when accepted publication output exists. Choose ci only after comment inspection routed to CI. Choose deliver only after CI is green or classified unrelated. Choose replan when evidence invalidates the approved plan. Choose blocked only when no safe route exists.",
+          "Do not skip required implementation, verification, review, CI, authorization, or delivery checks.",
+          `Task: ${request.task}`,
+          `Approved plan: ${JSON.stringify(currentPlan(context))}`,
+          `Authorized scope: ${request.scope ?? request.repository ?? "the current repository and task"}`,
+          `Timeout: ${JSON.stringify(guard)}`,
+          `Accepted outputs: ${JSON.stringify(context.outputs)}`,
+          `Previous fallback results: ${JSON.stringify(previousFallbacks)}`,
+          `Recent workflow attempts: ${JSON.stringify(recentWorkflowAttempts(context))}`,
+        ].join("\n");
+      },
+      expectedOutput: `{ "route": "retry" | "verify" | "review" | "ci" | "deliver" | "replan" | "blocked", "reason": "why this is the safest next stage", "evidence": ["state inspected before choosing the route"] }`,
+      validate: parseTimeoutFallback,
+    }),
+    routeTimeoutFallback: compute({
+      run: timeoutFallbackTarget,
+    }),
+    propagateSupportedFailure: compute({
+      run: throwLatestSupportedFailure,
+    }),
+    routeVerifyP2Result: compute({
+      run: ({ outputs }) => outputs.verifyP2,
+    }),
+    routeInspectCommentsResult: compute({
+      run: ({ outputs }) => outputs.inspectComments,
+    }),
+    routeInspectCiResult: compute({
+      run: ({ outputs }) => outputs.inspectCi,
+    }),
+    routeFinalizeDeliveryResult: compute({
+      run: ({ outputs }) => outputs.finalizeDelivery,
+    }),
     implement: agent({
-      timeoutMs: 60 * 60_000,
+      timeoutMs: 8 * 60 * 60_000,
       statusDetail: "implementing",
       prompt: (context) => {
         const request = context.input as AutoimplementInput;
@@ -1121,6 +1323,7 @@ export const autoimplementWorkflow = defineWorkflow({
           `Plan: ${JSON.stringify(currentPlan(context))}`,
           `Authorized scope: ${request.scope ?? request.repository ?? "the current repository and task"}`,
           `Constraints: ${JSON.stringify(request.constraints ?? [])}`,
+          "Before changing files, inspect the current worktree, diff, commits, branch, remote state, and matching pull request. Continue existing work and do not repeat completed effects.",
           "Follow repository instructions and use the most elegant long-term production-ready implementation without unnecessary work.",
           "If implementation exposes a new design or scope problem, report it precisely instead of forcing the old plan.",
           "Report every changed repository as an absolute path so independent verification can be bounded safely.",
@@ -1263,6 +1466,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: (context) =>
         [
           "Fix the current implementation issue without expanding the approved design.",
+          "Inspect the current diff and commits first. Continue any partial fix and change only work that is still missing.",
           `Issue: ${JSON.stringify(latestIssue(context))}`,
           `Current plan: ${JSON.stringify(currentPlan(context))}`,
           "Stop after the fix so verification can run again.",
@@ -1277,6 +1481,7 @@ export const autoimplementWorkflow = defineWorkflow({
         const request = input as AutoimplementInput;
         return [
           "Commit and push the verified implementation before review.",
+          "Inspect the branch, local and remote heads, and matching pull requests first. Do not push an already-pushed head or create a second pull request for the same branch and base.",
           "Use the existing implementation-plan PR when one exists. Otherwise open a PR and use the pr-description skill for its body.",
           "Inspect the complete public diff before every push or PR mutation.",
           "Report every repository that received a pushed pull request with its absolute repository path, branch, base branch, pushed head revision, and PR URL.",
@@ -1357,6 +1562,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: ({ outputs }) =>
         [
           "Address valid P2 findings from the last review when the improvement is proportionate and in scope.",
+          "Inspect the current diff and commits first. Do not repeat a P2 change that is already present.",
           "Do not rerun pi-reviewer solely because P2 work changes files. Verification will run once, then the workflow continues.",
           `Review: ${JSON.stringify(outputs.assessReview)}`,
         ].join("\n"),
@@ -1369,6 +1575,7 @@ export const autoimplementWorkflow = defineWorkflow({
       prompt: () =>
         [
           "Run focused verification for the P2 changes and push the verified result.",
+          "Inspect the local and remote heads first. Do not push again when the verified head is already remote.",
           "Do not run pi-reviewer again because the previous round had no P0 or P1 findings.",
           "Re-observe every published PR after the push and return its current repository, branch, base branch, head revision, PR URL, pushed status, and unchanged dependency fingerprint.",
           "Report exact commands and outcomes.",
@@ -1501,8 +1708,9 @@ export const autoimplementWorkflow = defineWorkflow({
           request.merge === false
             ? "Leave every verified PR ready without merging because input disabled merge."
             : "Handle verified PRs one at a time and merge each unless repository policy or explicit user instructions prohibit it.",
+          "Before each mutation, inspect the current PR head, merge state, and existing final report. Do not merge an already merged expected head or post a duplicate report.",
           "Use each repository's required merge method.",
-          "Post a final report with the implementation summary and exact validation commands on every PR.",
+          "Post a final report with the implementation summary and exact validation commands on every PR only when that report is missing.",
           "Keep the existing top-level merged, pr, reportComment, and reason fields. For several PRs, use the first PR for the top-level compatibility fields and include every result under repositories.",
           "Return blocked instead of claiming completion when a required merge or report action fails.",
           `Published repositories: ${JSON.stringify(currentPublishedRepositories(context))}`,
@@ -1577,7 +1785,45 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "replanGuard",
       switch: { on: "$.route", cases: { redesign: "redesign", blocked: "blocked" } },
     },
-    { from: "implement", to: "classifyImplementation" },
+    {
+      from: "timeoutFallbackGuard",
+      switch: { on: "$.route", cases: { recover: "timeoutFallback", blocked: "blocked" } },
+    },
+    { from: "timeoutFallback", to: "routeTimeoutFallback" },
+    { from: "propagateSupportedFailure", to: "blocked" },
+    {
+      from: "routeTimeoutFallback",
+      switch: {
+        on: "$.route",
+        cases: {
+          implement: "implement",
+          planVerification: "planVerification",
+          verify: "verify",
+          fix: "fix",
+          publish: "publish",
+          addressP2: "addressP2",
+          verifyP2: "verifyP2",
+          inspectComments: "inspectComments",
+          inspectCi: "inspectCi",
+          opportunisticTest: "opportunisticTest",
+          finalizeDelivery: "finalizeDelivery",
+          selectReviewCommands: "selectReviewCommands",
+          redesign: "redesign",
+          challengeBlockerGuard: "challengeBlockerGuard",
+        },
+      },
+    },
+    {
+      from: "implement",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "classifyImplementation",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     {
       from: "classifyImplementation",
       switch: {
@@ -1598,9 +1844,29 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "challengeBlocker",
       switch: { on: "$.route", cases: { continue: "redesign", blocked: "blocked" } },
     },
-    { from: "planVerification", to: "runVerification" },
+    {
+      from: "planVerification",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "runVerification",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     { from: "runVerification", to: "verify" },
-    { from: "verify", to: "classifyVerification" },
+    {
+      from: "verify",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "classifyVerification",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     {
       from: "classifyVerification",
       switch: {
@@ -1613,8 +1879,28 @@ export const autoimplementWorkflow = defineWorkflow({
         },
       },
     },
-    { from: "fix", to: "planVerification" },
-    { from: "publish", to: "selectReviewCommands" },
+    {
+      from: "fix",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "planVerification",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
+    {
+      from: "publish",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "selectReviewCommands",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     {
       from: "selectReviewCommands",
       switch: { on: "$.route", cases: { run: "runReview", reuse: "inspectComments" } },
@@ -1646,13 +1932,45 @@ export const autoimplementWorkflow = defineWorkflow({
       from: "triageReview",
       switch: { on: "$.route", cases: { redesign: "redesign", fix: "fix" } },
     },
-    { from: "addressP2", to: "verifyP2" },
+    {
+      from: "addressP2",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "verifyP2",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     {
       from: "verifyP2",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "routeVerifyP2Result",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
+    {
+      from: "routeVerifyP2Result",
       switch: { on: "$.passed", cases: { true: "inspectComments", false: "fix" } },
     },
     {
       from: "inspectComments",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "routeInspectCommentsResult",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
+    {
+      from: "routeInspectCommentsResult",
       switch: {
         on: "$.route",
         cases: {
@@ -1665,6 +1983,17 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "inspectCi",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "routeInspectCiResult",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
+    {
+      from: "routeInspectCiResult",
       switch: {
         on: "$.route",
         cases: {
@@ -1698,7 +2027,17 @@ export const autoimplementWorkflow = defineWorkflow({
         },
       },
     },
-    { from: "opportunisticTest", to: "inspectCi" },
+    {
+      from: "opportunisticTest",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "inspectCi",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
     {
       from: "classifyCi",
       switch: {
@@ -1713,6 +2052,17 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "finalizeDelivery",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "routeFinalizeDeliveryResult",
+          timed_out: "timeoutFallbackGuard",
+          failed: "propagateSupportedFailure",
+        },
+      },
+    },
+    {
+      from: "routeFinalizeDeliveryResult",
       switch: {
         on: "$.status",
         cases: { completed: "finalize", blocked: "challengeBlockerGuard" },

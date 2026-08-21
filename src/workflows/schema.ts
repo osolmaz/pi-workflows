@@ -35,10 +35,11 @@ function assertOptionalFunction(value: unknown, description: string): void {
 function assertCommonNodeFields(node: WorkflowNodeDefinition, nodeId: string): void {
   if (
     node.timeoutMs !== undefined &&
+    node.timeoutMs !== null &&
     typeof node.timeoutMs !== "function" &&
     (typeof node.timeoutMs !== "number" || !Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)
   ) {
-    fail(`node ${nodeId} timeoutMs must be a finite positive number or function`);
+    fail(`node ${nodeId} timeoutMs must be null, a finite positive number, or a function`);
   }
   if (node.statusDetail !== undefined && typeof node.statusDetail !== "string") {
     fail(`node ${nodeId} statusDetail must be a string`);

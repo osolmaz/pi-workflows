@@ -53,6 +53,18 @@ function published(
   };
 }
 
+function autoimplementWithTimeout(nodeId: string, timeoutMs: number) {
+  const node = autoimplementWorkflow.nodes[nodeId];
+  if (node === undefined) throw new Error(`autoimplement node is missing: ${nodeId}`);
+  return {
+    ...autoimplementWorkflow,
+    nodes: {
+      ...autoimplementWorkflow.nodes,
+      [nodeId]: { ...node, timeoutMs },
+    },
+  };
+}
+
 function cleanReview(headRevision = "abc123") {
   return {
     repositories: [
@@ -1265,10 +1277,10 @@ describe("built-in autoimplement", () => {
     expect(edge("repairReviewCommand")).toMatchObject({
       switch: { cases: { blocked: "challengeBlockerGuard" } },
     });
-    expect(edge("inspectComments")).toMatchObject({
+    expect(edge("routeInspectCommentsResult")).toMatchObject({
       switch: { cases: { blocked: "challengeBlockerGuard" } },
     });
-    expect(edge("inspectCi")).toMatchObject({
+    expect(edge("routeInspectCiResult")).toMatchObject({
       switch: { cases: { unavailable: "challengeBlockerGuard" } },
     });
     expect(edge("repairCiCommand")).toMatchObject({
@@ -1280,7 +1292,7 @@ describe("built-in autoimplement", () => {
     expect(edge("classifyCi")).toMatchObject({
       switch: { cases: { blocked: "challengeBlockerGuard" } },
     });
-    expect(edge("finalizeDelivery")).toMatchObject({
+    expect(edge("routeFinalizeDeliveryResult")).toMatchObject({
       switch: { cases: { blocked: "challengeBlockerGuard" } },
     });
 
@@ -1625,6 +1637,202 @@ describe("built-in autoimplement", () => {
     expect(
       updates.every((update) => !("stdout" in update.data) && !("stderr" in update.data)),
     ).toBe(true);
+  });
+
+  it("routes a timed-out implementation through the shared fallback", async () => {
+    const executor = new ScriptedExecutor()
+      .respond(
+        "implement",
+        { hang: true },
+        {
+          output: {
+            status: "implemented",
+            summary: "continued existing work",
+            files: ["src/change.ts"],
+            repositories: [repository],
+            issueKind: null,
+            evidence: "worktree inspection showed the remaining work",
+          },
+        },
+      )
+      .respond("timeoutFallback", {
+        output: {
+          route: "retry",
+          reason: "The timed-out implementation has incomplete local work.",
+          evidence: ["The current diff still has the planned incomplete change."],
+        },
+      })
+      .respond("classifyImplementation", {
+        output: { route: "verify", summary: "ready", evidence: "implementation complete" },
+      })
+      .respond("planVerification", {
+        output: {
+          commands: [
+            {
+              id: "verify",
+              command: process.execPath,
+              args: ["-e", "process.stdout.write('passed')"],
+              cwd: repository,
+              timeoutMs: 60_000,
+              maxOutputChars: 100_000,
+            },
+          ],
+          untested: [],
+        },
+      })
+      .respond("verify", {
+        output: {
+          passed: true,
+          commands: [{ command: "node verification", outcome: "passed" }],
+          failures: [],
+          untested: [],
+        },
+      })
+      .respond("classifyVerification", {
+        output: { route: "publish", summary: "checks passed", evidence: "verification" },
+      })
+      .respond("publish", { output: published() })
+      .respond("assessReview", { output: cleanReview() })
+      .respond("inspectComments", {
+        output: { route: "ci", summary: "no actionable comments", evidence: [] },
+      })
+      .respond("inspectCi", { output: ciInspection("green") })
+      .respond("finalizeDelivery", {
+        output: {
+          status: "completed",
+          merged: false,
+          pr: "https://example.test/pr/1",
+          reportComment: "https://example.test/pr/1#comment",
+          reason: "ready",
+        },
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-fallback"),
+    });
+
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 20), {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      merge: false,
+    });
+
+    expect(state.status, state.error).toBe("completed");
+    expect(
+      state.steps.filter((step) => step.nodeId === "implement").map((step) => step.outcome),
+    ).toEqual(["timed_out", "ok"]);
+    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(1);
+    expect(
+      executor.requests.find((request) => request.contract.nodeId === "timeoutFallback")?.prompt,
+    ).toContain("read-only fallback step");
+  });
+
+  it("stops after three timeout fallback executions", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("implement", { hang: true }, { hang: true }, { hang: true }, { hang: true })
+      .respond(
+        "timeoutFallback",
+        {
+          output: {
+            route: "retry",
+            reason: "Implementation remains incomplete.",
+            evidence: ["The current diff is incomplete."],
+          },
+        },
+        {
+          output: {
+            route: "retry",
+            reason: "Implementation remains incomplete.",
+            evidence: ["The current diff is still incomplete."],
+          },
+        },
+        {
+          output: {
+            route: "retry",
+            reason: "Implementation remains incomplete.",
+            evidence: ["The current diff remains incomplete."],
+          },
+        },
+      );
+    const engine = new WorkflowEngine({
+      executor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-limit"),
+    });
+
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      merge: false,
+    });
+
+    expect(state.status).toBe("completed");
+    expect((state.finalOutput as { status: string }).status).toBe("blocked");
+    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(3);
+    expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(4);
+  });
+
+  it("keeps failed implementation and cancellation out of timeout fallback", async () => {
+    const failedEngine = new WorkflowEngine({
+      executor: new ScriptedExecutor().respond("implement", { error: "implementation failed" }),
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-failed"),
+    });
+    const failed = await failedEngine.run(autoimplementWorkflow, {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      merge: false,
+    });
+    expect(failed.state.status).toBe("failed");
+    expect(failed.state.error).toBe("implementation failed");
+    expect(failed.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
+
+    const cancelledExecutor = new ScriptedExecutor().respond("implement", { hang: true });
+    const cancelledEngine = new WorkflowEngine({
+      executor: cancelledExecutor,
+      outputRoot: await makeTempDir("pi-workflows-autoimplement-cancelled"),
+    });
+    const cancelledPromise = cancelledEngine.run(autoimplementWithTimeout("implement", 1_000), {
+      task: "implement demo",
+      ...documentedPlan({ steps: ["change code"] }),
+      repository,
+      merge: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    cancelledEngine.cancel();
+    const cancelled = await cancelledPromise;
+    expect(cancelled.state.status).toBe("cancelled");
+    expect(cancelled.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
+  });
+
+  it("uses the eight-hour implementation timeout and shared outcome routes", () => {
+    expect(autoimplementWorkflow.nodes.implement?.timeoutMs).toBe(8 * 60 * 60_000);
+    const compiled = compileWorkflowDefinition(autoimplementWorkflow);
+    for (const nodeId of [
+      "implement",
+      "planVerification",
+      "verify",
+      "fix",
+      "publish",
+      "addressP2",
+      "verifyP2",
+      "inspectComments",
+      "inspectCi",
+      "opportunisticTest",
+      "finalizeDelivery",
+    ]) {
+      const edge = compiled.edges.find((candidate) => candidate.from === nodeId);
+      expect(edge).toMatchObject({
+        switch: {
+          on: "$result.outcome",
+          cases: {
+            timed_out: "timeoutFallbackGuard",
+            failed: "propagateSupportedFailure",
+          },
+        },
+      });
+    }
   });
 
   it("routes completed CI batches through per-PR assessment", () => {

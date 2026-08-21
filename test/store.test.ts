@@ -54,6 +54,19 @@ describe("workflowRunsBaseDir", () => {
 });
 
 describe("WorkflowRunStore", () => {
+  it("persists fixed null timeouts in the portable definition snapshot", () => {
+    const snapshot = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "no-timeout",
+        startAt: "one",
+        nodes: { one: agent({ prompt: () => "?", timeoutMs: null }) },
+        edges: [],
+      }),
+    );
+
+    expect(snapshot.nodes.one?.timeoutMs).toBeNull();
+  });
+
   it("omits computed timeouts from the portable definition snapshot", () => {
     const snapshot = createDefinitionSnapshot(
       defineWorkflow({
