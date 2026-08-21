@@ -50,6 +50,19 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
 }
 
 describe("plan-change workflow", () => {
+  it("rejects unknown input fields before applying approval defaults", async () => {
+    const engine = new WorkflowEngine({
+      outputRoot: await makeTempDir("plan-change-invalid"),
+      executor: planningExecutor({ summary: "plan", steps: ["one"] }),
+    });
+    await expect(
+      engine.run(planChangeWorkflow, {
+        task: "change the implementation",
+        approvals: { mode: "required" },
+      }),
+    ).rejects.toThrow(/unknown field approvals/);
+  });
+
   it("uses the shared skip policy without creating a human decision", async () => {
     const result = await new WorkflowEngine({
       outputRoot: await makeTempDir("plan-change-skip"),

@@ -61,6 +61,15 @@ function requireString(value: unknown, label: string): string {
   return value.trim();
 }
 
+function requireExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) throw new Error(`${label} has unknown field ${unexpected[0]}`);
+}
+
 function parseStringArray(value: unknown, label: string): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
@@ -71,6 +80,20 @@ function parseStringArray(value: unknown, label: string): string[] | undefined {
 
 function parseInput(value: unknown): NormalizedPlanChangeInput {
   const input = requireRecord(value, "plan change input");
+  requireExactKeys(
+    input,
+    [
+      "task",
+      "scope",
+      "constraints",
+      "repository",
+      "documents",
+      "previousPlan",
+      "newEvidence",
+      "approval",
+    ],
+    "plan change input",
+  );
   const constraints = parseStringArray(input.constraints, "plan change constraints");
   const documents = parseStringArray(input.documents, "plan change documents");
   return {

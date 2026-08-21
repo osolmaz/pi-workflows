@@ -641,7 +641,6 @@ export class HumanDecisionStore {
       cancelledAt: new Date().toISOString(),
       reason,
     };
-    const cancellationWrite = await writeImmutableJson(filePath, record, false);
     const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
     const resolution: HumanDecisionResolution = {
       schema:
@@ -657,7 +656,9 @@ export class HumanDecisionStore {
         ? resolution
         : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
     if (winner === null) throw new Error("Human decision resolution became unreadable");
-    if (winner.outcome === "accepted") return cancellationWrite;
+    if (winner.outcome === "accepted") {
+      throw new Error("Resolved human decision cannot be cancelled");
+    }
     const existing = winner.cancellation;
     if (
       existing.decisionId !== request.decisionId ||

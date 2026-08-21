@@ -324,7 +324,7 @@ describe("HumanDecisionStore", () => {
     );
   });
 
-  it("keeps cancellation terminal when it races with a timeout default", async () => {
+  it("settles cancellation and a timeout default through one immutable winner", async () => {
     const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout-cancel"));
     const request = createHumanDecisionRequest({
       runId: "run-cancel-race",
@@ -344,10 +344,18 @@ describe("HumanDecisionStore", () => {
       store.cancel(request, "cancelled"),
       store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
     ]);
-    expect(await store.readCancellation(request.decisionId)).toMatchObject({
-      reason: "cancelled",
-    });
-    expect(await store.readResolved(request.decisionId)).toBeNull();
+    const cancellation = await store.readCancellation(request.decisionId);
+    const resolved = await store.readResolved(request.decisionId);
+    expect([cancellation, resolved].filter((value) => value !== null)).toHaveLength(1);
+    if (cancellation !== null) {
+      expect(cancellation.reason).toBe("cancelled");
+      await expect(
+        store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
+      ).rejects.toThrow(/cancelled/);
+    } else {
+      expect(resolved).toMatchObject({ provenance: "timeout" });
+      await expect(store.cancel(request, "cancelled")).rejects.toThrow(/cannot be cancelled/);
+    }
   });
 
   it("records one immutable continuation identity", async () => {
