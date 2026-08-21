@@ -457,7 +457,7 @@ Serial mode is the default. It runs one temporary read-only Pi session for all f
 
 The workflow collects pull request intent and repository diff evidence before model review. Every review must cite evidence and give the strongest case for accepting the current design. The verification session removes unsupported claims, requires exact file and symbol references, resolves supported conflicts, and returns `keep`, `simplify`, `refactor`, `drop`, or `needs_evidence`.
 
-Child sessions have only `read`, `grep`, `find`, and `ls`. They do not load discovered extensions or skills, cannot mutate the repository, and do not save Pi session files. The workflow sends the final report through a final notification with `triggerTurn: false`, so the origin model does not produce another response. See [the Sanity Check plan](plans/2026-08-21-sanity-check-plan.md) for the selected implementation and test boundaries.
+Child sessions have only `read`, `grep`, `find`, and `ls`. They do not load discovered extensions, skills, or repository context files, cannot mutate the repository, and do not save Pi session files. The workflow sends the final report through a final notification with `triggerTurn: false`, so the origin model does not produce another response. See [the Sanity Check plan](plans/2026-08-21-sanity-check-plan.md) for the selected implementation and test boundaries.
 
 ### Built-in monitor
 

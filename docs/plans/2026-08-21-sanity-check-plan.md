@@ -111,6 +111,7 @@ The review nodes are function actions. The isolated runner starts Pi in non-inte
 --no-session
 --no-extensions
 --no-skills
+--no-context-files
 --tools read,grep,find,ls
 ```
 
