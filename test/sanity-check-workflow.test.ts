@@ -339,6 +339,19 @@ describe("isolated sanity-check sessions", () => {
       });
       process.argv.splice(0, process.argv.length, "node", "/tmp/pi", "--provider");
       expect(resolvePiInvocation()).toEqual({ command: process.execPath, prefixArgs: ["/tmp/pi"] });
+      process.argv.splice(
+        0,
+        process.argv.length,
+        "node",
+        path.join("/tmp", "pi-coding-agent", "dist", "cli.js"),
+        "--offline",
+      );
+      expect(resolvePiInvocation()).toEqual({
+        command: process.execPath,
+        prefixArgs: [path.join("/tmp", "pi-coding-agent", "dist", "cli.js"), "--offline"],
+      });
+      process.argv.splice(0, process.argv.length, "node", "/tmp/other-package/cli.js");
+      expect(resolvePiInvocation()).toEqual({ command: "pi", prefixArgs: [] });
       process.argv.splice(0, process.argv.length, "node", "/$bunfs/root/pi");
       expect(resolvePiInvocation()).toEqual({ command: "pi", prefixArgs: [] });
     } finally {

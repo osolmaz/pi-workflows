@@ -98,7 +98,10 @@ export function resolvePiInvocation(): PiInvocation {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
   const scriptName = currentScript === undefined ? "" : path.basename(currentScript).toLowerCase();
-  const isPiScript = /^(pi|pi\.[cm]?js)$/.test(scriptName);
+  const isPiPackageCli =
+    scriptName === "cli.js" &&
+    currentScript?.split(path.sep).some((segment) => segment === "pi-coding-agent");
+  const isPiScript = /^(pi|pi\.[cm]?js)$/.test(scriptName) || isPiPackageCli;
   if (currentScript && !isBunVirtualScript && isPiScript) {
     return {
       command: process.execPath,
