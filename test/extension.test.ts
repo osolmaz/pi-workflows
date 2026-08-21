@@ -961,13 +961,13 @@ describe("pi-workflows extension", () => {
       const harness = makeHarness({ cwd, respond: () => {} });
 
       const first = await harness.tool.execute("list-first", { action: "list" });
-      expect(first.details).toMatchObject({ total: 65, offset: 0, omitted: 15, nextOffset: 50 });
+      expect(first.details).toMatchObject({ total: 66, offset: 0, omitted: 16, nextOffset: 50 });
       expect(first.details.workflows).toHaveLength(50);
-      expect(first.content[0]?.text).toContain("15 more omitted; list again with offset 50");
+      expect(first.content[0]?.text).toContain("16 more omitted; list again with offset 50");
 
       const second = await harness.tool.execute("list-second", { action: "list", offset: 50 });
-      expect(second.details).toMatchObject({ total: 65, offset: 50, omitted: 0 });
-      expect(second.details.workflows).toHaveLength(15);
+      expect(second.details).toMatchObject({ total: 66, offset: 50, omitted: 0 });
+      expect(second.details.workflows).toHaveLength(16);
       expect(second.details).not.toHaveProperty("nextOffset");
 
       await expect(
@@ -977,7 +977,7 @@ describe("pi-workflows extension", () => {
         harness.tool.execute("list-negative", { action: "list", offset: -1 }),
       ).rejects.toThrow(/offset must be >= 0/);
       await expect(
-        harness.tool.execute("list-too-large", { action: "list", offset: 66 }),
+        harness.tool.execute("list-too-large", { action: "list", offset: 67 }),
       ).rejects.toThrow(/offset must be an integer/);
     } finally {
       vi.unstubAllEnvs();

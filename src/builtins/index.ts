@@ -25,6 +25,18 @@ export {
 } from "./monitor.workflow.js";
 export { presentPlan } from "./plan-presentation.js";
 export {
+  sanityCheckWorkflow,
+  type ContributionEvidence,
+  type SanityCheckArea,
+  type SanityCheckAreaResult,
+  type SanityCheckEvidence,
+  type SanityCheckInput,
+  type SanityCheckMode,
+  type SanityCheckResult,
+  type SanityCheckReview,
+  type SanityCheckVerdict,
+} from "./sanity-check.workflow.js";
+export {
   planApprovalWorkflow,
   type PlanApprovalContinue,
   type PlanApprovalInput,

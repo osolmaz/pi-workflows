@@ -13,8 +13,9 @@ function fixture(name = "fixture") {
 }
 
 describe("BuiltinWorkflowCatalog", () => {
-  it("ships autoimplement at revision 6", () => {
+  it("ships stable built-in revisions", () => {
     expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("6");
+    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("1");
   });
 
   it("resolves a stable built-in source without reading a file", () => {

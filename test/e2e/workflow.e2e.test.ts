@@ -441,6 +441,55 @@ describe.sequential("pi-workflows end to end", () => {
     // workflow tool and ends its turn after each tool result.
     mock = await startMockOpenAiServer(
       ({ lastUserText, lastRole }) => {
+        if (lastUserText.includes("Verify and combine the Sanity Check reviews.")) {
+          return {
+            kind: "text",
+            text: JSON.stringify({
+              verdict: "keep",
+              summary: "The fixture change is supported by its tests.",
+              findings: ["necessity", "duplication", "contracts", "scope_tests"].map((area) => ({
+                area,
+                assessment: "pass",
+                summary: `${area} passed`,
+                evidence: [
+                  {
+                    path: ".pi/workflows/e2e.workflow.ts",
+                    symbol: "default export",
+                    detail: "The fixture provides direct evidence.",
+                  },
+                ],
+              })),
+              requiredChanges: [],
+              questionsForContributor: [],
+              unknowns: [],
+            }),
+          };
+        }
+        if (lastUserText.includes("Review the contribution in the current repository.")) {
+          const requested = ["necessity", "duplication", "contracts", "scope_tests"].filter(
+            (area) => lastUserText.includes(area),
+          );
+          return {
+            kind: "text",
+            text: JSON.stringify({
+              areas: requested.map((area) => ({
+                area,
+                assessment: "pass",
+                summary: `${area} passed`,
+                evidence: [
+                  {
+                    path: ".pi/workflows/e2e.workflow.ts",
+                    symbol: "default export",
+                    detail: "The fixture provides direct evidence.",
+                  },
+                ],
+              })),
+              acceptanceCase: "The fixture directly exercises the requested behavior.",
+              questions: [],
+              unknowns: [],
+            }),
+          };
+        }
         if (lastUserText.includes("Presentation instructions:")) {
           return { kind: "text", text: "Implemented the boring, proven design." };
         }
@@ -757,6 +806,14 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
 
+    await execFileAsync("git", ["init", "-q"], { cwd: projectDir });
+    await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: projectDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+      cwd: projectDir,
+    });
+    await execFileAsync("git", ["add", "."], { cwd: projectDir });
+    await execFileAsync("git", ["commit", "-q", "-m", "test fixtures"], { cwd: projectDir });
+
     pi = startPiRpc({
       cwd: projectDir,
       env: {
@@ -793,6 +850,35 @@ describe.sequential("pi-workflows end to end", () => {
       ],
     });
   }, 30_000);
+
+  it("runs the built-in sanity check in isolated read-only Pi sessions", async () => {
+    const requestsBefore = mock.requests.length;
+    pi.send({
+      id: "sanity-check-e2e",
+      type: "prompt",
+      message: `/workflow sanity-check --input-json ${JSON.stringify({ baseRef: "HEAD" })}`,
+    });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "sanity-check" &&
+        ["completed", "failed", "cancelled"].includes(candidate.status),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(state.status, state.error).toBe("completed");
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "1" });
+    expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
+    expect(state.outputs.review).toHaveLength(1);
+    await waitForCondition(
+      () => mock.requests.length >= requestsBefore + 2,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    expect(mock.requests.length).toBe(requestsBefore + 2);
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+  }, 60_000);
 
   it("persists a model-started run, reports deferred failure, and accepts a corrected start", async () => {
     const workflowFile = path.join(

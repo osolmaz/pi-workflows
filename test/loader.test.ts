@@ -54,6 +54,7 @@ describe("discoverWorkflows", () => {
       ["autodoc", "builtin"],
       ["autoimplement", "builtin"],
       ["plan-approval", "builtin"],
+      ["sanity-check", "builtin"],
       ["monitor", "builtin"],
     ]);
   });
@@ -65,13 +66,14 @@ describe("discoverWorkflows", () => {
 
     const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(discovered).toHaveLength(6);
+    expect(discovered).toHaveLength(7);
     expect(discovered[0]?.source).toBe("project");
     expect(discovered.slice(1).map((item) => item.name)).toEqual([
       "autoplan",
       "autodoc",
       "autoimplement",
       "plan-approval",
+      "sanity-check",
       "monitor",
     ]);
   });
@@ -81,7 +83,7 @@ describe("discoverWorkflows", () => {
     const homeDir = await makeTempDir("pi-workflows-empty-home");
     expect(
       (await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).map((item) => item.name),
-    ).toEqual(["autoplan", "autodoc", "autoimplement", "plan-approval", "monitor"]);
+    ).toEqual(["autoplan", "autodoc", "autoimplement", "plan-approval", "sanity-check", "monitor"]);
   });
 
   it("lets a project workflow override the built-in monitor", async () => {

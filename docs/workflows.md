@@ -16,7 +16,7 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 3. Workflows built into Pi Workflows
 
 Pi Workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
-`plan-approval`, and `monitor` workflows. `autoplan` is the current name for the
+`plan-approval`, `sanity-check`, and `monitor` workflows. `autoplan` is the current name for the
 planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
 replaces the built-in monitor. The package registers each built-in in
@@ -441,6 +441,23 @@ The action abort signal stops active command process groups and prevents queued 
 A model-generated blocker from implementation or a safe later stage does not end autoimplement by itself. A separate blocker-challenge agent checks the task, approved plan, current result, evidence, scope, authority, earlier attempts, and practical alternatives. It confirms a blocker only when the blocker exists now, is outside the granted authority, has no safe path forward, has an empty next action, and includes concrete evidence and checked alternatives. A rejected blocker must name the next practical action and routes through the existing redesign workflow before implementation and verification continue.
 
 Autoimplement can run the blocker challenge at most three times in one run. Each later challenge receives the earlier challenge results. Reaching the limit stops with the normal workflow safety-limit reason. Explicit human stops, cancellation, exhausted workflow or replan limits, protected authorization gaps, and an independent blocked result from redesign remain direct stops. These hard boundaries do not enter the blocker challenge.
+
+### Built-in sanity check
+
+The built-in `sanity-check` workflow reviews a pull request or local contribution before implementation, approval, or merge. It checks whether the change is needed, duplicates existing code, should use a simpler design, adds unnecessary data models or public plugin and SDK APIs, or has scope and test problems.
+
+```json
+{
+  "mode": "serial",
+  "baseRef": "origin/main"
+}
+```
+
+Serial mode is the default. It runs one temporary read-only Pi session for all four review areas, then one temporary session to verify and combine the findings. Parallel mode runs four focused review sessions at the same time, then one verification session. Serial mode uses two model sessions. Parallel mode uses five.
+
+The workflow collects pull request intent and repository diff evidence before model review. Every review must cite evidence and give the strongest case for accepting the current design. The verification session removes unsupported claims, requires exact file and symbol references, resolves supported conflicts, and returns `keep`, `simplify`, `refactor`, `drop`, or `needs_evidence`.
+
+Child sessions have only `read`, `grep`, `find`, and `ls`. They do not load discovered extensions or skills, cannot mutate the repository, and do not save Pi session files. The workflow sends the final report through a final notification with `triggerTurn: false`, so the origin model does not produce another response. See [the Sanity Check plan](plans/2026-08-21-sanity-check-plan.md) for the selected implementation and test boundaries.
 
 ### Built-in monitor
 
