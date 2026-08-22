@@ -332,7 +332,6 @@ function startPiRpc(options: {
       "--mode",
       "rpc",
       "--no-session",
-      "--no-extensions",
       "--no-skills",
       "--no-themes",
       "--no-prompt-templates",
@@ -841,6 +840,42 @@ describe.sequential("pi-workflows end to end", () => {
       ),
       "utf8",
     );
+    await fs.writeFile(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({
+        defaultProvider: "fixture-legacy",
+        defaultModel: "fixture-legacy-model",
+        defaultThinkingLevel: "high",
+        extensions: [
+          path.join(REPO_ROOT, "test", "fixtures", "pi-agent-extensions", "legacy-provider.ts"),
+        ],
+      }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(agentDir, "models-store.json"),
+      JSON.stringify({
+        "fixture-legacy": {
+          models: [
+            {
+              id: "fixture-legacy-model",
+              name: "Fixture legacy model",
+              api: "openai-completions",
+              provider: "fixture-legacy",
+              baseUrl: mock.baseUrl,
+              reasoning: true,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 128_000,
+              maxTokens: 4_096,
+            },
+          ],
+          checkedAt: 1,
+        },
+      }),
+      "utf8",
+    );
+    await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n", "utf8");
 
     await execFileAsync("git", ["init", "-q"], { cwd: projectDir });
     await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: projectDir });
@@ -857,6 +892,8 @@ describe.sequential("pi-workflows end to end", () => {
         PI_CODING_AGENT_DIR: agentDir,
         PI_WORKFLOWS_RUNS_DIR: runsDir,
         PI_WORKFLOWS_CONTROLLER_DIR: controllerDir,
+        PI_AGENT_FIXTURE_BASE_URL: mock.baseUrl,
+        PI_AGENT_FIXTURE_API_KEY: "e2e-provider-key",
       },
     });
   }, 60_000);
@@ -1890,7 +1927,7 @@ export default function captureFailureExtension(pi: unknown) {
       traceSeq: 0,
       runId,
       workflowName: "sanity-check",
-      workflowSource: { kind: "builtin" as const, id: "sanity-check", revision: "2" },
+      workflowSource: { kind: "builtin" as const, id: "sanity-check", revision: "3" },
       startedAt: now,
       updatedAt: now,
       status: "running" as const,
@@ -1921,6 +1958,8 @@ export default function captureFailureExtension(pi: unknown) {
     const sessionsBefore = await sessionEntries(hostAgentDir);
     vi.stubEnv("HOME", hostAgentDir);
     vi.stubEnv("PI_CODING_AGENT_DIR", hostAgentDir);
+    vi.stubEnv("PI_AGENT_FIXTURE_BASE_URL", mock.baseUrl);
+    vi.stubEnv("PI_AGENT_FIXTURE_API_KEY", "e2e-provider-key");
     const host = new WorkflowHost({
       cwd: hostProjectDir,
       storeFile: hostControllerFile,
@@ -1930,6 +1969,8 @@ export default function captureFailureExtension(pi: unknown) {
         PI_CODING_AGENT_DIR: hostAgentDir,
         PI_WORKFLOWS_RUNS_DIR: hostRunsDir,
         PI_WORKFLOWS_CONTROLLER_DIR: hostControllerDir,
+        PI_AGENT_FIXTURE_BASE_URL: mock.baseUrl,
+        PI_AGENT_FIXTURE_API_KEY: "e2e-provider-key",
       },
       onLog: (line: string) => logs.push(line),
     });
@@ -1962,10 +2003,18 @@ export default function captureFailureExtension(pi: unknown) {
     expect(finished.workflowSource).toEqual({
       kind: "builtin",
       id: "sanity-check",
-      revision: "2",
+      revision: "3",
     });
     expect(finished.outputs.verify).toMatchObject({ verdict: "keep" });
-    expect(mock.requests.length).toBe(requestsBefore + 2);
+    expect(
+      mock.requests
+        .slice(requestsBefore)
+        .filter(({ messages }) =>
+          JSON.stringify(messages).match(
+            /Review the contribution in the current repository|Verify and combine the Sanity Check reviews/u,
+          ),
+        ),
+    ).toHaveLength(2);
     expect(await sessionEntries(hostAgentDir)).toEqual(sessionsBefore);
   }, 90_000);
 
@@ -1985,7 +2034,7 @@ export default function captureFailureExtension(pi: unknown) {
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
     expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "2" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "3" });
     expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
     expect(state.outputs.review).toHaveLength(1);
     const progress = (state.updates ?? []).filter((update) => update.type === "progress");
@@ -1999,13 +2048,21 @@ export default function captureFailureExtension(pi: unknown) {
     );
     expect(progress.find((update) => update.key === "agents/review/review")?.data).toMatchObject({
       status: "completed",
-      label: expect.stringContaining("mock/mock-model"),
+      label: expect.stringContaining("fixture-legacy/fixture-legacy-model"),
     });
     await waitForCondition(
       () => mock.requests.length >= requestsBefore + 2,
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
-    expect(mock.requests.length).toBe(requestsBefore + 2);
+    expect(
+      mock.requests
+        .slice(requestsBefore)
+        .filter(({ messages }) =>
+          JSON.stringify(messages).match(
+            /Review the contribution in the current repository|Verify and combine the Sanity Check reviews/u,
+          ),
+        ),
+    ).toHaveLength(2);
     expect(await sessionEntries(agentDir)).toEqual(sessionsBefore);
     await waitForCondition(
       () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
