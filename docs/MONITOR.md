@@ -9,7 +9,8 @@ The monitor checks a target, sends one status notification after every accepted 
 ```json
 {
   "task": "Check pull request 123 in osolmaz/example. Read state and checks with gh. Observe only.",
-  "stopWhen": "Stop when the pull request is merged or closed."
+  "stopWhen": "Stop when the pull request is merged or closed.",
+  "repair": false
 }
 ```
 
@@ -17,16 +18,16 @@ The monitor checks a target, sends one status notification after every accepted 
 
 ## Input fields
 
-| Field                 | Required | Type    | Default            | Meaning                           |
-| --------------------- | -------- | ------- | ------------------ | --------------------------------- |
-| `task`                | Yes      | string  | None               | Self-contained monitor task.      |
-| `everyMinutes`        | No       | integer | `30`               | Minutes between accepted checks.  |
-| `stopWhen`            | No       | string  | Explicit user stop | Condition that ends monitoring.   |
-| `maxChecks`           | No       | integer | `1000`             | Run safety limit.                 |
-| `checkTimeoutMinutes` | No       | integer | Derived            | Timeout for one agent check.      |
-| `repair`              | No       | object  | None               | Explicit automatic-repair policy. |
+| Field                 | Required | Type              | Default            | Meaning                               |
+| --------------------- | -------- | ----------------- | ------------------ | ------------------------------------- |
+| `task`                | Yes      | string            | None               | Self-contained monitor task.          |
+| `everyMinutes`        | No       | integer           | `30`               | Minutes between accepted checks.      |
+| `stopWhen`            | No       | string            | Explicit user stop | Condition that ends monitoring.       |
+| `maxChecks`           | No       | integer           | `1000`             | Run safety limit.                     |
+| `checkTimeoutMinutes` | No       | integer           | Derived            | Timeout for one agent check.          |
+| `repair`              | No       | object or `false` | Authorized         | Repair policy or observation opt-out. |
 
-`task` is 1 to 8,000 characters after trimming. It should name the target, stable identifier, source of truth, durable outputs, authorized routine work, and safety boundary. It must state any authorized mutations. Monitoring is read-only when the task does not authorize a mutation.
+`task` is 1 to 8,000 characters after trimming. It should name the target, stable identifier, source of truth, durable outputs, authorized routine work, and safety boundary. A monitor request authorizes routine bounded work needed to keep that objective running. Protected or consequential changes still require authority in the task or conversation.
 
 `everyMinutes` is from 1 through 1,440. The interval begins after a check report is durably queued. It does not delay the first check.
 
@@ -36,7 +37,7 @@ The monitor checks a target, sends one status notification after every accepted 
 
 `checkTimeoutMinutes` is from 5 through 1,440. When omitted, the workflow uses the larger of 60 minutes and `everyMinutes`. The node timeout includes the existing two-minute runtime margin.
 
-`repair` must set `authorized: true`. It can constrain scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Without this object the monitor is observation-only. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
+Repair is authorized by default. Set `repair: false` to make the monitor observation-only. A repair object must set `authorized: true` and can narrow scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
 
 `repair.approval` uses `auto`, `required`, or `skip` mode. When omitted, Monitor uses `auto` with audience `operator`, a 10-minute timeout, and three allowed replans. Auto mode asks and then continues with the exact plan if no answer is accepted by the deadline. Required mode waits for an explicit human answer. Skip mode asks nothing. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before the shared plan-change workflow runs again. The model-facing workflow tool cannot approve the gate.
 
@@ -276,7 +277,7 @@ The monitor skill must disclose a surfaced host limit and must never invent a sm
 
 ## Safety boundaries
 
-An observation-only request authorizes only observation and scheduled checks. Automatic repair also requires the explicit `repair` input object. An optional `repair.approval` object names a logical audience and inserts human plan approval after autodoc. Continue starts implementation, stop ends truthfully, and replan sends the exact human text back to autoplan before autodoc and approval run again.
+A request with `repair: false` authorizes only observation and scheduled checks. Otherwise, routine bounded repair is available by default. An optional `repair.approval` object names a logical audience and inserts human plan approval after autodoc. Continue starts implementation, stop ends truthfully, and replan sends the exact human text back to autoplan before autodoc and approval run again.
 
 When the user asks the monitor to keep an objective running or finish it, the monitor skill may record routine, bounded work in `task` and the repair policy. This can include retries, restarts, pinned task code, tests, configuration repairs, and temporary cleanup. The task must preserve the exact objective and state every mutation boundary.
 
@@ -292,7 +293,7 @@ The implementation must test:
 - removal of `reportWhen`
 - rejection of old quiet routes
 - required reports on every route
-- repair rejection without explicit authorization
+- repair enabled by default and rejected after the explicit `repair: false` opt-out
 - outer design, autodoc, optional approval, nested redesign, and post-repair checking
 - continue, stop, and exact-text replan approval routes
 - repeated no-progress repair detection

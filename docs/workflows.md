@@ -487,15 +487,11 @@ one looping workflow run. Its input is:
 ```json
 {
   "task": "Check pull request 123",
-  "stopWhen": "The pull request is merged or closed",
-  "repair": {
-    "authorized": true,
-    "scope": "the current repository"
-  }
+  "stopWhen": "The pull request is merged or closed"
 }
 ```
 
-The first check runs immediately. Omit `repair` for observation-only monitoring. An authorized repair routes through the shared plan-change workflow, Autoimplement, and a fresh check. A repeated issue with unchanged target evidence stops as blocked. Omit `repair.approval` for the 10-minute autonomous default. Use `approval.mode: "required"` to wait for an explicit answer or `approval.mode: "skip"` to continue without asking.
+The first check runs immediately. Routine bounded repair is authorized by default. Set `repair: false` for observation-only monitoring. A repair routes through the shared plan-change workflow, Autoimplement, and a fresh check. A repeated issue with unchanged target evidence stops as blocked. Use a repair object with `authorized: true` to narrow its scope or policy. Omit `repair.approval` for the 10-minute autonomous default. Use `approval.mode: "required"` to wait for an explicit answer or `approval.mode: "skip"` to continue without asking.
 
 `everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
 runtime queues that report as a workflow notification with `triggerTurn:

@@ -29,7 +29,7 @@ Derive the workflow input from the full conversation:
 - `task`: State the complete objective, the exact current target and stable identifiers, authoritative status sources, durable progress and final-output surfaces, routine actions authorized by the monitor request, other recorded approvals, immutable boundaries, cost and credential rules, and required validation or downstream operations.
 - `everyMinutes`: Use the user's interval when present. Raise values below `10` to `10` and state the adjustment. The minimum is 10 minutes, the recommended interval is 30 minutes, and the maximum is 24 hours. Use `30` when the user gives no interval.
 - `stopWhen`: Infer verified completion from the full conversation. Describe completion of the complete objective, not only the end of one physical process. Also name material blockers that require human intervention.
-- `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work. Omit `repair.approval` for the default behavior: ask on each new repair plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` to block on plan changes or `{ "mode": "skip" }` to continue without asking.
+- `repair`: Routine bounded repair is authorized by default for every monitor run. Set `repair: false` only when the user explicitly requests observation-only monitoring. Use a repair object with `authorized: true` when you must record a narrower repository, scope, base branch, merge policy, constraints, or plan approval policy. Omit `repair.approval` for the default behavior: ask on each new repair plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` to block on plan changes or `{ "mode": "skip" }` to continue without asking.
 
 Replace the example values below with facts from the conversation, then make one start call:
 
@@ -41,12 +41,13 @@ Replace the example values below with facts from the conversation, then make one
     "task": "Monitor GitHub Actions run 123456 in owner/repository. Inspect the run and its artifacts, retry only transient status reads, and report each check. Do not change code or repository state.",
     "everyMinutes": 30,
     "stopWhen": "Stop when run 123456 completes and its required artifacts are verified, or when a material external blocker prevents truthful verification.",
-    "checkTimeoutMinutes": 10
+    "checkTimeoutMinutes": 10,
+    "repair": false
   }
 }
 ```
 
-For authorized repair, add a complete `repair` object instead of leaving mutation authority implicit:
+When a monitor needs a narrower repair boundary than the conversation already supplies, add a complete `repair` object:
 
 ```json
 {

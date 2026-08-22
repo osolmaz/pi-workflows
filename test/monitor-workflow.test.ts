@@ -48,6 +48,15 @@ describe("built-in monitor workflow", () => {
       stopWhen: "Stop only when the user explicitly asks to stop.",
       maxChecks: 1_000,
       checkTimeoutMinutes: 60,
+      repair: {
+        authorized: true,
+        approval: {
+          mode: "auto",
+          audience: "operator",
+          timeoutMinutes: 10,
+          maxReplans: 3,
+        },
+      },
     });
     expect(() => prepareMonitorInput({ task: "Observe", reportWhen: "state changes" })).toThrow(
       "reportWhen is not supported",
@@ -200,10 +209,23 @@ describe("built-in monitor workflow", () => {
     expect(prompt).toContain("You are the regular Pi model running this check");
     expect(prompt).toContain("publish them with workflow action update");
     expect(prompt).toContain("Do not require the monitored target to implement a Pi-specific");
+    expect(prompt).toContain("Repair is explicitly authorized");
+
+    const observationOnlyPrompt = await checkNode.prompt({
+      input: input({ repair: false }),
+      outputs: {
+        prepare: prepareMonitorInput(input({ repair: false })),
+      },
+      results: {},
+      state: { steps: [] } as never,
+      signal: new AbortController().signal,
+    });
+    expect(observationOnlyPrompt).toContain("Observe only");
+    expect(observationOnlyPrompt).toContain("Choose route continue or stop");
     expect(executor).toBeDefined();
   });
 
-  it("requires explicit authorization and details for repair routes", () => {
+  it("rejects repair in observation-only mode and requires repair details", () => {
     const repair = check({
       route: "repair",
       observation: "A fixable defect is present.",
@@ -214,7 +236,7 @@ describe("built-in monitor workflow", () => {
         issueFingerprint: "issue-a-state-1",
       },
     });
-    expect(() => validateMonitorCheck(repair)).toThrow("authorization");
+    expect(() => validateMonitorCheck(repair)).toThrow("observation-only");
     expect(validateMonitorCheck(repair, true)).toMatchObject({
       route: "repair",
       repair: { issueFingerprint: "issue-a-state-1" },
@@ -243,8 +265,9 @@ describe("built-in monitor workflow", () => {
     ).toThrow("duplicated");
   });
 
-  it("mounts the shared plan change and validates the repair approval policy", () => {
-    expect(prepareMonitorInput(input()).repair).toBeUndefined();
+  it("enables repair by default and validates the repair approval policy", () => {
+    expect(prepareMonitorInput(input()).repair).toMatchObject({ authorized: true });
+    expect(prepareMonitorInput(input({ repair: false })).repair).toBeUndefined();
     expect(
       prepareMonitorInput(
         input({

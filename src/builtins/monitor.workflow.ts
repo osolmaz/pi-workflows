@@ -55,7 +55,7 @@ export type MonitorInput = {
   stopWhen?: string;
   maxChecks?: number;
   checkTimeoutMinutes?: number;
-  repair?: MonitorRepairPolicy;
+  repair?: MonitorRepairPolicy | false;
 };
 
 type MonitorConfig = {
@@ -153,9 +153,11 @@ export function prepareMonitorInput(input: unknown): MonitorConfig {
     );
   }
   let repair: MonitorRepairPolicy | undefined;
-  if (value.repair !== undefined) {
-    const raw = requireRecord(value.repair, "repair policy");
-    if (raw.authorized !== true) throw new Error("repair policy must set authorized to true");
+  if (value.repair !== false) {
+    const raw = value.repair === undefined ? {} : requireRecord(value.repair, "repair policy");
+    if (value.repair !== undefined && raw.authorized !== true) {
+      throw new Error("repair policy must set authorized to true");
+    }
     if (
       raw.constraints !== undefined &&
       (!Array.isArray(raw.constraints) || raw.constraints.some((item) => typeof item !== "string"))
@@ -213,7 +215,7 @@ export function validateMonitorCheck(output: unknown, repairAuthorized = false):
     throw new Error("route must be continue, repair, or stop");
   }
   if (value.route === "repair" && !repairAuthorized) {
-    throw new Error("route repair requires explicit monitor repair authorization");
+    throw new Error("route repair is disabled for observation-only monitoring");
   }
   const check: MonitorCheck = {
     route: value.route,

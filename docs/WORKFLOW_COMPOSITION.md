@@ -277,7 +277,7 @@ Autoimplement prepares a ready PR by default. It merges only when its input expl
 
 ## Monitor repair
 
-Monitor remains observation-only unless its input explicitly authorizes mutation. An authorized repair path is:
+Monitor authorizes routine bounded repair by default. Set `repair: false` when a run must remain observation-only. The repair path is:
 
 ```text
 check
@@ -329,6 +329,6 @@ The implementation must cover:
 - reviewer command correction;
 - P0 through P2 plus clean review routes;
 - five-minute CI wait and opportunistic testing routes;
-- monitor observation-only and authorized repair modes;
+- monitor default repair and explicit observation-only modes;
 - repeated repair with no progress;
 - real-Pi execution of nested monitor repair.
