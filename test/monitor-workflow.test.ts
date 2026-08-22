@@ -180,6 +180,43 @@ describe("built-in monitor workflow", () => {
     expect(await fs.readdir(outputRoot)).toEqual([]);
   });
 
+  it("validates public input types, lengths, and numeric bounds", () => {
+    const invalid: Array<[unknown, string]> = [
+      [null, "monitor input must be an object"],
+      [[], "monitor input must be an object"],
+      [{ task: 1 }, "task must be a string"],
+      [{ task: " " }, "task must not be empty"],
+      [{ task: "x".repeat(8_001) }, "task must be at most 8000 characters"],
+      [{ task: "Observe", everyMinutes: 0 }, "everyMinutes must be an integer"],
+      [{ task: "Observe", everyMinutes: 1.5 }, "everyMinutes must be an integer"],
+      [{ task: "Observe", everyMinutes: 1_441 }, "everyMinutes must be an integer"],
+      [{ task: "Observe", maxChecks: 0 }, "maxChecks must be an integer"],
+      [{ task: "Observe", maxChecks: 1.5 }, "maxChecks must be an integer"],
+      [{ task: "Observe", maxChecks: 1_001 }, "maxChecks must be an integer"],
+      [{ task: "Observe", stopWhen: " " }, "stopWhen must not be empty"],
+      [
+        { task: "Observe", stopWhen: "x".repeat(4_001) },
+        "stopWhen must be at most 4000 characters",
+      ],
+    ];
+    for (const [value, message] of invalid) {
+      expect(() => prepareMonitorInput(value)).toThrow(message);
+    }
+    expect(
+      prepareMonitorInput({
+        task: " Observe ",
+        stopWhen: " Complete ",
+        everyMinutes: 1,
+        maxChecks: 1,
+      }),
+    ).toEqual({
+      task: "Observe",
+      stopWhen: "Complete",
+      everyMinutes: 1,
+      maxChecks: 1,
+    });
+  });
+
   it("stops when the goal is already complete", async () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const result = await new WorkflowEngine({
@@ -407,13 +444,58 @@ describe("built-in monitor workflow", () => {
     expect(notifications[0]?.content).not.toContain("Work: running");
   });
 
-  it("rejects invalid routes, missing reports, duplicate tracks, and unknown fields", () => {
-    expect(() => validateMonitorObservation(observation({ route: "continue" }))).toThrow("route");
+  it("rejects malformed observation and progress contracts", () => {
     const { report: _report, ...withoutReport } = observation();
-    expect(() => validateMonitorObservation(withoutReport)).toThrow("report");
-    expect(() => validateMonitorObservation(observation({ extra: true }))).toThrow("not supported");
-    expect(() =>
-      validateMonitorObservation(
+    const invalid: Array<[unknown, string]> = [
+      [null, "monitor observation output must be an object"],
+      [[], "monitor observation output must be an object"],
+      [observation({ route: "continue" }), "route"],
+      [observation({ goalState: "unknown" }), "goalState"],
+      [observation({ workState: "busy" }), "workState"],
+      [withoutReport, "report"],
+      [observation({ extra: true }), "not supported"],
+      [observation({ authorizedActions: "start" }), "array of strings"],
+      [observation({ authorizedActions: [1] }), "array of strings"],
+      [observation({ observation: " " }), "observation must not be empty"],
+      [observation({ report: "x".repeat(4_001) }), "report must be at most 4000 characters"],
+      [actObservation("advance", { action: undefined }), "requires action details"],
+      [
+        actObservation("advance", { targetStateId: "different-state" }),
+        "must match the observed targetStateId",
+      ],
+      [
+        observation({
+          action: actionRequest("advance", { targetStateId: "pr-123:merged" }),
+        }),
+        "only valid for route act",
+      ],
+      [actObservation("advance", { goalState: "complete" }), "requires goalState incomplete"],
+      [actObservation("advance", { workState: "running" }), "requires idle, failed, or stopped"],
+      [waitObservation({ goalState: "blocked" }), "route wait requires goalState incomplete"],
+      [waitObservation({ workState: "idle" }), "requires running work or an external wait"],
+      [observation({ progress: null }), "progress must be an object"],
+      [observation({ progress: { tracks: [] } }), "must contain 1 through 256 entries"],
+      [observation({ progress: { tracks: "invalid" } }), "must contain 1 through 256 entries"],
+      [
+        observation({ progress: { tracks: Array.from({ length: 257 }, () => ({})) } }),
+        "must contain 1 through 256 entries",
+      ],
+      [observation({ progress: { tracks: [null] } }), "progress.tracks[0] must be an object"],
+      [
+        observation({ progress: { tracks: [{ key: "bad key", data: progress(1, 2) }] } }),
+        "key is invalid",
+      ],
+      [
+        observation({
+          progress: { tracks: [{ key: "valid", data: progress(1, 2), extra: true }] },
+        }),
+        "field extra is not supported",
+      ],
+      [
+        observation({ progress: { tracks: [{ key: "valid", data: null }] } }),
+        "progress.tracks[0].data must be an object",
+      ],
+      [
         observation({
           progress: {
             tracks: [
@@ -422,8 +504,128 @@ describe("built-in monitor workflow", () => {
             ],
           },
         }),
-      ),
-    ).toThrow("duplicated");
+        "duplicated",
+      ],
+    ];
+    for (const [value, message] of invalid) {
+      expect(() => validateMonitorObservation(value)).toThrow(message);
+    }
+  });
+
+  it("rejects malformed authorized action contracts", () => {
+    const valid = actionRequest();
+    const invalid: Array<[unknown, string]> = [
+      [actionRequest("advance", { kind: "retry" }), "kind must be advance, recover, or repair"],
+      [actionRequest("advance", { incomplete: " " }), "incomplete work must not be empty"],
+      [actionRequest("advance", { extra: true }), "field extra is not supported"],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, status: "invalid" } }),
+        "status must be authorized or outside",
+      ],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, merge: "yes" } }),
+        "merge must be boolean",
+      ],
+      [
+        actionRequest("advance", {
+          authority: { ...valid.authority, allowedMutations: "target" },
+        }),
+        "allowedMutations must be an array of strings",
+      ],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, allowedMutations: [1] } }),
+        "allowedMutations must be an array of strings",
+      ],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, allowedMutations: [" "] } }),
+        "allowedMutations[0] must not be empty",
+      ],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, allowedMutations: [] } }),
+        "requires at least one allowed mutation",
+      ],
+      [
+        actionRequest("advance", { authority: { ...valid.authority, repairApproval: 1 } }),
+        "repair approval must be an object",
+      ],
+      [
+        actionRequest("advance", {
+          cost: { paidAction: "yes", status: "within-limit", evidence: "approved" },
+        }),
+        "paidAction must be boolean",
+      ],
+      [
+        actionRequest("advance", {
+          cost: { paidAction: true, status: "invalid", evidence: "approved" },
+        }),
+        "cost status is invalid",
+      ],
+      [
+        actionRequest("advance", {
+          cost: { paidAction: true, status: "missing", evidence: "no admission" },
+        }),
+        "cannot launch paid work",
+      ],
+      [
+        actionRequest("advance", {
+          cost: { paidAction: true, status: "not-applicable", evidence: "invalid" },
+        }),
+        "paid route act requires cost status within-limit",
+      ],
+      [
+        actionRequest("advance", {
+          cost: { paidAction: false, status: "within-limit", evidence: "invalid" },
+        }),
+        "unpaid route act requires cost status not-applicable",
+      ],
+      [
+        actionRequest("advance", {
+          defect: {
+            sharedCodeOrDataDefect: "yes",
+            paidWorkers: "stopped",
+            evidence: "stopped",
+          },
+        }),
+        "sharedCodeOrDataDefect must be boolean",
+      ],
+      [
+        actionRequest("advance", {
+          defect: {
+            sharedCodeOrDataDefect: false,
+            paidWorkers: "unknown",
+            evidence: "unknown",
+          },
+        }),
+        "paidWorkers is invalid",
+      ],
+    ];
+    for (const [action, message] of invalid) {
+      expect(() => validateMonitorObservation(actObservation("advance", { action }))).toThrow(
+        message,
+      );
+    }
+
+    const { evidence: _evidence, ...withoutEvidence } = valid;
+    expect(
+      validateMonitorObservation(actObservation("advance", { action: withoutEvidence })).action,
+    ).toMatchObject({ evidence: null });
+  });
+
+  it("rejects malformed direct action results", () => {
+    const request = actionRequest();
+    const { evidence: _evidence, ...withoutEvidence } = actionResult();
+    expect(validateMonitorActionResult(withoutEvidence, request)).toMatchObject({ evidence: null });
+
+    const invalid: Array<[unknown, string]> = [
+      [null, "monitor action result must be an object"],
+      [actionResult("succeeded", { extra: true }), "field extra is not supported"],
+      [actionResult("succeeded", { status: "unknown" }), "status must be succeeded"],
+      [actionResult("succeeded", { summary: " " }), "summary must not be empty"],
+      [actionResult("succeeded", { targetStateId: "changed" }), "preserve the requested failure"],
+    ];
+    for (const [result, message] of invalid) {
+      expect(() => validateMonitorActionResult(result, request)).toThrow(message);
+    }
   });
 
   it("tells the regular model to observe read-only state without a target-specific API", async () => {
