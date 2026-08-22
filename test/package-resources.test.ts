@@ -10,6 +10,8 @@ const skillsRoot = path.join(repoRoot, "skills");
 interface PackageManifest {
   version: string;
   files?: string[];
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
   pi?: {
     extensions?: string[];
     skills?: string[];
@@ -77,6 +79,18 @@ describe("Pi package resources", () => {
     }
     await expect(fs.stat(path.join(repoRoot, extensionPath))).resolves.toBeDefined();
     await expect(fs.stat(path.join(repoRoot, skillPath))).resolves.toBeDefined();
+  });
+
+  it("pins one compatible Pi SDK baseline", async () => {
+    const manifest = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as PackageManifest;
+    for (const packageName of [
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-coding-agent",
+      "@earendil-works/pi-tui",
+    ]) {
+      expect(manifest.devDependencies?.[packageName]).toBe("0.84.2");
+      expect(manifest.peerDependencies?.[packageName]).toBe(">=0.84.2 <0.85.0");
+    }
   });
 
   it("ships one matching Herdr plugin from the package root", async () => {

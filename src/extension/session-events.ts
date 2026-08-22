@@ -9,7 +9,7 @@ export type PublicAssistantMessageEvent =
   | { type: "toolcall_start"; contentIndex: number; partial: unknown }
   | { type: "toolcall_delta"; contentIndex: number; delta: string; partial: unknown }
   | { type: "toolcall_end"; contentIndex: number; toolCall: unknown; partial: unknown }
-  | { type: "done"; reason: "stop" | "length" | "toolUse"; message: unknown }
+  | { type: "done"; reason: "stop" | "length" | "toolUse" | "deferred"; message: unknown }
   | { type: "error"; reason: "aborted" | "error"; error: unknown };
 
 export type TurnStartEventLike = { turnIndex: number };
@@ -44,7 +44,7 @@ export type NormalizedAssistantEvent =
   | { type: "toolcall_start"; contentIndex: number }
   | { type: "toolcall_delta"; contentIndex: number; delta: string }
   | { type: "toolcall_end"; contentIndex: number; toolCall: unknown }
-  | { type: "done"; reason: "stop" | "length" | "toolUse" }
+  | { type: "done"; reason: "stop" | "length" | "toolUse" | "deferred" }
   | { type: "error"; reason: "aborted" | "error" };
 
 /** Remove cumulative snapshots while preserving every semantic stream event. */

@@ -36,6 +36,47 @@ function message(text: string, stopReason = "stop", errorMessage?: string) {
   };
 }
 
+function fixtureExtension(name: string): string {
+  return path.resolve(`test/fixtures/pi-agent-extensions/${name}.ts`);
+}
+
+async function writeNativeFixtureConfig(agentDir: string, extensions?: string[]): Promise<void> {
+  await fs.writeFile(
+    path.join(agentDir, "settings.json"),
+    JSON.stringify({
+      defaultProvider: "fixture-native",
+      defaultModel: "fixture-model",
+      defaultThinkingLevel: "high",
+      extensions: extensions ?? [fixtureExtension("native-provider")],
+    }),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(agentDir, "models-store.json"),
+    JSON.stringify({
+      "fixture-native": {
+        models: [
+          {
+            id: "fixture-model",
+            name: "Fixture model",
+            api: "fixture-api",
+            provider: "fixture-native",
+            baseUrl: "http://localhost:0",
+            reasoning: true,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 128_000,
+            maxTokens: 4_096,
+          },
+        ],
+        checkedAt: 1,
+      },
+    }),
+    "utf8",
+  );
+  await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n", "utf8");
+}
+
 function successfulFactory(
   delays: Record<string, number> = {},
   results: Record<string, string> = {},
@@ -341,16 +382,34 @@ describe("Pi agent groups", () => {
       runPiAgentGroup([{ ...request("no-tools"), tools: [] }], { maxConcurrency: 1, signal }),
     ).rejects.toThrow(/at least one tool/);
     await expect(
-      runPiAgentGroup([{ ...request("provider"), model: { provider: "", id: "model" } }], {
-        maxConcurrency: 1,
-        signal,
-      }),
+      runPiAgentGroup(
+        [
+          {
+            ...request("provider"),
+            model: { provider: "", id: "model" },
+            thinkingLevel: "high",
+          },
+        ],
+        {
+          maxConcurrency: 1,
+          signal,
+        },
+      ),
     ).rejects.toThrow(/model provider/);
     await expect(
-      runPiAgentGroup([{ ...request("model-id"), model: { provider: "mock", id: "" } }], {
-        maxConcurrency: 1,
-        signal,
-      }),
+      runPiAgentGroup(
+        [
+          {
+            ...request("model-id"),
+            model: { provider: "mock", id: "" },
+            thinkingLevel: "high",
+          },
+        ],
+        {
+          maxConcurrency: 1,
+          signal,
+        },
+      ),
     ).rejects.toThrow(/model id/);
   });
 
@@ -799,6 +858,10 @@ describe("Pi agent groups", () => {
       }),
       "utf8",
     );
+    const catalogText = JSON.stringify({
+      cached: { models: [], checkedAt: 1, etag: '"catalog"' },
+    });
+    await fs.writeFile(path.join(agentDir, "models-store.json"), catalogText, "utf8");
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     try {
       const controller = new AbortController();
@@ -838,18 +901,29 @@ describe("Pi agent groups", () => {
       await credentials.delete("api");
       expect(await credentials.read("api")).toBeUndefined();
 
-      const models = createEphemeralModelStore();
-      expect(await models.read("mock")).toBeUndefined();
+      const models = await createEphemeralModelStore(controller.signal);
+      const cached = await models.read("cached");
+      expect(cached).toEqual({ models: [], checkedAt: 1, etag: '"catalog"' });
+      if (cached !== undefined) cached.checkedAt = 2;
+      expect(await models.read("cached")).toEqual({
+        models: [],
+        checkedAt: 1,
+        etag: '"catalog"',
+      });
       await models.write("mock", { models: [], checkedAt: 1 });
       expect(await models.read("mock")).toEqual({ models: [], checkedAt: 1 });
       await models.delete("mock");
       expect(await models.read("mock")).toBeUndefined();
+      expect(await fs.readFile(path.join(agentDir, "models-store.json"), "utf8")).toBe(catalogText);
 
       controller.abort(new Error("stop"));
       await expect(credentials.read("oauth")).rejects.toThrow("stop");
       await expect(credentials.list()).rejects.toThrow("stop");
       await expect(credentials.modify("oauth", async (value) => value)).rejects.toThrow("stop");
       await expect(credentials.delete("oauth")).rejects.toThrow("stop");
+      await expect(models.read("cached")).rejects.toThrow("stop");
+      await expect(models.write("mock", { models: [] })).rejects.toThrow("stop");
+      await expect(models.delete("cached")).rejects.toThrow("stop");
       expect(JSON.parse(await fs.readFile(path.join(agentDir, "auth.json"), "utf8"))).toEqual({
         api: { type: "api_key", key: "test-key" },
         command: { type: "api_key" },
@@ -905,79 +979,94 @@ describe("Pi agent groups", () => {
     }
   });
 
-  it("runs the production SDK path with isolated in-memory resources", async () => {
-    const mock = await startMockOpenAiServer(() => ({
-      kind: "text",
-      text: '{"answer":"ok"}',
-    }));
+  it("rejects malformed model catalogs without exposing their contents", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-invalid-models");
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    const invalidValues: unknown[] = [
+      null,
+      [],
+      "PRIVATE_MODEL_CATALOG_TEXT",
+      { bad: null },
+      { bad: { models: null } },
+      { bad: { models: [], checkedAt: "later" } },
+      { bad: { models: [], lastModified: "later" } },
+      { bad: { models: [], etag: 1 } },
+    ];
+    try {
+      for (const invalid of invalidValues) {
+        await fs.writeFile(
+          path.join(agentDir, "models-store.json"),
+          JSON.stringify(invalid),
+          "utf8",
+        );
+        await expect(createEphemeralModelStore(new AbortController().signal)).rejects.toThrow(
+          "Could not load Pi model catalog for isolated agents",
+        );
+      }
+      await fs.writeFile(path.join(agentDir, "models-store.json"), "PRIVATE_NOT_JSON", "utf8");
+      let message = "";
+      try {
+        await createEphemeralModelStore(new AbortController().signal);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe("Could not load Pi model catalog for isolated agents");
+      expect(message).not.toContain("PRIVATE_NOT_JSON");
+      await fs.rm(path.join(agentDir, "models-store.json"));
+      await expect(createEphemeralModelStore(new AbortController().signal)).resolves.toBeDefined();
+      const cancelled = new AbortController();
+      cancelled.abort(new Error("cancelled before model load"));
+      await expect(createEphemeralModelStore(cancelled.signal)).rejects.toThrow(
+        "cancelled before model load",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("runs provider extensions through isolated per-agent SDK runtimes", async () => {
     const agentDir = await makeTempDir("pi-agent-group-agent");
     const cwd = await makeTempDir("pi-agent-group-project");
+    const lifecycleFile = path.join(agentDir, "lifecycle.log");
+    const providerExtension = path.resolve("test/fixtures/pi-agent-extensions/native-provider.ts");
     await fs.writeFile(path.join(cwd, "AGENTS.md"), "PRIVATE_CONTEXT_MARKER", "utf8");
-    await fs.writeFile(
-      path.join(agentDir, "models.json"),
-      JSON.stringify({
-        providers: {
-          mock: {
-            name: "Mock",
-            baseUrl: mock.baseUrl,
-            api: "openai-completions",
-            apiKey: "mock-key",
-            compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
-            models: [{ id: "mock-model", reasoning: true }],
-          },
-        },
-      }),
-      "utf8",
-    );
-    await fs.writeFile(
-      path.join(agentDir, "settings.json"),
-      JSON.stringify({ defaultProvider: "mock", defaultModel: "mock-model" }),
-      "utf8",
-    );
-    await fs.writeFile(path.join(agentDir, "models-store.json"), "{}\n", "utf8");
-    await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n", "utf8");
+    await writeNativeFixtureConfig(agentDir, [providerExtension]);
     const settingsBefore = await fs.readFile(path.join(agentDir, "settings.json"), "utf8");
     const modelsStoreBefore = await fs.readFile(path.join(agentDir, "models-store.json"), "utf8");
     const authBefore = await fs.readFile(path.join(agentDir, "auth.json"), "utf8");
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.stubEnv("HOME", agentDir);
+    vi.stubEnv("PI_AGENT_FIXTURE_API_KEY", "provider-owned-key");
+    vi.stubEnv("PI_AGENT_FIXTURE_LIFECYCLE_FILE", lifecycleFile);
     try {
       const results = await runPiAgentGroup(
         [
-          { ...request("sdk"), cwd, tools: ["read"] },
-          {
-            ...request("sdk-override"),
-            cwd,
-            tools: ["read"],
-            model: { provider: "mock", id: "mock-model" },
-            thinkingLevel: "high",
-          },
+          { ...request("sdk-a"), cwd, tools: ["read"] },
+          { ...request("sdk-b"), cwd, tools: ["read"] },
         ],
         { maxConcurrency: 2, signal: new AbortController().signal },
       );
-      expect(results[0]).toMatchObject({
-        text: '{"answer":"ok"}',
-        model: "mock/mock-model",
-      });
-      expect(results[1]).toMatchObject({
-        text: '{"answer":"ok"}',
-        model: "mock/mock-model",
-        thinkingLevel: "high",
-      });
-      await expect(
-        runPiAgentGroup(
-          [
-            {
-              ...request("missing-model"),
-              cwd,
-              tools: ["read"],
-              model: { provider: "mock", id: "missing" },
-            },
-          ],
-          { maxConcurrency: 1, signal: new AbortController().signal },
-        ),
-      ).rejects.toThrow(/has no model/);
-      expect(JSON.stringify(mock.requests)).not.toContain("PRIVATE_CONTEXT_MARKER");
+      expect(results).toEqual([
+        expect.objectContaining({
+          id: "sdk-a",
+          text: '{"answer":"ok"}',
+          model: "fixture-native/fixture-model",
+          thinkingLevel: "high",
+        }),
+        expect.objectContaining({
+          id: "sdk-b",
+          text: '{"answer":"ok"}',
+          model: "fixture-native/fixture-model",
+          thinkingLevel: "high",
+        }),
+      ]);
+      expect((await fs.readFile(lifecycleFile, "utf8")).trim().split("\n").toSorted()).toEqual([
+        "session_shutdown",
+        "session_shutdown",
+        "session_shutdown",
+        "session_start",
+        "session_start",
+      ]);
       await expect(fs.stat(path.join(agentDir, "sessions"))).rejects.toThrow();
       expect(await fs.readFile(path.join(agentDir, "settings.json"), "utf8")).toBe(settingsBefore);
       expect(await fs.readFile(path.join(agentDir, "models-store.json"), "utf8")).toBe(
@@ -986,7 +1075,272 @@ describe("Pi agent groups", () => {
       expect(await fs.readFile(path.join(agentDir, "auth.json"), "utf8")).toBe(authBefore);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("admits explicit behavior extensions without activating their tools", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-behavior");
+    const cwd = await makeTempDir("pi-agent-group-behavior-project");
+    await writeNativeFixtureConfig(agentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("behavior"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [fixtureExtension("behavior")],
+        }),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          model: "fixture-native/fixture-model",
+          text: '{"answer":"ok"}',
+        }),
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("fails before prompting when provider-owned authentication is unavailable", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-missing-auth");
+    const cwd = await makeTempDir("pi-agent-group-missing-auth-project");
+    await writeNativeFixtureConfig(agentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    vi.stubEnv("PI_AGENT_FIXTURE_DISABLE_AUTH", "1");
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("missing-auth"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(/has no provider authentication/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("fails without the exact provider extension or cached model", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-exact-dispatch");
+    const cwd = await makeTempDir("pi-agent-group-exact-project");
+    await writeNativeFixtureConfig(agentDir, []);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("missing-provider"), cwd }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(/has no provider extension/);
+      await writeNativeFixtureConfig(agentDir);
+      await expect(
+        runPiAgentGroup(
+          [
+            {
+              ...request("missing-model"),
+              cwd,
+              model: { provider: "fixture-native", id: "missing" },
+              thinkingLevel: "high",
+            },
+          ],
+          { maxConcurrency: 1, signal: new AbortController().signal },
+        ),
+      ).rejects.toThrow(/has no model/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("discovers a legacy provider owner and uses its configured authentication", async () => {
+    const mock = await startMockOpenAiServer(() => ({
+      kind: "text",
+      text: '{"answer":"legacy"}',
+    }));
+    const agentDir = await makeTempDir("pi-agent-group-legacy");
+    const cwd = await makeTempDir("pi-agent-group-legacy-project");
+    await fs.writeFile(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({
+        defaultProvider: "fixture-legacy",
+        defaultModel: "fixture-legacy-model",
+        defaultThinkingLevel: "high",
+        extensions: [fixtureExtension("legacy-provider")],
+      }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(agentDir, "models-store.json"),
+      JSON.stringify({
+        "fixture-legacy": {
+          models: [
+            {
+              id: "fixture-legacy-model",
+              name: "Fixture legacy model",
+              api: "openai-completions",
+              provider: "fixture-legacy",
+              baseUrl: mock.baseUrl,
+              reasoning: true,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 128_000,
+              maxTokens: 4_096,
+            },
+          ],
+          checkedAt: 1,
+        },
+      }),
+      "utf8",
+    );
+    await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n", "utf8");
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    vi.stubEnv("PI_AGENT_FIXTURE_BASE_URL", mock.baseUrl);
+    vi.stubEnv("PI_AGENT_FIXTURE_API_KEY", "legacy-provider-key");
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("legacy"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          model: "fixture-legacy/fixture-legacy-model",
+          text: '{"answer":"legacy"}',
+        }),
+      ]);
+      expect(mock.requests).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
       await mock.close();
+    }
+  });
+
+  it("rejects workflow capabilities and built-in tool overrides", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-unsafe-extension");
+    const cwd = await makeTempDir("pi-agent-group-unsafe-project");
+    await writeNativeFixtureConfig(agentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("workflow-capability"), cwd }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [fixtureExtension("workflow-capability")],
+        }),
+      ).rejects.toThrow(/exposes workflow control/);
+      await expect(
+        runPiAgentGroup([{ ...request("read-override"), cwd }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [fixtureExtension("read-override")],
+        }),
+      ).rejects.toThrow(/replaces a built-in tool/);
+      let cleanupMessage = "";
+      try {
+        await runPiAgentGroup([{ ...request("shutdown-failure"), cwd }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [fixtureExtension("shutdown-failure")],
+        });
+      } catch (error) {
+        cleanupMessage = error instanceof Error ? error.message : String(error);
+      }
+      expect(cleanupMessage).toContain("could not settle extension preflight");
+      expect(cleanupMessage).not.toContain("PRIVATE_PRECHECK_CLEANUP_FAILURE");
+      await expect(
+        runPiAgentGroup([{ ...request("primary-before-cleanup"), cwd }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [
+            fixtureExtension("workflow-capability"),
+            fixtureExtension("shutdown-failure"),
+          ],
+        }),
+      ).rejects.toThrow(/exposes workflow control/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects incomplete, mixed, and slash-command dispatch requests", async () => {
+    const signal = new AbortController().signal;
+    await expect(
+      runPiAgentGroup(
+        [
+          {
+            ...request("partial"),
+            model: { provider: "fixture-native", id: "fixture-model" },
+          },
+        ],
+        { maxConcurrency: 1, signal, sessionFactory: successfulFactory() },
+      ),
+    ).rejects.toThrow(/model and thinkingLevel together/);
+    await expect(
+      runPiAgentGroup([{ ...request("slash"), prompt: "  /workflow status" }], {
+        maxConcurrency: 1,
+        signal,
+        sessionFactory: successfulFactory(),
+      }),
+    ).rejects.toThrow(/must not invoke an extension command/);
+    await expect(
+      runPiAgentGroup(
+        [
+          {
+            ...request("first-dispatch"),
+            model: { provider: "fixture-native", id: "fixture-model" },
+            thinkingLevel: "high",
+          },
+          {
+            ...request("second-dispatch"),
+            model: { provider: "fixture-native", id: "other-model" },
+            thinkingLevel: "high",
+          },
+        ],
+        { maxConcurrency: 2, signal },
+      ),
+    ).rejects.toThrow(/one exact model dispatch/);
+  });
+
+  it("excludes Pi Workflows wrapper packages before their factories run", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-wrapper");
+    const cwd = await makeTempDir("pi-agent-group-wrapper-project");
+    const wrapper = path.join(agentDir, "wrapper");
+    const marker = path.join(agentDir, "wrapper-loaded");
+    await fs.mkdir(wrapper);
+    await fs.writeFile(
+      path.join(wrapper, "package.json"),
+      JSON.stringify({
+        name: "fixture-workflows-wrapper",
+        type: "module",
+        dependencies: { "@osolmaz/pi-workflows": "0.12.0" },
+        pi: { extensions: ["./index.ts"] },
+      }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(wrapper, "index.ts"),
+      `import fs from "node:fs"; export default function () { fs.writeFileSync(${JSON.stringify(marker)}, "loaded"); }`,
+      "utf8",
+    );
+    await writeNativeFixtureConfig(agentDir, [
+      fixtureExtension("native-provider"),
+      path.join(wrapper, "index.ts"),
+    ]);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("wrapper"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toHaveLength(1);
+      await expect(fs.stat(marker)).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 

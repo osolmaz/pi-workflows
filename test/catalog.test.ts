@@ -18,7 +18,16 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("8");
     expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("9");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
-    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("2");
+    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("3");
+  });
+
+  it("rejects unfinished Sanity Check revision 2 with restart guidance", () => {
+    expect(() =>
+      builtinWorkflowCatalog.resolve(
+        { kind: "builtin", id: "sanity-check", revision: "2" },
+        "old-sanity-check",
+      ),
+    ).toThrow(/cancel run old-sanity-check, then start sanity-check again/);
   });
 
   it("resolves a stable built-in source without reading a file", () => {
