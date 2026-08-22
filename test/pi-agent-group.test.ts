@@ -1221,6 +1221,7 @@ describe("Pi agent groups", () => {
     const mock = await startMockOpenAiServer(() => ({ kind: "text", text: "must not run" }));
     const agentDir = await makeTempDir("pi-agent-group-invalid-registration");
     const cwd = await makeTempDir("pi-agent-group-invalid-registration-project");
+    const shutdownFile = path.join(agentDir, "invalid-provider-shutdown.log");
     await fs.writeFile(
       path.join(agentDir, "settings.json"),
       JSON.stringify({
@@ -1261,6 +1262,7 @@ describe("Pi agent groups", () => {
     );
     vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
     vi.stubEnv("HOME", agentDir);
+    vi.stubEnv("PI_AGENT_INVALID_PROVIDER_SHUTDOWN_FILE", shutdownFile);
     try {
       await expect(
         runPiAgentGroup([{ ...request("invalid-registration"), cwd, tools: ["read"] }], {
@@ -1269,9 +1271,37 @@ describe("Pi agent groups", () => {
         }),
       ).rejects.toThrow(/could not register provider extension: registration failed/);
       expect(mock.requests).toHaveLength(0);
+      expect((await fs.readFile(shutdownFile, "utf8")).trim().split("\n")).toEqual([
+        "session_shutdown",
+        "session_shutdown",
+      ]);
     } finally {
       vi.unstubAllEnvs();
       await mock.close();
+    }
+  });
+
+  it("surfaces child extension shutdown failures without private details", async () => {
+    const agentDir = await makeTempDir("pi-agent-group-child-shutdown-failure");
+    const cwd = await makeTempDir("pi-agent-group-child-shutdown-failure-project");
+    await writeNativeFixtureConfig(agentDir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      let message = "";
+      try {
+        await runPiAgentGroup([{ ...request("child-shutdown-failure"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+          behaviorExtensionPaths: [fixtureExtension("child-shutdown-failure")],
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain("could not settle child extensions");
+      expect(message).not.toContain("PRIVATE_CHILD_CLEANUP_FAILURE");
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 
