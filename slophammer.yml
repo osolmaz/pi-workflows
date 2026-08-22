@@ -15,24 +15,32 @@ typescript:
       enabled: true
       min_tokens: 100
   dependency_boundaries:
-    # workflows is the core engine; it must stay pi-agnostic and standalone.
-    - from: src/workflows
+    # state owns the Pi-independent SQLite protocol and write authority.
+    - from: src/state
       allow: []
+    # workflows is the core engine; it stays Pi-independent.
+    - from: src/workflows
+      allow:
+        - src/state
     # Durable reconciliation may launch finite child workflows, never the reverse.
     - from: src/controllers
       allow:
+        - src/state
         - src/workflows
     # Shared presentation: graph layout and terminal rendering, pi-agnostic.
     - from: src/render
       allow:
+        - src/state
         - src/workflows
     # Built-ins compose package-owned definitions from the public engine.
     - from: src/builtins
       allow:
+        - src/state
         - src/workflows
     # The extension embeds the engine in pi and draws the widget graph.
     - from: src/extension
       allow:
+        - src/state
         - src/workflows
         - src/builtins
         - src/controllers
@@ -41,6 +49,7 @@ typescript:
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
+        - src/state
         - src/workflows
         - src/builtins
         - src/controllers
@@ -51,6 +60,7 @@ typescript:
     # must never import the extension.
     - from: src/viewer
       allow:
+        - src/state
         - src/workflows
         - src/controllers
         - src/render
