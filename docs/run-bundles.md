@@ -9,6 +9,10 @@ session store or any other file outside the bundle directory.
 This document is the authoritative specification. There is exactly one format
 version; older layouts are not read and no compatibility paths exist.
 
+The accepted [SQLite state plan](plans/2026-08-23-sqlite-state-plan.md) will
+replace run bundles and the other live state stores with one database. This
+specification remains current until that implementation lands.
+
 ## Location and layout
 
 Bundles live under `~/.pi/agent/workflows/runs/` by default. The
