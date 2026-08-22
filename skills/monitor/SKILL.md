@@ -27,7 +27,7 @@ Do not finish the initiating turn before the workflow start call. If a safe cont
 Derive the workflow input from the full conversation:
 
 - `task`: State the complete objective, the exact current target and stable identifiers, authoritative status sources, durable progress and final-output surfaces, routine actions authorized by the monitor request, other recorded approvals, immutable boundaries, cost and credential rules, and required validation or downstream operations.
-- `everyMinutes`: Use the user's interval when present. Use `30` when the user gives no interval. The built-in workflow accepts intervals from 1 minute through 24 hours.
+- `everyMinutes`: Use the user's interval when present. Raise values below `10` to `10` and state the adjustment. Use `30` when the user gives no interval. For this skill, the allowed interval is 10 minutes through 24 hours.
 - `stopWhen`: Infer verified completion from the full conversation. Describe completion of the complete objective, not only the end of one physical process. Also name material blockers that require human intervention.
 - `repair`: Include this object only when the request or an existing approval authorizes mutation. Set `authorized: true` and record the repository, scope, base branch, merge policy, and constraints that apply. Omit it for observation-only work. Omit `repair.approval` for the default behavior: ask on each new repair plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` to block on plan changes or `{ "mode": "skip" }` to continue without asking.
 
@@ -39,7 +39,7 @@ Replace the example values below with facts from the conversation, then make one
   "workflow": "monitor",
   "input": {
     "task": "Monitor GitHub Actions run 123456 in owner/repository. Inspect the run and its artifacts, retry only transient status reads, and report each check. Do not change code or repository state.",
-    "everyMinutes": 5,
+    "everyMinutes": 10,
     "stopWhen": "Stop when run 123456 completes and its required artifacts are verified, or when a material external blocker prevents truthful verification.",
     "checkTimeoutMinutes": 10
   }
