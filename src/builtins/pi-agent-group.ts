@@ -542,7 +542,7 @@ async function resolveChildExtensionPaths(
   }
   if (result !== undefined) {
     try {
-      await settlePreflightExtensions(result, cwd, signal);
+      await shutdownLoadedExtensions(result, cwd, signal);
     } catch {
       failure ??= new PiAgentGroupError(
         "group",
@@ -557,7 +557,7 @@ async function resolveChildExtensionPaths(
   return admittedPaths!;
 }
 
-async function settlePreflightExtensions(
+async function shutdownLoadedExtensions(
   result: LoadExtensionsResult,
   cwd: string,
   signal: AbortSignal,
@@ -1047,7 +1047,15 @@ async function createSdkSession(
           diagnostics: services.diagnostics,
         };
       } catch (error) {
-        latestExtensions?.runtime.invalidate("Pi agent child session creation failed");
+        if (latestExtensions !== undefined) {
+          try {
+            await shutdownLoadedExtensions(latestExtensions, cwd, new AbortController().signal);
+          } catch {
+            // Preserve the child setup error as the primary failure.
+          } finally {
+            latestExtensions.runtime.invalidate("Pi agent child session creation failed");
+          }
+        }
         throw error;
       }
     },
@@ -1058,8 +1066,13 @@ async function createSdkSession(
       sessionStartEvent: { type: "session_start", reason: "startup" },
     },
   );
+  let extensionFailure = false;
+  let unsubscribeExtensionErrors: (() => void) | undefined;
   try {
     const session = runtime.session;
+    unsubscribeExtensionErrors = session.extensionRunner.onError(() => {
+      extensionFailure = true;
+    });
     await session.bindExtensions({ mode: "print" });
     assertExactSession(request, session, plan.dispatch);
     const auth = await runtime.services.modelRuntime.getAuth(model, { signal });
@@ -1099,7 +1112,22 @@ async function createSdkSession(
       dispose: async () => {
         if (disposed) return;
         disposed = true;
-        await runtime.dispose();
+        let disposalFailure: unknown;
+        try {
+          await runtime.dispose();
+        } catch (error) {
+          disposalFailure = error;
+        } finally {
+          unsubscribeExtensionErrors?.();
+        }
+        if (disposalFailure !== undefined) throw disposalFailure;
+        if (extensionFailure) {
+          throw new PiAgentGroupError(
+            request.id,
+            "could not settle child extensions",
+            "cleanup failed",
+          );
+        }
       },
       get model() {
         return session.model;
@@ -1110,6 +1138,7 @@ async function createSdkSession(
     };
   } catch (error) {
     await runtime.dispose().catch(() => undefined);
+    unsubscribeExtensionErrors?.();
     throw error;
   }
 }
