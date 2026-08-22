@@ -481,32 +481,45 @@ Serial mode still uses two sessions, and parallel mode still uses five. Prompts,
 
 ### Built-in monitor
 
-The built-in `monitor` workflow turns a plain request for repeated checks into
-one looping workflow run. Its input is:
+The built-in `monitor` workflow turns a plain request to finish and monitor an
+authorized goal into one looping workflow run. It accepts only `task`,
+`stopWhen`, `everyMinutes`, and `maxChecks`:
 
 ```json
 {
-  "task": "Check pull request 123",
-  "stopWhen": "The pull request is merged or closed"
+  "task": "Finish pull request 123 within the recorded repository and delivery authority.",
+  "stopWhen": "The pull request is merged or safe continuation is blocked.",
+  "everyMinutes": 30
 }
 ```
 
-The first check runs immediately. Routine bounded repair is authorized by default. Set `repair: false` for observation-only monitoring. A repair routes through the shared plan-change workflow, Autoimplement, and a fresh check. A repeated issue with unchanged target evidence stops as blocked. Use a repair object with `authorized: true` to narrow its scope or policy. Omit `repair.approval` for the 10-minute autonomous default. Use `approval.mode: "required"` to wait for an explicit answer or `approval.mode: "skip"` to continue without asking.
+The first `observe` step runs immediately and is read-only. It inspects the real
+target with normal tools and chooses `wait`, `act`, or `stop`. `wait` means that
+useful target work is moving or an external event must finish. `act` states one
+safe action that existing authority permits. `stop` means that the goal is
+complete or cannot continue safely.
 
-`everyMinutes` defaults to 30. Each accepted check must provide one concise report and choose `continue`, `repair` when authorized, or `stop`. The
+An `advance` or `recover` action runs directly in a separate normal-tools step.
+A `repair` action composes the shared plan-change workflow and Autoimplement.
+Monitor observes again immediately after every action. It stops instead of
+repeating a completed repair when the same stable failure and target state
+return. The timer is reachable only from `wait`.
+
+`everyMinutes` defaults to 30. Every accepted observation provides one concise
+report that separates Monitor state, goal state, and target work state. The
 runtime queues that report as a workflow notification with `triggerTurn:
-false`, so it does not cause an assistant reply. A check can also provide
-independent progress tracks. The regular Pi model running the check observes
-the target and submits those facts. Pi Workflows validates the counts and
-calculates rates, confidence, and ETA deterministically. The target does not
-need a Pi Workflows dependency or reporting protocol.
+false`, so it does not cause an assistant reply. An observation can also provide
+independent progress tracks. The regular Pi model observes the target and
+submits those facts. Pi Workflows validates counts and calculates rates,
+confidence, and ETA deterministically. The target does not need a Pi Workflows
+dependency or reporting protocol.
 
 Intervals must be whole minutes from 1 through 1,440. When `stopWhen` is
 omitted, the monitor stops only after an explicit user request. `maxChecks`
-defaults to the disclosed safety ceiling of 1,000 and cannot exceed it. Callers
-omit `maxChecks` unless the user requests a fixed count. `checkTimeoutMinutes`
-is from 5 through 1,440 and defaults to the larger of 60 and `everyMinutes`.
-See [MONITOR.md](MONITOR.md) for the check and progress schemas.
+defaults to the disclosed observation safety limit of 1,000 and cannot exceed
+it. Callers omit `maxChecks` unless the user requests a fixed count. Unknown
+fields fail before a run is created. See [MONITOR.md](MONITOR.md) for the
+observation, action, and progress schemas.
 
 The interval uses the existing shell action to launch the current Node
 executable with a timer. This works on every platform supported by Pi. The node
