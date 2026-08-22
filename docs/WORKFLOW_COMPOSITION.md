@@ -72,29 +72,29 @@ import repair from "./repair.workflow.js";
 export default defineWorkflow({
   source: import.meta.url,
   name: "monitor-with-repair",
-  startAt: "check",
+  startAt: "observe",
   includes: {
     repair: includeWorkflow(repair, {
       input: ({ outputs }) => ({
-        task: (outputs.check as { issue: string }).issue,
+        task: (outputs.observe as { action: { issue: string } }).action.issue,
       }),
     }),
   },
   nodes: {
-    check: agent({ prompt: () => "Check the target." }),
+    observe: agent({ prompt: () => "Observe the target without changing it." }),
     wait: compute({ run: () => ({}) }),
-    finish: compute({ run: ({ outputs }) => outputs.check }),
+    finish: compute({ run: ({ outputs }) => outputs.observe }),
   },
   edges: [
     {
-      from: "check",
+      from: "observe",
       switch: {
         on: "$.route",
-        cases: { continue: "wait", repair: "repair", stop: "finish" },
+        cases: { wait: "wait", act: "repair", stop: "finish" },
       },
     },
-    { from: "wait", to: "check" },
-    { from: "repair.fixed", to: "check" },
+    { from: "wait", to: "observe" },
+    { from: "repair.fixed", to: "observe" },
     { from: "repair.blocked", to: "finish" },
   ],
 });

@@ -1,11 +1,18 @@
+import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import monitor, {
   prepareMonitorInput,
-  validateMonitorCheck,
+  validateMonitorActionResult,
+  validateMonitorObservation,
 } from "../src/builtins/monitor.workflow.js";
+import { compute } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { AgentStepExecutor, WorkflowNotificationRequest } from "../src/workflows/types.js";
+import type {
+  AgentStepExecutor,
+  WorkflowDefinition,
+  WorkflowNotificationRequest,
+} from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
 function scriptedExecutor(outputs: unknown[], prompts: string[] = []): AgentStepExecutor {
@@ -24,112 +31,355 @@ function scriptedExecutor(outputs: unknown[], prompts: string[] = []): AgentStep
 
 function input(overrides: Record<string, unknown> = {}) {
   return {
-    task: "Check pull request 123",
-    stopWhen: "The pull request is merged or closed",
+    task: "Finish pull request 123 within the recorded repository authority",
+    stopWhen: "The pull request is merged or safely blocked",
     maxChecks: 5,
     ...overrides,
   };
 }
 
-function check(overrides: Record<string, unknown> = {}) {
+function observation(overrides: Record<string, unknown> = {}) {
   return {
     route: "stop",
+    goalState: "complete",
+    workState: "stopped",
     observation: "Pull request 123 is merged.",
     report: "PR 123 is merged.",
-    reason: "The stop condition is true.",
+    targetStateId: "pr-123:merged",
+    authorizedActions: [],
+    reason: "The goal is complete.",
     ...overrides,
   };
 }
 
+function actionRequest(
+  kind: "advance" | "recover" | "repair" = "advance",
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    kind,
+    incomplete: "One requested unit remains.",
+    evidence: { completed: 4, total: 5 },
+    nextAction: kind === "recover" ? "Resume the saved unit." : "Start the missing unit.",
+    authority: {
+      status: "authorized",
+      basis: "The task explicitly authorizes finishing all five units.",
+      allowedMutations: ["the saved unit and its launch process"],
+      forbiddenMutations: ["provider changes"],
+      costLimit: "No paid resources",
+      providerRuntime: "Keep the current runtime",
+      requiredChecks: ["confirm the worker is active"],
+      stopConditions: ["stop on a protected contract change"],
+      allowedRecoveryActions: ["resume saved work"],
+      merge: false,
+      repairApproval: { mode: "skip" },
+    },
+    cost: {
+      paidAction: false,
+      status: "not-applicable",
+      evidence: "The action uses local resources.",
+    },
+    defect: {
+      sharedCodeOrDataDefect: false,
+      paidWorkers: "not-applicable",
+      evidence: "No shared defect is present.",
+    },
+    verification: "Confirm that the worker is active.",
+    failureId: "unit-5-idle",
+    targetStateId: "units:4-of-5:idle",
+    ...overrides,
+  };
+}
+
+function actObservation(
+  kind: "advance" | "recover" | "repair" = "advance",
+  overrides: Record<string, unknown> = {},
+) {
+  return observation({
+    route: "act",
+    goalState: "incomplete",
+    workState: kind === "recover" ? "stopped" : "idle",
+    observation: "Four of five units are complete and no worker is active.",
+    report: "The target is idle with one unit missing.",
+    targetStateId: "units:4-of-5:idle",
+    reason: "One safe authorized action is available.",
+    action: actionRequest(kind),
+    ...overrides,
+  });
+}
+
+function actionResult(
+  status: "succeeded" | "failed" | "blocked" = "succeeded",
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    status,
+    summary: status === "succeeded" ? "Started the missing unit." : "The start command failed.",
+    evidence: { process: status === "succeeded" ? "active" : "not-found" },
+    verification: "Checked the real worker process.",
+    failureId: "unit-5-idle",
+    targetStateId: "units:4-of-5:idle",
+    ...overrides,
+  };
+}
+
+function waitObservation(overrides: Record<string, unknown> = {}) {
+  return observation({
+    route: "wait",
+    goalState: "incomplete",
+    workState: "running",
+    observation: "The missing unit worker is active.",
+    report: "Useful work is moving.",
+    targetStateId: "units:4-of-5:running",
+    reason: "The worker is active.",
+    ...overrides,
+  });
+}
+
+function fastMonitor(): WorkflowDefinition {
+  return {
+    ...monitor,
+    nodes: {
+      ...monitor.nodes,
+      sleep: compute({ run: () => ({ waitedMinutes: 0 }) }),
+    },
+  };
+}
+
+function notificationSink(notifications: WorkflowNotificationRequest[]) {
+  return {
+    notify(request: WorkflowNotificationRequest) {
+      notifications.push(request);
+      return { notificationId: `n${notifications.length}`, targetSessionId: "s1" };
+    },
+  };
+}
+
 describe("built-in monitor workflow", () => {
-  it("defaults to 30 minutes and explicit-user-stop when no finish rule is supplied", () => {
-    expect(prepareMonitorInput({ task: "Observe the target" })).toMatchObject({
+  it("keeps only the four public inputs and rejects unknown fields before run creation", async () => {
+    expect(prepareMonitorInput({ task: "Observe the target" })).toEqual({
+      task: "Observe the target",
       everyMinutes: 30,
       stopWhen: "Stop only when the user explicitly asks to stop.",
       maxChecks: 1_000,
-      checkTimeoutMinutes: 60,
-      repair: {
-        authorized: true,
-        approval: {
-          mode: "auto",
-          audience: "operator",
-          timeoutMinutes: 10,
-          maxReplans: 3,
-        },
-      },
     });
-    expect(() => prepareMonitorInput({ task: "Observe", reportWhen: "state changes" })).toThrow(
-      "reportWhen is not supported",
+    for (const field of ["audience", "repair", "checkTimeoutMinutes", "reportWhen"]) {
+      expect(() => prepareMonitorInput({ task: "Observe", [field]: true })).toThrow(
+        `monitor input field ${field} is not supported`,
+      );
+    }
+
+    const outputRoot = await makeTempDir("monitor-invalid-input");
+    const engine = new WorkflowEngine({
+      executor: scriptedExecutor([]),
+      store: new WorkflowRunStore(outputRoot),
+    });
+    await expect(engine.run(monitor, { task: "Observe", audience: "operator" })).rejects.toThrow(
+      "monitor input field audience is not supported",
     );
+    expect(await fs.readdir(outputRoot)).toEqual([]);
   });
 
-  it("reports every accepted stop check before completion", async () => {
+  it("stops when the goal is already complete", async () => {
     const notifications: WorkflowNotificationRequest[] = [];
-    const engine = new WorkflowEngine({
-      executor: scriptedExecutor([check()]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-stop")),
-      notificationSink: {
-        notify(request) {
-          notifications.push(request);
-          return { notificationId: "n1", targetSessionId: "s1" };
-        },
-      },
-    });
-
-    const result = await engine.run(monitor, input());
+    const result = await new WorkflowEngine({
+      executor: scriptedExecutor([observation()]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-complete")),
+      notificationSink: notificationSink(notifications),
+    }).run(monitor, input());
 
     expect(result.state.status).toBe("completed");
-    expect(notifications.map((item) => item.content)).toEqual(["PR 123 is merged."]);
     expect(result.state.steps.map((step) => step.nodeId)).toEqual([
       "prepare",
-      "check",
+      "observe",
+      "guard",
       "estimate",
       "publish_progress",
       "report",
       "decide",
       "finish",
     ]);
-    expect(result.state.finalOutput).toMatchObject({ reported: true, checks: 1 });
+    expect(notifications[0]?.content).toContain("Goal: complete");
+    expect(notifications[0]?.content).toContain("Work: stopped");
   });
 
-  it("reports a continue check and then stops at the disclosed safety limit", async () => {
+  it("waits only when target work is active and detects completion on the next observation", async () => {
+    const result = await new WorkflowEngine({
+      executor: scriptedExecutor([waitObservation(), observation()]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-active")),
+      notificationSink: notificationSink([]),
+    }).run(fastMonitor(), input());
+
+    const steps = result.state.steps.map((step) => step.nodeId);
+    expect(steps).toContain("schedule");
+    expect(steps).toContain("sleep");
+    expect(steps.filter((step) => step === "observe")).toHaveLength(2);
+    expect(steps.indexOf("schedule")).toBeLessThan(steps.indexOf("sleep"));
+    expect(result.state.finalOutput).toMatchObject({ goalState: "complete", checks: 2 });
+  });
+
+  it("starts idle work and observes again immediately", async () => {
     const notifications: WorkflowNotificationRequest[] = [];
-    const engine = new WorkflowEngine({
+    const result = await new WorkflowEngine({
+      executor: scriptedExecutor([actObservation("advance"), actionResult(), observation()]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-advance")),
+      notificationSink: notificationSink(notifications),
+    }).run(monitor, input());
+
+    const steps = result.state.steps.map((step) => step.nodeId);
+    const actIndex = steps.indexOf("act");
+    expect(steps[actIndex + 1]).toBe("observe");
+    expect(steps).not.toContain("schedule");
+    expect(steps).not.toContain("sleep");
+    expect(notifications[0]?.content).toContain("Monitor: active");
+    expect(notifications[0]?.content).toContain("Work: idle");
+    expect(notifications[0]?.content).toContain("Next action: Start the missing unit.");
+    expect(notifications[0]?.content).not.toContain("Work: running");
+    expect(notifications[1]?.content).toContain("Last action: Started the missing unit.");
+  });
+
+  it("resumes saved work without planning or documentation", async () => {
+    const result = await new WorkflowEngine({
       executor: scriptedExecutor([
-        check({
-          route: "continue",
-          observation: "PR 123 remains open.",
-          report: "PR 123 remains open.",
-          reason: "It is not merged.",
+        actObservation("recover", {
+          action: actionRequest("recover", {
+            incomplete: "A saved unit is stopped.",
+            evidence: { checkpoint: "verified" },
+          }),
         }),
+        actionResult("succeeded", { summary: "Resumed the saved unit." }),
+        observation(),
       ]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-limit")),
-      notificationSink: {
-        notify(request) {
-          notifications.push(request);
-          return { notificationId: "n1", targetSessionId: "s1" };
-        },
-      },
-    });
+      store: new WorkflowRunStore(await makeTempDir("monitor-recover")),
+      notificationSink: notificationSink([]),
+    }).run(monitor, input());
 
-    const result = await engine.run(monitor, input({ maxChecks: 1 }));
+    const steps = result.state.steps.map((step) => step.nodeId);
+    expect(steps).toContain("act");
+    expect(steps.some((step) => step.startsWith("planChange/"))).toBe(false);
+    expect(steps.some((step) => step.startsWith("implementation/"))).toBe(false);
+  });
 
-    expect(result.state.status).toBe("completed");
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]?.content).toContain("Reached the 1-check safety limit.");
-    expect(result.state.finalOutput).toMatchObject({
-      reason: "Reached the 1-check safety limit.",
-      reported: true,
+  it("observes a failed action and then performs one authorized recovery", async () => {
+    const recovery = actObservation("recover", {
+      observation: "The start command failed and the saved worker remains stopped.",
+      report: "The first action failed; a bounded recovery is available.",
+      targetStateId: "units:4-of-5:start-failed",
+      action: actionRequest("recover", {
+        nextAction: "Resume the verified saved worker.",
+        failureId: "unit-5-start-failed",
+        targetStateId: "units:4-of-5:start-failed",
+      }),
     });
+    const result = await new WorkflowEngine({
+      executor: scriptedExecutor([
+        actObservation("advance"),
+        actionResult("failed"),
+        recovery,
+        actionResult("succeeded", {
+          summary: "Resumed the verified saved worker.",
+          failureId: "unit-5-start-failed",
+          targetStateId: "units:4-of-5:start-failed",
+        }),
+        observation(),
+      ]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-recover-after-failure")),
+      notificationSink: notificationSink([]),
+    }).run(monitor, input());
+
+    expect(result.state.steps.filter((step) => step.nodeId === "act")).toHaveLength(2);
+    expect(result.state.steps.filter((step) => step.nodeId === "observe")).toHaveLength(3);
     expect(result.state.steps.some((step) => step.nodeId === "sleep")).toBe(false);
   });
 
-  it("publishes progress and adds a model-free estimate to the report", async () => {
-    const notifications: WorkflowNotificationRequest[] = [];
-    const engine = new WorkflowEngine({
+  it.each([
+    ["authority is outside scope", "The required repository mutation is not authorized."],
+    ["a paid action exceeds its limit", "The next paid launch would exceed the cost ceiling."],
+  ])("stops without acting when %s", async (_case, reason) => {
+    const result = await new WorkflowEngine({
       executor: scriptedExecutor([
-        check({
-          report: "Checks are still running.",
+        observation({
+          goalState: "blocked",
+          workState: "idle",
+          observation: reason,
+          report: reason,
+          targetStateId: `blocked:${_case}`,
+          reason,
+        }),
+      ]),
+      store: new WorkflowRunStore(await makeTempDir("monitor-authority-stop")),
+      notificationSink: notificationSink([]),
+    }).run(monitor, input());
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.steps.some((step) => step.nodeId === "act")).toBe(false);
+    expect(result.state.finalOutput).toMatchObject({ goalState: "blocked", reason });
+  });
+
+  it("rejects actions outside authority and paid actions outside the limit", () => {
+    expect(() =>
+      validateMonitorObservation(
+        actObservation("advance", {
+          action: actionRequest("advance", {
+            authority: {
+              ...(actionRequest().authority as Record<string, unknown>),
+              status: "outside",
+            },
+          }),
+        }),
+      ),
+    ).toThrow("authority status authorized");
+
+    expect(() =>
+      validateMonitorObservation(
+        actObservation("advance", {
+          action: actionRequest("advance", {
+            cost: {
+              paidAction: true,
+              status: "exceeded",
+              evidence: "The next launch would exceed the recorded ceiling.",
+            },
+          }),
+        }),
+      ),
+    ).toThrow("cannot launch paid work");
+  });
+
+  it("requires paid workers to stop before a shared repair", () => {
+    expect(() =>
+      validateMonitorObservation(
+        actObservation("repair", {
+          workState: "failed",
+          action: actionRequest("repair", {
+            defect: {
+              sharedCodeOrDataDefect: true,
+              paidWorkers: "running",
+              evidence: "Two affected workers are still active.",
+            },
+          }),
+        }),
+      ),
+    ).toThrow("paid workers must stop");
+  });
+
+  it("validates direct action results against the observed target identity", () => {
+    const request = actionRequest();
+    expect(validateMonitorActionResult(actionResult(), request)).toMatchObject({
+      status: "succeeded",
+      failureId: request.failureId,
+      targetStateId: request.targetStateId,
+    });
+    expect(() =>
+      validateMonitorActionResult(actionResult("succeeded", { failureId: "changed" }), request),
+    ).toThrow("preserve the requested failure");
+  });
+
+  it("publishes progress and keeps monitor state separate from target state", async () => {
+    const notifications: WorkflowNotificationRequest[] = [];
+    const result = await new WorkflowEngine({
+      executor: scriptedExecutor([
+        observation({
+          workState: "idle",
           progress: {
             tracks: [
               {
@@ -137,7 +387,7 @@ describe("built-in monitor workflow", () => {
                 data: {
                   schema: "pi-workflows.progress.v1",
                   label: "Checks",
-                  status: "running",
+                  status: "blocked",
                   completed: 8,
                   total: 10,
                   unit: "checks",
@@ -148,112 +398,23 @@ describe("built-in monitor workflow", () => {
         }),
       ]),
       store: new WorkflowRunStore(await makeTempDir("monitor-progress")),
-      notificationSink: {
-        notify(request) {
-          notifications.push(request);
-          return { notificationId: "n1", targetSessionId: "s1" };
-        },
-      },
-    });
+      notificationSink: notificationSink(notifications),
+    }).run(monitor, input());
 
-    const result = await engine.run(monitor, input());
-
-    expect(result.state.updates).toHaveLength(1);
     expect(result.state.updates?.[0]).toMatchObject({ type: "progress", key: "checks" });
-    expect(notifications[0]?.content).toContain("Progress: Checks  8/10 checks");
-    expect(notifications[0]?.content).toContain("ETA unavailable (needs another progress sample)");
+    expect(notifications[0]?.content).toContain("Monitor: stopping");
+    expect(notifications[0]?.content).toContain("Work: idle");
+    expect(notifications[0]?.content).not.toContain("Work: running");
   });
 
-  it("paces large progress batches below the engine update limit", async () => {
-    const tracks = Array.from({ length: 101 }, (_, index) => ({
-      key: `track-${index}`,
-      data: progress(1, 2),
-    }));
-    const engine = new WorkflowEngine({
-      executor: scriptedExecutor([check({ progress: { tracks } })]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-progress-batch")),
-      notificationSink: {
-        notify() {
-          return { notificationId: "n1", targetSessionId: "s1" };
-        },
-      },
-    });
-
-    const result = await engine.run(monitor, input());
-
-    expect(result.state.status).toBe("completed");
-    expect(result.state.updates).toHaveLength(101);
-  }, 10_000);
-
-  it("includes the prior observation and progress summary in the next prompt", async () => {
-    const prompts: string[] = [];
-    const executor = scriptedExecutor([], prompts);
-    const checkNode = monitor.nodes.check;
-    if (checkNode?.nodeType !== "agent") throw new Error("check must be an agent node");
-    const state = {
-      steps: [{ nodeId: "check", outcome: "ok" }],
-    } as never;
-    const prompt = await checkNode.prompt({
-      input: input(),
-      outputs: {
-        prepare: prepareMonitorInput(input()),
-        check: check({ observation: "The target is at 4 of 10." }),
-        estimate: { tracks: [] },
-      },
-      results: {},
-      state,
-      signal: new AbortController().signal,
-    });
-    expect(prompt).toContain("Perform monitoring check 2 of at most 5");
-    expect(prompt).toContain("Previous accepted observation: The target is at 4 of 10.");
-    expect(prompt).toContain("You are the regular Pi model running this check");
-    expect(prompt).toContain("publish them with workflow action update");
-    expect(prompt).toContain("Do not require the monitored target to implement a Pi-specific");
-    expect(prompt).toContain("Repair is explicitly authorized");
-
-    const observationOnlyPrompt = await checkNode.prompt({
-      input: input({ repair: false }),
-      outputs: {
-        prepare: prepareMonitorInput(input({ repair: false })),
-      },
-      results: {},
-      state: { steps: [] } as never,
-      signal: new AbortController().signal,
-    });
-    expect(observationOnlyPrompt).toContain("Observe only");
-    expect(observationOnlyPrompt).toContain("Choose route continue or stop");
-    expect(executor).toBeDefined();
-  });
-
-  it("rejects repair in observation-only mode and requires repair details", () => {
-    const repair = check({
-      route: "repair",
-      observation: "A fixable defect is present.",
-      report: "A fixable defect is present.",
-      repair: {
-        problem: "Fix the defect",
-        evidence: { failingTest: "test-a" },
-        issueFingerprint: "issue-a-state-1",
-      },
-    });
-    expect(() => validateMonitorCheck(repair)).toThrow("observation-only");
-    expect(validateMonitorCheck(repair, true)).toMatchObject({
-      route: "repair",
-      repair: { issueFingerprint: "issue-a-state-1" },
-    });
-    expect(() => validateMonitorCheck({ ...repair, repair: undefined }, true)).toThrow(
-      "requires repair details",
-    );
-  });
-
-  it("rejects quiet routes, missing reports, duplicate tracks, and unknown fields", () => {
-    expect(() => validateMonitorCheck(check({ route: "stop_quiet" }))).toThrow("route");
-    const { report: _report, ...withoutReport } = check();
-    expect(() => validateMonitorCheck(withoutReport)).toThrow("report");
-    expect(() => validateMonitorCheck(check({ extra: true }))).toThrow("not supported");
+  it("rejects invalid routes, missing reports, duplicate tracks, and unknown fields", () => {
+    expect(() => validateMonitorObservation(observation({ route: "continue" }))).toThrow("route");
+    const { report: _report, ...withoutReport } = observation();
+    expect(() => validateMonitorObservation(withoutReport)).toThrow("report");
+    expect(() => validateMonitorObservation(observation({ extra: true }))).toThrow("not supported");
     expect(() =>
-      validateMonitorCheck(
-        check({
+      validateMonitorObservation(
+        observation({
           progress: {
             tracks: [
               { key: "same", data: progress(1, 2) },
@@ -265,70 +426,34 @@ describe("built-in monitor workflow", () => {
     ).toThrow("duplicated");
   });
 
-  it("enables repair by default and validates the repair approval policy", () => {
-    expect(prepareMonitorInput(input()).repair).toMatchObject({ authorized: true });
-    expect(prepareMonitorInput(input({ repair: false })).repair).toBeUndefined();
-    expect(
-      prepareMonitorInput(
-        input({
-          repair: {
-            authorized: true,
-            scope: "current repo",
-            constraints: ["keep API"],
-            repository: "/repo",
-            baseBranch: "main",
-            merge: false,
-            approval: { mode: "required", audience: "operator", maxReplans: 4 },
-          },
-        }),
-      ),
-    ).toMatchObject({
-      repair: {
-        authorized: true,
-        scope: "current repo",
-        constraints: ["keep API"],
-        repository: "/repo",
-        baseBranch: "main",
-        merge: false,
-        approval: { mode: "required", audience: "operator", maxReplans: 4 },
-      },
+  it("tells the regular model to observe read-only state without a target-specific API", async () => {
+    const prompts: string[] = [];
+    const executor = scriptedExecutor([], prompts);
+    const node = monitor.nodes.observe;
+    if (node?.nodeType !== "agent") throw new Error("observe must be an agent node");
+    const prompt = await node.prompt({
+      input: input(),
+      outputs: { prepare: prepareMonitorInput(input()) },
+      results: {},
+      state: { steps: [] } as never,
+      signal: new AbortController().signal,
     });
-    expect(() => prepareMonitorInput(input({ repair: { authorized: false } }))).toThrow(
-      "authorized",
-    );
-    expect(() =>
-      prepareMonitorInput(input({ repair: { authorized: true, constraints: "bad" } })),
-    ).toThrow("constraints");
-    expect(() =>
-      prepareMonitorInput(input({ repair: { authorized: true, constraints: [3] } })),
-    ).toThrow("constraints");
-    expect(() =>
-      prepareMonitorInput(input({ repair: { authorized: true, merge: "yes" } })),
-    ).toThrow("boolean");
-    expect(() =>
-      prepareMonitorInput(
-        input({ repair: { authorized: true, approval: { mode: "auto", maxReplans: 0 } } }),
-      ),
-    ).toThrow("maxReplans");
-    expect(prepareMonitorInput(input({ repair: { authorized: true } }))).toMatchObject({
-      repair: {
-        approval: {
-          mode: "auto",
-          audience: "operator",
-          timeoutMinutes: 10,
-          maxReplans: 3,
-        },
-      },
-    });
-    expect(Object.keys(monitor.includes ?? {})).toEqual(["planChange", "implementation"]);
+    expect(prompt).toContain("Perform read-only observation 1");
+    expect(prompt).toContain("Do not mutate any file, process, Job, service, remote resource");
+    expect(prompt).toContain("regular Pi model and observation adapter");
+    expect(prompt).toContain("Do not require the target to implement a Pi-specific API");
+    expect(executor).toBeDefined();
   });
 
-  it("has no presentation prompt, report acknowledgement, or quiet routing", () => {
+  it("uses no presentation prompt and schedules only the wait route", () => {
     expect(monitor.presentationPrompt).toBeUndefined();
     expect(monitor.nodes.report?.nodeType).toBe("notify");
-    expect(monitor.nodes.report_continue).toBeUndefined();
-    expect(monitor.nodes.report_stop).toBeUndefined();
-    expect(JSON.stringify(monitor.edges)).not.toContain("quiet");
+    const edges = JSON.stringify(monitor.edges);
+    expect(edges).toContain('"wait":"schedule"');
+    expect(edges).not.toContain('"advance":"schedule"');
+    expect(edges).not.toContain('"recover":"schedule"');
+    expect(edges).not.toContain('"repair":"schedule"');
+    expect(Object.keys(monitor.includes ?? {})).toEqual(["planChange", "implementation"]);
   });
 });
 

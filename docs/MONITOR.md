@@ -2,174 +2,168 @@
 
 This specification defines the built-in `monitor` workflow and its use of [workflow updates](WORKFLOW_UPDATES.md).
 
-The monitor checks a target, sends one status notification after every accepted check, publishes optional progress tracks, waits, and repeats until its stop rule or safety limit is reached.
+Monitor finishes an authorized goal. It observes the real target, performs a safe action when work is incomplete and idle, confirms the result, and checks again on schedule until the goal is complete or cannot continue safely.
 
-## Minimal input
-
-```json
-{
-  "task": "Check pull request 123 in osolmaz/example. Read state and checks with gh. Observe only.",
-  "stopWhen": "Stop when the pull request is merged or closed.",
-  "repair": false
-}
-```
-
-`everyMinutes` defaults to 30. The first check starts immediately.
-
-## Input fields
-
-| Field                 | Required | Type              | Default            | Meaning                               |
-| --------------------- | -------- | ----------------- | ------------------ | ------------------------------------- |
-| `task`                | Yes      | string            | None               | Self-contained monitor task.          |
-| `everyMinutes`        | No       | integer           | `30`               | Minutes between accepted checks.      |
-| `stopWhen`            | No       | string            | Explicit user stop | Condition that ends monitoring.       |
-| `maxChecks`           | No       | integer           | `1000`             | Run safety limit.                     |
-| `checkTimeoutMinutes` | No       | integer           | Derived            | Timeout for one agent check.          |
-| `repair`              | No       | object or `false` | Authorized         | Repair policy or observation opt-out. |
-
-`task` is 1 to 8,000 characters after trimming. It should name the target, stable identifier, source of truth, durable outputs, authorized routine work, and safety boundary. A monitor request authorizes routine bounded work needed to keep that objective running. Protected or consequential changes still require authority in the task or conversation.
-
-`everyMinutes` is from 1 through 1,440. The interval begins after a check report is durably queued. It does not delay the first check.
-
-`stopWhen` is 1 to 4,000 characters when supplied. When the conversation gives no clear finish condition, the caller omits it and the workflow uses `Stop only when the user explicitly asks to stop.`
-
-`maxChecks` is from 1 through 1,000. Agents must omit it unless the user explicitly asks for a fixed check count. The workflow's default of 1,000 is a disclosed runtime safety limit. The agent does not infer it as a finish condition.
-
-`checkTimeoutMinutes` is from 5 through 1,440. When omitted, the workflow uses the larger of 60 minutes and `everyMinutes`. The node timeout includes the existing two-minute runtime margin.
-
-Repair is authorized by default. Set `repair: false` to make the monitor observation-only. A repair object must set `authorized: true` and can narrow scope, repository, base branch, merge behavior, and other implementation constraints. Omitted `merge` means the repair can prepare but cannot merge a pull request; merging requires explicit `merge: true`. Repair authority does not permit a protected model, benchmark, credential, hardware, spending, or scope change.
-
-`repair.approval` uses `auto`, `required`, or `skip` mode. When omitted, Monitor uses `auto` with audience `operator`, a 10-minute timeout, and three allowed replans. Auto mode asks and then continues with the exact plan if no answer is accepted by the deadline. Required mode waits for an explicit human answer. Skip mode asks nothing. Continue starts implementation, stop ends the repair truthfully, and replan preserves exact operator text before the shared plan-change workflow runs again. The model-facing workflow tool cannot approve the gate.
-
-`reportWhen` is removed. The monitor always reports after every accepted check.
-
-## Check output
-
-The check agent submits:
+## Input
 
 ```json
 {
-  "route": "continue",
-  "observation": "The pull request is open and 8 of 10 checks passed.",
-  "report": "PR 123 remains open. Eight of ten checks passed; two are running.",
-  "progress": {
-    "tracks": [
-      {
-        "key": "checks",
-        "data": {
-          "schema": "pi-workflows.progress.v1",
-          "label": "Checks",
-          "status": "running",
-          "completed": 8,
-          "total": 10,
-          "unit": "checks"
-        }
-      }
-    ]
-  },
-  "reason": "The stop condition is not met."
+  "task": "Resume the six missing modules and monitor the full 27-module build. Use the saved outputs. Keep total paid work below the recorded limit.",
+  "stopWhen": "Stop when all 27 modules have verified outputs or when safe continuation is blocked.",
+  "everyMinutes": 15
 }
 ```
 
-Fields:
+The public input has four fields:
 
-| Field         | Required   | Type   | Meaning                                     |
-| ------------- | ---------- | ------ | ------------------------------------------- |
-| `route`       | Yes        | string | `continue`, authorized `repair`, or `stop`. |
-| `observation` | Yes        | string | Current factual state.                      |
-| `report`      | Yes        | string | Concise user-facing update.                 |
-| `progress`    | No         | object | Current progress tracks.                    |
-| `repair`      | For repair | object | Problem, evidence, and stable fingerprint.  |
-| `reason`      | Yes        | string | Reason for the selected route.              |
+| Field          | Required | Type    | Default            | Meaning                           |
+| -------------- | -------- | ------- | ------------------ | --------------------------------- |
+| `task`         | Yes      | string  | None               | Goal, authority, and constraints. |
+| `stopWhen`     | No       | string  | Explicit user stop | Condition that ends monitoring.   |
+| `everyMinutes` | No       | integer | `30`               | Minutes between timed checks.     |
+| `maxChecks`    | No       | integer | `1000`             | Observation safety limit.         |
 
-`observation` is at most 8,000 characters. `report` is at most 4,000 characters. `reason` is at most 2,000 characters. All three must be non-empty after trimming.
+`task` is 1 to 8,000 characters after trimming. It must preserve the user's goal and the authority already present in the conversation and repository instructions. This includes:
 
-`progress.tracks` contains from 1 through 256 entries. Each entry has a unique `key` and one valid `pi-workflows.progress.v1` data object. The progress update rules, reserved `overall` key, and validation behavior come from [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md).
+- allowed files, systems, providers, runtimes, and resources
+- forbidden changes
+- cost and resource limits
+- required checks
+- stop conditions
+- allowed recovery actions
+- durable progress, checkpoints, and known target identifiers
 
-Unknown check fields are validation errors. A missing report is a validation error for every route. A repair route without input authorization or repair details is also invalid.
+`stopWhen` is 1 to 4,000 characters when supplied. When the conversation gives no finish condition, the workflow uses `Stop only when the user explicitly asks to stop.`
 
-## Graph
+`everyMinutes` is an integer from 1 through 1,440. The first observation starts immediately. The interval applies only after an observation proves that work is moving or waiting for an external event.
 
-The built-in graph uses existing nodes:
+`maxChecks` is an integer from 1 through 1,000. Callers omit it unless the user asks for a fixed limit. The default is a runtime safety limit.
+
+The input parser rejects every unknown field before a run is created. Inputs such as `audience`, `repair`, and `checkTimeoutMinutes` fail with a direct unsupported-field error. There are no compatibility aliases for removed fields.
+
+## Authority
+
+Monitor uses only authority that already exists in `task`, `stopWhen`, the conversation, and repository instructions. It does not infer permission from an idle target or from the existence of a possible action.
+
+The first observation extracts the applicable contract:
+
+- the complete goal
+- allowed files and systems
+- forbidden changes
+- cost ceiling
+- provider and runtime contract
+- required checks
+- stop conditions
+- allowed recovery actions
+
+An action can run only when its full effect is inside that contract. Monitor stops and reports the missing decision when an action would exceed the contract.
+
+A monitoring request does not create spending approval. Before paid work starts or resumes, the action must verify an applicable approval and prove that the next action stays inside its cumulative cost limit. It must not launch when the cost limit is missing, cannot be verified, or would be exceeded.
+
+## Read-only observation
+
+Every cycle begins with the `observe` agent step. The first observation and all observations after actions are read-only. The model uses normal tools to inspect authoritative target state and durable outputs.
+
+The observation answers these questions:
+
+- Is the goal complete?
+- Is useful work active?
+- Is the goal incomplete and idle?
+- Did work fail?
+- Is there a material blocker?
+- Which safe actions are already authorized?
+
+The result uses one of three routes:
+
+- `wait`: Work is moving, or an external event must finish.
+- `act`: The goal is incomplete and a safe authorized action is available.
+- `stop`: The goal is complete or cannot continue safely.
+
+The observation records the goal state and target work state separately. It also lists the safe actions that the user has already authorized, even when no action is needed now. Monitor state is never evidence that target work is running.
+
+## Action request
+
+An `act` result contains one action request with:
+
+- `kind`: `advance`, `recover`, or `repair`
+- what is incomplete
+- evidence that proves it
+- the exact next action
+- why existing authority covers the action
+- files, systems, or resources that may change
+- how to verify the action
+- a stable failure ID
+- a stable target-state ID
+
+The failure ID identifies the same failure across checks. The target-state ID identifies the relevant target state. Both values come from observed facts and remain stable while those facts remain unchanged.
+
+The action request cannot grant authority. It can only describe authority found during observation.
+
+## Direct actions
+
+`advance` starts or continues normal requested work. `recover` restarts or resumes work after an operational stop.
+
+Both routes use one mutation-capable `act` agent step with normal Pi tools. The step performs only the stated action. Its prompt includes the exact action, authority basis, allowed mutation set, and verification rule from the read-only observation.
+
+Direct actions can include:
+
+- starting work
+- resuming saved work
+- restarting stopped work
+- running the next command
+- updating a stale launch file
+- retrying a safe external operation
+- continuing from a verified checkpoint
+
+A normal start, resume, or restart does not run Autoplan, Autodoc, or Autoimplement.
+
+The action step returns whether the action succeeded, failed, or was blocked, with factual evidence. Monitor then runs `observe` again immediately. A failed direct action can lead to a new authorized recovery action, but it cannot cause an unbounded retry loop.
+
+## Repair actions
+
+`repair` changes code or configuration to fix a defect. It uses the existing shared plan-change workflow and Autoimplement workflow. Monitor does not copy their design, documentation, implementation, test, review, or delivery steps.
+
+The repair input preserves the action request, target evidence, authority, constraints, repository, and delivery limits. Existing plan approval rules still apply when the recorded contract requires them.
+
+Paid workers affected by a shared code or data defect must stop at safe boundaries before repair starts. Monitor preserves their durable outputs and failure evidence.
+
+After a completed repair, Monitor runs `observe` immediately. If the same failure ID and target-state ID return, Monitor stops. It does not run the same repair cycle again.
+
+## Workflow graph
 
 ```text
-prepare
-  → check
-  → estimate
-  → publish_progress
-  → report
-  → decide
-      ├─ stop → finish
-      ├─ continue → schedule → sleep → check
-      └─ repair → repairGuard
-           ├─ blocked → repairBlocked → repairReport → finish
-           └─ planChange
-                ├─ blocked → repairBlocked
-                └─ ready → implementation: autoimplement
-                     ├─ blocked → repairBlocked
-                     └─ completed → check
+observe
+  ├─ stop → finish
+  ├─ wait → report → schedule → sleep → observe
+  └─ act
+       ├─ advance → direct action → observe immediately
+       ├─ recover → direct action → observe immediately
+       └─ repair → plan change → Autoimplement → observe immediately
 ```
 
-- `prepare` is a `compute` node that validates and applies input defaults.
-- `check` is an `agent` node that inspects the target and submits the check output.
-- `estimate` is a `compute` node that updates per-track rate and ETA state with the pure progress helpers.
-- `publish_progress` is a function `action` that publishes each validated observed track.
-- `report` is a `notify` node that queues exactly one report.
-- `decide` is a `compute` node that applies the route and check safety limit.
-- `repairGuard` stops a repeated issue when a completed repair did not change its fingerprint or observed target state.
-- `planChange` and `implementation` are included workflows. Plan change owns Autoplan, Autodoc, approval policy, and exact-text replanning. Autoimplement receives the selected plan without another decision and enters its own plan-change mount only when later evidence requires a changed plan.
-- `repairBlocked` and `repairReport` preserve a truthful blocked result and user notification.
-- `schedule` is a function `action` that publishes the next-check time.
-- `sleep` is the existing runtime-owned shell wait.
-- `finish` is a `compute` node that returns the final observation and reason.
+The timer exists only on the `wait` route. No schedule or sleep step can occur between an action and its verification observation.
 
-The workflow has no quiet route, report acknowledgement agent, or `presentationPrompt`.
+`maxChecks` counts accepted observations. Reaching the limit reports the real goal and work state before the workflow stops.
 
-## Check prompt
+## Progress
 
-The check prompt includes:
+Progress is optional. The regular Pi model reads the target through normal tools and converts observed facts into `pi-workflows.progress.v1` tracks. The existing workflow update channel stores and displays those tracks.
 
-- check number and safety limit
-- task
-- stop condition
-- previous accepted observation
-- previous progress and estimate summary when present
-- read-only boundary unless the task authorizes a mutation
-- required output shape
+The target stays independent of Pi Workflows. Monitor must not require a target process, Job, application, provider, or repository to:
 
-It tells the model that every accepted check must include a concise report. It tells the model to submit observed progress facts and target-provided ETA values only. The model does not calculate the official rate, confidence, or measured ETA.
+- import Pi Workflows
+- expose a Pi-specific API or endpoint
+- write a Pi-specific progress file
+- create a Pi-specific store or schema
+- add a Pi-specific command or dependency
 
-A check may use available tools to read current state. It must use the target's authoritative source instead of treating a prior report or workflow update as current truth.
+When the target does not expose a factual completed value, total, rate, or source estimate, Monitor reports that the value or ETA is unavailable. It does not invent one.
 
-## Progress ownership boundary
-
-The regular Pi model running the check is the observation adapter. It uses the target-specific tools authorized by the task, converts observed facts into `pi-workflows.progress.v1` tracks, and publishes them through the existing `workflow` tool. pi-workflows validates, stores, estimates, and displays those tracks.
-
-The monitored target stays independent of pi-workflows. A monitor must not require a target Job or application to import pi-workflows, emit a Pi schema, write a Pi progress file, expose a Pi endpoint, create a progress store, or add a progress reader command solely for monitoring. Provider-specific clients and credentials do not belong in pi-workflows.
-
-When a target does not expose a factual count, total, or source estimate, the check reports that ETA is unavailable. Better application telemetry is separate work. It should expose normal operational facts for all operators, not a Pi-specific reporting protocol.
-
-## Progress publication
-
-`estimate` keeps the last eight usable intervals for each track in its normal node output. The output is durable and becomes the prior estimator state on the next loop visit.
-
-`publish_progress` calls `context.publishUpdate()` once for each track with:
-
-```ts
-{
-  type: "progress",
-  key: track.key,
-  data: track.data,
-}
-```
-
-The published data remains the observed progress snapshot. Derived estimates stay in the estimator output and presentation view. The widget and viewer combine the observed update history with the pure estimator so they do not misrepresent estimates as target facts.
-
-When a check contains no progress object, `estimate` and `publish_progress` return an empty result. The report still runs.
+Progress data cannot contain a command or grant mutation authority.
 
 ## Schedule publication
 
-Before sleeping, `schedule` publishes:
+On the `wait` route, `schedule` publishes:
 
 ```json
 {
@@ -184,130 +178,83 @@ Before sleeping, `schedule` publishes:
 }
 ```
 
-All fields are required. Times use RFC 3339 UTC form. `everyMinutes` must match the prepared monitor configuration.
+All fields are required. Times use RFC 3339 UTC form. `everyMinutes` must match the prepared Monitor configuration.
 
-The schedule update lets the widget and viewer show time since the last check and time until the next check without calling a model or writing state on each clock tick.
+No schedule update is published on `act` or `stop` routes.
 
-## Report formatting
+## Reports
 
-The notification begins with the submitted `report`. When progress is present, a model-free formatter appends a bounded structured summary.
+Every accepted observation sends one notification. Reports show Monitor state, goal state, and target work state as separate facts.
 
-Example:
+A moving target report uses this form:
 
 ```text
-Import remains healthy.
-Progress: 420/1,000 rows (42%, +60)
-Rate: 29–33 rows/min
-ETA: 18–20 min (medium confidence, 4 samples)
-Next check: 30 min
+Monitor: active
+Goal: incomplete
+Work: running
+Progress: 21/27 modules
+Last action: resumed six missing modules
+Next check: 15 minutes
 ```
 
-Rules:
+An idle target that has an authorized action uses this form before the action runs:
+
+```text
+Monitor: active
+Goal: incomplete
+Work: idle
+Next action: refreshing launch files and resuming work now
+```
+
+A report must not say `Work: running` because Monitor itself is active. It may say running only when target evidence proves useful work is active.
+
+Progress formatting follows these rules:
 
 - Show absolute values before deltas.
-- Label source ETA as `source ETA`.
+- Label a target-provided ETA as `source ETA`.
 - Show `ETA unavailable` with a short reason when no valid estimate exists.
-- Do not display a negative countdown after an ETA passes.
-- Use `ETA passed; awaiting next check` until a new sample arrives.
-- Keep failed, blocked, or stale state ahead of rate details.
-- Show every track when the formatted report remains within 4,000 characters.
-- When it does not fit, show `overall`, failed or blocked tracks, then as many active tracks as fit, followed by the omitted count.
+- Keep failed, blocked, or idle state ahead of rate details.
+- Keep independent progress tracks separate.
 
-Unrelated tracks are never combined. The monitor uses an explicit `overall` track when the target supplies meaningful aggregate progress.
+Notifications use the existing session-addressed outbox with `triggerTurn: false`. They do not start an extra assistant response.
 
-## Notification delivery
+## Stop conditions
 
-Each accepted check reaches `report`, including a check that selects `stop`. The `notify` node writes one durable message through the existing session-addressed outbox.
+Monitor stops when:
 
-The extension delivers the custom Pi message with `triggerTurn: false`. The notification stays in session history and later model context. Its arrival does not start an assistant response.
+- the goal is complete
+- a material blocker prevents safe continuation
+- the next action is outside recorded authority
+- a paid action lacks approval or would exceed its limit
+- a provider, runtime, method, data source, or other protected contract would change
+- a required credential lacks prior source-and-destination authority
+- a checkpoint is invalid or cannot preserve useful work
+- the same failure and target state return after one completed repair
+- the observation safety limit is reached
+- the user cancels the run
 
-The monitor does not use `sendUserMessage`. It does not ask an agent to repeat or acknowledge the notification. After the workflow tool accepts the check, the extension removes any extra assistant tail text from that agent run, so only the notification reports the check.
+Monitor reports the current goal and target work state before a normal `stop` route completes.
 
-A check that times out or fails before producing accepted output is not an accepted check. The run enters its normal terminal error state and the extension shows the workflow lifecycle notification. It does not invent a successful check report.
+## Acceptance tests
 
-## Routing and stopping
+The implementation must test at least these cases:
 
-`route: "stop"` queues the report and then completes the workflow.
+1. The goal is already complete.
+2. Work is active, so Monitor waits.
+3. Work is idle, so Monitor starts it.
+4. Saved work exists, so Monitor resumes it.
+5. An action succeeds, so Monitor observes again immediately.
+6. An action fails once, then recovery succeeds.
+7. The same repaired failure returns, so Monitor stops.
+8. An action is outside authority, so Monitor stops.
+9. A paid action exceeds the limit, so Monitor does not launch it.
+10. Monitor is active while the target is idle.
+11. The target completes between timed observations.
+12. Unknown input fields fail before run creation.
+13. A normal restart does not trigger planning or documentation.
+14. A real code defect uses the existing repair path.
+15. No target-specific monitoring API is required.
 
-`route: "continue"` queues the report and then checks the safety limit. If the limit remains available, the workflow schedules and waits for the next check. If the accepted check reaches `maxChecks`, the workflow finishes after that check's report and records `Reached the <n>-check safety limit.`
+Existing progress, notification, cancellation, interruption, resume, widget, schedule, and safety-limit tests must continue to pass where they apply to the new graph.
 
-A user cancellation stops the active check or wait immediately. It does not queue another report. The existing workflow lifecycle notification reports cancellation.
-
-Failures, blocked states, and unavailable status follow the user's `stopWhen` rule. The check may continue after reporting an unavailable source when observation remains safe and the stop condition is not met. It must stop when the requested terminal state is verified.
-
-## Widget
-
-Progress display is optional. A monitor without progress uses the normal workflow graph widget.
-
-With progress, the widget uses the existing 10-line budget. It keeps the active graph row and uses remaining lines for a compact progress panel. It shows `overall` first, then failed or blocked tracks, then active tracks. Existing widget scrolling exposes omitted tracks.
-
-The widget may show:
-
-```text
-Overall   420/1,000 rows  ETA 18–20m
-Worker A  running         7m elapsed
-Worker B  waiting
-Last check 7m ago  next check 23m
-```
-
-Between checks, the existing one-second widget ticker may update:
-
-- workflow and phase elapsed time
-- time since the last progress sample
-- ETA countdown derived from the last estimate
-- time until the next check
-
-It does not advance observed `completed`, publish updates, write bundle state, or call a model.
-
-When an ETA expires, the widget shows that the estimate passed and waits for the next sample. `piw` shows the complete track list, update history, estimate basis, confidence, and source timestamps.
-
-## Several monitored processes
-
-One monitor can track several processes. Each uses a stable progress key. A missing key in a later check does not mean completion; the check should publish an explicit terminal or `unknown` state before it stops reporting that process.
-
-The progress estimator treats each key independently. A phase, unit, total, or counter reset in one track does not reset another track.
-
-## Interval and lifetime
-
-The normal workflow engine remains finite. The built-in monitor therefore retains the 1,000-check safety ceiling and must not claim to be mathematically unbounded.
-
-At the default 30-minute interval, the ceiling allows about 20 days and 20 hours after the immediate first check. A caller that needs longer unattended reconciliation should use the controller runtime. A controller-backed indefinite monitor is a separate resource lifecycle. The workflow engine keeps its finite-step guard.
-
-The monitor skill must disclose a surfaced host limit and must never invent a smaller limit such as two checks. When no finish condition is clear, it sets the stop rule to explicit user stop and omits `maxChecks` so the workflow uses its documented safety ceiling.
-
-## Safety boundaries
-
-A request with `repair: false` authorizes only observation and scheduled checks. Otherwise, routine bounded repair is available by default. An optional `repair.approval` object names a logical audience and inserts human plan approval after autodoc. Continue starts implementation, stop ends truthfully, and replan sends the exact human text back to autoplan before autodoc and approval run again.
-
-When the user asks the monitor to keep an objective running or finish it, the monitor skill may record routine, bounded work in `task` and the repair policy. This can include retries, restarts, pinned task code, tests, configuration repairs, and temporary cleanup. The task must preserve the exact objective and state every mutation boundary.
-
-A progress object is data. It cannot contain a command or grant execution authority. Fixed probes belong in workflow-authored `action` or `shell` nodes.
-
-A monitoring request does not create spending approval or a default spending ceiling. Existing approvals can cover paid actions, and the monitor should continue without another prompt while each action stays within them. Paid compute, inference runtime, and other domain policies continue to apply to every check.
-
-## Validation and acceptance
-
-The implementation must test:
-
-- input defaults and bounds
-- removal of `reportWhen`
-- rejection of old quiet routes
-- required reports on every route
-- repair enabled by default and rejected after the explicit `repair: false` opt-out
-- outer design, autodoc, optional approval, nested redesign, and post-repair checking
-- continue, stop, and exact-text replan approval routes
-- repeated no-progress repair detection
-- exactly one notification per accepted check
-- no assistant turn from a notification
-- progress omission and multiple tracks
-- invalid and duplicate track keys
-- progress resets and stale samples
-- measured, source, unavailable, paused, and expired ETA display
-- schedule timestamps and countdown rendering
-- final report before stop
-- safety-limit report before completion
-- immediate cancellation during a check or wait
-- resume after host interruption
-- widget behavior with zero, one, and many tracks
-
-The real-Pi end-to-end test must start a short monitor, observe its custom notification without a new assistant turn, inspect the widget, and stop the run without mutating an external target.
+The real-Pi end-to-end test must start a short Monitor run, observe its notification without an extra assistant turn, inspect the widget, and stop the run without mutating an external target.

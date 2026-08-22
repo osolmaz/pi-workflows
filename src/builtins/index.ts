@@ -21,7 +21,7 @@ export type { AutoimplementConcurrency } from "./autoimplement-command-batches.j
 export {
   default as monitorWorkflow,
   type MonitorInput,
-  type MonitorRepairPolicy,
+  type MonitorObservation,
 } from "./monitor.workflow.js";
 export {
   planChangeWorkflow,

@@ -2768,8 +2768,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
     label: "Workflow",
     description: [
       "List, start, inspect, pause, resume, cancel, answer, update, or complete pi-workflows runs.",
-      "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, everyMinutes, stopWhen, and optional maxChecks.",
-      "Monitor requests authorize routine bounded recovery by default; set repair to false only when the user requests observation-only monitoring.",
+      "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, stopWhen, everyMinutes, and optional maxChecks.",
+      "Put the exact goal, authority, limits, and recovery rules in task; Monitor observes first, performs only safe authorized actions, verifies them immediately, and waits only while target work is moving or an external event is pending.",
       "Use update or submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
       "Do not start repeated work without the user's request.",
     ].join(" "),

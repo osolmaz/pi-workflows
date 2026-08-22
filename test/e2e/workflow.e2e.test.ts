@@ -576,22 +576,26 @@ describe.sequential("pi-workflows end to end", () => {
         }
         if (
           lastRole === "tool" &&
-          /workflow step contract \(workflow: monitor, step: check/i.test(lastUserText)
+          /workflow step contract \(workflow: monitor, step: observe/i.test(lastUserText)
         ) {
           const monitorStepMatch = lastUserText.match(
-            /workflow step contract \(workflow: monitor, step: check, attempt: ([a-z0-9-]+)\)/i,
+            /workflow step contract \(workflow: monitor, step: observe, attempt: ([a-z0-9-]+)\)/i,
           );
           return {
             kind: "tool",
             toolName: "workflow",
             args: {
               action: "submit",
-              step: "check",
+              step: "observe",
               attempt: monitorStepMatch?.[1] ?? "",
               output: {
                 route: "stop",
+                goalState: "complete",
+                workState: "stopped",
                 observation: "The fixture check completed at 1 of 2 items.",
                 report: "The fixture check completed.",
+                targetStateId: "fixture:first-check-complete",
+                authorizedActions: [],
                 progress: {
                   tracks: [
                     {
@@ -660,13 +664,13 @@ describe.sequential("pi-workflows end to end", () => {
         const monitorStepMatch = lastUserText.match(
           /workflow step contract \(workflow: monitor, step: ([a-z_]+), attempt: ([a-z0-9-]+)\)/i,
         );
-        if (monitorStepMatch?.[1] === "check") {
+        if (monitorStepMatch?.[1] === "observe") {
           return {
             kind: "tool",
             toolName: "workflow",
             args: {
               action: "update",
-              step: "check",
+              step: "observe",
               attempt: monitorStepMatch[2] ?? "",
               update: {
                 type: "progress",
@@ -1607,7 +1611,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "9" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "10" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

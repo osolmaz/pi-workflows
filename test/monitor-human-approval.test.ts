@@ -14,25 +14,62 @@ import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 let originalPath = "";
 let repository = "";
 
-function repairCheck() {
+function repairObservation() {
   return {
-    route: "repair",
+    route: "act",
+    goalState: "incomplete",
+    workState: "failed",
     observation: "A deterministic test fails.",
     report: "A repair is available.",
+    targetStateId: "test-a:one",
+    authorizedActions: ["repair test-a with operator approval"],
     reason: "Repair is authorized.",
-    repair: {
-      problem: "Fix the deterministic test",
+    action: {
+      kind: "repair",
+      incomplete: "test-a must pass",
       evidence: { test: "test-a" },
-      issueFingerprint: "test-a:one",
+      nextAction: "Fix the deterministic test",
+      authority: {
+        status: "authorized",
+        basis: "The task authorizes repair in the current repository.",
+        allowedMutations: ["source and tests in the current repository"],
+        forbiddenMutations: ["unrelated repositories"],
+        costLimit: "No paid resources",
+        providerRuntime: "Keep the current runtime",
+        requiredChecks: ["run test-a"],
+        stopConditions: ["stop if the repair leaves scope"],
+        allowedRecoveryActions: ["repair test-a"],
+        repository,
+        baseBranch: "main",
+        merge: true,
+        repairApproval: { mode: "required", audience: "operator", maxReplans: 3 },
+      },
+      cost: {
+        paidAction: false,
+        status: "not-applicable",
+        evidence: "The repair uses local resources.",
+      },
+      defect: {
+        sharedCodeOrDataDefect: true,
+        paidWorkers: "stopped",
+        evidence: "No affected paid workers are active.",
+      },
+      verification: "Run test-a and confirm it passes.",
+      failureId: "test-a",
+      targetStateId: "test-a:one",
     },
   };
 }
 
-function stopCheck() {
+function stopObservation() {
   return {
     route: "stop",
+    goalState: "complete",
+    workState: "stopped",
     observation: "The test passes.",
     report: "The repair is verified.",
+    targetStateId: "test-a:two",
+    authorizedActions: [],
     reason: "Complete.",
   };
 }
@@ -99,7 +136,11 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
 
 function completedRepairExecutor(rounds = 1): ScriptedExecutor {
   return designResponses(
-    new ScriptedExecutor().respond("check", { output: repairCheck() }, { output: stopCheck() }),
+    new ScriptedExecutor().respond(
+      "observe",
+      { output: repairObservation() },
+      { output: stopObservation() },
+    ),
     rounds,
   )
     .respond("implementation/implement", {
@@ -260,15 +301,9 @@ describe("monitor human repair approval", () => {
       builtinWorkflowCatalog,
     );
     const first = await makeEngine(executor, store).run(resolved.definition, {
-      task: "Monitor and repair",
+      task: "Monitor and repair test-a in the current repository with required operator approval. Merge is authorized.",
       stopWhen: "test passes",
       maxChecks: 3,
-      repair: {
-        authorized: true,
-        repository,
-        merge: true,
-        approval: { mode: "required", audience: "operator", maxReplans: 3 },
-      },
     });
     if (first.state.status !== "waiting") {
       throw new Error(
@@ -286,7 +321,7 @@ describe("monitor human repair approval", () => {
     expect(continued.state.steps.some((step) => step.nodeId === "implementation/implement")).toBe(
       true,
     );
-    expect(continued.state.steps.filter((step) => step.nodeId === "check")).toHaveLength(2);
+    expect(continued.state.steps.filter((step) => step.nodeId === "observe")).toHaveLength(2);
     expect(
       continued.state.steps.filter((step) => step.nodeId.endsWith("approval/approve")),
     ).toHaveLength(1);
@@ -306,14 +341,9 @@ describe("monitor human repair approval", () => {
       builtinWorkflowCatalog,
     );
     const first = await makeEngine(executor, store).run(resolved.definition, {
-      task: "Monitor and repair",
+      task: "Monitor and repair test-a in the current repository with required operator approval.",
       stopWhen: "test passes",
       maxChecks: 3,
-      repair: {
-        authorized: true,
-        repository,
-        approval: { mode: "required", audience: "operator", maxReplans: 3 },
-      },
     });
     const stopped = await answer(store, executor, resolved.definition, first.state.runId, {
       choice: "stop",
@@ -336,15 +366,9 @@ describe("monitor human repair approval", () => {
       builtinWorkflowCatalog,
     );
     const first = await makeEngine(executor, store).run(resolved.definition, {
-      task: "Monitor and repair",
+      task: "Monitor and repair test-a in the current repository with required operator approval. Merge is authorized.",
       stopWhen: "test passes",
       maxChecks: 3,
-      repair: {
-        authorized: true,
-        repository,
-        merge: true,
-        approval: { mode: "required", audience: "operator", maxReplans: 3 },
-      },
     });
     const firstDigest = (first.state.finalOutput as { subject?: { planDigest?: string } }).subject
       ?.planDigest;

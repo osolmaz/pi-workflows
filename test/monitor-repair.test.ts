@@ -13,32 +13,69 @@ import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 let originalPath = "";
 let repository = "";
 
-function repairCheck() {
+function repairObservation() {
   return {
-    route: "repair",
+    route: "act",
+    goalState: "incomplete",
+    workState: "failed",
     observation: "A deterministic test fails in target state one.",
     report: "A fixable test failure was found.",
+    targetStateId: "test-a:state-one",
+    authorizedActions: ["repair test-a in the current repository"],
     reason: "Repair is authorized and in scope.",
-    repair: {
-      problem: "Fix the deterministic test failure",
+    action: {
+      kind: "repair",
+      incomplete: "test-a must pass",
       evidence: { test: "test-a", state: "one" },
-      issueFingerprint: "test-a:state-one",
+      nextAction: "Fix the deterministic test failure",
+      authority: {
+        status: "authorized",
+        basis: "The task authorizes repair in the current repository.",
+        allowedMutations: ["source and tests in the current repository"],
+        forbiddenMutations: ["unrelated repositories"],
+        costLimit: "No paid resources",
+        providerRuntime: "Keep the current runtime",
+        requiredChecks: ["run test-a"],
+        stopConditions: ["stop if the defect requires a protected contract change"],
+        allowedRecoveryActions: ["repair this deterministic defect"],
+        repository,
+        baseBranch: "main",
+        merge: true,
+        repairApproval: { mode: "skip" },
+      },
+      cost: {
+        paidAction: false,
+        status: "not-applicable",
+        evidence: "The repair uses local resources.",
+      },
+      defect: {
+        sharedCodeOrDataDefect: true,
+        paidWorkers: "stopped",
+        evidence: "No affected paid worker is active.",
+      },
+      verification: "Run test-a and confirm it passes.",
+      failureId: "test-a",
+      targetStateId: "test-a:state-one",
     },
   };
 }
 
-function stopCheck() {
+function stopObservation() {
   return {
     route: "stop",
+    goalState: "complete",
+    workState: "stopped",
     observation: "The test passes in target state two.",
     report: "The repair is verified.",
+    targetStateId: "test-a:state-two",
+    authorizedActions: [],
     reason: "The monitored success condition is true.",
   };
 }
 
-function repairExecutor(secondCheck: unknown): ScriptedExecutor {
+function repairExecutor(secondObservation: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
-    .respond("check", { output: repairCheck() }, { output: secondCheck })
+    .respond("observe", { output: repairObservation() }, { output: secondObservation })
     .respond("planChange/design/frame", {
       output: {
         problem: "test failure",
@@ -195,10 +232,10 @@ afterEach(() => {
 });
 
 describe("monitor automatic repair", () => {
-  it("devises, implements, and then checks the target again", async () => {
+  it("uses the shared repair workflows and then observes immediately", async () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const engine = new WorkflowEngine({
-      executor: repairExecutor(stopCheck()),
+      executor: repairExecutor(stopObservation()),
       store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-repair")),
       notificationSink: {
         notify(request) {
@@ -216,16 +253,9 @@ describe("monitor automatic repair", () => {
     const { state } = await engine.run(
       resolved.definition,
       {
-        task: "Monitor and repair test-a",
+        task: "Monitor and repair test-a in the current repository. Merge is authorized. Do not use paid resources.",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: {
-          authorized: true,
-          scope: "current repository",
-          repository,
-          merge: true,
-          approval: { mode: "skip" },
-        },
       },
       { workflowSource: resolved.source },
     );
@@ -233,11 +263,13 @@ describe("monitor automatic repair", () => {
     expect(state.status).toBe("completed");
     expect(state.steps.map((step) => step.nodeId)).toContain("planChange/design/frame");
     expect(state.steps.map((step) => step.nodeId)).toContain("implementation/implement");
-    expect(state.steps.filter((step) => step.nodeId === "check")).toHaveLength(2);
-    expect(notifications.map((item) => item.content)).toEqual([
-      "A fixable test failure was found.",
-      "The repair is verified.",
-    ]);
+    expect(state.steps.filter((step) => step.nodeId === "observe")).toHaveLength(2);
+    const repairCompleteIndex = state.steps.findIndex((step) => step.nodeId === "repairComplete");
+    expect(state.steps[repairCompleteIndex + 1]?.nodeId).toBe("observe");
+    expect(notifications).toHaveLength(2);
+    expect(notifications[0]?.content).toContain("Next action: Fix the deterministic test failure");
+    expect(notifications[1]?.content).toContain("Goal: complete");
+    expect(notifications[1]?.content).toContain("Last action: Fix the deterministic test failure");
     expect(state.workflowSources?.map((item) => item.mountPath.join("/"))).toEqual([
       "implementation",
       "implementation/documentation",
@@ -253,10 +285,10 @@ describe("monitor automatic repair", () => {
     expect(state.definitionDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
-  it("stops when the same target evidence returns after repair", async () => {
+  it("stops when the same failure and target state return after repair", async () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const engine = new WorkflowEngine({
-      executor: repairExecutor(repairCheck()),
+      executor: repairExecutor(repairObservation()),
       store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-no-progress")),
       notificationSink: {
         notify(request) {
@@ -274,26 +306,23 @@ describe("monitor automatic repair", () => {
     const { state } = await engine.run(
       resolved.definition,
       {
-        task: "Monitor and repair test-a",
+        task: "Monitor and repair test-a in the current repository. Merge is authorized. Do not use paid resources.",
         stopWhen: "test-a passes",
         maxChecks: 3,
-        repair: {
-          authorized: true,
-          scope: "current repository",
-          repository,
-          merge: true,
-          approval: { mode: "skip" },
-        },
       },
       { workflowSource: resolved.source },
     );
 
     expect(state.status).toBe("completed");
     expect(state.steps.filter((step) => step.nodeId === "implementation")).toHaveLength(1);
-    expect(state.steps.map((step) => step.nodeId)).toContain("repairBlocked");
+    expect(state.steps.filter((step) => step.nodeId === "repairComplete")).toHaveLength(1);
+    expect(state.steps.map((step) => step.nodeId)).not.toContain("repairBlocked");
     expect(state.finalOutput).toMatchObject({
-      reason: "The same issue returned after a completed repair with no changed target evidence.",
+      goalState: "blocked",
+      reason: "Repair stopped because test-a returned in target state test-a:state-one.",
     });
-    expect(notifications.at(-1)?.content).toContain("Automatic repair stopped");
+    expect(notifications.at(-1)?.content).toContain(
+      "same failure and target state returned after one completed repair",
+    );
   });
 });

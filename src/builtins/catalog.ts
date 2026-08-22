@@ -14,7 +14,7 @@ export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "sanity-check", revision: "3", definition: sanityCheckWorkflow },
   {
     id: "monitor",
-    revision: "9",
+    revision: "10",
     definition: monitorWorkflow,
     legacySources: [
       {
