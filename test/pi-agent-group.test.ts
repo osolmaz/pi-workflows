@@ -1217,6 +1217,64 @@ describe("Pi agent groups", () => {
     }
   });
 
+  it("rejects a failed child provider registration instead of using a built-in fallback", async () => {
+    const mock = await startMockOpenAiServer(() => ({ kind: "text", text: "must not run" }));
+    const agentDir = await makeTempDir("pi-agent-group-invalid-registration");
+    const cwd = await makeTempDir("pi-agent-group-invalid-registration-project");
+    await fs.writeFile(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({
+        defaultProvider: "openai",
+        defaultModel: "fixture-openai-model",
+        defaultThinkingLevel: "high",
+        extensions: [fixtureExtension("invalid-openai-provider")],
+      }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(agentDir, "models-store.json"),
+      JSON.stringify({
+        openai: {
+          models: [
+            {
+              id: "fixture-openai-model",
+              name: "Fixture OpenAI model",
+              api: "openai-responses",
+              provider: "openai",
+              baseUrl: mock.baseUrl,
+              reasoning: true,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 128_000,
+              maxTokens: 4_096,
+            },
+          ],
+          checkedAt: 1,
+        },
+      }),
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(agentDir, "auth.json"),
+      JSON.stringify({ openai: { type: "api_key", key: "fixture-key" } }),
+      "utf8",
+    );
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    vi.stubEnv("HOME", agentDir);
+    try {
+      await expect(
+        runPiAgentGroup([{ ...request("invalid-registration"), cwd, tools: ["read"] }], {
+          maxConcurrency: 1,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(/could not register provider extension: registration failed/);
+      expect(mock.requests).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+      await mock.close();
+    }
+  });
+
   it("rejects workflow capabilities and built-in tool overrides", async () => {
     const agentDir = await makeTempDir("pi-agent-group-unsafe-extension");
     const cwd = await makeTempDir("pi-agent-group-unsafe-project");

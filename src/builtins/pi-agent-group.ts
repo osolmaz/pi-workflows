@@ -1032,6 +1032,7 @@ async function createSdkSession(
         });
         latestExtensions = services.resourceLoader.getExtensions();
         assertLoadedProfile(request.id, latestExtensions, plan.extensionPaths);
+        assertProviderRegistration(request.id, services, plan.dispatch.provider);
         const sessionResult = await createAgentSessionFromServices({
           services,
           sessionManager,
@@ -1110,6 +1111,19 @@ async function createSdkSession(
   } catch (error) {
     await runtime.dispose().catch(() => undefined);
     throw error;
+  }
+}
+
+function assertProviderRegistration(
+  id: string,
+  services: Awaited<ReturnType<typeof createAgentSessionServices>>,
+  provider: string,
+): void {
+  if (services.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+    throw new PiAgentGroupError(id, "could not register provider extension", "registration failed");
+  }
+  if (!services.modelRuntime.getRegisteredProviderIds().includes(provider)) {
+    throw new PiAgentGroupError(id, "could not register provider extension", provider);
   }
 }
 
