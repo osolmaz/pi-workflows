@@ -11,6 +11,7 @@ import {
   decisionDocumentSegments,
   decisionPresentationFingerprint,
   digestCanonical,
+  humanDecisionChannelRequest,
 } from "../workflows/decision-presentation.js";
 import { HumanDecisionStore, createHumanDecisionAttemptId } from "../workflows/human-decision.js";
 import type {
@@ -415,6 +416,15 @@ class TelegramProjection {
 
   close(): void {
     this.release();
+  }
+
+  ownsLease(): boolean {
+    try {
+      this.assertOwner();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   acquire(now = Date.now()): boolean {
@@ -874,6 +884,33 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
 
   async deliver(request: HumanDecisionChannelRequest): Promise<HumanDecisionDeliveryResult> {
     const channelPath = this.channelPath();
+    if (!this.projection.ownsLease()) {
+      const attemptId = `queued-${createHash("sha256")
+        .update(`${this.id}\0${request.decisionId}\0${request.requestDigest}`)
+        .digest("hex")
+        .slice(0, 40)}`;
+      await this.store.recordDelivery(
+        request,
+        channelPath,
+        deliveryRecord(
+          request,
+          this.id,
+          attemptId,
+          "complete",
+          "intent",
+          new Date().toISOString(),
+          {
+            errorCode: "queued_for_channel_owner",
+          },
+        ),
+      );
+      return {
+        status: "unknown",
+        channel: this.id,
+        attemptId,
+        errorCode: "queued_for_channel_owner",
+      };
+    }
     const parts = renderTelegramParts(request);
     const partDigests = parts.map((part) => digestCanonical(part));
     const prior = await this.store.listDeliveries(request.decisionId, channelPath);
@@ -1190,6 +1227,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         continue;
       }
       try {
+        await this.deliverPendingRequests();
         const result = await this.call(
           "getUpdates",
           {
@@ -1209,6 +1247,28 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
       } catch {
         if (signal.aborted) return;
         await wait(POLL_BACKOFF_MS, signal);
+      }
+    }
+  }
+
+  private async deliverPendingRequests(): Promise<void> {
+    const channelPath = this.channelPath();
+    for (const request of await this.store.listRequests()) {
+      if (request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now()) continue;
+      if ((await this.store.readResolved(request.decisionId)) !== null) continue;
+      if ((await this.store.readCancellation(request.decisionId)) !== null) continue;
+      const deliveries = await this.store.listDeliveries(request.decisionId, channelPath);
+      if (
+        !deliveries.some(
+          (record) => record.state === "intent" && record.errorCode === "queued_for_channel_owner",
+        )
+      ) {
+        continue;
+      }
+      try {
+        await this.deliver(humanDecisionChannelRequest(request));
+      } catch {
+        // Durable delivery evidence controls retries for each request.
       }
     }
   }
