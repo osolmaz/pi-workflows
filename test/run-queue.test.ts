@@ -43,6 +43,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(run).toMatchObject({
       runId: "run-1",
       workflowName: "echo",
+      workflowSourceRef: "builtin:echo",
       status: "queued",
       originSessionId: "session-1",
     });
@@ -132,7 +133,7 @@ describe("workflow run queue in canonical SQLite", () => {
       claimToken: "token-1",
       leaseMs: 60_000,
     });
-    expect(claimed?.claimGeneration).toBe(1);
+    expect(claimed).toMatchObject({ claimToken: "token-1", claimGeneration: 1 });
     expect(store.verifyWorkflowRunClaim({ runId: "run-1", claimToken: "token-1" })).toBe(true);
     expect(store.workflowRunAuthority("run-1", "token-1")).toMatchObject({
       generation: 1,
@@ -147,6 +148,39 @@ describe("workflow run queue in canonical SQLite", () => {
       }),
     ).toBe(true);
     expect(store.markWorkflowRunRunning({ runId: "run-1", claimToken: "token-1" })).toBe(true);
+    store.close();
+  });
+
+  it("reclaims an expired running queue entry with a new token", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const now = Date.now();
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "session-1",
+      claimToken: "expired",
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
+    });
+    expect(
+      store.markWorkflowRunRunning({
+        runId: "run-1",
+        claimToken: "expired",
+        now: new Date(now).toISOString(),
+      }),
+    ).toBe(true);
+    const reclaimed = store.claimNextWorkflowRun({
+      runnerId: "session-1",
+      claimToken: "replacement",
+      leaseMs: 10_000,
+      now: new Date(now + 2_000).toISOString(),
+    });
+    expect(reclaimed).toMatchObject({
+      runId: "run-1",
+      status: "starting",
+      claimToken: "replacement",
+      claimGeneration: 2,
+    });
     store.close();
   });
 
