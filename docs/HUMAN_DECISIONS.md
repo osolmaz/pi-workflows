@@ -214,7 +214,7 @@ pi-workflows keeps credential references in a separate private file. A Telegram 
 }
 ```
 
-Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect whether profiles are active, and `/workflow-channel reload` after a private configuration change. Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, run bundles, logs, child environments, or model-visible tool results.
+Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect whether profiles are active, and `/workflow-channel reload` after a private configuration change. Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, SQLite runs, logs, child environments, or model-visible tool results.
 
 The same Unix account can read a local credential file. This design prevents accidental propagation, not a hostile same-account process. A separately owned connector can implement the same channel interface later if stronger isolation becomes necessary.
 
@@ -254,29 +254,28 @@ A choice without input submits from its button. A text choice such as `replan` w
 4. the channel verifies the numeric user ID, chat ID, reply message ID, decision ID, and request digest; and
 5. the exact received text becomes `input.instructions`.
 
-The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. The private channel store maps each opaque ID to the full decision request.
+The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. Private local SQLite rows map each opaque ID to the validated decision presentation. Credentials remain outside the database.
 
-Telegram permits one long-polling consumer for a bot profile. Active Pi processes use a shared lease so one process owns polling and the others use the same private channel state. The lease owner can accept a verified reply, but only the Pi session that owns the waiting run creates its continuation. Active sessions inspect the durable accepted-answer fence and recover their own continuation. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
+Telegram permits one long-polling consumer for a bot profile. Active Pi processes use the shared SQLite lease so one process owns polling and the others observe the same channel state. The lease owner can accept a verified reply, but only the Pi session that owns the waiting run creates its continuation. Active sessions inspect the durable accepted-answer fence and recover their own continuation. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
 
 The Bot API does not provide an idempotency key for `sendMessage`. pi-workflows therefore writes a delivery intent before sending and never blindly retries an ambiguous send. A timed-out send is recorded as `unknown`; Pi remains available and an operator can request another delivery. This avoids automatic duplicate messages while keeping decision acceptance exactly once.
 
 ## Durable decision records
 
-Decision records live next to workflow run bundles under the pi-workflows state root. They are additive and linked by run ID. A decision directory contains immutable records for:
+Human decisions use the canonical [SQLite state](SQLITE_STATE.md) database:
 
-- the request;
-- channel delivery intents and results;
-- answer attempts;
-- the atomic accepted-or-cancelled resolution;
-- the accepted answer or cancellation detail;
-- channel settlement results; and
-- the continuation request and result.
+- `human_decisions` stores each immutable request;
+- `human_decision_submissions` records human, policy, channel, and control candidates;
+- `human_decision_resolutions` stores the one accepted-or-cancelled winner;
+- `continuations` links the parent and continuation runs;
+- `effects` records parent settlement, continuation, and presentation settlement work; and
+- channel tables store delivery and settlement receipts.
 
-The resolution record uses a no-replace create. A valid human answer or eligible timeout response claims the same immutable resolution. The saved result includes `human` or `timeout` provenance. A timeout result has no human actor or channel identity. Cancellation writes a terminal tombstone that takes precedence over automatic continuation. A retry adopts the existing matching result. A conflicting or late answer receives an `already decided` result.
+A valid human answer, eligible timeout policy, explicit cancellation, or no-default expiry competes for the same resolution primary key. The winning transaction records the immutable resolution, audit event, and required effects together. A retry adopts the existing matching result. A conflicting or late answer receives the durable winner.
 
-The continuation run ID is derived from the decision ID. Recovery adopts an existing matching continuation or creates it once. A crash after resolution cannot run the next workflow step twice. The continuation record and redacted receipt carry the resolution provenance, decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Human actor, channel, event, and idempotency details stay only in the private decision records and never enter the run bundle or model context.
+A deadline with a validated default response is timeout-policy acceptance. It cannot become expiry cancellation. No-default expiry can cancel. Automatic policy and continuation creation require the current run owner's token and lease generation. A verified channel can submit a human candidate without gaining run ownership.
 
-SQLite may index pending decisions and channel leases, but immutable decision files remain the source of truth. The index is disposable and rebuildable.
+The continuation run ID is derived from the decision ID. The owner adopts an existing matching continuation or creates it once. The continuation record and redacted receipt carry the resolution provenance, decision ID, request digest, gate node ID, choice, acceptance time, and answer digest. Human actor, channel, event, and idempotency details remain private and do not enter model-visible status output.
 
 ## Planning workflow composition
 

@@ -1,21 +1,20 @@
-import { listRunBundles, readRunBundle } from "../workflows/store.js";
-import type { LoadedRunBundle } from "../workflows/store.js";
+import { WorkflowRunStore, type LoadedWorkflowRun } from "../workflows/store.js";
 import {
   maxDetailScroll,
   renderRunDetailLines,
   renderRunListLines,
   type ViewportSize,
 } from "./render.js";
-import { watchRunsDir } from "./watch.js";
+import { watchStateDatabase } from "./watch.js";
 
 const ALT_SCREEN_ON = "\u001b[?1049h\u001b[?25l";
 const ALT_SCREEN_OFF = "\u001b[?25h\u001b[?1049l";
 const CLEAR = "\u001b[2J\u001b[H";
 
-type ViewerMode = { view: "list" } | { view: "detail"; runDir: string };
+type ViewerMode = { view: "list" } | { view: "detail"; runId: string };
 
 export type ViewerOptions = {
-  runsDir: string;
+  databasePath: string;
   runId?: string | undefined;
   /** Redraw interval for elapsed timers while a run is active. */
   tickMs?: number;
@@ -29,12 +28,13 @@ function viewportSize(): ViewportSize {
 }
 
 /**
- * Interactive live viewer. Watches the runs directory and re-renders as run
- * bundles change on disk. Returns when the user quits.
+ * Interactive live viewer. Watches the SQLite database and re-renders after
+ * committed run changes. Returns when the user quits.
  */
 export async function runViewer(options: ViewerOptions): Promise<void> {
+  const store = new WorkflowRunStore(options.databasePath, { readOnly: true });
   let mode: ViewerMode = { view: "list" };
-  let bundles: LoadedRunBundle[] = [];
+  let bundles: LoadedWorkflowRun[] = [];
   let selectedIndex = 0;
   let detailScroll = 0;
   /** Replay position; null follows the latest step live. */
@@ -42,29 +42,29 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   let detailStepCount = 0;
 
   if (options.runId) {
-    bundles = await listRunBundles(options.runsDir);
+    bundles = store.listRuns();
     const match = bundles.find((bundle) => bundle.state.runId === options.runId);
     if (!match) {
       throw new Error(`Run not found: ${options.runId}`);
     }
-    mode = { view: "detail", runDir: match.runDir };
+    mode = { view: "detail", runId: match.runId };
   }
 
   const draw = async () => {
-    bundles = await listRunBundles(options.runsDir);
+    bundles = store.listRuns();
     selectedIndex = Math.min(selectedIndex, Math.max(0, bundles.length - 1));
     const size = viewportSize();
     const lines =
       mode.view === "list"
         ? renderRunListLines(bundles, selectedIndex, size)
-        : await renderDetail(mode.runDir, size);
+        : await renderDetail(mode.runId, size);
     process.stdout.write(CLEAR + lines.join("\n"));
   };
 
-  const renderDetail = async (runDir: string, size: ViewportSize): Promise<string[]> => {
-    const bundle = await readRunBundle(runDir, { includeTrace: true });
+  const renderDetail = async (runId: string, size: ViewportSize): Promise<string[]> => {
+    const bundle = store.readRun(runId, { includeTrace: true });
     if (!bundle) {
-      return ["Run bundle disappeared. Press q to go back."];
+      return ["SQLite run state disappeared. Press q to go back."];
     }
     detailStepCount = bundle.state.steps.length;
     if (selectedStep !== null && selectedStep >= detailStepCount - 1) {
@@ -76,7 +76,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   };
 
   process.stdout.write(ALT_SCREEN_ON);
-  const stopWatching = watchRunsDir(options.runsDir, () => {
+  const stopWatching = watchStateDatabase(options.databasePath, () => {
     void draw();
   });
   const ticker = setInterval(() => {
@@ -136,7 +136,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
         } else if (key === "\r" || key === "\n") {
           const selected = bundles[selectedIndex];
           if (selected) {
-            mode = { view: "detail", runDir: selected.runDir };
+            mode = { view: "detail", runId: selected.runId };
             detailScroll = 0;
             selectedStep = null;
             void draw();
@@ -150,6 +150,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   } finally {
     clearInterval(ticker);
     stopWatching();
+    store.close();
     if (rawModeSupported) {
       process.stdin.setRawMode(false);
     }

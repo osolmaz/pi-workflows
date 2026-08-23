@@ -208,7 +208,7 @@ Notify nodes and updates keep qualified node identities. Only the root workflow 
 
 ## Persistence
 
-Composition extends the existing run bundle.
+Composition extends the existing SQLite run state.
 
 The manifest and state record:
 
@@ -297,14 +297,14 @@ A protected change to model choice, benchmark method, credentials, hardware, spe
 
 ## Compatibility and release
 
-Workflows without inputs, exits, or includes run unchanged. Existing controller child workflows remain unchanged. Existing terminal run bundles remain readable.
+Workflows without inputs, exits, or includes run unchanged. Existing controller child workflows remain unchanged. Existing terminal SQLite runs remain readable.
 
 This is a compatible public API addition under the project's pre-1.0 policy. It targets `0.10.0` if no earlier release changes the next version.
 
 ## Contract impact
 
 - **Session state:** normal workflow messages and tool results only.
-- **Other persistent data:** additive source and mount data, definition digests, and include events in existing run bundles.
+- **Other persistent data:** additive source and mount data, definition digests, and include events in existing SQLite runs.
 - **Pi internals:** none.
 - **Public Pi API:** existing extension APIs only.
 - **Public pi-workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, and `defineWorkflowRegistry()`.

@@ -1,26 +1,24 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { decision, decisionEdge } from "../src/workflows/decision.js";
 import { agent, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine, appendStepContract } from "../src/workflows/engine.js";
-import { WorkflowRunStore, readRunBundle } from "../src/workflows/store.js";
+import { WorkflowRunStore, readWorkflowRun } from "../src/workflows/store.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
-import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor, waitUntil } from "./helpers.js";
 
 async function makeEngine(
   executor: ScriptedExecutor,
   options: { maxSteps?: number; defaultNodeTimeoutMs?: number } = {},
 ) {
-  const outputRoot = await makeTempDir("pi-workflows-engine");
+  const databasePath = await makeStateDatabasePath("pi-workflows-engine");
   const events: WorkflowTraceEvent[] = [];
   const engine = new WorkflowEngine({
     executor,
-    outputRoot,
+    databasePath,
     onEvent: (event) => events.push(event),
     ...options,
   });
-  return { engine, outputRoot, events };
+  return { engine, databasePath, events };
 }
 
 describe("WorkflowEngine", () => {
@@ -31,13 +29,13 @@ describe("WorkflowEngine", () => {
       nodes: { one: compute({ run: () => 1 }) },
       edges: [],
     });
-    const outputRoot = await makeTempDir("pi-workflows-engine");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-workflows-engine");
+    const store = new WorkflowRunStore(databasePath);
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
       store,
-      onRunStarted: async (runDir, state) => {
-        await store.writeSessionBinding(runDir, {
+      onRunStarted: async (runId, state) => {
+        await store.writeSessionBinding(runId, {
           schema: "pi-workflows.session-binding.v1",
           runId: state.runId,
           piSessionId: "s1",
@@ -47,13 +45,11 @@ describe("WorkflowEngine", () => {
       },
     });
 
-    const { runDir, state } = await engine.run(workflow, {});
+    const { runId, state } = await engine.run(workflow, {});
 
-    const trace = (await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as WorkflowTraceEvent);
+    const trace = store.readRun(runId, { includeTrace: true })?.traceEvents ?? [];
     expect(trace.map((event) => event.type)).toEqual([
+      "run_created",
       "run_started",
       "session_bound",
       "node_started",
@@ -62,7 +58,7 @@ describe("WorkflowEngine", () => {
     ]);
     // The terminal projection reflects the whole trace.
     expect(state.traceSeq).toBe(trace.at(-1)?.seq);
-    expect((await readRunBundle(runDir))?.manifest.paths.session).toBe("session");
+    expect(store.readRun(runId)?.sessionBinding?.piSessionId).toBe("s1");
   });
 
   it("runs a linear agent + compute workflow to completion", async () => {
@@ -78,26 +74,21 @@ describe("WorkflowEngine", () => {
       edges: [{ from: "ask", to: "summarize" }],
     });
     const executor = new ScriptedExecutor().respond("ask", { output: { answer: "42" } });
-    const { engine, events } = await makeEngine(executor);
+    const { engine, databasePath, events } = await makeEngine(executor);
 
-    const { state, runDir } = await engine.run(workflow, { q: "6x7" });
+    const { state, runId } = await engine.run(workflow, { q: "6x7" });
 
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toEqual({ final: "42" });
     expect(state.steps.map((step) => step.nodeId)).toEqual(["ask", "summarize"]);
     expect(events.at(-1)?.type).toBe("run_completed");
 
-    const bundle = await readRunBundle(runDir);
+    const bundle = readWorkflowRun(runId, { databasePath, includeTrace: true });
     expect(bundle?.state.status).toBe("completed");
-    expect(bundle?.manifest.status).toBe("completed");
-    expect(bundle?.snapshot?.nodes.ask?.nodeType).toBe("agent");
+    expect(bundle?.snapshot.nodes.ask?.nodeType).toBe("agent");
 
-    const trace = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-    const lines = trace
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as WorkflowTraceEvent);
-    expect(lines[0]?.type).toBe("run_started");
+    const lines = bundle?.traceEvents ?? [];
+    expect(lines[0]?.type).toBe("run_created");
     expect(lines.map((line) => line.seq)).toEqual(lines.map((_line, index) => index + 1));
   });
 

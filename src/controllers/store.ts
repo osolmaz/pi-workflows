@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import type {
   ChildWorkflowRecord,
   ControllerEvent,
@@ -12,8 +8,6 @@ import type {
   EffectRecord,
   JsonObject,
 } from "./types.js";
-
-export const CONTROLLER_STORE_SCHEMA = "pi-workflows.controller-store.v1" as const;
 
 export type QueueRequeueOptions = {
   availableAt: string;
@@ -65,6 +59,7 @@ export interface ControllerStore {
   updateStatus<TStatus>(options: {
     ref: ControllerResourceRef;
     expectedResourceVersion: number;
+    claim: ControllerQueueClaim;
     status: ControllerResourceStatus<TStatus>;
     finalizers?: string[];
     now?: string;
@@ -76,11 +71,16 @@ export interface ControllerStore {
     finalizers: string[];
     now?: string;
   }): ControllerResource;
-  deleteResource(ref: ControllerResourceRef, expectedResourceVersion: number): boolean;
+  deleteResource(
+    ref: ControllerResourceRef,
+    expectedResourceVersion: number,
+    claim: ControllerQueueClaim,
+  ): boolean;
 
   enqueue(ref: ControllerResourceRef, availableAt?: string): void;
   claimNext(options: {
     controllers: string[];
+    ownerId: string;
     leaseMs: number;
     now?: string;
   }): ControllerQueueClaim | undefined;
@@ -92,6 +92,7 @@ export interface ControllerStore {
   reserveEffect(options: {
     key: string;
     resourceUid: string;
+    claim: ControllerQueueClaim;
     generation: number;
     kind: string;
     requestFingerprint: string;
@@ -101,6 +102,7 @@ export interface ControllerStore {
   updateEffect(options: {
     resourceUid: string;
     key: string;
+    claim: ControllerQueueClaim;
     state: EffectRecord["state"];
     externalRef?: string;
     error?: string;
@@ -110,51 +112,27 @@ export interface ControllerStore {
 
   reserveWorkflow(options: {
     resourceUid: string;
+    claim: ControllerQueueClaim;
     requestKey: string;
     workflow: string;
     inputFingerprint: string;
   }): WorkflowReservation;
   getWorkflow(resourceUid: string, requestKey: string): ChildWorkflowRecord | undefined;
   getWorkflowByRequestId(requestId: string): ChildWorkflowRecord | undefined;
-  updateWorkflow(requestId: string, update: WorkflowRecordUpdate): ChildWorkflowRecord;
+  updateWorkflow(
+    requestId: string,
+    update: WorkflowRecordUpdate,
+    claim: ControllerQueueClaim,
+  ): ChildWorkflowRecord;
   listWorkflows(resourceUid: string): ChildWorkflowRecord[];
 
   recordEvent(options: {
     controller: string;
     key: string;
+    claim?: ControllerQueueClaim;
     type: string;
     payload?: JsonObject;
     now?: string;
   }): ControllerEvent;
   listEvents(options?: { controller?: string; key?: string; limit?: number }): ControllerEvent[];
-}
-
-export function controllerStoreBaseDir(homeDir: string = os.homedir()): string {
-  const override = process.env.PI_WORKFLOWS_CONTROLLER_DIR;
-  if (override !== undefined && override.length > 0) {
-    return override;
-  }
-  return path.join(homeDir, ".pi", "agent", "workflows", "controllers");
-}
-
-export function controllerStorePath(homeDir: string = os.homedir()): string {
-  return path.join(controllerStoreBaseDir(homeDir), "controller.sqlite");
-}
-
-export function controllerProjectScope(cwd: string): string {
-  let canonicalCwd: string;
-  try {
-    canonicalCwd = fs.realpathSync.native(cwd);
-  } catch {
-    canonicalCwd = path.resolve(cwd);
-  }
-  return createHash("sha256").update(canonicalCwd).digest("hex").slice(0, 24);
-}
-
-export function projectControllerStoreBaseDir(cwd: string, homeDir: string = os.homedir()): string {
-  return path.join(controllerStoreBaseDir(homeDir), "projects", controllerProjectScope(cwd));
-}
-
-export function projectControllerStorePath(cwd: string, homeDir: string = os.homedir()): string {
-  return path.join(projectControllerStoreBaseDir(cwd, homeDir), "controller.sqlite");
 }

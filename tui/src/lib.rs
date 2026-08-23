@@ -1,7 +1,6 @@
-//! piw: terminal viewer and live replay server for pi-workflows run bundles.
+//! piw: terminal viewer and live replay server for pi-workflows SQLite workflow state.
 //! The library form exists for integration tests; `main.rs` is the CLI.
 
-pub mod bundle;
 pub mod canvas;
 pub mod client;
 pub mod format;
@@ -11,5 +10,6 @@ pub mod render;
 pub mod server;
 pub mod session;
 pub mod source;
+pub mod state;
 pub mod theme;
 pub mod ui;

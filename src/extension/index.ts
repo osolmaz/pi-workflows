@@ -1,13 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
-import {
-  projectControllerStorePath,
-  SqliteControllerStore,
-  type WorkflowRunQueueRecord,
-} from "../controllers/index.js";
+import { SqliteControllerStore, type WorkflowRunQueueRecord } from "../controllers/index.js";
 import type {
   WorkflowTurnIntentCause,
   WorkflowTurnIntentResolution,
@@ -30,13 +25,11 @@ import {
   validateHumanDecisionResponse,
 } from "../workflows/human-decision.js";
 import { discoverWorkflows, resolveWorkflowRef } from "../workflows/loader.js";
-import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
 import { appendProgressHistory, progressRecordsFromTrace } from "../workflows/progress.js";
 import {
   createRunId,
-  listRunBundles,
-  readLastTraceEvent,
-  readRunBundle,
+  listWorkflowRuns,
+  readWorkflowRun,
   WorkflowRunStore,
   createDefinitionSnapshot,
 } from "../workflows/store.js";
@@ -436,10 +429,28 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ...[...telegramDecisionChannels.values()].map(async (channel) => channel.settle(decision)),
     ]);
   };
-  const migrationBlockedRuns = new Set<string>();
   const ensureRunQueueStore = (cwd: string): SqliteControllerStore => {
-    runQueueStore ??= new SqliteControllerStore(projectControllerStorePath(cwd));
+    runQueueStore ??= new SqliteControllerStore(undefined, { projectPath: cwd });
     return runQueueStore;
+  };
+  const workflowStore = (
+    cwd: string,
+    options: Omit<ConstructorParameters<typeof WorkflowRunStore>[1], "state"> = {},
+  ): WorkflowRunStore => {
+    const queue = ensureRunQueueStore(cwd);
+    return new WorkflowRunStore(queue.filePath, { ...options, state: queue.state });
+  };
+  const humanDecisionStore = (
+    cwd: string,
+    authorityProvider?: NonNullable<
+      ConstructorParameters<typeof HumanDecisionStore>[1]
+    >["authorityProvider"],
+  ): HumanDecisionStore => {
+    const queue = ensureRunQueueStore(cwd);
+    return new HumanDecisionStore(queue.filePath, {
+      state: queue.state,
+      ...(authorityProvider === undefined ? {} : { authorityProvider }),
+    });
   };
 
   // Session-addressed delivery: each session polls only its durable outbox.
@@ -838,7 +849,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     workflowViewTarget = {
       runId: state.runId,
       workflowName: state.workflowName,
-      runDir: path.resolve(new WorkflowRunStore().runDirFor(state.runId)),
     };
     renderWidget(ctx);
   };
@@ -1048,12 +1058,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     try {
       if (outcome === "park") {
-        runQueueStore.parkWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
-      } else {
-        runQueueStore.completeWorkflowRun({ runId: run.runId, claimToken: run.claimToken });
+        if (runQueueStore.parkWorkflowRun({ runId: run.runId, claimToken: run.claimToken })) {
+          runQueueStore.settleRunEffect(run.runId, "run.park_queue");
+        }
+      } else if (
+        runQueueStore.completeWorkflowRun({ runId: run.runId, claimToken: run.claimToken })
+      ) {
+        runQueueStore.settleRunEffect(run.runId, "run.settle_queue");
       }
     } catch {
-      // Queue bookkeeping is best-effort next to the durable bundle.
+      // Queue bookkeeping is best-effort next to the durable run fact.
     } finally {
       run.claimToken = undefined;
     }
@@ -1068,7 +1082,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       activeRun = null;
     }
     if (result.state.status === "running") {
-      // The run was parked for another runner; its bundle stays resumable
+      // The run was parked for another runner; its SQLite state stays resumable
       // and its queue row becomes claimable. The recorder drains first: its
       // finalization writes share the fenced store, so the claim must stay
       // valid until capture is complete. Nothing else to present.
@@ -1095,7 +1109,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       );
       return;
     }
-    releaseClaim(run, "done");
+    releaseClaim(run, result.state.status === "waiting" ? "park" : "done");
     recordRunEvent({
       runId: run.runId,
       workflowRef: run.workflowName,
@@ -1223,7 +1237,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     // refused continuation (edited source, missing parent) must not consume
     // the parent's one-continuation slot.
     if (options.parentRunId !== undefined) {
-      const parent = await readRunBundle(new WorkflowRunStore().runDirFor(options.parentRunId));
+      const parent = readWorkflowRun(options.parentRunId);
       if (parent === null || parent.state.status !== "waiting") {
         throw new Error(`Workflow run ${options.parentRunId} is not waiting at a checkpoint`);
       }
@@ -1258,6 +1272,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
               : workflowSource.path,
           workflowSource: launchSourceIdentity(workflow, workflowSource),
           definitionDigest: definitionDigest(snapshot),
+          definitionSnapshot: snapshot,
           input,
           launchOptions: preparedLaunchOptions(options),
           runnerId,
@@ -1343,12 +1358,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
         rangeSince: (mark) => run.recorder?.rangeSince(mark),
       },
     });
-    // The store is shared between the engine and the session recorder so the
-    // trace sequence stays single-writer (see docs/run-bundles.md). Queued
-    // runs are fenced: every write proves the claim is still ours first.
-    const store = new WorkflowRunStore(
-      undefined,
-      fence === undefined ? {} : { fenceProvider: () => fence },
+    // The engine and session recorder share one transactional SQLite store.
+    const store = workflowStore(
+      ctx.cwd,
+      queueStore === null || claimToken === undefined
+        ? {}
+        : {
+            authorityProvider: () => queueStore.workflowRunAuthority(runId, claimToken),
+          },
     );
     const engine = new WorkflowEngine({
       executor,
@@ -1373,8 +1390,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
       },
       // Awaited by the engine after run_started is persisted, so the session
       // binding and its trace event always precede node and terminal events.
-      onRunStarted: async (runDir, state) => {
-        const recorder = new SessionRecorder(store, runDir, state.runId);
+      onRunStarted: async (runId) => {
+        const recorder = new SessionRecorder(store, runId);
         try {
           await recorder.bind(ctx);
           run.recorder = recorder;
@@ -1474,23 +1491,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
         // once the cause is fixed, and say so in the feed.
         let resumeFailed = run.resume === true && !isClaimLostError(error);
         let terminalStatus: string | undefined;
-        // Re-parking only makes sense while the bundle is still resumable.
-        // A terminal or waiting bundle closes the queue row instead, or
-        // every session start would retry it forever — and the feed reports
-        // the bundle's real state, not a bogus failure.
+        // Re-parking only makes sense while the run is still resumable.
+        // A terminal or waiting run closes the queue row instead, and the feed
+        // reports the authoritative run state.
         if (resumeFailed) {
           try {
-            const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+            const bundle = readWorkflowRun(runId);
             if (bundle === null || bundle.state.status !== "running") {
               resumeFailed = false;
               terminalStatus = bundle?.state.status;
             }
           } catch {
-            // Unreadable bundles close the row too.
+            // Unreadable run state closes the row too.
             resumeFailed = false;
           }
         }
-        // A continuation that failed before its bundle exists frees the
+        // A continuation that failed before its run row exists frees the
         // parent's continuation slot instead of consuming it forever.
         let continuationSlotFreed = false;
         if (
@@ -1499,7 +1515,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           !isClaimLostError(error)
         ) {
           try {
-            const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+            const bundle = readWorkflowRun(runId);
             if (bundle === null) {
               continuationSlotFreed =
                 runQueueStore?.deleteWorkflowRun({ runId, claimToken: run.claimToken }) === true;
@@ -1577,7 +1593,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       runnerId,
       claimToken,
       leaseMs: RUN_CLAIM_LEASE_MS,
-      excludeRunIds: [...migrationBlockedRuns],
+      excludeRunIds: [],
       sessionId: ctx.sessionManager.getSessionId(),
     });
     if (claimed === undefined) {
@@ -1585,7 +1601,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     let started: string | undefined;
     try {
-      const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(claimed.runId));
+      const bundle = readWorkflowRun(claimed.runId);
       const sourceRef =
         bundle?.state.workflowSource === undefined
           ? claimed.workflowSourceRef
@@ -1623,16 +1639,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
         ? { state: "running", runId: activeRun.runId }
         : workflowSchedulerResult(activeRun.lastState);
     }
-    const store = new WorkflowRunStore();
-    const bundle = await readRunBundle(store.runDirFor(request.runId));
+    const store = workflowStore(controllerContext?.cwd ?? process.cwd());
+    const bundle = store.readRun(request.runId);
     if (bundle !== null) {
       const recovered =
         bundle.state.status === "running" ? await store.markRunInterrupted(request.runId) : bundle;
       if (recovered !== null) {
-        const lastTraceEvent = await readLastTraceEvent(
-          recovered.runDir,
-          recovered.manifest.paths.trace,
-        );
+        const lastTraceEvent = recovered.traceEvents?.at(-1) ?? null;
         return workflowSchedulerResult(recovered.state, lastTraceEvent?.type === "run_interrupted");
       }
       return { state: "pending" };
@@ -1640,7 +1653,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (controllerContext === null) {
       return { state: "pending" };
     }
-    await store.quarantineIncompleteRun(request.runId);
     const runId = await startRun(controllerContext, request.workflow, request.input, {
       runId: request.runId,
       childKey,
@@ -1746,11 +1758,17 @@ export default function piWorkflows(pi: ExtensionAPI) {
     notify(ctx, result.message, result.level);
   };
 
-  const cancelHumanDecision = async (request: HumanDecisionRequest): Promise<void> => {
-    const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+  const cancelHumanDecision = async (
+    ctx: ExtensionContext,
+    request: HumanDecisionRequest,
+  ): Promise<void> => {
+    const store = humanDecisionStore(ctx.cwd);
     await store.cancel(request, "cancelled");
     const cancellation = await store.readCancellation(request.decisionId);
-    if (cancellation !== null) await settleHumanDecisionChannels(cancellation);
+    if (cancellation !== null) {
+      await settleHumanDecisionChannels(cancellation);
+      store.markEffectApplied(request.decisionId, "decision.settle_presentations");
+    }
     lastWaitingRunId = null;
   };
 
@@ -1767,7 +1785,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const continued = new Set(
       rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
     );
-    const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+    const bundles = listWorkflowRuns();
     for (const bundle of bundles) {
       if (
         bundle.state.status !== "waiting" ||
@@ -1833,7 +1851,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const { state } = widgetSource;
       const request = humanDecisionRequest(state.finalOutput);
       if (state.status === "waiting" && request !== null) {
-        await cancelHumanDecision(request);
+        await cancelHumanDecision(ctx, request);
         clearWidgetTimer();
         clearWidget(ctx);
         return {
@@ -1854,7 +1872,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     const recovered = await findOwnedWaitingHumanDecision(ctx);
     if (recovered !== null) {
-      await cancelHumanDecision(recovered.request);
+      await cancelHumanDecision(ctx, recovered.request);
       return {
         message: `Cancelled the pending human decision for workflow ${recovered.state.workflowName}.`,
         details: {
@@ -1959,9 +1977,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
     runId?: string,
   ): Promise<WorkflowControlResult> => {
     if (runId !== undefined) {
-      const bundle = await readRunBundle(new WorkflowRunStore().runDirFor(runId));
+      const launch = ensureRunQueueStore(ctx.cwd).getWorkflowRun(runId);
+      if (
+        launch !== undefined &&
+        ["queued", "starting", "failed", "cancelled"].includes(launch.status)
+      ) {
+        return workflowLaunchStatus(launch);
+      }
+      const bundle = readWorkflowRun(runId);
       if (bundle === null) {
-        const launch = ensureRunQueueStore(ctx.cwd).getWorkflowRun(runId);
         if (launch === undefined) throw new Error(`Workflow run not found: ${runId}`);
         return workflowLaunchStatus(launch);
       }
@@ -2008,7 +2032,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const continued = new Set(
         rows.map((row) => row.parentRunId).filter((parent): parent is string => parent !== null),
       );
-      const bundles = await listRunBundles(new WorkflowRunStore().outputRoot);
+      const bundles = listWorkflowRuns();
       parentRunId =
         bundles.find(
           (bundle) =>
@@ -2029,7 +2053,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ) {
       throw new Error(`Workflow run ${parentRunId} belongs to another Pi session.`);
     }
-    const parent = await readRunBundle(new WorkflowRunStore().runDirFor(parentRunId));
+    const parent = readWorkflowRun(parentRunId);
     if (
       parent === null ||
       parent.state.status !== "waiting" ||
@@ -2056,7 +2080,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     verified?: HumanDecisionChannelAnswer,
   ): Promise<WorkflowControlResult> => {
     const waiting = await resolveWaitingWorkflow(ctx, requestedRunId, verified !== undefined);
-    const parent = await readRunBundle(new WorkflowRunStore().runDirFor(waiting.parentRunId));
+    const parent = readWorkflowRun(waiting.parentRunId);
     if (parent === null) throw new Error(`Workflow run ${waiting.parentRunId} is unreadable.`);
     const request = humanDecisionRequest(parent.state.finalOutput);
     let accepted: AcceptedHumanDecision | undefined;
@@ -2082,7 +2106,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         },
         idempotencyKey: verified?.idempotencyKey ?? createHumanDecisionAttemptId(),
       };
-      const store = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
+      const store = humanDecisionStore(ctx.cwd);
       const acceptance = await store.accept(request, submission);
       if (acceptance.status === "conflict" || acceptance.decision.provenance !== "human") {
         throw new Error("That human decision was already answered differently.");
@@ -2110,22 +2134,23 @@ export default function piWorkflows(pi: ExtensionAPI) {
         };
       }
     }
-    const decisionStore = new HumanDecisionStore(new WorkflowRunStore().outputRoot);
-    if (request !== null && continuationRunId !== undefined && accepted !== undefined) {
-      await decisionStore.recordContinuation(request.decisionId, {
-        schema: "pi-workflows.human-decision-continuation.v1",
-        decisionId: request.decisionId,
-        requestDigest: request.requestDigest,
-        provenance: accepted.provenance,
-        parentRunId: waiting.parentRunId,
-        runId: continuationRunId,
-        createdAt: accepted.acceptedAt,
+    if (request !== null && accepted !== undefined) {
+      const queue = ensureRunQueueStore(ctx.cwd);
+      const token = randomUUID();
+      const claim = queue.claimWorkflowRun({
+        runId: waiting.parentRunId,
+        runnerId: ctx.sessionManager.getSessionId(),
+        claimToken: token,
+        leaseMs: RUN_CLAIM_LEASE_MS,
       });
+      if (claim === undefined) {
+        throw new Error("The waiting workflow is owned by another session.");
+      }
+      queue.completeWorkflowRun({ runId: waiting.parentRunId, claimToken: token });
     }
+    const decisionStore = humanDecisionStore(ctx.cwd);
     if (continuationRunId !== undefined) {
-      const existingContinuation = await readRunBundle(
-        new WorkflowRunStore().runDirFor(continuationRunId),
-      );
+      const existingContinuation = readWorkflowRun(continuationRunId);
       if (existingContinuation !== null) {
         if (accepted !== undefined) await settleHumanDecisionChannels(accepted);
         lastWaitingRunId = null;
@@ -2149,7 +2174,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
       throw new Error("Could not start the checkpoint continuation.");
     }
     if (request !== null && accepted !== undefined) {
+      await decisionStore.recordContinuation(request.decisionId, {
+        schema: "pi-workflows.human-decision-continuation.v1",
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        provenance: accepted.provenance,
+        parentRunId: waiting.parentRunId,
+        runId: continued,
+        createdAt: accepted.acceptedAt,
+      });
+      decisionStore.markEffectApplied(request.decisionId, "decision.continue");
       await settleHumanDecisionChannels(accepted);
+      decisionStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
     }
     lastWaitingRunId = null;
     return {
@@ -2170,7 +2206,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const channel = new PiDecisionChannel({
       actorId: ctx.sessionManager.getSessionId(),
       ui: ctx.ui,
-      store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
+      store: humanDecisionStore(ctx.cwd),
       onAnswer: async (answer) => {
         const result = await answerWorkflowControl(ctx, answer.response, request.runId, answer);
         notify(ctx, result.message, result.level);
@@ -2207,7 +2243,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       config: loaded.channels,
       credentials: loaded.credentials,
       configDir: loaded.configDir,
-      store: new HumanDecisionStore(new WorkflowRunStore().outputRoot),
+      store: humanDecisionStore(ctx.cwd),
       onAnswer: async (answer) => {
         await answerWorkflowControl(ctx, answer.response, answer.request.runId, answer);
       },
@@ -2221,13 +2257,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     deliverPending = true,
   ): Promise<void> => {
-    const runStore = new WorkflowRunStore();
-    const store = new HumanDecisionStore(runStore.outputRoot);
+    const runStore = workflowStore(ctx.cwd);
+    const store = humanDecisionStore(ctx.cwd);
     const requests = (await store.listRequests()).sort((left, right) =>
       left.createdAt.localeCompare(right.createdAt),
     );
     for (const request of requests) {
-      const parent = await readRunBundle(runStore.runDirFor(request.runId));
+      const parent = runStore.readRun(request.runId);
       if (parent === null || parent.state.status !== "waiting") continue;
       const currentRequest = humanDecisionRequest(parent.state.finalOutput);
       if (
@@ -2242,6 +2278,19 @@ export default function piWorkflows(pi: ExtensionAPI) {
         queueRecord !== undefined &&
         (queueRecord.originSessionId === null ||
           queueRecord.originSessionId === ctx.sessionManager.getSessionId());
+      if (!ownedBySession) continue;
+      const recoveryToken = randomUUID();
+      const recoveryQueue = ensureRunQueueStore(ctx.cwd);
+      const claimed = recoveryQueue.claimWorkflowRun({
+        runId: request.runId,
+        runnerId: ctx.sessionManager.getSessionId(),
+        claimToken: recoveryToken,
+        leaseMs: RUN_CLAIM_LEASE_MS,
+      });
+      if (claimed === undefined) continue;
+      const ownerStore = humanDecisionStore(ctx.cwd, () =>
+        recoveryQueue.workflowRunAuthority(request.runId, recoveryToken),
+      );
       let resolved = await store.readResolved(request.decisionId);
       if (resolved === null) {
         let cancellation = await store.readCancellation(request.decisionId);
@@ -2249,11 +2298,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
           request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now();
         if (cancellation === null && expired) {
           if (request.defaultResponse === undefined) {
-            await store.cancel(request, "expired");
-            cancellation = await store.readCancellation(request.decisionId);
+            await ownerStore.cancel(request, "expired");
+            cancellation = await ownerStore.readCancellation(request.decisionId);
           } else {
             try {
-              resolved = (await store.resolveTimeout(request)).decision;
+              resolved = (await ownerStore.resolveTimeout(request)).decision;
             } catch {
               cancellation = await store.readCancellation(request.decisionId);
               resolved = await store.readResolved(request.decisionId);
@@ -2261,11 +2310,19 @@ export default function piWorkflows(pi: ExtensionAPI) {
           }
         }
         if (cancellation !== null) {
+          recoveryQueue.completeWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
+          ownerStore.markEffectApplied(request.decisionId, "decision.cancel_parent");
           await settleHumanDecisionChannels(cancellation);
+          ownerStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
+          ownerStore.close();
           continue;
         }
         if (resolved === null) {
-          if (!deliverPending || !ownedBySession) continue;
+          if (!deliverPending) {
+            recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
+            ownerStore.close();
+            continue;
+          }
           const channels = audienceChannels(decisionChannelConfig, request.audience);
           for (const channelId of channels) {
             const channel = telegramDecisionChannels.get(channelId);
@@ -2275,13 +2332,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
             lastWaitingRunId = request.runId;
             queueMicrotask(() => void promptHumanDecision(ctx, request));
           }
+          recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
+          ownerStore.close();
           continue;
         }
       }
 
-      if (!ownedBySession) continue;
-      const currentParent = await readRunBundle(runStore.runDirFor(request.runId));
-      if (currentParent === null || currentParent.state.status !== "waiting") continue;
+      const currentParent = runStore.readRun(request.runId);
+      if (currentParent === null || currentParent.state.status !== "waiting") {
+        recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
+        ownerStore.close();
+        continue;
+      }
       const runId = `continuation-${request.decisionId.slice("decision-".length)}`;
       const continuation = (await store.readContinuation(request.decisionId)) ?? {
         schema: "pi-workflows.human-decision-continuation.v1" as const,
@@ -2292,10 +2354,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runId,
         createdAt: resolved.acceptedAt,
       };
-      await store.recordContinuation(request.decisionId, continuation);
-      const existing = await readRunBundle(runStore.runDirFor(continuation.runId));
+      recoveryQueue.completeWorkflowRun({
+        runId: request.runId,
+        claimToken: recoveryToken,
+      });
+      const existing = runStore.readRun(continuation.runId);
       if (existing === null && activeRun === null) {
-        if (currentParent.state.workflowSource === undefined) continue;
+        if (currentParent.state.workflowSource === undefined) {
+          ownerStore.close();
+          continue;
+        }
         const workflowRef =
           currentParent.state.workflowSource.kind === "builtin"
             ? `builtin:${currentParent.state.workflowSource.id}`
@@ -2307,7 +2375,13 @@ export default function piWorkflows(pi: ExtensionAPI) {
           quiet: true,
         });
       }
+      if (runStore.readRun(continuation.runId) !== null) {
+        await ownerStore.recordContinuation(request.decisionId, continuation);
+        ownerStore.markEffectApplied(request.decisionId, "decision.continue");
+      }
       await settleHumanDecisionChannels(resolved);
+      ownerStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
+      ownerStore.close();
       if (activeRun !== null) break;
     }
   };
@@ -2380,7 +2454,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const workflow = resolved.definition;
     const workflowSource = resolved.source;
     if (options.parentRunId !== undefined) {
-      const parent = await readRunBundle(new WorkflowRunStore().runDirFor(options.parentRunId));
+      const parent = readWorkflowRun(options.parentRunId);
       if (parent === null || parent.state.status !== "waiting") {
         throw new Error(`Workflow run ${options.parentRunId} is not waiting at a checkpoint`);
       }
@@ -2405,6 +2479,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           workflowSource.kind === "builtin" ? `builtin:${workflowSource.id}` : workflowSource.path,
         workflowSource: launchSourceIdentity(workflow, workflowSource),
         definitionDigest: definitionDigest(snapshot),
+        definitionSnapshot: snapshot,
         input,
         launchOptions: preparedLaunchOptions(options),
         runnerId,
@@ -2613,7 +2688,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           const message = errorMessage(error);
           notify(
             ctx,
-            /workflow_run_queue_parent/.test(message)
+            /continuations\.parent_run_id/.test(message)
               ? "That checkpoint was already answered; see its continuation run."
               : `Could not continue workflow: ${message}`,
             "error",
@@ -2798,7 +2873,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           break;
         case "answer": {
           const waiting = await resolveWaitingWorkflow(ctx, params.runId);
-          const parent = await readRunBundle(new WorkflowRunStore().runDirFor(waiting.parentRunId));
+          const parent = readWorkflowRun(waiting.parentRunId);
           if (parent !== null && humanDecisionRequest(parent.state.finalOutput) !== null) {
             throw new Error(
               "This checkpoint requires a verified human answer from Pi UI or a configured decision channel.",
@@ -2836,7 +2911,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
             }
             throw new Error("No workflow step is waiting for output.");
           }
-          // Flush the conversation into the bundle before accepting, so the
+          // Flush the conversation into SQLite before accepting, so the
           // attempt range includes the assistant message carrying this call.
           await activeRun.recorder?.record(ctx).catch(() => undefined);
           await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
@@ -2883,24 +2958,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     sessionClosed = false;
     controllerContext = ctx;
     if (herdrEnabled) void refreshHerdrCapability(ctx);
-    try {
-      const queue = ensureRunQueueStore(ctx.cwd);
-      const migration = await migrateLegacyWorkflowSources({
-        catalog: builtinWorkflowCatalog,
-        queue,
-      });
-      migrationBlockedRuns.clear();
-      for (const blocked of migration.blocked) migrationBlockedRuns.add(blocked.runId);
-      if (migration.blocked.length > 0) {
-        notify(
-          ctx,
-          `Could not migrate ${migration.blocked.length} legacy workflow source(s).`,
-          "warning",
-        );
-      }
-    } catch (error) {
-      notify(ctx, `Could not migrate legacy workflow sources: ${errorMessage(error)}`, "warning");
-    }
+    ensureRunQueueStore(ctx.cwd);
     try {
       await reloadDecisionChannels(ctx);
     } catch {

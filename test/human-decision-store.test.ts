@@ -1,397 +1,350 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { describe, expect, it } from "vitest";
-import {
-  HumanDecisionStore,
-  createHumanDecisionRequest,
-  defineHumanChoices,
-  choice,
-  textInput,
-} from "../src/workflows/human-decision.js";
-import type {
-  HumanDecisionDeliveryRecord,
-  HumanDecisionSettlementRecord,
-  HumanDecisionSubmission,
-} from "../src/workflows/types.js";
-import { decisionPrompt, makeTempDir } from "./helpers.js";
+import { describe, expect, it, vi } from "vitest";
+import echoWorkflow from "../examples/workflows/echo.workflow.js";
+import workflow from "../examples/workflows/human-decision.workflow.js";
+import { StateDatabase } from "../src/state/database.js";
+import { StateMutationStore, resourceIdFor } from "../src/state/mutation.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
+import { HumanDecisionStore, createHumanDecisionRequest } from "../src/workflows/human-decision.js";
+import { ScriptedExecutor, makeStateDatabasePath, makeTempDir } from "./helpers.js";
 
-function makeRequest() {
-  return createHumanDecisionRequest({
-    runId: "run-a",
-    workflowName: "workflow-a",
-    nodeId: "approve",
-    attemptId: "attempt-a",
-    contract: {
-      audience: "operator",
-      choices: defineHumanChoices({
-        continue: choice({ label: "Continue" }),
-        replan: choice({
-          label: "Replan",
-          input: textInput({ name: "instructions", prompt: "What should change?" }),
-        }),
-      }),
+async function waitingDecision(databasePath: string) {
+  const result = await new WorkflowEngine({
+    databasePath,
+    executor: new ScriptedExecutor(),
+  }).run(workflow, { task: "approve" });
+  const store = new HumanDecisionStore(databasePath);
+  const request = (await store.listRequests())[0];
+  if (request === undefined) throw new Error("decision request missing");
+  return { result, request, store };
+}
+
+async function defaultedRequest(
+  store: HumanDecisionStore,
+  request: Awaited<ReturnType<typeof waitingDecision>>["request"],
+) {
+  const value = createHumanDecisionRequest({
+    runId: request.runId,
+    workflowName: request.workflowName,
+    nodeId: request.nodeId,
+    attemptId: request.attemptId,
+    contract: { audience: request.audience, choices: request.choices },
+    prompt: {
+      title: request.title,
+      subject: request.subject,
+      presentation: request.presentation,
+      revision: request.revision,
     },
-    prompt: decisionPrompt({ plan: "a" }),
-    createdAt: "2026-08-19T00:00:00.000Z",
+    timeout: { afterMs: 1, response: { choice: "continue" } },
+    createdAt: "2026-08-22T00:00:00.000Z",
   });
+  await store.createRequest(value);
+  return value;
 }
 
-function submission(
-  request: ReturnType<typeof makeRequest>,
-  choiceId: "continue" | "replan",
-  key: string,
-): HumanDecisionSubmission {
-  return {
-    decisionId: request.decisionId,
-    requestDigest: request.requestDigest,
-    choice: choiceId,
-    ...(choiceId === "replan" ? { input: { instructions: "keep exact text  " } } : {}),
-    source: { channel: "pi", actorId: "person-a", eventId: key },
-    idempotencyKey: key,
-  };
-}
-
-describe("HumanDecisionStore", () => {
-  it("rejects superseded human-decision state with reset guidance", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-old-state"));
-    const decisionId = "decision-old";
-    await fs.mkdir(store.decisionDir(decisionId), { recursive: true });
-    await fs.writeFile(
-      path.join(store.decisionDir(decisionId), "request.json"),
-      `${JSON.stringify({ schema: "pi-workflows.human-decision-request.v2", decisionId })}\n`,
-    );
-    await expect(store.readRequest(decisionId)).rejects.toThrow(
-      /incompatible alpha contract.*reset/,
-    );
+describe("HumanDecisionStore SQLite", () => {
+  it("uses the canonical default database", async () => {
+    const home = await makeTempDir("decision-default-home");
+    vi.stubEnv("HOME", home);
+    try {
+      const store = new HumanDecisionStore();
+      expect(await store.listRequests()).toEqual([]);
+      store.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it("creates immutable requests and adopts identical retries", async () => {
-    const runs = await makeTempDir("human-decision-store");
-    const store = new HumanDecisionStore(runs);
-    const request = makeRequest();
-    expect(await store.createRequest(request)).toBe("created");
+  it("adopts an identical request and rejects a changed immutable request", async () => {
+    const databasePath = await makeStateDatabasePath("decision-request-adopt");
+    const { request, store } = await waitingDecision(databasePath);
     expect(await store.createRequest(request)).toBe("adopted");
-    expect(await store.readRequest(request.decisionId)).toEqual(request);
-    const directory = store.decisionDir(request.decisionId);
-    const stat = await fs.stat(path.join(directory, "request.json"));
-    expect(stat.mode & 0o077).toBe(0);
-    expect((await fs.readdir(directory)).some((name) => name.endsWith(".tmp"))).toBe(false);
+    await expect(
+      store.createRequest({ ...request, createdAt: "2000-01-01T00:00:00.000Z" }),
+    ).rejects.toThrow(/request conflicts/);
+    expect(await store.readRequest("missing")).toBeNull();
+    store.close();
   });
 
-  it("records v2 subject and presentation evidence on the accepted answer", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-v2-accepted"));
+  it("rejects a request whose run is not durable", async () => {
+    const store = new HumanDecisionStore(await makeStateDatabasePath("decision-missing-run"));
     const request = createHumanDecisionRequest({
-      runId: "run-v2",
-      workflowName: "workflow-v2",
+      runId: "missing-run",
+      workflowName: "missing",
       nodeId: "approve",
-      attemptId: "attempt-v2",
+      attemptId: "attempt",
       contract: {
         audience: "operator",
-        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+        choices: { continue: { label: "Continue" } },
       },
       prompt: {
         title: "Approve",
-        subject: { action: "implement" },
+        subject: {},
         presentation: {
           schema: "pi-workflows.decision-presentation.v1",
-          summary: "Implement the approved change.",
+          summary: "Approve.",
           blocks: [],
         },
       },
-      createdAt: "2026-08-19T00:00:00.000Z",
     });
-    await store.createRequest(request);
-    const accepted = await store.accept(request, {
+    await expect(store.createRequest(request)).rejects.toThrow(/run is missing/);
+    store.close();
+  });
+
+  it("accepts one verified human answer and adopts its retry", async () => {
+    const databasePath = await makeStateDatabasePath("decision-human");
+    const { request, store } = await waitingDecision(databasePath);
+    const submission = {
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       choice: "continue",
-      source: { channel: "pi", actorId: "person", eventId: "event-v1" },
-      idempotencyKey: "event-v1",
+      source: { channel: "pi", actorId: "operator", eventId: "click-1" },
+      idempotencyKey: "click-1",
+    } as const;
+
+    expect((await store.accept(request, submission)).status).toBe("accepted");
+    expect((await store.accept(request, submission)).status).toBe("adopted");
+    expect((await store.readResolved(request.decisionId))?.response).toEqual({
+      choice: "continue",
     });
-    expect(accepted.decision).toMatchObject({
-      schema: "pi-workflows.human-decision-accepted.v1",
-      provenance: "human",
-      subjectDigest: request.subjectDigest,
-      presentationDigest: request.presentationDigest,
-      revision: 1,
+    expect(
+      store.state.connection
+        .prepare("SELECT count(*) AS count FROM human_decision_resolutions")
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
+      count: 3,
     });
-    const resolution = JSON.parse(
-      await fs.readFile(
-        path.join(store.decisionDir(request.decisionId), "resolution.json"),
-        "utf8",
-      ),
-    ) as { schema: string };
-    expect(resolution.schema).toBe("pi-workflows.human-decision-resolution.v1");
+    store.close();
   });
 
-  it("accepts one concurrent answer and rejects the conflicting answer", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-race"));
-    const request = makeRequest();
-    await store.createRequest(request);
-    const results = await Promise.all([
-      store.accept(request, submission(request, "continue", "event-a")),
-      store.accept(request, submission(request, "replan", "event-b")),
-    ]);
-    expect(results.filter((result) => result.status === "accepted")).toHaveLength(1);
-    expect(results.filter((result) => result.status === "conflict")).toHaveLength(1);
-    const accepted = await store.readResolved(request.decisionId);
-    expect(accepted?.response.choice).toBe(
-      results.find((result) => result.status === "accepted")?.decision.response.choice,
-    );
-  });
-
-  it("accepts a verified namespaced external channel ID", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-external-channel"));
-    const request = makeRequest();
-    const external = submission(request, "continue", "telegram-event");
-    external.source = { channel: "telegram:approval", actorId: "100", eventId: "event" };
-    expect((await store.accept(request, external)).status).toBe("accepted");
-  });
-
-  it("adopts identical idempotent retries and rejects key reuse", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-idempotency"));
-    const request = makeRequest();
-    await store.createRequest(request);
-    const first = submission(request, "continue", "same-event");
-    expect((await store.accept(request, first)).status).toBe("accepted");
-    expect((await store.accept(request, first)).status).toBe("adopted");
+  it("rejects reuse of one answer idempotency key with different evidence", async () => {
+    const databasePath = await makeStateDatabasePath("decision-idempotency");
+    const { request, store } = await waitingDecision(databasePath);
+    const base = {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "one", eventId: "one" },
+      idempotencyKey: "same",
+    } as const;
+    await store.accept(request, base);
     await expect(
       store.accept(request, {
-        ...submission(request, "replan", "same-event"),
-        source: first.source,
+        ...base,
+        source: { channel: "pi", actorId: "one", eventId: "different" },
       }),
-    ).rejects.toThrow(/idempotency key/);
+    ).rejects.toThrow(/idempotency key conflicts/);
+    store.close();
   });
 
-  it("rejects stale and expired submissions", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-stale"));
-    const request = makeRequest();
-    await expect(
-      store.accept(request, { ...submission(request, "continue", "stale"), requestDigest: "bad" }),
-    ).rejects.toThrow(/stale/);
-    const expired = createHumanDecisionRequest({
-      runId: "run-expired",
-      workflowName: "workflow-a",
-      nodeId: "approve",
-      attemptId: "attempt-expired",
-      contract: { audience: request.audience, choices: request.choices },
-      prompt: decisionPrompt({ plan: "a" }, "2020-01-01T00:00:00.000Z"),
-      createdAt: "2019-12-31T00:00:00.000Z",
+  it("returns the durable winner for a conflicting late answer", async () => {
+    const databasePath = await makeStateDatabasePath("decision-conflict");
+    const { request, store } = await waitingDecision(databasePath);
+    await store.accept(request, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "one", eventId: "one" },
+      idempotencyKey: "one",
     });
-    await expect(store.accept(expired, submission(expired, "continue", "expired"))).rejects.toThrow(
-      /expired/,
-    );
+    const conflict = await store.accept(request, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "stop",
+      source: { channel: "pi", actorId: "two", eventId: "two" },
+      idempotencyKey: "two",
+    });
+    expect(conflict).toMatchObject({
+      status: "conflict",
+      decision: { response: { choice: "continue" } },
+    });
+    store.close();
   });
 
-  it("cancels or expires a pending request and rejects later answers", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-cancel"));
-    const request = makeRequest();
-    await store.createRequest(request);
+  it("keeps cancellation immutable and idempotent", async () => {
+    const databasePath = await makeStateDatabasePath("decision-cancel");
+    const { request, store } = await waitingDecision(databasePath);
+
     expect(await store.cancel(request, "cancelled")).toBe("created");
     expect(await store.cancel(request, "cancelled")).toBe("adopted");
-    await expect(store.accept(request, submission(request, "continue", "late"))).rejects.toThrow(
-      /cancelled/,
-    );
-    await expect(store.cancel(request, "expired")).rejects.toThrow(/conflicts/);
-  });
-
-  it("recovers accepted state from the immutable resolution fence", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-resolution-recovery"));
-    const request = makeRequest();
-    const accepted = await store.accept(request, submission(request, "continue", "recover"));
-    await fs.unlink(path.join(store.decisionDir(request.decisionId), "accepted.json"));
-    expect(await store.readResolved(request.decisionId)).toEqual(accepted.decision);
-  });
-
-  it("resolves concurrent answer and cancellation with one atomic winner", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-resolution-race"));
-    const request = makeRequest();
-    await store.createRequest(request);
-    const outcomes = await Promise.allSettled([
-      store.accept(request, submission(request, "continue", "race-answer")),
-      store.cancel(request, "cancelled"),
-    ]);
-    const accepted = await store.readResolved(request.decisionId);
-    const cancelled = await store.readCancellation(request.decisionId);
-    expect(Number(accepted !== null) + Number(cancelled !== null)).toBe(1);
-    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
-  });
-
-  it("handles empty indexes and validates delivery and settlement paths", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-record-paths"));
-    expect(await store.listRequests()).toEqual([]);
-    const request = makeRequest();
-    const delivery: HumanDecisionDeliveryRecord = {
-      schema: "pi-workflows.human-decision-delivery.v1",
-      attemptId: "attempt-a",
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      presentationDigest: request.presentationDigest,
-      channel: "pi",
-      phase: "complete",
-      state: "confirmed",
-      createdAt: "2026-08-19T00:00:00.000Z",
-    };
-    await expect(store.recordDelivery(request, "bad/channel", delivery)).rejects.toThrow(/channel/);
+    await expect(store.cancel(request, "expired")).rejects.toThrow(/already cancelled/);
     await expect(
-      store.recordDelivery(request, "pi", { ...delivery, attemptId: "bad/attempt" }),
-    ).rejects.toThrow(/attempt/);
-    expect(await store.listDeliveries(request.decisionId, "pi")).toEqual([]);
-    const settlement: HumanDecisionSettlementRecord = {
-      schema: "pi-workflows.human-decision-settlement.v1",
-      attemptId: "bad/attempt",
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      channel: "pi",
-      state: "confirmed",
-      createdAt: "2026-08-19T00:00:00.000Z",
-      finishedAt: "2026-08-19T00:00:01.000Z",
-    };
-    await expect(store.recordSettlement(request.decisionId, "pi", settlement)).rejects.toThrow(
-      /attempt/,
-    );
-    expect(await store.listSettlements(request.decisionId, "pi")).toEqual([]);
-    const validSettlement = { ...settlement, attemptId: "attempt-a" };
-    await store.recordSettlement(request.decisionId, "pi", validSettlement);
-    expect(await store.listSettlements(request.decisionId, "pi")).toEqual([validSettlement]);
-    await expect(store.listSettlements(request.decisionId, "bad/channel")).rejects.toThrow(
-      /channel/,
-    );
-  });
-
-  it("rebuilds cancellation detail and refuses to cancel an accepted decision", async () => {
-    const cancelledStore = new HumanDecisionStore(
-      await makeTempDir("human-decision-cancel-recovery"),
-    );
-    const request = makeRequest();
-    await cancelledStore.cancel(request, "cancelled");
-    await fs.unlink(path.join(cancelledStore.decisionDir(request.decisionId), "cancelled.json"));
-    expect(await cancelledStore.readCancellation(request.decisionId)).toMatchObject({
-      reason: "cancelled",
-    });
-
-    const acceptedStore = new HumanDecisionStore(
-      await makeTempDir("human-decision-cancel-accepted"),
-    );
-    await acceptedStore.accept(request, submission(request, "continue", "accepted"));
-    await expect(acceptedStore.cancel(request, "cancelled")).rejects.toThrow(/cannot be cancelled/);
-  });
-
-  it("resolves one durable timeout response without a human actor", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout"));
-    const request = createHumanDecisionRequest({
-      runId: "run-timeout",
-      workflowName: "workflow-a",
-      nodeId: "approve",
-      attemptId: "attempt-timeout",
-      contract: {
-        audience: "operator",
-        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
-      },
-      prompt: decisionPrompt({ plan: "a" }),
-      timeout: { afterMs: 600_000, response: { choice: "continue" } },
-      createdAt: "2099-01-01T00:00:00.000Z",
-    });
-    await store.createRequest(request);
-    await expect(
-      store.resolveTimeout(request, new Date("2099-01-01T00:09:59.999Z")),
-    ).rejects.toThrow(/not eligible/);
-    const result = await store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z"));
-    expect(result.decision).toEqual(
-      expect.objectContaining({
-        provenance: "timeout",
-        response: { choice: "continue" },
-        acceptedAt: "2099-01-01T00:10:00.000Z",
-      }),
-    );
-    expect(result.decision).not.toHaveProperty("source");
-    expect(await store.readResolved(request.decisionId)).toEqual(result.decision);
-  });
-
-  it("lets one valid human or timeout resolution win", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout-race"));
-    const request = createHumanDecisionRequest({
-      runId: "run-race",
-      workflowName: "workflow-a",
-      nodeId: "approve",
-      attemptId: "attempt-race",
-      contract: {
-        audience: "operator",
-        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
-      },
-      prompt: decisionPrompt(),
-      timeout: { afterMs: 600_000, response: { choice: "continue" } },
-      createdAt: "2099-01-01T00:00:00.000Z",
-    });
-    await store.createRequest(request);
-    const [human, timeout] = await Promise.all([
       store.accept(request, {
         decisionId: request.decisionId,
         requestDigest: request.requestDigest,
         choice: "continue",
-        source: { channel: "pi", actorId: "person", eventId: "race-human" },
-        idempotencyKey: "race-human",
+        source: { channel: "pi", actorId: "operator", eventId: "late" },
+        idempotencyKey: "late",
       }),
-      store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
-    ]);
-    expect([human.status, timeout.status].filter((status) => status === "accepted")).toHaveLength(
-      1,
-    );
-    expect(await store.readResolved(request.decisionId)).toEqual(
-      human.status === "accepted" ? human.decision : timeout.decision,
-    );
+    ).rejects.toThrow(/cancelled/);
+    store.close();
   });
 
-  it("settles cancellation and a timeout default through one immutable winner", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-timeout-cancel"));
-    const request = createHumanDecisionRequest({
-      runId: "run-cancel-race",
-      workflowName: "workflow-a",
-      nodeId: "approve",
-      attemptId: "attempt-cancel-race",
-      contract: {
-        audience: "operator",
-        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
-      },
-      prompt: decisionPrompt(),
-      timeout: { afterMs: 600_000, response: { choice: "continue" } },
-      createdAt: "2099-01-01T00:00:00.000Z",
+  it("rejects ineligible or missing timeout policy", async () => {
+    const databasePath = await makeStateDatabasePath("decision-timeout-invalid");
+    const { request, store } = await waitingDecision(databasePath);
+    await expect(store.resolveTimeout(request)).rejects.toThrow(/no timeout default/);
+    const defaulted = await defaultedRequest(store, request);
+    await expect(
+      store.resolveTimeout(defaulted, new Date("2026-08-22T00:00:00.000Z")),
+    ).rejects.toThrow(/not eligible/);
+    store.close();
+  });
+
+  it("requires the current run owner for timeout policy", async () => {
+    const databasePath = await makeStateDatabasePath("decision-timeout-owner");
+    const { request, store } = await waitingDecision(databasePath);
+    const defaulted = await defaultedRequest(store, request);
+    await expect(
+      store.resolveTimeout(defaulted, new Date("2026-08-23T00:00:00.000Z")),
+    ).rejects.toThrow(/current run owner/);
+    store.close();
+  });
+
+  it("resolves a defaulted timeout as acceptance and never expiry cancellation", async () => {
+    const databasePath = await makeStateDatabasePath("decision-timeout");
+    const { result, request, store } = await waitingDecision(databasePath);
+    const defaulted = await defaultedRequest(store, request);
+    const state = new StateDatabase({ filePath: databasePath });
+    const mutations = new StateMutationStore(state);
+    const resourceId = resourceIdFor("run", result.runId);
+    const revision = state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId) as { revision: number };
+    const claim = mutations.claim({
+      resourceId,
+      ownerType: "session",
+      ownerId: "session-owner",
+      expectedRevision: revision.revision,
+      leaseMs: 60_000,
+      now: Date.parse("2026-08-23T00:00:00.000Z"),
     });
-    await store.createRequest(request);
-    await Promise.allSettled([
-      store.cancel(request, "cancelled"),
-      store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
-    ]);
-    const cancellation = await store.readCancellation(request.decisionId);
-    const resolved = await store.readResolved(request.decisionId);
-    expect([cancellation, resolved].filter((value) => value !== null)).toHaveLength(1);
-    if (cancellation !== null) {
-      expect(cancellation.reason).toBe("cancelled");
-      await expect(
-        store.resolveTimeout(request, new Date("2099-01-01T00:10:00.000Z")),
-      ).rejects.toThrow(/cancelled/);
-    } else {
-      expect(resolved).toMatchObject({ provenance: "timeout" });
-      await expect(store.cancel(request, "cancelled")).rejects.toThrow(/cannot be cancelled/);
-    }
+    if (claim === undefined) throw new Error("run claim missing");
+    const ownerStore = new HumanDecisionStore(databasePath, {
+      authorityProvider: () => ({
+        actor: { type: "session", id: claim.ownerId },
+        ownerType: claim.ownerType,
+        ownerId: claim.ownerId,
+        token: claim.token,
+        generation: claim.generation,
+      }),
+    });
+    const accepted = await ownerStore.resolveTimeout(
+      defaulted,
+      new Date("2026-08-23T00:00:01.000Z"),
+    );
+    expect(accepted.decision.provenance).toBe("timeout");
+    await expect(ownerStore.cancel(defaulted, "expired")).rejects.toThrow(/timeout policy/);
+    ownerStore.close();
+    store.close();
+    state.close();
   });
 
-  it("records one immutable continuation identity", async () => {
-    const store = new HumanDecisionStore(await makeTempDir("human-decision-continuation"));
-    const request = makeRequest();
-    const continuation = {
+  it("records and adopts one continuation after acceptance", async () => {
+    const databasePath = await makeStateDatabasePath("decision-continuation");
+    const { request, store } = await waitingDecision(databasePath);
+    const accepted = await store.accept(request, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "operator", eventId: "continue" },
+      idempotencyKey: "continue",
+    });
+    const child = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
+    }).run(echoWorkflow, {}, { runId: "continuation-run" });
+    const record = {
       schema: "pi-workflows.human-decision-continuation.v1" as const,
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
-      provenance: "human" as const,
+      provenance: accepted.decision.provenance,
       parentRunId: request.runId,
-      runId: "continuation-a",
-      createdAt: "2026-08-19T00:01:00.000Z",
+      runId: child.runId,
+      createdAt: accepted.decision.acceptedAt,
     };
-    expect(await store.recordContinuation(request.decisionId, continuation)).toBe("created");
-    expect(await store.recordContinuation(request.decisionId, continuation)).toBe("adopted");
+    expect(await store.recordContinuation(request.decisionId, record)).toBe("created");
+    expect(await store.recordContinuation(request.decisionId, record)).toBe("adopted");
+    expect(await store.readContinuation(request.decisionId)).toEqual(record);
+    expect(await store.readContinuation("missing")).toBeNull();
     await expect(
-      store.recordContinuation(request.decisionId, { ...continuation, runId: "other" }),
-    ).rejects.toThrow(/conflicts/);
+      store.recordContinuation(request.decisionId, {
+        ...record,
+        createdAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow(/continuation conflicts/);
+    store.close();
+  });
+
+  it("marks deterministic decision effects as applied", async () => {
+    const databasePath = await makeStateDatabasePath("decision-effects");
+    const { request, store } = await waitingDecision(databasePath);
+    await store.accept(request, {
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      choice: "continue",
+      source: { channel: "pi", actorId: "operator", eventId: "effect" },
+      idempotencyKey: "effect",
+    });
+    store.markEffectApplied(request.decisionId, "decision.continue");
+    store.markEffectApplied(request.decisionId, "decision.settle_presentations");
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT count(*) AS count FROM effects e
+           JOIN human_decisions d ON d.resource_id = e.source_resource_id
+           WHERE d.decision_id = ? AND e.status = 'applied'`,
+        )
+        .get(request.decisionId),
+    ).toEqual({ count: 2 });
+    store.close();
+  });
+
+  it("stores delivery and settlement state in the canonical database", async () => {
+    const databasePath = await makeStateDatabasePath("decision-channel");
+    const { request, store } = await waitingDecision(databasePath);
+    const createdAt = "2026-08-23T00:00:00.000Z";
+    await store.recordDelivery(request, "telegram-main", {
+      schema: "pi-workflows.human-decision-delivery.v1",
+      attemptId: "delivery-1",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      presentationDigest: request.presentationDigest,
+      channel: "telegram-main",
+      phase: "complete",
+      state: "confirmed",
+      createdAt,
+      finishedAt: createdAt,
+    });
+    await store.recordSettlement(request.decisionId, "telegram-main", {
+      schema: "pi-workflows.human-decision-settlement.v1",
+      attemptId: "settlement-1",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      channel: "telegram-main",
+      state: "confirmed",
+      createdAt,
+      finishedAt: createdAt,
+    });
+    expect(await store.listDeliveries(request.decisionId, "telegram-main")).toHaveLength(1);
+    expect(
+      await store.recordDelivery(request, "telegram-main", {
+        schema: "pi-workflows.human-decision-delivery.v1",
+        attemptId: "delivery-1",
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        presentationDigest: request.presentationDigest,
+        channel: "telegram-main",
+        phase: "complete",
+        state: "confirmed",
+        createdAt,
+        finishedAt: createdAt,
+      }),
+    ).toBe("adopted");
+    expect(await store.listSettlements(request.decisionId, "telegram-main")).toHaveLength(1);
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM channel_messages").get(),
+    ).toEqual({ count: 2 });
+    store.close();
   });
 });

@@ -1,15 +1,13 @@
-import { randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { ArtifactWriter, encodeValue } from "./artifacts.js";
+import { createHash, randomUUID } from "node:crypto";
+import { StateDatabase, workflowStatePath } from "../state/database.js";
+import { canonicalJson } from "../state/json.js";
+import { resourceIdFor, tokenHash, type MutationActor, type OwnerType } from "../state/mutation.js";
 import { compositionMetadata } from "./composition.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowNodeDefinition,
   WorkflowNodeSnapshot,
-  WorkflowRunManifest,
   WorkflowRunState,
   WorkflowSessionBinding,
   WorkflowSessionCapture,
@@ -22,427 +20,330 @@ import type {
 } from "./types.js";
 import { MAX_CURRENT_UPDATES, createUpdateId, updateProjection } from "./updates.js";
 
-export const RUN_BUNDLE_SCHEMA = "pi-workflows.run-bundle.v1" as const;
 export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
-export const TRACE_EVENT_SCHEMA = "pi-workflows.trace-event.v1" as const;
 export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" as const;
 export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const;
 export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
 export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
-export const SESSION_EVENT_MAX_BYTES = 1024 * 1024;
+export const SESSION_EVENT_MAX_BYTES = 16 * 1024 * 1024;
 
-const MANIFEST_PATH = "manifest.json";
-const WORKFLOW_SNAPSHOT_PATH = "workflow.json";
-const STATE_PATH = "state.json";
-const TRACE_PATH = "trace.ndjson";
-const SESSION_DIR = "session";
-const SESSION_BINDING_PATH = `${SESSION_DIR}/binding.json`;
-const SESSION_ENTRIES_PATH = `${SESSION_DIR}/entries.ndjson`;
-const SESSION_EVENTS_PATH = `${SESSION_DIR}/events.ndjson`;
-const SESSION_CAPTURE_PATH = `${SESSION_DIR}/capture.json`;
-const SESSION_SEGMENTS_DIR = `${SESSION_DIR}/segments`;
-
-/** Capture file layout for one recorder attempt; "" is the legacy flat stream. */
-function sessionStreamPaths(attemptId?: string): {
-  dir: string;
-  binding: string;
-  entries: string;
-  events: string;
-  capture: string;
-} {
-  if (attemptId === undefined) {
-    return {
-      dir: SESSION_DIR,
-      binding: SESSION_BINDING_PATH,
-      entries: SESSION_ENTRIES_PATH,
-      events: SESSION_EVENTS_PATH,
-      capture: SESSION_CAPTURE_PATH,
-    };
-  }
-  assertValidRunId(attemptId);
-  const dir = `${SESSION_SEGMENTS_DIR}/${attemptId}`;
-  return {
-    dir,
-    binding: `${dir}/binding.json`,
-    entries: `${dir}/entries.ndjson`,
-    events: `${dir}/events.ndjson`,
-    capture: `${dir}/capture.json`,
-  };
-}
-
-/** Runs directory: `$PI_WORKFLOWS_RUNS_DIR` or `~/.pi/agent/workflows/runs`. */
-export function workflowRunsBaseDir(homeDir: string = os.homedir()): string {
-  const override = process.env.PI_WORKFLOWS_RUNS_DIR;
-  if (override !== undefined && override.length > 0) {
-    return override;
-  }
-  return path.join(homeDir, ".pi", "agent", "workflows", "runs");
+export function workflowStateDatabasePath(homeDir?: string): string {
+  return workflowStatePath(homeDir);
 }
 
 export function createRunId(workflowName: string, now: Date = new Date()): string {
-  const stamp = now
-    .toISOString()
-    .replaceAll(/[-:]/g, "")
-    .replace(/\.\d+Z$/, "Z");
-  const slug = workflowName
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/g, "-")
-    .replaceAll(/(^-|-$)/g, "")
-    .slice(0, 40);
-  return `${stamp}-${slug || "workflow"}-${randomUUID().slice(0, 8)}`;
+  const safeName = workflowName.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80) || "workflow";
+  return `${now.toISOString().replace(/[-:.]/g, "").replace("T", "T").replace("Z", "Z")}-${safeName}-${randomUUID().slice(0, 8)}`;
 }
 
-/** Per-attempt capture stream state; the "" key is the legacy flat stream. */
-type SessionStreamState = {
-  sessionSeq: number;
-  sessionEventSeq: number;
-  sessionBound: boolean;
-  sessionEventsStopped: boolean;
-  /** Session events have a separate append chain so token traffic cannot
-   * queue ahead of workflow transitions. */
-  lock: Promise<unknown>;
+export type RunWriteAuthority = {
+  actor: MutationActor;
+  ownerType: OwnerType;
+  ownerId: string;
+  token: string;
+  generation: number;
 };
-
-type RunBundleContext = {
-  traceSeq: number;
-  artifacts: ArtifactWriter;
-  /**
-   * Serializes complete transitions (encode, trace append, projections) so
-   * concurrent writers cannot interleave sequence assignment with physical
-   * append order.
-   */
-  lock: Promise<unknown>;
-  streams: Map<string, SessionStreamState>;
-};
-
-/**
- * Persists run bundles (see docs/run-bundles.md). `trace.ndjson` is the
- * append-only source of truth; every transition appends the trace event
- * first, then atomically replaces `state.json` (carrying `traceSeq`) and
- * `manifest.json`. Large string leaves in persisted values are externalized
- * into content-addressed `artifacts/`. Bundles are private: directories are
- * 0700 and files 0600.
- */
-/**
- * A fence proves the writer still owns the run. It is checked before every
- * locked write; it throws (ClaimLostError) when the queue claim was lost, so
- * a stalled runner can never interleave writes with the new claim holder.
- */
-export type RunFence = () => void;
 
 export type WorkflowRunStoreOptions = {
-  fenceProvider?: (runDir: string) => RunFence | undefined;
+  authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
+  state?: StateDatabase;
+  readOnly?: boolean;
+};
+
+type RunContext = {
+  revision: number;
+  lock: Promise<void>;
+};
+
+type RunRow = {
+  runId: string;
+  resourceId: string;
+  stateHash: Buffer;
+  definitionHash: Buffer;
+  status: string;
+};
+
+type EventRow = {
+  resourceRevision: number;
+  eventType: string;
+  payloadHash: Buffer | null;
+  recordedAt: number;
+};
+
+type SegmentRow = {
+  segmentId: string;
+  runId: string;
+  attemptId: string | null;
+  captureKey: string | null;
+  sessionId: string;
+  bindingHash: Buffer | null;
+  status: WorkflowSessionCapture["status"];
+  entryCount: number;
+  eventCount: number;
+  failureHash: Buffer | null;
+  createdAt: number;
+  finishedAt: number | null;
+};
+
+type SessionEntryRow = {
+  entrySeq: number;
+  entryHash: Buffer;
+  recordedAt: number;
+};
+
+type SessionEventRow = {
+  eventSeq: number;
+  eventType: WorkflowSessionEventRecord["type"];
+  nodeId: string;
+  attemptId: string;
+  turnId: string | null;
+  messageId: string | null;
+  toolCallId: string | null;
+  payloadHash: Buffer;
+  recordedAt: number;
+};
+
+export type SessionCaptureIntegrity = {
+  status: "unavailable" | "recording" | "complete" | "failed" | "invalid";
+  diagnostics: string[];
+};
+
+export type SessionCaptureSegment = {
+  attemptId: string;
+  binding: WorkflowSessionBinding | null;
+  entries: WorkflowSessionEntryRecord[];
+  events: WorkflowSessionEventRecord[];
+  capture: WorkflowSessionCapture | null;
+  integrity: SessionCaptureIntegrity;
+};
+
+export type LoadedWorkflowRun = {
+  runId: string;
+  state: WorkflowRunState;
+  snapshot: WorkflowDefinitionSnapshot;
+  traceEvents?: WorkflowTraceEvent[];
+  sessionBinding: WorkflowSessionBinding | null;
+  sessionEntries: WorkflowSessionEntryRecord[];
+  sessionEvents: WorkflowSessionEventRecord[];
+  sessionCapture: WorkflowSessionCapture | null;
+  sessionIntegrity: SessionCaptureIntegrity;
+  sessionSegments: SessionCaptureSegment[];
+};
+
+export type ReadWorkflowRunOptions = {
+  includeTrace?: boolean;
 };
 
 export class WorkflowRunStore {
-  readonly outputRoot: string;
-  private readonly fenceProvider: ((runDir: string) => RunFence | undefined) | undefined;
-  private readonly contexts = new Map<string, RunBundleContext>();
+  readonly databasePath: string;
+  readonly state: StateDatabase;
+  private readonly authorityProvider:
+    | ((runId: string) => RunWriteAuthority | undefined)
+    | undefined;
+  private readonly contexts = new Map<string, RunContext>();
+  private readonly ownsState: boolean;
 
-  constructor(outputRoot: string = workflowRunsBaseDir(), options: WorkflowRunStoreOptions = {}) {
-    this.outputRoot = outputRoot;
-    this.fenceProvider = options.fenceProvider;
+  constructor(databasePath: string = workflowStatePath(), options: WorkflowRunStoreOptions = {}) {
+    this.authorityProvider = options.authorityProvider;
+    this.ownsState = options.state === undefined;
+    this.state =
+      options.state ??
+      new StateDatabase({
+        filePath: databasePath,
+        mode: options.readOnly === true ? "read-only" : "read-write",
+        checkLegacyState: databasePath === workflowStatePath(),
+      });
+    this.databasePath = this.state.filePath;
   }
 
-  runDirFor(runId: string): string {
-    assertValidRunId(runId);
-    return path.join(this.outputRoot, runId);
+  close(): void {
+    if (this.ownsState) this.state.close();
   }
 
-  async quarantineIncompleteRun(runId: string): Promise<string | undefined> {
-    const runDir = this.runDirFor(runId);
-    let runStat;
-    try {
-      runStat = await fs.lstat(runDir);
-    } catch (error) {
-      if (isMissingPath(error)) {
-        return undefined;
-      }
-      throw error;
-    }
-    if (!runStat.isDirectory() || runStat.isSymbolicLink()) {
-      throw new Error(`Reserved workflow run path is not a directory: ${runDir}`);
-    }
-    try {
-      await fs.lstat(path.join(runDir, MANIFEST_PATH));
-      throw new Error(`Reserved workflow run has an unreadable manifest: ${runId}`);
-    } catch (error) {
-      if (!isMissingPath(error)) {
-        throw error;
-      }
-    }
-    const quarantineDir = path.join(
-      this.outputRoot,
-      `.${runId}.incomplete-${randomUUID().slice(0, 8)}`,
-    );
-    await fs.rename(runDir, quarantineDir);
-    this.contexts.delete(runDir);
-    return quarantineDir;
-  }
-
-  private contextFor(runDir: string): RunBundleContext {
-    let context = this.contexts.get(runDir);
-    if (!context) {
-      context = {
-        traceSeq: 0,
-        artifacts: new ArtifactWriter(runDir),
+  async initializeRun(workflow: WorkflowDefinition, state: WorkflowRunState): Promise<string> {
+    assertValidRunId(state.runId);
+    if (!this.contexts.has(state.runId)) {
+      const reserved = this.readRunRow(state.runId);
+      this.contexts.set(state.runId, {
+        revision: reserved === undefined ? 0 : this.requireResourceRevision(reserved.resourceId),
         lock: Promise.resolve(),
-        streams: new Map(),
-      };
-      this.contexts.set(runDir, context);
+      });
     }
-    return context;
+    return await this.withRunLock(state.runId, async () => {
+      let acceptedRevision = 1;
+      const now = Date.now();
+      const at = new Date(now).toISOString();
+      const snapshot = createDefinitionSnapshot(workflow);
+      const definitionJson = canonicalJson(snapshot);
+      const definitionDigest = createHash("sha256").update(definitionJson).digest();
+      const source = sourceForState(state, definitionDigest);
+      const resourceId = resourceIdFor("run", state.runId);
+      this.state.transaction(() => {
+        const reserved = this.readRunRow(state.runId);
+        if (reserved !== undefined) {
+          if (reserved.status !== "queued") {
+            throw new Error(`Workflow run already exists: ${state.runId}`);
+          }
+          const context = this.contextFor(state.runId);
+          this.assertWriteAuthority(reserved, context.revision);
+          const storedSnapshot = this.readDefinition(reserved.definitionHash);
+          if (canonicalJson(storedSnapshot) !== definitionJson) {
+            throw new Error(`Reserved workflow definition conflicts: ${state.runId}`);
+          }
+          const revision = context.revision + 1;
+          acceptedRevision = revision;
+          state.traceSeq = revision;
+          state.updatedAt = at;
+          insertRunEvent(this.state, reserved.resourceId, revision, at, {
+            scope: "run",
+            type: "run_initialized",
+            payload: { workflowName: workflow.name },
+          });
+          this.persistRunState(reserved, state, revision, now);
+          this.syncNodeAttempts(state, snapshot, now);
+          context.revision = revision;
+          return;
+        }
+        const definitionHash = this.state.putJson(snapshot, now);
+        this.state.connection
+          .prepare(
+            `INSERT INTO workflow_definitions(
+               definition_digest, workflow_name, definition_hash, created_at
+             ) VALUES (?, ?, ?, ?)
+             ON CONFLICT(definition_digest) DO NOTHING`,
+          )
+          .run(definitionDigest, workflow.name, definitionHash, now);
+        this.state.connection
+          .prepare(
+            `INSERT INTO resources(
+               resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+             ) VALUES (?, 'run', ?, 1, ?, ?)`,
+          )
+          .run(resourceId, state.runId, now, now);
+        this.state.connection
+          .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+          .run(resourceId);
+        state.traceSeq = 1;
+        state.updatedAt = at;
+        const inputHash = this.state.putJson(state.input, now);
+        const workflowSourceHash = this.state.putJson(state.workflowSource ?? source, now);
+        const launchOptionsHash = this.state.putJson({}, now);
+        const stateHash = this.state.putJson(state, now);
+        const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
+        this.state.connection
+          .prepare(
+            `INSERT INTO runs(
+               run_id, resource_id, project_id, parent_run_id, definition_digest,
+               workflow_ref, workflow_source_hash, launch_options_hash,
+               source_type, source_ref, source_revision, title, status, paused,
+               status_detail, input_hash, output_hash, error_hash,
+               created_at, updated_at, finished_at
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            state.runId,
+            resourceId,
+            state.parentRunId ?? null,
+            definitionDigest,
+            state.workflowName,
+            workflowSourceHash,
+            launchOptionsHash,
+            source.type,
+            source.ref,
+            source.revision,
+            state.runTitle ?? null,
+            state.status,
+            state.paused === true ? 1 : 0,
+            state.statusDetail ?? null,
+            inputHash,
+            stateHash,
+            errorHash,
+            Date.parse(state.startedAt),
+            now,
+            state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
+          );
+        insertRunEvent(this.state, resourceId, 1, at, {
+          scope: "run",
+          type: "run_created",
+          payload: { workflowName: workflow.name },
+        });
+        this.syncNodeAttempts(state, snapshot, now);
+      });
+      this.contexts.set(state.runId, { revision: acceptedRevision, lock: Promise.resolve() });
+      return state.runId;
+    });
   }
 
-  private streamFor(runDir: string, attemptId?: string): SessionStreamState {
-    const context = this.contextFor(runDir);
-    const key = attemptId ?? "";
-    let stream = context.streams.get(key);
-    if (!stream) {
-      stream = {
-        sessionSeq: 0,
-        sessionEventSeq: 0,
-        sessionBound: false,
-        sessionEventsStopped: false,
-        lock: Promise.resolve(),
-      };
-      context.streams.set(key, stream);
+  async prepareRunResume(runId: string): Promise<LoadedWorkflowRun> {
+    const loaded = this.readRun(runId, { includeTrace: true });
+    if (loaded === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
+    if (loaded.state.status !== "running") {
+      throw new Error(`Cannot resume workflow run ${runId} with status ${loaded.state.status}`);
     }
-    return stream;
-  }
-
-  /**
-   * Run `task` exclusively for this bundle. Sequence numbers are assigned
-   * inside the lock, so physical file order always matches logical order.
-   */
-  private withRunLock<T>(runDir: string, task: () => Promise<T>): Promise<T> {
-    const context = this.contextFor(runDir);
-    const result = context.lock.then(async () => {
-      this.fenceProvider?.(runDir)?.();
-      return await task();
+    const revision = this.resourceRevision(runId);
+    this.contexts.set(runId, { revision, lock: Promise.resolve() });
+    this.finalizeRecordingCaptures(runId, "Workflow host stopped before the run finished");
+    this.state.transaction(() => {
+      const row = this.requireRunRow(runId);
+      const context = this.contextFor(runId);
+      this.assertWriteAuthority(row, context.revision);
+      const nextRevision = context.revision + 1;
+      const now = Date.now();
+      const at = new Date(now).toISOString();
+      this.state.connection
+        .prepare(
+          `UPDATE node_attempts
+           SET status = 'cancelled', finished_at = ?, updated_at = ?
+           WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
+        )
+        .run(now, now, runId);
+      insertRunEvent(this.state, row.resourceId, nextRevision, at, {
+        scope: "run",
+        type: "run_resume_prepared",
+        payload: {},
+      });
+      loaded.state.traceSeq = nextRevision;
+      loaded.state.updatedAt = at;
+      this.persistRunState(row, loaded.state, nextRevision, now);
+      context.revision = nextRevision;
     });
-    context.lock = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-
-  private withSessionEventLock<T>(
-    runDir: string,
-    attemptId: string | undefined,
-    task: () => Promise<T>,
-  ): Promise<T> {
-    const stream = this.streamFor(runDir, attemptId);
-    const result = stream.lock.then(async () => {
-      this.fenceProvider?.(runDir)?.();
-      return await task();
-    });
-    stream.lock = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-
-  async initializeRunBundle(
-    workflow: WorkflowDefinition,
-    state: WorkflowRunState,
-  ): Promise<string> {
-    const runDir = this.runDirFor(state.runId);
-    return await this.withRunLock(runDir, async () => {
-      await fs.mkdir(this.outputRoot, { recursive: true, mode: 0o700 });
-      await fs.mkdir(runDir, { recursive: false, mode: 0o700 });
-      await writeJsonAtomic(
-        path.join(runDir, WORKFLOW_SNAPSHOT_PATH),
-        createDefinitionSnapshot(workflow),
-      );
-      await appendLine(path.join(runDir, TRACE_PATH), null);
-      await this.writeProjections(runDir, state);
-      return runDir;
-    });
-  }
-
-  /**
-   * Prepare an interrupted bundle for resume. Repairs a torn trace tail,
-   * drops trace events the state projection never recorded, and seeds the
-   * in-process context so new events continue the sequence. The caller must
-   * hold the run's queue claim; the fence is verified before any write.
-   */
-  async prepareRunResume(runId: string): Promise<LoadedRunBundle> {
-    const runDir = this.runDirFor(runId);
-    this.fenceProvider?.(runDir)?.();
-    const bundle = await readRunBundle(runDir);
-    if (bundle === null) {
-      throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
-    }
-    if (bundle.state.status !== "running") {
-      throw new Error(`Cannot resume workflow run ${runId} with status ${bundle.state.status}`);
-    }
-    const tracePath = resolveBundlePath(runDir, bundle.manifest.paths.trace, TRACE_PATH);
-    await repairTraceFile(tracePath, bundle.state.traceSeq, () => {
-      // The repair rewrites the trace; re-verify ownership immediately
-      // before the rename so a stalled runner cannot truncate a new claim
-      // holder's appended events.
-      this.fenceProvider?.(runDir)?.();
-    });
-
-    // A crashed session never finalizes its capture, and resuming recorders
-    // always write new segments — so dangling "recording" captures end here
-    // instead of reporting the run capture-corrupt forever.
-    await this.finalizeRecordingCaptures(runDir, "Workflow host stopped before the run finished");
-
-    const counts = await this.sessionCounts(runDir);
-    const captureFinished =
-      bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
-    this.contexts.set(runDir, {
-      traceSeq: bundle.state.traceSeq,
-      artifacts: new ArtifactWriter(runDir),
-      lock: Promise.resolve(),
-      streams: seededStreams({
-        sessionSeq: counts.entryCount,
-        sessionEventSeq: counts.lastEventSeq,
-        sessionBound: bundle.manifest.paths.session !== undefined,
-        sessionEventsStopped: captureFinished,
-      }),
-    });
-    const prepared = await readRunBundle(runDir);
-    if (prepared === null) {
-      throw new Error(`Workflow run ${runId} became unreadable during resume preparation`);
-    }
+    const prepared = this.readRun(runId, { includeTrace: true });
+    if (prepared === null) throw new Error(`Workflow run became unreadable: ${runId}`);
     return prepared;
   }
 
-  /**
-   * Finalize captures left "recording" by a session that is gone, so they
-   * report failed with the reason instead of dangling forever.
-   */
-  private async finalizeRecordingCaptures(
-    runDir: string,
-    reason: string,
-    options: { skipFlat?: boolean } = {},
-  ): Promise<void> {
-    if (options.skipFlat !== true) {
-      const flatCapture = await readJsonFile<WorkflowSessionCapture>(
-        path.join(runDir, SESSION_CAPTURE_PATH),
-      );
-      if (flatCapture?.status === "recording") {
-        const counts = await this.sessionCounts(runDir);
-        await this.writeSessionCapture(runDir, {
-          schema: SESSION_CAPTURE_SCHEMA,
-          eventSchema: SESSION_EVENT_SCHEMA,
-          status: "failed",
-          ...counts,
-          failure: {
-            failedAt: new Date().toISOString(),
-            code: "host_interrupted",
-            message: reason,
-          },
-        });
-      }
-    }
-    for (const segmentId of await this.listSessionSegments(runDir)) {
-      const segmentCapture = await readJsonFile<WorkflowSessionCapture>(
-        path.join(runDir, sessionStreamPaths(segmentId).capture),
-      );
-      if (segmentCapture?.status !== "recording") {
-        continue;
-      }
-      const segmentCounts = await this.sessionCounts(runDir, segmentId);
-      await this.writeSessionCapture(
-        runDir,
-        {
-          schema: SESSION_CAPTURE_SCHEMA,
-          eventSchema: SESSION_EVENT_SCHEMA,
-          status: "failed",
-          ...segmentCounts,
-          failure: {
-            failedAt: new Date().toISOString(),
-            code: "host_interrupted",
-            message: reason,
-          },
-        },
-        segmentId,
-      );
-    }
-  }
-
-  /** Mark a nonterminal bundle failed and append an interruption event. */
   async markRunInterrupted(
     runId: string,
     reason = "Workflow host stopped before the run finished",
-  ): Promise<LoadedRunBundle | null> {
-    const runDir = this.runDirFor(runId);
-    const bundle = await readRunBundle(runDir);
-    if (bundle === null || bundle.state.status !== "running") {
-      return bundle;
-    }
-    const lastTraceEvent = await readLastTraceEvent(runDir, bundle.manifest.paths.trace);
-    const counts = await this.sessionCounts(runDir);
-    const sessionBound = bundle.manifest.paths.session !== undefined;
-    const captureFinished =
-      bundle.sessionCapture?.status === "complete" || bundle.sessionCapture?.status === "failed";
-    this.contexts.set(runDir, {
-      traceSeq: Math.max(bundle.state.traceSeq, lastTraceEvent?.seq ?? 0),
-      artifacts: new ArtifactWriter(runDir),
-      lock: Promise.resolve(),
-      streams: seededStreams({
-        sessionSeq: counts.entryCount,
-        sessionEventSeq: counts.lastEventSeq,
-        sessionBound,
-        sessionEventsStopped: captureFinished,
-      }),
+  ): Promise<LoadedWorkflowRun | null> {
+    const loaded = this.readRun(runId);
+    if (loaded === null || loaded.state.status !== "running") return loaded;
+    this.finalizeRecordingCaptures(runId, reason);
+    loaded.state.status = "failed";
+    loaded.state.finishedAt = new Date().toISOString();
+    loaded.state.error = reason;
+    delete loaded.state.currentNode;
+    delete loaded.state.currentAttemptId;
+    delete loaded.state.currentNodeStartedAt;
+    delete loaded.state.statusDetail;
+    delete loaded.state.paused;
+    await this.writeSnapshot(runId, loaded.state, {
+      scope: "run",
+      type: "run_interrupted",
+      payload: { error: reason },
     });
-    const state = bundle.state;
-    if (lastTraceEvent !== null && recoverTerminalProjection(state, lastTraceEvent)) {
-      await this.writeLoadedProjections(runDir, state);
-      return await readRunBundle(runDir);
-    }
-    if (sessionBound && !captureFinished) {
-      await this.writeSessionCapture(runDir, {
-        schema: SESSION_CAPTURE_SCHEMA,
-        eventSchema: SESSION_EVENT_SCHEMA,
-        status: "failed",
-        ...counts,
-        failure: {
-          failedAt: new Date().toISOString(),
-          code: "host_interrupted",
-          message: reason,
-        },
-      });
-    }
-    await this.finalizeRecordingCaptures(runDir, reason, { skipFlat: true });
-    state.status = "failed";
-    state.finishedAt = new Date().toISOString();
-    state.error = reason;
-    delete state.currentNode;
-    delete state.currentAttemptId;
-    delete state.currentNodeStartedAt;
-    delete state.statusDetail;
-    delete state.paused;
-    await this.withRunLock(runDir, async () => {
-      const traceEvent = await this.appendTraceEvent(runDir, state.runId, {
-        scope: "run",
-        type: "run_interrupted",
-        payload: { error: reason },
-      });
-      state.traceSeq = traceEvent.seq;
-      state.updatedAt = traceEvent.at;
-      await this.writeLoadedProjections(runDir, state);
-    });
-    return await readRunBundle(runDir);
+    return this.readRun(runId, { includeTrace: true });
   }
 
-  /** Publish one durable update under the run's serialized claim-fenced writer. */
   async publishUpdate(
-    runDir: string,
+    runId: string,
     state: WorkflowRunState,
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
     options: { signal?: AbortSignal } = {},
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
-    return await this.withRunLock(runDir, async () => {
+    return await this.withRunLock(runId, async () => {
       if (options.signal?.aborted === true) {
         throw options.signal.reason ?? new Error("workflow update attempt is no longer active");
       }
@@ -452,375 +353,1060 @@ export class WorkflowRunStore {
       if (!exists && (state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
         throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
       }
+      const data = structuredClone(update.data) as Record<string, unknown>;
       const updateId = createUpdateId();
-      const data = JSON.parse(JSON.stringify(update.data)) as Record<string, unknown>;
-      const event = await this.appendTraceEvent(runDir, state.runId, {
-        scope: "node",
-        type: "update_published",
-        nodeId,
-        attemptId,
-        payload: { updateId, type: update.type, key: update.key, data },
+      let acceptedEvent: WorkflowTraceEvent | undefined;
+      let acceptedRecord: WorkflowUpdateRecord | undefined;
+      this.state.transaction(() => {
+        const context = this.contextFor(runId);
+        const run = this.requireRunRow(runId);
+        this.assertWriteAuthority(run, context.revision);
+        const revision = context.revision + 1;
+        const at = new Date().toISOString();
+        const event: WorkflowTraceEvent = {
+          seq: revision,
+          at,
+          runId,
+          scope: "node",
+          type: "update_published",
+          nodeId,
+          attemptId,
+          payload: { updateId, type: update.type, key: update.key, data },
+        };
+        const record: WorkflowUpdateRecord = {
+          updateId,
+          seq: revision,
+          at,
+          runId,
+          nodeId,
+          attemptId,
+          type: update.type,
+          key: update.key,
+          data,
+        };
+        state.updates = updateProjection(state.updates, record);
+        state.traceSeq = revision;
+        state.updatedAt = at;
+        this.ensureAttempt(state, nodeId, attemptId, Date.now());
+        const dataHash = this.state.putJson(data);
+        const nextUpdateSeq = this.nextUpdateSequence(attemptId);
+        this.state.connection
+          .prepare(
+            `INSERT INTO workflow_updates(
+               update_id, attempt_id, update_seq, update_type, update_key, data_hash, recorded_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(updateId, attemptId, nextUpdateSeq, update.type, update.key, dataHash, Date.now());
+        insertRunEvent(this.state, run.resourceId, revision, at, event);
+        this.persistRunState(run, state, revision, Date.now());
+        context.revision = revision;
+        acceptedEvent = event;
+        acceptedRecord = record;
       });
-      const record: WorkflowUpdateRecord = {
-        updateId,
-        seq: event.seq,
-        at: event.at,
-        runId: state.runId,
-        nodeId,
-        attemptId,
-        type: update.type,
-        key: update.key,
-        data,
-      };
-      state.updates = updateProjection(state.updates, record);
-      state.traceSeq = event.seq;
-      state.updatedAt = event.at;
-      await this.writeProjections(runDir, state);
-      return { event, record };
+      if (acceptedEvent === undefined || acceptedRecord === undefined) {
+        throw new Error("Workflow update transaction did not produce a result");
+      }
+      return { event: acceptedEvent, record: acceptedRecord };
     });
   }
 
-  /**
-   * Persist one transition: append the trace event, then rewrite the
-   * projections reflecting it.
-   */
   async writeSnapshot(
-    runDir: string,
+    runId: string,
     state: WorkflowRunState,
     event: WorkflowTraceEventDraft,
   ): Promise<WorkflowTraceEvent> {
-    return await this.withRunLock(runDir, async () => {
-      const traceEvent = await this.appendTraceEvent(runDir, state.runId, event);
-      state.traceSeq = traceEvent.seq;
-      state.updatedAt = new Date().toISOString();
-      await this.writeProjections(runDir, state);
-      return traceEvent;
+    return await this.withRunLock(runId, async () => {
+      let accepted: WorkflowTraceEvent | undefined;
+      this.state.transaction(() => {
+        const context = this.contextFor(runId);
+        const run = this.requireRunRow(runId);
+        this.assertWriteAuthority(run, context.revision);
+        const revision = context.revision + 1;
+        const now = Date.now();
+        const at = new Date(now).toISOString();
+        const traceEvent: WorkflowTraceEvent = { seq: revision, at, runId, ...event };
+        state.traceSeq = revision;
+        state.updatedAt = at;
+        insertRunEvent(this.state, run.resourceId, revision, at, traceEvent);
+        this.persistRunState(run, state, revision, now);
+        const snapshot = this.readDefinition(run.definitionHash);
+        this.syncNodeAttempts(state, snapshot, now);
+        context.revision = revision;
+        accepted = traceEvent;
+      });
+      if (accepted === undefined) throw new Error("Workflow snapshot transaction did not commit");
+      return accepted;
     });
   }
 
-  /**
-   * Bind the run to a Pi conversation: write `session/binding.json` once and
-   * append a `session_bound` trace event. Projections catch up on the next
-   * snapshot.
-   */
-  /** True when a session binding already exists for this bundle. */
-  async hasSessionBinding(runDir: string): Promise<boolean> {
-    try {
-      await fs.lstat(path.join(runDir, SESSION_BINDING_PATH));
-      return true;
-    } catch {
-      return false;
-    }
+  async hasSessionBinding(runId: string): Promise<boolean> {
+    return (
+      this.state.connection
+        .prepare("SELECT 1 AS present FROM session_segments WHERE run_id = ? LIMIT 1")
+        .get(runId) !== undefined
+    );
   }
 
-  /** List capture segment attempt ids under `session/segments/`. */
-  async listSessionSegments(runDir: string): Promise<string[]> {
-    try {
-      const entries = await fs.readdir(path.join(runDir, SESSION_SEGMENTS_DIR), {
-        withFileTypes: true,
-      });
-      return entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .sort();
-    } catch {
-      return [];
-    }
+  async listSessionSegments(runId: string): Promise<string[]> {
+    return this.segmentRows(runId)
+      .flatMap((row) => (row.captureKey === null ? [] : [row.captureKey]))
+      .sort();
   }
 
   async writeSessionBinding(
-    runDir: string,
+    runId: string,
     binding: WorkflowSessionBinding,
     attemptId?: string,
   ): Promise<void> {
-    await this.withRunLock(runDir, async () => {
-      const stream = this.streamFor(runDir, attemptId);
-      if (stream.sessionBound) {
-        return;
-      }
-      stream.sessionBound = true;
-      const paths = sessionStreamPaths(attemptId);
-      await fs.mkdir(path.join(runDir, paths.dir), { recursive: true, mode: 0o700 });
-      await writeJsonAtomic(path.join(runDir, paths.binding), binding);
-      await this.appendTraceEvent(runDir, binding.runId, {
-        scope: "session",
-        type: "session_bound",
-        payload: {
-          piSessionId: binding.piSessionId,
-          ...(attemptId !== undefined ? { captureAttemptId: attemptId } : {}),
-        },
+    assertValidRunId(runId);
+    if (binding.runId !== runId || binding.schema !== SESSION_BINDING_SCHEMA) {
+      throw new Error("Session binding does not match the workflow run");
+    }
+    await this.withRunLock(runId, async () => {
+      const segmentId = segmentIdFor(runId, attemptId);
+      if (this.segmentRow(segmentId) !== undefined) return;
+      this.state.transaction(() => {
+        const run = this.requireRunRow(runId);
+        const context = this.contextFor(runId);
+        this.assertWriteAuthority(run, context.revision);
+        const now = Date.parse(binding.boundAt);
+        const resourceId = resourceIdFor("session", segmentId);
+        const bindingHash = this.state.putJson(binding, now);
+        this.state.connection
+          .prepare(
+            `INSERT INTO resources(
+               resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+             ) VALUES (?, 'session', ?, 1, ?, ?)`,
+          )
+          .run(resourceId, segmentId, now, now);
+        this.state.connection
+          .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+          .run(resourceId);
+        this.state.connection
+          .prepare(
+            `INSERT INTO session_segments(
+               segment_id, run_id, attempt_id, capture_key, session_id, resource_id, binding_hash,
+               status, entry_count, event_count, created_at
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'recording', 0, 0, ?)`,
+          )
+          .run(
+            segmentId,
+            runId,
+            attemptId ?? null,
+            binding.piSessionId,
+            resourceId,
+            bindingHash,
+            now,
+          );
+        insertGenericEvent(
+          this.state,
+          resourceId,
+          1,
+          "session.created",
+          "session",
+          binding.piSessionId,
+          bindingHash,
+          now,
+        );
+        this.state.connection
+          .prepare(
+            `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
+             VALUES (?, ?, 'interactive', ?)
+             ON CONFLICT(run_id) DO NOTHING`,
+          )
+          .run(runId, binding.piSessionId, now);
+        const revision = context.revision + 1;
+        const at = new Date(now).toISOString();
+        insertRunEvent(this.state, run.resourceId, revision, at, {
+          seq: revision,
+          at,
+          runId,
+          scope: "session",
+          type: "session_bound",
+          payload: {
+            piSessionId: binding.piSessionId,
+            ...(attemptId !== undefined ? { captureAttemptId: attemptId } : {}),
+          },
+        });
+        const current = this.readState(run.stateHash);
+        current.traceSeq = revision;
+        current.updatedAt = at;
+        this.persistRunState(run, current, revision, now);
+        context.revision = revision;
       });
     });
   }
 
-  /** Append one verbatim Pi session entry to `session/entries.ndjson`. */
   async appendSessionEntry(
-    runDir: string,
+    runId: string,
     entry: Record<string, unknown>,
     attemptId?: string,
   ): Promise<number> {
-    return await this.withRunLock(runDir, async () => {
-      const stream = this.streamFor(runDir, attemptId);
-      stream.sessionSeq += 1;
-      const record: WorkflowSessionEntryRecord = {
-        seq: stream.sessionSeq,
-        at: new Date().toISOString(),
-        entry,
-      };
-      await appendLine(path.join(runDir, sessionStreamPaths(attemptId).entries), record);
-      return record.seq;
+    const segment = this.requireSegment(segmentIdFor(runId, attemptId));
+    return this.state.transaction(() => {
+      const revision = this.requireResourceRevision(segmentResourceId(segment));
+      const sequence = segment.entryCount + 1;
+      const now = Date.now();
+      const entryHash = this.state.putJson(entry, now);
+      const entryId = typeof entry.id === "string" ? entry.id : `entry-${sequence}`;
+      this.state.connection
+        .prepare(
+          `INSERT INTO session_entries(segment_id, entry_seq, entry_id, entry_hash, recorded_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(segment.segmentId, sequence, entryId, entryHash, now);
+      this.state.connection
+        .prepare("UPDATE session_segments SET entry_count = ? WHERE segment_id = ?")
+        .run(sequence, segment.segmentId);
+      this.bumpResource(segmentResourceId(segment), revision, now);
+      insertGenericEvent(
+        this.state,
+        segmentResourceId(segment),
+        revision + 1,
+        "session.entry_appended",
+        "session",
+        segment.sessionId,
+        entryHash,
+        now,
+      );
+      return sequence;
     });
   }
 
-  /** Append a fully stamped ordered batch to `session/events.ndjson`. */
   async appendSessionEventBatch(
-    runDir: string,
+    runId: string,
     records: WorkflowSessionEventRecord[],
     attemptId?: string,
   ): Promise<void> {
-    if (records.length === 0) {
-      return;
-    }
-    await this.withSessionEventLock(runDir, attemptId, async () => {
-      const stream = this.streamFor(runDir, attemptId);
-      if (stream.sessionEventsStopped) {
-        throw new Error("Session event capture has stopped");
-      }
-      try {
-        let expected = stream.sessionEventSeq + 1;
-        for (const record of records) {
-          validateSessionEventRecord(record);
-          if (record.seq !== expected) {
-            throw new Error(`Expected session event seq ${expected}, got ${record.seq}`);
-          }
-          expected += 1;
+    if (records.length === 0) return;
+    const segment = this.requireSegment(segmentIdFor(runId, attemptId));
+    this.state.transaction(() => {
+      const current = this.requireSegment(segment.segmentId);
+      if (current.status !== "recording") throw new Error("Session event capture has stopped");
+      let expected = current.eventCount + 1;
+      for (const record of records) {
+        validateSessionEventRecord(record);
+        if (record.seq !== expected) {
+          throw new Error(`Expected session event seq ${expected}, got ${record.seq}`);
         }
-        const encoded = await Promise.all(
-          records.map(async (record) => ({
-            ...record,
-            payload:
-              record.type === "tool_execution_started" ||
-              record.type === "tool_execution_finished" ||
-              (record.type === "assistant_event" && record.payload.type === "toolcall_end")
-                ? ((await encodeValue(record.payload, this.contextFor(runDir).artifacts)) as Record<
-                    string,
-                    unknown
-                  >)
-                : record.payload,
-          })),
-        );
-        for (const record of encoded) {
-          if (Buffer.byteLength(JSON.stringify(record), "utf8") + 1 > SESSION_EVENT_MAX_BYTES) {
-            throw new Error(`session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`);
-          }
+        if (Buffer.byteLength(canonicalJson(record), "utf8") > SESSION_EVENT_MAX_BYTES) {
+          throw new Error(`session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`);
         }
-        await appendLines(path.join(runDir, sessionStreamPaths(attemptId).events), encoded);
-        stream.sessionEventSeq = records.at(-1)?.seq ?? stream.sessionEventSeq;
-      } catch (error) {
-        stream.sessionEventsStopped = true;
-        throw error;
+        const payloadHash = this.state.putJson(record.payload, Date.parse(record.at));
+        this.state.connection
+          .prepare(
+            `INSERT INTO session_events(
+               segment_id, event_seq, event_type, node_id, attempt_id,
+               turn_id, message_id, tool_call_id, payload_hash, recorded_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            current.segmentId,
+            record.seq,
+            record.type,
+            record.nodeId,
+            record.attemptId,
+            record.turnId ?? null,
+            record.messageId ?? null,
+            record.toolCallId ?? null,
+            payloadHash,
+            Date.parse(record.at),
+          );
+        expected += 1;
       }
+      const now = Date.now();
+      this.state.connection
+        .prepare("UPDATE session_segments SET event_count = ? WHERE segment_id = ?")
+        .run(expected - 1, current.segmentId);
+      const resourceId = segmentResourceId(current);
+      const revision = this.requireResourceRevision(resourceId);
+      this.bumpResource(resourceId, revision, now);
+      const payloadHash = this.state.putJson({ count: records.length, lastSeq: expected - 1 }, now);
+      insertGenericEvent(
+        this.state,
+        resourceId,
+        revision + 1,
+        "session.events_appended",
+        "session",
+        current.sessionId,
+        payloadHash,
+        now,
+      );
     });
   }
 
-  /** Atomically replace the temporal capture integrity projection. */
   async writeSessionCapture(
-    runDir: string,
+    runId: string,
     capture: WorkflowSessionCapture,
     attemptId?: string,
   ): Promise<void> {
     validateSessionCapture(capture);
-    await this.withSessionEventLock(runDir, attemptId, async () => {
-      const stream = this.streamFor(runDir, attemptId);
-      if (capture.status !== "recording") {
-        stream.sessionEventsStopped = true;
-      }
-      await writeJsonAtomic(path.join(runDir, sessionStreamPaths(attemptId).capture), capture);
+    const segment = this.requireSegment(segmentIdFor(runId, attemptId));
+    this.state.transaction(() => {
+      const current = this.requireSegment(segment.segmentId);
+      if (current.status === "failed" && capture.status !== "failed") return;
+      if (current.status === "complete" && capture.status !== "complete") return;
+      const now = Date.now();
+      const failureHash =
+        capture.failure === undefined ? null : this.state.putJson(capture.failure, now);
+      this.state.connection
+        .prepare(
+          `UPDATE session_segments
+           SET status = ?, entry_count = ?, event_count = ?, failure_hash = ?, finished_at = ?
+           WHERE segment_id = ?`,
+        )
+        .run(
+          capture.status,
+          capture.entryCount,
+          capture.eventCount,
+          failureHash,
+          capture.status === "recording" ? null : now,
+          segment.segmentId,
+        );
+      const resourceId = segmentResourceId(segment);
+      const revision = this.requireResourceRevision(resourceId);
+      this.bumpResource(resourceId, revision, now);
+      const payloadHash = this.state.putJson(capture, now);
+      insertGenericEvent(
+        this.state,
+        resourceId,
+        revision + 1,
+        "session.capture_updated",
+        "session",
+        segment.sessionId,
+        payloadHash,
+        now,
+      );
     });
   }
 
-  /** Count complete durable session records after both writers have drained. */
   async sessionCounts(
-    runDir: string,
+    runId: string,
     attemptId?: string,
   ): Promise<{ eventCount: number; entryCount: number; lastEventSeq: number }> {
-    const paths = sessionStreamPaths(attemptId);
-    const events = await readCompleteNdjson(path.join(runDir, paths.events));
-    const entries = await readCompleteNdjson(path.join(runDir, paths.entries));
+    const segment = this.segmentRow(segmentIdFor(runId, attemptId));
     return {
-      eventCount: events.length,
-      entryCount: entries.length,
-      lastEventSeq: events.at(-1)?.seq ?? 0,
+      eventCount: segment?.eventCount ?? 0,
+      entryCount: segment?.entryCount ?? 0,
+      lastEventSeq: segment?.eventCount ?? 0,
     };
   }
 
-  private async appendTraceEvent(
-    runDir: string,
-    runId: string,
-    event: WorkflowTraceEventDraft,
-  ): Promise<WorkflowTraceEvent> {
-    const context = this.contextFor(runDir);
-    const traceEvent: WorkflowTraceEvent = {
-      seq: context.traceSeq + 1,
-      at: new Date().toISOString(),
+  readRun(runId: string, options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun | null {
+    const row = this.readRunRow(runId);
+    if (row === undefined) return null;
+    const state = this.readState(row.stateHash);
+    const snapshot = this.readDefinition(row.definitionHash);
+    const segments = this.segmentRows(runId).map((segment) => this.loadSegment(segment, state));
+    const flat = segments.find((segment) => segment.attemptId === "") ?? emptySegment();
+    return {
       runId,
-      ...event,
-      payload: (await encodeValue(event.payload, context.artifacts)) as Record<string, unknown>,
+      state,
+      snapshot,
+      ...(options.includeTrace === true ? { traceEvents: this.traceEvents(row) } : {}),
+      sessionBinding: flat.binding,
+      sessionEntries: flat.entries,
+      sessionEvents: flat.events,
+      sessionCapture: flat.capture,
+      sessionIntegrity: flat.integrity,
+      sessionSegments: segments.filter((segment) => segment.attemptId !== ""),
     };
-    await appendLine(path.join(runDir, TRACE_PATH), traceEvent);
-    context.traceSeq = traceEvent.seq;
-    return traceEvent;
   }
 
-  private async writeProjections(runDir: string, state: WorkflowRunState): Promise<void> {
-    const context = this.contextFor(runDir);
-    const encoded = await encodeRunState(state, context.artifacts);
-    await writeJsonAtomic(path.join(runDir, STATE_PATH), encoded);
-    await writeJsonAtomic(
-      path.join(runDir, MANIFEST_PATH),
-      createManifest(state, {
-        session: [...context.streams.values()].some((stream) => stream.sessionBound),
-      }),
-    );
-  }
-
-  private async writeLoadedProjections(runDir: string, state: WorkflowRunState): Promise<void> {
-    const context = this.contextFor(runDir);
-    await writeJsonAtomic(path.join(runDir, STATE_PATH), state);
-    await writeJsonAtomic(
-      path.join(runDir, MANIFEST_PATH),
-      createManifest(state, {
-        session: [...context.streams.values()].some((stream) => stream.sessionBound),
-      }),
-    );
-  }
-}
-
-/**
- * Truncate a trace file to the longest contiguous valid prefix, then to the
- * event count the state projection recorded. A crash can leave a partial
- * final line or one event appended before its projection write; the repair
- * keeps state and trace consistent so resume can continue the sequence. The
- * rewrite is atomic: a stale writer appending to the old inode cannot
- * interleave with the repaired file.
- */
-async function repairTraceFile(
-  tracePath: string,
-  keepSeq: number,
-  beforeWrite?: () => void,
-): Promise<void> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(tracePath, "utf8");
-  } catch {
-    return;
-  }
-  const lines = raw.split("\n");
-  if (lines.at(-1) === "") {
-    lines.pop();
-  }
-  const good: string[] = [];
-  let expectedSeq = 1;
-  for (const line of lines) {
-    if (line.trim().length === 0) {
-      break;
+  listRuns(options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun[] {
+    const rows = this.state.connection
+      .prepare("SELECT run_id AS runId FROM runs ORDER BY created_at DESC, run_id DESC")
+      .all();
+    const loaded: LoadedWorkflowRun[] = [];
+    for (const row of rows) {
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isRunIdRow(row)) continue;
+      const run = this.readRun(row.runId, options);
+      if (run !== null) loaded.push(run);
     }
+    return loaded;
+  }
+
+  readLastTraceEvent(runId: string): WorkflowTraceEvent | null {
+    const run = this.readRunRow(runId);
+    if (run === undefined) return null;
+    const last = this.traceEvents(run).at(-1);
+    /* istanbul ignore if -- every durable run has a creation event */
+    if (last === undefined) throw new Error("Workflow run has no creation event");
+    return last;
+  }
+
+  private contextFor(runId: string): RunContext {
+    let context = this.contexts.get(runId);
+    if (context === undefined) {
+      context = { revision: this.resourceRevision(runId), lock: Promise.resolve() };
+      this.contexts.set(runId, context);
+    }
+    return context;
+  }
+
+  private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const context = this.contextFor(runId);
+    const prior = context.lock;
+    let release: (() => void) | undefined;
+    context.lock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
     try {
-      const event = JSON.parse(line) as { seq?: unknown };
-      if (event.seq !== expectedSeq) {
-        break;
-      }
-      good.push(line);
-      expectedSeq += 1;
-    } catch {
-      break;
+      return await operation();
+    } finally {
+      release?.();
     }
   }
-  const kept = good.slice(0, keepSeq);
-  if (kept.length === lines.length) {
-    return;
+
+  private resourceRevision(runId: string): number {
+    const run = this.requireRunRow(runId);
+    return this.requireResourceRevision(run.resourceId);
   }
-  beforeWrite?.();
-  const tempPath = `${tracePath}.${process.pid}.${randomUUID()}.tmp`;
-  await fs.writeFile(tempPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
+
+  private requireResourceRevision(resourceId: string): number {
+    const row = this.state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isRevisionRow(row)) throw new Error(`Resource is missing: ${resourceId}`);
+    return row.revision;
+  }
+
+  private bumpResource(resourceId: string, expectedRevision: number, now: number): void {
+    const result = this.state.connection
+      .prepare(
+        `UPDATE resources SET revision = revision + 1, updated_at = ?
+         WHERE resource_id = ? AND revision = ?`,
+      )
+      .run(now, resourceId, expectedRevision);
+    if (result.changes !== 1) throw new Error("Resource revision conflict");
+  }
+
+  private assertWriteAuthority(run: RunRow, expectedRevision: number): void {
+    const actualRevision = this.requireResourceRevision(run.resourceId);
+    if (actualRevision !== expectedRevision) {
+      throw new Error(
+        `Workflow run revision conflict: expected ${expectedRevision}, got ${actualRevision}`,
+      );
+    }
+    const lease = this.state.connection
+      .prepare(
+        `SELECT generation, owner_type AS ownerType, owner_id AS ownerId,
+                token_hash AS tokenHash, expires_at AS expiresAt
+         FROM leases WHERE resource_id = ?`,
+      )
+      .get(run.resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isLeaseAuthorityRow(lease)) throw new Error("Workflow run lease is missing");
+    if (lease.ownerId === null) return;
+    const authority = this.authorityProvider?.(run.runId);
+    if (
+      authority === undefined ||
+      authority.ownerType !== lease.ownerType ||
+      authority.ownerId !== lease.ownerId ||
+      authority.generation !== lease.generation ||
+      lease.tokenHash === null ||
+      !lease.tokenHash.equals(tokenHash(authority.token)) ||
+      lease.expiresAt === null ||
+      lease.expiresAt <= Date.now()
+    ) {
+      throw new Error("Workflow run write rejected because ownership changed");
+    }
+  }
+
+  private persistRunState(
+    run: RunRow,
+    state: WorkflowRunState,
+    expectedRevision: number,
+    now: number,
+  ): void {
+    this.bumpResource(run.resourceId, expectedRevision - 1, now);
+    const stateHash = this.state.putJson(state, now);
+    const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
+    const update = this.state.connection
+      .prepare(
+        `UPDATE runs
+         SET title = ?, status = ?, paused = ?, status_detail = ?, output_hash = ?,
+             error_hash = ?, updated_at = ?, finished_at = ?
+         WHERE run_id = ?`,
+      )
+      .run(
+        state.runTitle ?? null,
+        state.status,
+        state.paused === true ? 1 : 0,
+        state.statusDetail ?? null,
+        stateHash,
+        errorHash,
+        now,
+        state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
+        state.runId,
+      );
+    if (update.changes !== 1) throw new Error(`Workflow run is missing: ${state.runId}`);
+    if (state.status !== "running") {
+      this.enqueueRunSettlementEffect(run.resourceId, expectedRevision, state, now);
+    }
+    run.stateHash = stateHash;
+  }
+
+  private enqueueRunSettlementEffect(
+    runResourceId: string,
+    sourceRevision: number,
+    state: WorkflowRunState,
+    now: number,
+  ): void {
+    const effectType = state.status === "waiting" ? "run.park_queue" : "run.settle_queue";
+    const idempotencyKey = `${state.runId}:${state.status}`;
+    const effectId = `effect-${createHash("sha256")
+      .update(`${runResourceId}\0${effectType}\0${idempotencyKey}`)
+      .digest("hex")
+      .slice(0, 40)}`;
+    if (
+      this.state.connection.prepare("SELECT 1 FROM effects WHERE effect_id = ?").get(effectId) !==
+      undefined
+    ) {
+      return;
+    }
+    const effectResourceId = resourceIdFor("effect", effectId);
+    const payloadHash = this.state.putJson({ runId: state.runId, status: state.status }, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO resources(
+           resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+         ) VALUES (?, 'effect', ?, 1, ?, ?)`,
+      )
+      .run(effectResourceId, effectId, now, now);
+    this.state.connection
+      .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+      .run(effectResourceId);
+    this.state.connection
+      .prepare(
+        `INSERT INTO effects(
+           effect_id, resource_id, source_resource_id, source_revision,
+           effect_type, idempotency_key, payload_hash, owner_scope,
+           status, attempt_count, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'run', 'pending', 0, ?, ?)`,
+      )
+      .run(
+        effectId,
+        effectResourceId,
+        runResourceId,
+        sourceRevision,
+        effectType,
+        idempotencyKey,
+        payloadHash,
+        now,
+        now,
+      );
+    insertGenericEvent(
+      this.state,
+      effectResourceId,
+      1,
+      "effect.created",
+      "system",
+      null,
+      payloadHash,
+      now,
+    );
+  }
+
+  private syncNodeAttempts(
+    state: WorkflowRunState,
+    snapshot: WorkflowDefinitionSnapshot,
+    now: number,
+  ): void {
+    for (const step of state.steps) {
+      const resultHash = this.state.putJson(step, now);
+      const outputHash = step.output === undefined ? null : this.state.putJson(step.output, now);
+      const errorHash = step.error === undefined ? null : this.state.putText(step.error, now);
+      const promptHash = step.prompt === null ? null : this.state.putJson(step.prompt, now);
+      const existing = this.state.connection
+        .prepare("SELECT attempt_id AS attemptId FROM node_attempts WHERE attempt_id = ?")
+        .get(step.attemptId);
+      if (existing === undefined) {
+        const attemptNumber = this.nextAttemptNumber(state.runId, step.nodeId);
+        this.state.connection
+          .prepare(
+            `INSERT INTO node_attempts(
+               attempt_id, run_id, node_id, attempt_number, node_type, status,
+               presentation_hash, output_hash, result_hash, error_hash,
+               started_at, finished_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            step.attemptId,
+            state.runId,
+            step.nodeId,
+            attemptNumber,
+            step.nodeType,
+            outcomeStatus(step.outcome),
+            promptHash,
+            outputHash,
+            resultHash,
+            errorHash,
+            Date.parse(step.startedAt),
+            Date.parse(step.finishedAt),
+            Date.parse(step.startedAt),
+            now,
+          );
+      } else {
+        this.state.connection
+          .prepare(
+            `UPDATE node_attempts
+             SET status = ?, presentation_hash = ?, output_hash = ?, result_hash = ?,
+                 error_hash = ?, finished_at = ?, updated_at = ?
+             WHERE attempt_id = ?`,
+          )
+          .run(
+            outcomeStatus(step.outcome),
+            promptHash,
+            outputHash,
+            resultHash,
+            errorHash,
+            Date.parse(step.finishedAt),
+            now,
+            step.attemptId,
+          );
+      }
+    }
+    if (state.currentAttemptId !== undefined && state.currentNode !== undefined) {
+      this.ensureAttempt(state, state.currentNode, state.currentAttemptId, now, snapshot);
+    }
+  }
+
+  private ensureAttempt(
+    state: WorkflowRunState,
+    nodeId: string,
+    attemptId: string,
+    now: number,
+    snapshot?: WorkflowDefinitionSnapshot,
+  ): void {
+    const existing = this.state.connection
+      .prepare("SELECT attempt_id AS attemptId FROM node_attempts WHERE attempt_id = ?")
+      .get(attemptId);
+    const status = state.status === "waiting" ? "waiting" : "running";
+    if (existing !== undefined) {
+      this.state.connection
+        .prepare("UPDATE node_attempts SET status = ?, updated_at = ? WHERE attempt_id = ?")
+        .run(status, now, attemptId);
+      return;
+    }
+    const definition =
+      snapshot ?? this.readDefinition(this.requireRunRow(state.runId).definitionHash);
+    const nodeType = definition.nodes[nodeId]?.nodeType ?? "agent";
+    this.state.connection
+      .prepare(
+        `INSERT INTO node_attempts(
+           attempt_id, run_id, node_id, attempt_number, node_type, status,
+           started_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        attemptId,
+        state.runId,
+        nodeId,
+        this.nextAttemptNumber(state.runId, nodeId),
+        nodeType,
+        status,
+        state.currentNodeStartedAt === undefined ? now : Date.parse(state.currentNodeStartedAt),
+        now,
+        now,
+      );
+  }
+
+  private nextAttemptNumber(runId: string, nodeId: string): number {
+    const row = this.state.connection
+      .prepare(
+        `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attemptNumber
+         FROM node_attempts WHERE run_id = ? AND node_id = ?`,
+      )
+      .get(runId, nodeId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isAttemptNumberRow(row)) throw new Error("Could not allocate node attempt number");
+    return row.attemptNumber;
+  }
+
+  private nextUpdateSequence(attemptId: string): number {
+    const row = this.state.connection
+      .prepare(
+        `SELECT COALESCE(MAX(update_seq), 0) + 1 AS updateSeq
+         FROM workflow_updates WHERE attempt_id = ?`,
+      )
+      .get(attemptId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isUpdateSequenceRow(row)) throw new Error("Could not allocate workflow update sequence");
+    return row.updateSeq;
+  }
+
+  private readRunRow(runId: string): RunRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT r.run_id AS runId, r.resource_id AS resourceId,
+                r.output_hash AS stateHash, d.definition_hash AS definitionHash,
+                r.status
+         FROM runs r
+         JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+         WHERE r.run_id = ?`,
+      )
+      .get(runId);
+    return isRunRow(row) ? row : undefined;
+  }
+
+  private requireRunRow(runId: string): RunRow {
+    const row = this.readRunRow(runId);
+    if (row === undefined) throw new Error(`Workflow run is missing: ${runId}`);
+    return row;
+  }
+
+  private readState(hash: Buffer): WorkflowRunState {
+    const value = this.state.readJson(hash);
+    if (!isRecord(value) || value.schema !== RUN_STATE_SCHEMA) {
+      throw new Error("Workflow run state has an incompatible schema");
+    }
+    return value as WorkflowRunState;
+  }
+
+  private readDefinition(hash: Buffer): WorkflowDefinitionSnapshot {
+    const value = this.state.readJson(hash);
+    if (!isRecord(value) || value.schema !== DEFINITION_SNAPSHOT_SCHEMA) {
+      throw new Error("Workflow definition snapshot has an incompatible schema");
+    }
+    return value as WorkflowDefinitionSnapshot;
+  }
+
+  private traceEvents(run: RunRow): WorkflowTraceEvent[] {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT resource_revision AS resourceRevision, event_type AS eventType,
+                payload_hash AS payloadHash, recorded_at AS recordedAt
+         FROM events WHERE resource_id = ? ORDER BY resource_revision`,
+      )
+      .all(run.resourceId);
+    const events: WorkflowTraceEvent[] = [];
+    for (const row of rows) {
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isEventRow(row)) continue;
+      const payload = row.payloadHash === null ? {} : this.state.readJson(row.payloadHash);
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isRecord(payload)) throw new Error("Workflow trace payload is not an object");
+      events.push({
+        seq: row.resourceRevision,
+        at: new Date(row.recordedAt).toISOString(),
+        runId: run.runId,
+        scope: traceScope(payload.scope),
+        type: row.eventType,
+        ...(typeof payload.nodeId === "string" ? { nodeId: payload.nodeId } : {}),
+        ...(typeof payload.attemptId === "string" ? { attemptId: payload.attemptId } : {}),
+        payload: isRecord(payload.payload) ? payload.payload : {},
+      });
+    }
+    return events;
+  }
+
+  private segmentRows(runId: string): SegmentRow[] {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT segment_id AS segmentId, run_id AS runId, attempt_id AS attemptId,
+                capture_key AS captureKey, session_id AS sessionId, binding_hash AS bindingHash, status,
+                entry_count AS entryCount, event_count AS eventCount,
+                failure_hash AS failureHash, created_at AS createdAt, finished_at AS finishedAt
+         FROM session_segments WHERE run_id = ? ORDER BY created_at, segment_id`,
+      )
+      .all(runId);
+    return rows.filter(isSegmentRow);
+  }
+
+  private segmentRow(segmentId: string): SegmentRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT segment_id AS segmentId, run_id AS runId, attempt_id AS attemptId,
+                capture_key AS captureKey, session_id AS sessionId, binding_hash AS bindingHash, status,
+                entry_count AS entryCount, event_count AS eventCount,
+                failure_hash AS failureHash, created_at AS createdAt, finished_at AS finishedAt
+         FROM session_segments WHERE segment_id = ?`,
+      )
+      .get(segmentId);
+    return isSegmentRow(row) ? row : undefined;
+  }
+
+  private requireSegment(segmentId: string): SegmentRow {
+    const row = this.segmentRow(segmentId);
+    if (row === undefined) throw new Error(`Session capture segment is missing: ${segmentId}`);
+    return row;
+  }
+
+  private loadSegment(segment: SegmentRow, runState: WorkflowRunState): SessionCaptureSegment {
+    const binding =
+      segment.bindingHash === null
+        ? null
+        : (this.state.readJson(segment.bindingHash) as WorkflowSessionBinding);
+    const entries = this.state.connection
+      .prepare(
+        `SELECT entry_seq AS entrySeq, entry_hash AS entryHash, recorded_at AS recordedAt
+         FROM session_entries WHERE segment_id = ? ORDER BY entry_seq`,
+      )
+      .all(segment.segmentId)
+      .filter(isSessionEntryRow)
+      .map((row) => ({
+        seq: row.entrySeq,
+        at: new Date(row.recordedAt).toISOString(),
+        entry: this.state.readJson(row.entryHash) as Record<string, unknown>,
+      }));
+    const events = this.state.connection
+      .prepare(
+        `SELECT event_seq AS eventSeq, event_type AS eventType, node_id AS nodeId,
+                attempt_id AS attemptId, turn_id AS turnId, message_id AS messageId,
+                tool_call_id AS toolCallId, payload_hash AS payloadHash,
+                recorded_at AS recordedAt
+         FROM session_events WHERE segment_id = ? ORDER BY event_seq`,
+      )
+      .all(segment.segmentId)
+      .filter(isSessionEventRow)
+      .map((row) => ({
+        seq: row.eventSeq,
+        at: new Date(row.recordedAt).toISOString(),
+        nodeId: row.nodeId,
+        attemptId: row.attemptId,
+        ...(row.turnId === null ? {} : { turnId: row.turnId }),
+        ...(row.messageId === null ? {} : { messageId: row.messageId }),
+        ...(row.toolCallId === null ? {} : { toolCallId: row.toolCallId }),
+        type: row.eventType,
+        payload: this.state.readJson(row.payloadHash) as Record<string, unknown>,
+      }));
+    const failure =
+      segment.failureHash === null
+        ? undefined
+        : (this.state.readJson(segment.failureHash) as WorkflowSessionCapture["failure"]);
+    const capture: WorkflowSessionCapture = {
+      schema: SESSION_CAPTURE_SCHEMA,
+      eventSchema: SESSION_EVENT_SCHEMA,
+      status: segment.status,
+      eventCount: segment.eventCount,
+      entryCount: segment.entryCount,
+      lastEventSeq: segment.eventCount,
+      ...(failure === undefined ? {} : { failure }),
+    };
+    const diagnostics: string[] = [];
+    if (entries.length !== segment.entryCount || events.length !== segment.eventCount) {
+      diagnostics.push("session capture counts do not match durable rows");
+    }
+    if (runState.status !== "running" && segment.status === "recording") {
+      diagnostics.push("terminal run still reports recording capture");
+    }
+    const integrity: SessionCaptureIntegrity =
+      diagnostics.length > 0
+        ? { status: "invalid", diagnostics }
+        : segment.status === "failed"
+          ? { status: "failed", diagnostics: [failure?.message ?? "session capture failed"] }
+          : { status: segment.status, diagnostics: [] };
+    return {
+      attemptId: segment.captureKey ?? "",
+      binding,
+      entries,
+      events,
+      capture,
+      integrity,
+    };
+  }
+
+  private finalizeRecordingCaptures(runId: string, reason: string): void {
+    for (const segment of this.segmentRows(runId)) {
+      if (segment.status !== "recording") continue;
+      const capture: WorkflowSessionCapture = {
+        schema: SESSION_CAPTURE_SCHEMA,
+        eventSchema: SESSION_EVENT_SCHEMA,
+        status: "failed",
+        eventCount: segment.eventCount,
+        entryCount: segment.entryCount,
+        lastEventSeq: segment.eventCount,
+        failure: {
+          failedAt: new Date().toISOString(),
+          code: "host_interrupted",
+          message: reason,
+        },
+      };
+      const now = Date.now();
+      this.state.transaction(() => {
+        const failureHash = this.state.putJson(capture.failure, now);
+        this.state.connection
+          .prepare(
+            `UPDATE session_segments
+             SET status = 'failed', failure_hash = ?, finished_at = ?
+             WHERE segment_id = ? AND status = 'recording'`,
+          )
+          .run(failureHash, now, segment.segmentId);
+        const resourceId = segmentResourceId(segment);
+        const revision = this.requireResourceRevision(resourceId);
+        this.bumpResource(resourceId, revision, now);
+        const payloadHash = this.state.putJson(capture, now);
+        insertGenericEvent(
+          this.state,
+          resourceId,
+          revision + 1,
+          "session.capture_failed",
+          "system",
+          null,
+          payloadHash,
+          now,
+        );
+      });
+    }
+  }
+}
+
+export function readWorkflowRun(
+  runId: string,
+  options: ReadWorkflowRunOptions & { databasePath?: string } = {},
+): LoadedWorkflowRun | null {
+  const store = new WorkflowRunStore(options.databasePath ?? workflowStatePath(), {
+    readOnly: true,
   });
-  await fs.rename(tempPath, tracePath);
+  try {
+    return store.readRun(runId, options);
+  } finally {
+    store.close();
+  }
 }
 
-function seededStreams(flat: Omit<SessionStreamState, "lock">): Map<string, SessionStreamState> {
-  return new Map([["", { ...flat, lock: Promise.resolve() }]]);
+export function listWorkflowRuns(
+  options: ReadWorkflowRunOptions & { databasePath?: string } = {},
+): LoadedWorkflowRun[] {
+  const store = new WorkflowRunStore(options.databasePath ?? workflowStatePath(), {
+    readOnly: true,
+  });
+  try {
+    return store.listRuns(options);
+  } finally {
+    store.close();
+  }
 }
 
-function recoverTerminalProjection(state: WorkflowRunState, event: WorkflowTraceEvent): boolean {
-  const status = terminalStatusForEvent(event.type);
-  if (status === undefined) {
-    return false;
+export function readLastTraceEvent(
+  runId: string,
+  options: { databasePath?: string } = {},
+): WorkflowTraceEvent | null {
+  const store = new WorkflowRunStore(options.databasePath ?? workflowStatePath(), {
+    readOnly: true,
+  });
+  try {
+    return store.readLastTraceEvent(runId);
+  } finally {
+    store.close();
   }
-  state.traceSeq = event.seq;
-  state.status = status;
-  state.updatedAt = event.at;
-  state.finishedAt = event.at;
-  if (typeof event.payload.error === "string") {
-    state.error = event.payload.error;
-  }
-  if (typeof event.payload.waitingOn === "string") {
-    state.waitingOn = event.payload.waitingOn;
-  }
-  if (Object.hasOwn(event.payload, "finalOutput")) {
-    state.finalOutput = event.payload.finalOutput;
-  }
-  delete state.currentNode;
-  delete state.currentAttemptId;
-  delete state.currentNodeStartedAt;
-  return true;
 }
 
-function terminalStatusForEvent(type: string): WorkflowRunState["status"] | undefined {
-  switch (type) {
-    case "run_waiting":
-      return "waiting";
-    case "run_completed":
+function insertRunEvent(
+  state: StateDatabase,
+  resourceId: string,
+  revision: number,
+  at: string,
+  event: WorkflowTraceEventDraft | WorkflowTraceEvent,
+): void {
+  const payloadHash = state.putJson(
+    {
+      scope: event.scope,
+      ...(event.nodeId === undefined ? {} : { nodeId: event.nodeId }),
+      ...(event.attemptId === undefined ? {} : { attemptId: event.attemptId }),
+      payload: event.payload,
+    },
+    Date.parse(at),
+  );
+  insertGenericEvent(
+    state,
+    resourceId,
+    revision,
+    event.type,
+    "system",
+    null,
+    payloadHash,
+    Date.parse(at),
+  );
+}
+
+function insertGenericEvent(
+  state: StateDatabase,
+  resourceId: string,
+  revision: number,
+  eventType: string,
+  actorType: string,
+  actorId: string | null,
+  payloadHash: Buffer | null,
+  now: number,
+): void {
+  state.connection
+    .prepare(
+      `INSERT INTO events(
+         event_id, resource_id, resource_revision, event_type,
+         actor_type, actor_id, payload_hash, recorded_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      `event-${randomUUID()}`,
+      resourceId,
+      revision,
+      eventType,
+      actorType,
+      actorId,
+      payloadHash,
+      now,
+    );
+}
+
+function sourceForState(
+  state: WorkflowRunState,
+  definitionDigest: Buffer,
+): { type: "builtin" | "file"; ref: string; revision: string } {
+  const source = state.workflowSource;
+  if (source?.kind === "builtin")
+    return { type: "builtin", ref: source.id, revision: source.revision };
+  if (source?.kind === "file") return { type: "file", ref: source.path, revision: source.hash };
+  return {
+    type: "file",
+    ref: `inline:${state.workflowName}`,
+    revision: definitionDigest.toString("hex"),
+  };
+}
+
+function segmentIdFor(runId: string, attemptId?: string): string {
+  return `segment-${createHash("sha256")
+    .update(`${runId}\0${attemptId ?? ""}`)
+    .digest("hex")
+    .slice(0, 40)}`;
+}
+
+function segmentResourceId(segment: SegmentRow): string {
+  return resourceIdFor("session", segment.segmentId);
+}
+
+function outcomeStatus(outcome: string): string {
+  switch (outcome) {
+    case "ok":
       return "completed";
-    case "run_failed":
-    case "run_interrupted":
-      return "failed";
-    case "run_timed_out":
+    case "timed_out":
       return "timed_out";
-    case "run_cancelled":
+    case "cancelled":
       return "cancelled";
     default:
-      return undefined;
+      return "failed";
   }
 }
 
-function assertValidRunId(runId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
-    throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
-  }
+function traceScope(value: unknown): WorkflowTraceEvent["scope"] {
+  return value === "node" || value === "agent" || value === "action" || value === "session"
+    ? value
+    : "run";
 }
 
-function isMissingPath(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
-async function appendLine(filePath: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fs.appendFile(filePath, value === null ? "" : `${JSON.stringify(value)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
-
-async function appendLines(filePath: string, values: unknown[]): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const text = values.map((value) => `${JSON.stringify(value)}\n`).join("");
-  await fs.appendFile(filePath, text, { encoding: "utf8", mode: 0o600 });
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
+function emptySegment(): SessionCaptureSegment {
+  return {
+    attemptId: "",
+    binding: null,
+    entries: [],
+    events: [],
+    capture: null,
+    integrity: { status: "unavailable", diagnostics: [] },
+  };
 }
 
 function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
@@ -828,105 +1414,15 @@ function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
     throw new Error("Session event seq must be a positive safe integer");
   }
   if (
-    !isNonEmptyString(record.at) ||
-    !isNonEmptyString(record.nodeId) ||
-    !isNonEmptyString(record.attemptId) ||
-    !isNonEmptyString(record.type) ||
+    record.at.length === 0 ||
+    record.nodeId.length === 0 ||
+    record.attemptId.length === 0 ||
     typeof record.payload !== "object" ||
     record.payload === null ||
     Array.isArray(record.payload)
   ) {
     throw new Error("Session event is missing required envelope fields");
   }
-  const knownType = [
-    "turn_started",
-    "turn_finished",
-    "message_started",
-    "assistant_event",
-    "message_finished",
-    "tool_execution_started",
-    "tool_execution_updated",
-    "tool_execution_finished",
-  ].includes(record.type);
-  if (!knownType) {
-    return;
-  }
-  if (!isNonEmptyString(record.turnId)) {
-    throw new Error(`${record.type} requires turnId`);
-  }
-  if (
-    !["turn_started", "turn_finished"].includes(record.type) &&
-    !isNonEmptyString(record.messageId)
-  ) {
-    throw new Error(`${record.type} requires messageId`);
-  }
-  if (record.type.startsWith("tool_execution_") && !isNonEmptyString(record.toolCallId)) {
-    throw new Error(`${record.type} requires toolCallId`);
-  }
-}
-
-function sessionRelationshipDiagnostics(
-  entries: WorkflowSessionEntryRecord[],
-  events: WorkflowSessionEventRecord[],
-): string[] {
-  const entryIds = new Set(
-    entries.flatMap((record) => (isNonEmptyString(record.entry.id) ? [record.entry.id] : [])),
-  );
-  const turns = new Set<string>();
-  const messages = new Set<string>();
-  const tools = new Set<string>();
-  const diagnostics: string[] = [];
-  for (const event of events) {
-    switch (event.type) {
-      case "turn_started":
-        if (event.turnId) turns.add(event.turnId);
-        break;
-      case "turn_finished":
-        if (!event.turnId || !turns.has(event.turnId)) {
-          diagnostics.push(`turn_finished ${event.seq} precedes turn_started`);
-        }
-        break;
-      case "message_started":
-        if (!event.turnId || !turns.has(event.turnId)) {
-          diagnostics.push(`message_started ${event.seq} precedes turn_started`);
-        }
-        if (event.messageId) messages.add(event.messageId);
-        break;
-      case "assistant_event":
-        if (!event.messageId || !messages.has(event.messageId)) {
-          diagnostics.push(`assistant_event ${event.seq} precedes message_started`);
-        }
-        break;
-      case "message_finished": {
-        if (!event.messageId || !messages.has(event.messageId)) {
-          diagnostics.push(`message_finished ${event.seq} precedes message_started`);
-        }
-        const settled = event.payload.settled;
-        const entryId = event.payload.entryId;
-        if (settled === true && (!isNonEmptyString(entryId) || !entryIds.has(entryId))) {
-          diagnostics.push(`message_finished ${event.seq} references a missing entry`);
-        } else if (settled !== true && entryId !== undefined) {
-          diagnostics.push(`message_finished ${event.seq} has entryId while unsettled`);
-        }
-        break;
-      }
-      case "tool_execution_started":
-        if (!event.messageId || !messages.has(event.messageId)) {
-          diagnostics.push(`tool_execution_started ${event.seq} precedes message_started`);
-        }
-        if (event.toolCallId) tools.add(event.toolCallId);
-        break;
-      case "tool_execution_updated":
-      case "tool_execution_finished":
-        if (!event.toolCallId || !tools.has(event.toolCallId)) {
-          diagnostics.push(`${event.type} ${event.seq} precedes tool_execution_started`);
-        }
-        break;
-      default:
-        break;
-    }
-  }
-  return diagnostics;
 }
 
 function validateSessionCapture(capture: WorkflowSessionCapture): void {
@@ -951,423 +1447,60 @@ function validateSessionCapture(capture: WorkflowSessionCapture): void {
   }
 }
 
-async function readCompleteNdjson(filePath: string): Promise<Array<{ seq: number }>> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-  const lines = raw.split("\n");
-  if (!raw.endsWith("\n")) {
-    lines.pop();
-  }
-  const records: Array<{ seq: number }> = [];
-  for (const line of lines) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    try {
-      const value = JSON.parse(line) as { seq?: unknown };
-      if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 1) {
-        break;
-      }
-      records.push({ seq: value.seq as number });
-    } catch {
-      break;
-    }
-  }
-  return records;
-}
-
-/**
- * Encode the externalizable value positions of the state document. The
- * in-memory state always holds raw values; the persisted copy may carry
- * `$artifact` references instead of large strings.
- */
-async function encodeRunState(
-  state: WorkflowRunState,
-  artifacts: ArtifactWriter,
-): Promise<WorkflowRunState> {
-  const results = Object.fromEntries(
-    await Promise.all(
-      Object.entries(state.results).map(async ([nodeId, result]) => [
-        nodeId,
-        "output" in result
-          ? { ...result, output: await encodeValue(result.output, artifacts) }
-          : result,
-      ]),
-    ),
-  ) as WorkflowRunState["results"];
-  return {
-    ...state,
-    input: await encodeValue(state.input, artifacts),
-    outputs: Object.fromEntries(
-      await Promise.all(
-        Object.entries(state.outputs).map(async ([nodeId, output]) => [
-          nodeId,
-          await encodeValue(output, artifacts),
-        ]),
-      ),
-    ),
-    results,
-    steps: await Promise.all(
-      state.steps.map(async (step) => ({
-        ...step,
-        prompt: (await encodeValue(
-          step.prompt,
-          artifacts,
-        )) as WorkflowRunState["steps"][number]["prompt"],
-        output: await encodeValue(step.output, artifacts),
-      })),
-    ),
-    ...(state.finalOutput !== undefined
-      ? { finalOutput: await encodeValue(state.finalOutput, artifacts) }
-      : {}),
-  };
-}
-
-export type SessionCaptureIntegrity = {
-  status: "unavailable" | "recording" | "complete" | "failed" | "invalid";
-  diagnostics: string[];
-};
-
-/** One capture attempt: the session data a single recorder wrote. */
-export type SessionCaptureSegment = {
-  attemptId: string;
-  binding: WorkflowSessionBinding | null;
-  entries: WorkflowSessionEntryRecord[];
-  events: WorkflowSessionEventRecord[];
-  capture: WorkflowSessionCapture | null;
-  integrity: SessionCaptureIntegrity;
-};
-
-export type LoadedRunBundle = {
-  runDir: string;
-  manifest: WorkflowRunManifest;
-  state: WorkflowRunState;
-  snapshot: WorkflowDefinitionSnapshot | null;
-  /** Full durable trace when loaded by the current reader. */
-  traceEvents?: WorkflowTraceEvent[];
-  sessionBinding: WorkflowSessionBinding | null;
-  sessionEntries: WorkflowSessionEntryRecord[];
-  sessionEvents: WorkflowSessionEventRecord[];
-  sessionCapture: WorkflowSessionCapture | null;
-  sessionIntegrity: SessionCaptureIntegrity;
-  /** Per-attempt captures written after a handoff or resume. */
-  sessionSegments: SessionCaptureSegment[];
-};
-
-/** Read the final trace record without loading the rest of a run bundle. */
-export async function readLastTraceEvent(
-  runDir: string,
-  tracePath?: string,
-): Promise<WorkflowTraceEvent | null> {
-  const events = await readNdjsonFile<WorkflowTraceEvent>(
-    resolveBundlePath(runDir, tracePath, TRACE_PATH),
-  );
-  return events.records.at(-1) ?? null;
-}
-
-export type ReadRunBundleOptions = {
-  /** Load the full append-only trace. Detail views need it; run lists do not. */
-  includeTrace?: boolean;
-};
-
-/** Read a run bundle from disk. Returns null when the bundle is unreadable. */
-export async function readRunBundle(
-  runDir: string,
-  options: ReadRunBundleOptions = {},
-): Promise<LoadedRunBundle | null> {
-  const manifest = await readJsonFile<WorkflowRunManifest>(path.join(runDir, MANIFEST_PATH));
-  if (!manifest || manifest.schema !== RUN_BUNDLE_SCHEMA) {
-    return null;
-  }
-  // A schema-tagged manifest may still be malformed (e.g. hand-edited);
-  // treat anything unexpected as an unreadable bundle rather than throwing.
-  const paths: Partial<WorkflowRunManifest["paths"]> =
-    typeof manifest.paths === "object" && manifest.paths !== null ? manifest.paths : {};
-  const state = await readJsonFile<WorkflowRunState>(
-    resolveBundlePath(runDir, paths.state, STATE_PATH),
-  );
-  if (!state || state.schema !== RUN_STATE_SCHEMA) {
-    return null;
-  }
-  const snapshot = await readJsonFile<WorkflowDefinitionSnapshot>(
-    resolveBundlePath(runDir, paths.workflow, WORKFLOW_SNAPSHOT_PATH),
-  );
-  const trace =
-    options.includeTrace === true
-      ? await readNdjsonFile<WorkflowTraceEvent>(resolveBundlePath(runDir, paths.trace, TRACE_PATH))
-      : undefined;
-  const sessionDir = resolveBundlePath(runDir, paths.session, SESSION_DIR);
-  const sessionBinding = await readJsonFile<WorkflowSessionBinding>(
-    path.join(sessionDir, "binding.json"),
-  );
-  const entries = await readNdjsonFile<WorkflowSessionEntryRecord>(
-    path.join(sessionDir, "entries.ndjson"),
-  );
-  const events = await readNdjsonFile<WorkflowSessionEventRecord>(
-    path.join(sessionDir, "events.ndjson"),
-  );
-  const sessionCapture = await readJsonFile<WorkflowSessionCapture>(
-    path.join(sessionDir, "capture.json"),
-  );
-  const flatIntegrity = assessSessionIntegrity({
-    binding: sessionBinding,
-    entries,
-    events,
-    capture: sessionCapture,
-    runTerminal: state.status !== "running",
-  });
-  const sessionSegments: SessionCaptureSegment[] = [];
-  let segmentIds: string[] = [];
-  try {
-    segmentIds = (await fs.readdir(path.join(sessionDir, "segments"), { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    // No segments directory means only the flat stream can exist.
-  }
-  for (const attemptId of segmentIds) {
-    const segmentDir = path.join(sessionDir, "segments", attemptId);
-    const binding = await readJsonFile<WorkflowSessionBinding>(
-      path.join(segmentDir, "binding.json"),
-    );
-    const segmentEntries = await readNdjsonFile<WorkflowSessionEntryRecord>(
-      path.join(segmentDir, "entries.ndjson"),
-    );
-    const segmentEvents = await readNdjsonFile<WorkflowSessionEventRecord>(
-      path.join(segmentDir, "events.ndjson"),
-    );
-    const capture = await readJsonFile<WorkflowSessionCapture>(
-      path.join(segmentDir, "capture.json"),
-    );
-    sessionSegments.push({
-      attemptId,
-      binding,
-      entries: segmentEntries.records,
-      events: segmentEvents.records,
-      capture,
-      integrity: assessSessionIntegrity({
-        binding,
-        entries: segmentEntries,
-        events: segmentEvents,
-        capture,
-        runTerminal: state.status !== "running",
-      }),
-    });
-  }
-  // The headline integrity is the flat stream's when present; otherwise the
-  // chronologically latest capture segment speaks for the run (segment ids
-  // are random, so directory order says nothing about time).
-  sessionSegments.sort((a, b) =>
-    (a.binding?.boundAt ?? "").localeCompare(b.binding?.boundAt ?? ""),
-  );
-  const sessionIntegrity =
-    flatIntegrity.status !== "unavailable" || sessionSegments.length === 0
-      ? flatIntegrity
-      : (sessionSegments.at(-1)?.integrity ?? flatIntegrity);
-  return {
-    runDir,
-    manifest,
-    state,
-    snapshot,
-    ...(trace !== undefined ? { traceEvents: trace.records } : {}),
-    sessionBinding,
-    sessionEntries: entries.records,
-    sessionEvents: events.records,
-    sessionCapture,
-    sessionIntegrity,
-    sessionSegments,
-  };
-}
-
-/**
- * Resolve a manifest-relative path, rejecting anything that is not a string
- * or escapes the bundle directory. Malformed manifests must degrade to an
- * unreadable bundle, never to a thrown error that aborts a listing.
- */
-function resolveBundlePath(runDir: string, relative: unknown, fallback: string): string {
-  const candidate = path.resolve(
-    runDir,
-    typeof relative === "string" && relative ? relative : fallback,
-  );
-  if (
-    candidate !== path.resolve(runDir) &&
-    !candidate.startsWith(path.resolve(runDir) + path.sep)
-  ) {
-    return path.join(runDir, fallback);
-  }
-  return candidate;
-}
-
-/** List run bundles under `outputRoot`, most recently started first. */
-export async function listRunBundles(outputRoot: string): Promise<LoadedRunBundle[]> {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(outputRoot);
-  } catch {
-    return [];
-  }
-  const bundles: LoadedRunBundle[] = [];
-  for (const entry of entries) {
-    const bundle = await readRunBundle(path.join(outputRoot, entry), { includeTrace: false });
-    if (bundle) {
-      bundles.push(bundle);
-    }
-  }
-  bundles.sort((a, b) => b.state.startedAt.localeCompare(a.state.startedAt));
-  return bundles;
-}
-
-async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
+function assertValidRunId(runId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
+    throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
   }
 }
 
-type NdjsonRead<T> = {
-  records: T[];
-  exists: boolean;
-  tornTail: boolean;
-  malformed: boolean;
-};
-
-async function readNdjsonFile<T>(filePath: string): Promise<NdjsonRead<T>> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch {
-    return { records: [], exists: false, tornTail: false, malformed: false };
-  }
-  const tornTail = raw.length > 0 && !raw.endsWith("\n");
-  const lines = raw.split("\n");
-  if (tornTail) {
-    lines.pop();
-  }
-  const records: T[] = [];
-  let malformed = false;
-  for (const line of lines) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    try {
-      records.push(JSON.parse(line) as T);
-    } catch {
-      malformed = true;
-    }
-  }
-  return { records, exists: true, tornTail, malformed };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function assessSessionIntegrity(input: {
-  binding: WorkflowSessionBinding | null;
-  entries: NdjsonRead<WorkflowSessionEntryRecord>;
-  events: NdjsonRead<WorkflowSessionEventRecord>;
-  capture: WorkflowSessionCapture | null;
-  runTerminal: boolean;
-}): SessionCaptureIntegrity {
-  const anySessionFile =
-    input.binding !== null || input.entries.exists || input.events.exists || input.capture !== null;
-  if (!anySessionFile) {
-    return { status: "unavailable", diagnostics: [] };
-  }
-  const diagnostics: string[] = [];
-  if (!input.binding || input.binding.schema !== SESSION_BINDING_SCHEMA) {
-    diagnostics.push("missing or invalid session binding");
-  }
-  if (!input.capture) {
-    diagnostics.push("missing session capture status");
-    return { status: "invalid", diagnostics };
-  }
-  try {
-    validateSessionCapture(input.capture);
-  } catch (error) {
-    diagnostics.push(failureMessageForDiagnostic(error));
-    return { status: "invalid", diagnostics };
-  }
-  if (input.entries.malformed || input.events.malformed) {
-    diagnostics.push("malformed NDJSON line before the journal tail");
-  }
-  if (input.events.tornTail && input.capture.status !== "recording") {
-    diagnostics.push("terminal session event journal has a torn tail");
-  }
-  if (input.runTerminal && input.capture.status === "recording") {
-    diagnostics.push("terminal run still reports recording capture");
-  }
-  let expected = 1;
-  for (const event of input.events.records) {
-    try {
-      validateSessionEventRecord(event);
-    } catch (error) {
-      diagnostics.push(failureMessageForDiagnostic(error));
-      break;
-    }
-    if (event.seq !== expected) {
-      diagnostics.push(`session event sequence gap at ${expected}`);
-      break;
-    }
-    expected += 1;
-  }
-  diagnostics.push(...sessionRelationshipDiagnostics(input.entries.records, input.events.records));
-  if (input.capture.status !== "recording") {
-    const lastEventSeq = input.events.records.at(-1)?.seq ?? 0;
-    if (
-      input.capture.eventCount !== input.events.records.length ||
-      input.capture.entryCount !== input.entries.records.length ||
-      input.capture.lastEventSeq !== lastEventSeq
-    ) {
-      diagnostics.push("session capture counts do not match durable files");
-    }
-  }
-  if (diagnostics.length > 0) {
-    return { status: "invalid", diagnostics };
-  }
-  if (input.capture.status === "failed") {
-    return {
-      status: "failed",
-      diagnostics: [input.capture.failure?.message ?? "session capture failed"],
-    };
-  }
-  return { status: input.capture.status, diagnostics: [] };
+function isRunRow(value: unknown): value is RunRow {
+  return isRecord(value);
 }
 
-function failureMessageForDiagnostic(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function isRunIdRow(value: unknown): value is { runId: string } {
+  return isRecord(value);
 }
 
-function createManifest(
-  state: WorkflowRunState,
-  present: { session: boolean },
-): WorkflowRunManifest {
-  return {
-    schema: RUN_BUNDLE_SCHEMA,
-    runId: state.runId,
-    workflowName: state.workflowName,
-    ...(state.runTitle !== undefined ? { runTitle: state.runTitle } : {}),
-    ...(state.workflowSource !== undefined ? { workflowSource: state.workflowSource } : {}),
-    ...(state.workflowSources !== undefined ? { workflowSources: state.workflowSources } : {}),
-    ...(state.definitionDigest !== undefined ? { definitionDigest: state.definitionDigest } : {}),
-    startedAt: state.startedAt,
-    ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
-    status: state.status,
-    traceSchema: TRACE_EVENT_SCHEMA,
-    paths: {
-      workflow: WORKFLOW_SNAPSHOT_PATH,
-      state: STATE_PATH,
-      trace: TRACE_PATH,
-      ...(present.session ? { session: SESSION_DIR } : {}),
-      // Declare this before any payload can externalize a string. Live
-      // session-event patches may reference a newly written artifact before
-      // the next workflow state projection refreshes the manifest.
-      artifacts: "artifacts",
-    },
-  };
+function isRevisionRow(value: unknown): value is { revision: number } {
+  return isRecord(value);
+}
+
+function isAttemptNumberRow(value: unknown): value is { attemptNumber: number } {
+  return isRecord(value);
+}
+
+function isUpdateSequenceRow(value: unknown): value is { updateSeq: number } {
+  return isRecord(value);
+}
+
+function isEventRow(value: unknown): value is EventRow {
+  return isRecord(value);
+}
+
+function isSegmentRow(value: unknown): value is SegmentRow {
+  return isRecord(value);
+}
+
+function isSessionEntryRow(value: unknown): value is SessionEntryRow {
+  return isRecord(value);
+}
+
+function isSessionEventRow(value: unknown): value is SessionEventRow {
+  return isRecord(value);
+}
+
+function isLeaseAuthorityRow(value: unknown): value is {
+  generation: number;
+  ownerType: OwnerType | null;
+  ownerId: string | null;
+  tokenHash: Buffer | null;
+  expiresAt: number | null;
+} {
+  return isRecord(value);
 }
 
 export function createDefinitionSnapshot(workflow: WorkflowDefinition): WorkflowDefinitionSnapshot {
@@ -1425,12 +1558,8 @@ function snapshotNode(
   if (node.nodeType === "agent" && node.expectedOutput !== undefined) {
     common.expectedOutput = node.expectedOutput;
   }
-  if (node.nodeType === "notify") {
-    common.summary = node.kind ?? "progress";
-  }
-  if (node.nodeType === "checkpoint" && node.summary !== undefined) {
-    common.summary = node.summary;
-  }
+  if (node.nodeType === "notify") common.summary = node.kind ?? "progress";
+  if (node.nodeType === "checkpoint" && node.summary !== undefined) common.summary = node.summary;
   if (node.nodeType === "checkpoint" && node.humanDecision !== undefined) {
     common.humanDecision = {
       audience:
@@ -1444,18 +1573,6 @@ function snapshotNode(
       ...(typeof node.humanDecision.onTimeout === "function" ? { dynamicTimeout: true } : {}),
     };
   }
-  if (node.nodeType === "action") {
-    common.actionExecution = "exec" in node ? "shell" : "function";
-  }
+  if (node.nodeType === "action") common.actionExecution = "exec" in node ? "shell" : "function";
   return common;
-}
-
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await fs.rename(tempPath, filePath);
 }

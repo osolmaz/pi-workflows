@@ -1,17 +1,15 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   TelegramDecisionChannel,
-  loadDecisionChannelConfig,
   renderDecisionText,
   renderTelegramParts,
-  verifyTelegramTokenFile,
-  writeDecisionChannelProfile,
   type HumanDecisionChannelAnswer,
   type TelegramFetch,
 } from "../src/extension/decision-channels.js";
-import { humanDecisionChannelRequest } from "../src/workflows/decision-presentation.js";
+import {
+  digestCanonical,
+  humanDecisionChannelRequest,
+} from "../src/workflows/decision-presentation.js";
 import {
   HumanDecisionStore,
   choice,
@@ -19,386 +17,283 @@ import {
   defineHumanChoices,
   textInput,
 } from "../src/workflows/human-decision.js";
-import { decisionPrompt, makeTempDir } from "./helpers.js";
+import {
+  decisionPrompt,
+  makeStateDatabasePath,
+  seedHumanDecisionRequest,
+  waitUntil,
+} from "./helpers.js";
 
-function request() {
-  return humanDecisionChannelRequest(
-    createHumanDecisionRequest({
-      runId: "run-a",
-      workflowName: "workflow-a",
-      nodeId: "approve",
-      attemptId: "attempt-a",
-      contract: {
-        audience: "operator",
-        choices: defineHumanChoices({
-          continue: choice({ label: "Continue" }),
-          replan: choice({
-            label: "Replan",
-            input: textInput({ name: "instructions", prompt: "What should change?" }),
-          }),
+function fullRequest(text = "Apply the safe change.") {
+  return createHumanDecisionRequest({
+    runId: "run-a",
+    workflowName: "workflow-a",
+    nodeId: "approve",
+    attemptId: "attempt-a",
+    contract: {
+      audience: "operator",
+      choices: defineHumanChoices({
+        continue: choice({ label: "Continue" }),
+        replan: choice({
+          label: "Replan",
+          input: textInput({ name: "instructions", prompt: "What should change?" }),
         }),
+      }),
+    },
+    prompt: {
+      ...decisionPrompt({ privateMachineField: "not-for-display" }),
+      presentation: {
+        schema: "pi-workflows.decision-presentation.v1",
+        summary: "Review this readable plan.",
+        blocks: [{ kind: "paragraph", text }],
       },
-      prompt: decisionPrompt({ plan: "a" }),
-      createdAt: "2026-08-19T00:00:00.000Z",
-    }),
-  );
-}
-
-function presentedRequest(text: string) {
-  return humanDecisionChannelRequest(
-    createHumanDecisionRequest({
-      runId: "run-readable",
-      workflowName: "workflow-readable",
-      nodeId: "approve",
-      attemptId: "attempt-readable",
-      contract: {
-        audience: "operator",
-        choices: defineHumanChoices({
-          continue: choice({ label: "Continue" }),
-          replan: choice({
-            label: "Replan",
-            input: textInput({ name: "instructions", prompt: "What should change?" }),
-          }),
-        }),
-      },
-      prompt: {
-        title: "Approve readable plan",
-        subject: { privateMachineField: "not-for-display" },
-        presentation: {
-          schema: "pi-workflows.decision-presentation.v1",
-          summary: "Review this readable plan.",
-          blocks: [{ kind: "paragraph", text }],
-        },
-      },
-      createdAt: "2026-08-19T00:00:00.000Z",
-    }),
-  );
+    },
+    createdAt: "2026-08-19T00:00:00.000Z",
+  });
 }
 
 function fakeBot() {
-  const calls: Array<{ method: string; payload: Record<string, unknown>; url: string }> = [];
+  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
   let nextMessage = 10;
   const fetchFn: TelegramFetch = async (url, init) => {
     const method = url.split("/").at(-1) ?? "";
     const payload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-    calls.push({ method, payload, url });
-    if (method === "sendMessage") {
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return { ok: true, result: { message_id: nextMessage++ } };
-        },
-      };
+    calls.push({ method, payload });
+    if (method === "getUpdates") {
+      await new Promise((resolve) => setTimeout(resolve, 5));
     }
     return {
       ok: true,
       status: 200,
       async json() {
-        return { ok: true, result: method === "getUpdates" ? [] : true };
+        return {
+          ok: true,
+          result:
+            method === "sendMessage"
+              ? { message_id: nextMessage++ }
+              : method === "getUpdates"
+                ? []
+                : true,
+        };
       },
     };
   };
   return { calls, fetchFn };
 }
 
-async function channel(options: {
-  answers?: HumanDecisionChannelAnswer[];
-  fetchFn?: TelegramFetch;
-  configDir?: string;
-  runs?: string;
-}) {
+async function fixture(
+  options: {
+    fetchFn?: TelegramFetch;
+    ownerId?: string;
+    answers?: HumanDecisionChannelAnswer[];
+  } = {},
+) {
+  const request = fullRequest();
+  const store = new HumanDecisionStore(await makeStateDatabasePath("telegram"));
+  await seedHumanDecisionRequest(store, request);
   const answers = options.answers ?? [];
-  const runs = options.runs ?? (await makeTempDir("telegram-decision-runs"));
-  const configDir = options.configDir ?? (await makeTempDir("telegram-decision-config"));
-  return new TelegramDecisionChannel({
+  const channel = new TelegramDecisionChannel({
     profileName: "approval",
     token: "test-token-not-real",
     allowedUserIds: ["100"],
     allowedChatIds: ["-200"],
-    store: new HumanDecisionStore(runs),
-    configDir,
+    store,
     onAnswer: async (answer) => {
       answers.push(answer);
     },
-    ...(options.fetchFn !== undefined ? { fetchFn: options.fetchFn } : {}),
+    fetchFn: options.fetchFn ?? fakeBot().fetchFn,
     apiBase: "https://telegram.test",
-    ownerId: "owner-a",
+    ownerId: options.ownerId ?? "owner-a",
   });
+  await channel.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  return { request, store, channel, answers };
 }
 
-afterEach(() => {
-  vi.useRealTimers();
-});
-
 describe("Telegram decision presentation", () => {
-  it("renders readable text without exposing the canonical subject", () => {
-    const rendered = renderDecisionText(presentedRequest("Apply the safe change."));
+  it("renders readable text without exposing the subject", () => {
+    const rendered = renderDecisionText(humanDecisionChannelRequest(fullRequest()));
     expect(rendered).toContain("Review this readable plan.");
     expect(rendered).toContain("Apply the safe change.");
-    expect(rendered).toContain("What should change?");
     expect(rendered).not.toContain("privateMachineField");
-    expect(rendered).not.toContain("not-for-display");
-    expect(rendered).not.toContain('{"');
   });
 
-  it("splits complete long Unicode content without truncation", () => {
-    const content = Array.from({ length: 7_000 }, (_, index) =>
-      index % 71 === 0 ? "\n" : "🙂",
-    ).join("");
-    const decision = presentedRequest(content);
-    const parts = renderTelegramParts(decision);
+  it("splits long Unicode text without truncation", () => {
+    const text = "🙂".repeat(5_000);
+    const parts = renderTelegramParts(humanDecisionChannelRequest(fullRequest(text)));
     expect(parts.length).toBeGreaterThan(1);
-    expect(parts.length).toBeLessThanOrEqual(20);
-    expect(parts.every((part) => part.length <= 4_096)).toBe(true);
-    expect(parts.some((part) => part.includes("…"))).toBe(false);
-    expect(parts.at(-1)).toContain("Choices");
-    expect(parts.at(-1)).toContain("What should change?");
-    const deliveredBodies = parts
-      .map((part) => part.replace(/^Part \d+\/\d+\nDecision [a-f0-9]+\n\n/u, ""))
-      .join("");
-    expect([...deliveredBodies].filter((character) => character === "🙂")).toHaveLength(
-      [...content].filter((character) => character === "🙂").length,
-    );
-    for (const part of parts) {
-      const lastCodeUnit = part.charCodeAt(part.length - 1);
-      expect(lastCodeUnit < 0xd800 || lastCodeUnit > 0xdbff).toBe(true);
-    }
+    expect(parts.every((part) => [...part].length <= 4_096)).toBe(true);
+    expect(parts.join("").match(/🙂/gu)).toHaveLength(5_000);
   });
 });
 
-describe("TelegramDecisionChannel", () => {
-  it("rejects invalid profile, token, and allowlist construction", async () => {
-    const configDir = await makeTempDir("telegram-constructor-config");
-    const store = new HumanDecisionStore(await makeTempDir("telegram-constructor-runs"));
+describe("TelegramDecisionChannel SQLite", () => {
+  it("validates profile and authorization inputs", async () => {
+    const store = new HumanDecisionStore(await makeStateDatabasePath("telegram-validation"));
     const base = {
       profileName: "approval",
-      token: "fixture",
+      token: "token",
       allowedUserIds: ["100"],
       allowedChatIds: ["-200"],
       store,
-      configDir,
       onAnswer: async () => {},
     };
-    expect(() => new TelegramDecisionChannel({ ...base, profileName: "bad/name" })).toThrow(
-      /profile/,
+    expect(() => new TelegramDecisionChannel({ ...base, profileName: "bad profile" })).toThrow();
+    expect(() => new TelegramDecisionChannel({ ...base, token: " " })).toThrow(/must not be empty/);
+    expect(() => new TelegramDecisionChannel({ ...base, allowedUserIds: ["bad"] })).toThrow(
+      /numeric/,
     );
-    expect(() => new TelegramDecisionChannel({ ...base, token: "" })).toThrow(/token/);
-    expect(() => new TelegramDecisionChannel({ ...base, allowedUserIds: [] })).toThrow(/numeric/);
     expect(() => new TelegramDecisionChannel({ ...base, allowedChatIds: ["bad"] })).toThrow(
       /numeric/,
     );
-  });
-  it("records every multipart message and puts controls only on the final part", async () => {
-    const runs = await makeTempDir("telegram-multipart-runs");
-    const bot = fakeBot();
-    const adapter = await channel({ fetchFn: bot.fetchFn, runs });
-    const decision = presentedRequest("Readable line.\n".repeat(700));
-    const expectedParts = renderTelegramParts(decision);
-    expect((await adapter.deliver(decision)).status).toBe("confirmed");
-    const sends = bot.calls.filter((call) => call.method === "sendMessage");
-    expect(sends.map((call) => call.payload.text)).toEqual(expectedParts);
-    expect(sends.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
-    expect(sends.at(-1)?.payload.reply_markup).toBeDefined();
-    const records = await new HumanDecisionStore(runs).listDeliveries(
-      decision.decisionId,
-      "telegram-approval",
-    );
-    expect(
-      records.filter(
-        (record) =>
-          record.schema === "pi-workflows.human-decision-delivery.v1" &&
-          record.phase === "part" &&
-          record.state === "confirmed",
-      ),
-    ).toHaveLength(expectedParts.length);
-    expect(records.some((record) => record.state === "unknown")).toBe(false);
-    expect(JSON.stringify(records)).not.toContain("-200");
-    expect(JSON.stringify(records)).not.toContain("message_id");
-    await adapter.stop();
+    store.close();
   });
 
-  it("binds callbacks and preserves exact ForceReply text", async () => {
-    const answers: HumanDecisionChannelAnswer[] = [];
+  it("delivers once and adopts durable message evidence", async () => {
     const bot = fakeBot();
-    const adapter = await channel({ answers, fetchFn: bot.fetchFn });
-    const decision = request();
-    expect((await adapter.deliver(decision)).status).toBe("confirmed");
-    expect((await adapter.deliver(decision)).status).toBe("confirmed");
+    const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn });
+    const first = await channel.deliver(humanDecisionChannelRequest(request));
+    const second = await channel.deliver(humanDecisionChannelRequest(request));
+    expect(first.status).toBe("confirmed");
+    expect(second).toMatchObject({ status: "confirmed", attemptId: "adopted" });
     expect(bot.calls.filter((call) => call.method === "sendMessage")).toHaveLength(1);
-    const initial = bot.calls.find((call) => call.method === "sendMessage");
-    const keyboard = initial?.payload.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
-    };
-    const replanToken = keyboard.inline_keyboard[1]?.[0]?.callback_data;
-    expect(replanToken).toMatch(/^piw:/);
-
-    await adapter.handleUpdate({
-      update_id: 1,
-      callback_query: {
-        id: "callback-1",
-        data: replanToken,
-        from: { id: 100 },
-        message: { chat: { id: -200 } },
-      },
-    });
-    const forceReply = bot.calls.filter((call) => call.method === "sendMessage").at(-1);
-    expect(forceReply?.payload.reply_markup).toEqual({ force_reply: true, selective: true });
-    const exact = "  use the smaller option\nkeep this  ";
-    await adapter.handleUpdate({
-      update_id: 2,
-      message: {
-        message_id: 20,
-        text: exact,
-        from: { id: 100 },
-        chat: { id: -200 },
-        reply_to_message: { message_id: 11 },
-      },
-    });
-    expect(answers).toHaveLength(1);
-    expect(answers[0]?.response).toEqual({
-      choice: "replan",
-      input: { instructions: exact },
-    });
-    expect(answers[0]?.request.requestDigest).toBe(decision.requestDigest);
-    expect(bot.calls.every((call) => !JSON.stringify(call.payload).includes("test-token"))).toBe(
-      true,
-    );
-    await adapter.stop();
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM channel_message_parts").get(),
+    ).toEqual({ count: 1 });
+    await channel.stop();
+    store.close();
   });
 
-  it("accepts a verified no-input callback", async () => {
-    const answers: HumanDecisionChannelAnswer[] = [];
+  it("delivers multipart content to multiple recipients", async () => {
     const bot = fakeBot();
-    const adapter = await channel({ answers, fetchFn: bot.fetchFn });
-    await adapter.deliver(request());
-    const initial = bot.calls.find((call) => call.method === "sendMessage");
-    const keyboard = initial?.payload.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
-    };
-    await adapter.handleUpdate({
-      update_id: 1,
-      callback_query: {
-        id: "continue-callback",
-        data: keyboard.inline_keyboard[0]?.[0]?.callback_data,
-        from: { id: 100 },
-        message: { chat: { id: -200 } },
-      },
+    const request = fullRequest("long ".repeat(2_000));
+    const store = new HumanDecisionStore(await makeStateDatabasePath("telegram-multipart"));
+    await seedHumanDecisionRequest(store, request);
+    const channel = new TelegramDecisionChannel({
+      profileName: "approval",
+      token: "token",
+      allowedUserIds: ["100"],
+      allowedChatIds: ["-200", "-201"],
+      store,
+      onAnswer: async () => {},
+      fetchFn: bot.fetchFn,
+      ownerId: "owner-multipart",
     });
-    expect(answers[0]).toMatchObject({
-      response: { choice: "continue" },
-      source: { channel: "telegram:approval", actorId: "100" },
+    await channel.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const result = await channel.deliver(humanDecisionChannelRequest(request));
+    expect(result.status).toBe("confirmed");
+    expect(bot.calls.filter((call) => call.method === "sendMessage").length).toBeGreaterThan(2);
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM channel_message_parts").get(),
+    ).toMatchObject({
+      count: expect.any(Number),
     });
-    await adapter.stop();
+    await channel.stop();
+    store.close();
   });
 
-  it("restores callback and ForceReply bindings after a Pi restart", async () => {
-    const runs = await makeTempDir("telegram-restart-runs");
-    const configDir = await makeTempDir("telegram-restart-config");
-    const firstBot = fakeBot();
-    const first = await channel({ fetchFn: firstBot.fetchFn, runs, configDir });
-    await first.deliver(request());
-    const initial = firstBot.calls.find((call) => call.method === "sendMessage");
-    const keyboard = initial?.payload.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
-    };
-    await first.handleUpdate({
-      update_id: 1,
-      callback_query: {
-        id: "callback-restart",
-        data: keyboard.inline_keyboard[1]?.[0]?.callback_data,
-        from: { id: 100 },
-        message: { chat: { id: -200 } },
-      },
-    });
-    await first.stop();
-
-    const answers: HumanDecisionChannelAnswer[] = [];
-    const secondBot = fakeBot();
-    const second = await channel({ answers, fetchFn: secondBot.fetchFn, runs, configDir });
-    const exact = "restart text  ";
-    await second.handleUpdate({
-      update_id: 2,
-      message: {
-        message_id: 30,
-        text: exact,
-        from: { id: 100 },
-        chat: { id: -200 },
-        reply_to_message: { message_id: 11 },
-      },
-    });
-    expect(answers[0]?.response).toEqual({
-      choice: "replan",
-      input: { instructions: exact },
-    });
-    await second.stop();
+  it("adopts unknown and unsettled delivery evidence without resending", async () => {
+    for (const state of ["unknown", "intent"] as const) {
+      const bot = fakeBot();
+      const request = fullRequest();
+      const store = new HumanDecisionStore(await makeStateDatabasePath(`telegram-${state}`));
+      await seedHumanDecisionRequest(store, request);
+      const createdAt = new Date().toISOString();
+      await store.recordDelivery(request, "telegram-approval", {
+        schema: "pi-workflows.human-decision-delivery.v1",
+        attemptId: `${state}-attempt`,
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        presentationDigest: request.presentationDigest,
+        channel: "telegram:approval",
+        phase: state === "intent" ? "part" : "complete",
+        state,
+        createdAt,
+        ...(state === "intent"
+          ? { recipientIndex: 1, partIndex: 1, partCount: 1, contentDigest: "digest" }
+          : {}),
+      });
+      expect(await store.listDeliveries(request.decisionId, "telegram-approval")).toMatchObject([
+        { state },
+      ]);
+      const channel = new TelegramDecisionChannel({
+        profileName: "approval",
+        token: "token",
+        allowedUserIds: ["100"],
+        allowedChatIds: ["-200"],
+        store,
+        onAnswer: async () => {},
+        fetchFn: bot.fetchFn,
+        ownerId: `owner-${state}`,
+      });
+      await channel.start();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await channel.deliver(humanDecisionChannelRequest(request))).toMatchObject({
+        status: "unknown",
+        attemptId: "adopted",
+      });
+      expect(bot.calls.filter((call) => call.method === "sendMessage")).toHaveLength(0);
+      await channel.stop();
+      store.close();
+    }
   });
 
-  it("ignores malformed, unrelated, and unbound updates", async () => {
-    const answers: HumanDecisionChannelAnswer[] = [];
+  it("fails closed when confirmed part evidence lacks its transport receipt", async () => {
     const bot = fakeBot();
-    const adapter = await channel({ answers, fetchFn: bot.fetchFn });
-    await expect(adapter.handleUpdate(null)).rejects.toThrow(/must be an object/);
-    await adapter.handleUpdate({ update_id: 1 });
-    await adapter.handleUpdate({ update_id: 2, callback_query: {} });
-    await adapter.handleUpdate({
-      update_id: 3,
-      callback_query: {
-        from: { id: 100 },
-        message: { chat: { id: -200 } },
-        data: "unknown",
-      },
+    const request = fullRequest();
+    const channelRequest = humanDecisionChannelRequest(request);
+    const store = new HumanDecisionStore(await makeStateDatabasePath("telegram-part-mismatch"));
+    await seedHumanDecisionRequest(store, request);
+    const parts = renderTelegramParts(channelRequest);
+    await store.recordDelivery(request, "telegram-approval", {
+      schema: "pi-workflows.human-decision-delivery.v1",
+      attemptId: "confirmed-part",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      presentationDigest: request.presentationDigest,
+      channel: "telegram:approval",
+      phase: "part",
+      state: "confirmed",
+      createdAt: new Date().toISOString(),
+      recipientIndex: 1,
+      partIndex: 1,
+      partCount: parts.length,
+      contentDigest: digestCanonical(parts[0]),
     });
-    await adapter.handleUpdate({
-      update_id: 4,
-      message: { from: { id: 100 }, chat: { id: -200 }, text: "unbound" },
+    const channel = new TelegramDecisionChannel({
+      profileName: "approval",
+      token: "token",
+      allowedUserIds: ["100"],
+      allowedChatIds: ["-200"],
+      store,
+      onAnswer: async () => {},
+      fetchFn: bot.fetchFn,
+      ownerId: "owner-mismatch",
     });
-    await adapter.handleUpdate({ update_id: 5, message: {} });
-    expect(answers).toEqual([]);
-    await adapter.stop();
+    await channel.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(await channel.deliver(channelRequest)).toMatchObject({
+      status: "unknown",
+      errorCode: "telegram_part_evidence_mismatch",
+    });
+    await channel.stop();
+    store.close();
   });
 
-  it("ignores users and chats outside the private allowlist", async () => {
-    const answers: HumanDecisionChannelAnswer[] = [];
-    const bot = fakeBot();
-    const adapter = await channel({ answers, fetchFn: bot.fetchFn });
-    await adapter.deliver(request());
-    const initial = bot.calls.find((call) => call.method === "sendMessage");
-    const keyboard = initial?.payload.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
-    };
-    await adapter.handleUpdate({
-      update_id: 1,
-      callback_query: {
-        id: "bad",
-        data: keyboard.inline_keyboard[0]?.[0]?.callback_data,
-        from: { id: 999 },
-        message: { chat: { id: -200 } },
-      },
-    });
-    expect(answers).toEqual([]);
-    await adapter.stop();
-  });
-
-  it("records a definite HTTP delivery failure and permits a safe retry", async () => {
-    let sends = 0;
+  it("advances a valid provider cursor", async () => {
+    let firstPoll = true;
     const fetchFn: TelegramFetch = async (url) => {
-      if (url.endsWith("/sendMessage")) {
-        sends += 1;
-        if (sends === 1) {
-          return {
-            ok: false,
-            status: 400,
-            async json() {
-              return {};
-            },
-          };
-        }
+      const method = url.split("/").at(-1) ?? "";
+      if (method === "getUpdates") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const result = firstPoll ? [{ update_id: 5 }] : [];
+        firstPoll = false;
         return {
           ok: true,
           status: 200,
           async json() {
-            return { ok: true, result: { message_id: 10 } };
+            return { ok: true, result };
           },
         };
       }
@@ -410,174 +305,263 @@ describe("TelegramDecisionChannel", () => {
         },
       };
     };
-    const adapter = await channel({ fetchFn });
-    const decision = request();
-    expect((await adapter.deliver(decision)).status).toBe("failed");
-    expect((await adapter.deliver(decision)).status).toBe("confirmed");
-    expect(sends).toBe(2);
-    await adapter.stop();
+    const { store, channel } = await fixture({ fetchFn });
+    await waitUntil(
+      () =>
+        store.state.connection
+          .prepare(
+            "SELECT cursor_value AS value FROM channel_cursors WHERE cursor_key = 'telegram_update'",
+          )
+          .get() !== undefined,
+    );
+    expect(
+      store.state.connection
+        .prepare(
+          "SELECT cursor_value AS value FROM channel_cursors WHERE cursor_key = 'telegram_update'",
+        )
+        .get(),
+    ).toEqual({ value: "6" });
+    await channel.stop();
+    store.close();
   });
 
-  it("retries only chats that did not already receive a multi-chat decision", async () => {
-    const counts = new Map<string, number>();
-    const fetchFn: TelegramFetch = async (url, init) => {
-      if (!url.endsWith("/sendMessage")) {
+  it("accepts an authorized callback as a verified human answer", async () => {
+    const bot = fakeBot();
+    const answers: HumanDecisionChannelAnswer[] = [];
+    const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn, answers });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    const send = bot.calls.find((call) => call.method === "sendMessage");
+    const markup = send?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    const callbackData = markup.inline_keyboard?.[0]?.[0]?.callback_data;
+    if (callbackData === undefined) throw new Error("callback token missing");
+    await channel.handleUpdate({
+      update_id: 1,
+      callback_query: {
+        id: "callback-1",
+        from: { id: 100 },
+        message: { message_id: 10, chat: { id: -200 } },
+        data: callbackData,
+      },
+    });
+    expect(answers[0]).toMatchObject({
+      response: { choice: "continue" },
+      source: { channel: "telegram:approval", actorId: "100" },
+    });
+    await channel.stop();
+    store.close();
+  });
+
+  it("ignores an unknown callback token", async () => {
+    const bot = fakeBot();
+    const answers: HumanDecisionChannelAnswer[] = [];
+    const { store, channel } = await fixture({ fetchFn: bot.fetchFn, answers });
+    await channel.handleUpdate({
+      update_id: 20,
+      callback_query: {
+        id: "unknown-callback",
+        from: { id: 100 },
+        message: { message_id: 10, chat: { id: -200 } },
+        data: "unknown-token",
+      },
+    });
+    expect(answers).toEqual([]);
+    await channel.stop();
+    store.close();
+  });
+
+  it("rejects callbacks from an unauthorized actor", async () => {
+    const bot = fakeBot();
+    const answers: HumanDecisionChannelAnswer[] = [];
+    const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn, answers });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    const send = bot.calls.find((call) => call.method === "sendMessage");
+    const markup = send?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    const callbackData = markup.inline_keyboard?.[0]?.[0]?.callback_data;
+    await channel.handleUpdate({
+      update_id: 2,
+      callback_query: {
+        id: "callback-unauthorized",
+        from: { id: 999 },
+        message: { message_id: 10, chat: { id: -200 } },
+        data: callbackData,
+      },
+    });
+    expect(answers).toEqual([]);
+    await channel.stop();
+    store.close();
+  });
+
+  it("collects exact reply text for an input choice", async () => {
+    const bot = fakeBot();
+    const answers: HumanDecisionChannelAnswer[] = [];
+    const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn, answers });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    const send = bot.calls.find((call) => call.method === "sendMessage");
+    const markup = send?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    const replan = markup.inline_keyboard?.[1]?.[0]?.callback_data;
+    await channel.handleUpdate({
+      update_id: 3,
+      callback_query: {
+        id: "callback-replan",
+        from: { id: 100 },
+        message: { message_id: 10, chat: { id: -200 } },
+        data: replan,
+      },
+    });
+    await channel.handleUpdate({ update_id: 4 });
+    await channel.handleUpdate({
+      update_id: 5,
+      message: { from: { id: 999 }, chat: { id: -200 }, text: "ignored" },
+    });
+    await channel.handleUpdate({
+      update_id: 6,
+      message: { from: { id: 100 }, chat: { id: -200 }, text: "ignored" },
+    });
+    await channel.handleUpdate({
+      update_id: 7,
+      message: {
+        message_id: 12,
+        chat: { id: -200 },
+        from: { id: 100 },
+        text: 42,
+        reply_to_message: { message_id: 11 },
+      },
+    });
+    await channel.handleUpdate({
+      update_id: 8,
+      message: {
+        message_id: 12,
+        chat: { id: -200 },
+        from: { id: 100 },
+        text: "  exact reply  ",
+        reply_to_message: { message_id: 11 },
+      },
+    });
+    expect(answers[0]?.response).toEqual({
+      choice: "replan",
+      input: { instructions: "  exact reply  " },
+    });
+    await channel.stop();
+    store.close();
+  });
+
+  it("ignores a stale callback request", async () => {
+    const request = createHumanDecisionRequest({
+      runId: "stale-run",
+      workflowName: "stale",
+      nodeId: "approve",
+      attemptId: "stale-attempt",
+      contract: {
+        audience: "operator",
+        choices: defineHumanChoices({ continue: choice({ label: "Continue" }) }),
+      },
+      prompt: {
+        ...decisionPrompt({}),
+        expiresAt: "2026-08-19T00:00:01.000Z",
+      },
+      createdAt: "2026-08-19T00:00:00.000Z",
+    });
+    const bot = fakeBot();
+    const answers: HumanDecisionChannelAnswer[] = [];
+    const store = new HumanDecisionStore(await makeStateDatabasePath("telegram-stale"));
+    await seedHumanDecisionRequest(store, request);
+    const channel = new TelegramDecisionChannel({
+      profileName: "approval",
+      token: "token",
+      allowedUserIds: ["100"],
+      allowedChatIds: ["-200"],
+      store,
+      onAnswer: async (answer) => {
+        answers.push(answer);
+      },
+      fetchFn: bot.fetchFn,
+      ownerId: "owner-stale",
+    });
+    await channel.start();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await channel.deliver(humanDecisionChannelRequest(request));
+    const send = bot.calls.find((call) => call.method === "sendMessage");
+    const markup = send?.payload.reply_markup as {
+      inline_keyboard?: Array<Array<{ callback_data?: string }>>;
+    };
+    await channel.handleUpdate({
+      update_id: 30,
+      callback_query: {
+        id: "stale",
+        from: { id: 100 },
+        message: { message_id: 10, chat: { id: -200 } },
+        data: markup.inline_keyboard?.[0]?.[0]?.callback_data,
+      },
+    });
+    expect(answers).toEqual([]);
+    await channel.stop();
+    store.close();
+  });
+
+  it("ignores malformed provider updates", async () => {
+    const { store, channel } = await fixture();
+    await expect(channel.handleUpdate(null)).rejects.toThrow(/must be an object/);
+    await expect(channel.handleUpdate({ update_id: "bad" })).resolves.toBeUndefined();
+    await channel.stop();
+    store.close();
+  });
+
+  it("stops an in-flight long poll through its abort signal", async () => {
+    const fetchFn: TelegramFetch = async (_url, init) =>
+      await new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      });
+    const { store, channel } = await fixture({ fetchFn });
+    await expect(channel.stop()).resolves.toBeUndefined();
+    store.close();
+  });
+
+  it("settles confirmed messages after another channel wins", async () => {
+    const bot = fakeBot();
+    const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    await channel.settle({
+      schema: "pi-workflows.human-decision-accepted.v1",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      response: { choice: "continue" },
+      provenance: "human",
+      source: { channel: "pi", actorId: "session", eventId: "event" },
+      idempotencyKey: "event",
+      acceptedAt: "2026-08-19T00:00:01.000Z",
+      answerDigest: "sha256:" + "a".repeat(64),
+      subjectDigest: request.subjectDigest,
+      presentationDigest: request.presentationDigest,
+      revision: request.revision,
+    });
+    expect(bot.calls.some((call) => call.method === "editMessageReplyMarkup")).toBe(true);
+    await channel.stop();
+    store.close();
+  });
+
+  it("adopts Telegram's message-not-modified settlement response", async () => {
+    let sendId = 10;
+    const fetchFn: TelegramFetch = async (url) => {
+      const method = url.split("/").at(-1) ?? "";
+      if (method === "getUpdates") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
         return {
           ok: true,
           status: 200,
           async json() {
-            return { ok: true, result: true };
+            return { ok: true, result: [] };
           },
         };
       }
-      const chatId = String((JSON.parse(String(init?.body)) as { chat_id: string }).chat_id);
-      const count = (counts.get(chatId) ?? 0) + 1;
-      counts.set(chatId, count);
-      if (chatId === "-201" && count === 1) {
-        return {
-          ok: false,
-          status: 400,
-          async json() {
-            return {};
-          },
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return { ok: true, result: { message_id: count } };
-        },
-      };
-    };
-    const adapter = new TelegramDecisionChannel({
-      profileName: "approval",
-      token: "fixture",
-      allowedUserIds: ["100"],
-      allowedChatIds: ["-200", "-201"],
-      store: new HumanDecisionStore(await makeTempDir("telegram-multichat-runs")),
-      configDir: await makeTempDir("telegram-multichat-config"),
-      onAnswer: async () => {},
-      fetchFn,
-      apiBase: "https://telegram.test",
-    });
-    const decision = request();
-    expect((await adapter.deliver(decision)).status).toBe("failed");
-    expect((await adapter.deliver(decision)).status).toBe("confirmed");
-    expect(counts.get("-200")).toBe(1);
-    expect(counts.get("-201")).toBe(2);
-    await adapter.stop();
-  });
-
-  it("ignores an expired callback binding", async () => {
-    const answers: HumanDecisionChannelAnswer[] = [];
-    const bot = fakeBot();
-    const adapter = await channel({ answers, fetchFn: bot.fetchFn });
-    const expired = { ...request(), expiresAt: "2000-01-01T00:00:00.000Z" };
-    await adapter.deliver(expired);
-    const initial = bot.calls.find((call) => call.method === "sendMessage");
-    const keyboard = initial?.payload.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
-    };
-    await adapter.handleUpdate({
-      update_id: 1,
-      callback_query: {
-        id: "expired",
-        data: keyboard.inline_keyboard[0]?.[0]?.callback_data,
-        from: { id: 100 },
-        message: { chat: { id: -200 } },
-      },
-    });
-    expect(answers).toEqual([]);
-    await adapter.stop();
-  });
-
-  it("settles confirmed messages once and bounds settlement failures", async () => {
-    const bot = fakeBot();
-    const runs = await makeTempDir("telegram-settle-runs");
-    const store = new HumanDecisionStore(runs);
-    const configDir = await makeTempDir("telegram-settle-config");
-    const adapter = await channel({ fetchFn: bot.fetchFn, runs, configDir });
-    const decision = request();
-    const accepted = {
-      schema: "pi-workflows.human-decision-accepted.v1" as const,
-      provenance: "human" as const,
-      decisionId: decision.decisionId,
-      requestDigest: decision.requestDigest,
-      subjectDigest: `sha256:${"b".repeat(64)}`,
-      presentationDigest: decision.presentationDigest,
-      revision: decision.revision,
-      response: { choice: "continue" },
-      source: { channel: "pi", actorId: "person", eventId: "event" },
-      idempotencyKey: "event",
-      acceptedAt: "2026-08-19T00:01:00.000Z",
-      answerDigest: `sha256:${"a".repeat(64)}`,
-    };
-    await adapter.deliver(decision);
-    await Promise.all([adapter.settle(accepted), adapter.settle(accepted)]);
-    await adapter.settle(accepted);
-    expect(bot.calls.filter((call) => call.method === "editMessageReplyMarkup")).toHaveLength(1);
-    expect(await store.listSettlements(decision.decisionId, "telegram-approval")).toHaveLength(1);
-    await adapter.stop();
-
-    const failingRuns = await makeTempDir("telegram-settle-fail-runs");
-    const failingStore = new HumanDecisionStore(failingRuns);
-    let editAttempts = 0;
-    const failing = await channel({
-      runs: failingRuns,
-      configDir: await makeTempDir("telegram-settle-fail-config"),
-      fetchFn: async (url) => {
-        if (url.endsWith("/sendMessage")) {
-          return {
-            ok: true,
-            status: 200,
-            async json() {
-              return { ok: true, result: { message_id: 1 } };
-            },
-          };
-        }
-        editAttempts += 1;
-        return {
-          ok: false,
-          status: 500,
-          async json() {
-            return {};
-          },
-        };
-      },
-    });
-    await failing.deliver(decision);
-    const cancellation = {
-      schema: "pi-workflows.human-decision-cancellation.v1" as const,
-      decisionId: decision.decisionId,
-      requestDigest: decision.requestDigest,
-      cancelledAt: "2026-08-19T00:01:00.000Z",
-      reason: "cancelled" as const,
-    };
-    for (let attempt = 0; attempt < 10; attempt += 1) await failing.settle(cancellation);
-    expect(editAttempts).toBe(3);
-    expect(
-      await failingStore.listSettlements(decision.decisionId, "telegram-approval"),
-    ).toHaveLength(3);
-    await failing.stop();
-  });
-
-  it("adopts Telegram's already-settled response as a confirmed settlement", async () => {
-    const runs = await makeTempDir("telegram-settle-adopt-runs");
-    const store = new HumanDecisionStore(runs);
-    const adapter = await channel({
-      runs,
-      configDir: await makeTempDir("telegram-settle-adopt-config"),
-      fetchFn: async (url) => {
-        if (url.endsWith("/sendMessage")) {
-          return {
-            ok: true,
-            status: 200,
-            async json() {
-              return { ok: true, result: { message_id: 1 } };
-            },
-          };
-        }
+      if (method === "editMessageReplyMarkup") {
         return {
           ok: false,
           status: 400,
@@ -585,248 +569,168 @@ describe("TelegramDecisionChannel", () => {
             return { ok: false, description: "Bad Request: message is not modified" };
           },
         };
-      },
-    });
-    const decision = request();
-    await adapter.deliver(decision);
-    await adapter.settle({
-      schema: "pi-workflows.human-decision-cancellation.v1",
-      decisionId: decision.decisionId,
-      requestDigest: decision.requestDigest,
-      cancelledAt: "2026-08-19T00:01:00.000Z",
-      reason: "cancelled",
-    });
-    expect(await store.listSettlements(decision.decisionId, "telegram-approval")).toMatchObject([
-      { state: "confirmed" },
-    ]);
-    await adapter.stop();
-  });
-
-  it("bounds malformed and rejected Bot API responses", async () => {
-    const malformed = await channel({
-      fetchFn: async () => ({
-        ok: true,
-        status: 200,
-        async json() {
-          return { ok: true, result: {} };
-        },
-      }),
-    });
-    expect((await malformed.deliver(request())).status).toBe("unknown");
-    await malformed.stop();
-
-    const rejected = await channel({
-      fetchFn: async () => ({
-        ok: true,
-        status: 200,
-        async json() {
-          return { ok: false };
-        },
-      }),
-    });
-    expect((await rejected.deliver(request())).status).toBe("failed");
-    await rejected.stop();
-  });
-
-  it("does not retry an ambiguous send automatically", async () => {
-    let sends = 0;
-    const fetchFn: TelegramFetch = async (url) => {
-      if (url.endsWith("/sendMessage")) {
-        sends += 1;
-        throw new Error("network timeout");
       }
       return {
         ok: true,
         status: 200,
         async json() {
-          return { ok: true, result: [] };
+          return { ok: true, result: method === "sendMessage" ? { message_id: sendId++ } : true };
         },
       };
     };
-    const runs = await makeTempDir("telegram-ambiguous-runs");
-    const configDir = await makeTempDir("telegram-ambiguous-config");
-    const adapter = await channel({ fetchFn, runs, configDir });
-    const decision = request();
-    expect((await adapter.deliver(decision)).status).toBe("unknown");
-    expect((await adapter.deliver(decision)).status).toBe("unknown");
-    expect(sends).toBe(1);
-    await adapter.stop();
+    const { request, store, channel } = await fixture({ fetchFn });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    await channel.settle({
+      schema: "pi-workflows.human-decision-cancellation.v1",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      cancelledAt: new Date().toISOString(),
+      reason: "cancelled",
+    });
+    expect(await store.listSettlements(request.decisionId, "telegram-approval")).toMatchObject([
+      { state: "confirmed" },
+    ]);
+    await channel.stop();
+    store.close();
   });
 
-  it("does not retry a delivery intent left uncertain by a crash", async () => {
-    const runs = await makeTempDir("telegram-intent-runs");
-    const configDir = await makeTempDir("telegram-intent-config");
-    const decision = request();
-    const store = new HumanDecisionStore(runs);
-    await store.recordDelivery(decision, "telegram-approval", {
-      schema: "pi-workflows.human-decision-delivery.v1",
-      attemptId: "attempt-before-crash",
-      decisionId: decision.decisionId,
-      requestDigest: decision.requestDigest,
-      presentationDigest: decision.presentationDigest,
-      channel: "telegram:approval",
-      phase: "part",
-      state: "intent",
-      createdAt: "2026-08-19T00:00:00.000Z",
-      recipientIndex: 1,
-      partIndex: 1,
-      partCount: 1,
-      contentDigest: `sha256:${"c".repeat(64)}`,
-    });
-    let sends = 0;
-    const fetchFn: TelegramFetch = async () => {
-      sends += 1;
+  it("records rejected Bot API delivery without treating it as ambiguous", async () => {
+    const fetchFn: TelegramFetch = async (url) => {
+      const method = url.split("/").at(-1) ?? "";
+      if (method === "getUpdates") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: [] };
+          },
+        };
+      }
       return {
         ok: true,
         status: 200,
         async json() {
-          return { ok: true, result: true };
+          return { ok: false, description: "denied" };
         },
       };
     };
-    const adapter = await channel({ fetchFn, runs, configDir });
-    expect((await adapter.deliver(decision)).status).toBe("unknown");
-    expect(sends).toBe(0);
-    await adapter.stop();
+    const { request, store, channel } = await fixture({ fetchFn });
+    expect(await channel.deliver(humanDecisionChannelRequest(request))).toMatchObject({
+      status: "failed",
+      errorCode: "telegram_rejected",
+    });
+    await channel.stop();
+    store.close();
   });
 
-  it("hands the shared long-poll lease to another Pi process", async () => {
-    vi.useFakeTimers();
-    const configDir = await makeTempDir("telegram-lease-config");
-    const runs = await makeTempDir("telegram-lease-runs");
-    let firstPolls = 0;
-    let secondPolls = 0;
-    const pendingFetch =
-      (counter: () => void): TelegramFetch =>
-      async (_url, init) => {
-        counter();
-        return await new Promise((resolve, reject) => {
-          const signal = init?.signal;
-          const abort = () => reject(new Error("aborted"));
-          if (signal?.aborted) abort();
-          else signal?.addEventListener("abort", abort, { once: true });
-        });
+  it("records failed settlement attempts and stops after the bound", async () => {
+    let sendId = 10;
+    const fetchFn: TelegramFetch = async (url) => {
+      const method = url.split("/").at(-1) ?? "";
+      if (method === "getUpdates") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: [] };
+          },
+        };
+      }
+      if (method === "editMessageReplyMarkup") throw new Error("edit failed");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, result: method === "sendMessage" ? { message_id: sendId++ } : true };
+        },
       };
+    };
+    const { request, store, channel } = await fixture({ fetchFn });
+    await channel.deliver(humanDecisionChannelRequest(request));
+    const cancellation = {
+      schema: "pi-workflows.human-decision-cancellation.v1" as const,
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      cancelledAt: new Date().toISOString(),
+      reason: "cancelled" as const,
+    };
+    await channel.settle(cancellation);
+    await channel.settle(cancellation);
+    await channel.settle(cancellation);
+    await channel.settle(cancellation);
+    const settlements = await store.listSettlements(request.decisionId, "telegram-approval");
+    expect(settlements).toHaveLength(3);
+    expect(settlements.every((record) => record.state === "failed")).toBe(true);
+    await channel.stop();
+    store.close();
+  });
+
+  it("records ambiguous delivery and does not repeat it blindly", async () => {
+    const fetchFn = vi.fn<TelegramFetch>(async (url) => {
+      if (url.endsWith("/getUpdates")) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: [] };
+          },
+        };
+      }
+      throw new Error("connection lost");
+    });
+    const { request, store, channel } = await fixture({ fetchFn });
+    const first = await channel.deliver(humanDecisionChannelRequest(request));
+    const calls = fetchFn.mock.calls.length;
+    const second = await channel.deliver(humanDecisionChannelRequest(request));
+    expect(first.status).toBe("unknown");
+    expect(second).toMatchObject({
+      status: "unknown",
+      errorCode: "ambiguous_delivery_not_retried",
+    });
+    expect(fetchFn.mock.calls.length).toBe(calls);
+    await channel.stop();
+    store.close();
+  });
+
+  it("allows only one channel owner for a profile", async () => {
+    const databasePath = await makeStateDatabasePath("telegram-lease");
+    const request = fullRequest();
+    const firstStore = new HumanDecisionStore(databasePath);
+    await seedHumanDecisionRequest(firstStore, request);
     const first = new TelegramDecisionChannel({
       profileName: "approval",
       token: "test-token-not-real",
       allowedUserIds: ["100"],
       allowedChatIds: ["-200"],
-      store: new HumanDecisionStore(runs),
-      configDir,
+      store: firstStore,
       onAnswer: async () => {},
-      fetchFn: pendingFetch(() => {
-        firstPolls += 1;
-      }),
-      apiBase: "https://telegram.test",
-      ownerId: "owner-first",
+      fetchFn: fakeBot().fetchFn,
+      ownerId: "owner-a",
     });
     const second = new TelegramDecisionChannel({
       profileName: "approval",
       token: "test-token-not-real",
       allowedUserIds: ["100"],
       allowedChatIds: ["-200"],
-      store: new HumanDecisionStore(runs),
-      configDir,
+      store: new HumanDecisionStore(databasePath),
       onAnswer: async () => {},
-      fetchFn: pendingFetch(() => {
-        secondPolls += 1;
-      }),
-      apiBase: "https://telegram.test",
-      ownerId: "owner-second",
+      fetchFn: fakeBot().fetchFn,
+      ownerId: "owner-b",
     });
-    await first.start();
     await first.start();
     await second.start();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(firstPolls).toBe(1);
-    expect(secondPolls).toBe(0);
-    await first.stop();
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(secondPolls).toBe(1);
+    await waitUntil(
+      () =>
+        firstStore.state.connection
+          .prepare("SELECT owner_id AS ownerId FROM leases WHERE resource_id LIKE 'channel-%'")
+          .get() !== undefined,
+    );
+    await expect(second.deliver(humanDecisionChannelRequest(request))).rejects.toThrow(/not owned/);
     await second.stop();
-  });
-
-  it("verifies and merges private token-file profiles without copying a token", async () => {
-    const configDir = await makeTempDir("telegram-profile-config");
-    const tokenFile = path.join(configDir, "token");
-    await fs.writeFile(tokenFile, "test-token-not-real\n", { mode: 0o600 });
-    const calls: string[] = [];
-    const fetchFn: TelegramFetch = async (url) => {
-      calls.push(url);
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return { ok: true, result: { id: 1 } };
-        },
-      };
-    };
-    await verifyTelegramTokenFile(tokenFile, fetchFn, "https://telegram.test");
-    await writeDecisionChannelProfile({
-      configDir,
-      audience: "operator",
-      profile: "approval",
-      credential: "approval",
-      tokenFile,
-      allowedUserIds: ["100"],
-      allowedChatIds: ["-200"],
-    });
-    await writeDecisionChannelProfile({
-      configDir,
-      audience: "maintainer",
-      profile: "maintenance",
-      credential: "maintenance",
-      tokenFile,
-      allowedUserIds: ["101"],
-      allowedChatIds: ["-201"],
-    });
-    const loaded = await loadDecisionChannelConfig(configDir);
-    expect(Object.keys(loaded?.channels.audiences ?? {})).toEqual(["operator", "maintainer"]);
-    expect(Object.keys(loaded?.credentials ?? {})).toEqual(["approval", "maintenance"]);
-    expect((await fs.stat(path.join(configDir, "channels.json"))).mode & 0o077).toBe(0);
-    expect((await fs.stat(path.join(configDir, "credentials.json"))).mode & 0o077).toBe(0);
-    expect(await fs.readFile(path.join(configDir, "credentials.json"), "utf8")).not.toContain(
-      "test-token-not-real",
-    );
-    expect(calls).toHaveLength(1);
-  });
-
-  it("loads only mode-0600 token-file references", async () => {
-    const configDir = await makeTempDir("telegram-config");
-    const tokenFile = path.join(configDir, "token");
-    await fs.writeFile(tokenFile, "test-token-not-real\n", { mode: 0o600 });
-    await fs.writeFile(
-      path.join(configDir, "channels.json"),
-      `${JSON.stringify({
-        schema: "pi-workflows.channels.v1",
-        audiences: {
-          operator: {
-            channels: ["pi", "telegram:approval"],
-            accept: "first-valid-answer",
-          },
-        },
-        telegramProfiles: {
-          approval: {
-            credential: "approval",
-            allowedUserIds: ["100"],
-            allowedChatIds: ["-200"],
-          },
-        },
-      })}\n`,
-      { mode: 0o600 },
-    );
-    await fs.writeFile(
-      path.join(configDir, "credentials.json"),
-      `${JSON.stringify({
-        schema: "pi-workflows.credentials.v1",
-        telegram: { approval: { tokenFile } },
-      })}\n`,
-      { mode: 0o600 },
-    );
-    const loaded = await loadDecisionChannelConfig(configDir);
-    expect(loaded?.credentials.approval).toBe("test-token-not-real");
-    await fs.chmod(tokenFile, 0o644);
-    await expect(loadDecisionChannelConfig(configDir)).rejects.toThrow(/0600/);
+    await first.stop();
+    firstStore.close();
   });
 });

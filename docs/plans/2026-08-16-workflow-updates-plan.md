@@ -355,7 +355,7 @@ Update:
 
 - `README.md`
 - `docs/workflows.md`
-- `docs/run-bundles.md`
+- `docs/SQLITE_STATE.md`
 - `docs/development.md`
 - `docs/WORKFLOW_UPDATES.md`
 - `docs/WORKFLOW_STEP_MESSAGES.md`

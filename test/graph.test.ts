@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../src/render/ansi.js";
 import { graphCardSize, renderGraphLines } from "../src/render/graph-render.js";
 import { expandEdges, layoutGraph } from "../src/render/graph.js";
-import type { LoadedRunBundle } from "../src/workflows/store.js";
+import type { LoadedWorkflowRun } from "../src/workflows/store.js";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -92,7 +92,7 @@ function makeBundle(
   snapshot: WorkflowDefinitionSnapshot,
   steps: WorkflowStepRecord[],
   overrides: Partial<WorkflowRunState> = {},
-): LoadedRunBundle {
+): LoadedWorkflowRun {
   const state: WorkflowRunState = {
     schema: "pi-workflows.run-state.v1",
     traceSeq: 1,
@@ -108,16 +108,7 @@ function makeBundle(
     ...overrides,
   };
   return {
-    runDir: "/tmp/run-graph",
-    manifest: {
-      schema: "pi-workflows.run-bundle.v1",
-      runId: state.runId,
-      workflowName: state.workflowName,
-      startedAt: state.startedAt,
-      status: state.status,
-      traceSchema: "pi-workflows.trace-event.v1",
-      paths: { workflow: "workflow.json", state: "state.json", trace: "trace.ndjson" },
-    },
+    runId: state.runId,
     state,
     snapshot,
     sessionBinding: null,

@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compileWorkflowDefinition, compositionMetadata } from "../src/workflows/composition.js";
 import {
@@ -12,9 +10,9 @@ import {
 } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
-import { readRunBundle } from "../src/workflows/store.js";
-import type { WorkflowDefinition, WorkflowTraceEvent } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { readWorkflowRun } from "../src/workflows/store.js";
+import type { WorkflowDefinition } from "../src/workflows/types.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function childWorkflow() {
   return defineWorkflow({
@@ -99,12 +97,13 @@ describe("workflow composition", () => {
     });
     const compiled = compileWorkflowDefinition(parent);
     validateWorkflowDefinition(compiled);
+    const databasePath = await makeStateDatabasePath("pi-workflows-composition");
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot: await makeTempDir("pi-workflows-composition"),
+      databasePath,
     });
 
-    const { runDir, state } = await engine.run(compiled, {});
+    const { runId, state } = await engine.run(compiled, {});
 
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toEqual({
@@ -122,12 +121,9 @@ describe("workflow composition", () => {
       "repair/__piw_exit_ready",
       "finish",
     ]);
-    const bundle = await readRunBundle(runDir);
-    expect(bundle?.snapshot?.composition?.mounts).toHaveLength(1);
-    const trace = (await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as WorkflowTraceEvent);
+    const bundle = readWorkflowRun(runId, { databasePath, includeTrace: true });
+    expect(bundle?.snapshot.composition?.mounts).toHaveLength(1);
+    const trace = bundle?.traceEvents ?? [];
     expect(trace.filter((event) => event.type === "include_entered")).toHaveLength(1);
     expect(trace.filter((event) => event.type === "include_exited")).toHaveLength(1);
   });
@@ -167,7 +163,7 @@ describe("workflow composition", () => {
     });
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot: await makeTempDir("pi-workflows-composition-repeat"),
+      databasePath: await makeStateDatabasePath("pi-workflows-composition-repeat"),
     });
 
     const { state } = await engine.run(parent, {});
@@ -213,7 +209,7 @@ describe("workflow composition", () => {
     expect(mounts.map((mount) => mount.mountPath.join("/"))).toEqual(["middle", "middle/inner"]);
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot: await makeTempDir("pi-workflows-composition-nested"),
+      databasePath: await makeStateDatabasePath("pi-workflows-composition-nested"),
     });
 
     const { state } = await engine.run(compiled, {});
@@ -249,8 +245,8 @@ describe("workflow composition", () => {
         { from: "child.ready", to: "finish" },
       ],
     });
-    const outputRoot = await makeTempDir("pi-workflows-composition-checkpoint");
-    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), outputRoot });
+    const databasePath = await makeStateDatabasePath("pi-workflows-composition-checkpoint");
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), databasePath });
 
     const waiting = await engine.run(parent, {});
     expect(waiting.state.status).toBe("waiting");
@@ -291,7 +287,7 @@ describe("workflow composition", () => {
     });
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot: await makeTempDir("pi-workflows-composition-limit"),
+      databasePath: await makeStateDatabasePath("pi-workflows-composition-limit"),
     });
 
     const { state } = await engine.run(parent, {});
@@ -340,7 +336,7 @@ describe("workflow composition", () => {
     });
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot: await makeTempDir("pi-workflows-composition-ancestor-limit"),
+      databasePath: await makeStateDatabasePath("pi-workflows-composition-ancestor-limit"),
     });
 
     const { state } = await engine.run(parent, {});

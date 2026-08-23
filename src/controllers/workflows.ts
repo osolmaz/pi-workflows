@@ -5,6 +5,7 @@ import type {
   ChildWorkflowRecord,
   ChildWorkflowRequest,
   ChildWorkflowState,
+  ControllerQueueClaim,
   ControllerResource,
   ControllerWorkflows,
 } from "./types.js";
@@ -37,35 +38,49 @@ export class ControllerWorkflowCoordinator {
     private readonly scheduler?: ControllerWorkflowScheduler,
   ) {}
 
-  forResource(resource: ControllerResource, signal: AbortSignal): ControllerWorkflows {
+  forResource(
+    resource: ControllerResource,
+    claim: ControllerQueueClaim,
+    signal: AbortSignal,
+  ): ControllerWorkflows {
     return {
-      ensure: async (request) => await this.ensure(resource, request, signal),
+      ensure: async (request) => await this.ensure(resource, claim, request, signal),
     };
   }
 
-  complete(requestId: string, result: WorkflowSchedulerResult): ChildWorkflowRecord {
+  complete(
+    requestId: string,
+    result: WorkflowSchedulerResult,
+    claim: ControllerQueueClaim,
+  ): ChildWorkflowRecord {
     const previous = this.store.getWorkflowByRequestId(requestId);
     if (previous === undefined) {
       throw new Error(`Workflow request not found: ${requestId}`);
     }
-    const record = this.store.updateWorkflow(requestId, {
-      state: result.state,
-      ...(result.runId !== undefined ? { runId: result.runId } : {}),
-      ...(result.error !== undefined ? { error: result.error } : { error: null }),
-    });
+    const record = this.store.updateWorkflow(
+      requestId,
+      {
+        state: result.state,
+        ...(result.runId !== undefined ? { runId: result.runId } : {}),
+        ...(result.error !== undefined ? { error: result.error } : { error: null }),
+      },
+      claim,
+    );
     this.enqueueParent(record.resourceUid);
-    this.recordEvent(record, "workflow_state_changed");
+    this.recordEvent(record, "workflow_state_changed", claim);
     return record;
   }
 
   private async ensure(
     resource: ControllerResource,
+    claim: ControllerQueueClaim,
     request: ChildWorkflowRequest,
     signal: AbortSignal,
   ): Promise<ChildWorkflowRecord> {
     const inputFingerprint = jsonFingerprint(request.input);
     const reservation = this.store.reserveWorkflow({
       resourceUid: resource.metadata.uid,
+      claim,
       requestKey: request.requestKey,
       workflow: request.workflow,
       inputFingerprint,
@@ -78,18 +93,26 @@ export class ControllerWorkflowCoordinator {
       return record;
     }
     if (record.state === "interrupted" || record.attempt === 0) {
-      record = this.store.updateWorkflow(record.requestId, {
-        state: "pending",
-        attempt: record.attempt + 1,
-        runId: createRunId(record.workflow),
-        error: null,
-      });
+      record = this.store.updateWorkflow(
+        record.requestId,
+        {
+          state: "pending",
+          attempt: record.attempt + 1,
+          runId: createRunId(record.workflow),
+          error: null,
+        },
+        claim,
+      );
     } else if (record.runId === undefined) {
-      record = this.store.updateWorkflow(record.requestId, {
-        state: "pending",
-        runId: createRunId(record.workflow),
-        error: null,
-      });
+      record = this.store.updateWorkflow(
+        record.requestId,
+        {
+          state: "pending",
+          runId: createRunId(record.workflow),
+          error: null,
+        },
+        claim,
+      );
     }
     if (record.runId === undefined) {
       throw new Error(`Workflow request has no reserved run ID: ${record.requestId}`);
@@ -104,18 +127,23 @@ export class ControllerWorkflowCoordinator {
       },
       signal,
       (completed) => {
-        this.complete(record.requestId, completed);
+        this.complete(record.requestId, completed, claim);
       },
     );
-    record = this.store.updateWorkflow(record.requestId, {
-      state: result.state,
-      ...(result.runId !== undefined ? { runId: result.runId } : {}),
-      ...(result.error !== undefined ? { error: result.error } : { error: null }),
-    });
+    record = this.store.updateWorkflow(
+      record.requestId,
+      {
+        state: result.state,
+        ...(result.runId !== undefined ? { runId: result.runId } : {}),
+        ...(result.error !== undefined ? { error: result.error } : { error: null }),
+      },
+      claim,
+    );
     if (reservation.created || result.state !== "running") {
       this.recordEvent(
         record,
         reservation.created ? "workflow_requested" : "workflow_state_changed",
+        claim,
       );
     }
     return record;
@@ -131,7 +159,11 @@ export class ControllerWorkflowCoordinator {
     }
   }
 
-  private recordEvent(record: ChildWorkflowRecord, type: string): void {
+  private recordEvent(
+    record: ChildWorkflowRecord,
+    type: string,
+    claim: ControllerQueueClaim,
+  ): void {
     const resource = this.store.getResourceByUid(record.resourceUid);
     if (resource === undefined) {
       return;
@@ -139,6 +171,7 @@ export class ControllerWorkflowCoordinator {
     this.store.recordEvent({
       controller: resource.metadata.controller,
       key: resource.metadata.key,
+      claim,
       type,
       payload: {
         requestId: record.requestId,

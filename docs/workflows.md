@@ -2,8 +2,8 @@
 
 This document is the authoring reference for pi-workflows definitions. It
 covers the file format, every node type, edge routing, the step contract the
-model sees, and how runs behave at runtime. For the on-disk run format, see
-[run-bundles.md](run-bundles.md).
+model sees, and how runs behave at runtime. For durable state, see
+[SQLITE_STATE.md](SQLITE_STATE.md).
 
 ## Workflow files
 
@@ -105,11 +105,11 @@ Function actions receive `WorkflowActionContext`, which adds
 
 Every interactive `/workflow` run is tracked in the project run queue (see
 [CONTROLLERS.md](CONTROLLERS.md) for the store). The session that starts a run
-claims it and owns it while it executes; every bundle write proves the claim
+claims it and owns it while it executes; every owner-only SQLite write proves the claim
 first (write fencing).
 
 Closing the Pi session mid-run no longer cancels the run. The engine **parks**:
-it stops without a terminal event, releases the claim, and leaves the bundle
+it stops without a terminal event, releases the claim, and leaves the run
 resumable. When a runner is available again (a reopened Pi session or the
 standalone host), the run **resumes** at the node it stopped on. Completed
 nodes replay from the recorded state; only the interrupted node and everything
@@ -259,10 +259,10 @@ schema, limits, estimation, and error rules.
 
 ### checkpoint
 
-Ends the run in a `waiting` state for human review. The checkpoint bundle is
+Ends the run in a `waiting` state for human review. The checkpoint run is
 terminal, so no process keeps running while the run waits. The human answers
 with `/workflow answer <json>` (or plain text), which starts a **continuation
-run**: a new run with its own bundle and trace, linked to the checkpointed run
+run**: a new run with its own state and events, linked to the checkpointed run
 through `parentRunId`. The continuation receives the answer as its input,
 carries forward every output the parent produced (including the checkpoint's),
 and continues routing along the checkpoint's outgoing edge. Outgoing edges
@@ -442,7 +442,7 @@ Autoimplement uses batches for pi-reviewer, pending CI watches, and local verifi
 
 Autoimplement inspects every pull request before it waits for CI. It accepts only supported pending `gh pr checks --watch` or `gh run watch` descriptors and binds each one to the validated pull request as `gh pr checks <PR URL> --watch`. Repository and pull-request overrides are rejected. One watch lasts at most five minutes. A failed or timed-out watch affects only its pull request. When checks remain pending, the model runs more useful local tests before checking CI again. Autoimplement does not invent an ETA.
 
-The action abort signal stops active command process groups and prevents queued commands from starting. Accepted outputs use the existing trace and artifacts. An interrupted unaccepted batch runs again because batch commands are read-only or isolated local checks. Progress updates contain metadata only and never control routing. Truncated reviewer or CI output cannot count as clean. See [Run independent commands in bounded batches](plans/2026-08-20-bounded-command-batches-plan.md) for the complete contract and implementation plan.
+The action abort signal stops active command process groups and prevents queued commands from starting. Accepted outputs use immutable events and content-addressed blobs. An interrupted unaccepted batch runs again because batch commands are read-only or isolated local checks. Progress updates contain metadata only and never control routing. Truncated reviewer or CI output cannot count as clean. See [Run independent commands in bounded batches](plans/2026-08-20-bounded-command-batches-plan.md) for the complete contract and implementation plan.
 
 A model-generated blocker from implementation or a safe later stage does not end autoimplement by itself. A separate blocker-challenge agent checks the task, approved plan, current result, evidence, scope, authority, earlier attempts, and practical alternatives. It confirms a blocker only when the blocker exists now, is outside the granted authority, has no safe path forward, has an empty next action, and includes concrete evidence and checked alternatives. A rejected blocker must name the next practical action and routes through the existing redesign workflow before implementation and verification continue.
 
@@ -598,7 +598,7 @@ been queued, another workflow cannot start until that assistant response
 settles, so results cannot interleave.
 
 Presentation is outside the workflow graph: it cannot route to another node,
-change the run status, or alter the run bundle. If prompt generation or message
+change the run status, or alter the SQLite run state. If prompt generation or message
 delivery fails, the extension reports a warning and leaves the finished run
 unchanged. Opting in adds one hidden custom message and one assistant response
 to the normal Pi session; it adds no other persistent data and uses no Pi
@@ -607,7 +607,7 @@ internals.
 ## Runtime behavior
 
 Runs execute one node at a time. Every transition is persisted to the run
-bundle before the engine moves on, which is what makes the live viewer
+database transaction before the engine moves on, which is what makes the live viewer
 possible. Defaults worth knowing:
 
 - Node timeout is 15 minutes unless the node sets `timeoutMs` to a positive
@@ -626,7 +626,7 @@ possible. Defaults worth knowing:
   `/workflow resume` re-delivers the pending step prompt.
 - A model-started workflow is persisted as `queued` with its final run ID before the start tool
   returns. Activation waits for the initiating agent turn to settle, then moves through `starting`
-  and `running`. `workflow status` and `workflow cancel` accept the run ID before a run bundle
+  and `running`. `workflow status` and `workflow cancel` accept the run ID before a SQLite run state
   exists.
 - If deferred activation fails, the queue stores a bounded safe error, releases the session
   reservation, and creates one deferred-turn intent for the initiating session. A workflow that
@@ -666,7 +666,7 @@ if (run.state !== "succeeded") {
 }
 ```
 
-Child workflow completion queues the parent resource again. A running child left by a stopped host is recorded as a failed run bundle with a `run_interrupted` event. The controller treats that child attempt as interrupted, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
+Child workflow completion queues the parent resource again. A running child left by a stopped host is recorded as a failed SQLite run state with a `run_interrupted` event. The controller treats that child attempt as interrupted, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
 
 See [CONTROLLERS.md](CONTROLLERS.md) for controller definitions and the full recovery contract.
 

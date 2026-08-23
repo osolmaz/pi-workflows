@@ -44,6 +44,7 @@ export type ControllerManagerOptions = {
 
 export class ControllerManager {
   readonly store: ControllerStore;
+  private readonly ownerId = `controller-manager-${randomUUID()}`;
   private readonly definitions = new Map<string, AnyControllerDefinition>();
   private readonly workflowCoordinator: ControllerWorkflowCoordinator;
   private readonly maxConcurrent: number;
@@ -237,6 +238,7 @@ export class ControllerManager {
   private claimNext(): ControllerQueueClaim | undefined {
     return this.store.claimNext({
       controllers: this.eligibleControllers(),
+      ownerId: this.ownerId,
       leaseMs: this.leaseMs,
       now: this.now().toISOString(),
     });
@@ -303,14 +305,19 @@ export class ControllerManager {
       Math.max(100, Math.floor(this.leaseMs / 3)),
     );
     renew.unref?.();
-    this.recordEvent(ref, "reconcile_started", {
-      reconcileId,
-      generation: resource.metadata.generation,
-    });
+    this.recordEvent(
+      ref,
+      "reconcile_started",
+      {
+        reconcileId,
+        generation: resource.metadata.generation,
+      },
+      claim,
+    );
 
     try {
       const result = await raceWithAbort(
-        this.callReconciler(definition, resource, abort.signal),
+        this.callReconciler(definition, resource, claim, abort.signal),
         abort.signal,
       );
       if (abort.signal.aborted) {
@@ -330,12 +337,13 @@ export class ControllerManager {
   private async callReconciler(
     definition: AnyControllerDefinition,
     resource: ControllerResource,
+    claim: ControllerQueueClaim,
     signal: AbortSignal,
   ): Promise<ReconcileResult<unknown>> {
     const context: ReconcileContext<unknown> = {
       signal,
-      effects: new ControllerEffectService(this.store, resource, signal),
-      workflows: this.workflowCoordinator.forResource(resource, signal),
+      effects: new ControllerEffectService(this.store, resource, claim, signal),
+      workflows: this.workflowCoordinator.forResource(resource, claim, signal),
       ...createResultHelpers<unknown>(),
     };
     const result = await definition.reconcile(context, asTypedResource(resource));
@@ -361,34 +369,40 @@ export class ControllerManager {
     try {
       const updated = this.store.updateStatus({
         ref,
-        expectedResourceVersion: resource.metadata.resourceVersion,
+        expectedResourceVersion: claim.resourceVersion,
+        claim,
         status,
         ...(result.status?.finalizers !== undefined
           ? { finalizers: result.status.finalizers }
           : {}),
         now: now.toISOString(),
       });
-      this.recordEvent(ref, "reconcile_finished", {
-        reconcileId,
-        result: result.kind,
-        generation: resource.metadata.generation,
-        durationMs: Math.max(0, now.getTime() - startedAtMs),
-        ...(result.kind === "requeue" && result.afterMs !== undefined
-          ? { requeueAfterMs: result.afterMs }
-          : {}),
-      });
+      this.recordEvent(
+        ref,
+        "reconcile_finished",
+        {
+          reconcileId,
+          result: result.kind,
+          generation: resource.metadata.generation,
+          durationMs: Math.max(0, now.getTime() - startedAtMs),
+          ...(result.kind === "requeue" && result.afterMs !== undefined
+            ? { requeueAfterMs: result.afterMs }
+            : {}),
+        },
+        claim,
+      );
       if (
         result.kind === "settled" &&
         updated.metadata.deletionTimestamp !== undefined &&
         updated.metadata.finalizers.length === 0
       ) {
-        this.recordEvent(ref, "resource_deleted", { reconcileId });
-        this.store.deleteResource(ref, updated.metadata.resourceVersion);
+        this.recordEvent(ref, "resource_deleted", { reconcileId }, claim);
+        this.store.deleteResource(ref, claim.resourceVersion, claim);
         return;
       }
     } catch (error) {
       if (error instanceof ResourceConflictError) {
-        this.recordEvent(ref, "reconcile_conflict", { reconcileId });
+        this.recordEvent(ref, "reconcile_conflict", { reconcileId }, claim);
         this.store.requeueClaim(claim, { availableAt: now.toISOString() }, now.toISOString());
         return;
       }
@@ -416,12 +430,17 @@ export class ControllerManager {
     const now = this.now();
     const message = boundedError(error);
     const delay = this.backoffMs(claim.consecutiveErrors + 1);
-    this.recordEvent(ref, "reconcile_failed", {
-      reconcileId,
-      error: message,
-      durationMs: Math.max(0, now.getTime() - startedAtMs),
-      requeueAfterMs: delay,
-    });
+    this.recordEvent(
+      ref,
+      "reconcile_failed",
+      {
+        reconcileId,
+        error: message,
+        durationMs: Math.max(0, now.getTime() - startedAtMs),
+        requeueAfterMs: delay,
+      },
+      claim,
+    );
     this.store.requeueClaim(
       claim,
       {
@@ -444,10 +463,16 @@ export class ControllerManager {
     return this.store.listQueue().some((item) => Date.parse(item.availableAt) <= now);
   }
 
-  private recordEvent(ref: ControllerResourceRef, type: string, payload: JsonObject = {}): void {
+  private recordEvent(
+    ref: ControllerResourceRef,
+    type: string,
+    payload: JsonObject = {},
+    claim?: ControllerQueueClaim,
+  ): void {
     this.store.recordEvent({
       controller: ref.controller,
       key: ref.key,
+      ...(claim === undefined ? {} : { claim }),
       type,
       payload,
       now: this.now().toISOString(),

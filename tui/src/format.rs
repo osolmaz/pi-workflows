@@ -29,7 +29,7 @@ pub fn format_duration(duration_ms: i64) -> String {
     format!("{minutes}m{rest:02}s")
 }
 
-/// `Date.parse` for the ISO-8601 timestamps run bundles contain. Returns
+/// `Date.parse` for the ISO-8601 timestamps SQLite workflow state contain. Returns
 /// milliseconds since the epoch, or `None` for unparsable input.
 pub fn parse_timestamp_ms(value: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(value)

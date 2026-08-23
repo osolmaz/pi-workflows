@@ -76,19 +76,12 @@ function failureMessage(error: unknown): string {
 }
 
 /**
- * Records both settled Pi entries and normalized temporal events into one run
- * bundle. The hot event path only stamps and queues records; filesystem work
- * runs on a separate ordered append chain.
+ * Records settled Pi entries and normalized temporal events in SQLite.
  */
 export class SessionRecorder {
   private readonly store: WorkflowRunStore;
-  private readonly runDir: string;
   private readonly runId: string;
-  /**
-   * Capture segment for this recorder. Undefined writes the legacy flat
-   * stream; a second recorder attaching to the same bundle (resume or
-   * handoff) writes a segment instead so the first capture stays intact.
-   */
+  /** Capture segment for this recorder after an ownership handoff. */
   private segmentId: string | undefined;
   private cursor: string | null = null;
   private readonly recorded: string[] = [];
@@ -122,9 +115,8 @@ export class SessionRecorder {
   private flushPromise: Promise<void> | null = null;
   private captureFailure: WorkflowSessionCaptureFailure | null = null;
 
-  constructor(store: WorkflowRunStore, runDir: string, runId: string) {
+  constructor(store: WorkflowRunStore, runId: string) {
     this.store = store;
-    this.runDir = runDir;
     this.runId = runId;
   }
 
@@ -135,13 +127,12 @@ export class SessionRecorder {
     this.bound = true;
     this.cursor = ctx.sessionManager.getLeafId();
     const sessionFile = ctx.sessionManager.getSessionFile();
-    // A bundle that already has a binding belongs to an earlier capture
-    // attempt; this recorder writes its own segment under session/segments.
-    if (await this.store.hasSessionBinding(this.runDir)) {
+    // An existing binding belongs to an earlier capture segment.
+    if (await this.store.hasSessionBinding(this.runId)) {
       this.segmentId = randomUUID();
     }
     await this.store.writeSessionBinding(
-      this.runDir,
+      this.runId,
       {
         schema: SESSION_BINDING_SCHEMA,
         runId: this.runId,
@@ -153,7 +144,7 @@ export class SessionRecorder {
       this.segmentId,
     );
     await this.store.writeSessionCapture(
-      this.runDir,
+      this.runId,
       {
         schema: SESSION_CAPTURE_SCHEMA,
         eventSchema: SESSION_EVENT_SCHEMA,
@@ -344,7 +335,7 @@ export class SessionRecorder {
       }
       const appended: RecordedEntry[] = [];
       for (const entry of branch.slice(startIndex)) {
-        await this.store.appendSessionEntry(this.runDir, entry, this.segmentId);
+        await this.store.appendSessionEntry(this.runId, entry, this.segmentId);
         const recorded = { id: entry.id, entry, claimed: false };
         appended.push(recorded);
         this.unclaimedEntries.push(recorded);
@@ -426,9 +417,9 @@ export class SessionRecorder {
       try {
         await this.flushAllEvents();
         await this.entryChain;
-        const counts = await this.store.sessionCounts(this.runDir, this.segmentId);
+        const counts = await this.store.sessionCounts(this.runId, this.segmentId);
         await this.store.writeSessionCapture(
-          this.runDir,
+          this.runId,
           {
             schema: SESSION_CAPTURE_SCHEMA,
             eventSchema: SESSION_EVENT_SCHEMA,
@@ -443,9 +434,9 @@ export class SessionRecorder {
         // the workflow's terminal persistence hook.
         this.failCapture("capture_finalize_failed", failureMessage(error));
         try {
-          const counts = await this.store.sessionCounts(this.runDir, this.segmentId);
+          const counts = await this.store.sessionCounts(this.runId, this.segmentId);
           await this.store.writeSessionCapture(
-            this.runDir,
+            this.runId,
             {
               schema: SESSION_CAPTURE_SCHEMA,
               eventSchema: SESSION_EVENT_SCHEMA,
@@ -602,7 +593,7 @@ export class SessionRecorder {
     }
     this.flushPromise = this.store
       .appendSessionEventBatch(
-        this.runDir,
+        this.runId,
         batch.map((queued) => queued.record),
         this.segmentId,
       )

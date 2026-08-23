@@ -1,12 +1,12 @@
 # Replayable run bundles — implementation plan
 
 Goal: make every workflow run bundle self-contained for replay, as specified
-in [run-bundles.md](../run-bundles.md). This is a hard cutover: one format,
+in [run-bundles.md](../SQLITE_STATE.md). This is a hard cutover: one format,
 no readers for the previous layout, no compatibility code.
 
 ## Steps
 
-1. **Spec** — rewrite `docs/run-bundles.md`: trace-first write discipline,
+1. **Spec** — rewrite `docs/SQLITE_STATE.md`: trace-first write discipline,
    `traceSeq` in `state.json`, content-addressed `artifacts/`, `session/`
    with binding + verbatim Pi entries, explicit `conversation` entry ranges
    on agent steps, event payload catalog. Review the data model with

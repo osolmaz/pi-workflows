@@ -10,7 +10,6 @@ import {
 const target: WorkflowViewTarget = {
   runId: "20260818T120000Z-monitor-a1b2c3d4",
   workflowName: "monitor",
-  runDir: "/tmp/runs/20260818T120000Z-monitor-a1b2c3d4",
 };
 
 type Call = { command: string; args: string[] };
@@ -201,7 +200,7 @@ describe("HerdrWorkflowViewer", () => {
       );
       expect(open?.command).toBe("herdr");
       expect(open?.args).toContain(`PI_WORKFLOWS_RUN_ID=${target.runId}`);
-      expect(open?.args).toContain(`PI_WORKFLOWS_RUN_DIR=${target.runDir}`);
+      expect(open?.args).not.toContain(expect.stringContaining("PI_WORKFLOWS_RUN_DIR="));
       expect(open?.args).not.toContain("--cwd");
       expect(open?.args).toContain("--target-pane");
       expect(open?.args.at(-1)).toBe(placement === "below" ? "down" : "right");

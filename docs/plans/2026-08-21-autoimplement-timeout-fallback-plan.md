@@ -153,7 +153,7 @@ A repeated node performs only missing work. It must not create a duplicate commi
 7. Route supported `timed_out` outcomes to the fallback. Preserve success, failure, and cancellation behavior.
 8. Update consequential-node prompts so repeated attempts inspect state and perform only missing work.
 9. Increment the built-in Autoimplement revision from 5 to 6 in `src/builtins/catalog.ts`.
-10. Update `docs/workflows.md` and `docs/run-bundles.md` when implementation ships so public documentation matches the code.
+10. Update `docs/workflows.md` and `docs/SQLITE_STATE.md` when implementation ships so public documentation matches the code.
 
 ## Alpha cutover
 

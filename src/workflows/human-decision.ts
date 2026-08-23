@@ -1,15 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
-import fs from "node:fs/promises";
-import path from "node:path";
+import { StateDatabase, workflowStatePath } from "../state/database.js";
+import { resourceIdFor, tokenHash } from "../state/mutation.js";
 import {
   digestCanonical,
   normalizeDecisionPresentation,
   validateHumanDecisionRequestIntegrity,
 } from "./decision-presentation.js";
 import { checkpoint } from "./definition.js";
+import type { RunWriteAuthority } from "./store.js";
 import type {
-  AcceptedHumanDecision,
   CheckpointNodeDefinition,
   HumanDecisionChoice,
   HumanDecisionAudience,
@@ -309,10 +308,8 @@ export function validateHumanDecisionSubmission(
   };
 }
 
-export function humanDecisionStateRoot(runsRoot: string): string {
-  return path.basename(runsRoot) === "runs"
-    ? path.join(path.dirname(runsRoot), "decisions")
-    : `${runsRoot}.decisions`;
+export function humanDecisionDatabasePath(homeDir?: string): string {
+  return workflowStatePath(homeDir);
 }
 
 export type HumanDecisionAcceptance =
@@ -347,59 +344,121 @@ function requireCurrentDecision(value: unknown): ResolvedHumanDecision {
   return value as ResolvedHumanDecision;
 }
 
-function requireCurrentResolution(value: unknown): HumanDecisionResolution | null {
-  if (value === null) return null;
-  const resolution = requireRecord(value, "Human decision resolution");
-  if (resolution.schema !== "pi-workflows.human-decision-resolution.v1") {
-    throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
-  }
-  if (resolution.outcome === "accepted") {
-    return {
-      ...resolution,
-      decision: requireCurrentDecision(resolution.decision),
-    } as HumanDecisionResolution;
-  }
-  if (resolution.outcome === "cancelled") return value as HumanDecisionResolution;
-  throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
-}
-
-function requireCurrentDelivery(value: unknown): HumanDecisionDeliveryRecord {
-  const delivery = requireRecord(value, "Human decision delivery");
-  if (
-    delivery.schema !== "pi-workflows.human-decision-delivery.v1" ||
-    !Object.hasOwn(delivery, "presentationDigest") ||
-    !Object.hasOwn(delivery, "phase")
-  ) {
-    throw new Error(INCOMPATIBLE_HUMAN_DECISION_STATE);
-  }
-  return value as HumanDecisionDeliveryRecord;
-}
-
 export class HumanDecisionStore {
-  readonly root: string;
+  readonly databasePath: string;
+  readonly state: StateDatabase;
+  private readonly ownsState: boolean;
+  private readonly authorityProvider:
+    | ((runId: string) => RunWriteAuthority | undefined)
+    | undefined;
 
-  constructor(runsRoot: string) {
-    this.root = humanDecisionStateRoot(runsRoot);
+  constructor(
+    databasePath: string = workflowStatePath(),
+    options: {
+      state?: StateDatabase;
+      authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
+      readOnly?: boolean;
+    } = {},
+  ) {
+    this.ownsState = options.state === undefined;
+    this.state =
+      options.state ??
+      new StateDatabase({
+        filePath: databasePath,
+        mode: options.readOnly === true ? "read-only" : "read-write",
+        checkLegacyState: databasePath === workflowStatePath(),
+      });
+    this.databasePath = this.state.filePath;
+    this.authorityProvider = options.authorityProvider;
   }
 
-  decisionDir(decisionId: string): string {
-    assertId(decisionId, "decision id");
-    return path.join(this.root, decisionId);
+  close(): void {
+    if (this.ownsState) this.state.close();
   }
 
   async createRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
     validateHumanDecisionRequestIntegrity(request);
-    return await writeImmutableJson(
-      path.join(this.decisionDir(request.decisionId), "request.json"),
-      request,
-    );
+    return this.state.transaction(() => {
+      const existing = this.readRequestRow(request.decisionId);
+      if (existing !== undefined) {
+        const stored = this.readRequestFromHash(existing.requestHash);
+        if (canonicalJson(stored) !== canonicalJson(request)) {
+          throw new Error("Immutable human decision request conflicts");
+        }
+        return "adopted";
+      }
+      const run = this.state.connection
+        .prepare("SELECT resource_id AS resourceId FROM runs WHERE run_id = ?")
+        .get(request.runId);
+      if (!isResourceIdRow(run)) throw new Error(`Human decision run is missing: ${request.runId}`);
+      const attempt = this.state.connection
+        .prepare("SELECT 1 AS present FROM node_attempts WHERE attempt_id = ? AND run_id = ?")
+        .get(request.attemptId, request.runId);
+      if (!isPresentRow(attempt)) {
+        throw new Error(`Human decision attempt is missing: ${request.attemptId}`);
+      }
+      const now = Date.parse(request.createdAt);
+      const resourceId = resourceIdFor("decision", request.decisionId);
+      const subjectHash = this.state.putJson(request.subject, now);
+      const presentationHash = this.state.putJson(request.presentation, now);
+      const choicesHash = this.state.putJson(request.choices, now);
+      const defaultHash =
+        request.defaultResponse === undefined
+          ? null
+          : this.state.putJson(request.defaultResponse, now);
+      const requestHash = this.state.putJson(request, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'decision', ?, 1, ?, ?)`,
+        )
+        .run(resourceId, request.decisionId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(resourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO human_decisions(
+             decision_id, resource_id, run_id, attempt_id, audience, title,
+             subject_hash, presentation_hash, choices_hash, request_digest,
+             presentation_revision, deadline_at, default_response_hash, request_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          request.decisionId,
+          resourceId,
+          request.runId,
+          request.attemptId,
+          request.audience,
+          request.title,
+          subjectHash,
+          presentationHash,
+          choicesHash,
+          digestBuffer(request.requestDigest),
+          request.revision,
+          request.expiresAt === undefined ? null : Date.parse(request.expiresAt),
+          defaultHash,
+          requestHash,
+          now,
+        );
+      this.insertDecisionEvent(
+        resourceId,
+        1,
+        "decision.requested",
+        "system",
+        null,
+        requestHash,
+        now,
+      );
+      return "created";
+    });
   }
 
   async readRequest(decisionId: string): Promise<HumanDecisionRequest | null> {
-    const request = (await readJson(
-      path.join(this.decisionDir(decisionId), "request.json"),
-    )) as HumanDecisionRequest | null;
-    return request === null ? null : validateHumanDecisionRequestIntegrity(request);
+    assertId(decisionId, "decision id");
+    const row = this.readRequestRow(decisionId);
+    return row === undefined ? null : this.readRequestFromHash(row.requestHash);
   }
 
   async recordDelivery(
@@ -407,18 +466,7 @@ export class HumanDecisionStore {
     channel: string,
     value: HumanDecisionDeliveryRecord,
   ): Promise<"created" | "adopted"> {
-    const safeChannel = requireSimpleId(channel, "Human decision channel");
-    const attemptId = requireString(value.attemptId, "Human decision delivery attempt");
-    assertId(attemptId, "delivery attempt id");
-    return await writeImmutableJson(
-      path.join(
-        this.decisionDir(request.decisionId),
-        "deliveries",
-        safeChannel,
-        `${attemptId}.json`,
-      ),
-      value,
-    );
+    return this.recordChannelMessage(request.decisionId, channel, "delivery", value);
   }
 
   async accept(
@@ -426,101 +474,37 @@ export class HumanDecisionStore {
     submission: HumanDecisionSubmission,
   ): Promise<HumanDecisionAcceptance> {
     validateHumanDecisionRequestIntegrity(request);
-    const cancellation = await this.readCancellation(request.decisionId);
-    if (cancellation !== null) {
-      throw new Error(`Human decision request was ${cancellation.reason}`);
-    }
     const normalized = validateHumanDecisionSubmission(request, submission);
-    let attemptedAt = new Date().toISOString();
+    const attemptedAt = new Date().toISOString();
     const attemptId = digestHex({
       decisionId: request.decisionId,
       idempotencyKey: normalized.idempotencyKey,
     }).slice(0, 40);
-    const attemptPath = path.join(
-      this.decisionDir(request.decisionId),
-      "answers",
-      `${attemptId}.json`,
-    );
-    const attempt = {
-      schema: "pi-workflows.human-decision-answer-attempt.v1",
-      attemptId,
-      attemptedAt,
-      ...normalized,
-    };
-    const attemptWrite = await writeImmutableJson(attemptPath, attempt, false);
-    if (attemptWrite === "adopted") {
-      const existingAttempt = requireRecord(
-        await readJson(attemptPath),
-        "Existing human decision answer attempt",
-      );
-      const existingSubmission = {
-        decisionId: existingAttempt.decisionId,
-        requestDigest: existingAttempt.requestDigest,
-        choice: existingAttempt.choice,
-        ...(existingAttempt.input !== undefined ? { input: existingAttempt.input } : {}),
-        source: existingAttempt.source,
-        idempotencyKey: existingAttempt.idempotencyKey,
-      };
-      if (canonicalJson(existingSubmission) !== canonicalJson(normalized)) {
-        throw new Error("Human decision idempotency key was reused for a different answer");
-      }
-      attemptedAt = requireString(existingAttempt.attemptedAt, "answer attempt time");
-    }
-    const response = validateHumanDecisionResponse(request, normalized);
-    const commonDecision = {
+    const decision: ResolvedHumanDecision = {
+      schema: "pi-workflows.human-decision-accepted.v1",
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
-      response,
-      provenance: "human" as const,
+      response: validateHumanDecisionResponse(request, normalized),
+      provenance: "human",
       source: normalized.source,
       idempotencyKey: normalized.idempotencyKey,
       acceptedAt: attemptedAt,
-      answerDigest: digest({ response, source: normalized.source }),
-    };
-    const decision: AcceptedHumanDecision = {
-      schema: "pi-workflows.human-decision-accepted.v1",
-      ...commonDecision,
+      answerDigest: digest({
+        requestDigest: request.requestDigest,
+        response: validateHumanDecisionResponse(request, normalized),
+        source: normalized.source,
+      }),
       subjectDigest: request.subjectDigest,
       presentationDigest: request.presentationDigest,
       revision: request.revision,
     };
-    const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution: HumanDecisionResolution = {
-      schema: "pi-workflows.human-decision-resolution.v1",
-      outcome: "accepted",
-      decision,
-    };
-    const result = await writeImmutableJson(resolutionPath, resolution, false);
-    const winner =
-      result === "created"
-        ? resolution
-        : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
-    if (winner === null) throw new Error("Human decision resolution became unreadable");
-    const winningCancellation = await this.readCancellation(request.decisionId);
-    if (winningCancellation !== null) {
-      throw new Error(`Human decision request was ${winningCancellation.reason}`);
-    }
-    if (winner.outcome === "cancelled") {
-      throw new Error(`Human decision request was ${winner.cancellation.reason}`);
-    }
-    const existing = winner.decision;
-    await writeImmutableJson(
-      path.join(this.decisionDir(request.decisionId), "accepted.json"),
-      existing,
-    );
-    if (result === "created") return { status: "accepted", decision: existing };
-    if (canonicalJson(existing) === canonicalJson(decision)) {
-      return { status: "adopted", decision: existing };
-    }
-    if (
-      existing.provenance === "human" &&
-      existing.idempotencyKey === decision.idempotencyKey &&
-      canonicalJson(existing.response) === canonicalJson(decision.response) &&
-      canonicalJson(existing.source) === canonicalJson(decision.source)
-    ) {
-      return { status: "adopted", decision: existing };
-    }
-    return { status: "conflict", decision: existing };
+    return this.attemptAcceptance(request, decision, {
+      attemptId,
+      source: "human",
+      actorId: normalized.source.actorId,
+      channel: normalized.source.channel,
+      candidate: normalized,
+    });
   }
 
   async resolveTimeout(
@@ -534,63 +518,38 @@ export class HumanDecisionStore {
     if (Date.parse(request.expiresAt) > now.getTime()) {
       throw new Error("Human decision timeout default is not eligible yet");
     }
+    this.assertRunOwner(request.runId, now.getTime());
     const response = validateHumanDecisionResponse(request, request.defaultResponse);
-    const commonDecision = {
+    const decision: ResolvedHumanDecision = {
+      schema: "pi-workflows.human-decision-accepted.v1",
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
       response,
-      provenance: "timeout" as const,
+      provenance: "timeout",
       acceptedAt: now.toISOString(),
       answerDigest: digest({
         provenance: "timeout",
         requestDigest: request.requestDigest,
         response,
       }),
-    };
-    const decision: ResolvedHumanDecision = {
-      schema: "pi-workflows.human-decision-accepted.v1",
-      ...commonDecision,
       subjectDigest: request.subjectDigest,
       presentationDigest: request.presentationDigest,
       revision: request.revision,
     };
-    const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution: HumanDecisionResolution = {
-      schema: "pi-workflows.human-decision-resolution.v1",
-      outcome: "accepted",
-      decision,
-    };
-    const result = await writeImmutableJson(resolutionPath, resolution, false);
-    const winner =
-      result === "created"
-        ? resolution
-        : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
-    if (winner === null) throw new Error("Human decision resolution became unreadable");
-    const winningCancellation = await this.readCancellation(request.decisionId);
-    if (winningCancellation !== null) {
-      throw new Error(`Human decision request was ${winningCancellation.reason}`);
-    }
-    if (winner.outcome === "cancelled") {
-      throw new Error(`Human decision request was ${winner.cancellation.reason}`);
-    }
-    const existing = winner.decision;
-    await writeImmutableJson(
-      path.join(this.decisionDir(request.decisionId), "accepted.json"),
-      existing,
-    );
-    if (result === "created") return { status: "accepted", decision: existing };
-    return canonicalJson(existing) === canonicalJson(decision)
-      ? { status: "adopted", decision: existing }
-      : { status: "conflict", decision: existing };
+    const actorId = this.authorityProvider?.(request.runId)?.ownerId;
+    return this.attemptAcceptance(request, decision, {
+      attemptId: digestHex({ decisionId: request.decisionId, provenance: "timeout" }).slice(0, 40),
+      source: "policy",
+      ...(actorId === undefined ? {} : { actorId }),
+      candidate: response,
+    });
   }
 
   async listDeliveries(
     decisionId: string,
     channel: string,
   ): Promise<HumanDecisionDeliveryRecord[]> {
-    const safeChannel = requireSimpleId(channel, "Human decision channel");
-    const directory = path.join(this.decisionDir(decisionId), "deliveries", safeChannel);
-    return (await readJsonDirectory(directory)).map(requireCurrentDelivery);
+    return this.listChannelMessages<HumanDecisionDeliveryRecord>(decisionId, channel, "delivery");
   }
 
   async recordSettlement(
@@ -598,26 +557,18 @@ export class HumanDecisionStore {
     channel: string,
     value: HumanDecisionSettlementRecord,
   ): Promise<"created" | "adopted"> {
-    const safeChannel = requireSimpleId(channel, "Human decision channel");
-    assertId(value.attemptId, "settlement attempt id");
-    return await writeImmutableJson(
-      path.join(
-        this.decisionDir(decisionId),
-        "settlements",
-        safeChannel,
-        `${value.attemptId}.json`,
-      ),
-      value,
-    );
+    return this.recordChannelMessage(decisionId, channel, "settlement", value);
   }
 
   async listSettlements(
     decisionId: string,
     channel: string,
   ): Promise<HumanDecisionSettlementRecord[]> {
-    const safeChannel = requireSimpleId(channel, "Human decision channel");
-    const directory = path.join(this.decisionDir(decisionId), "settlements", safeChannel);
-    return (await readJsonDirectory(directory)) as HumanDecisionSettlementRecord[];
+    return this.listChannelMessages<HumanDecisionSettlementRecord>(
+      decisionId,
+      channel,
+      "settlement",
+    );
   }
 
   async cancel(
@@ -625,107 +576,644 @@ export class HumanDecisionStore {
     reason: HumanDecisionCancellationRecord["reason"],
   ): Promise<"created" | "adopted"> {
     validateHumanDecisionRequestIntegrity(request);
-    if ((await this.readResolved(request.decisionId)) !== null) {
-      throw new Error("Resolved human decision cannot be cancelled");
+    if (reason === "expired" && request.defaultResponse !== undefined) {
+      throw new Error("A defaulted human decision must resolve through its timeout policy");
     }
-    const filePath = path.join(this.decisionDir(request.decisionId), "cancelled.json");
-    const record: HumanDecisionCancellationRecord = {
-      schema: "pi-workflows.human-decision-cancellation.v1",
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      cancelledAt: new Date().toISOString(),
-      reason,
-    };
-    const resolutionPath = path.join(this.decisionDir(request.decisionId), "resolution.json");
-    const resolution: HumanDecisionResolution = {
-      schema: "pi-workflows.human-decision-resolution.v1",
-      outcome: "cancelled",
-      cancellation: record,
-    };
-    const result = await writeImmutableJson(resolutionPath, resolution, false);
-    const winner =
-      result === "created"
-        ? resolution
-        : ((await readJson(resolutionPath)) as HumanDecisionResolution | null);
-    if (winner === null) throw new Error("Human decision resolution became unreadable");
-    if (winner.outcome === "accepted") {
-      throw new Error("Resolved human decision cannot be cancelled");
-    }
-    const existing = winner.cancellation;
-    if (
-      existing.decisionId !== request.decisionId ||
-      existing.requestDigest !== request.requestDigest ||
-      existing.reason !== reason
-    ) {
-      throw new Error("Immutable human decision cancellation conflicts");
-    }
-    await writeImmutableJson(filePath, existing);
-    return result;
+    return this.state.transaction(() => {
+      this.requireStoredRequest(request);
+      const winner = this.readResolution(request.decisionId);
+      if (winner !== null) {
+        if (winner.outcome === "cancelled") {
+          if (winner.cancellation.reason === reason) return "adopted";
+          throw new Error(
+            `Human decision was already cancelled with reason ${winner.cancellation.reason}`,
+          );
+        }
+        throw new Error(`Human decision was already accepted by ${winner.decision.provenance}`);
+      }
+      const now = Date.now();
+      const record: HumanDecisionCancellationRecord = {
+        schema: "pi-workflows.human-decision-cancellation.v1",
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        cancelledAt: new Date(now).toISOString(),
+        reason,
+      };
+      const provenance = reason === "expired" ? "expired_no_default" : "explicit_cancel";
+      this.state.connection
+        .prepare(
+          `INSERT INTO human_decision_resolutions(
+             decision_id, outcome, provenance, response_hash, reason, channel,
+             actor_id, request_digest, resolved_at
+           ) VALUES (?, 'cancelled', ?, NULL, ?, NULL, NULL, ?, ?)`,
+        )
+        .run(request.decisionId, provenance, reason, digestBuffer(request.requestDigest), now);
+      const row = this.requireDecisionResource(request.decisionId);
+      this.bumpDecision(row.resourceId, row.revision, now);
+      const recordHash = this.state.putJson(record, now);
+      this.insertDecisionEvent(
+        row.resourceId,
+        row.revision + 1,
+        "decision.cancelled",
+        reason === "expired" ? "policy" : "control",
+        null,
+        recordHash,
+        now,
+      );
+      this.enqueueResolutionEffects(row.resourceId, row.revision + 1, request, "cancelled", now);
+      return "created";
+    });
   }
 
   async readCancellation(decisionId: string): Promise<HumanDecisionCancellationRecord | null> {
-    const stored = (await readJson(
-      path.join(this.decisionDir(decisionId), "cancelled.json"),
-    )) as HumanDecisionCancellationRecord | null;
-    if (stored !== null) return stored;
-    const resolution = requireCurrentResolution(
-      await readJson(path.join(this.decisionDir(decisionId), "resolution.json")),
-    );
-    if (resolution?.outcome !== "cancelled") return null;
-    await writeImmutableJson(
-      path.join(this.decisionDir(decisionId), "cancelled.json"),
-      resolution.cancellation,
-    );
-    return resolution.cancellation;
+    const resolution = this.readResolution(decisionId);
+    return resolution?.outcome === "cancelled" ? resolution.cancellation : null;
   }
 
   async readResolved(decisionId: string): Promise<ResolvedHumanDecision | null> {
-    const cancellation = await readJson(path.join(this.decisionDir(decisionId), "cancelled.json"));
-    if (cancellation !== null) return null;
-    const stored = await readJson(path.join(this.decisionDir(decisionId), "accepted.json"));
-    if (stored !== null) return requireCurrentDecision(stored);
-    const resolution = requireCurrentResolution(
-      await readJson(path.join(this.decisionDir(decisionId), "resolution.json")),
-    );
-    if (resolution?.outcome !== "accepted") return null;
-    await writeImmutableJson(
-      path.join(this.decisionDir(decisionId), "accepted.json"),
-      resolution.decision,
-    );
-    return resolution.decision;
+    const resolution = this.readResolution(decisionId);
+    return resolution?.outcome === "accepted" ? resolution.decision : null;
   }
 
   async recordContinuation(
     decisionId: string,
     value: HumanDecisionContinuationRecord,
   ): Promise<"created" | "adopted"> {
-    return await writeImmutableJson(
-      path.join(this.decisionDir(decisionId), "continuation.json"),
-      value,
-    );
+    return this.state.transaction(() => {
+      const existing = this.readContinuationRow(decisionId);
+      if (existing !== undefined) {
+        const stored = this.state.readJson(existing.recordHash) as HumanDecisionContinuationRecord;
+        if (canonicalJson(stored) !== canonicalJson(value)) {
+          throw new Error("Immutable human decision continuation conflicts");
+        }
+        return "adopted";
+      }
+      const resolution = this.readResolution(decisionId);
+      if (resolution?.outcome !== "accepted") {
+        throw new Error("A continuation requires an accepted human decision");
+      }
+      const recordHash = this.state.putJson(value, Date.parse(value.createdAt));
+      this.state.connection
+        .prepare(
+          `INSERT INTO continuations(
+             decision_id, parent_run_id, continuation_run_id, response_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(decisionId, value.parentRunId, value.runId, recordHash, Date.parse(value.createdAt));
+      return "created";
+    });
   }
 
   async readContinuation(decisionId: string): Promise<HumanDecisionContinuationRecord | null> {
-    return (await readJson(
-      path.join(this.decisionDir(decisionId), "continuation.json"),
-    )) as HumanDecisionContinuationRecord | null;
+    const row = this.readContinuationRow(decisionId);
+    return row === undefined
+      ? null
+      : (this.state.readJson(row.recordHash) as HumanDecisionContinuationRecord);
+  }
+
+  markEffectApplied(
+    decisionId: string,
+    effectType: "decision.continue" | "decision.cancel_parent" | "decision.settle_presentations",
+  ): void {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT e.effect_id AS effectId, e.resource_id AS resourceId
+         FROM effects e
+         JOIN human_decisions d ON d.resource_id = e.source_resource_id
+         WHERE d.decision_id = ? AND e.effect_type = ? AND e.status = 'pending'`,
+      )
+      .all(decisionId, effectType);
+    for (const row of rows) {
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isEffectIdentityRecord(row)) continue;
+      this.state.transaction(() => {
+        const now = Date.now();
+        const revisionRow = this.state.connection
+          .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+          .get(row.resourceId);
+        /* istanbul ignore if -- exact schema and internal query shape */
+        if (!isRevisionRecord(revisionRow)) throw new Error("Decision effect resource is missing");
+        this.state.connection
+          .prepare(
+            `UPDATE effects SET status = 'applied', updated_at = ?, settled_at = ?
+             WHERE effect_id = ? AND status = 'pending'`,
+          )
+          .run(now, now, row.effectId);
+        this.state.connection
+          .prepare(
+            `UPDATE resources SET revision = revision + 1, updated_at = ?
+             WHERE resource_id = ? AND revision = ?`,
+          )
+          .run(now, row.resourceId, revisionRow.revision);
+        const payloadHash = this.state.putJson({ decisionId, effectType }, now);
+        this.insertDecisionEvent(
+          row.resourceId,
+          revisionRow.revision + 1,
+          "effect.applied",
+          "system",
+          null,
+          payloadHash,
+          now,
+        );
+      });
+    }
   }
 
   async listRequests(): Promise<HumanDecisionRequest[]> {
-    let entries: Dirent[];
-    try {
-      entries = await fs.readdir(this.root, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
-    const requests = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => await this.readRequest(entry.name)),
-    );
-    return requests.filter((request): request is HumanDecisionRequest => request !== null);
+    const rows = this.state.connection
+      .prepare("SELECT request_hash AS requestHash FROM human_decisions ORDER BY created_at")
+      .all();
+    return rows.filter(isRequestHashRow).map((row) => this.readRequestFromHash(row.requestHash));
   }
+
+  private attemptAcceptance(
+    request: HumanDecisionRequest,
+    decision: ResolvedHumanDecision,
+    attempt: {
+      attemptId: string;
+      source: "human" | "policy";
+      actorId?: string;
+      channel?: string;
+      candidate: unknown;
+    },
+  ): HumanDecisionAcceptance {
+    return this.state.transaction(() => {
+      this.requireStoredRequest(request);
+      const candidateHash = this.state.putJson(attempt.candidate);
+      const existingSubmission = this.state.connection
+        .prepare(
+          `SELECT candidate_hash AS candidateHash
+           FROM human_decision_submissions WHERE decision_id = ? AND attempt_id = ?`,
+        )
+        .get(request.decisionId, attempt.attemptId);
+      if (
+        isCandidateHashRow(existingSubmission) &&
+        !existingSubmission.candidateHash.equals(candidateHash)
+      ) {
+        throw new Error("Human decision submission idempotency key conflicts");
+      }
+      this.state.connection
+        .prepare(
+          `INSERT INTO human_decision_submissions(
+             decision_id, attempt_id, source, actor_id, channel,
+             candidate_hash, outcome, submitted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'rejected', ?)
+           ON CONFLICT(decision_id, attempt_id) DO NOTHING`,
+        )
+        .run(
+          request.decisionId,
+          attempt.attemptId,
+          attempt.source,
+          attempt.actorId ?? null,
+          attempt.channel ?? null,
+          candidateHash,
+          Date.parse(decision.acceptedAt),
+        );
+      const winner = this.readResolution(request.decisionId);
+      if (winner !== null) {
+        this.markSubmission(request.decisionId, attempt.attemptId, "already_resolved", null);
+        if (winner.outcome === "cancelled") {
+          throw new Error(`Human decision request was ${winner.cancellation.reason}`);
+        }
+        return canonicalJson(winner.decision) === canonicalJson(decision) ||
+          sameHumanAnswer(winner.decision, decision)
+          ? { status: "adopted", decision: winner.decision }
+          : { status: "conflict", decision: winner.decision };
+      }
+      const now = Date.parse(decision.acceptedAt);
+      const responseHash = this.state.putJson(decision, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO human_decision_resolutions(
+             decision_id, outcome, provenance, response_hash, reason, channel,
+             actor_id, request_digest, resolved_at
+           ) VALUES (?, 'accepted', ?, ?, NULL, ?, ?, ?, ?)`,
+        )
+        .run(
+          request.decisionId,
+          decision.provenance === "timeout" ? "timeout_policy" : "human",
+          responseHash,
+          attempt.channel ?? null,
+          attempt.actorId ?? null,
+          digestBuffer(request.requestDigest),
+          now,
+        );
+      const row = this.requireDecisionResource(request.decisionId);
+      this.bumpDecision(row.resourceId, row.revision, now);
+      this.insertDecisionEvent(
+        row.resourceId,
+        row.revision + 1,
+        "decision.accepted",
+        decision.provenance === "timeout" ? "policy" : "human",
+        attempt.actorId ?? null,
+        responseHash,
+        now,
+      );
+      this.enqueueResolutionEffects(row.resourceId, row.revision + 1, request, "accepted", now);
+      this.markSubmission(request.decisionId, attempt.attemptId, "won", responseHash);
+      return { status: "accepted", decision };
+    });
+  }
+
+  private readResolution(decisionId: string): HumanDecisionResolution | null {
+    const row = this.state.connection
+      .prepare(
+        `SELECT outcome, provenance, response_hash AS responseHash, reason,
+                request_digest AS requestDigest, resolved_at AS resolvedAt
+         FROM human_decision_resolutions WHERE decision_id = ?`,
+      )
+      .get(decisionId);
+    if (!isResolutionRow(row)) return null;
+    const request = this.readRequestRow(decisionId);
+    if (request === undefined) throw new Error("Human decision request is missing");
+    const storedRequest = this.readRequestFromHash(request.requestHash);
+    if (!row.requestDigest.equals(digestBuffer(storedRequest.requestDigest))) {
+      throw new Error("Human decision resolution request digest conflicts");
+    }
+    if (row.outcome === "accepted") {
+      if (row.responseHash === null) throw new Error("Accepted decision response is missing");
+      const decision = this.state.readJson(row.responseHash) as ResolvedHumanDecision;
+      return {
+        schema: "pi-workflows.human-decision-resolution.v1",
+        outcome: "accepted",
+        decision: requireCurrentDecision(decision),
+      };
+    }
+    const cancellation: HumanDecisionCancellationRecord = {
+      schema: "pi-workflows.human-decision-cancellation.v1",
+      decisionId,
+      requestDigest: storedRequest.requestDigest,
+      cancelledAt: new Date(row.resolvedAt).toISOString(),
+      reason: row.reason === "expired" ? "expired" : "cancelled",
+    };
+    return {
+      schema: "pi-workflows.human-decision-resolution.v1",
+      outcome: "cancelled",
+      cancellation,
+    };
+  }
+
+  private requireStoredRequest(request: HumanDecisionRequest): void {
+    const row = this.readRequestRow(request.decisionId);
+    if (row === undefined) throw new Error("Human decision request is not durable");
+    const stored = this.readRequestFromHash(row.requestHash);
+    if (canonicalJson(stored) !== canonicalJson(request)) {
+      throw new Error("Human decision request does not match durable state");
+    }
+  }
+
+  private readRequestRow(decisionId: string): { requestHash: Buffer } | undefined {
+    const row = this.state.connection
+      .prepare("SELECT request_hash AS requestHash FROM human_decisions WHERE decision_id = ?")
+      .get(decisionId);
+    return isRequestHashRow(row) ? row : undefined;
+  }
+
+  private readRequestFromHash(hash: Buffer): HumanDecisionRequest {
+    return validateHumanDecisionRequestIntegrity(this.state.readJson(hash) as HumanDecisionRequest);
+  }
+
+  private requireDecisionResource(decisionId: string): { resourceId: string; revision: number } {
+    const row = this.state.connection
+      .prepare(
+        `SELECT d.resource_id AS resourceId, r.revision
+         FROM human_decisions d JOIN resources r ON r.resource_id = d.resource_id
+         WHERE d.decision_id = ?`,
+      )
+      .get(decisionId);
+    if (!isDecisionResourceRow(row)) throw new Error(`Human decision is missing: ${decisionId}`);
+    return row;
+  }
+
+  private bumpDecision(resourceId: string, expectedRevision: number, now: number): void {
+    const result = this.state.connection
+      .prepare(
+        `UPDATE resources SET revision = revision + 1, updated_at = ?
+         WHERE resource_id = ? AND revision = ?`,
+      )
+      .run(now, resourceId, expectedRevision);
+    if (result.changes !== 1) throw new Error("Human decision revision conflict");
+  }
+
+  private insertDecisionEvent(
+    resourceId: string,
+    revision: number,
+    eventType: string,
+    actorType: string,
+    actorId: string | null,
+    payloadHash: Buffer,
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare(
+        `INSERT INTO events(
+           event_id, resource_id, resource_revision, event_type,
+           actor_type, actor_id, payload_hash, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `event-${randomUUID()}`,
+        resourceId,
+        revision,
+        eventType,
+        actorType,
+        actorId,
+        payloadHash,
+        now,
+      );
+  }
+
+  private enqueueResolutionEffects(
+    decisionResourceId: string,
+    revision: number,
+    request: HumanDecisionRequest,
+    outcome: "accepted" | "cancelled",
+    now: number,
+  ): void {
+    const types =
+      outcome === "accepted"
+        ? ["decision.continue", "decision.settle_presentations"]
+        : ["decision.cancel_parent", "decision.settle_presentations"];
+    for (const effectType of types) {
+      const idempotencyKey = request.decisionId;
+      const effectId = `effect-${digestHex({ decisionId: request.decisionId, effectType }).slice(0, 40)}`;
+      const effectResourceId = resourceIdFor("effect", effectId);
+      const payloadHash = this.state.putJson(
+        { decisionId: request.decisionId, runId: request.runId, outcome },
+        now,
+      );
+      this.state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'effect', ?, 0, ?, ?)`,
+        )
+        .run(effectResourceId, effectId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(effectResourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO effects(
+             effect_id, resource_id, source_resource_id, source_revision,
+             effect_type, idempotency_key, payload_hash, owner_scope,
+             status, attempt_count, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'run', 'pending', 0, ?, ?)`,
+        )
+        .run(
+          effectId,
+          effectResourceId,
+          decisionResourceId,
+          revision,
+          effectType,
+          idempotencyKey,
+          payloadHash,
+          now,
+          now,
+        );
+    }
+  }
+
+  private assertRunOwner(runId: string, now: number): void {
+    const authority = this.authorityProvider?.(runId);
+    if (authority === undefined) {
+      throw new Error("Timeout policy requires the current run owner");
+    }
+    const row = this.state.connection
+      .prepare(
+        `SELECT l.generation, l.owner_type AS ownerType, l.owner_id AS ownerId,
+                l.token_hash AS tokenHash, l.expires_at AS expiresAt
+         FROM runs r JOIN leases l ON l.resource_id = r.resource_id
+         WHERE r.run_id = ?`,
+      )
+      .get(runId);
+    if (
+      !isOwnerRow(row) ||
+      row.ownerType !== authority.ownerType ||
+      row.ownerId !== authority.ownerId ||
+      row.generation !== authority.generation ||
+      row.tokenHash === null ||
+      !row.tokenHash.equals(tokenHash(authority.token)) ||
+      row.expiresAt === null ||
+      row.expiresAt <= now
+    ) {
+      throw new Error("Timeout policy run ownership is stale");
+    }
+  }
+
+  private recordChannelMessage<
+    T extends HumanDecisionDeliveryRecord | HumanDecisionSettlementRecord,
+  >(
+    decisionId: string,
+    channel: string,
+    purpose: "delivery" | "settlement",
+    value: T,
+  ): "created" | "adopted" {
+    const safeChannel = requireSimpleId(channel, "Human decision channel");
+    assertId(value.attemptId, `${purpose} attempt id`);
+    return this.state.transaction(() => {
+      if (this.readRequestRow(decisionId) === undefined) {
+        throw new Error(`Human decision is missing: ${decisionId}`);
+      }
+      const channelId = this.ensureChannel(safeChannel, Date.parse(value.createdAt));
+      const messageId = `message-${digestHex({
+        decisionId,
+        channel: safeChannel,
+        purpose,
+        attemptId: value.attemptId,
+        phase: "phase" in value ? value.phase : undefined,
+        partIndex: "partIndex" in value ? value.partIndex : undefined,
+      }).slice(0, 40)}`;
+      const contentHash = this.state.putJson(value, Date.parse(value.createdAt));
+      const existing = this.state.connection
+        .prepare("SELECT content_hash AS contentHash FROM channel_messages WHERE message_id = ?")
+        .get(messageId);
+      if (isContentHashRow(existing)) {
+        if (!existing.contentHash.equals(contentHash)) {
+          throw new Error(`Immutable human decision ${purpose} conflicts`);
+        }
+        return "adopted";
+      }
+      const status = channelMessageStatus(value);
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_messages(
+             message_id, channel_id, decision_id, purpose, content_hash,
+             status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          messageId,
+          channelId,
+          decisionId,
+          purpose,
+          contentHash,
+          status,
+          Date.parse(value.createdAt),
+          "finishedAt" in value && value.finishedAt !== undefined
+            ? Date.parse(value.finishedAt)
+            : Date.parse(value.createdAt),
+        );
+      return "created";
+    });
+  }
+
+  private listChannelMessages<T>(
+    decisionId: string,
+    channel: string,
+    purpose: "delivery" | "settlement",
+  ): T[] {
+    const channelId = channelIdFor(requireSimpleId(channel, "Human decision channel"));
+    const rows = this.state.connection
+      .prepare(
+        `SELECT content_hash AS contentHash
+         FROM channel_messages
+         WHERE decision_id = ? AND channel_id = ? AND purpose = ?
+         ORDER BY created_at, message_id`,
+      )
+      .all(decisionId, channelId, purpose);
+    return rows.filter(isContentHashRow).map((row) => this.state.readJson(row.contentHash) as T);
+  }
+
+  private ensureChannel(channel: string, now: number): string {
+    const channelId = channelIdFor(channel);
+    const resourceId = resourceIdFor("channel", channelId);
+    this.state.connection
+      .prepare(
+        `INSERT INTO resources(
+           resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+         ) VALUES (?, 'channel', ?, 1, ?, ?)
+         ON CONFLICT(resource_type, aggregate_key) DO NOTHING`,
+      )
+      .run(resourceId, channelId, now, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO leases(resource_id, generation)
+         VALUES (?, 0) ON CONFLICT(resource_id) DO NOTHING`,
+      )
+      .run(resourceId);
+    this.state.connection
+      .prepare(
+        `INSERT INTO channels(channel_id, resource_id, adapter_type, profile_key, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(channel_id) DO NOTHING`,
+      )
+      .run(channelId, resourceId, channel.split("-")[0] ?? channel, channel, now);
+    return channelId;
+  }
+
+  private markSubmission(
+    decisionId: string,
+    attemptId: string,
+    outcome: "won" | "adopted" | "already_resolved" | "rejected",
+    resultHash: Buffer | null,
+  ): void {
+    this.state.connection
+      .prepare(
+        `UPDATE human_decision_submissions SET outcome = ?, result_hash = ?
+         WHERE decision_id = ? AND attempt_id = ?`,
+      )
+      .run(outcome, resultHash, decisionId, attemptId);
+  }
+
+  private readContinuationRow(decisionId: string): { recordHash: Buffer } | undefined {
+    const row = this.state.connection
+      .prepare("SELECT response_hash AS recordHash FROM continuations WHERE decision_id = ?")
+      .get(decisionId);
+    return isContinuationRow(row) ? row : undefined;
+  }
+}
+
+function digestBuffer(value: string): Buffer {
+  const hex = value.startsWith("sha256:") ? value.slice(7) : value;
+  if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
+  return Buffer.from(hex, "hex");
+}
+
+function channelIdFor(channel: string): string {
+  return `channel-${digestHex(channel).slice(0, 40)}`;
+}
+
+function sameHumanAnswer(left: ResolvedHumanDecision, right: ResolvedHumanDecision): boolean {
+  return (
+    left.provenance === "human" &&
+    right.provenance === "human" &&
+    left.idempotencyKey === right.idempotencyKey &&
+    canonicalJson(left.response) === canonicalJson(right.response) &&
+    canonicalJson(left.source) === canonicalJson(right.source)
+  );
+}
+
+function channelMessageStatus(
+  value: HumanDecisionDeliveryRecord | HumanDecisionSettlementRecord,
+): "pending" | "confirmed" | "failed" | "ambiguous" {
+  if (value.state === "confirmed") return "confirmed";
+  if (value.state === "failed") return "failed";
+  if (value.state === "unknown") return "ambiguous";
+  return "pending";
+}
+
+type ResolutionRow = {
+  outcome: "accepted" | "cancelled";
+  provenance: string;
+  responseHash: Buffer | null;
+  reason: string | null;
+  requestDigest: Buffer;
+  resolvedAt: number;
+};
+
+function isResourceIdRow(value: unknown): value is { resourceId: string } {
+  return isRecordValue(value);
+}
+
+function isPresentRow(value: unknown): value is { present: number } {
+  return isRecordValue(value);
+}
+
+function isRequestHashRow(value: unknown): value is { requestHash: Buffer } {
+  return isRecordValue(value);
+}
+
+function isCandidateHashRow(value: unknown): value is { candidateHash: Buffer } {
+  return isRecordValue(value);
+}
+
+function isContentHashRow(value: unknown): value is { contentHash: Buffer } {
+  return isRecordValue(value);
+}
+
+function isContinuationRow(value: unknown): value is { recordHash: Buffer } {
+  return isRecordValue(value);
+}
+
+function isDecisionResourceRow(value: unknown): value is { resourceId: string; revision: number } {
+  return isRecordValue(value);
+}
+
+function isResolutionRow(value: unknown): value is ResolutionRow {
+  return isRecordValue(value);
+}
+
+function isEffectIdentityRecord(value: unknown): value is { effectId: string; resourceId: string } {
+  return isRecordValue(value);
+}
+
+function isRevisionRecord(value: unknown): value is { revision: number } {
+  return isRecordValue(value);
+}
+
+function isOwnerRow(value: unknown): value is {
+  generation: number;
+  ownerType: string | null;
+  ownerId: string | null;
+  tokenHash: Buffer | null;
+  expiresAt: number | null;
+} {
+  return isRecordValue(value);
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function createHumanDecisionAttemptId(): string {
@@ -855,46 +1343,6 @@ function assertJsonValue(value: unknown, label: string): void {
   }
 }
 
-async function writeImmutableJson(
-  filePath: string,
-  value: unknown,
-  requireIdentical = true,
-): Promise<"created" | "adopted"> {
-  const bytes = `${canonicalJson(value)}\n`;
-  const directory = path.dirname(filePath);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  const handle = await fs.open(temporary, "wx", 0o600);
-  try {
-    await handle.writeFile(bytes, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
-    await fs.link(temporary, filePath);
-    const directoryHandle = await fs.open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-    return "created";
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = await fs.readFile(filePath, "utf8");
-    if (requireIdentical && existing !== bytes) {
-      throw new Error(`Immutable human decision record conflicts: ${filePath}`);
-    }
-    return "adopted";
-  } finally {
-    await fs.unlink(temporary).catch(() => undefined);
-  }
-}
-
 function validateExpiry(
   value: string | undefined,
   createdAt: string | undefined,
@@ -907,30 +1355,4 @@ function validateExpiry(
     throw new Error("Human decision expiry must be after creation");
   }
   return new Date(parsed).toISOString();
-}
-
-async function readJsonDirectory(directory: string): Promise<unknown[]> {
-  let names: string[];
-  try {
-    names = await fs.readdir(directory);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  const values = await Promise.all(
-    names
-      .filter((name) => name.endsWith(".json"))
-      .sort()
-      .map(async (name) => await readJson(path.join(directory, name))),
-  );
-  return values.filter((value) => value !== null);
-}
-
-async function readJson(filePath: string): Promise<unknown | null> {
-  try {
-    return JSON.parse(await fs.readFile(filePath, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
 }

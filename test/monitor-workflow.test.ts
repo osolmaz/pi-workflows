@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import monitor, {
   prepareMonitorInput,
@@ -13,7 +12,7 @@ import type {
   WorkflowDefinition,
   WorkflowNotificationRequest,
 } from "../src/workflows/types.js";
-import { makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath } from "./helpers.js";
 
 function scriptedExecutor(outputs: unknown[], prompts: string[] = []): AgentStepExecutor {
   const remaining = [...outputs];
@@ -169,15 +168,19 @@ describe("built-in monitor workflow", () => {
       );
     }
 
-    const outputRoot = await makeTempDir("monitor-invalid-input");
+    const databasePath = await makeStateDatabasePath("monitor-invalid-input");
+    const store = new WorkflowRunStore(databasePath);
     const engine = new WorkflowEngine({
       executor: scriptedExecutor([]),
-      store: new WorkflowRunStore(outputRoot),
+      store,
     });
     await expect(engine.run(monitor, { task: "Observe", audience: "operator" })).rejects.toThrow(
       "monitor input field audience is not supported",
     );
-    expect(await fs.readdir(outputRoot)).toEqual([]);
+    expect(store.state.connection.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({
+      count: 0,
+    });
+    store.close();
   });
 
   it("validates public input types, lengths, and numeric bounds", () => {
@@ -221,7 +224,7 @@ describe("built-in monitor workflow", () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const result = await new WorkflowEngine({
       executor: scriptedExecutor([observation()]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-complete")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-complete")),
       notificationSink: notificationSink(notifications),
     }).run(monitor, input());
 
@@ -243,7 +246,7 @@ describe("built-in monitor workflow", () => {
   it("waits only when target work is active and detects completion on the next observation", async () => {
     const result = await new WorkflowEngine({
       executor: scriptedExecutor([waitObservation(), observation()]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-active")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-active")),
       notificationSink: notificationSink([]),
     }).run(fastMonitor(), input());
 
@@ -259,7 +262,7 @@ describe("built-in monitor workflow", () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const result = await new WorkflowEngine({
       executor: scriptedExecutor([actObservation("advance"), actionResult(), observation()]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-advance")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-advance")),
       notificationSink: notificationSink(notifications),
     }).run(monitor, input());
 
@@ -287,7 +290,7 @@ describe("built-in monitor workflow", () => {
         actionResult("succeeded", { summary: "Resumed the saved unit." }),
         observation(),
       ]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-recover")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-recover")),
       notificationSink: notificationSink([]),
     }).run(monitor, input());
 
@@ -320,7 +323,7 @@ describe("built-in monitor workflow", () => {
         }),
         observation(),
       ]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-recover-after-failure")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-recover-after-failure")),
       notificationSink: notificationSink([]),
     }).run(monitor, input());
 
@@ -344,7 +347,7 @@ describe("built-in monitor workflow", () => {
           reason,
         }),
       ]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-authority-stop")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-authority-stop")),
       notificationSink: notificationSink([]),
     }).run(monitor, input());
 
@@ -434,7 +437,7 @@ describe("built-in monitor workflow", () => {
           },
         }),
       ]),
-      store: new WorkflowRunStore(await makeTempDir("monitor-progress")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("monitor-progress")),
       notificationSink: notificationSink(notifications),
     }).run(monitor, input());
 

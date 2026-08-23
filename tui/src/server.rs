@@ -1,9 +1,8 @@
 //! `piw serve`: a WebSocket server exposing run views over the live replay
-//! protocol. The server is a bundle reader like any other — it never writes
-//! bundles — and binds to localhost by default because bundles contain
+//! protocol. The server is a run reader like any other — it never writes
+//! database runs — and binds to localhost by default because database runs contain
 //! private data.
 
-use crate::bundle::reader::read_declared_artifact_checked;
 use crate::protocol::{ClientMessage, PatchOp, ServerMessage, PROTOCOL_ID};
 use crate::source::RunSource;
 use anyhow::{Context, Result};
@@ -26,12 +25,8 @@ enum Update {
     },
 }
 
-/// Cap on `fetch_artifact` responses: bundles can declare arbitrary sizes,
-/// and a single WebSocket text frame holds the whole content.
-const ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
-
 pub struct ServeOptions {
-    pub runs_dir: PathBuf,
+    pub database_path: PathBuf,
     pub bind: String,
 }
 
@@ -41,16 +36,16 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         .with_context(|| format!("binding {}", options.bind))?;
     eprintln!(
         "piw serve: watching {} on ws://{}/ws",
-        options.runs_dir.display(),
+        options.database_path.display(),
         listener.local_addr()?
     );
-    serve_on(listener, options.runs_dir).await
+    serve_on(listener, options.database_path).await
 }
 
 /// Accept-loop core, split out so tests can bind an ephemeral port.
-pub async fn serve_on(listener: TcpListener, runs_dir: PathBuf) -> Result<()> {
+pub async fn serve_on(listener: TcpListener, database_path: PathBuf) -> Result<()> {
     // The protocol has no authentication, so a reachable server hands run
-    // bundles to anyone. Refuse non-loopback listeners here, at the single
+    // database runs to anyone. Refuse non-loopback listeners here, at the single
     // entry point every caller goes through; view remote runs through an
     // SSH tunnel instead.
     let local = listener.local_addr()?;
@@ -61,7 +56,7 @@ pub async fn serve_on(listener: TcpListener, runs_dir: PathBuf) -> Result<()> {
              for remote access"
         );
     }
-    let source = Arc::new(Mutex::new(RunSource::new(&runs_dir)));
+    let source = Arc::new(Mutex::new(RunSource::new(&database_path)));
     let (updates_tx, _) = broadcast::channel::<Update>(256);
 
     // Refresh loop: wake on filesystem changes (plus a slow safety tick for
@@ -69,22 +64,9 @@ pub async fn serve_on(listener: TcpListener, runs_dir: PathBuf) -> Result<()> {
     {
         let source = Arc::clone(&source);
         let updates_tx = updates_tx.clone();
-        let runs_dir = runs_dir.clone();
         tokio::spawn(async move {
-            let mut watcher = crate::bundle::watch::RunsWatcher::new(&runs_dir).ok();
             loop {
-                match watcher.as_mut() {
-                    Some(watcher) => {
-                        tokio::select! {
-                            _ = watcher.changed() => {}
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
-                        }
-                    }
-                    None => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
-                }
-                // Coalesce a token burst into one revision while preserving
-                // each durable event as a distinct append record.
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 let outcome = source.lock().await.refresh_all();
                 for (run_id, revision, patch) in outcome.patches {
                     let _ = updates_tx.send(Update::Patch {
@@ -146,7 +128,7 @@ async fn handle_connection(
 ) -> Result<()> {
     // Browsers always send an Origin header; native clients do not. The
     // protocol is unauthenticated, so a web page must never be able to read
-    // run bundles by opening a WebSocket to localhost — reject any
+    // SQLite workflow state by opening a WebSocket to localhost — reject any
     // browser-originated handshake outright.
     let ws = tokio_tungstenite::accept_hdr_async(stream, reject_browser_origins).await?;
     let (mut sink, mut reads) = ws.split();
@@ -212,29 +194,10 @@ async fn handle_connection(
                         watched.remove(&run_id);
                     }
                     ClientMessage::FetchArtifact { run_id, path } => {
-                        let content = {
-                            let source = source.lock().await;
-                            source.get(&run_id).and_then(|entry| {
-                                let artifact_dir = entry.manifest.paths.artifacts.as_deref()?;
-                                read_declared_artifact_checked(
-                                    &entry.dir,
-                                    artifact_dir,
-                                    &path,
-                                    ARTIFACT_MAX_BYTES,
-                                )
-                            })
-                        };
-                        match content {
-                            Some(content) => {
-                                send(&mut sink, &ServerMessage::Artifact { run_id, path, content }).await?;
-                            }
-                            None => {
-                                send(&mut sink, &ServerMessage::Error {
-                                    message: format!("artifact {path} not available"),
-                                    run_id: Some(run_id),
-                                }).await?;
-                            }
-                        }
+                        send(&mut sink, &ServerMessage::Error {
+                            message: format!("artifact {path} not available; values are stored in SQLite"),
+                            run_id: Some(run_id),
+                        }).await?;
                     }
                 }
             }

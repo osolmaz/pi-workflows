@@ -13,7 +13,7 @@ import {
   type TelegramFetch,
 } from "../src/extension/decision-channels.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
-import { makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir } from "./helpers.js";
 
 async function privateJson(filePath: string, value: unknown, mode = 0o600) {
   await fs.writeFile(filePath, `${JSON.stringify(value)}\n`, { mode });
@@ -263,11 +263,29 @@ describe("decision channel configuration", () => {
         },
       },
       credentials: { approval: "fixture" },
-      store: new HumanDecisionStore(await makeTempDir("decision-create-channel-runs")),
+      store: new HumanDecisionStore(await makeStateDatabasePath("decision-create-channel-runs")),
       onAnswer: async () => {},
     });
     expect([...channels.keys()]).toEqual(["telegram:approval"]);
     await Promise.all([...channels.values()].map(async (channel) => channel.stop()));
+  });
+
+  it("writes a first private channel and credential profile", async () => {
+    const configDir = await makeTempDir("decision-setup-first");
+    const tokenFile = path.join(configDir, "token");
+    await fs.writeFile(tokenFile, "fixture", { mode: 0o600 });
+    await writeDecisionChannelProfile({
+      configDir,
+      audience: "operator",
+      profile: "approval",
+      credential: "approval",
+      tokenFile,
+      allowedUserIds: ["100"],
+      allowedChatIds: ["-200"],
+    });
+    const loaded = await loadDecisionChannelConfig(configDir);
+    expect(loaded?.channels.audiences.operator?.channels).toEqual(["pi", "telegram:approval"]);
+    expect(loaded?.credentials.approval).toBe("fixture");
   });
 
   it("rejects invalid setup values and missing resolved credentials", async () => {
@@ -310,7 +328,7 @@ describe("decision channel configuration", () => {
           },
         },
         credentials: {},
-        store: new HumanDecisionStore(configDir),
+        store: new HumanDecisionStore(path.join(configDir, "state.sqlite")),
         onAnswer: async () => {},
       }),
     ).toThrow(/missing credential/);

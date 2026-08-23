@@ -34,7 +34,7 @@ CREATE TABLE blobs (
 CREATE TABLE resources (
   resource_id TEXT PRIMARY KEY,
   resource_type TEXT NOT NULL CHECK (resource_type IN (
-    'run', 'decision', 'controller', 'effect', 'channel', 'notification', 'turn_intent'
+    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'notification', 'turn_intent'
   )),
   aggregate_key TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
@@ -89,10 +89,13 @@ CREATE TABLE workflow_definitions (
 
 CREATE TABLE runs (
   run_id TEXT PRIMARY KEY,
-  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id),
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
   project_id TEXT REFERENCES projects(project_id),
   parent_run_id TEXT REFERENCES runs(run_id),
   definition_digest BLOB NOT NULL REFERENCES workflow_definitions(definition_digest),
+  workflow_ref TEXT NOT NULL,
+  workflow_source_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  launch_options_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   source_type TEXT NOT NULL CHECK (source_type IN ('builtin', 'file')),
   source_ref TEXT NOT NULL,
   source_revision TEXT NOT NULL,
@@ -108,7 +111,7 @@ CREATE TABLE runs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
-  CHECK ((status IN ('completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL))
+  CHECK ((status IN ('waiting', 'completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL))
 ) STRICT;
 
 CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
@@ -131,6 +134,7 @@ CREATE TABLE run_queue (
   )),
   available_at INTEGER NOT NULL,
   affinity_runner_id TEXT,
+  origin_session_id TEXT NOT NULL,
   consecutive_errors INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0),
   error_code TEXT,
   error_hash BLOB REFERENCES blobs(blob_hash),
@@ -141,6 +145,8 @@ CREATE TABLE run_queue (
 ) STRICT;
 
 CREATE INDEX run_queue_claim_idx ON run_queue(status, available_at, created_at);
+CREATE UNIQUE INDEX run_queue_active_session_idx ON run_queue(origin_session_id)
+WHERE status NOT IN ('done', 'failed', 'cancelled');
 
 CREATE TABLE node_attempts (
   attempt_id TEXT PRIMARY KEY,
@@ -186,7 +192,10 @@ CREATE TABLE session_segments (
   segment_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   attempt_id TEXT REFERENCES node_attempts(attempt_id),
+  capture_key TEXT,
   session_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id),
+  binding_hash BLOB REFERENCES blobs(blob_hash),
   status TEXT NOT NULL CHECK (status IN ('recording', 'complete', 'failed')),
   entry_count INTEGER NOT NULL DEFAULT 0 CHECK (entry_count >= 0),
   event_count INTEGER NOT NULL DEFAULT 0 CHECK (event_count >= 0),
@@ -284,7 +293,7 @@ CREATE TABLE continuations (
 
 CREATE TABLE controller_resources (
   controller_resource_id TEXT PRIMARY KEY,
-  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id),
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
   project_id TEXT REFERENCES projects(project_id),
   controller_name TEXT NOT NULL,
   resource_key TEXT NOT NULL,
@@ -311,6 +320,7 @@ CREATE TABLE controller_finalizers (
 CREATE TABLE controller_queue (
   controller_resource_id TEXT PRIMARY KEY REFERENCES controller_resources(controller_resource_id) ON DELETE CASCADE,
   available_at INTEGER NOT NULL,
+  queue_version INTEGER NOT NULL DEFAULT 1 CHECK (queue_version > 0),
   consecutive_errors INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0),
   last_error_hash BLOB REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL,
@@ -325,6 +335,7 @@ CREATE TABLE controller_workflows (
   request_key TEXT NOT NULL,
   workflow_name TEXT NOT NULL,
   input_fingerprint BLOB NOT NULL CHECK (length(input_fingerprint) = 32),
+  reserved_run_id TEXT,
   run_id TEXT REFERENCES runs(run_id),
   status TEXT NOT NULL CHECK (status IN (
     'pending', 'running', 'waiting', 'succeeded', 'failed', 'interrupted'
@@ -391,11 +402,19 @@ CREATE TABLE turn_intents (
   turn_intent_id TEXT PRIMARY KEY,
   resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id),
   effect_id TEXT NOT NULL UNIQUE REFERENCES effects(effect_id),
+  source_event_id TEXT NOT NULL UNIQUE,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  workflow_ref TEXT NOT NULL,
   target_session_id TEXT NOT NULL,
-  resolution_type TEXT NOT NULL,
+  cause TEXT NOT NULL,
+  node_id TEXT,
+  attempt_id TEXT,
+  resolution_type TEXT,
+  resolution_message_id TEXT,
   facts_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  eligible_at INTEGER NOT NULL,
+  requested_at INTEGER NOT NULL,
+  eligible_at INTEGER,
+  resolved_at INTEGER,
   created_at INTEGER NOT NULL
 ) STRICT;
 
@@ -444,9 +463,12 @@ CREATE INDEX channel_messages_decision_idx ON channel_messages(decision_id, purp
 
 CREATE TABLE channel_message_parts (
   message_id TEXT NOT NULL REFERENCES channel_messages(message_id) ON DELETE CASCADE,
+  recipient_index INTEGER NOT NULL CHECK (recipient_index >= 0),
   part_index INTEGER NOT NULL CHECK (part_index >= 0),
+  content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  external_conversation_ref TEXT NOT NULL,
   external_message_ref TEXT NOT NULL,
-  PRIMARY KEY (message_id, part_index)
+  PRIMARY KEY (message_id, recipient_index, part_index)
 ) STRICT;
 `;
 

@@ -8,7 +8,7 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowNotificationRequest } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 let originalPath = "";
 let repository = "";
@@ -236,7 +236,7 @@ describe("monitor automatic repair", () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const engine = new WorkflowEngine({
       executor: repairExecutor(stopObservation()),
-      store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-repair")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("pi-workflows-monitor-repair")),
       notificationSink: {
         notify(request) {
           notifications.push(request);
@@ -289,7 +289,7 @@ describe("monitor automatic repair", () => {
     const notifications: WorkflowNotificationRequest[] = [];
     const engine = new WorkflowEngine({
       executor: repairExecutor(repairObservation()),
-      store: new WorkflowRunStore(await makeTempDir("pi-workflows-monitor-no-progress")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("pi-workflows-monitor-no-progress")),
       notificationSink: {
         notify(request) {
           notifications.push(request);

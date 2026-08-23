@@ -1,7 +1,6 @@
 import { ansi, fitWidth, sanitizeText } from "../render/ansi.js";
 import { formatDuration, runElapsedMs } from "../render/format.js";
 import { renderGraphLines } from "../render/graph-render.js";
-import { decodeValueWith } from "../workflows/artifacts.js";
 import {
   decisionDocumentSegments,
   decisionPresentationFingerprint,
@@ -12,7 +11,7 @@ import {
   progressRecordsFromTrace,
   progressTracksFromRecords,
 } from "../workflows/progress.js";
-import type { LoadedRunBundle } from "../workflows/store.js";
+import type { LoadedWorkflowRun } from "../workflows/store.js";
 import type {
   HumanDecisionRequest,
   WorkflowRunStatus,
@@ -20,22 +19,6 @@ import type {
 } from "../workflows/types.js";
 
 export { formatDuration, runElapsedMs };
-
-/**
- * Replace `$artifact` references with a compact placeholder for display. The
- * terminal viewer shows summaries; full artifact contents are for replay
- * tooling.
- */
-function withArtifactPlaceholders(value: unknown): unknown {
-  return decodeValueWith(value, (ref) => `«artifact ${formatBytes(ref.bytes)} ${ref.path}»`);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes}B`;
-  }
-  return `${(bytes / 1024).toFixed(1)}KB`;
-}
 
 export type ViewportSize = {
   width: number;
@@ -59,7 +42,7 @@ function previewValue(rawValue: unknown, maxLength: number): string {
   if (rawValue === undefined) {
     return "";
   }
-  const value = withArtifactPlaceholders(rawValue);
+  const value = rawValue;
   const text = typeof value === "string" ? value : JSON.stringify(value);
   // Model-controlled values must not carry escape sequences into the terminal.
   const singleLine = sanitizeText(text ?? "")
@@ -70,7 +53,7 @@ function previewValue(rawValue: unknown, maxLength: number): string {
 
 /** One line per run for the run picker. */
 export function renderRunListLines(
-  bundles: LoadedRunBundle[],
+  bundles: LoadedWorkflowRun[],
   selectedIndex: number,
   size: ViewportSize,
   now: Date = new Date(),
@@ -126,7 +109,12 @@ function stepLine(
 }
 
 /** Fallback node status list for bundles without a definition snapshot. */
-function nodeStatusLine(bundle: LoadedRunBundle, nodeId: string, width: number, now: Date): string {
+function nodeStatusLine(
+  bundle: LoadedWorkflowRun,
+  nodeId: string,
+  width: number,
+  now: Date,
+): string {
   const state = bundle.state;
   const nodeType = bundle.snapshot?.nodes[nodeId]?.nodeType ?? "?";
   const result = state.results[nodeId];
@@ -187,7 +175,7 @@ function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
     );
     return lines;
   }
-  const body = step.error !== undefined ? step.error : withArtifactPlaceholders(step.output);
+  const body = step.error !== undefined ? step.error : step.output;
   const rendered =
     typeof body === "string" && step.error !== undefined ? body : JSON.stringify(body, null, 2);
   for (const raw of (rendered ?? "null").split("\n")) {
@@ -221,7 +209,7 @@ function humanDecisionRequest(value: unknown): HumanDecisionRequest | null {
  * scrubs the replay position (defaults to the latest step, i.e. live).
  */
 export function renderRunDetailLines(
-  bundle: LoadedRunBundle,
+  bundle: LoadedWorkflowRun,
   size: ViewportSize,
   now: Date = new Date(),
   scroll = 0,
@@ -320,7 +308,7 @@ export function renderRunDetailLines(
 
 /** Highest useful `scroll` value for the detail view of `bundle`. */
 export function maxDetailScroll(
-  bundle: LoadedRunBundle,
+  bundle: LoadedWorkflowRun,
   size: ViewportSize,
   selectedStepIndex: number | null = null,
 ): number {

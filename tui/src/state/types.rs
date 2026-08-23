@@ -1,12 +1,12 @@
-//! Serde types mirroring the run bundle documents specified in
-//! `docs/run-bundles.md`. Unknown fields are tolerated everywhere so bundles
+//! Serde types mirroring the SQLite workflow state documents specified in
+//! `docs/run-database runs.md`. Unknown fields are tolerated everywhere so database runs
 //! written by newer writers within the same schema version stay readable.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const RUN_BUNDLE_SCHEMA: &str = "pi-workflows.run-bundle.v1";
+pub const RUN_BUNDLE_SCHEMA: &str = "pi-workflows.run-run.v1";
 pub const RUN_STATE_SCHEMA: &str = "pi-workflows.run-state.v1";
 pub const DEFINITION_SNAPSHOT_SCHEMA: &str = "pi-workflows.definition-snapshot.v1";
 pub const SESSION_BINDING_SCHEMA: &str = "pi-workflows.session-binding.v1";

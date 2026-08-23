@@ -14,7 +14,7 @@ import {
   defineHumanChoices,
 } from "../src/workflows/human-decision.js";
 import { createDefinitionSnapshot } from "../src/workflows/store.js";
-import type { LoadedRunBundle } from "../src/workflows/store.js";
+import type { LoadedWorkflowRun } from "../src/workflows/store.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
 
 const NOW = new Date("2026-07-19T00:01:00.000Z");
@@ -29,7 +29,7 @@ const workflow = defineWorkflow({
   edges: [{ from: "one", to: "two" }],
 });
 
-function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedRunBundle {
+function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedWorkflowRun {
   const state: WorkflowRunState = {
     schema: "pi-workflows.run-state.v1",
     traceSeq: 1,
@@ -45,16 +45,7 @@ function makeBundle(overrides: Partial<WorkflowRunState> = {}): LoadedRunBundle 
     ...overrides,
   };
   return {
-    runDir: "/tmp/run-1",
-    manifest: {
-      schema: "pi-workflows.run-bundle.v1",
-      runId: state.runId,
-      workflowName: state.workflowName,
-      startedAt: state.startedAt,
-      status: state.status,
-      traceSchema: "pi-workflows.trace-event.v1",
-      paths: { workflow: "workflow.json", state: "state.json", trace: "trace.ndjson" },
-    },
+    runId: state.runId,
     state,
     snapshot: createDefinitionSnapshot(workflow),
     sessionBinding: null,
@@ -292,28 +283,6 @@ describe("renderRunDetailLines", () => {
     expect(second).toContain("ƒ compute");
     expect(second).toContain("✗ failed");
     expect(second).toContain("two");
-  });
-
-  it("falls back to a flat node list without a snapshot", () => {
-    const bundle = makeBundle({
-      status: "waiting",
-      waitingOn: "one",
-      results: {
-        one: {
-          attemptId: "a",
-          nodeId: "one",
-          nodeType: "compute",
-          outcome: "ok",
-          startedAt: "2026-07-19T00:00:00.000Z",
-          finishedAt: "2026-07-19T00:00:01.000Z",
-          durationMs: 1000,
-        },
-      },
-    });
-    const withoutSnapshot = { ...bundle, snapshot: null };
-    const text = renderRunDetailLines(withoutSnapshot, size, NOW).map(stripAnsi).join("\n");
-    expect(text).toContain("⏸ one");
-    expect(text).toContain("waiting");
   });
 
   it("scrolls the detail view over long content", () => {

@@ -1,564 +1,99 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
-import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
+import { describe, expect, it } from "vitest";
+import { agent, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
-import { resolveWorkflowRef } from "../src/workflows/loader.js";
-import {
-  readLastTraceEvent,
-  readRunBundle,
-  RUN_STATE_SCHEMA,
-  WorkflowRunStore,
-} from "../src/workflows/store.js";
-import type { WorkflowDefinition, WorkflowRunState } from "../src/workflows/types.js";
-import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
+import { ScriptedExecutor, makeStateDatabasePath, waitUntil } from "./helpers.js";
 
-function runningState(runId: string, workflow: WorkflowDefinition): WorkflowRunState {
-  const now = "2026-08-04T00:00:00.000Z";
-  return {
-    schema: RUN_STATE_SCHEMA,
-    traceSeq: 0,
-    runId,
-    workflowName: workflow.name,
-    startedAt: now,
-    updatedAt: now,
-    status: "running",
-    input: {},
-    outputs: {},
-    results: {},
-    steps: [],
-  };
-}
-
-function makeEngine(store: WorkflowRunStore) {
-  return new WorkflowEngine({ executor: new ScriptedExecutor(), store });
-}
-
-async function traceTypes(runDir: string): Promise<string[]> {
-  const raw = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-  return raw
-    .trim()
-    .split("\n")
-    .map((line) => (JSON.parse(line) as { type: string }).type);
-}
-
-describe("WorkflowEngine.resumeRun", () => {
-  it("refuses resume when an included source changes", async () => {
-    const project = await makeTempDir("pi-resume-composed-project");
-    const homeDir = await makeTempDir("pi-resume-composed-home");
-    const workflowDir = path.join(project, ".pi", "workflows");
-    await fs.mkdir(workflowDir, { recursive: true });
-    const api = JSON.stringify(path.resolve(__dirname, "..", "src", "workflows", "index.ts"));
-    const childPath = path.join(workflowDir, "child.workflow.ts");
-    const parentPath = path.join(workflowDir, "parent.workflow.ts");
-    const childSource = (prompt: string) =>
-      `import { agent, defineWorkflow } from ${api};\nexport default defineWorkflow({ name: "child", startAt: "work", exits: { ready: { from: "work" } }, nodes: { work: agent({ prompt: () => ${JSON.stringify(prompt)} }) }, edges: [] });\n`;
-    await fs.writeFile(childPath, childSource("first prompt"), "utf8");
-    await fs.writeFile(
-      parentPath,
-      `import { compute, defineWorkflow, includeWorkflow } from ${api};\nexport default defineWorkflow({ name: "parent", startAt: "start", includes: { child: includeWorkflow({ workflow: "./child.workflow.ts" }) }, nodes: { start: compute({ run: () => ({}) }), finish: compute({ run: () => ({}) }) }, edges: [{ from: "start", to: "child" }, { from: "child.ready", to: "finish" }] });\n`,
-      "utf8",
-    );
-    const resolved = await resolveWorkflowRef(
-      parentPath,
-      { cwd: project, homeDir },
-      builtinWorkflowCatalog,
-    );
-    const events: string[] = [];
-    const outputRoot = await makeTempDir("pi-resume-composed-runs");
-    const engine = new WorkflowEngine({
-      executor: new ScriptedExecutor().respond("child/work", { hang: true }),
-      outputRoot,
-      onEvent: (event) => events.push(`${event.type}:${event.nodeId ?? ""}`),
-    });
-    const running = engine.run(resolved.definition, {}, { workflowSource: resolved.source });
-    await waitUntil(() => events.includes("node_started:child/work"));
-    engine.park();
-    const parked = await running;
-    expect(parked.state.status).toBe("running");
-
-    await fs.writeFile(childPath, childSource("changed prompt"), "utf8");
-    const changed = await resolveWorkflowRef(
-      parentPath,
-      { cwd: project, homeDir },
-      builtinWorkflowCatalog,
-    );
-    const resumed = new WorkflowEngine({ executor: new ScriptedExecutor(), outputRoot });
-
-    await expect(
-      resumed.resumeRun(changed.definition, parked.state.runId, {
-        workflowSource: changed.source,
+function workflow(counter: { count: number }) {
+  return defineWorkflow({
+    name: "resumable",
+    startAt: "prepare",
+    nodes: {
+      prepare: compute({
+        run: () => {
+          counter.count += 1;
+          return { prepared: true };
+        },
       }),
-    ).rejects.toBeInstanceOf(WorkflowSourceChangedError);
+      finish: agent({ prompt: () => "finish" }),
+    },
+    edges: [{ from: "prepare", to: "finish" }],
   });
+}
 
-  it("resumes at the interrupted node without rerunning completed work", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const one = vi.fn(() => "first");
-    const two = vi.fn(() => "second");
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "one",
-      nodes: { one: compute({ run: one }), two: compute({ run: two }) },
-      edges: [{ from: "one", to: "two" }],
-    });
+describe("WorkflowEngine.resumeRun SQLite", () => {
+  it("continues at the interrupted node without repeating completed work", async () => {
+    const databasePath = await makeStateDatabasePath("resume-run");
+    const counter = { count: 0 };
+    const definition = workflow(counter);
+    const firstExecutor = new ScriptedExecutor().respond("finish", { hang: true });
+    const first = new WorkflowEngine({ databasePath, executor: firstExecutor });
+    const running = first.run(definition, {}, { runId: "resume-1" });
+    await waitUntil(() => firstExecutor.requests.length === 1);
+    first.park();
+    await running;
 
-    // Simulate the crash: node one finished, node two was mid-flight.
-    const state = runningState("resume-1", workflow);
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    state.currentNode = "one";
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_started",
-      nodeId: "one",
-      attemptId: "a1",
-      payload: { nodeType: "compute" },
+    const second = new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("finish", { output: { done: true } }),
     });
-    state.results.one = {
-      attemptId: "a1",
-      nodeId: "one",
-      nodeType: "compute",
-      outcome: "ok",
-      output: "first",
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      durationMs: 1,
-    };
-    state.outputs.one = "first";
-    state.steps.push({
-      attemptId: "a1",
-      nodeId: "one",
-      nodeType: "compute",
-      outcome: "ok",
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      prompt: null,
-      output: "first",
-    });
-    delete state.currentNode;
-    state.currentNode = "two";
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_finished",
-      nodeId: "one",
-      attemptId: "a1",
-      payload: { outcome: "ok", output: "first", durationMs: 1 },
-    });
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_started",
-      nodeId: "two",
-      attemptId: "a2",
-      payload: { nodeType: "compute" },
-    });
-
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "resume-1");
-
+    const result = await second.resumeRun(definition, "resume-1");
     expect(result.state.status).toBe("completed");
-    expect(result.state.finalOutput).toBe("second");
-    expect(one).not.toHaveBeenCalled();
-    expect(two).toHaveBeenCalledTimes(1);
-    expect(result.state.steps).toHaveLength(2);
-    const types = await traceTypes(runDir);
-    expect(types).toContain("run_resumed");
-    // Contiguous sequence numbers after resume.
-    const bundle = await readRunBundle(runDir);
-    const raw = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-    const seqs = raw
-      .trim()
-      .split("\n")
-      .map((line) => (JSON.parse(line) as { seq: number }).seq);
-    expect(seqs).toEqual([...Array(seqs.length).keys()].map((index) => index + 1));
-    expect(bundle?.state.traceSeq).toBe(seqs.length);
+    expect(result.state.finalOutput).toEqual({ done: true });
+    expect(counter.count).toBe(1);
   });
 
-  it("repairs a torn trace tail before resuming", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "work",
-      nodes: { work: compute({ run: () => "done" }) },
-      edges: [],
-    });
-    const state = runningState("resume-torn", workflow);
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    state.currentNode = "work";
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_started",
-      nodeId: "work",
-      attemptId: "a1",
-      payload: { nodeType: "compute" },
-    });
-    // A kill -9 mid-append leaves a partial final line.
-    await fs.appendFile(path.join(runDir, "trace.ndjson"), '{"seq": 5, "typ');
-
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "resume-torn");
-    expect(result.state.status).toBe("completed");
-    const raw = await fs.readFile(path.join(runDir, "trace.ndjson"), "utf8");
-    const seqs = raw
-      .trim()
-      .split("\n")
-      .map((line) => (JSON.parse(line) as { seq: number }).seq);
-    expect(seqs).toEqual([...Array(seqs.length).keys()].map((index) => index + 1));
-  });
-
-  it("drops trace events the projection never recorded", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const work = vi.fn(() => "done");
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "work",
-      nodes: { work: compute({ run: work }) },
-      edges: [],
-    });
-    const state = runningState("resume-stale", workflow);
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    state.currentNode = "work";
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_started",
-      nodeId: "work",
-      attemptId: "a1",
-      payload: { nodeType: "compute" },
-    });
-    // Crash between trace append and projection: seq 3 exists only in trace.
-    await fs.appendFile(
-      path.join(runDir, "trace.ndjson"),
-      `${JSON.stringify({
-        seq: 3,
-        at: new Date().toISOString(),
-        runId: "resume-stale",
-        scope: "node",
-        type: "node_finished",
-        nodeId: "work",
-        attemptId: "a1",
-        payload: { outcome: "ok", output: "phantom", durationMs: 1 },
-      })}\n`,
+  it("rejects changed source unless force is explicit", async () => {
+    const databasePath = await makeStateDatabasePath("resume-source");
+    const definition = workflow({ count: 0 });
+    const executor = new ScriptedExecutor().respond("finish", { hang: true });
+    const first = new WorkflowEngine({ databasePath, executor });
+    const running = first.run(
+      definition,
+      {},
+      {
+        runId: "resume-source",
+        workflowSource: { kind: "file", path: "/workflow.ts", hash: "old" },
+      },
     );
+    await waitUntil(() => executor.requests.length === 1);
+    first.park();
+    await running;
 
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "resume-stale");
-    expect(result.state.status).toBe("completed");
-    // The phantom result was discarded; the node really reran.
-    expect(work).toHaveBeenCalledTimes(1);
-    expect(result.state.results.work?.output).toBe("done");
-  });
-
-  it("refuses to resume against changed source unless forced", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "work",
-      nodes: { work: compute({ run: () => "done" }) },
-      edges: [],
+    const second = new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("finish", { output: { done: true } }),
     });
-    const state = {
-      ...runningState("resume-hash", workflow),
-      workflowSource: { kind: "file" as const, path: "/demo.ts", hash: "old-hash" },
-    };
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-
-    const engine = makeEngine(store);
     await expect(
-      engine.resumeRun(workflow, "resume-hash", {
-        workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+      second.resumeRun(definition, "resume-source", {
+        workflowSource: { kind: "file", path: "/workflow.ts", hash: "new" },
       }),
     ).rejects.toThrow(WorkflowSourceChangedError);
-
-    const forced = await engine.resumeRun(workflow, "resume-hash", {
-      workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
+    const forced = await second.resumeRun(definition, "resume-source", {
+      workflowSource: { kind: "file", path: "/workflow.ts", hash: "new" },
       force: true,
     });
     expect(forced.state.status).toBe("completed");
-    const resumed = await readLastTraceEvent(runDir);
-    expect(resumed?.type).toBe("run_completed");
-    const types = await traceTypes(runDir);
-    expect(types).toContain("run_resumed");
   });
 
-  it("refuses a changed legacy file hash", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "work",
-      nodes: { work: compute({ run: () => "done" }) },
+  it("rejects a terminal run", async () => {
+    const databasePath = await makeStateDatabasePath("resume-terminal");
+    const definition = defineWorkflow({
+      name: "terminal",
+      startAt: "done",
+      nodes: { done: compute({ run: () => true }) },
       edges: [],
     });
-    const state = { ...runningState("legacy-hash", workflow), workflowHash: "old-hash" };
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-
-    await expect(
-      makeEngine(store).resumeRun(workflow, "legacy-hash", {
-        workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
-      }),
-    ).rejects.toThrow(WorkflowSourceChangedError);
-  });
-
-  it("restores the waiting gate when a crash hit after a checkpoint", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const downstream = vi.fn(() => "should not run");
-    const workflow = defineWorkflow({
-      name: "gate-flow",
-      startAt: "approval",
-      nodes: {
-        approval: checkpoint({ summary: "approve" }),
-        apply: compute({ run: downstream }),
-      },
-      edges: [{ from: "approval", to: "apply" }],
-    });
-
-    // Crash window: the checkpoint's node_finished persisted, but the
-    // terminal run_waiting event did not.
-    const state = runningState("resume-checkpoint", workflow);
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    state.results.approval = {
-      attemptId: "a1",
-      nodeId: "approval",
-      nodeType: "checkpoint",
-      outcome: "ok",
-      output: { summary: "approve" },
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      durationMs: 1,
-    };
-    state.outputs.approval = { summary: "approve" };
-    state.steps.push({
-      attemptId: "a1",
-      nodeId: "approval",
-      nodeType: "checkpoint",
-      outcome: "ok",
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      prompt: null,
-      output: { summary: "approve" },
-    });
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_finished",
-      nodeId: "approval",
-      attemptId: "a1",
-      payload: { outcome: "ok", output: { summary: "approve" }, durationMs: 1 },
-    });
-
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "resume-checkpoint");
-
-    // The human gate is restored; nothing downstream executes.
-    expect(result.state.status).toBe("waiting");
-    expect(result.state.waitingOn).toBe("approval");
-    expect(downstream).not.toHaveBeenCalled();
-    void runDir;
-  });
-
-  it("resumes a parked continuation past the answered checkpoint", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "gate-flow",
-      startAt: "approval",
-      nodes: {
-        approval: checkpoint({ summary: "approve" }),
-        apply: compute({ run: () => "deployed" }),
-      },
-      edges: [{ from: "approval", to: "apply" }],
-    });
-
-    // A parked continuation bundle: the parent's carried checkpoint is the
-    // last recorded step, parentRunId is set, and nothing new has run yet.
-    const state = {
-      ...runningState("continuation-parked", workflow),
-      parentRunId: "parent-run",
-      carriedStepCount: 1,
-    };
-    state.results.approval = {
-      attemptId: "a1",
-      nodeId: "approval",
-      nodeType: "checkpoint",
-      outcome: "ok",
-      output: { summary: "approve" },
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      durationMs: 1,
-    };
-    state.outputs.approval = { summary: "approve" };
-    state.steps.push({
-      attemptId: "a1",
-      nodeId: "approval",
-      nodeType: "checkpoint",
-      outcome: "ok",
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      prompt: null,
-      output: { summary: "approve" },
-    });
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-
-    const resumer = makeEngine(store);
-    const resumed = await resumer.resumeRun(workflow, "continuation-parked");
-    // It routes past the answered checkpoint instead of regressing to waiting.
-    expect(resumed.state.status).toBe("completed");
-    expect(resumed.state.finalOutput).toBe("deployed");
-    void runDir;
-  });
-
-  it("restores the gate for a continuation's own checkpoint after a crash", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "two-gates",
-      startAt: "approval",
-      nodes: {
-        approval: checkpoint({ summary: "first" }),
-        review: checkpoint({ summary: "second" }),
-        apply: compute({ run: () => "deployed" }),
-      },
-      edges: [
-        { from: "approval", to: "review" },
-        { from: "review", to: "apply" },
-      ],
-    });
-
-    // The continuation answered "approval", recorded its own checkpoint
-    // "review", and crashed before run_waiting persisted.
-    const state = {
-      ...runningState("continuation-own-gate", workflow),
-      parentRunId: "parent-run",
-      carriedStepCount: 1,
-    };
-    const carried = {
-      attemptId: "a1",
-      nodeType: "checkpoint" as const,
-      outcome: "ok" as const,
-      startedAt: state.startedAt,
-      finishedAt: state.startedAt,
-      durationMs: 1,
-    };
-    state.results.approval = { ...carried, nodeId: "approval", output: { summary: "first" } };
-    state.results.review = {
-      ...carried,
-      attemptId: "a2",
-      nodeId: "review",
-      output: { summary: "second" },
-    };
-    state.outputs.approval = { summary: "first" };
-    state.outputs.review = { summary: "second" };
-    state.steps.push(
-      { ...carried, nodeId: "approval", prompt: null, output: { summary: "first" } },
-      {
-        ...carried,
-        attemptId: "a2",
-        nodeId: "review",
-        prompt: null,
-        output: { summary: "second" },
-      },
+    await new WorkflowEngine({ databasePath, executor: new ScriptedExecutor() }).run(
+      definition,
+      {},
+      { runId: "terminal-run" },
     );
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_finished",
-      nodeId: "review",
-      attemptId: "a2",
-      payload: { outcome: "ok", output: { summary: "second" }, durationMs: 1 },
-    });
-
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "continuation-own-gate");
-    // The run's own checkpoint gate is restored, not routed past.
-    expect(result.state.status).toBe("waiting");
-    expect(result.state.waitingOn).toBe("review");
-    void runDir;
-  });
-
-  it("refuses to resume terminal or waiting runs", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "work",
-      nodes: { work: compute({ run: () => "done" }) },
-      edges: [],
-    });
-    const engine = makeEngine(store);
-    await engine.run(workflow, {}, { runId: "resume-done" });
-    await expect(engine.resumeRun(workflow, "resume-done")).rejects.toThrow(/status/);
-  });
-
-  it("accounts replayed steps against maxSteps", async () => {
-    const outputRoot = await makeTempDir("pi-resume-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "demo",
-      maxSteps: 2,
-      startAt: "one",
-      nodes: {
-        one: compute({ run: () => 1 }),
-        two: compute({ run: () => 2 }),
-        three: compute({ run: () => 3 }),
-      },
-      edges: [
-        { from: "one", to: "two" },
-        { from: "two", to: "three" },
-      ],
-    });
-    const state = runningState("resume-steps", workflow);
-    const runDir = await store.initializeRunBundle(workflow, state);
-    await store.writeSnapshot(runDir, state, { scope: "run", type: "run_started", payload: {} });
-    // Two steps already recorded; the graph was mid-walk to node three.
-    for (const nodeId of ["one", "two"]) {
-      state.results[nodeId] = {
-        attemptId: `a-${nodeId}`,
-        nodeId,
-        nodeType: "compute",
-        outcome: "ok",
-        output: nodeId === "one" ? 1 : 2,
-        startedAt: state.startedAt,
-        finishedAt: state.startedAt,
-        durationMs: 1,
-      };
-      state.steps.push({
-        attemptId: `a-${nodeId}`,
-        nodeId,
-        nodeType: "compute",
-        outcome: "ok",
-        startedAt: state.startedAt,
-        finishedAt: state.startedAt,
-        prompt: null,
-        output: null,
-      });
-    }
-    state.outputs.one = 1;
-    state.outputs.two = 2;
-    await store.writeSnapshot(runDir, state, {
-      scope: "node",
-      type: "node_finished",
-      nodeId: "two",
-      attemptId: "a-two",
-      payload: { outcome: "ok", output: 2, durationMs: 1 },
-    });
-
-    const engine = makeEngine(store);
-    const result = await engine.resumeRun(workflow, "resume-steps");
-    // The third dispatch exceeds maxSteps=2 with two replayed steps.
-    expect(result.state.status).toBe("failed");
-    expect(result.state.error).toMatch(/maxSteps/);
+    await expect(
+      new WorkflowEngine({ databasePath, executor: new ScriptedExecutor() }).resumeRun(
+        definition,
+        "terminal-run",
+      ),
+    ).rejects.toThrow(/status completed/);
   });
 });

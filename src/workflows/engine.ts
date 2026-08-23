@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { resolveArtifacts } from "./artifacts.js";
 import {
   compileWorkflowDefinition,
   compositionMetadata,
@@ -29,7 +28,6 @@ import {
   WorkflowRunStore,
   createDefinitionSnapshot,
   createRunId,
-  readRunBundle,
 } from "./store.js";
 import type {
   ResolvedHumanDecision,
@@ -92,8 +90,8 @@ type NodeAttempt = {
 /**
  * Executes a workflow graph step by step. Agent steps are delegated to the
  * configured executor; compute/action/checkpoint nodes run inline. Every
- * state transition is persisted to the run bundle before the engine moves on,
- * so a live viewer can follow along by watching the bundle directory.
+ * state transition is persisted to the SQLite run state before the engine moves on,
+ * so a live viewer can follow committed SQLite events.
  */
 export class WorkflowEngine {
   private readonly executor: AgentStepExecutor;
@@ -107,7 +105,7 @@ export class WorkflowEngine {
   private activeAbort: AbortController | null = null;
   private activeAttempt:
     | {
-        runDir: string;
+        runId: string;
         state: WorkflowRunState;
         nodeId: string;
         attemptId: string;
@@ -124,7 +122,7 @@ export class WorkflowEngine {
   constructor(options: WorkflowEngineOptions) {
     this.executor = options.executor;
     this.notificationSink = options.notificationSink;
-    this.store = options.store ?? new WorkflowRunStore(options.outputRoot);
+    this.store = options.store ?? new WorkflowRunStore(options.databasePath);
     this.defaultNodeTimeoutMs = options.defaultNodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.onEvent = options.onEvent;
@@ -132,8 +130,8 @@ export class WorkflowEngine {
     this.onRunFinishing = options.onRunFinishing;
   }
 
-  get outputRoot(): string {
-    return this.store.outputRoot;
+  get databasePath(): string {
+    return this.store.databasePath;
   }
 
   /** Publish a durable update for the currently active attempt without completing it. */
@@ -171,7 +169,7 @@ export class WorkflowEngine {
       }
       limiter.take();
       const { event, record } = await this.store.publishUpdate(
-        active.runDir,
+        active.runId,
         active.state,
         active.nodeId,
         active.attemptId,
@@ -235,8 +233,7 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
-    // Fail before any bundle exists so bad input cannot leave a partial run
-    // on disk or silently change shape when state.json round-trips.
+    // Fail before any run row exists so bad input cannot leave partial state.
     const suppliedInput = input === undefined ? null : input;
     const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
     assertJsonSerializable(normalizedInput, "Workflow run input");
@@ -253,8 +250,8 @@ export class WorkflowEngine {
       options.workflowSource,
       options.runId,
     );
-    const runDir = await this.store.initializeRunBundle(workflow, state);
-    await this.persist(runDir, state, {
+    const runId = await this.store.initializeRun(workflow, state);
+    await this.persist(runId, state, {
       scope: "run",
       type: "run_started",
       payload: {
@@ -266,18 +263,18 @@ export class WorkflowEngine {
     // Awaited so anything the hook writes (e.g. a session binding and its
     // `session_bound` event) lands before node events and can never trail
     // the terminal event of a fast run.
-    await this.onRunStarted?.(runDir, state);
+    await this.onRunStarted?.(runId, state);
 
     try {
-      await this.executeGraph(workflow, state, runDir);
+      await this.executeGraph(workflow, state, runId);
     } catch (error) {
       if (isRunParkedError(error) || this.parked) {
-        return { runDir, state };
+        return { runId, state };
       }
-      await this.finishAfterError(runDir, state, error);
-      return { runDir, state };
+      await this.finishAfterError(runId, state, error);
+      return { runId, state };
     }
-    return { runDir, state };
+    return { runId, state };
   }
 
   /**
@@ -297,9 +294,8 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const bundle = await this.store.prepareRunResume(runId);
-    const { runDir } = bundle;
-    const state = bundle.state;
+    const loaded = await this.store.prepareRunResume(runId);
+    const state = loaded.state;
     const sourceMismatch = workflowIdentityMismatch(state, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
@@ -314,7 +310,7 @@ export class WorkflowEngine {
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
     delete state.statusDetail;
-    await this.persist(runDir, state, {
+    await this.persist(runId, state, {
       scope: "run",
       type: "run_resumed",
       payload: {
@@ -323,50 +319,50 @@ export class WorkflowEngine {
         ...(sourceMismatch ? { workflowSourceMismatch: true, forced: true } : {}),
       },
     });
-    await this.onRunStarted?.(runDir, state);
+    await this.onRunStarted?.(runId, state);
 
     if (point.nodeId === null) {
       // The last recorded transition already finished the graph; the crash
       // happened before the terminal event was written. A finished
       // checkpoint restores its waiting gate rather than completing.
       if (point.waitingOn !== undefined) {
-        await this.finishRun(runDir, state, "waiting", {
+        await this.finishRun(runId, state, "waiting", {
           waitingOn: point.waitingOn,
           finalOutput: point.lastOutput,
         });
       } else if (point.failedResult === undefined) {
-        await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
+        await this.finishRun(runId, state, "completed", { finalOutput: point.lastOutput });
       } else {
         const timedOut = point.failedResult.outcome === "timed_out";
-        await this.finishRun(runDir, state, timedOut ? "timed_out" : "failed", {
+        await this.finishRun(runId, state, timedOut ? "timed_out" : "failed", {
           error: point.failedResult.error ?? `Workflow node failed: ${point.failedResult.nodeId}`,
         });
       }
-      return { runDir, state };
+      return { runId, state };
     }
 
     try {
       await this.executeGraph(
         workflow,
         state,
-        runDir,
+        runId,
         point.nodeId,
         countExecutableSteps(workflow, state.steps),
         point.lastOutput,
       );
     } catch (error) {
       if (isRunParkedError(error) || this.parked) {
-        return { runDir, state };
+        return { runId, state };
       }
-      await this.finishAfterError(runDir, state, error);
-      return { runDir, state };
+      await this.finishAfterError(runId, state, error);
+      return { runId, state };
     }
-    return { runDir, state };
+    return { runId, state };
   }
 
   /**
    * Start a continuation run from a checkpointed parent. The new run gets a
-   * fresh bundle and trace, carries forward the parent's outputs, results,
+   * fresh run and event stream, carries forward the parent's outputs, results,
    * and step accounting, and continues routing after the checkpoint.
    */
   async continueRun(
@@ -385,7 +381,7 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const parent = await readRunBundle(this.store.runDirFor(parentRunId));
+    const parent = this.store.readRun(parentRunId);
     if (parent === null) {
       throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
     }
@@ -418,7 +414,7 @@ export class WorkflowEngine {
       ) {
         throw new Error("Accepted human decision does not match the waiting request");
       }
-      const durableDecision = await new HumanDecisionStore(this.store.outputRoot).readResolved(
+      const durableDecision = await new HumanDecisionStore(this.store.databasePath).readResolved(
         request.decisionId,
       );
       if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
@@ -426,7 +422,7 @@ export class WorkflowEngine {
       }
       acceptedResponse = validateHumanDecisionResponse(request, durableDecision.response);
       acceptedNodeId = request.nodeId;
-      normalizedInput = await resolveArtifacts(parent.state.input, parent.runDir);
+      normalizedInput = structuredClone(parent.state.input);
     } else {
       const suppliedInput = input === undefined ? null : input;
       normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
@@ -443,20 +439,9 @@ export class WorkflowEngine {
       options.runId,
     );
     state.parentRunId = parentRunId;
-    // Artifact references point into the parent's bundle, so carried values
-    // are fully resolved here and re-externalized into the new bundle.
-    state.outputs = (await resolveArtifacts(
-      parent.state.outputs,
-      parent.runDir,
-    )) as WorkflowRunState["outputs"];
-    state.results = (await resolveArtifacts(
-      parent.state.results,
-      parent.runDir,
-    )) as WorkflowRunState["results"];
-    state.steps = (await resolveArtifacts(
-      parent.state.steps,
-      parent.runDir,
-    )) as WorkflowRunState["steps"];
+    state.outputs = structuredClone(parent.state.outputs);
+    state.results = structuredClone(parent.state.results);
+    state.steps = structuredClone(parent.state.steps);
     if (humanContract !== undefined && options.humanDecision !== undefined) {
       const receipt = {
         decisionId: options.humanDecision.decisionId,
@@ -490,8 +475,8 @@ export class WorkflowEngine {
     }
     state.carriedStepCount = state.steps.length;
 
-    const runDir = await this.store.initializeRunBundle(workflow, state);
-    await this.persist(runDir, state, {
+    const runId = await this.store.initializeRun(workflow, state);
+    await this.persist(runId, state, {
       scope: "run",
       type: "run_started",
       payload: {
@@ -503,31 +488,31 @@ export class WorkflowEngine {
         carriedSteps: state.steps.length,
       },
     });
-    await this.onRunStarted?.(runDir, state);
+    await this.onRunStarted?.(runId, state);
 
     const point = this.resumePointFor(workflow, state, "continue");
     if (point.nodeId === null) {
       // The checkpoint was the final node; the answer completes the chain.
-      await this.finishRun(runDir, state, "completed", { finalOutput: point.lastOutput });
-      return { runDir, state };
+      await this.finishRun(runId, state, "completed", { finalOutput: point.lastOutput });
+      return { runId, state };
     }
     try {
       await this.executeGraph(
         workflow,
         state,
-        runDir,
+        runId,
         point.nodeId,
         countExecutableSteps(workflow, state.steps),
         point.lastOutput,
       );
     } catch (error) {
       if (isRunParkedError(error) || this.parked) {
-        return { runDir, state };
+        return { runId, state };
       }
-      await this.finishAfterError(runDir, state, error);
-      return { runDir, state };
+      await this.finishAfterError(runId, state, error);
+      return { runId, state };
     }
-    return { runDir, state };
+    return { runId, state };
   }
 
   /**
@@ -583,17 +568,17 @@ export class WorkflowEngine {
   }
 
   private async finishAfterError(
-    runDir: string,
+    runId: string,
     state: WorkflowRunState,
     error: unknown,
   ): Promise<void> {
     const cancelled = this.cancelled || isAbortLikeError(error);
     try {
-      await this.finishRun(runDir, state, cancelled ? "cancelled" : "failed", {
+      await this.finishRun(runId, state, cancelled ? "cancelled" : "failed", {
         error: errorMessage(error),
       });
     } catch (finishError) {
-      // A fenced-out runner must not touch the bundle, including terminal
+      // A fenced-out runner must not touch run state, including terminal
       // projections. Propagate the claim loss instead of the node error.
       if (isClaimLostError(finishError)) {
         throw finishError;
@@ -661,7 +646,7 @@ export class WorkflowEngine {
   private async executeGraph(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    runDir: string,
+    runId: string,
     startNodeId: string | null = workflow.startAt,
     executedStepsBase = 0,
     initialLastOutput?: unknown,
@@ -673,7 +658,7 @@ export class WorkflowEngine {
     let lastOutput: unknown = initialLastOutput;
 
     while (currentNodeId !== null) {
-      await this.holdWhilePaused(state, runDir);
+      await this.holdWhilePaused(state, runId);
       const isTransition =
         composition?.entries[currentNodeId] !== undefined ||
         composition?.exits[currentNodeId] !== undefined;
@@ -692,7 +677,7 @@ export class WorkflowEngine {
         throw new Error(`Workflow node is missing: ${currentNodeId}`);
       }
 
-      const attempt = await this.executeNode(workflow, state, runDir, currentNodeId, node);
+      const attempt = await this.executeNode(workflow, state, runId, currentNodeId, node);
       if (this.parked) {
         // Do not record the aborted attempt: the projection keeps the node
         // as in-flight, and resume reruns it with a fresh attempt.
@@ -701,7 +686,7 @@ export class WorkflowEngine {
       this.recordAttempt(workflow, state, attempt);
       // The terminal node event carries the output, receipt, and conversation
       // linkage so the trace alone is sufficient to reconstruct the run.
-      await this.persist(runDir, state, {
+      await this.persist(runId, state, {
         scope: "node",
         type: attempt.result.outcome === "ok" ? "node_finished" : "node_failed",
         nodeId: attempt.result.nodeId,
@@ -726,7 +711,7 @@ export class WorkflowEngine {
       const entered = composition?.entries[attempt.result.nodeId];
       if (entered !== undefined) {
         const value = attempt.result.output as { invocation?: number } | undefined;
-        await this.persist(runDir, state, {
+        await this.persist(runId, state, {
           scope: "run",
           type: "include_entered",
           payload: {
@@ -739,7 +724,7 @@ export class WorkflowEngine {
       const exited = composition?.exits[attempt.result.nodeId];
       if (exited !== undefined) {
         const entrySteps = state.steps.filter((step) => step.nodeId === exited.mountPath);
-        await this.persist(runDir, state, {
+        await this.persist(runId, state, {
           scope: "run",
           type: "include_exited",
           payload: {
@@ -754,7 +739,7 @@ export class WorkflowEngine {
 
       lastOutput = attempt.result.output;
       if (node.nodeType === "checkpoint") {
-        await this.finishRun(runDir, state, "waiting", {
+        await this.finishRun(runId, state, "waiting", {
           waitingOn: attempt.result.nodeId,
           finalOutput: lastOutput,
         });
@@ -768,14 +753,14 @@ export class WorkflowEngine {
       );
     }
 
-    await this.finishRun(runDir, state, "completed", { finalOutput: lastOutput });
+    await this.finishRun(runId, state, "completed", { finalOutput: lastOutput });
   }
 
   /**
    * Hold the run at the step boundary while a pause is in effect. Pausing
    * never interrupts a node mid-flight; it only delays the next dispatch.
    */
-  private async holdWhilePaused(state: WorkflowRunState, runDir: string): Promise<void> {
+  private async holdWhilePaused(state: WorkflowRunState, runId: string): Promise<void> {
     if (this.parked) {
       throw new RunParkedError();
     }
@@ -786,7 +771,7 @@ export class WorkflowEngine {
       return;
     }
     state.paused = true;
-    await this.persist(runDir, state, { scope: "run", type: "run_paused", payload: {} });
+    await this.persist(runId, state, { scope: "run", type: "run_paused", payload: {} });
     while (this.paused && !this.cancelled && !this.parked) {
       await new Promise<void>((resolve) => {
         this.wakePause = resolve;
@@ -800,7 +785,7 @@ export class WorkflowEngine {
     if (this.cancelled) {
       throw new CancelledError();
     }
-    await this.persist(runDir, state, { scope: "run", type: "run_resumed", payload: {} });
+    await this.persist(runId, state, { scope: "run", type: "run_resumed", payload: {} });
   }
 
   private routeAfterFailure(
@@ -867,7 +852,7 @@ export class WorkflowEngine {
   private async executeNode(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    runDir: string,
+    runId: string,
     nodeId: string,
     node: WorkflowNodeDefinition,
   ): Promise<NodeAttempt> {
@@ -879,7 +864,7 @@ export class WorkflowEngine {
     if (node.statusDetail !== undefined) {
       state.statusDetail = node.statusDetail;
     }
-    await this.persist(runDir, state, {
+    await this.persist(runId, state, {
       scope: "node",
       type: "node_started",
       nodeId,
@@ -892,7 +877,7 @@ export class WorkflowEngine {
       const execution = await this.runNodeWithTimeout(
         workflow,
         state,
-        runDir,
+        runId,
         nodeId,
         attemptId,
         node,
@@ -955,7 +940,7 @@ export class WorkflowEngine {
   private async runNodeWithTimeout(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    runDir: string,
+    runId: string,
     nodeId: string,
     attemptId: string,
     node: WorkflowNodeDefinition,
@@ -985,11 +970,11 @@ export class WorkflowEngine {
           abort.abort(new TimeoutError(timeoutMs));
         }, timeoutMs);
       }
-      this.activeAttempt = { runDir, state, nodeId, attemptId, signal: abort.signal };
+      this.activeAttempt = { runId, state, nodeId, attemptId, signal: abort.signal };
       const dispatched = this.dispatchNode(
         workflow,
         state,
-        runDir,
+        runId,
         nodeId,
         attemptId,
         node,
@@ -1006,7 +991,7 @@ export class WorkflowEngine {
       const execution = await Promise.race([dispatched, abortRejection(abort.signal)]);
       if (execution.output === undefined) {
         // JSON cannot represent undefined; normalize so the in-memory state
-        // matches what the persisted bundle round-trips to.
+        // matches what persisted canonical JSON round-trips to.
         execution.output = null;
       }
       assertJsonSerializable(execution.output, `Node ${nodeId} output`);
@@ -1070,7 +1055,7 @@ export class WorkflowEngine {
   private async dispatchNode(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    runDir: string,
+    runId: string,
     nodeId: string,
     attemptId: string,
     node: WorkflowNodeDefinition,
@@ -1083,7 +1068,7 @@ export class WorkflowEngine {
         return await this.runAgentNode(
           workflow,
           state,
-          runDir,
+          runId,
           nodeId,
           attemptId,
           node,
@@ -1141,7 +1126,7 @@ export class WorkflowEngine {
   private async runAgentNode(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    runDir: string,
+    runId: string,
     nodeId: string,
     attemptId: string,
     node: AgentNodeDefinition,
@@ -1152,7 +1137,7 @@ export class WorkflowEngine {
     const basePrompt = await node.prompt(context);
     if (signal.aborted) {
       // The node timed out or the run was cancelled while the async prompt
-      // builder ran; a late continuation must not write into a bundle that
+      // builder ran; a late continuation must not write into a run that
       // may already be terminal.
       throw abortError(signal);
     }
@@ -1164,7 +1149,7 @@ export class WorkflowEngine {
       node.expectedOutput,
     );
     meta.promptText = prompt;
-    await this.persist(runDir, state, {
+    await this.persist(runId, state, {
       scope: "agent",
       type: "agent_prompt_sent",
       nodeId,
@@ -1242,11 +1227,11 @@ export class WorkflowEngine {
   }
 
   private async persist(
-    runDir: string,
+    runId: string,
     state: WorkflowRunState,
     event: WorkflowTraceEventDraft,
   ): Promise<void> {
-    const traceEvent = await this.store.writeSnapshot(runDir, state, event);
+    const traceEvent = await this.store.writeSnapshot(runId, state, event);
     try {
       this.onEvent?.(traceEvent, state);
     } catch {
@@ -1256,7 +1241,7 @@ export class WorkflowEngine {
   }
 
   private async finishRun(
-    runDir: string,
+    runId: string,
     state: WorkflowRunState,
     status: WorkflowRunState["status"],
     fields: { error?: string; waitingOn?: string; finalOutput?: unknown },
@@ -1265,9 +1250,9 @@ export class WorkflowEngine {
       status = "timed_out";
     }
     // Let observers (e.g. the session recorder) stop and drain before the
-    // terminal event exists, so the bundle is immutable from that point on.
+    // terminal event exists, so the terminal fact is immutable from that point on.
     try {
-      await this.onRunFinishing?.(runDir, state);
+      await this.onRunFinishing?.(runId, state);
     } catch {
       // Finishing the run wins over observer failures.
     }
@@ -1285,7 +1270,7 @@ export class WorkflowEngine {
     delete state.currentNode;
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
-    await this.persist(runDir, state, {
+    await this.persist(runId, state, {
       scope: "run",
       type: `run_${status}`,
       payload: {
@@ -1327,7 +1312,7 @@ async function runCheckpointNode(
       prompt,
       ...(timeout !== undefined ? { timeout } : {}),
     });
-    await new HumanDecisionStore(execution.store.outputRoot).createRequest(request);
+    await new HumanDecisionStore(execution.store.databasePath).createRequest(request);
     return { output: request, promptText: null };
   }
   const output = node.run ? await node.run(context) : { summary: node.summary ?? "checkpoint" };
@@ -1458,7 +1443,7 @@ function assertInvocationStepLimit(
 }
 
 /**
- * Outputs are persisted to the run bundle, so they must be JSON-serializable.
+ * Outputs are persisted to the SQLite run state, so they must be JSON-serializable.
  * Failing here turns a bad callback return value into a normal node failure
  * instead of corrupting the run state.
  */

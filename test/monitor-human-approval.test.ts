@@ -9,7 +9,7 @@ import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 let originalPath = "";
 let repository = "";
@@ -254,15 +254,13 @@ async function answer(
   parentRunId: string,
   response: HumanDecisionResponse,
 ) {
-  const parent = await import("../src/workflows/store.js").then(
-    async ({ readRunBundle }) => await readRunBundle(store.runDirFor(parentRunId)),
-  );
+  const parent = store.readRun(parentRunId);
   if (parent === null) throw new Error("missing waiting bundle");
   const request = parent.state.finalOutput as HumanDecisionRequest;
   if (request?.choices === undefined) {
     throw new Error(`Invalid human decision request: ${JSON.stringify(request)}`);
   }
-  const accepted = await new HumanDecisionStore(store.outputRoot).accept(request, {
+  const accepted = await new HumanDecisionStore(store.databasePath).accept(request, {
     decisionId: request.decisionId,
     requestDigest: request.requestDigest,
     ...response,
@@ -294,7 +292,7 @@ afterEach(() => {
 describe("monitor human repair approval", () => {
   it("continues only after the verified human continue answer", async () => {
     const executor = completedRepairExecutor();
-    const store = new WorkflowRunStore(await makeTempDir("monitor-approval-runs"));
+    const store = new WorkflowRunStore(await makeStateDatabasePath("monitor-approval-runs"));
     const resolved = await resolveWorkflowRef(
       "monitor",
       { cwd: repository, homeDir: await makeTempDir("monitor-approval-home") },
@@ -334,7 +332,7 @@ describe("monitor human repair approval", () => {
 
   it("stops truthfully when the operator rejects the repair", async () => {
     const executor = completedRepairExecutor();
-    const store = new WorkflowRunStore(await makeTempDir("monitor-stop-runs"));
+    const store = new WorkflowRunStore(await makeStateDatabasePath("monitor-stop-runs"));
     const resolved = await resolveWorkflowRef(
       "monitor",
       { cwd: repository, homeDir: await makeTempDir("monitor-stop-home") },
@@ -359,7 +357,7 @@ describe("monitor human repair approval", () => {
 
   it("feeds exact replan text to autoplan, documents the revision, and asks again", async () => {
     const executor = completedRepairExecutor(2);
-    const store = new WorkflowRunStore(await makeTempDir("monitor-replan-runs"));
+    const store = new WorkflowRunStore(await makeStateDatabasePath("monitor-replan-runs"));
     const resolved = await resolveWorkflowRef(
       "monitor",
       { cwd: repository, homeDir: await makeTempDir("monitor-replan-home") },

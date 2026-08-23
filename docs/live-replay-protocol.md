@@ -1,18 +1,18 @@
 # Live replay protocol
 
-The Rust viewer (`tui/`) can watch runs in two ways: by reading run bundles
+The Rust viewer (`tui/`) can watch runs in two ways: by reading SQLite runs
 directly from the filesystem (the default, in-process) or by connecting to a
 `piw serve` WebSocket server. Both paths produce the same semantic state; the
 protocol below is the network form of that state. Protocol id:
 `pi-workflows.replay.v1`.
 
-The server is a reader like any other: it only consumes run bundles (see
-[run-bundles.md](run-bundles.md)) and never writes them. The protocol has no
+The server is a reader like any other: it only consumes SQLite runs (see
+[SQLITE_STATE.md](SQLITE_STATE.md)) and never writes them. The protocol has no
 authentication, so the server only accepts loopback bind addresses and refuses
-to start on anything else; bundles contain private data, and remote viewing
+to start on anything else; workflow state contains private data, and remote viewing
 goes through an SSH tunnel. Handshakes that
 carry an `Origin` header are rejected: browsers always send one, and a web
-page must not be able to read bundles by opening a WebSocket to localhost.
+page must not be able to read workflow state by opening a WebSocket to localhost.
 
 ## Transport and framing
 
@@ -49,18 +49,15 @@ run:
 }
 ```
 
-- `manifest`, `workflow`, `state`, `events`, and every `session` field are the
-  bundle documents verbatim. `workflow` is the definition snapshot,
-  top-level `events` are parsed workflow trace lines, `session.entries` are
-  settled Pi entries, `session.events` are normalized temporal events, and
-  `session.capture` is capture integrity. `session.eventsMalformed` and
-  `session.eventsTornTail` are derived transport diagnostics from the live
-  tailer, not bundle documents. `session` is `null` until a binding exists.
-- `live` is true while the run status is non-terminal and the bundle is still
-  growing. `possiblyInterrupted` is true when the status is `running` but the
-  bundle has not changed for 60 seconds.
-- Artifact references inside the view stay references; contents are fetched
-  on demand.
+- `manifest`, `workflow`, `state`, `events`, and every `session` field are
+  semantic projections from SQLite. `workflow` is the definition snapshot,
+  top-level `events` are workflow events, `session.entries` are settled Pi
+  entries, `session.events` are normalized temporal events, and
+  `session.capture` is capture integrity. `session` is `null` until a binding
+  exists.
+- `live` is true while the run status is non-terminal. `possiblyInterrupted`
+  is a reader-side diagnostic based on current ownership and update time.
+- Values are resolved from content-addressed SQLite blobs.
 
 Because the full trace and session history are part of the view, replay
 scrubbing is a pure client-side operation; rewinding never requires the
@@ -106,7 +103,7 @@ Client to server:
 | `watch_runs`     | —               | subscribe to the run listing |
 | `watch_run`      | `runId`         | subscribe to one run's view  |
 | `unwatch_run`    | `runId`         | end a run subscription       |
-| `fetch_artifact` | `runId`, `path` | request artifact contents    |
+| `fetch_artifact` | `runId`, `path` | unsupported; returns `error` |
 
 Server to client:
 
@@ -116,13 +113,11 @@ Server to client:
 | `runs`         | `runs`                       | full run listing (summaries), re-sent on change |
 | `run_snapshot` | `runId`, `revision`, `view`  | full view after subscribe                       |
 | `run_patch`    | `runId`, `revision`, `patch` | incremental view update                         |
-| `artifact`     | `runId`, `path`, `content`   | artifact contents (UTF-8)                       |
+| `artifact`     | `runId`, `path`, `content`   | reserved; not sent by SQLite-backed servers     |
 | `error`        | `message`, `runId?`          | request failed                                  |
 
-Artifact requests are answered only from files below the artifact directory
-declared by `manifest.paths.artifacts`. Paths outside that directory and
-symlinks whose canonical targets leave it are refused. Responses are capped at
-4 MiB of actual file size; anything else produces an `error`.
+SQLite-backed views contain resolved values. A `fetch_artifact` request returns
+an `error` because there is no artifact directory.
 
 Run listing summaries are the manifest plus `live` and
 `possiblyInterrupted`:
@@ -136,20 +131,16 @@ run views use patches.
 
 ## Reconnection
 
-The native client treats the run listing, selected run, and pending artifact
-reads as desired state rather than one-shot commands. After a connection closes,
+The native client treats the run listing and selected run as desired state rather
+than one-shot commands. After a connection closes,
 it keeps the cached run visible with a stale/reconnecting label, retries with
 bounded backoff, sends `watch_runs` after the next valid `hello`, and restores
 the current `watch_run`. A reconnect receives a fresh snapshot before later
-patches. Pending artifact reads are resubmitted once per connection.
+patches.
 
-## Filesystem semantics behind the protocol
+## SQLite semantics behind the protocol
 
-The server watches the runs directory (inotify with polling fallback) and
-tails `trace.ndjson`, `session/entries.ndjson`, and `session/events.ndjson`
-incrementally. Torn final NDJSON lines are buffered until complete. The server
-also re-reads atomic `session/capture.json` changes. `state.json` and
-`manifest.json` are
-re-read on change; a `state.json` whose `traceSeq` is older than the last
-tailed trace event is stale and is replaced when the writer catches up. After
-a terminal status, watching stops.
+The server polls `state.sqlite` through a query-only connection. Each refresh
+reads a committed run projection, immutable events, session rows, and blob
+values. A transaction is either fully visible or not visible, so a client never
+observes half of a state transition.

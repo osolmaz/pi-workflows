@@ -310,7 +310,11 @@ function schemaShape(database: Database.Database): string {
 
 function assertNoLegacyState(databasePath: string, homeDir: string): void {
   const root = path.dirname(databasePath);
-  const legacy = [path.join(root, "runs"), path.join(root, "decisions"), path.join(root, "controllers")];
+  const legacy = [
+    path.join(root, "runs"),
+    path.join(root, "decisions"),
+    path.join(root, "controllers"),
+  ];
   const telegramState = path.join(homeDir, ".config", "pi-workflows", "telegram-state.sqlite");
   if (legacy.some((candidate) => fs.existsSync(candidate)) || fs.existsSync(telegramState)) {
     throw new Error(RESET_INSTRUCTION);

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function documentedPlan(plan: unknown) {
   return {
@@ -31,7 +31,7 @@ function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
 async function run(executor: ScriptedExecutor, input: unknown) {
   return await new WorkflowEngine({
     executor,
-    outputRoot: await makeTempDir("autoimplement-plan-discovery"),
+    databasePath: await makeStateDatabasePath("autoimplement-plan-discovery"),
   }).run(autoimplementWorkflow, input);
 }
 

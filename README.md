@@ -79,6 +79,17 @@ The npm package also includes the simpler `pi-workflows` snapshot viewer. To
 link that command from a clone, run `npm install && npm run build && npm link`,
 or run it in place with `npx tsx src/viewer/cli.ts`.
 
+All live workflow and controller state uses one local database:
+
+```text
+~/.pi/agent/workflows/state.sqlite
+```
+
+Runs, decisions, queues, claims, controllers, session capture, notifications,
+channel transport state, effects, and large text values share that database.
+Reads are read-only. Every write checks its actor, expected revision, and owner
+lease when required. See [SQLite state](docs/SQLITE_STATE.md).
+
 ## Herdr integration
 
 pi-workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
@@ -96,7 +107,7 @@ plan](docs/plans/2026-08-20-herdr-plugin-sync-plan.md) defines update and
 recovery behavior.
 
 When Pi runs inside Herdr, a workflow widget shows `Ctrl+Shift+R piw`. When the widget has hidden rows, this call to action shares the existing scroll-controls line instead of taking another line.
-The shortcut opens the exact run bundle and lets you choose a split, tab, or new
+The shortcut opens the exact SQLite run state and lets you choose a split, tab, or new
 workspace. `/piw` opens the same menu, and `/piw right`, `/piw below`, `/piw
 left`, `/piw above`, `/piw tab`, or `/piw workspace` selects a placement
 directly. If a viewer for that run already exists, pi-workflows focuses it
@@ -294,7 +305,7 @@ the model to pick from a fixed set of choices and validates the answer, and
 `decisionEdge` routes on the result with compile-time case checking.
 
 See [docs/workflows.md](docs/workflows.md) for the full authoring reference
-and [docs/run-bundles.md](docs/run-bundles.md) for the on-disk run format.
+and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk run format.
 
 ## Controllers
 
@@ -330,7 +341,7 @@ The standalone CLI provides read-only views with `pi-workflows controllers` and 
 
 Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it. Another interactive session cannot claim it. Reopening the exact session that started the run resumes it. A standalone host can also resume it without changing where reports go. A checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
 
-Workflow reports use a durable session-addressed outbox. A report waits while its starting session is closed and is delivered only to that session when it opens again. Runs in the same directory do not broadcast messages to each other's conversations.
+Workflow reports use a durable session-addressed outbox. A report waits while its starting session is closed and is delivered only to that session when it opens again. Runs in the same database do not broadcast messages to each other's conversations.
 
 For runs that must continue while Pi is closed, keep the standalone host running:
 
@@ -338,7 +349,7 @@ For runs that must continue while Pi is closed, keep the standalone host running
 pi-workflows host --project /path/to/project
 ```
 
-The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. It is a foreground process — stop it with Ctrl-C; a crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/run-bundles.md](docs/run-bundles.md) for the on-disk rules.
+The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. It is a foreground process — stop it with Ctrl-C; a crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk rules.
 
 ## Examples
 

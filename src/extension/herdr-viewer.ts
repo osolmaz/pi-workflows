@@ -14,7 +14,6 @@ export type ViewerPlacement = (typeof VIEWER_PLACEMENTS)[number];
 export type WorkflowViewTarget = {
   runId: string;
   workflowName: string;
-  runDir: string;
 };
 
 export type HerdrCapability = { available: true } | { available: false; reason: string };
@@ -178,8 +177,6 @@ export class HerdrWorkflowViewer {
       HERDR_PLUGIN_ENTRYPOINT,
       "--env",
       `PI_WORKFLOWS_RUN_ID=${target.runId}`,
-      "--env",
-      `PI_WORKFLOWS_RUN_DIR=${target.runDir}`,
       "--focus",
     ];
     if (placement === "tab") {
@@ -229,8 +226,6 @@ export class HerdrWorkflowViewer {
           created.workspaceId,
           "--env",
           `PI_WORKFLOWS_RUN_ID=${target.runId}`,
-          "--env",
-          `PI_WORKFLOWS_RUN_DIR=${target.runDir}`,
           "--focus",
         ]),
       );

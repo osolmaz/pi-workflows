@@ -30,7 +30,9 @@ A notification should not start a model turn unless the workflow explicitly requ
 
 Runs should survive interruption and remain safe to resume. Save the run input and every accepted output. Save attempts and events along with enough evidence of side effects for replay and diagnosis.
 
-The trace is the record of what happened. Viewers and state projections should derive their answers from that record instead of creating a second source of truth.
+Immutable SQLite events are the record of what happened. Domain rows are current projections written in the same transaction. Viewers derive their answers from those facts instead of creating another source of truth.
+
+Reading shared state never gives mutation authority. Every durable write checks its actor, expected resource revision, and current lease generation when ownership is required. Follow-up work uses deterministic effects and idempotent receipts so partial failure can converge safely.
 
 ## Boundaries
 

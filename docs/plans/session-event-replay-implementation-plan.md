@@ -343,7 +343,7 @@ resnapshot.
 ### Documentation and format replacement
 
 When code and tests pass, fold the target contract into
-`docs/run-bundles.md` and remove the target-status note from
+`docs/SQLITE_STATE.md` and remove the target-status note from
 `docs/session-event-journal.md`. Update `docs/live-replay-protocol.md`,
 `docs/tui-viewer.md`, `docs/development.md`, and the README where users need new
 commands or controls.

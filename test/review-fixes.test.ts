@@ -8,13 +8,13 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
 import { extractJsonValue } from "../src/workflows/json.js";
 import { runShellAction } from "../src/workflows/shell.js";
-import { createDefinitionSnapshot } from "../src/workflows/store.js";
+import { createDefinitionSnapshot, readWorkflowRun } from "../src/workflows/store.js";
 import type { AgentStepRequest } from "../src/workflows/types.js";
-import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function makeEngine(options: { executor?: ScriptedExecutor } = {}) {
-  const outputRoot = await makeTempDir("pi-workflows-fixes");
-  return new WorkflowEngine({ executor: options.executor ?? new ScriptedExecutor(), outputRoot });
+  const databasePath = await makeStateDatabasePath("pi-workflows-fixes");
+  return new WorkflowEngine({ executor: options.executor ?? new ScriptedExecutor(), databasePath });
 }
 
 describe("timeouts and cancellation for local nodes", () => {
@@ -394,18 +394,19 @@ describe("late prompt continuations", () => {
       },
       edges: [],
     });
-    const { state, runDir } = await (await makeEngine()).run(workflow, {});
+    const engine = await makeEngine();
+    const { state, runId } = await engine.run(workflow, {});
     expect(state.status).toBe("timed_out");
 
     // The stale continuation resolves after the run is terminal.
     resolvePrompt?.("late prompt");
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    const trace = await fs.readFile(`${runDir}/trace.ndjson`, "utf8");
-    const types = trace
-      .trim()
-      .split("\n")
-      .map((line) => (JSON.parse(line) as { type: string }).type);
+    const types =
+      readWorkflowRun(runId, {
+        databasePath: engine.databasePath,
+        includeTrace: true,
+      })?.traceEvents?.map((event) => event.type) ?? [];
     expect(types).not.toContain("agent_prompt_sent");
     expect(types.at(-1)).toBe("run_timed_out");
   });
@@ -583,10 +584,10 @@ describe("shell robustness", () => {
 
 describe("observer isolation", () => {
   it("completes the run even when onEvent throws", async () => {
-    const outputRoot = await makeTempDir("pi-workflows-observer");
+    const databasePath = await makeStateDatabasePath("pi-workflows-observer");
     const engine = new WorkflowEngine({
       executor: new ScriptedExecutor(),
-      outputRoot,
+      databasePath,
       onEvent: () => {
         throw new Error("UI exploded");
       },
@@ -690,11 +691,10 @@ describe("terminal output sanitization", () => {
       output: { text: "\u001b[2J\u001b[H cleared" },
     });
     const engine = await makeEngine({ executor });
-    const { state, runDir } = await engine.run(workflow, {});
+    const { state, runId } = await engine.run(workflow, {});
     const lines = renderRunDetailLines(
       {
-        runDir,
-        manifest: null as never,
+        runId,
         state,
         snapshot: createDefinitionSnapshot(workflow),
         sessionBinding: null,

@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import Database from "better-sqlite3";
+import type { StateDatabase } from "../state/database.js";
+import { resourceIdFor, tokenHash } from "../state/mutation.js";
 import {
   MAX_PRESENTATION_TRANSPORT_PARTS,
   decisionDocumentSegments,
@@ -154,6 +154,9 @@ export class PiDecisionChannel implements HumanDecisionChannel {
   }
 
   async deliver(request: HumanDecisionChannelRequest): Promise<HumanDecisionDeliveryResult> {
+    if (await this.alreadyDecided(request.decisionId)) {
+      return { status: "confirmed", channel: this.id, attemptId: "adopted" };
+    }
     const attemptId = createHumanDecisionAttemptId();
     const createdAt = new Date().toISOString();
     const controller = new AbortController();
@@ -281,6 +284,9 @@ export class PiDecisionChannel implements HumanDecisionChannel {
         }
         response = { choice: selectedChoice, input: { [definition.input.name]: text } };
       }
+      if (await this.alreadyDecided(request.decisionId)) {
+        return { status: "confirmed", channel: this.id, attemptId: "adopted" };
+      }
       const eventId = createHumanDecisionAttemptId();
       await this.options.onAnswer({
         request,
@@ -305,6 +311,13 @@ export class PiDecisionChannel implements HumanDecisionChannel {
     } finally {
       if (this.promptAbort === controller) this.promptAbort = null;
     }
+  }
+
+  private async alreadyDecided(decisionId: string): Promise<boolean> {
+    return (
+      (await this.options.store.readResolved(decisionId)) !== null ||
+      (await this.options.store.readCancellation(decisionId)) !== null
+    );
   }
 
   async settle(decision: SettledHumanDecision): Promise<void> {
@@ -354,8 +367,6 @@ type ReplyBinding = CallbackBinding & {
   promptMessageId: string;
 };
 
-type CallbackRow = { request_json: string; choice_id: string };
-type ReplyRow = { request_json: string; choice_id: string; chat_id: string; message_id: string };
 type MessageRow = { chat_id: string; message_id: string };
 type MessagePartRow = {
   recipient_index: number;
@@ -364,189 +375,205 @@ type MessagePartRow = {
   chat_id: string;
   message_id: string;
 };
-type OffsetRow = { next_offset: number };
 
 class TelegramProjection {
-  private readonly db: Database.Database;
+  private readonly channelId: string;
+  private readonly resourceId: string;
+  private readonly token = randomBytes(32).toString("base64url");
+  private generation = 0;
 
   constructor(
-    filePath: string,
+    private readonly state: StateDatabase,
     private readonly profile: string,
     private readonly owner: string,
   ) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    this.db = new Database(filePath);
-    fs.chmodSync(filePath, 0o600);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("busy_timeout = 5000");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS leases (
-        profile TEXT PRIMARY KEY,
-        owner TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS offsets (
-        profile TEXT PRIMARY KEY,
-        next_offset INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS callbacks (
-        profile TEXT NOT NULL,
-        token TEXT NOT NULL,
-        request_json TEXT NOT NULL,
-        choice_id TEXT NOT NULL,
-        PRIMARY KEY (profile, token)
-      );
-      CREATE TABLE IF NOT EXISTS replies (
-        profile TEXT NOT NULL,
-        chat_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        request_json TEXT NOT NULL,
-        choice_id TEXT NOT NULL,
-        PRIMARY KEY (profile, chat_id, message_id)
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        profile TEXT NOT NULL,
-        decision_id TEXT NOT NULL,
-        chat_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        PRIMARY KEY (profile, decision_id, chat_id, message_id)
-      );
-      CREATE TABLE IF NOT EXISTS message_parts (
-        profile TEXT NOT NULL,
-        decision_id TEXT NOT NULL,
-        recipient_index INTEGER NOT NULL,
-        part_index INTEGER NOT NULL,
-        content_digest TEXT NOT NULL,
-        chat_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        PRIMARY KEY (profile, decision_id, recipient_index, part_index)
-      );
-    `);
+    this.channelId = `telegram-${createHash("sha256").update(profile).digest("hex").slice(0, 40)}`;
+    this.resourceId = resourceIdFor("channel", this.channelId);
+    this.state.transaction(() => {
+      const now = Date.now();
+      this.state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'channel', ?, 1, ?, ?)
+           ON CONFLICT(resource_type, aggregate_key) DO NOTHING`,
+        )
+        .run(this.resourceId, this.channelId, now, now);
+      this.state.connection
+        .prepare(
+          "INSERT INTO leases(resource_id, generation) VALUES (?, 0) ON CONFLICT(resource_id) DO NOTHING",
+        )
+        .run(this.resourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO channels(channel_id, resource_id, adapter_type, profile_key, created_at)
+           VALUES (?, ?, 'telegram', ?, ?) ON CONFLICT(channel_id) DO NOTHING`,
+        )
+        .run(this.channelId, this.resourceId, this.profile, now);
+    });
   }
 
   close(): void {
     this.release();
-    this.db.close();
   }
 
   acquire(now = Date.now()): boolean {
-    const transaction = this.db.transaction(() => {
-      const row = this.db
-        .prepare("SELECT owner, expires_at FROM leases WHERE profile = ?")
-        .get(this.profile) as { owner: string; expires_at: number } | undefined;
-      if (row !== undefined && row.owner !== this.owner && row.expires_at > now) return false;
-      this.db
+    return this.state.transaction(() => {
+      const lease = this.lease();
+      if (
+        lease.ownerId !== null &&
+        lease.ownerId !== this.owner &&
+        lease.expiresAt !== null &&
+        lease.expiresAt > now
+      ) {
+        return false;
+      }
+      const generation = lease.ownerId === this.owner ? lease.generation : lease.generation + 1;
+      const result = this.state.connection
         .prepare(
-          "INSERT INTO leases(profile, owner, expires_at) VALUES (?, ?, ?) ON CONFLICT(profile) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at",
+          `UPDATE leases
+           SET generation = ?, owner_type = 'channel', owner_id = ?, token_hash = ?,
+               acquired_at = COALESCE(acquired_at, ?), heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND generation = ?`,
         )
-        .run(this.profile, this.owner, now + LEASE_TTL_MS);
+        .run(
+          generation,
+          this.owner,
+          tokenHash(this.token),
+          now,
+          now,
+          now + LEASE_TTL_MS,
+          this.resourceId,
+          lease.generation,
+        );
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (result.changes !== 1) return false;
+      this.generation = generation;
+      this.recordMutation("channel.lease_acquired", { expiresAt: now + LEASE_TTL_MS }, now);
       return true;
     });
-    return transaction();
   }
 
   renew(now = Date.now()): boolean {
     return (
-      this.db
-        .prepare("UPDATE leases SET expires_at = ? WHERE profile = ? AND owner = ?")
-        .run(now + LEASE_TTL_MS, this.profile, this.owner).changes === 1
+      this.state.connection
+        .prepare(
+          `UPDATE leases SET heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND owner_id = ? AND token_hash = ? AND generation = ?`,
+        )
+        .run(
+          now,
+          now + LEASE_TTL_MS,
+          this.resourceId,
+          this.owner,
+          tokenHash(this.token),
+          this.generation,
+        ).changes === 1
     );
   }
 
   release(): void {
-    this.db
-      .prepare("DELETE FROM leases WHERE profile = ? AND owner = ?")
-      .run(this.profile, this.owner);
+    this.state.transaction(() => {
+      const result = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+               acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND owner_id = ? AND token_hash = ? AND generation = ?`,
+        )
+        .run(this.resourceId, this.owner, tokenHash(this.token), this.generation);
+      if (result.changes === 1) {
+        this.recordMutation("channel.lease_released", {}, Date.now());
+      }
+    });
   }
 
   offset(): number {
-    return (
-      (
-        this.db.prepare("SELECT next_offset FROM offsets WHERE profile = ?").get(this.profile) as
-          | OffsetRow
-          | undefined
-      )?.next_offset ?? 0
-    );
+    const row = this.state.connection
+      .prepare(
+        "SELECT cursor_value AS cursorValue FROM channel_cursors WHERE channel_id = ? AND cursor_key = 'telegram_update'",
+      )
+      .get(this.channelId);
+    return isCursorRow(row) ? Number.parseInt(row.cursorValue, 10) || 0 : 0;
   }
 
   setOffset(offset: number): void {
-    this.db
-      .prepare(
-        "INSERT INTO offsets(profile, next_offset) VALUES (?, ?) ON CONFLICT(profile) DO UPDATE SET next_offset = MAX(next_offset, excluded.next_offset)",
-      )
-      .run(this.profile, offset);
+    this.mutate("channel.cursor_updated", { offset }, () => {
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_cursors(channel_id, cursor_key, cursor_value, updated_at)
+           VALUES (?, 'telegram_update', ?, ?)
+           ON CONFLICT(channel_id, cursor_key) DO UPDATE SET
+             cursor_value = CAST(MAX(CAST(channel_cursors.cursor_value AS INTEGER), CAST(excluded.cursor_value AS INTEGER)) AS TEXT),
+             updated_at = excluded.updated_at`,
+        )
+        .run(this.channelId, String(offset), Date.now());
+    });
   }
 
   putCallback(token: string, binding: CallbackBinding): void {
-    this.db
-      .prepare(
-        "INSERT INTO callbacks(profile, token, request_json, choice_id) VALUES (?, ?, ?, ?) ON CONFLICT(profile, token) DO UPDATE SET request_json = excluded.request_json, choice_id = excluded.choice_id",
-      )
-      .run(this.profile, token, JSON.stringify(binding.request), binding.choice);
+    this.putInbox(`callback:${token}`, "callback", binding);
   }
 
   callback(token: string): CallbackBinding | undefined {
-    const row = this.db
-      .prepare("SELECT request_json, choice_id FROM callbacks WHERE profile = ? AND token = ?")
-      .get(this.profile, token) as CallbackRow | undefined;
-    return row === undefined
-      ? undefined
-      : {
-          request: JSON.parse(row.request_json) as HumanDecisionChannelRequest,
-          choice: row.choice_id,
-        };
+    return this.inbox<CallbackBinding>(`callback:${token}`);
   }
 
   putReply(binding: ReplyBinding): void {
-    this.db
-      .prepare(
-        "INSERT INTO replies(profile, chat_id, message_id, request_json, choice_id) VALUES (?, ?, ?, ?, ?) ON CONFLICT(profile, chat_id, message_id) DO UPDATE SET request_json = excluded.request_json, choice_id = excluded.choice_id",
-      )
-      .run(
-        this.profile,
-        binding.chatId,
-        binding.promptMessageId,
-        JSON.stringify(binding.request),
-        binding.choice,
-      );
+    this.putInbox(`reply:${binding.chatId}:${binding.promptMessageId}`, "reply", binding);
   }
 
   reply(chatId: string, messageId: string): ReplyBinding | undefined {
-    const row = this.db
-      .prepare(
-        "SELECT request_json, choice_id, chat_id, message_id FROM replies WHERE profile = ? AND chat_id = ? AND message_id = ?",
-      )
-      .get(this.profile, chatId, messageId) as ReplyRow | undefined;
-    return row === undefined
-      ? undefined
-      : {
-          request: JSON.parse(row.request_json) as HumanDecisionChannelRequest,
-          choice: row.choice_id,
-          chatId: row.chat_id,
-          promptMessageId: row.message_id,
-        };
+    return this.inbox<ReplyBinding>(`reply:${chatId}:${messageId}`);
   }
 
   deleteReply(chatId: string, messageId: string): void {
-    this.db
-      .prepare("DELETE FROM replies WHERE profile = ? AND chat_id = ? AND message_id = ?")
-      .run(this.profile, chatId, messageId);
+    this.mutate("channel.reply_consumed", { chatId, messageId }, () => {
+      this.state.connection
+        .prepare("DELETE FROM channel_inbox WHERE channel_id = ? AND external_event_id = ?")
+        .run(this.channelId, `reply:${chatId}:${messageId}`);
+    });
   }
 
   putMessage(decisionId: string, chatId: string, messageId: string): void {
-    this.db
-      .prepare(
-        "INSERT OR IGNORE INTO messages(profile, decision_id, chat_id, message_id) VALUES (?, ?, ?, ?)",
-      )
-      .run(this.profile, decisionId, chatId, messageId);
+    const localId = transportMessageId(this.channelId, decisionId, chatId, messageId);
+    this.mutate("channel.message_confirmed", { decisionId, chatId, messageId }, () => {
+      const contentHash = this.state.putJson({ chatId, messageId });
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_messages(
+             message_id, channel_id, decision_id, purpose, content_hash,
+             external_conversation_ref, external_message_ref, status, created_at, updated_at
+           ) VALUES (?, ?, ?, 'delivery', ?, ?, ?, 'confirmed', ?, ?)
+           ON CONFLICT(message_id) DO NOTHING`,
+        )
+        .run(
+          localId,
+          this.channelId,
+          decisionId,
+          contentHash,
+          chatId,
+          messageId,
+          Date.now(),
+          Date.now(),
+        );
+    });
   }
 
   messages(decisionId: string): MessageRow[] {
-    return this.db
+    const rows = this.state.connection
       .prepare(
-        "SELECT chat_id, message_id FROM messages WHERE profile = ? AND decision_id = ? ORDER BY chat_id, message_id",
+        `SELECT external_conversation_ref AS chatId, external_message_ref AS messageId
+         FROM channel_messages
+         WHERE channel_id = ? AND decision_id = ? AND purpose = 'delivery'
+           AND external_conversation_ref IS NOT NULL AND external_message_ref IS NOT NULL
+         ORDER BY external_conversation_ref, external_message_ref`,
       )
-      .all(this.profile, decisionId) as MessageRow[];
+      .all(this.channelId, decisionId);
+    return rows.filter(isTransportMessageRow).map((row) => ({
+      chat_id: row.chatId,
+      message_id: row.messageId,
+    }));
   }
 
   putMessagePart(
@@ -557,11 +584,35 @@ class TelegramProjection {
     chatId: string,
     messageId: string,
   ): void {
-    this.db
-      .prepare(
-        "INSERT INTO message_parts(profile, decision_id, recipient_index, part_index, content_digest, chat_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile, decision_id, recipient_index, part_index) DO UPDATE SET content_digest = excluded.content_digest, chat_id = excluded.chat_id, message_id = excluded.message_id",
-      )
-      .run(this.profile, decisionId, recipientIndex, partIndex, contentDigest, chatId, messageId);
+    const localId = `telegram-parts-${createHash("sha256")
+      .update(`${this.channelId}\0${decisionId}`)
+      .digest("hex")
+      .slice(0, 40)}`;
+    this.mutate("channel.message_part_confirmed", { decisionId, recipientIndex, partIndex }, () => {
+      const parentHash = this.state.putJson({ decisionId });
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_messages(
+             message_id, channel_id, decision_id, purpose, content_hash,
+             status, created_at, updated_at
+           ) VALUES (?, ?, ?, 'delivery', ?, 'confirmed', ?, ?)
+           ON CONFLICT(message_id) DO NOTHING`,
+        )
+        .run(localId, this.channelId, decisionId, parentHash, Date.now(), Date.now());
+      const contentHash = this.state.putText(contentDigest);
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_message_parts(
+             message_id, recipient_index, part_index, content_hash,
+             external_conversation_ref, external_message_ref
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(message_id, recipient_index, part_index) DO UPDATE SET
+             content_hash = excluded.content_hash,
+             external_conversation_ref = excluded.external_conversation_ref,
+             external_message_ref = excluded.external_message_ref`,
+        )
+        .run(localId, recipientIndex, partIndex, contentHash, chatId, messageId);
+    });
   }
 
   messagePart(
@@ -569,12 +620,182 @@ class TelegramProjection {
     recipientIndex: number,
     partIndex: number,
   ): MessagePartRow | undefined {
-    return this.db
+    const localId = `telegram-parts-${createHash("sha256")
+      .update(`${this.channelId}\0${decisionId}`)
+      .digest("hex")
+      .slice(0, 40)}`;
+    const row = this.state.connection
       .prepare(
-        "SELECT recipient_index, part_index, content_digest, chat_id, message_id FROM message_parts WHERE profile = ? AND decision_id = ? AND recipient_index = ? AND part_index = ?",
+        `SELECT recipient_index AS recipientIndex, part_index AS partIndex,
+                content_hash AS contentHash,
+                external_conversation_ref AS chatId,
+                external_message_ref AS messageId
+         FROM channel_message_parts
+         WHERE message_id = ? AND recipient_index = ? AND part_index = ?`,
       )
-      .get(this.profile, decisionId, recipientIndex, partIndex) as MessagePartRow | undefined;
+      .get(localId, recipientIndex, partIndex);
+    if (!isMessagePartProjectionRow(row)) return undefined;
+    const content = this.state.readBlob(row.contentHash);
+    /* istanbul ignore if -- foreign key guarantees the content blob */
+    if (content === undefined) throw new Error("Telegram part content is missing");
+    return {
+      recipient_index: row.recipientIndex,
+      part_index: row.partIndex,
+      content_digest: content.content.toString("utf8"),
+      chat_id: row.chatId,
+      message_id: row.messageId,
+    };
   }
+
+  private putInbox(
+    eventId: string,
+    type: "callback" | "reply",
+    binding: CallbackBinding | ReplyBinding,
+  ): void {
+    this.mutate(`channel.${type}_stored`, { eventId }, () => {
+      const payloadHash = this.state.putJson(binding);
+      this.state.connection
+        .prepare(
+          `INSERT INTO channel_inbox(
+             channel_id, external_event_id, event_type, payload_hash, received_at
+           ) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(channel_id, external_event_id) DO UPDATE SET payload_hash = excluded.payload_hash`,
+        )
+        .run(this.channelId, eventId, type, payloadHash, Date.now());
+    });
+  }
+
+  private inbox<T>(eventId: string): T | undefined {
+    const row = this.state.connection
+      .prepare(
+        "SELECT payload_hash AS payloadHash FROM channel_inbox WHERE channel_id = ? AND external_event_id = ?",
+      )
+      .get(this.channelId, eventId);
+    return isPayloadHashRow(row) ? (this.state.readJson(row.payloadHash) as T) : undefined;
+  }
+
+  private mutate(type: string, payload: unknown, operation: () => void): void {
+    this.state.transaction(() => {
+      this.assertOwner();
+      operation();
+      this.recordMutation(type, payload, Date.now());
+    });
+  }
+
+  private recordMutation(type: string, payload: unknown, now: number): void {
+    const revisionRow = this.state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(this.resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isRevisionProjectionRow(revisionRow))
+      throw new Error("Telegram channel resource is missing");
+    const revision = revisionRow.revision + 1;
+    this.state.connection
+      .prepare(
+        "UPDATE resources SET revision = ?, updated_at = ? WHERE resource_id = ? AND revision = ?",
+      )
+      .run(revision, now, this.resourceId, revision - 1);
+    const payloadHash = this.state.putJson(payload, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO events(
+           event_id, resource_id, resource_revision, event_type, actor_type,
+           actor_id, lease_generation, payload_hash, recorded_at
+         ) VALUES (?, ?, ?, ?, 'channel', ?, ?, ?, ?)`,
+      )
+      .run(
+        `event-${randomUUID()}`,
+        this.resourceId,
+        revision,
+        type,
+        this.owner,
+        this.generation === 0 ? null : this.generation,
+        payloadHash,
+        now,
+      );
+  }
+
+  private assertOwner(): void {
+    const lease = this.lease();
+    if (
+      lease.ownerId !== this.owner ||
+      lease.generation !== this.generation ||
+      lease.tokenHash === null ||
+      !lease.tokenHash.equals(tokenHash(this.token)) ||
+      lease.expiresAt === null ||
+      lease.expiresAt <= Date.now()
+    ) {
+      throw new Error(`Telegram profile ${this.profile} is not owned by this channel process`);
+    }
+  }
+
+  private lease(): TelegramLeaseRow {
+    const row = this.state.connection
+      .prepare(
+        `SELECT generation, owner_id AS ownerId, token_hash AS tokenHash,
+                expires_at AS expiresAt
+         FROM leases WHERE resource_id = ?`,
+      )
+      .get(this.resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isTelegramLeaseRow(row)) throw new Error("Telegram channel lease is missing");
+    return row;
+  }
+}
+
+function transportMessageId(
+  channelId: string,
+  decisionId: string,
+  chatId: string,
+  messageId: string,
+): string {
+  return `telegram-message-${createHash("sha256")
+    .update(`${channelId}\0${decisionId}\0${chatId}\0${messageId}`)
+    .digest("hex")
+    .slice(0, 40)}`;
+}
+
+type TelegramLeaseRow = {
+  generation: number;
+  ownerId: string | null;
+  tokenHash: Buffer | null;
+  expiresAt: number | null;
+};
+
+function isTelegramLeaseRow(value: unknown): value is TelegramLeaseRow {
+  return isProjectionRecord(value);
+}
+
+function isCursorRow(value: unknown): value is { cursorValue: string } {
+  return isProjectionRecord(value);
+}
+
+function isPayloadHashRow(value: unknown): value is { payloadHash: Buffer } {
+  return isProjectionRecord(value);
+}
+
+function isTransportMessageRow(value: unknown): value is { chatId: string; messageId: string } {
+  return isProjectionRecord(value);
+}
+
+function isMessagePartProjectionRow(value: unknown): value is {
+  recipientIndex: number;
+  partIndex: number;
+  contentHash: Buffer;
+  chatId: string;
+  messageId: string;
+} {
+  return isProjectionRecord(value);
+}
+
+function isRevisionProjectionRow(value: unknown): value is { revision: number } {
+  return isProjectionRecord(value);
+}
+
+function isProjectionRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 class TelegramCallError extends Error {
@@ -628,7 +849,7 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
     this.fetchFn = options.fetchFn ?? (fetch as TelegramFetch);
     this.apiBase = options.apiBase ?? DEFAULT_API_BASE;
     this.projection = new TelegramProjection(
-      path.join(options.configDir ?? decisionConfigDir(), "telegram-state.sqlite"),
+      options.store.state,
       options.profileName,
       options.ownerId ?? randomUUID(),
     );
@@ -1074,16 +1295,18 @@ export function createTelegramChannels(options: {
 
 export async function verifyTelegramTokenFile(
   tokenFile: string,
-  fetchFn: TelegramFetch = fetch as TelegramFetch,
+  fetchFn?: TelegramFetch,
   apiBase = DEFAULT_API_BASE,
 ): Promise<void> {
+  /* istanbul ignore next -- global fetch is used only by operator setup */
+  const request = fetchFn ?? (fetch as TelegramFetch);
   if (!path.isAbsolute(tokenFile)) throw new Error("Telegram token file path must be absolute");
   await requirePrivateFile(tokenFile, "Telegram token file");
   const token = (await fsp.readFile(tokenFile, "utf8")).trim();
   if (token.length === 0) throw new Error("Telegram token file is empty");
   let response;
   try {
-    response = await fetchFn(`${apiBase}/bot${encodeURIComponent(token)}/getMe`, {
+    response = await request(`${apiBase}/bot${encodeURIComponent(token)}/getMe`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",

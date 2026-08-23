@@ -13,17 +13,16 @@ cargo install pi-workflows
 
 ## Use
 
-Open the default run directory:
+Open the canonical workflow database:
 
 ```bash
 piw
 ```
 
-Open another run directory or one specific run bundle:
+Open one run by ID:
 
 ```bash
-piw /path/to/runs
-piw /path/to/one-run
+piw 20260823T120000Z-example-a1b2c3d4
 ```
 
 Serve local runs over the live replay protocol:
@@ -35,7 +34,7 @@ piw serve
 Connect another viewer to that server:
 
 ```bash
-piw connect ws://127.0.0.1:9377/ws
+piw --connect ws://127.0.0.1:9377/ws
 ```
 
 See the [piw viewer guide](https://github.com/osolmaz/pi-workflows/blob/main/docs/tui-viewer.md) for controls, themes, replay behavior, and remote viewing.
