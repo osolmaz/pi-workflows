@@ -305,11 +305,14 @@ export class WorkflowHost {
     try {
       const result = await engine.resumeRun(workflow, runId, { workflowSource });
       clearInterval(renewTimer);
-      if (result.state.status === "running") {
-        // Parked again mid-drain: leave it claimable for the next runner.
+      if (result.state.status === "running" || result.state.status === "waiting") {
+        // A drained run or new checkpoint stays available to its next owner.
         this.store.parkWorkflowRun({ runId, claimToken });
         this.store.settleRunEffect(runId, "run.park_queue");
-        this.recordEvent(runId, record.workflowName, "parked", {});
+        if (result.state.status === "waiting") this.skippedRuns.add(runId);
+        this.recordEvent(runId, record.workflowName, "parked", {
+          status: result.state.status,
+        });
         this.log(`parked ${record.workflowName} run ${runId}`);
         return;
       }
@@ -349,6 +352,7 @@ export class WorkflowHost {
       if (index !== -1) {
         this.parkedEngines.splice(index, 1);
       }
+      fencedStore.close();
       await executor.close().catch(() => undefined);
     }
   }
