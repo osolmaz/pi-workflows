@@ -152,6 +152,49 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
+  it("keeps fresh interactive reservations out of host claims", async () => {
+    const { store } = await setup();
+    reserve(store);
+    store.state.connection
+      .prepare("UPDATE run_queue SET affinity_runner_id = NULL WHERE run_id = 'run-1'")
+      .run();
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "host-worker",
+        claimToken: "host-token",
+        leaseMs: 10_000,
+      }),
+    ).toBeUndefined();
+    expect(store.getWorkflowRun("run-1")?.status).toBe("queued");
+    store.close();
+  });
+
+  it("allows a host to reclaim an abandoned interactive start", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const now = Date.now();
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "session-1",
+      claimToken: "expired",
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
+    });
+    const reclaimed = store.claimNextWorkflowRun({
+      runnerId: "host-worker",
+      claimToken: "host-token",
+      leaseMs: 10_000,
+      now: new Date(now + 2_000).toISOString(),
+    });
+    expect(reclaimed).toMatchObject({
+      runId: "run-1",
+      initialized: false,
+      claimToken: "host-token",
+      claimGeneration: 2,
+    });
+    store.close();
+  });
+
   it("reclaims an expired running queue entry with a new token", async () => {
     const { store } = await setup();
     reserve(store);
@@ -247,6 +290,21 @@ describe("workflow run queue in canonical SQLite", () => {
     });
     expect(continuation.status).toBe("queued");
     expect(store.getWorkflowRun("parent-run")?.status).toBe("done");
+    expect(() =>
+      store.reserveWorkflowRun({
+        runId: "duplicate-continuation",
+        workflowName: "echo",
+        workflowSourceRef: "builtin:echo",
+        workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+        definitionDigest,
+        definitionSnapshot: snapshot,
+        input: {},
+        runnerId: "session-1",
+        originSessionId: "session-1",
+        parentRunId: "parent-run",
+      }),
+    ).toThrow(/already has a reserved continuation/);
+    expect(store.getWorkflowRun("duplicate-continuation")).toBeUndefined();
     store.close();
   });
 
