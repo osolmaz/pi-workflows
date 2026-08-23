@@ -31,21 +31,30 @@ pub struct LoadedRun {
     pub session_entries: Vec<SessionEntryRecord>,
     pub session_events: Vec<SessionEventRecord>,
     pub session_capture: Option<SessionCapture>,
+    pub possibly_interrupted: bool,
 }
 
 pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     let connection = open(database_path)?;
     let row = connection
         .query_row(
-            "SELECT r.output_hash, d.definition_hash
+            "SELECT r.output_hash, d.definition_hash, l.owner_id, l.expires_at
              FROM runs r
              JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+             JOIN leases l ON l.resource_id = r.resource_id
              WHERE r.run_id = ?1",
             [run_id],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((state_hash, definition_hash)) = row else {
+    let Some((state_hash, definition_hash, owner_id, lease_expires_at)) = row else {
         bail!("workflow run not found: {run_id}");
     };
     let state_value = read_json_blob(&connection, &state_hash)?;
@@ -65,6 +74,10 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     let (session_binding, session_entries, session_events, session_capture) =
         read_session(&connection, run_id)?;
     let manifest = manifest_from_state(&state);
+    let possibly_interrupted = state.status.label() == "running"
+        && (owner_id.is_none()
+            || lease_expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now().timestamp_millis()));
     Ok(LoadedRun {
         manifest,
         state,
@@ -74,6 +87,7 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
         session_entries,
         session_events,
         session_capture,
+        possibly_interrupted,
     })
 }
 

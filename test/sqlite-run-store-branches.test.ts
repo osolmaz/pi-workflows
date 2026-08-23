@@ -4,6 +4,7 @@ import {
   RUN_STATE_SCHEMA,
   SESSION_BINDING_SCHEMA,
   SESSION_CAPTURE_SCHEMA,
+  SESSION_EVENT_MAX_BYTES,
   SESSION_EVENT_SCHEMA,
   WorkflowRunStore,
   listWorkflowRuns,
@@ -163,6 +164,18 @@ describe("WorkflowRunStore branch behavior", () => {
         },
       ]),
     ).rejects.toThrow(/Expected session event seq 1/);
+    await expect(
+      store.appendSessionEventBatch("run-4", [
+        {
+          seq: 1,
+          at: new Date().toISOString(),
+          nodeId: "work",
+          attemptId: "attempt",
+          type: "future_event" as never,
+          payload: { text: "x".repeat(SESSION_EVENT_MAX_BYTES) },
+        },
+      ]),
+    ).rejects.toThrow(`session event exceeded ${SESSION_EVENT_MAX_BYTES} bytes`);
     await expect(
       store.writeSessionCapture("run-4", {
         schema: SESSION_CAPTURE_SCHEMA,

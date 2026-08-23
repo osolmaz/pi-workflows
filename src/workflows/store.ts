@@ -25,7 +25,7 @@ export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" 
 export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const;
 export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
 export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
-export const SESSION_EVENT_MAX_BYTES = 16 * 1024 * 1024;
+export const SESSION_EVENT_MAX_BYTES = 1024 * 1024;
 
 export function workflowStateDatabasePath(homeDir?: string): string {
   return workflowStatePath(homeDir);
