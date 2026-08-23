@@ -414,9 +414,9 @@ export class WorkflowEngine {
       ) {
         throw new Error("Accepted human decision does not match the waiting request");
       }
-      const durableDecision = await new HumanDecisionStore(this.store.databasePath).readResolved(
-        request.decisionId,
-      );
+      const durableDecision = await new HumanDecisionStore(this.store.databasePath, {
+        state: this.store.state,
+      }).readResolved(request.decisionId);
       if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
         throw new Error("Accepted human decision does not match the durable decision record");
       }
@@ -1312,7 +1312,9 @@ async function runCheckpointNode(
       prompt,
       ...(timeout !== undefined ? { timeout } : {}),
     });
-    await new HumanDecisionStore(execution.store.databasePath).createRequest(request);
+    await new HumanDecisionStore(execution.store.databasePath, {
+      state: execution.store.state,
+    }).createRequest(request);
     return { output: request, promptText: null };
   }
   const output = node.run ? await node.run(context) : { summary: node.summary ?? "checkpoint" };

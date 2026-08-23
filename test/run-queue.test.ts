@@ -136,17 +136,20 @@ describe("workflow run queue in canonical SQLite", () => {
       leaseMs: 60_000,
     });
     expect(store.parkWorkflowRun({ runId: "parent-run", claimToken: "parent-token" })).toBe(true);
-    expect(() => reserve(store, "continuation-run")).toThrow(/UNIQUE constraint/);
-    store.claimWorkflowRun({
-      runId: "parent-run",
+    const continuation = store.reserveWorkflowRun({
+      runId: "continuation-run",
+      workflowName: "echo",
+      workflowSourceRef: "builtin:echo",
+      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
       runnerId: "session-1",
-      claimToken: "settle-token",
-      leaseMs: 60_000,
+      originSessionId: "session-1",
+      parentRunId: "parent-run",
     });
-    expect(store.completeWorkflowRun({ runId: "parent-run", claimToken: "settle-token" })).toBe(
-      true,
-    );
-    expect(reserve(store, "continuation-run").status).toBe("queued");
+    expect(continuation.status).toBe("queued");
+    expect(store.getWorkflowRun("parent-run")?.status).toBe("done");
     store.close();
   });
 

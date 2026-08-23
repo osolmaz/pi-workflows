@@ -279,7 +279,7 @@ This table records the Pi session that owns interactive execution.
 | `started_at`         | `INTEGER` | First execution time                                                        |
 | `finished_at`        | `INTEGER` | Terminal queue time                                                         |
 
-Indexes cover claimable status and time, origin-session reservations through `run_bindings`, and parent continuation uniqueness through `continuations`.
+Indexes cover claimable status and time. A partial unique index permits one queued, starting, or running reservation per origin session. Parked waiting parents are excluded, and continuation reservation settles the parent queue in the same transaction. `continuations` keeps parent linkage unique.
 
 ### `node_attempts`
 
