@@ -131,7 +131,10 @@ describe("workflow agent-step messages", () => {
         type: "message",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", name: "read" }],
+          content: [
+            { type: "text", text: "I will read the file first." },
+            { type: "toolCall", name: "read" },
+          ],
           stopReason: "toolUse",
         },
       },
@@ -160,6 +163,7 @@ describe("workflow agent-step messages", () => {
       },
     ];
 
+    expect(recoverAssistantStep(entries.slice(0, 4), assistantDetails.contract)).toBeUndefined();
     expect(recoverAssistantStep(entries, assistantDetails.contract)).toMatchObject({
       output: "visible answer",
       conversation: { firstEntryId: "prompt-2", lastEntryId: "answer-2" },

@@ -322,10 +322,19 @@ describe("ConversationStepExecutor", () => {
     await expect(stepPromise).resolves.toMatchObject({ output: "visible" });
   });
 
-  it("fails empty, tool-only, aborted, and errored assistant outcomes", async () => {
+  it("fails non-final assistant outcomes even when they contain text", async () => {
     for (const message of [
       assistantMessage([]),
-      { role: "assistant", content: [{ type: "toolCall", name: "read" }], stopReason: "toolUse" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I will inspect the file first." },
+          { type: "toolCall", name: "read" },
+        ],
+        stopReason: "toolUse",
+      },
+      assistantMessage(["partial"], "pending"),
+      assistantMessage(["partial"], "deferred"),
       assistantMessage(["partial"], "aborted"),
       { ...assistantMessage(["partial"], "error"), errorMessage: "provider failed" },
     ]) {

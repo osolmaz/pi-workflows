@@ -172,7 +172,7 @@ function isAssistantWithVisibleText(message: unknown): boolean {
   if (message === null || typeof message !== "object") return false;
   const candidate = message as { role?: unknown; content?: unknown; stopReason?: unknown };
   if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) return false;
-  if (candidate.stopReason === "error" || candidate.stopReason === "aborted") return false;
+  if (candidate.stopReason !== "stop" && candidate.stopReason !== "length") return false;
   return candidate.content.some(
     (part) =>
       part !== null &&

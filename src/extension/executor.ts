@@ -392,10 +392,10 @@ export function visibleAssistantText(message: unknown, maxChars?: number): strin
   if (assistant === undefined) {
     throw new Error("Assistant step settled without a final assistant message");
   }
-  if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+  if (assistant.stopReason !== "stop" && assistant.stopReason !== "length") {
     throw new Error(
       assistant.errorMessage?.trim() ||
-        `Assistant step stopped with ${JSON.stringify(assistant.stopReason)}`,
+        `Assistant step stopped with ${JSON.stringify(assistant.stopReason)} before a final response`,
     );
   }
   const text = assistant.content
