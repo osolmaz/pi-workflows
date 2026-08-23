@@ -71,6 +71,24 @@ describe("ControllerManager", () => {
     await manager.stop();
   });
 
+  it("returns resource revisions after their audit events", async () => {
+    const store = await makeStore();
+    const controller = defineController<{}, {}>({
+      name: "event-revisions",
+      initialStatus: () => ({}),
+      reconcile: (ctx) => ctx.settled(),
+    });
+    const manager = new ControllerManager({ store, controllers: [controller] });
+    const created = manager.putResource(controller, "one", {});
+    expect(created.metadata.resourceVersion).toBe(
+      store.getResource({ controller: controller.name, key: "one" })?.metadata.resourceVersion,
+    );
+    const deleting = manager.requestDeletion({ controller: controller.name, key: "one" });
+    expect(deleting.metadata.resourceVersion).toBe(
+      store.getResource({ controller: controller.name, key: "one" })?.metadata.resourceVersion,
+    );
+  });
+
   it("reconciles current state and records observed generation", async () => {
     const store = await makeStore();
     let calls = 0;
