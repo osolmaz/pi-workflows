@@ -1043,6 +1043,7 @@ export class SqliteControllerStore implements ControllerStore {
       }
       const resourceId = resourceIdFor("run", options.runId);
       const definitionHash = this.state.putJson(options.definitionSnapshot, now);
+      const queuedSource = queuedWorkflowSource(options.workflowSource);
       const sourceHash = this.state.putJson(options.workflowSource, now);
       const inputHash = this.state.putJson(options.input ?? null, now);
       const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
@@ -1052,6 +1053,13 @@ export class SqliteControllerStore implements ControllerStore {
           traceSeq: 1,
           runId: options.runId,
           workflowName: options.workflowName,
+          workflowSource: queuedSource.root,
+          ...(queuedSource.mounted.length === 0
+            ? {}
+            : {
+                workflowSources: queuedSource.mounted,
+                definitionDigest: options.definitionDigest,
+              }),
           ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
           startedAt: new Date(now).toISOString(),
           updatedAt: new Date(now).toISOString(),
@@ -2891,6 +2899,16 @@ function digestBuffer(value: string): Buffer {
   if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
   return Buffer.from(hex, "hex");
 }
+function queuedWorkflowSource(value: unknown): { root: unknown; mounted: unknown[] } {
+  if (isRecord(value) && (value.kind === "builtin" || value.kind === "file")) {
+    return { root: value, mounted: [] };
+  }
+  if (isRecord(value) && isRecord(value.root) && Array.isArray(value.mounted)) {
+    return { root: value.root, mounted: value.mounted };
+  }
+  throw new Error("Stored workflow source identity is invalid");
+}
+
 function sourceParts(
   ref: string,
   revision: string,
