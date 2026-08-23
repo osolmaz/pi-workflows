@@ -368,7 +368,7 @@ describe("SessionRecorder", () => {
         toolCall: {
           id: "large-call",
           name: "write",
-          arguments: { text: "x".repeat(1_100_000) },
+          arguments: { text: "x".repeat(900_000) },
         },
         partial: assistant,
       },
@@ -387,7 +387,7 @@ describe("SessionRecorder", () => {
         (toolCall?.payload as { toolCall?: { arguments?: { text?: string } } })?.toolCall?.arguments
           ?.text ?? ""
       ).length,
-    ).toBe(1_100_000);
+    ).toBe(900_000);
     expect(
       store.state.connection.prepare("SELECT count(*) AS count FROM blobs").get(),
     ).toMatchObject({

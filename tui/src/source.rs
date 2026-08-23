@@ -87,7 +87,7 @@ impl RunEntry {
             state: loaded.state,
             snapshot: loaded.snapshot,
             live,
-            possibly_interrupted: false,
+            possibly_interrupted: loaded.possibly_interrupted,
             revision,
         })
     }

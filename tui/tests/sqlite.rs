@@ -34,6 +34,7 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
             "CREATE TABLE blobs(blob_hash BLOB PRIMARY KEY, media_type TEXT, content BLOB);
              CREATE TABLE workflow_definitions(definition_digest BLOB PRIMARY KEY, definition_hash BLOB);
              CREATE TABLE runs(run_id TEXT PRIMARY KEY, resource_id TEXT, definition_digest BLOB, output_hash BLOB, created_at INTEGER);
+             CREATE TABLE leases(resource_id TEXT PRIMARY KEY, owner_id TEXT, expires_at INTEGER);
              CREATE TABLE events(resource_id TEXT, resource_revision INTEGER, event_type TEXT, payload_hash BLOB, recorded_at INTEGER);
              CREATE TABLE session_segments(segment_id TEXT, run_id TEXT, capture_key TEXT, binding_hash BLOB, status TEXT, entry_count INTEGER, event_count INTEGER, failure_hash BLOB, created_at INTEGER);
              CREATE TABLE session_entries(segment_id TEXT, entry_seq INTEGER, entry_hash BLOB, recorded_at INTEGER);
@@ -73,6 +74,12 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
         .unwrap();
     connection
         .execute(
+            "INSERT INTO leases(resource_id, owner_id, expires_at) VALUES ('resource-1', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
             "INSERT INTO events(resource_id, resource_revision, event_type, payload_hash, recorded_at) VALUES ('resource-1', 1, 'run_started', ?1, 1)",
             [event_hash],
         )
@@ -87,7 +94,17 @@ fn reads_and_lists_runs_from_sqlite() {
     let run = read_run(&database, "run-1").unwrap();
     assert_eq!(run.state.run_id, "run-1");
     assert_eq!(run.trace.len(), 1);
+    assert!(run.possibly_interrupted);
     assert_eq!(list_runs(&database).len(), 1);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE leases SET owner_id = 'host', expires_at = ?1 WHERE resource_id = 'resource-1'",
+            [i64::MAX],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(!read_run(&database, "run-1").unwrap().possibly_interrupted);
 }
 
 #[test]
