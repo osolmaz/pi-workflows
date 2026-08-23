@@ -6,11 +6,11 @@ This contract is implemented for the release after `0.5.3`.
 
 ## Goal
 
-Agent-step prompts contain the task, workflow identity, attempt identity, output shape, and submission rules. This information is required by the model, but showing it as a large user message makes the conversation hard to read.
+Agent-step prompts contain the task, workflow identity, attempt identity, output form, and completion rules. Submitted steps call the workflow tool. Assistant-message steps reply normally. This information is required by the model, but showing it as a large user message makes the conversation hard to read.
 
 pi-workflows will send the same prompt as a custom Pi message. A custom renderer will show a compact summary by default and the full content when expanded.
 
-This is a presentation change. It does not add a workflow primitive, change graph execution, or change the step completion contract.
+Both output forms use the existing `agent` node. The completion form changes through `expectedOutput`; no new node type is added.
 
 ## Message contract
 
@@ -45,7 +45,7 @@ pi.sendMessage(
 
 `content` is the complete prompt that the existing executor would send as a user message. It remains available to the model and in session history.
 
-`details` contains structured display data. The renderer reads this object directly and never parses the prompt text. `AgentStepContract` remains the source of every identity field and the expected-output field.
+`details` contains structured display data. The renderer reads this object directly and never parses the prompt text. `AgentStepContract` remains the source of every identity field, the completion form, the submitted output description, and any explicit assistant character limit.
 
 `kind` distinguishes the first delivery from a reminder or a resume that must repeat the instructions. An ordinary resume that can continue without another prompt does not create a message.
 
@@ -53,7 +53,7 @@ pi.sendMessage(
 
 The workflow engine remains independent of Pi. It continues to produce an `AgentStepRequest` with a complete prompt and structured contract.
 
-The request gains optional presentation data for the run title and node status detail. The conversation executor passes the prompt, contract, presentation data, delivery kind, and streaming state to the Pi extension. The RPC executor sends the same complete prompt to headless Pi without TUI metadata.
+The request carries optional presentation data for the run title and node status detail. The conversation executor passes the prompt, contract, presentation data, delivery kind, and streaming state to the Pi extension. The RPC executor handles submitted steps. An assistant-message step parks for the origin Pi session; a detached run with no origin session fails before prompting.
 
 One pure formatter remains responsible for the model prompt used by both executors. Interactive delivery must not shorten, summarize, or rebuild the model prompt from display fields.
 
@@ -82,16 +82,17 @@ The expanded card shows:
 - node id
 - attempt id
 - delivery kind
-- expected output
+- completion form
+- expected output and optional character limit
 - full model prompt
 
 Expansion uses Pi's existing custom-message expansion state and keys. pi-workflows does not add another toggle or store separate expansion state.
 
 ## Reminders and resumes
 
-The existing bounded reminder behavior stays in place. A reminder uses the same custom message type and renderer. It keeps the contract and sets `kind: "reminder"`.
+The existing bounded reminder behavior stays in place for submitted steps. A reminder uses the same custom message type and renderer. It keeps the contract and sets `kind: "reminder"`. Assistant-message steps do not nudge or retry after a visible response.
 
-A resumed step uses `kind: "resume"` only when the executor must send the instructions again. The attempt id must still identify the active attempt. Stale attempts remain invalid.
+A resumed step uses `kind: "resume"` only when the executor must send the instructions again. An interrupted assistant-message step keeps its attempt id. If its matching prompt already has a completed assistant child on the active branch, the executor adopts that exact response instead of displaying it again. Stale attempts and responses from another branch remain invalid.
 
 ## Notifications
 
@@ -105,7 +106,7 @@ The two message types must not share delivery code that can accidentally change 
 
 New interactive step deliveries replace `sendUserMessage` with `sendMessage`. Existing session entries remain readable and are not rewritten.
 
-The custom message is a normal documented Pi session message. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores the existing full prompt and structured step contract in content-addressed blobs, so this behavior does not add another durable format.
+The custom prompt and visible assistant response are normal documented Pi session messages. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores the full prompt, exact assistant text, conversation range, and additive digest receipt in existing content-addressed records, so this behavior adds no durable format.
 
 If the renderer is unavailable, Pi still retains the custom message content. pi-workflows does not add a fallback path that sends a duplicate user message.
 
@@ -115,7 +116,7 @@ This design uses the documented `pi.sendMessage()` and `pi.registerMessageRender
 
 It does not require a Pi core change or private Pi API.
 
-The workflow package adds no node, graph action, tool action, or workflow-file field for this feature. Workflow authors do not configure message rendering.
+The workflow package adds `assistantMessage()` as an `expectedOutput` value for the existing `agent` node. It adds no node type, graph action, Pi tool, private API, or message-rendering option.
 
 ## Validation and tests
 
@@ -127,10 +128,13 @@ The implementation must verify:
 - expanded rendering shows the full prompt and exact contract ids
 - long and missing display fields render safely
 - reminders and resumed deliveries keep the active attempt id
-- stale attempts remain rejected after timeout or cancellation
-- session replay restores the same custom message
+- submitted steps still reject stale attempts after timeout or cancellation
+- assistant steps wait for `agent_settled` and capture only visible text
+- empty, failed, aborted, tool-only, and explicitly over-limit responses fail once
+- session replay restores the same custom prompt and adopts an existing response once
+- detached execution parks for the origin session or fails clearly when none exists
 - notifications still enter context without starting a model turn
-- no duplicate user message is sent
+- no duplicate prompt or assistant response is sent
 
 The end-to-end test must inspect the provider-facing prompt as well as the TUI message record. A correct card with missing model instructions is a failure.
 

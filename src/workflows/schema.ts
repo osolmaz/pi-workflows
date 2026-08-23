@@ -51,7 +51,25 @@ export function assertValidAgentNode(node: AgentNodeDefinition, nodeId = "agent"
     fail(`node ${nodeId} requires a prompt function`);
   }
   if (node.expectedOutput !== undefined && typeof node.expectedOutput !== "string") {
-    fail(`node ${nodeId} expectedOutput must be a string`);
+    const output = node.expectedOutput as { kind?: unknown; maxChars?: unknown };
+    if (output === null || typeof output !== "object" || output.kind !== "assistant-message") {
+      fail(`node ${nodeId} expectedOutput must be a string or assistantMessage()`);
+    }
+    const unknown = Object.keys(output).filter((key) => key !== "kind" && key !== "maxChars");
+    if (unknown.length > 0) {
+      fail(`node ${nodeId} assistantMessage has unknown field ${JSON.stringify(unknown[0])}`);
+    }
+    if (
+      output.maxChars !== undefined &&
+      (typeof output.maxChars !== "number" ||
+        !Number.isInteger(output.maxChars) ||
+        output.maxChars <= 0)
+    ) {
+      fail(`node ${nodeId} assistantMessage maxChars must be a positive integer`);
+    }
+    if (node.validate !== undefined) {
+      fail(`node ${nodeId} cannot use validate with assistantMessage()`);
+    }
   }
   assertOptionalFunction(node.validate, `node ${nodeId} validate`);
   assertCommonNodeFields(node, nodeId);

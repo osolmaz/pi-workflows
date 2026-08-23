@@ -13,8 +13,8 @@
       },
       "propose": {
         "nodeType": "agent",
-        "statusDetail": "devising a solution",
-        "expectedOutput": "{ \"solution\": \"proposal\", \"rationale\": \"why\", \"parts\": [\"part\"], \"tradeoffs\": [\"trade-off\"] }"
+        "statusDetail": "devising candidate solutions",
+        "expectedOutput": "{ \"candidates\": [{ \"id\": \"stable-id\", \"title\": \"short title\", \"gist\": \"plain gist\", \"solution\": \"full proposal\", \"rationale\": \"why\", \"parts\": [\"part\"], \"tradeoffs\": [\"trade-off\"] }], \"previousPlan\": { \"status\": \"candidate\", \"candidateId\": \"id\" } | { \"status\": \"rejected\", \"reason\": \"reason\" } }"
       },
       "ideal": {
         "nodeType": "agent",
@@ -24,7 +24,7 @@
       "choose": {
         "nodeType": "agent",
         "statusDetail": "choosing the practical solution",
-        "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selected\": \"solution\", \"why\": \"reason\", \"relationshipToIdeal\": \"relationship\", \"excluded\": [\"excluded work\"], \"compromises\": [\"compromise\"], \"blocker\": \"required only when blocked\" }"
+        "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selectedId\": \"candidate-id-or-ideal\", \"why\": \"reason\", \"relationshipToIdeal\": \"relationship\", \"rejected\": [{ \"id\": \"other-id\", \"reason\": \"why it lost\" }], \"compromises\": [\"compromise\"], \"blocker\": \"required only when blocked\" }"
       },
       "plan": {
         "nodeType": "agent",
@@ -37,9 +37,91 @@
       },
       "finalize": {
         "nodeType": "compute"
+      },
+      "readySummary": {
+        "nodeType": "compute",
+        "mountPath": ["readySummary"],
+        "localNodeId": "readySummary",
+        "includeTransition": "entry",
+        "statusDetail": "entering plain-summary"
+      },
+      "readySummary/__piw_exit_completed": {
+        "nodeType": "compute",
+        "mountPath": ["readySummary"],
+        "localNodeId": "completed",
+        "includeTransition": "exit",
+        "statusDetail": "leaving plain-summary through completed"
+      },
+      "readySummary/summarize": {
+        "nodeType": "agent",
+        "mountPath": ["readySummary"],
+        "localNodeId": "summarize",
+        "statusDetail": "writing a plain summary",
+        "expectedOutput": {
+          "kind": "assistant-message",
+          "maxChars": 10000
+        }
+      },
+      "readySummary/finish": {
+        "nodeType": "compute",
+        "mountPath": ["readySummary"],
+        "localNodeId": "finish"
+      },
+      "blockedSummary": {
+        "nodeType": "compute",
+        "mountPath": ["blockedSummary"],
+        "localNodeId": "blockedSummary",
+        "includeTransition": "entry",
+        "statusDetail": "entering plain-summary"
+      },
+      "blockedSummary/__piw_exit_completed": {
+        "nodeType": "compute",
+        "mountPath": ["blockedSummary"],
+        "localNodeId": "completed",
+        "includeTransition": "exit",
+        "statusDetail": "leaving plain-summary through completed"
+      },
+      "blockedSummary/summarize": {
+        "nodeType": "agent",
+        "mountPath": ["blockedSummary"],
+        "localNodeId": "summarize",
+        "statusDetail": "writing a plain summary",
+        "expectedOutput": {
+          "kind": "assistant-message",
+          "maxChars": 10000
+        }
+      },
+      "blockedSummary/finish": {
+        "nodeType": "compute",
+        "mountPath": ["blockedSummary"],
+        "localNodeId": "finish"
       }
     },
     "edges": [
+      {
+        "from": "readySummary",
+        "to": "readySummary/summarize"
+      },
+      {
+        "from": "readySummary/finish",
+        "to": "readySummary/__piw_exit_completed"
+      },
+      {
+        "from": "readySummary/summarize",
+        "to": "readySummary/finish"
+      },
+      {
+        "from": "blockedSummary",
+        "to": "blockedSummary/summarize"
+      },
+      {
+        "from": "blockedSummary/finish",
+        "to": "blockedSummary/__piw_exit_completed"
+      },
+      {
+        "from": "blockedSummary/summarize",
+        "to": "blockedSummary/finish"
+      },
       {
         "from": "frame",
         "to": "propose"
@@ -58,17 +140,44 @@
           "on": "$.status",
           "cases": {
             "ready": "plan",
-            "blocked": "blocked"
+            "blocked": "blockedSummary"
           }
         }
       },
       {
         "from": "plan",
+        "to": "readySummary"
+      },
+      {
+        "from": "readySummary/__piw_exit_completed",
         "to": "finalize"
+      },
+      {
+        "from": "blockedSummary/__piw_exit_completed",
+        "to": "blocked"
       }
     ],
     "composition": {
-      "mounts": []
+      "mounts": [
+        {
+          "mountPath": ["blockedSummary"],
+          "workflowName": "plain-summary",
+          "entryNode": "blockedSummary",
+          "exits": {
+            "completed": "blockedSummary/__piw_exit_completed"
+          },
+          "maxSteps": 2
+        },
+        {
+          "mountPath": ["readySummary"],
+          "workflowName": "plain-summary",
+          "entryNode": "readySummary",
+          "exits": {
+            "completed": "readySummary/__piw_exit_completed"
+          },
+          "maxSteps": 2
+        }
+      ]
     }
   },
   "layout": {
@@ -104,7 +213,47 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "choose->blocked#3.1"
+          "edgeId": "choose->blockedSummary#9.1"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "readySummary"
+        },
+        {
+          "kind": "node",
+          "nodeId": "blockedSummary"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "readySummary/summarize"
+        },
+        {
+          "kind": "node",
+          "nodeId": "blockedSummary/summarize"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "readySummary/finish"
+        },
+        {
+          "kind": "node",
+          "nodeId": "blockedSummary/finish"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "readySummary/__piw_exit_completed"
+        },
+        {
+          "kind": "node",
+          "nodeId": "blockedSummary/__piw_exit_completed"
         }
       ],
       [
@@ -120,88 +269,184 @@
     ],
     "edges": [
       {
-        "edgeId": "frame->propose#0.0",
+        "edgeId": "readySummary->readySummary/summarize#0.0",
+        "from": "readySummary",
+        "to": "readySummary/summarize",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "readySummary/finish->readySummary/__piw_exit_completed#1.0",
+        "from": "readySummary/finish",
+        "to": "readySummary/__piw_exit_completed",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "readySummary/summarize->readySummary/finish#2.0",
+        "from": "readySummary/summarize",
+        "to": "readySummary/finish",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "blockedSummary->blockedSummary/summarize#3.0",
+        "from": "blockedSummary",
+        "to": "blockedSummary/summarize",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "blockedSummary/finish->blockedSummary/__piw_exit_completed#4.0",
+        "from": "blockedSummary/finish",
+        "to": "blockedSummary/__piw_exit_completed",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "blockedSummary/summarize->blockedSummary/finish#5.0",
+        "from": "blockedSummary/summarize",
+        "to": "blockedSummary/finish",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "frame->propose#6.0",
         "from": "frame",
         "to": "propose",
         "isBackEdge": false
       },
       {
-        "edgeId": "propose->ideal#1.0",
+        "edgeId": "propose->ideal#7.0",
         "from": "propose",
         "to": "ideal",
         "isBackEdge": false
       },
       {
-        "edgeId": "ideal->choose#2.0",
+        "edgeId": "ideal->choose#8.0",
         "from": "ideal",
         "to": "choose",
         "isBackEdge": false
       },
       {
-        "edgeId": "choose->plan#3.0",
+        "edgeId": "choose->plan#9.0",
         "from": "choose",
         "to": "plan",
         "label": "ready",
         "isBackEdge": false
       },
       {
-        "edgeId": "choose->blocked#3.1",
+        "edgeId": "choose->blockedSummary#9.1",
         "from": "choose",
-        "to": "blocked",
+        "to": "blockedSummary",
         "label": "blocked",
         "isBackEdge": false
       },
       {
-        "edgeId": "plan->finalize#4.0",
+        "edgeId": "plan->readySummary#10.0",
         "from": "plan",
+        "to": "readySummary",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "readySummary/__piw_exit_completed->finalize#11.0",
+        "from": "readySummary/__piw_exit_completed",
         "to": "finalize",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "blockedSummary/__piw_exit_completed->blocked#12.0",
+        "from": "blockedSummary/__piw_exit_completed",
+        "to": "blocked",
         "isBackEdge": false
       }
     ],
     "segments": [
       {
-        "edgeId": "frame->propose#0.0",
+        "edgeId": "readySummary->readySummary/summarize#0.0",
+        "rank": 5,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "readySummary/finish->readySummary/__piw_exit_completed#1.0",
+        "rank": 7,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "readySummary/summarize->readySummary/finish#2.0",
+        "rank": 6,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "blockedSummary->blockedSummary/summarize#3.0",
+        "rank": 5,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "blockedSummary/finish->blockedSummary/__piw_exit_completed#4.0",
+        "rank": 7,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "blockedSummary/summarize->blockedSummary/finish#5.0",
+        "rank": 6,
+        "fromCell": 1,
+        "toCell": 1
+      },
+      {
+        "edgeId": "frame->propose#6.0",
         "rank": 0,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "propose->ideal#1.0",
+        "edgeId": "propose->ideal#7.0",
         "rank": 1,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "ideal->choose#2.0",
+        "edgeId": "ideal->choose#8.0",
         "rank": 2,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "choose->plan#3.0",
+        "edgeId": "choose->plan#9.0",
         "rank": 3,
         "fromCell": 0,
         "toCell": 0,
         "label": "ready"
       },
       {
-        "edgeId": "choose->blocked#3.1",
+        "edgeId": "choose->blockedSummary#9.1",
         "rank": 3,
         "fromCell": 0,
         "toCell": 1,
         "label": "blocked"
       },
       {
-        "edgeId": "choose->blocked#3.1",
+        "edgeId": "choose->blockedSummary#9.1",
         "rank": 4,
         "fromCell": 1,
         "toCell": 1
       },
       {
-        "edgeId": "plan->finalize#4.0",
+        "edgeId": "plan->readySummary#10.0",
         "rank": 4,
         "fromCell": 0,
         "toCell": 0
+      },
+      {
+        "edgeId": "readySummary/__piw_exit_completed->finalize#11.0",
+        "rank": 8,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "blockedSummary/__piw_exit_completed->blocked#12.0",
+        "rank": 8,
+        "fromCell": 1,
+        "toCell": 1
       }
     ],
     "rankOfNode": {
@@ -210,8 +455,16 @@
       "ideal": 2,
       "choose": 3,
       "plan": 4,
-      "blocked": 5,
-      "finalize": 5
+      "blockedSummary": 5,
+      "readySummary": 5,
+      "blockedSummary/summarize": 6,
+      "readySummary/summarize": 6,
+      "blockedSummary/finish": 7,
+      "readySummary/finish": 7,
+      "blockedSummary/__piw_exit_completed": 8,
+      "readySummary/__piw_exit_completed": 8,
+      "blocked": 9,
+      "finalize": 9
     }
   },
   "state": {
@@ -232,98 +485,156 @@
       "stepIndex": -1,
       "nodeStyle": "line",
       "lines": [
-        "                     ▶ · frame [agent] not visited",
-        "                                    │",
-        "                                    ▼",
-        "                      · propose [agent] not visited",
-        "                                    │",
-        "                                    ▼",
-        "                       · ideal [agent] not visited",
-        "                                    │",
-        "                                    ▼",
-        "                      · choose [agent] not visited",
-        "                                  │ └─── blocked ───┐",
-        "                                  │ ready           │",
-        "                                  │                 │",
-        "                                  ▼                 │",
-        "                    · plan [agent] not visited      │",
-        "                  ┌──────────────┘                  └──┐",
-        "                  │                                    │",
-        "                  ▼                                    ▼",
-        "  · finalize [compute] not visited ■    · blocked [compute] not visited ■"
+        "                                            ▶ · frame [agent] not visited",
+        "                                                           │",
+        "                                                           ▼",
+        "                                             · propose [agent] not visited",
+        "                                                           │",
+        "                                                           ▼",
+        "                                              · ideal [agent] not visited",
+        "                                                           │",
+        "                                                           ▼",
+        "                                             · choose [agent] not visited",
+        "                                                       ┌─┘ └── blocked ───┐",
+        "                                                       │ ready            │",
+        "                                                       │                  │",
+        "                                                       ▼                  │",
+        "                                          · plan [agent] not visited      │",
+        "                                 ┌─────────────────────┘                  └─────────┐",
+        "                                 │                                                  │",
+        "                                 ▼                                                  ▼",
+        "           · readySummary · enter [compute] not visited      · blockedSummary · enter [compute] not visited",
+        "                                 │                                                  │",
+        "                                 ▼                                                  ▼",
+        "         · readySummary › summarize [agent] not visited      · blockedSummary › summarize [agent] not visited",
+        "                                │                                                    │",
+        "                                ▼                                                    ▼",
+        "          · readySummary › finish [compute] not visited      · blockedSummary › finish [compute] not visited",
+        "                            ┌───┘                                                   └───┐",
+        "                            │                                                           │",
+        "                            ▼                                                           ▼",
+        "  · readySummary · completed exit [compute] not visited      · blockedSummary · completed exit [compute] not visited",
+        "                            └───────────┐                                    ┌──────────┘",
+        "                                        │                                    │",
+        "                                        ▼                                    ▼",
+        "                        · finalize [compute] not visited ■    · blocked [compute] not visited ■"
       ]
     },
     {
       "stepIndex": -1,
       "nodeStyle": "box",
       "lines": [
-        "                     ┌──────────────────────────────┐",
-        "                   ▶ │            frame             │",
-        "                     ├──────────────────────────────┤",
-        "                     │ ● agent             · queued │",
-        "                     │ ↻ 0                      ◷ — │",
-        "                     │                              │",
-        "                     │                              │",
-        "                     │ … framing the problem        │",
-        "                     └──────────────────────────────┘",
-        "                                     │",
-        "                                     ▼",
-        "                     ┌──────────────────────────────┐",
-        "                     │           propose            │",
-        "                     ├──────────────────────────────┤",
-        "                     │ ● agent             · queued │",
-        "                     │ ↻ 0                      ◷ — │",
-        "                     │                              │",
-        "                     │                              │",
-        "                     │ … devising a solution        │",
-        "                     └──────────────────────────────┘",
-        "                                     │",
-        "                                     ▼",
-        "                     ┌──────────────────────────────┐",
-        "                     │            ideal             │",
-        "                     ├──────────────────────────────┤",
-        "                     │ ● agent             · queued │",
-        "                     │ ↻ 0                      ◷ — │",
-        "                     │                              │",
-        "                     │                              │",
-        "                     │ … describing the ideal end … │",
-        "                     └──────────────────────────────┘",
-        "                                     │",
-        "                                     ▼",
-        "                     ┌──────────────────────────────┐",
-        "                     │            choose            │",
-        "                     ├──────────────────────────────┤",
-        "                     │ ● agent             · queued │",
-        "                     │ ↻ 0                      ◷ — │",
-        "                     │ ◇ ready                      │",
-        "                     │ ◇ blocked                    │",
-        "                     │ … choosing the practical so… │",
-        "                     └──────────────────────────────┘",
-        "                                 ┌─┘ └──── blocked ────┐",
-        "                                 │ ready               │",
-        "                                 │                     │",
-        "                                 ▼                     │",
-        "                 ┌──────────────────────────────┐      │",
-        "                 │             plan             │      │",
-        "                 ├──────────────────────────────┤      │",
-        "                 │ ● agent             · queued │      │",
-        "                 │ ↻ 0                      ◷ — │      │",
-        "                 │                              │      │",
-        "                 │                              │      │",
-        "                 │ … writing the implementatio… │      │",
-        "                 └──────────────────────────────┘      │",
-        "                  ┌──────────────┘                     │",
-        "                  │                                    │",
-        "                  ▼                                    ▼",
-        "  ┌──────────────────────────────┐      ┌──────────────────────────────┐",
-        "  │           finalize           │ ■    │           blocked            │ ■",
-        "  ├──────────────────────────────┤      ├──────────────────────────────┤",
-        "  │ ƒ compute           · queued │      │ ƒ compute           · queued │",
-        "  │ ↻ 0                      ◷ — │      │ ↻ 0                      ◷ — │",
-        "  │                              │      │                              │",
-        "  │                              │      │                              │",
-        "  │                              │      │                              │",
-        "  └──────────────────────────────┘      └──────────────────────────────┘"
+        "                       ┌─────────────────────────────────┐",
+        "                     ▶ │              frame              │",
+        "                       ├─────────────────────────────────┤",
+        "                       │ ● agent                · queued │",
+        "                       │ ↻ 0                         ◷ — │",
+        "                       │                                 │",
+        "                       │                                 │",
+        "                       │ … framing the problem           │",
+        "                       └─────────────────────────────────┘",
+        "                                        │",
+        "                                        ▼",
+        "                       ┌─────────────────────────────────┐",
+        "                       │             propose             │",
+        "                       ├─────────────────────────────────┤",
+        "                       │ ● agent                · queued │",
+        "                       │ ↻ 0                         ◷ — │",
+        "                       │                                 │",
+        "                       │                                 │",
+        "                       │ … devising candidate solutions  │",
+        "                       └─────────────────────────────────┘",
+        "                                        │",
+        "                                        ▼",
+        "                       ┌─────────────────────────────────┐",
+        "                       │              ideal              │",
+        "                       ├─────────────────────────────────┤",
+        "                       │ ● agent                · queued │",
+        "                       │ ↻ 0                         ◷ — │",
+        "                       │                                 │",
+        "                       │                                 │",
+        "                       │ … describing the ideal end sta… │",
+        "                       └─────────────────────────────────┘",
+        "                                        │",
+        "                                        ▼",
+        "                       ┌─────────────────────────────────┐",
+        "                       │             choose              │",
+        "                       ├─────────────────────────────────┤",
+        "                       │ ● agent                · queued │",
+        "                       │ ↻ 0                         ◷ — │",
+        "                       │ ◇ ready                         │",
+        "                       │ ◇ blocked                       │",
+        "                       │ … choosing the practical solut… │",
+        "                       └─────────────────────────────────┘",
+        "                                    ┌─┘ └───── blocked ─────┐",
+        "                                    │ ready                 │",
+        "                                    │                       │",
+        "                                    ▼                       │",
+        "                   ┌─────────────────────────────────┐      │",
+        "                   │              plan               │      │",
+        "                   ├─────────────────────────────────┤      │",
+        "                   │ ● agent                · queued │      │",
+        "                   │ ↻ 0                         ◷ — │      │",
+        "                   │                                 │      │",
+        "                   │                                 │      │",
+        "                   │ … writing the implementation p… │      │",
+        "                   └─────────────────────────────────┘      │",
+        "                   ┌────────────────┘                       │",
+        "                   │                                        │",
+        "                   ▼                                        ▼",
+        "  ┌─────────────────────────────────┐      ┌─────────────────────────────────┐",
+        "  │      readySummary · enter       │      │     blockedSummary · enter      │",
+        "  ├─────────────────────────────────┤      ├─────────────────────────────────┤",
+        "  │ ƒ compute              · queued │      │ ƒ compute              · queued │",
+        "  │ ↻ 0                         ◷ — │      │ ↻ 0                         ◷ — │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  │ … entering plain-summary        │      │ … entering plain-summary        │",
+        "  └─────────────────────────────────┘      └─────────────────────────────────┘",
+        "                   │                                        │",
+        "                   ▼                                        ▼",
+        "  ┌─────────────────────────────────┐      ┌─────────────────────────────────┐",
+        "  │    readySummary › summarize     │      │   blockedSummary › summarize    │",
+        "  ├─────────────────────────────────┤      ├─────────────────────────────────┤",
+        "  │ ● agent                · queued │      │ ● agent                · queued │",
+        "  │ ↻ 0                         ◷ — │      │ ↻ 0                         ◷ — │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  │ … assistant response · writing… │      │ … assistant response · writing… │",
+        "  └─────────────────────────────────┘      └─────────────────────────────────┘",
+        "                   │                                        │",
+        "                   ▼                                        ▼",
+        "  ┌─────────────────────────────────┐      ┌─────────────────────────────────┐",
+        "  │      readySummary › finish      │      │     blockedSummary › finish     │",
+        "  ├─────────────────────────────────┤      ├─────────────────────────────────┤",
+        "  │ ƒ compute              · queued │      │ ƒ compute              · queued │",
+        "  │ ↻ 0                         ◷ — │      │ ↻ 0                         ◷ — │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  └─────────────────────────────────┘      └─────────────────────────────────┘",
+        "                   │                                        │",
+        "                   ▼                                        ▼",
+        "  ┌─────────────────────────────────┐      ┌─────────────────────────────────┐",
+        "  │  readySummary · completed exit  │      │ blockedSummary · completed exit │",
+        "  ├─────────────────────────────────┤      ├─────────────────────────────────┤",
+        "  │ ƒ compute              · queued │      │ ƒ compute              · queued │",
+        "  │ ↻ 0                         ◷ — │      │ ↻ 0                         ◷ — │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  │ … leaving plain-summary throug… │      │ … leaving plain-summary throug… │",
+        "  └─────────────────────────────────┘      └─────────────────────────────────┘",
+        "                   │                                        │",
+        "                   ▼                                        ▼",
+        "  ┌─────────────────────────────────┐      ┌─────────────────────────────────┐",
+        "  │            finalize             │ ■    │             blocked             │ ■",
+        "  ├─────────────────────────────────┤      ├─────────────────────────────────┤",
+        "  │ ƒ compute              · queued │      │ ƒ compute              · queued │",
+        "  │ ↻ 0                         ◷ — │      │ ↻ 0                         ◷ — │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  │                                 │      │                                 │",
+        "  └─────────────────────────────────┘      └─────────────────────────────────┘"
       ]
     }
   ]

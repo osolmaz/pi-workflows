@@ -11,6 +11,7 @@ import { nodeTypeGlyph } from "../src/render/node-type.js";
 import {
   action,
   agent,
+  assistantMessage,
   checkpoint,
   compute,
   defineWorkflow,
@@ -474,6 +475,35 @@ describe("buildWidgetLines", () => {
     expect(joined).not.toMatch(/[┏┌┃]/u);
     expect(lines.join("\n")).not.toContain("\u001b");
     expect(lines.length).toBeLessThanOrEqual(10);
+  });
+
+  it("marks assistant-message agents compactly", () => {
+    const assistantSnapshot = createDefinitionSnapshot(
+      defineWorkflow({
+        name: "assistant-widget",
+        startAt: "present",
+        nodes: {
+          present: agent({
+            prompt: () => "Present",
+            expectedOutput: assistantMessage(),
+            statusDetail: "summarizing",
+          }),
+        },
+        edges: [],
+      }),
+    );
+    const state = makeState({
+      workflowName: "assistant-widget",
+      currentNode: "present",
+      currentNodeStartedAt: "2026-01-01T00:00:00.000Z",
+      statusDetail: "summarizing",
+    });
+
+    expect(
+      stripAnsi(
+        buildWidgetLines(state, assistantSnapshot, new Date("2026-01-01T00:00:02.000Z")).join("\n"),
+      ),
+    ).toContain("assistant response · summarizing");
   });
 
   it("uses the Pi theme to emphasize status without removing glyphs", () => {

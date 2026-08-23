@@ -9,12 +9,35 @@ function makeRequest(overrides: Partial<AgentStepRequest> = {}): AgentStepReques
       workflowName: "w",
       nodeId: "step1",
       attemptId: "a1",
+      completion: "submit",
       expectedOutput: `{ "x": 1 }`,
     },
     prompt: "Do the step",
     presentation: { runTitle: "Run one", statusDetail: "Doing the step" },
     accept: async (output) => ({ ok: true, value: output }),
     ...overrides,
+  };
+}
+
+function makeAssistantRequest(maxOutputChars?: number): AgentStepRequest {
+  return makeRequest({
+    contract: {
+      runId: "r1",
+      workflowName: "w",
+      nodeId: "step1",
+      attemptId: "a1",
+      completion: "assistant",
+      ...(maxOutputChars !== undefined ? { maxOutputChars } : {}),
+    },
+    prompt: "Reply normally",
+  });
+}
+
+function assistantMessage(textParts: string[], stopReason = "stop") {
+  return {
+    role: "assistant",
+    content: textParts.map((text) => ({ type: "text", text })),
+    stopReason,
   };
 }
 
@@ -40,6 +63,7 @@ describe("ConversationStepExecutor", () => {
           workflowName: "w",
           nodeId: "step1",
           attemptId: "a1",
+          completion: "submit",
           expectedOutput: `{ "x": 1 }`,
         },
         presentation: { runTitle: "Run one", statusDetail: "Doing the step" },
@@ -229,6 +253,114 @@ describe("ConversationStepExecutor", () => {
     expect(deliveries.every((delivery) => delivery.contract.attemptId === "a1")).toBe(true);
     await executor.submit("step1", "a1", {});
     await stepPromise;
+  });
+
+  it("uses one settled visible assistant response as exact string output", async () => {
+    const sent: PromptDelivery[] = [];
+    const recorded = ["before"];
+    const executor = new ConversationStepExecutor({
+      sendPrompt: (delivery) => {
+        sent.push(delivery);
+        recorded.push("prompt", "assistant");
+      },
+      conversation: {
+        mark: () => recorded.length,
+        rangeSince: (mark) => ({
+          firstEntryId: recorded[mark] as string,
+          lastEntryId: recorded.at(-1) as string,
+        }),
+      },
+    });
+    const stepPromise = executor.runAgentStep(makeAssistantRequest(), new AbortController().signal);
+    executor.handleMessageEnd(assistantMessage(["first", "second"]));
+    expect(executor.handleAgentSettled()).toBe(false);
+
+    await expect(stepPromise).resolves.toMatchObject({
+      output: "first\nsecond",
+      conversation: { firstEntryId: "prompt", lastEntryId: "assistant" },
+      assistantMessage: {
+        entryId: "assistant",
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expect(sent).toHaveLength(1);
+    expect(executor.pendingStepId).toBeNull();
+  });
+
+  it("adds no character limit unless the contract supplies one", async () => {
+    const { executor } = makeExecutor();
+    const text = "x".repeat(60_000);
+    const stepPromise = executor.runAgentStep(makeAssistantRequest(), new AbortController().signal);
+    executor.handleMessageEnd(assistantMessage([text]));
+    executor.handleAgentSettled();
+    await expect(stepPromise).resolves.toMatchObject({ output: text });
+  });
+
+  it("fails one over-limit visible response without retrying it", async () => {
+    const { executor, sent } = makeExecutor();
+    const stepPromise = executor.runAgentStep(
+      makeAssistantRequest(3),
+      new AbortController().signal,
+    );
+    const rejected = expect(stepPromise).rejects.toThrow(/above the configured limit of 3/);
+    executor.handleMessageEnd(assistantMessage(["four"]));
+    expect(executor.handleAgentSettled()).toBe(false);
+    await rejected;
+    expect(sent).toHaveLength(1);
+  });
+
+  it("rejects workflow submissions during assistant completion", async () => {
+    const { executor } = makeExecutor();
+    const stepPromise = executor.runAgentStep(makeAssistantRequest(), new AbortController().signal);
+    await expect(executor.submit("step1", "a1", { ignored: true })).resolves.toEqual({
+      accepted: false,
+      message:
+        "This step completes with a normal assistant response. Do not submit workflow output.",
+    });
+    executor.handleMessageEnd(assistantMessage(["visible"]));
+    executor.handleAgentSettled();
+    await expect(stepPromise).resolves.toMatchObject({ output: "visible" });
+  });
+
+  it("fails empty, tool-only, aborted, and errored assistant outcomes", async () => {
+    for (const message of [
+      assistantMessage([]),
+      { role: "assistant", content: [{ type: "toolCall", name: "read" }], stopReason: "toolUse" },
+      assistantMessage(["partial"], "aborted"),
+      { ...assistantMessage(["partial"], "error"), errorMessage: "provider failed" },
+    ]) {
+      const { executor } = makeExecutor();
+      const stepPromise = executor.runAgentStep(
+        makeAssistantRequest(),
+        new AbortController().signal,
+      );
+      const rejected = expect(stepPromise).rejects.toThrow();
+      executor.handleMessageEnd(message);
+      executor.handleAgentSettled();
+      await rejected;
+    }
+  });
+
+  it("adopts a recovered visible response without sending another prompt", async () => {
+    const sent: PromptDelivery[] = [];
+    const executor = new ConversationStepExecutor({
+      sendPrompt: (delivery) => sent.push(delivery),
+      conversation: {
+        recoverAssistant: () => ({
+          output: "already visible",
+          assistantMessage: { sha256: "a".repeat(64), recovered: true },
+        }),
+        mark: () => 0,
+        rangeSince: () => undefined,
+      },
+    });
+    await expect(
+      executor.runAgentStep(makeAssistantRequest(), new AbortController().signal),
+    ).resolves.toMatchObject({
+      output: "already visible",
+      assistantMessage: { recovered: true },
+    });
+    expect(sent).toEqual([]);
   });
 
   it("does nothing on settle without a pending step", () => {

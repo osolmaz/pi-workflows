@@ -7,7 +7,7 @@ import {
   renderRunListLines,
   runElapsedMs,
 } from "../src/viewer/render.js";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { agent, assistantMessage, compute, defineWorkflow } from "../src/workflows/definition.js";
 import {
   choice,
   createHumanDecisionRequest,
@@ -232,6 +232,33 @@ describe("renderRunDetailLines", () => {
     expect(text).toContain("↻ 1");
     expect(text).toContain("◷ 10s");
     expect(text).toContain("… reviewing");
+  });
+
+  it("shows assistant response as an agent detail", () => {
+    const assistantWorkflow = defineWorkflow({
+      name: "assistant-detail",
+      startAt: "present",
+      nodes: {
+        present: agent({
+          prompt: () => "Present",
+          expectedOutput: assistantMessage(),
+          statusDetail: "summarizing",
+        }),
+      },
+      edges: [],
+    });
+    const bundle = makeBundle({
+      workflowName: "assistant-detail",
+      currentNode: "present",
+      currentNodeStartedAt: "2026-07-19T00:00:50.000Z",
+      statusDetail: "summarizing",
+    });
+    bundle.snapshot = createDefinitionSnapshot(assistantWorkflow);
+
+    const text = renderRunDetailLines(bundle, { ...size, width: 160 }, NOW)
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("assistant response");
   });
 
   it("scrubs to a selected step with position and inspector", () => {

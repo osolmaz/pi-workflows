@@ -175,6 +175,7 @@ describe("SessionRecorder", () => {
       workflowName: "demo",
       nodeId: "review",
       attemptId: "attempt-1",
+      completion: "submit",
     });
 
     const assistant = { role: "assistant", content: [], timestamp: 1_723_000_000_000 };
@@ -232,6 +233,7 @@ describe("SessionRecorder", () => {
       workflowName: "demo",
       nodeId: "next",
       attemptId: "attempt-2",
+      completion: "submit",
     });
     await recorder.handleTurnEnd({ turnIndex: 0, message: { ...assistant } }, ctx);
     await finishing;
@@ -278,7 +280,13 @@ describe("SessionRecorder", () => {
     const recorder = new SessionRecorder(store, runId);
     const ctx = makeCtx([]);
     await recorder.bind(ctx);
-    const contract = { runId, workflowName: "demo", nodeId: "one", attemptId: "a1" };
+    const contract = {
+      runId,
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "a1",
+      completion: "submit" as const,
+    };
     recorder.beginAttempt(contract);
     recorder.handleTurnStart({ turnIndex: 0 });
     await recorder.handleTurnEnd({ turnIndex: 0, message: { role: "assistant" } }, ctx);
@@ -304,7 +312,13 @@ describe("SessionRecorder", () => {
       const { store, runId } = await makeRun();
       const recorder = new SessionRecorder(store, runId);
       await recorder.bind(makeCtx([]));
-      recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+      recorder.beginAttempt({
+        runId,
+        workflowName: "demo",
+        nodeId: "one",
+        attemptId: "a1",
+        completion: "submit",
+      });
       recorder.handleTurnStart({ turnIndex: 0 });
       const finishing = recorder.finish();
       await vi.advanceTimersByTimeAsync(30_000);
@@ -333,7 +347,13 @@ describe("SessionRecorder", () => {
     const branch: FakeEntry[] = [];
     const ctx = makeCtx(branch);
     await recorder.bind(ctx);
-    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "a1",
+      completion: "submit",
+    });
     const assistant = { role: "assistant", content: [], timestamp: 1 };
     recorder.handleTurnStart({ turnIndex: 0 });
     await recorder.handleMessageStart({ message: assistant }, ctx);
@@ -356,7 +376,13 @@ describe("SessionRecorder", () => {
     const recorder = new SessionRecorder(store, runId);
     const ctx = makeCtx([]);
     await recorder.bind(ctx);
-    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "a1",
+      completion: "submit",
+    });
     const assistant = { role: "assistant", content: [], timestamp: 1 };
     recorder.handleTurnStart({ turnIndex: 0 });
     await recorder.handleMessageStart({ message: assistant }, ctx);
@@ -431,7 +457,13 @@ describe("SessionRecorder", () => {
     const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     await recorder.bind(makeCtx(branch));
-    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "a1",
+      completion: "submit",
+    });
     recorder.handleTurnStart({ turnIndex: 0 });
     await recorder.handleTurnEnd({ turnIndex: 0, message: { role: "assistant" } }, makeCtx(branch));
     await recorder.stop();
@@ -494,7 +526,13 @@ describe("SessionRecorder", () => {
     storesByRun.set(runId, store);
     const recorder = new SessionRecorder(store, runId);
     await recorder.bind(makeCtx([]));
-    recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
+    recorder.beginAttempt({
+      runId,
+      workflowName: "demo",
+      nodeId: "one",
+      attemptId: "a1",
+      completion: "submit",
+    });
     for (let index = 0; index < 8_300; index += 1) {
       recorder.handleTurnStart({ turnIndex: index });
     }

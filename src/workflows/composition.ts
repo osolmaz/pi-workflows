@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type {
   ActionNodeDefinition,
-  AgentNodeDefinition,
   CheckpointNodeDefinition,
   ComputeNodeDefinition,
   FunctionActionNodeDefinition,
@@ -451,11 +450,20 @@ function wrapNode(
     ...(node.statusDetail !== undefined ? { statusDetail: node.statusDetail } : {}),
   };
   switch (node.nodeType) {
-    case "agent":
+    case "agent": {
+      const prompt = (context: WorkflowNodeContext) => node.prompt(project(context));
+      if (typeof node.expectedOutput === "object") {
+        return {
+          ...common,
+          nodeType: "agent",
+          prompt,
+          expectedOutput: node.expectedOutput,
+        };
+      }
       return {
         ...common,
         nodeType: "agent",
-        prompt: (context) => (node as AgentNodeDefinition).prompt(project(context)),
+        prompt,
         ...(node.expectedOutput !== undefined ? { expectedOutput: node.expectedOutput } : {}),
         ...(node.validate !== undefined
           ? {
@@ -464,6 +472,7 @@ function wrapNode(
             }
           : {}),
       };
+    }
     case "compute":
       return {
         ...common,

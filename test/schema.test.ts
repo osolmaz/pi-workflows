@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   action,
   agent,
+  assistantMessage,
   checkpoint,
   compute,
   defineWorkflow,
@@ -116,6 +117,22 @@ describe("node constructors", () => {
     expect(() => agent({ prompt: () => "p", expectedOutput: 5 as never })).toThrow(
       /expectedOutput/,
     );
+    expect(() => assistantMessage({ maxChars: 0 })).toThrow(/positive integer/);
+    expect(() => assistantMessage({ maxChars: 1.5 })).toThrow(/positive integer/);
+    expect(() => assistantMessage(null as never)).toThrow(/options must be an object/);
+    expect(() => assistantMessage({ extra: true } as never)).toThrow(/unknown option/);
+    expect(assistantMessage()).toEqual({ kind: "assistant-message" });
+    expect(assistantMessage({ maxChars: 2000 })).toEqual({
+      kind: "assistant-message",
+      maxChars: 2000,
+    });
+    expect(() =>
+      agent({
+        prompt: () => "p",
+        expectedOutput: assistantMessage(),
+        validate: (() => "invalid") as never,
+      }),
+    ).toThrow(/cannot use validate/);
     expect(() => agent({ prompt: () => "p", validate: "x" as never })).toThrow(/validate/);
     expect(() => agent({ prompt: () => "p", timeoutMs: -1 })).toThrow(/timeoutMs/);
     expect(agent({ prompt: () => "p", timeoutMs: null }).timeoutMs).toBeNull();
@@ -210,6 +227,20 @@ describe("definition snapshots", () => {
       expectedOutput: "{}",
       timeoutMs: 1000,
       statusDetail: "thinking",
+    });
+    const assistantSnapshot = createDefinitionSnapshot(
+      define({
+        nodes: {
+          start: agent({
+            prompt: () => "p",
+            expectedOutput: assistantMessage(),
+          }),
+        },
+      }),
+    );
+    expect(assistantSnapshot.nodes.start).toEqual({
+      nodeType: "agent",
+      expectedOutput: { kind: "assistant-message" },
     });
     expect(snapshot.nodes.act).toEqual({ nodeType: "action", actionExecution: "shell" });
     expect(snapshot.nodes.fn).toEqual({ nodeType: "action", actionExecution: "function" });

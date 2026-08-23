@@ -3,18 +3,20 @@ import autodocWorkflow from "./autodoc.workflow.js";
 import autoimplementWorkflow from "./autoimplement.workflow.js";
 import autoplanWorkflow from "./autoplan.workflow.js";
 import monitorWorkflow from "./monitor.workflow.js";
+import plainSummaryWorkflow from "./plain-summary.workflow.js";
 import planApprovalWorkflow from "./plan-approval.workflow.js";
 import sanityCheckWorkflow from "./sanity-check.workflow.js";
 
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
-  { id: "autoplan", revision: "1", definition: autoplanWorkflow },
+  { id: "plain-summary", revision: "1", definition: plainSummaryWorkflow },
+  { id: "autoplan", revision: "2", definition: autoplanWorkflow },
   { id: "autodoc", revision: "1", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "8", definition: autoimplementWorkflow },
+  { id: "autoimplement", revision: "9", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "4", definition: planApprovalWorkflow },
   { id: "sanity-check", revision: "3", definition: sanityCheckWorkflow },
   {
     id: "monitor",
-    revision: "10",
+    revision: "11",
     definition: monitorWorkflow,
     legacySources: [
       {

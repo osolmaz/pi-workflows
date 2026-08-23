@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { decision, decisionEdge } from "../src/workflows/decision.js";
-import { agent, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
+import {
+  agent,
+  assistantMessage,
+  checkpoint,
+  compute,
+  defineWorkflow,
+  shell,
+} from "../src/workflows/definition.js";
 import { WorkflowEngine, appendStepContract } from "../src/workflows/engine.js";
 import { WorkflowRunStore, readWorkflowRun } from "../src/workflows/store.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
@@ -197,6 +204,101 @@ describe("WorkflowEngine", () => {
     expect(prompt).toBe(
       appendStepContract("Base prompt", "contract", "ask", attemptId, `{ "x": 1 }`),
     );
+  });
+
+  it("uses exact visible text for assistant-message agent output", async () => {
+    const workflow = defineWorkflow({
+      name: "assistant-contract",
+      startAt: "present",
+      nodes: {
+        present: agent({
+          prompt: () => "Explain it plainly",
+          expectedOutput: assistantMessage(),
+        }),
+      },
+      edges: [],
+    });
+    const executor = new ScriptedExecutor().respond("present", (request) => {
+      expect(request.contract).toMatchObject({ completion: "assistant" });
+      expect(request.contract.maxOutputChars).toBeUndefined();
+      expect(request.prompt).toContain("Reply with a normal assistant message.");
+      expect(request.prompt).not.toContain('"action": "submit"');
+      return {
+        output: '{"visible":"text"}',
+        assistantMessage: { sha256: "a".repeat(64), entryId: "assistant-1" },
+        conversation: { firstEntryId: "prompt-1", lastEntryId: "assistant-1" },
+      };
+    });
+    const { engine } = await makeEngine(executor);
+
+    const { state } = await engine.run(workflow, {});
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toBe('{"visible":"text"}');
+    expect(state.steps[0]).toMatchObject({
+      output: '{"visible":"text"}',
+      assistantMessage: { entryId: "assistant-1", sha256: "a".repeat(64) },
+      conversation: { firstEntryId: "prompt-1", lastEntryId: "assistant-1" },
+    });
+  });
+
+  it("parks for an origin session and resumes the same assistant attempt", async () => {
+    const workflow = defineWorkflow({
+      name: "assistant-resume",
+      startAt: "present",
+      nodes: {
+        present: agent({ prompt: () => "Present", expectedOutput: assistantMessage() }),
+      },
+      edges: [],
+    });
+    const databasePath = await makeStateDatabasePath("pi-workflows-assistant-resume");
+    const parkedExecutor = {
+      assistantMessageMode: "park" as const,
+      runAgentStep: async () => {
+        throw new Error("parked executor must not receive a prompt");
+      },
+    };
+    const parkedEngine = new WorkflowEngine({ executor: parkedExecutor, databasePath });
+    const parked = await parkedEngine.run(workflow, {});
+    const attemptId = parked.state.currentAttemptId;
+    expect(parked.state).toMatchObject({
+      status: "running",
+      currentNode: "present",
+      statusDetail: "waiting for origin Pi session",
+    });
+
+    const visibleExecutor = new ScriptedExecutor().respond("present", (request) => {
+      expect(request.contract.attemptId).toBe(attemptId);
+      return { output: "visible", assistantMessage: { sha256: "b".repeat(64) } };
+    });
+    const resumedEngine = new WorkflowEngine({ executor: visibleExecutor, databasePath });
+    const resumed = await resumedEngine.resumeRun(workflow, parked.state.runId);
+
+    expect(resumed.state.status).toBe("completed");
+    expect(resumed.state.finalOutput).toBe("visible");
+    expect(resumed.state.steps).toHaveLength(1);
+    expect(resumed.state.steps[0]?.attemptId).toBe(attemptId);
+  });
+
+  it("fails assistant completion when no visible executor or origin exists", async () => {
+    const workflow = defineWorkflow({
+      name: "assistant-unsupported",
+      startAt: "present",
+      nodes: {
+        present: agent({ prompt: () => "Present", expectedOutput: assistantMessage() }),
+      },
+      edges: [],
+    });
+    const unsupported = {
+      runAgentStep: async () => ({ output: "must not run" }),
+    };
+    const databasePath = await makeStateDatabasePath("pi-workflows-assistant-unsupported");
+    const engine = new WorkflowEngine({ executor: unsupported, databasePath });
+
+    const { state } = await engine.run(workflow, {});
+
+    expect(state.status).toBe("failed");
+    expect(state.error).toMatch(/requires an origin Pi session/);
   });
 
   it("routes decisions through switch edges", async () => {

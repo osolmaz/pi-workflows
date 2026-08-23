@@ -87,7 +87,28 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
       },
     })
     .respond("planChange/design/propose", {
-      output: { solution: "fix code", rationale: "owned", parts: ["code"], tradeoffs: [] },
+      output: {
+        candidates: [
+          {
+            id: "fix-code",
+            title: "Fix code",
+            gist: "Fix the local code.",
+            solution: "fix code",
+            rationale: "owned",
+            parts: ["code"],
+            tradeoffs: [],
+          },
+          {
+            id: "replace-code",
+            title: "Replace code",
+            gist: "Replace the component.",
+            solution: "replace code",
+            rationale: "possible",
+            parts: ["replacement"],
+            tradeoffs: ["larger"],
+          },
+        ],
+      },
     })
     .respond("planChange/design/ideal", {
       output: { ideal: "correct code", outsideDependencies: [], additionalValue: [] },
@@ -95,10 +116,13 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
     .respond("planChange/design/choose", {
       output: {
         status: "ready",
-        selected: "fix code",
+        selectedId: "fix-code",
         why: "in scope",
         relationshipToIdeal: "same",
-        excluded: [],
+        rejected: [
+          { id: "replace-code", reason: "larger than needed" },
+          { id: "ideal", reason: "the local fix reaches it" },
+        ],
         compromises: [],
       },
     })
@@ -112,6 +136,10 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
         boundaries: [],
       },
     })
+    .respond("planChange/design/readySummary/summarize", () => ({
+      output: "Fix the local code. Replacing it is unnecessary; the ideal adds no value.",
+      assistantMessage: { sha256: "a".repeat(64) },
+    }))
     .respond("planChange/documentation/inspectDocumentation", {
       output: {
         route: "current",
@@ -276,10 +304,14 @@ describe("monitor automatic repair", () => {
       "implementation/redesign",
       "implementation/redesign/approval",
       "implementation/redesign/design",
+      "implementation/redesign/design/blockedSummary",
+      "implementation/redesign/design/readySummary",
       "implementation/redesign/documentation",
       "planChange",
       "planChange/approval",
       "planChange/design",
+      "planChange/design/blockedSummary",
+      "planChange/design/readySummary",
       "planChange/documentation",
     ]);
     expect(state.definitionDigest).toMatch(/^sha256:[a-f0-9]{64}$/);

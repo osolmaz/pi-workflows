@@ -97,20 +97,34 @@ export type WorkflowEdge =
       };
     };
 
-/**
- * A model-shaped step. The engine sends the prompt into the pi conversation
- * and the model completes the step by calling the `workflow` tool with a JSON
- * output. `expectedOutput` is appended to the step contract so the model
- * knows what shape to submit. `validate` may reject (throw) or normalize the
- * submitted output; rejections are surfaced to the model so it can retry
- * within the same step.
- */
-export type AgentNodeDefinition = WorkflowNodeCommon & {
+/** A visible assistant response used as the accepted agent-node output. */
+export type AssistantMessageOutput = {
+  kind: "assistant-message";
+  /** Optional author-supplied character limit. Omission adds no workflow limit. */
+  maxChars?: number;
+};
+
+export type AgentExpectedOutput = string | AssistantMessageOutput;
+
+type AgentNodeBase = WorkflowNodeCommon & {
   nodeType: "agent";
   prompt: (context: WorkflowNodeContext) => MaybePromise<string>;
+};
+
+/** The existing workflow-tool submission form. */
+export type SubmittedAgentNodeDefinition = AgentNodeBase & {
   expectedOutput?: string;
   validate?: (output: unknown, context: WorkflowNodeContext) => MaybePromise<unknown>;
 };
+
+/** A model turn whose normal visible assistant text becomes the node output. */
+export type AssistantAgentNodeDefinition = AgentNodeBase & {
+  expectedOutput: AssistantMessageOutput;
+  validate?: never;
+};
+
+/** A model-shaped step with either submitted or visible assistant output. */
+export type AgentNodeDefinition = SubmittedAgentNodeDefinition | AssistantAgentNodeDefinition;
 
 /** A pure local function: shape inputs, route, format, derive values. */
 export type ComputeNodeDefinition = WorkflowNodeCommon & {
@@ -587,6 +601,8 @@ export type WorkflowStepRecord = {
   output: unknown;
   error?: string;
   action?: WorkflowActionReceipt;
+  /** Receipt for a visible assistant-message completion. */
+  assistantMessage?: AssistantMessageReceipt;
   /** For agent steps recorded inside a Pi conversation. */
   conversation?: ConversationRange;
 };
@@ -673,7 +689,7 @@ export type WorkflowNodeSnapshot = {
   timeoutMs?: number | null;
   statusDetail?: string;
   summary?: string;
-  expectedOutput?: string;
+  expectedOutput?: AgentExpectedOutput;
   actionExecution?: "function" | "shell";
   mountPath?: string[];
   localNodeId?: string;
@@ -786,13 +802,27 @@ export type WorkflowRunResult = {
   state: WorkflowRunState;
 };
 
+export type AgentStepCompletion = "submit" | "assistant";
+
+export type AssistantMessageReceipt = {
+  sha256: string;
+  /** Pi session entry containing the visible response, when available. */
+  entryId?: string;
+  /** Present only when the workflow author supplied a limit. */
+  maxChars?: number;
+  /** True when recovery adopted an already visible response. */
+  recovered?: boolean;
+};
+
 /** The step contract handed to the executor alongside the prompt. */
 export type AgentStepContract = {
   runId: string;
   workflowName: string;
   nodeId: string;
   attemptId: string;
+  completion: AgentStepCompletion;
   expectedOutput?: string;
+  maxOutputChars?: number;
 };
 
 /** Optional human-facing labels for an agent step. They never affect execution. */
@@ -819,6 +849,8 @@ export type AgentStepRequest = {
 
 export type AgentStepSubmission = {
   output: unknown;
+  /** Receipt for a visible assistant response. */
+  assistantMessage?: AssistantMessageReceipt;
   /**
    * The Pi conversation slice this step produced, when the executor records
    * one. Persisted verbatim into the step record and terminal node event.
@@ -828,10 +860,15 @@ export type AgentStepSubmission = {
 
 /**
  * Runs one agent step to completion. Implementations deliver the prompt to
- * the model and resolve once a submission has been accepted via `accept`.
+ * the model and resolve once the configured output has been accepted.
  * Must reject with an `AbortError`-like error when `signal` aborts.
  */
 export interface AgentStepExecutor {
+  /**
+   * `visible` supports assistant-message output. `park` asks the engine to
+   * leave the run claimable for an origin session. Omission is unsupported.
+   */
+  readonly assistantMessageMode?: "visible" | "park" | "unsupported";
   runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission>;
 }
 

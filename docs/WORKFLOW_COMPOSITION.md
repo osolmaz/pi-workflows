@@ -204,7 +204,7 @@ A checkpoint inside a child uses the normal continuation behavior and resumes at
 
 ### Reports and presentation
 
-Notify nodes and updates keep qualified node identities. Only the root workflow produces final presentation. A child's `presentationPrompt` applies when the child runs alone and is ignored when included.
+Notify nodes and updates keep qualified node identities. Only the root workflow produces final `presentationPrompt` output. A child's `presentationPrompt` applies when the child runs alone and is ignored when included. An agent with `expectedOutput: assistantMessage()` is part of the graph, so its normal assistant response remains visible when included. The parent continues only after that turn settles.
 
 ## Persistence
 
@@ -259,7 +259,7 @@ monitor
 
 ## Autoplan, autodoc, and autoimplement
 
-`autoplan` accepts the problem, scope, constraints, an optional previous plan, and new evidence. It automatically selects the best practical in-scope solution. The ideal end state can win when it is feasible, but an unavailable upstream change cannot block a valid practical solution. It exits through `ready` or `blocked` and returns a plan digest and change status.
+`autoplan` accepts the problem, scope, constraints, an optional previous plan, and new evidence. It records two through four practical candidates plus the ideal, automatically selects the best in-scope solution, and records one rejection reason for every other explicit candidate. It includes `plain-summary` on ready and blocked routes, so the user sees one short normal assistant response before the parent continues. The response calls the choice a plan selected for approval and cannot satisfy the later human decision. Autoplan exits through `ready` or `blocked` and returns the full candidates, selection, detailed plan when ready, plain summary, plan digest, and change status.
 
 `autodoc` accepts an already selected plan or finds it in the active conversation and referenced canonical documents. It adopts current documentation or updates the canonical specification and implementation plan, runs documentation checks, and returns a documented-plan record. It never selects a solution or implements one.
 
@@ -303,11 +303,11 @@ This is a compatible public API addition under the project's pre-1.0 policy. It 
 
 ## Contract impact
 
-- **Session state:** normal workflow messages and tool results only.
+- **Session state:** normal workflow messages, tool results, and visible assistant-message node outputs.
 - **Other persistent data:** additive source and mount data, definition digests, and include events in existing SQLite runs.
 - **Pi internals:** none.
 - **Public Pi API:** existing extension APIs only.
-- **Public pi-workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, and `defineWorkflowRegistry()`.
+- **Public pi-workflows API:** typed workflow inputs and exits, `includeWorkflow()`, direct imports, dynamic references, `defineWorkflowRegistry()`, and `expectedOutput: assistantMessage()`.
 
 ## Required tests
 

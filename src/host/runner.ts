@@ -261,6 +261,7 @@ export class WorkflowHost {
     const executor = new RpcStepExecutor({
       cwd: this.options.cwd,
       registry: this.registry,
+      ...(record.originSessionId !== null ? { assistantMessageMode: "park" as const } : {}),
       ...(this.options.piArgs !== undefined ? { piArgs: this.options.piArgs } : {}),
       ...(this.options.env !== undefined ? { env: this.options.env } : {}),
     });
@@ -316,14 +317,22 @@ export class WorkflowHost {
             });
       clearInterval(renewTimer);
       if (result.state.status === "running" || result.state.status === "waiting") {
-        // A drained run or new checkpoint stays available to its next owner.
+        // A drained run, visible-assistant handoff, or new checkpoint stays
+        // available to its next owner. Skip waits in this host process so it
+        // cannot reclaim the same run in a tight loop.
         this.store.parkWorkflowRun({ runId, claimToken });
         this.store.settleRunEffect(runId, "run.park_queue");
-        if (result.state.status === "waiting") this.skippedRuns.add(runId);
+        const waitingForOrigin =
+          result.state.status === "running" &&
+          result.state.statusDetail === "waiting for origin Pi session";
+        if (result.state.status === "waiting" || waitingForOrigin) this.skippedRuns.add(runId);
         this.recordEvent(runId, record.workflowName, "parked", {
           status: result.state.status,
+          ...(waitingForOrigin ? { reason: "waiting for origin Pi session" } : {}),
         });
-        this.log(`parked ${record.workflowName} run ${runId}`);
+        this.log(
+          `parked ${record.workflowName} run ${runId}${waitingForOrigin ? ": waiting for origin Pi session" : ""}`,
+        );
         return;
       }
       this.store.completeWorkflowRun({ runId, claimToken });
