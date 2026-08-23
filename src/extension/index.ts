@@ -1602,6 +1602,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
     let started: string | undefined;
     try {
       const bundle = readWorkflowRun(claimed.runId);
+      if (bundle?.state.status === "waiting") {
+        queueStore.parkWorkflowRun({ runId: claimed.runId, claimToken });
+        return;
+      }
       const sourceRef =
         bundle?.state.workflowSource === undefined
           ? claimed.workflowSourceRef
@@ -2428,7 +2432,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     const queue = ensureRunQueueStore(ctx.cwd);
     const existing = queue.findSessionReservation(ctx.sessionManager.getSessionId());
-    if (existing !== undefined) {
+    if (existing !== undefined && existing.runId !== options.parentRunId) {
       throw new Error(
         `Workflow ${existing.workflowName} is already ${existing.status} (run ${existing.runId}).`,
       );

@@ -1040,7 +1040,9 @@ export class SqliteControllerStore implements ControllerStore {
             { continuationRunId: options.runId },
             now,
           );
-        } else if (parent.status !== "done") {
+        } else if (parent.status === "done") {
+          throw new Error("Continuation parent already has a reserved continuation");
+        } else {
           throw new Error(`Continuation parent queue is ${parent.status}`);
         }
       }
@@ -1254,7 +1256,7 @@ export class SqliteControllerStore implements ControllerStore {
       "q.status IN ('queued', 'parked', 'starting', 'running')",
       "q.available_at <= ?",
       "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
-      "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status = 'parked')",
+      "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
     ];
     const params: unknown[] = [
       this.requireProjectId(),
@@ -1266,6 +1268,8 @@ export class SqliteControllerStore implements ControllerStore {
     if (options.sessionId !== undefined) {
       clauses.push("b.origin_session_id = ?");
       params.push(options.sessionId);
+    } else {
+      clauses.push("(b.execution_mode = 'headless' OR q.status <> 'queued')");
     }
     if (options.excludeRunIds !== undefined && options.excludeRunIds.length > 0) {
       clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
