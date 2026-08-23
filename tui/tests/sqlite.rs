@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 
 fn blob(connection: &Connection, value: &serde_json::Value) -> Vec<u8> {
@@ -132,6 +133,58 @@ fn refreshes_a_run_after_one_committed_update() {
         source.get("run-1").unwrap().state.status.label(),
         "completed"
     );
+}
+
+#[test]
+fn combines_capture_segments_in_order() {
+    let (_temp, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    let first_entry = blob(&connection, &json!({"id": "entry-1", "type": "message"}));
+    let second_entry = blob(&connection, &json!({"id": "entry-2", "type": "message"}));
+    let payload = blob(&connection, &json!({"turnIndex": 1}));
+    connection
+        .execute(
+            "INSERT INTO session_segments(segment_id, run_id, capture_key, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', NULL, 'complete', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_segments(segment_id, run_id, capture_key, status, entry_count, event_count, created_at) VALUES ('s2', 'run-1', 'handoff', 'complete', 1, 1, 2)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_entries(segment_id, entry_seq, entry_hash, recorded_at) VALUES ('s1', 1, ?1, 1), ('s2', 1, ?2, 2)",
+            params![first_entry, second_entry],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_events(segment_id, event_seq, event_type, node_id, attempt_id, turn_id, payload_hash, recorded_at) VALUES ('s1', 1, 'turn_started', 'work', 'a1', 't1', ?1, 1), ('s2', 1, 'turn_started', 'work', 'a2', 't2', ?1, 2)",
+            [payload],
+        )
+        .unwrap();
+    drop(connection);
+
+    let run = read_run(&database, "run-1").unwrap();
+    assert_eq!(run.session_entries.len(), 2);
+    assert_eq!(run.session_entries[1].seq, 2);
+    assert_eq!(run.session_events.len(), 2);
+    assert_eq!(run.session_events[1].seq, 2);
+}
+
+#[test]
+fn remote_mode_does_not_require_local_state() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_piw"))
+        .args(["--connect", "ws://127.0.0.1:9/ws"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("database"));
 }
 
 #[test]

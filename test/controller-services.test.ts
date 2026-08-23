@@ -266,16 +266,52 @@ describe("ControllerWorkflowCoordinator", () => {
       attempt: 1,
     });
     expect(second.requestId).toBe(first.requestId);
-    const completed = coordinator.complete(
-      first.requestId,
-      {
-        state: "succeeded",
-        ...(first.runId !== undefined ? { runId: first.runId } : {}),
-      },
-      claim,
-    );
+    const completed = coordinator.complete(first.requestId, {
+      state: "succeeded",
+      ...(first.runId !== undefined ? { runId: first.runId } : {}),
+    });
     expect(completed.state).toBe("succeeded");
     expect(store.listQueue()).toHaveLength(1);
+  });
+
+  it("accepts asynchronous child completion after the reconcile claim is released", async () => {
+    const { store, resource, claim } = await fixture();
+    let complete: ((result: { state: "succeeded"; runId: string }) => void) | undefined;
+    const coordinator = new ControllerWorkflowCoordinator(store, {
+      ensure: async (request, _signal, onComplete) => {
+        complete = onComplete as typeof complete;
+        return { state: "running", runId: request.runId };
+      },
+    });
+    const child = await coordinator
+      .forResource(resource, claim, new AbortController().signal)
+      .ensure({ requestKey: "async", workflow: "repair", input: {} });
+    expect(store.settleClaim(claim)).toBe(true);
+    complete?.({ state: "succeeded", runId: child.runId as string });
+    expect(store.getWorkflowByRequestId(child.requestId)?.state).toBe("succeeded");
+    expect(store.listQueue()).toHaveLength(1);
+  });
+
+  it("rejects invalid asynchronous completion authority", async () => {
+    const { store, resource, claim } = await fixture();
+    const child = store.reserveWorkflow({
+      resourceUid: resource.metadata.uid,
+      claim,
+      requestKey: "completion",
+      workflow: "repair",
+      inputFingerprint: "c".repeat(64),
+    }).record;
+    store.updateWorkflow(
+      child.requestId,
+      { state: "pending", runId: "reserved-run", attempt: 1 },
+      claim,
+    );
+    expect(() =>
+      store.completeWorkflow(child.requestId, { state: "running", runId: "reserved-run" }),
+    ).toThrow(/settled child state/);
+    expect(() =>
+      store.completeWorkflow(child.requestId, { state: "succeeded", runId: "other-run" }),
+    ).toThrow(/does not match/);
   });
 
   it("persists a run ID before scheduler startup and reuses it after failure", async () => {
@@ -324,14 +360,10 @@ describe("ControllerWorkflowCoordinator", () => {
       workflow: "repair",
       input: {},
     });
-    coordinator.complete(
-      first.requestId,
-      {
-        state: "interrupted",
-        ...(first.runId !== undefined ? { runId: first.runId } : {}),
-      },
-      claim,
-    );
+    coordinator.complete(first.requestId, {
+      state: "interrupted",
+      ...(first.runId !== undefined ? { runId: first.runId } : {}),
+    });
     const second = await workflows.ensure({
       requestKey: "repair:a",
       workflow: "repair",
@@ -359,9 +391,7 @@ describe("ControllerWorkflowCoordinator", () => {
     });
     expect(first.state).toBe("failed");
     expect(second.state).toBe("failed");
-    expect(() => coordinator.complete("missing", { state: "succeeded" }, claim)).toThrow(
-      /not found/,
-    );
+    expect(() => coordinator.complete("missing", { state: "succeeded" })).toThrow(/not found/);
   });
 
   it("leaves requests pending when the host has no scheduler", async () => {

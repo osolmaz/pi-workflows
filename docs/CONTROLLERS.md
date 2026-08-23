@@ -159,7 +159,7 @@ Mutation policy stays in deterministic effect drivers. Agent workflows return fi
 
 ## Child workflows
 
-`ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key. The controller transaction reserves and saves each attempt's run ID before the scheduler starts it, so recovery can find the run row.
+`ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key. An asynchronous child completion validates the reserved request and run IDs through a separate scheduler-completion command; it never reuses the controller claim that launched the child. The controller transaction reserves and saves each attempt's run ID before the scheduler starts it, so recovery can find the run row.
 
 A child run is one immutable attempt. Its existing SQLite run state remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can record an abandoned attempt and create another attempt for the same stable request.
 

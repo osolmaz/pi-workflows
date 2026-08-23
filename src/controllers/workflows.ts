@@ -48,26 +48,17 @@ export class ControllerWorkflowCoordinator {
     };
   }
 
-  complete(
-    requestId: string,
-    result: WorkflowSchedulerResult,
-    claim: ControllerQueueClaim,
-  ): ChildWorkflowRecord {
+  complete(requestId: string, result: WorkflowSchedulerResult): ChildWorkflowRecord {
     const previous = this.store.getWorkflowByRequestId(requestId);
     if (previous === undefined) {
       throw new Error(`Workflow request not found: ${requestId}`);
     }
-    const record = this.store.updateWorkflow(
-      requestId,
-      {
-        state: result.state,
-        ...(result.runId !== undefined ? { runId: result.runId } : {}),
-        ...(result.error !== undefined ? { error: result.error } : { error: null }),
-      },
-      claim,
-    );
+    const record = this.store.completeWorkflow(requestId, {
+      state: result.state,
+      ...(result.runId !== undefined ? { runId: result.runId } : {}),
+      ...(result.error !== undefined ? { error: result.error } : { error: null }),
+    });
     this.enqueueParent(record.resourceUid);
-    this.recordEvent(record, "workflow_state_changed", claim);
     return record;
   }
 
@@ -127,7 +118,7 @@ export class ControllerWorkflowCoordinator {
       },
       signal,
       (completed) => {
-        this.complete(record.requestId, completed, claim);
+        this.complete(record.requestId, completed);
       },
     );
     record = this.store.updateWorkflow(

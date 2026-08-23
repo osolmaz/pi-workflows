@@ -2134,7 +2134,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         };
       }
     }
-    if (request !== null && accepted !== undefined) {
+    {
       const queue = ensureRunQueueStore(ctx.cwd);
       const token = randomUUID();
       const claim = queue.claimWorkflowRun({
