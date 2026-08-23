@@ -20,7 +20,7 @@ import {
 } from "../workflows/errors.js";
 import { resolveWorkflowRef, resolveWorkflowSource } from "../workflows/loader.js";
 import { WorkflowRunStore } from "../workflows/store.js";
-import type { WorkflowDefinition } from "../workflows/types.js";
+import type { ResolvedHumanDecision, WorkflowDefinition } from "../workflows/types.js";
 import { HostProcessRegistry } from "./processes.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
 
@@ -303,7 +303,17 @@ export class WorkflowHost {
 
     this.recordEvent(runId, record.workflowName, "resumed", { runnerId: this.runnerId });
     try {
-      const result = await engine.resumeRun(workflow, runId, { workflowSource });
+      const humanDecision =
+        record.parentRunId === null ? undefined : hostHumanDecision(record.launchOptions);
+      const result = record.initialized
+        ? await engine.resumeRun(workflow, runId, { workflowSource })
+        : record.parentRunId === null
+          ? await engine.run(workflow, record.input, { workflowSource, runId })
+          : await engine.continueRun(workflow, record.parentRunId, record.input, {
+              workflowSource,
+              runId,
+              ...(humanDecision === undefined ? {} : { humanDecision }),
+            });
       clearInterval(renewTimer);
       if (result.state.status === "running" || result.state.status === "waiting") {
         // A drained run or new checkpoint stays available to its next owner.
@@ -408,6 +418,23 @@ export class WorkflowHost {
       // The event feed is best-effort.
     }
   }
+}
+
+function hostHumanDecision(value: unknown): ResolvedHumanDecision | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Stored workflow launch options are invalid");
+  }
+  const decision = Reflect.get(value, "humanDecision");
+  if (decision === undefined) return undefined;
+  if (
+    typeof decision !== "object" ||
+    decision === null ||
+    Array.isArray(decision) ||
+    Reflect.get(decision, "schema") !== "pi-workflows.human-decision-accepted.v1"
+  ) {
+    throw new Error("Stored human decision launch option is invalid");
+  }
+  return decision as ResolvedHumanDecision;
 }
 
 function hostProjectScope(cwd: string): string {

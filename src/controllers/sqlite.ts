@@ -44,6 +44,7 @@ export type WorkflowRunQueueRecord = {
   workflowName: string;
   workflowSourceRef: string;
   workflowSource: unknown;
+  initialized: boolean;
   definitionDigest: string;
   input: unknown;
   launchOptions: unknown;
@@ -153,6 +154,7 @@ type RunRow = {
   resourceId: string;
   workflowName: string;
   workflowRef: string;
+  runStatus: string;
   workflowSourceHash: Buffer;
   definitionDigest: Buffer;
   inputHash: Buffer;
@@ -2256,6 +2258,7 @@ export class SqliteControllerStore implements ControllerStore {
       workflowName: row.workflowName,
       workflowSourceRef: row.workflowRef,
       workflowSource: this.state.readJson(row.workflowSourceHash),
+      initialized: row.runStatus !== "queued",
       definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
       input: this.state.readJson(row.inputHash),
       launchOptions: this.state.readJson(row.launchOptionsHash),
@@ -2803,7 +2806,7 @@ function workflowSelect(clause: string): string {
 
 function workflowRunSelect(clause: string): string {
   return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
-    d.workflow_name AS workflowName, r.workflow_ref AS workflowRef,
+    d.workflow_name AS workflowName, r.workflow_ref AS workflowRef, r.status AS runStatus,
     r.workflow_source_hash AS workflowSourceHash, r.definition_digest AS definitionDigest,
     r.input_hash AS inputHash, r.output_hash AS outputHash,
     r.launch_options_hash AS launchOptionsHash,
