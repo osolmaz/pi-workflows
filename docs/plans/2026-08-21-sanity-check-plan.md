@@ -20,9 +20,9 @@ The workflow keeps only the final bounded answer and safe operational facts. It 
 
 The change is limited to Pi Workflows. It changes the private SDK agent-group runner, Sanity Check composition, extension admission, model runtime construction, tests, and canonical documentation.
 
-The workflow continues to use existing `action`, `compute`, and `notify` nodes. `src/workflows` and `WorkflowActionContext` remain Pi-independent. The change does not add a workflow primitive, public agent-group export, persisted schema, child workflow run, service, queue, store, transport, Pi core change, or private Pi API.
+The workflow uses existing `action`, `agent`, and `compute` nodes and includes the existing `plain-summary` workflow. `src/workflows` and `WorkflowActionContext` remain Pi-independent. The change does not add a workflow primitive, public agent-group export, persisted schema, child workflow run, service, queue, store, transport, Pi core change, or private Pi API.
 
-Sanity Check keeps its existing input, review areas, prompts, evidence rules, session counts, strict result validation, verdicts, final notification, and progress schema.
+Sanity Check keeps its existing input, review areas, child prompts, evidence rules, session counts, strict result validation, verdicts, and progress schema. After verification, it shows two ordered normal assistant responses: the full detailed report first, then a short plain-language summary.
 
 ## Child session contract
 
@@ -188,6 +188,14 @@ Updates are deduplicated, throttled, and observational. They cannot change agent
 
 The Pi widget shows the aggregate plus failed and active children within its ten-line limit. `piw` shows all durable child tracks and samples. Both views use existing progress records. No new persisted field or schema is added.
 
+## Ordered assistant reports
+
+After strict verification succeeds, an assistant-message `agent` shows the complete bounded report. Its prompt supplies the deterministic report and requires a verbatim response without tools. A mismatch stops before summary generation. This replaces the old final workflow notification.
+
+The graph then includes `plain-summary`. The summarizer receives the verified verdict and detailed report, keeps the verdict, and writes one short plain-language response. It uses the plain-summary workflow limits of 2,000 characters and five sentences. The detailed response always settles before the summary starts.
+
+Neither response uses `presentationPrompt`, and neither can change the verified verdict. A final compute node returns the original strict `SanityCheckResult` as the workflow result. Both visible responses and their normal assistant receipts use existing Pi session and SQLite records. A detached host parks before these session-visible nodes until the origin Pi session can continue them.
+
 ## Implementation plan
 
 1. Update the Pi SDK development baseline to one compatible 0.84.x release. Keep the Pi coding-agent, Pi AI, and Pi TUI packages aligned and set an honest peer compatibility floor. Do not add Pi Factory or a provider extension as a dependency.
@@ -199,17 +207,18 @@ The Pi widget shows the aggregate plus failed and active children within its ten
 7. Verify exact provider, model, thinking, authentication, admitted extensions, active tools, and tool sources before every prompt.
 8. Complete provider, extension, and session cleanup on every exit path.
 9. Pass the private profile and exact dispatch through Sanity Check without changing its review behavior or progress schema. Remove any `--no-extensions` launch guidance.
-10. Change the built-in Sanity Check revision from 2 to 3.
-11. Add temporary fixture extensions and full unit, integration, interactive Pi, and standalone host coverage.
-12. Update this plan and `docs/workflows.md` to match the shipped behavior.
-13. Run the complete repository gate and inspect the full public diff.
-14. After mock-provider verification, run one bounded real acceptance on OpenClaw pull request 126028 with `openai-codex/gpt-5.6-sol` and high thinking. Abort immediately if any child reports another provider or model. Do not modify OpenClaw.
+10. Add the ordered detailed assistant response and included plain summary, then return the original verified result from a final compute node.
+11. Change the built-in Sanity Check revision from 3 to 4 for the presentation graph change.
+12. Add temporary fixture extensions and full unit, integration, interactive Pi, and standalone host coverage.
+13. Update this plan and `docs/workflows.md` to match the shipped behavior.
+14. Run the complete repository gate and inspect the full public diff.
+15. After mock-provider verification of the provider architecture, run one bounded real acceptance on OpenClaw pull request 126028 with `openai-codex/gpt-5.6-sol` and high thinking. Abort immediately if any child reports another provider or model. Do not modify OpenClaw.
 
 ## Revision and compatibility
 
-Sanity Check moves from built-in revision 2 to revision 3.
+Sanity Check revision 3 introduced the provider-first child runtime. Revision 4 replaces the final notification with the ordered detailed and plain assistant responses.
 
-This is an alpha hard cutover. Do not retain the revision-2 child runtime, fallback, compatibility runner, migration, alias, dual path, or feature flag. An unfinished revision-2 run must fail with clear cancel-and-restart guidance. Terminal revision-2 bundles remain readable historical evidence because the persisted schema does not change.
+This is an alpha hard cutover. Do not retain the revision-3 notification graph, compatibility runner, migration, alias, dual path, or feature flag. An unfinished revision-3 run must fail with clear cancel-and-restart guidance. Terminal older runs remain readable historical evidence because the persisted schema does not change.
 
 ## Tests
 
@@ -232,8 +241,10 @@ Unit and integration tests must cover:
 - interactive Pi with normal extensions enabled and the local mock provider;
 - standalone `WorkflowHost` through the same private runtime path;
 - no child session files or child workflow runs;
-- built-in revision 3 and historical terminal bundle reading;
-- final notification without another model turn.
+- built-in revision 4 and historical terminal run reading;
+- one full detailed assistant response followed by one short plain-language assistant response;
+- unchanged strict final result after both visible responses;
+- no final notification or root presentation turn.
 
 Tests use mock providers and temporary directories. They do not call real models or write outside temporary directories.
 
@@ -252,7 +263,7 @@ After these checks and Pi Reviewer pass, perform the one explicitly authorized b
 
 The implementation is complete when:
 
-- `/workflow sanity-check` discovers built-in revision 3;
+- `/workflow sanity-check` discovers built-in revision 4;
 - the parent Pi process runs with its normal configured extensions;
 - serial mode uses two independent in-memory SDK sessions;
 - parallel mode uses five independent in-memory SDK sessions, with four reviews running concurrently;
@@ -264,14 +275,16 @@ The implementation is complete when:
 - the workflow keeps only bounded final answers and safe operational facts;
 - child prompts, reasoning, tool payloads, histories, credentials, and extension state do not enter run bundles or progress updates;
 - provider, extension, and session cleanup completes on every exit path;
-- Sanity Check review behavior, strict validation, verdicts, progress, and final notification remain unchanged;
-- interactive and headless runs use the same private SDK path;
+- Sanity Check review behavior, strict validation, verdicts, and progress remain unchanged;
+- the full detailed assistant response appears before the short plain-language summary;
+- the final workflow result remains the strict verified result;
+- interactive and headless runs use the same private SDK path, while session-visible reports wait for the origin Pi session;
 - all required checks pass with coverage margin;
 - the bounded acceptance run on OpenClaw pull request 126028 reports GPT-5.6 Sol for every child and completes with a strict verdict without modifying OpenClaw.
 
 ## Contract impact
 
-- **Origin session:** The normal workflow start record and one final workflow notification.
+- **Origin session:** The normal workflow start record, one detailed assistant response, and one short plain-language assistant response.
 - **Parent extensions:** The parent Pi process loads its normal configured extensions.
 - **Child extensions:** Only the exact provider owner and explicit private behavior paths are admitted.
 - **Child sessions:** Independent in-memory contexts and complete per-child runtimes in the same Node process. No child session file or child workflow run.

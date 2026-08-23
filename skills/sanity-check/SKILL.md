@@ -30,7 +30,7 @@ Replace the example values below with facts from the conversation, then make one
 }
 ```
 
-The workflow is read-only. It collects committed and working-tree evidence, reads matching pull-request metadata when available, runs isolated reviews, verifies their claims, and reports one verdict. It does not edit files, post comments, or fix findings.
+The workflow is read-only. It collects committed and working-tree evidence, reads matching pull-request metadata when available, runs isolated reviews, and verifies their claims. It then shows the full detailed report as a normal assistant message, followed by a short plain-language assistant summary. The strict verified verdict remains the workflow result. It does not edit files, post comments, or fix findings.
 
 When this skill is loaded inside an active workflow step, do not start another workflow. Complete the current step contract.
 

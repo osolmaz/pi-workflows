@@ -20,13 +20,13 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("9");
     expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("11");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
-    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("3");
+    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("4");
   });
 
-  it("rejects unfinished Sanity Check revision 2 with restart guidance", () => {
+  it("rejects unfinished Sanity Check revision 3 with restart guidance", () => {
     expect(() =>
       builtinWorkflowCatalog.resolve(
-        { kind: "builtin", id: "sanity-check", revision: "2" },
+        { kind: "builtin", id: "sanity-check", revision: "3" },
         "old-sanity-check",
       ),
     ).toThrow(/cancel run old-sanity-check, then start sanity-check again/);

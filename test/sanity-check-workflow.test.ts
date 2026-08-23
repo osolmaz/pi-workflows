@@ -5,7 +5,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import sanityCheckWorkflow, {
+  buildDetailedSanityCheckPrompt,
   buildReviewRequests,
+  buildSanityCheckSummaryInput,
   buildVerificationRequest,
   collectContributionEvidence,
   formatSanityCheckReport,
@@ -209,7 +211,7 @@ describe("sanity-check workflow", () => {
     ).toThrow(/at most 40/);
   });
 
-  it("formats a bounded final report with evidence and no presentation turn", () => {
+  it("shows the full report before a composed plain summary", () => {
     const result = parseSanityCheckResult(finalResult("keep"));
     const report = formatSanityCheckReport(result);
     expect(report).toContain("Sanity Check: keep");
@@ -228,16 +230,40 @@ describe("sanity-check workflow", () => {
     expect(detailed).toContain("Required changes:");
     expect(detailed).toContain("Questions for the contributor:");
     expect(detailed).toContain("Unknowns:");
-    expect(formatSanityCheckReport({ ...result, summary: "x".repeat(20_000) })).toContain(
-      "[report truncated]",
+    const bounded = formatSanityCheckReport({ ...result, summary: "x".repeat(20_000) });
+    expect(bounded).toContain("[report truncated]");
+    expect(bounded.length).toBeLessThanOrEqual(12_000);
+
+    const prompt = buildDetailedSanityCheckPrompt(result);
+    expect(prompt).toContain("Reply with the report below verbatim");
+    expect(prompt).toContain(report);
+    const summary = buildSanityCheckSummaryInput(result, report);
+    expect(summary).toMatchObject({
+      source: { verdict: "keep", detailedReport: report },
+      mustInclude: ["Verdict: keep"],
+      maxChars: 2_000,
+      maxSentences: 5,
+      format: "mixed",
+    });
+    expect(() => buildSanityCheckSummaryInput(result, "A changed report")).toThrow(
+      /did not match the verified report/,
     );
+
     expect(sanityCheckWorkflow.presentationPrompt).toBeUndefined();
-    expect(sanityCheckWorkflow.nodes.report).toMatchObject({ nodeType: "notify", kind: "final" });
+    expect(sanityCheckWorkflow.maxSteps).toBe(8);
+    expect(sanityCheckWorkflow.nodes.detailedReport).toMatchObject({
+      nodeType: "agent",
+      expectedOutput: { kind: "assistant-message", maxChars: 12_000 },
+    });
+    expect(Object.keys(sanityCheckWorkflow.includes ?? {})).toEqual(["plainSummary"]);
+    expect(sanityCheckWorkflow.nodes.finish).toMatchObject({ nodeType: "compute" });
     expect(sanityCheckWorkflow.edges).toEqual([
       { from: "prepare", to: "collectEvidence" },
       { from: "collectEvidence", to: "review" },
       { from: "review", to: "verify" },
-      { from: "verify", to: "report" },
+      { from: "verify", to: "detailedReport" },
+      { from: "detailedReport", to: "plainSummary" },
+      { from: "plainSummary.completed", to: "finish" },
     ]);
   });
 

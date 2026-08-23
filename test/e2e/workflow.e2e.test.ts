@@ -18,6 +18,19 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
+const SANITY_DETAILED_RESPONSE = [
+  "Sanity Check: keep",
+  "",
+  "The fixture change is supported by its tests.",
+  "",
+  "Findings:",
+  ...["necessity", "duplication", "contracts", "scope_tests"].flatMap((area) => [
+    `- ${area} (pass): ${area} passed`,
+    "  - .pi/workflows/e2e.workflow.ts :: default export: The fixture provides direct evidence.",
+  ]),
+].join("\n");
+const SANITY_PLAIN_RESPONSE =
+  "Verdict: keep. The change is supported, and the review found no required follow-up.";
 
 async function sessionEntries(agentDirectory: string): Promise<string[]> {
   return await fs
@@ -335,6 +348,13 @@ type RpcHandle = {
   stop: () => Promise<void>;
 };
 
+type RpcState = {
+  isStreaming: boolean;
+  pendingMessageCount: number;
+};
+
+let rpcStateRequest = 0;
+
 function startPiRpc(options: {
   cwd: string;
   env: Record<string, string>;
@@ -399,6 +419,39 @@ function startPiRpc(options: {
       }
     },
   };
+}
+
+async function readRpcState(pi: RpcHandle): Promise<RpcState> {
+  const id = `e2e-state-${++rpcStateRequest}`;
+  const start = pi.stdoutLines.length;
+  pi.send({ id, type: "get_state" });
+  await waitForCondition(
+    () => pi.stdoutLines.slice(start).some((line) => line.includes(`"id":"${id}"`)),
+    () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+  );
+  const response = pi.stdoutLines
+    .slice(start)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((value) => value.id === id);
+  const data = response?.data;
+  if (data === null || typeof data !== "object") {
+    throw new Error(`Pi RPC get_state ${id} returned no state`);
+  }
+  return data as RpcState;
+}
+
+async function waitForPiIdle(pi: RpcHandle, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = await readRpcState(pi);
+    if (!state.isStreaming && state.pendingMessageCount === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Timed out waiting for Pi RPC idle state.\n${pi.stderr()}\n${pi.stdoutLines.slice(-15).join("\n")}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 async function waitForCondition(
@@ -483,7 +536,7 @@ describe.sequential("pi-workflows end to end", () => {
     // The scripted "model": answers each workflow step contract through the
     // workflow tool and ends its turn after each tool result.
     mock = await startMockOpenAiServer(
-      ({ lastUserText, lastRole }) => {
+      ({ messages, lastUserText, lastRole }) => {
         if (lastUserText.includes("Verify and combine the Sanity Check reviews.")) {
           return {
             kind: "text",
@@ -532,6 +585,14 @@ describe.sequential("pi-workflows end to end", () => {
               unknowns: [],
             }),
           };
+        }
+        if (lastUserText.includes("Show the full verified Sanity Check report")) {
+          return { kind: "text", text: SANITY_DETAILED_RESPONSE };
+        }
+        if (
+          lastUserText.includes("Give a short plain-language summary of the Sanity Check verdict")
+        ) {
+          return { kind: "text", text: SANITY_PLAIN_RESPONSE };
         }
         if (lastUserText.includes("Presentation instructions:")) {
           return { kind: "text", text: "Implemented the boring, proven design." };
@@ -589,6 +650,7 @@ describe.sequential("pi-workflows end to end", () => {
         }
         if (
           lastRole === "tool" &&
+          contentText(messages.at(-1)?.content).includes("Workflow update published") &&
           /workflow step contract \(workflow: monitor, step: observe/i.test(lastUserText)
         ) {
           const monitorStepMatch = lastUserText.match(
@@ -1550,6 +1612,7 @@ describe.sequential("pi-workflows end to end", () => {
   });
 
   it("starts the built-in monitor from the model-facing workflow tool", async () => {
+    await waitForPiIdle(pi);
     pi.send({ id: "monitor-1", type: "prompt", message: "Start the built-in monitor now." });
 
     const { state } = await waitForRunState(
@@ -1576,6 +1639,7 @@ describe.sequential("pi-workflows end to end", () => {
         expect.objectContaining({ type: "progress", key: "fixture" }),
       ]),
     );
+    await waitForPiIdle(pi);
   });
 
   it("reconciles a durable controller through the real pi extension", async () => {
@@ -1660,6 +1724,7 @@ describe.sequential("pi-workflows end to end", () => {
   }, 30_000);
 
   it("runs the built-in sanity check in isolated read-only Pi sessions", async () => {
+    await waitForPiIdle(pi);
     const requestsBefore = mock.requests.length;
     const sessionsBefore = await sessionEntries(agentDir);
     pi.send({
@@ -1667,17 +1732,24 @@ describe.sequential("pi-workflows end to end", () => {
       type: "prompt",
       message: `/workflow sanity-check --input-json ${JSON.stringify({ baseRef: "HEAD" })}`,
     });
-    const { state } = await waitForRunState(
+    const { state, runId } = await waitForRunState(
       runsDir,
       (candidate) =>
         candidate.workflowName === "sanity-check" &&
         ["completed", "failed", "cancelled"].includes(candidate.status),
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      45_000,
     );
     expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "3" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "4" });
     expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
     expect(state.outputs.review).toHaveLength(1);
+    expect(state.outputs.detailedReport).toBe(SANITY_DETAILED_RESPONSE);
+    expect(state.outputs.plainSummary).toMatchObject({
+      exit: "completed",
+      output: { text: SANITY_PLAIN_RESPONSE },
+    });
+    expect(state.finalOutput).toMatchObject({ verdict: "keep" });
     const progress = (state.updates ?? []).filter((update) => update.type === "progress");
     expect(progress.map((update) => update.key)).toEqual(
       expect.arrayContaining([
@@ -1692,7 +1764,7 @@ describe.sequential("pi-workflows end to end", () => {
       label: expect.stringContaining("fixture-legacy/fixture-legacy-model"),
     });
     await waitForCondition(
-      () => mock.requests.length >= requestsBefore + 2,
+      () => mock.requests.length >= requestsBefore + 4,
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
     expect(
@@ -1705,9 +1777,20 @@ describe.sequential("pi-workflows end to end", () => {
         ),
     ).toHaveLength(2);
     expect(await sessionEntries(agentDir)).toEqual(sessionsBefore);
+    const records = readWorkflowRun(runId, { databasePath: runsDir })?.sessionEntries ?? [];
+    const visibleReports = records.flatMap((record) => {
+      if (record.entry.type !== "message") return [];
+      const text = contentText(
+        (record.entry.message as { content?: unknown } | undefined)?.content,
+      );
+      return text === SANITY_DETAILED_RESPONSE || text === SANITY_PLAIN_RESPONSE ? [text] : [];
+    });
+    expect(visibleReports).toEqual([SANITY_DETAILED_RESPONSE, SANITY_PLAIN_RESPONSE]);
     await waitForCondition(
-      () => pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")),
+      () =>
+        pi.stdoutLines.some((line) => line.includes("Sanity Check: keep")) &&
+        pi.stdoutLines.some((line) => line.includes("Verdict: keep")),
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
-  }, 60_000);
+  }, 90_000);
 });
