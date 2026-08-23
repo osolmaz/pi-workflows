@@ -739,6 +739,25 @@ export class HumanDecisionStore {
   ): HumanDecisionAcceptance {
     return this.state.transaction(() => {
       this.requireStoredRequest(request);
+      const timing = this.state.connection
+        .prepare("SELECT deadline_at AS deadlineAt FROM human_decisions WHERE decision_id = ?")
+        .get(request.decisionId);
+      if (!isDeadlineRow(timing)) throw new Error("Human decision request is missing");
+      const arbitrationTime =
+        attempt.source === "policy" ? Date.parse(decision.acceptedAt) : Date.now();
+      if (
+        attempt.source === "human" &&
+        timing.deadlineAt !== null &&
+        arbitrationTime > timing.deadlineAt
+      ) {
+        throw new Error("Human decision request expired before the answer was accepted");
+      }
+      if (
+        attempt.source === "policy" &&
+        (timing.deadlineAt === null || arbitrationTime < timing.deadlineAt)
+      ) {
+        throw new Error("Human decision timeout default is not eligible yet");
+      }
       const candidateHash = this.state.putJson(attempt.candidate);
       const existingSubmission = this.state.connection
         .prepare(
@@ -1171,6 +1190,10 @@ function isPresentRow(value: unknown): value is { present: number } {
 }
 
 function isRequestHashRow(value: unknown): value is { requestHash: Buffer } {
+  return isRecordValue(value);
+}
+
+function isDeadlineRow(value: unknown): value is { deadlineAt: number | null } {
   return isRecordValue(value);
 }
 

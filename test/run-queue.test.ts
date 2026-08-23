@@ -281,7 +281,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("records terminal queue failures and cancellation", async () => {
+  it("records terminal queue failures in the run projection", async () => {
     const { store } = await setup();
     reserve(store);
     expect(
@@ -296,7 +296,59 @@ describe("workflow run queue in canonical SQLite", () => {
       errorCode: "launch_failed",
       errorMessage: "could not launch",
     });
+    expect(
+      new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
+    ).toMatchObject({
+      status: "failed",
+      error: "could not launch",
+      finishedAt: expect.any(String),
+    });
     expect(store.cancelWorkflowRun({ runId: "missing" })).toBe(false);
+    store.close();
+  });
+
+  it("does not let an unclaimed cancellation override a live or expired owner", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const now = Date.now();
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "session-1",
+      claimToken: "owner",
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
+    });
+    expect(
+      store.cancelWorkflowRun({ runId: "run-1", now: new Date(now + 500).toISOString() }),
+    ).toBe(false);
+    expect(
+      store.cancelWorkflowRun({ runId: "run-1", now: new Date(now + 2_000).toISOString() }),
+    ).toBe(false);
+    expect(store.getWorkflowRun("run-1")?.status).toBe("starting");
+    store.close();
+  });
+
+  it("does not let an expired claimant record a terminal failure", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const now = Date.now();
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "session-1",
+      claimToken: "expired",
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
+    });
+    expect(
+      store.failWorkflowRun({
+        runId: "run-1",
+        claimToken: "expired",
+        errorCode: "late_failure",
+        errorMessage: "stale owner",
+        now: new Date(now + 2_000).toISOString(),
+      }),
+    ).toBe(false);
+    expect(store.getWorkflowRun("run-1")?.status).toBe("starting");
     store.close();
   });
 
