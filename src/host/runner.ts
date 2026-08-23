@@ -203,6 +203,14 @@ export class WorkflowHost {
     let workflowSource: import("../workflows/types.js").WorkflowSource;
     try {
       const bundle = this.childRunStore.readRun(runId);
+      if (bundle?.state.status === "waiting") {
+        if (this.store.parkWorkflowRun({ runId, claimToken })) {
+          this.store.settleRunEffect(runId, "run.park_queue");
+          this.skippedRuns.add(runId);
+          this.log(`left ${record.workflowName} run ${runId} waiting for its decision owner`);
+        }
+        return;
+      }
       if (bundle?.state.workflowSource === undefined) {
         throw new Error(`Workflow run ${runId} has no canonical workflow source`);
       }

@@ -930,7 +930,7 @@ export class WorkflowRunStore {
     snapshot: WorkflowDefinitionSnapshot,
     now: number,
   ): void {
-    for (const step of state.steps) {
+    for (const step of state.steps.slice(state.carriedStepCount ?? 0)) {
       const resultHash = this.state.putJson(step, now);
       const outputHash = step.output === undefined ? null : this.state.putJson(step.output, now);
       const errorHash = step.error === undefined ? null : this.state.putText(step.error, now);
