@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
-import { checkpoint, defineWorkflow } from "../src/workflows/definition.js";
+import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, ScriptedExecutor, waitUntil } from "./helpers.js";
 
@@ -116,6 +118,100 @@ describe("WorkflowHost SQLite", () => {
     expect(
       new WorkflowRunStore(databasePath, { state: inspection.state }).readRun("waiting-run")?.state
         .status,
+    ).toBe("waiting");
+    inspection.close();
+  });
+
+  it("parks a run that reaches a human decision while hosted", async () => {
+    const cwd = await makeTempDir("host-new-waiting-project");
+    const databasePath = path.join(await makeTempDir("host-new-waiting-state"), "state.sqlite");
+    const workflowPath = path.join(cwd, "host-new-waiting.workflow.ts");
+    await fs.writeFile(
+      workflowPath,
+      `import { checkpoint, compute, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({
+  name: "host-new-waiting",
+  startAt: "prepare",
+  nodes: {
+    prepare: compute({ run: () => 1 }),
+    approval: checkpoint({ summary: "approve" }),
+  },
+  edges: [{ from: "prepare", to: "approval" }],
+});\n`,
+    );
+    const resolved = await resolveWorkflowRef(workflowPath, { cwd });
+    let engine: WorkflowEngine | undefined;
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "host-new-waiting",
+        startAt: "prepare",
+        nodes: {
+          prepare: compute({
+            run: () => {
+              engine?.pause();
+              return 1;
+            },
+          }),
+          approval: checkpoint({ summary: "approve" }),
+        },
+        edges: [{ from: "prepare", to: "approval" }],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const digest = `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+    const queue = new SqliteControllerStore(databasePath, { projectPath: cwd });
+    queue.enqueueWorkflowRun({
+      runId: "new-waiting-run",
+      workflowName: workflow.name,
+      workflowSourceRef: workflowPath,
+      workflowSource: resolved.source,
+      definitionDigest: digest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-owner",
+      claimToken: "session-token",
+      leaseMs: 60_000,
+      originSessionId: "session-owner",
+    });
+    const runStore = new WorkflowRunStore(databasePath, {
+      state: queue.state,
+      authorityProvider: () => queue.workflowRunAuthority("new-waiting-run", "session-token"),
+    });
+    engine = new WorkflowEngine({ store: runStore, executor: new ScriptedExecutor() });
+    const running = engine.run(
+      workflow,
+      {},
+      {
+        runId: "new-waiting-run",
+        workflowSource: resolved.source,
+      },
+    );
+    await waitUntil(() => runStore.readRun("new-waiting-run")?.state.paused === true);
+    engine.park();
+    const parked = await running;
+    expect(parked.state).toMatchObject({ status: "running", paused: true });
+    expect(queue.parkWorkflowRun({ runId: "new-waiting-run", claimToken: "session-token" })).toBe(
+      true,
+    );
+    queue.close();
+
+    const logs: string[] = [];
+    const host = new WorkflowHost({
+      cwd,
+      databasePath,
+      runnerId: "host-new-waiting",
+      claimPollMs: 10,
+      onLog: (message) => logs.push(message),
+    });
+    await host.start();
+    await waitUntil(() => logs.some((message) => message.includes("parked host-new-waiting")));
+    await host.stop();
+
+    const inspection = new SqliteControllerStore(databasePath, { projectPath: cwd });
+    expect(inspection.getWorkflowRun("new-waiting-run")?.status).toBe("parked");
+    expect(
+      new WorkflowRunStore(databasePath, { state: inspection.state }).readRun("new-waiting-run")
+        ?.state.status,
     ).toBe("waiting");
     inspection.close();
   });
