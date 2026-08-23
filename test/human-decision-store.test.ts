@@ -248,6 +248,109 @@ describe("HumanDecisionStore SQLite", () => {
     store.close();
   });
 
+  it("rejects timeout policy after the run owner changes before arbitration", async () => {
+    const databasePath = await makeStateDatabasePath("decision-timeout-handoff");
+    const { result, request, store } = await waitingDecision(databasePath);
+    const defaulted = await defaultedRequest(store, request);
+    const state = new StateDatabase({ filePath: databasePath });
+    const mutations = new StateMutationStore(state);
+    const resourceId = resourceIdFor("run", result.runId);
+    const revision = state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId) as { revision: number };
+    const now = Date.now();
+    const claim = mutations.claim({
+      resourceId,
+      ownerType: "session",
+      ownerId: "first-owner",
+      expectedRevision: revision.revision,
+      leaseMs: 60_000,
+      now,
+    });
+    if (claim === undefined) throw new Error("run claim missing");
+    const ownerStore = new HumanDecisionStore(databasePath, {
+      authorityProvider: () => ({
+        actor: { type: "session", id: claim.ownerId },
+        ownerType: claim.ownerType,
+        ownerId: claim.ownerId,
+        token: claim.token,
+        generation: claim.generation,
+      }),
+    });
+    const transaction = ownerStore.state.transaction.bind(ownerStore.state);
+    vi.spyOn(ownerStore.state, "transaction").mockImplementationOnce((operation) =>
+      transaction(() => {
+        ownerStore.state.connection
+          .prepare(
+            `UPDATE leases
+             SET generation = generation + 1, owner_type = 'session', owner_id = 'next-owner',
+                 token_hash = zeroblob(32), heartbeat_at = ?, expires_at = ?
+             WHERE resource_id = ?`,
+          )
+          .run(now, now + 60_000, resourceId);
+        return operation();
+      }),
+    );
+    await expect(ownerStore.resolveTimeout(defaulted, new Date(now + 2_000))).rejects.toThrow(
+      /ownership is stale/,
+    );
+    expect(await ownerStore.readResolved(defaulted.decisionId)).toBeNull();
+    ownerStore.close();
+    store.close();
+    state.close();
+  });
+
+  it("requires the current run owner for automatic expiry cancellation", async () => {
+    const databasePath = await makeStateDatabasePath("decision-expiry-owner");
+    const { result, request, store } = await waitingDecision(databasePath);
+    const now = Date.now();
+    const expiring = createHumanDecisionRequest({
+      runId: request.runId,
+      workflowName: request.workflowName,
+      nodeId: request.nodeId,
+      attemptId: request.attemptId,
+      contract: { audience: request.audience, choices: request.choices },
+      prompt: {
+        title: request.title,
+        subject: request.subject,
+        presentation: request.presentation,
+        revision: request.revision,
+        expiresAt: new Date(now - 1_000).toISOString(),
+      },
+      createdAt: new Date(now - 10_000).toISOString(),
+    });
+    await store.createRequest(expiring);
+    await expect(store.cancel(expiring, "expired")).rejects.toThrow(/current run owner/);
+    const state = new StateDatabase({ filePath: databasePath });
+    const mutations = new StateMutationStore(state);
+    const resourceId = resourceIdFor("run", result.runId);
+    const revision = state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId) as { revision: number };
+    const claim = mutations.claim({
+      resourceId,
+      ownerType: "session",
+      ownerId: "expiry-owner",
+      expectedRevision: revision.revision,
+      leaseMs: 60_000,
+      now,
+    });
+    if (claim === undefined) throw new Error("run claim missing");
+    const ownerStore = new HumanDecisionStore(databasePath, {
+      authorityProvider: () => ({
+        actor: { type: "session", id: claim.ownerId },
+        ownerType: claim.ownerType,
+        ownerId: claim.ownerId,
+        token: claim.token,
+        generation: claim.generation,
+      }),
+    });
+    expect(await ownerStore.cancel(expiring, "expired")).toBe("created");
+    ownerStore.close();
+    store.close();
+    state.close();
+  });
+
   it("resolves a defaulted timeout as acceptance and never expiry cancellation", async () => {
     const databasePath = await makeStateDatabasePath("decision-timeout");
     const { result, request, store } = await waitingDecision(databasePath);
