@@ -124,6 +124,7 @@ export interface ControllerStore {
     update: WorkflowRecordUpdate,
     claim: ControllerQueueClaim,
   ): ChildWorkflowRecord;
+  completeWorkflow(requestId: string, update: WorkflowRecordUpdate): ChildWorkflowRecord;
   listWorkflows(resourceUid: string): ChildWorkflowRecord[];
 
   recordEvent(options: {

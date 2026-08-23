@@ -845,6 +845,57 @@ export class SqliteControllerStore implements ControllerStore {
     return this.mapWorkflow(this.requireWorkflowRow(requestId));
   }
 
+  completeWorkflow(requestId: string, update: WorkflowRecordUpdate): ChildWorkflowRecord {
+    const row = this.requireWorkflowRow(requestId);
+    if (update.state === "pending" || update.state === "running") {
+      throw new Error("Scheduler completion must report a settled child state");
+    }
+    if (update.runId !== undefined && row.runId !== null && update.runId !== row.runId) {
+      throw new Error("Scheduler completion run ID does not match the reserved child run");
+    }
+    const source = this.requireControllerRowByUid(row.resourceUid);
+    const now = Date.now();
+    return this.state.transaction(() => {
+      const errorHash =
+        update.error === undefined || update.error === null
+          ? null
+          : this.state.putText(update.error, now);
+      this.state.connection
+        .prepare(
+          `UPDATE controller_workflows
+           SET run_id = CASE
+                 WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
+                 ELSE run_id
+               END,
+               status = ?, attempt_count = COALESCE(?, attempt_count),
+               error_hash = ?, updated_at = ?
+           WHERE request_id = ?`,
+        )
+        .run(
+          update.runId ?? null,
+          update.runId ?? null,
+          update.runId ?? null,
+          update.state,
+          update.attempt ?? null,
+          errorHash,
+          now,
+          requestId,
+        );
+      const revision = this.resourceRevision(source.resourceId);
+      this.bumpResource(source.resourceId, revision, now);
+      this.insertEvent(
+        source.resourceId,
+        revision + 1,
+        "workflow_state_changed",
+        "system",
+        null,
+        { requestId, state: update.state, runId: update.runId ?? row.runId },
+        now,
+      );
+      return this.mapWorkflow(this.requireWorkflowRow(requestId));
+    });
+  }
+
   listWorkflows(resourceUid: string): ChildWorkflowRecord[] {
     const rows = this.state.connection
       .prepare(workflowSelect("WHERE c.uid = ? ORDER BY w.created_at, w.request_id"))

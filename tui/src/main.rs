@@ -53,13 +53,18 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    let cli_theme = cli.theme.clone();
+    if cli.command.is_none() {
+        if let Some(url) = cli.connect.as_deref() {
+            return ui::run_remote(url, cli_theme.as_deref());
+        }
+    }
     let database = default_database();
     anyhow::ensure!(
         database.is_file(),
         "Pi Workflows database {} does not exist",
         database.display()
     );
-    let cli_theme = cli.theme.clone();
     match cli.command {
         Some(Command::Serve { bind }) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -68,14 +73,9 @@ fn main() -> Result<()> {
                 bind,
             }))
         }
-        None => {
-            if let Some(url) = cli.connect {
-                return ui::run_remote(&url, cli_theme.as_deref());
-            }
-            match cli.run_id {
-                Some(run_id) => ui::run_single(&database, &run_id, cli_theme.as_deref()),
-                None => ui::run_local(&database, cli_theme.as_deref()),
-            }
-        }
+        None => match cli.run_id {
+            Some(run_id) => ui::run_single(&database, &run_id, cli_theme.as_deref()),
+            None => ui::run_local(&database, cli_theme.as_deref()),
+        },
     }
 }

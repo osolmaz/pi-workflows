@@ -126,6 +126,30 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
+  it("releases a waiting parent reservation before its continuation", async () => {
+    const { store } = await setup();
+    reserve(store, "parent-run");
+    store.claimWorkflowRun({
+      runId: "parent-run",
+      runnerId: "session-1",
+      claimToken: "parent-token",
+      leaseMs: 60_000,
+    });
+    expect(store.parkWorkflowRun({ runId: "parent-run", claimToken: "parent-token" })).toBe(true);
+    expect(() => reserve(store, "continuation-run")).toThrow(/UNIQUE constraint/);
+    store.claimWorkflowRun({
+      runId: "parent-run",
+      runnerId: "session-1",
+      claimToken: "settle-token",
+      leaseMs: 60_000,
+    });
+    expect(store.completeWorkflowRun({ runId: "parent-run", claimToken: "settle-token" })).toBe(
+      true,
+    );
+    expect(reserve(store, "continuation-run").status).toBe("queued");
+    store.close();
+  });
+
   it("filters queue listings and session reservations", async () => {
     const { store } = await setup();
     reserve(store);

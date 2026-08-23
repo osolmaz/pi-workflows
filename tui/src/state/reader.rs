@@ -180,107 +180,121 @@ fn read_trace(connection: &Connection, run_id: &str) -> Result<Vec<TraceEvent>> 
 }
 
 fn read_session(connection: &Connection, run_id: &str) -> Result<LoadedSession> {
-    let segment = connection
-        .query_row(
-            "SELECT segment_id, binding_hash, status, entry_count, event_count,
-                    failure_hash
-             FROM session_segments
-             WHERE run_id = ?1 AND capture_key IS NULL
-             ORDER BY created_at LIMIT 1",
-            [run_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<Vec<u8>>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, u64>(3)?,
-                    row.get::<_, u64>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((segment_id, binding_hash, status, entry_count, event_count, failure_hash)) = segment
-    else {
-        return Ok((None, Vec::new(), Vec::new(), None));
-    };
-    let binding = match binding_hash {
-        Some(hash) => Some(serde_json::from_value(read_json_blob(connection, &hash)?)?),
-        None => None,
-    };
-    let mut entries_statement = connection.prepare(
-        "SELECT entry_seq, entry_hash, recorded_at
-         FROM session_entries WHERE segment_id = ?1 ORDER BY entry_seq",
+    let mut segments_statement = connection.prepare(
+        "SELECT segment_id, binding_hash, status, entry_count, event_count,
+                failure_hash
+         FROM session_segments
+         WHERE run_id = ?1
+         ORDER BY created_at, segment_id",
     )?;
-    let entries = entries_statement
-        .query_map([&segment_id], |row| {
+    let segment_rows = segments_statement
+        .query_map([run_id], |row| {
             Ok((
-                row.get::<_, u64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
             ))
         })?
-        .map(|row| -> Result<SessionEntryRecord> {
-            let (seq, hash, at) = row?;
-            Ok(serde_json::from_value(json!({
-                "seq": seq,
+        .collect::<Result<Vec<_>, _>>()?;
+    if segment_rows.is_empty() {
+        return Ok((None, Vec::new(), Vec::new(), None));
+    }
+
+    let mut binding = None;
+    let mut entries = Vec::new();
+    let mut events = Vec::new();
+    let mut status = "complete".to_string();
+    let mut failure = None;
+
+    for (segment_id, binding_hash, segment_status, _entry_count, _event_count, failure_hash) in
+        segment_rows
+    {
+        if binding.is_none() {
+            if let Some(hash) = binding_hash {
+                binding = Some(serde_json::from_value(read_json_blob(connection, &hash)?)?);
+            }
+        }
+        if segment_status == "failed" {
+            status = "failed".to_string();
+            if failure.is_none() {
+                if let Some(hash) = failure_hash {
+                    failure = Some(read_json_blob(connection, &hash)?);
+                }
+            }
+        } else if segment_status == "recording" && status != "failed" {
+            status = "recording".to_string();
+        }
+
+        let mut entries_statement = connection.prepare(
+            "SELECT entry_hash, recorded_at
+             FROM session_entries WHERE segment_id = ?1 ORDER BY entry_seq",
+        )?;
+        let segment_entries = entries_statement
+            .query_map([&segment_id], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (hash, at) in segment_entries {
+            entries.push(serde_json::from_value(json!({
+                "seq": entries.len() + 1,
                 "at": timestamp(at),
                 "entry": read_json_blob(connection, &hash)?,
-            }))?)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut events_statement = connection.prepare(
-        "SELECT event_seq, event_type, node_id, attempt_id, turn_id,
-                message_id, tool_call_id, payload_hash, recorded_at
-         FROM session_events WHERE segment_id = ?1 ORDER BY event_seq",
-    )?;
-    let rows = events_statement.query_map([&segment_id], |row| {
-        Ok((
-            row.get::<_, u64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Vec<u8>>(7)?,
-            row.get::<_, i64>(8)?,
-        ))
-    })?;
-    let mut events = Vec::new();
-    for row in rows {
-        let (seq, event_type, node_id, attempt_id, turn_id, message_id, tool_call_id, hash, at) =
-            row?;
-        let mut value = json!({
-            "seq": seq,
-            "at": timestamp(at),
-            "nodeId": node_id,
-            "attemptId": attempt_id,
-            "type": event_type,
-            "payload": read_json_blob(connection, &hash)?,
-        });
-        if let Some(turn_id) = turn_id {
-            value["turnId"] = json!(turn_id);
+            }))?);
         }
-        if let Some(message_id) = message_id {
-            value["messageId"] = json!(message_id);
+
+        let mut events_statement = connection.prepare(
+            "SELECT event_type, node_id, attempt_id, turn_id,
+                    message_id, tool_call_id, payload_hash, recorded_at
+             FROM session_events WHERE segment_id = ?1 ORDER BY event_seq",
+        )?;
+        let segment_events = events_statement
+            .query_map([&segment_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (event_type, node_id, attempt_id, turn_id, message_id, tool_call_id, hash, at) in
+            segment_events
+        {
+            let mut value = json!({
+                "seq": events.len() + 1,
+                "at": timestamp(at),
+                "nodeId": node_id,
+                "attemptId": attempt_id,
+                "type": event_type,
+                "payload": read_json_blob(connection, &hash)?,
+            });
+            if let Some(turn_id) = turn_id {
+                value["turnId"] = json!(turn_id);
+            }
+            if let Some(message_id) = message_id {
+                value["messageId"] = json!(message_id);
+            }
+            if let Some(tool_call_id) = tool_call_id {
+                value["toolCallId"] = json!(tool_call_id);
+            }
+            events.push(serde_json::from_value(value)?);
         }
-        if let Some(tool_call_id) = tool_call_id {
-            value["toolCallId"] = json!(tool_call_id);
-        }
-        events.push(serde_json::from_value(value)?);
     }
-    let failure = match failure_hash {
-        Some(hash) => Some(read_json_blob(connection, &hash)?),
-        None => None,
-    };
+
     let mut capture = json!({
         "schema": "pi-workflows.session-capture.v1",
         "eventSchema": "pi-workflows.session-event.v1",
         "status": status,
-        "eventCount": event_count,
-        "entryCount": entry_count,
-        "lastEventSeq": event_count,
+        "eventCount": events.len(),
+        "entryCount": entries.len(),
+        "lastEventSeq": events.len(),
     });
     if let Some(failure) = failure {
         capture["failure"] = failure;
