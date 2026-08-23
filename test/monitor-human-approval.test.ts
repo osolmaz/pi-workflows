@@ -91,7 +91,29 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
     )
     .respond(
       "planChange/design/propose",
-      ...repeated({ solution: "fix", rationale: "owned", parts: ["code"], tradeoffs: [] }),
+      ...repeated({
+        candidates: [
+          {
+            id: "fix",
+            title: "Fix",
+            gist: "Fix the code.",
+            solution: "fix",
+            rationale: "owned",
+            parts: ["code"],
+            tradeoffs: [],
+          },
+          {
+            id: "replace",
+            title: "Replace",
+            gist: "Replace the code.",
+            solution: "replace",
+            rationale: "possible",
+            parts: ["replacement"],
+            tradeoffs: ["larger"],
+          },
+        ],
+        previousPlan: { status: "candidate", candidateId: "fix" },
+      }),
     )
     .respond(
       "planChange/design/ideal",
@@ -101,10 +123,13 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       "planChange/design/choose",
       ...repeated({
         status: "ready",
-        selected: "fix",
+        selectedId: "fix",
         why: "in scope",
         relationshipToIdeal: "same",
-        excluded: [],
+        rejected: [
+          { id: "replace", reason: "larger than needed" },
+          { id: "ideal", reason: "the fix reaches it" },
+        ],
         compromises: [],
       }),
     )
@@ -121,6 +146,13 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
           risks: [],
           boundaries: [],
         },
+      })),
+    )
+    .respond(
+      "planChange/design/readySummary/summarize",
+      ...Array.from({ length: rounds }, () => () => ({
+        output: "Fix the code. Replacing it is unnecessary; the ideal adds no value.",
+        assistantMessage: { sha256: "a".repeat(64) },
       })),
     )
     .respond(

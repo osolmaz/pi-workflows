@@ -56,6 +56,7 @@ const EXAMPLE_FILES = [
   "autoresearch.workflow.ts",
   "branch.workflow.ts",
   "echo.workflow.ts",
+  "plain-summary.workflow.ts",
   "shell.workflow.ts",
   "two-turn.workflow.ts",
 ];

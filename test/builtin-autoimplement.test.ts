@@ -198,10 +198,27 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
     })
     .respond("redesign/design/propose", {
       output: {
-        solution: "use the supported path",
-        rationale: "it is authorized",
-        parts: ["adjust plan", "verify"],
-        tradeoffs: [],
+        candidates: [
+          {
+            id: "supported-path",
+            title: "Supported path",
+            gist: "Use the supported path.",
+            solution: "use the supported path",
+            rationale: "it is authorized",
+            parts: ["adjust plan", "verify"],
+            tradeoffs: [],
+          },
+          {
+            id: "larger-path",
+            title: "Larger path",
+            gist: "Use a larger replacement.",
+            solution: "use a larger replacement",
+            rationale: "it can work",
+            parts: ["replace"],
+            tradeoffs: ["larger"],
+          },
+        ],
+        previousPlan: { status: "rejected", reason: "new evidence invalidated it" },
       },
     })
     .respond("redesign/design/ideal", {
@@ -210,14 +227,24 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
     .respond("redesign/design/choose", {
       output: {
         status: "ready",
-        selected: "use the supported path",
+        selectedId: "supported-path",
         why: "it completes in scope",
         relationshipToIdeal: "same result",
-        excluded: [],
+        rejected: [
+          { id: "larger-path", reason: "larger than needed" },
+          { id: "ideal", reason: "the supported path reaches it" },
+        ],
         compromises: [],
       },
     })
     .respond("redesign/design/plan", ...plans.map((plan) => ({ output: plan })))
+    .respond(
+      "redesign/design/readySummary/summarize",
+      ...plans.map(() => () => ({
+        output: "Use the supported path. The larger and ideal options add no value.",
+        assistantMessage: { sha256: "a".repeat(64) },
+      })),
+    )
     .respond("redesign/documentation/inspectDocumentation", {
       output: {
         route: "current",

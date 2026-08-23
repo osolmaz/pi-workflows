@@ -298,6 +298,14 @@ function nodeRuntimeSegments(
   now: Date,
 ): string[] {
   const segments: string[] = [];
+  const node = snapshot.nodes[nodeId];
+  if (
+    node?.nodeType === "agent" &&
+    typeof node.expectedOutput === "object" &&
+    node.expectedOutput.kind === "assistant-message"
+  ) {
+    segments.push("assistant response");
+  }
   const completedAttempts = state.steps.filter((step) => step.nodeId === nodeId).length;
   const attempts = completedAttempts + (state.currentNode === nodeId ? 1 : 0);
   if (attempts > 1) {

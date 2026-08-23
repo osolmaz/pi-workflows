@@ -89,6 +89,7 @@ import {
 } from "./herdr-viewer.js";
 import { SessionRecorder } from "./recorder.js";
 import {
+  recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
   WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
   WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
@@ -1354,6 +1355,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
       },
       conversation: {
         beginAttempt: (contract) => run.recorder?.beginAttempt(contract),
+        recoverAssistant: (contract) =>
+          recoverAssistantStep(ctx.sessionManager.getBranch(), contract),
         mark: () => run.recorder?.mark() ?? 0,
         rangeSince: (mark) => run.recorder?.rangeSince(mark),
       },
@@ -3040,6 +3043,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("turn_end", async (event, ctx) => {
     await activeRun?.recorder?.handleTurnEnd(event, ctx).catch(() => undefined);
+    // turn_end observes the message after message_end replacement handlers,
+    // so this is the exact assistant message that remains visible.
+    activeRun?.executor.handleMessageEnd(event.message);
   });
 
   pi.on("message_start", async (event, ctx) => {
@@ -3094,11 +3100,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
     }
-    const flushedNatural = turnCoordinator.flushNatural(
-      ctx.isIdle() && !sessionClosed && !runHeld(),
-    );
     const run = activeRun;
     if (!run) {
+      turnCoordinator.flushNatural(ctx.isIdle() && !sessionClosed && !runHeld());
       presentationPending = null;
       runSyncPass(ctx);
       return;
@@ -3106,7 +3110,16 @@ export default function piWorkflows(pi: ExtensionAPI) {
     await run.recorder?.synchronize(ctx).catch(() => undefined);
     run.recorder?.settleAttempt();
     run.executor.setStreaming(false);
-    if (flushedNatural === 0) run.executor.handleAgentSettled();
+    if (run.executor.pendingCompletion === "assistant") {
+      // The visible response is the step output. Resolve it before any
+      // unrelated deferred turn can start and replace the captured message.
+      run.executor.handleAgentSettled();
+    } else {
+      const flushedNatural = turnCoordinator.flushNatural(
+        ctx.isIdle() && !sessionClosed && !runHeld(),
+      );
+      if (flushedNatural === 0) run.executor.handleAgentSettled();
+    }
     runSyncPass(ctx);
   });
 

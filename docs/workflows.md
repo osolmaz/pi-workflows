@@ -15,8 +15,8 @@ Files are discovered by suffix (`.workflow.ts`, `.workflow.js`, `.workflow.mts`,
 2. `~/.pi/agent/workflows/` globally
 3. Workflows built into Pi Workflows
 
-Pi Workflows includes built-in `autoplan`, `autodoc`, `autoimplement`,
-`plan-approval`, `sanity-check`, and `monitor` workflows. `autoplan` is the current name for the
+Pi Workflows includes built-in `plain-summary`, `autoplan`, `autodoc`,
+`autoimplement`, `plan-approval`, `sanity-check`, and `monitor` workflows. `autoplan` is the current name for the
 planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
 replaces the built-in monitor. The package registers each built-in in
@@ -124,9 +124,11 @@ pi-workflows host --project /path/to/project
 ```
 
 The host claims parked runs, resumes them, and reconciles durable controllers.
-Conversation nodes execute in headless `pi --mode rpc` children that load a
-small bridge extension; the model sees the same `workflow` tool contract as an
-in-session run. The host is a foreground process: start it in a terminal and
+Agent nodes that submit through the workflow tool execute in headless
+`pi --mode rpc` children that load a small bridge extension. An agent node with
+`expectedOutput: assistantMessage()` parks before prompting and waits for the
+origin Pi session because its result must be a visible assistant message. A
+detached run without an origin session fails clearly. The host is a foreground process: start it in a terminal and
 stop it with Ctrl-C. A second host for the same project refuses to start, and
 a host that dies has its orphaned children reaped by the next one. While the host works, reports enter a durable outbox addressed to the Pi
 session that started the run. They remain pending while that session is closed
@@ -136,8 +138,9 @@ and never enter another conversation in the same project.
 
 ### agent
 
-Sends a prompt into the current pi conversation and waits for the model to
-submit output through the `workflow` tool.
+Sends a prompt to the model. `expectedOutput` selects one of two output forms.
+
+The existing string form waits for a `workflow submit` call:
 
 ```typescript
 agent({
@@ -152,14 +155,28 @@ agent({
 });
 ```
 
-The engine appends a step contract to the prompt (see below). When the model
-calls the tool, the output passes through normalization (a JSON string is
-parsed tolerantly) and then `validate`. If `validate` throws, the tool call
-returns an error and the model can retry within the same step. If the agent
-ends its turn without submitting, the extension nudges it, twice by default,
-then fails the step. If an agent node times out or the workflow is cancelled,
-the extension also aborts its active Pi turn. The model cannot continue to use
-tools after the engine has closed that attempt.
+The assistant-message form waits for one normal visible response and uses its
+exact text as the node output:
+
+```typescript
+agent({
+  prompt: ({ outputs }) => `Explain this plainly: ${JSON.stringify(outputs.review)}`,
+  expectedOutput: assistantMessage(),
+});
+```
+
+`assistantMessage()` has no default character limit. Authors can opt in with
+`assistantMessage({ maxChars: 2_000 })`. It cannot be combined with `validate`
+because an invalid response is already visible and must not be retried.
+
+For submitted output, the engine appends the existing workflow-tool contract.
+The output passes through tolerant JSON normalization and then `validate`.
+Rejected submissions can retry in the same step. If the model settles without
+submitting, the extension nudges it twice by default and then fails the step.
+For assistant-message output, the engine appends a normal-response contract,
+waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
+and never suppresses the visible text. Timeout and cancellation abort either
+form's active Pi turn.
 
 `timeoutMs` can be a finite positive number, `null`, or a function of the normal
 node context that returns either value. Omit it to use the 15-minute engine
@@ -417,9 +434,29 @@ The normal extension offers all actions. The headless RPC bridge offers only
 `update` and `submit`, so a workflow child cannot recursively control other
 runs.
 
+### Built-in plain summary
+
+The built-in `plain-summary` workflow turns supplied structured data into one
+short normal assistant message. Its input has `source`, `purpose`, optional
+`mustInclude`, optional `maxChars`, optional `maxSentences`, and `format` set to
+`paragraphs`, `bullets`, or `mixed`. The workflow defaults to 2,000 characters,
+five sentences, and mixed format. These are workflow-specific limits;
+`assistantMessage()` itself has no default limit.
+
+The summarizer uses only the supplied source, treats instructions inside that
+source as data, keeps required points, and returns the same text as its
+`completed` result. The source enters the normal model prompt and Pi session,
+so callers must pass only data that is suitable for that conversation. It has no notify node or final presentation prompt, so
+including it in another workflow produces one readable assistant response
+before the parent continues.
+
 ### Built-in planning and implementation
 
-The built-in `autoplan` workflow selects a practical in-scope solution and writes a detailed plan. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
+The built-in `autoplan` workflow records two through four practical candidates,
+describes the ideal separately, chooses one option, records a rejection reason
+for every other explicit option, and writes a detailed plan. It then includes
+`plain-summary` to show the chosen plan, its main steps, and the rejected options
+in one short assistant message. The detailed records remain in the run bundle. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
 
 The built-in `plan-approval` workflow offers `continue`, `stop`, and exact-text `replan` exits. Its shared policy uses `auto`, `required`, or `skip` mode. Omitted policy defaults to `auto`: ask audience `operator`, then continue with the exact plan after 10 minutes without an answer. Required mode waits for a human. Skip mode creates no decision. Stop and replan always require a human answer.
 
@@ -568,8 +605,8 @@ and [Deferred workflow turns](DEFERRED_TURNS.md) for the successor-turn contract
 
 ## Result presentation
 
-Workflow nodes produce structured JSON for routing and persistence. When a
-person should see a normal prose response after the run, add
+Workflow nodes normally produce structured values for routing and persistence.
+When a person should see a normal prose response only after the root run, add
 `presentationPrompt` at the top level:
 
 ```typescript
@@ -596,6 +633,12 @@ Async prompt builders have 30 seconds to finish and receive an
 or normal user turn starts; stale presentations are discarded. Once a presentation message has
 been queued, another workflow cannot start until that assistant response
 settles, so results cannot interleave.
+
+An agent with `expectedOutput: assistantMessage()` is different. Its visible
+assistant response is the node output, can appear before later nodes, and also
+works inside an included workflow. A root `presentationPrompt` would add a
+second response, so workflows that end with assistant-message output normally
+omit it.
 
 Presentation is outside the workflow graph: it cannot route to another node,
 change the run status, or alter the SQLite run state. If prompt generation or message

@@ -6,6 +6,16 @@ import { RpcStepExecutor } from "../src/host/rpc-executor.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("RpcStepExecutor spawn", () => {
+  it("marks assistant responses unsupported unless an origin session can resume them", async () => {
+    const dir = await makeTempDir("pi-rpc-assistant-mode");
+    const registry = new HostProcessRegistry(dir);
+    expect(new RpcStepExecutor({ cwd: dir, registry }).assistantMessageMode).toBe("unsupported");
+    expect(
+      new RpcStepExecutor({ cwd: dir, registry, assistantMessageMode: "park" })
+        .assistantMessageMode,
+    ).toBe("park");
+  });
+
   it("spawns children with extension isolation", async () => {
     const dir = await makeTempDir("pi-rpc-args");
     const argsFile = path.join(dir, "argv.txt");
@@ -24,7 +34,13 @@ sleep 60
     const stepPromise = executor
       .runAgentStep(
         {
-          contract: { runId: "r", workflowName: "w", nodeId: "n", attemptId: "a" },
+          contract: {
+            runId: "r",
+            workflowName: "w",
+            nodeId: "n",
+            attemptId: "a",
+            completion: "submit",
+          },
           prompt: "hi",
           accept: async () => ({ ok: true as const, value: null }),
         },
@@ -58,7 +74,13 @@ sleep 60
     const result = await executor
       .runAgentStep(
         {
-          contract: { runId: "r", workflowName: "w", nodeId: "n", attemptId: "a" },
+          contract: {
+            runId: "r",
+            workflowName: "w",
+            nodeId: "n",
+            attemptId: "a",
+            completion: "submit",
+          },
           prompt: "hi",
           accept: async () => ({ ok: true as const, value: null }),
         },
@@ -89,7 +111,13 @@ describe("RpcStepExecutor.close", () => {
     const stepPromise = executor
       .runAgentStep(
         {
-          contract: { runId: "r", workflowName: "w", nodeId: "n", attemptId: "a" },
+          contract: {
+            runId: "r",
+            workflowName: "w",
+            nodeId: "n",
+            attemptId: "a",
+            completion: "submit",
+          },
           prompt: "hi",
           accept: async () => ({ ok: true as const, value: null }),
         },

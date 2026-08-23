@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { agent, compute, defineWorkflow } from "../workflows/definition.js";
+import { agent, compute, defineWorkflow, includeWorkflow } from "../workflows/definition.js";
+import plainSummaryWorkflow, {
+  type PlainSummaryInput,
+  type PlainSummaryResult,
+} from "./plain-summary.workflow.js";
 
 export type AutoplanInput = {
   problem: string;
@@ -9,13 +13,47 @@ export type AutoplanInput = {
   newEvidence?: unknown;
 };
 
+export type AutoplanCandidate = {
+  id: string;
+  title: string;
+  gist: string;
+  solution: string;
+  rationale: string;
+  parts: string[];
+  tradeoffs: string[];
+};
+
+export type AutoplanProposal = {
+  candidates: AutoplanCandidate[];
+  previousPlan?:
+    | { status: "candidate"; candidateId: string }
+    | { status: "rejected"; reason: string };
+};
+
+export type AutoplanIdeal = {
+  ideal: string;
+  outsideDependencies: string[];
+  additionalValue: string[];
+};
+
+export type AutoplanSelection = {
+  status: "ready" | "blocked";
+  selectedId: string;
+  why: string;
+  relationshipToIdeal: string;
+  rejected: Array<{ id: string; reason: string }>;
+  compromises: string[];
+  blocker?: string;
+};
+
 export type AutoplanReady = {
   status: "ready";
   frame: unknown;
-  proposal: unknown;
-  ideal: unknown;
-  selection: unknown;
+  proposal: AutoplanProposal;
+  ideal: AutoplanIdeal;
+  selection: AutoplanSelection;
   plan: unknown;
+  plainSummary: PlainSummaryResult;
   planDigest: string;
   previousPlanDigest?: string;
   changed: boolean;
@@ -24,9 +62,10 @@ export type AutoplanReady = {
 export type AutoplanBlocked = {
   status: "blocked";
   frame: unknown;
-  proposal: unknown;
-  ideal: unknown;
-  selection: unknown;
+  proposal: AutoplanProposal;
+  ideal: AutoplanIdeal;
+  selection: AutoplanSelection;
+  plainSummary: PlainSummaryResult;
   reason: string;
 };
 
@@ -42,6 +81,24 @@ function requireString(value: unknown, label: string): string {
     throw new Error(`${label} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function requireBoundedString(value: unknown, label: string, maxChars: number): string {
+  const text = requireString(value, label);
+  if (text.length > maxChars) throw new Error(`${label} exceeds ${maxChars} characters`);
+  return text;
+}
+
+function requireStringArray(
+  value: unknown,
+  label: string,
+  maxItems = 32,
+  maxChars = 2_000,
+): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new Error(`${label} must be an array with at most ${maxItems} strings`);
+  }
+  return value.map((item, index) => requireBoundedString(item, `${label}[${index}]`, maxChars));
 }
 
 function parseInput(value: unknown): AutoplanInput {
@@ -62,19 +119,198 @@ function parseInput(value: unknown): AutoplanInput {
   };
 }
 
-function parseSelection(value: unknown): Record<string, unknown> {
+function parseProposal(value: unknown, previousPlanSupplied: boolean): AutoplanProposal {
+  const proposal = requireRecord(value, "autoplan proposal");
+  if (
+    !Array.isArray(proposal.candidates) ||
+    proposal.candidates.length < 2 ||
+    proposal.candidates.length > 4
+  ) {
+    throw new Error("autoplan proposal must contain two through four candidates");
+  }
+  const ids = new Set<string>();
+  const candidates = proposal.candidates.map((value, index): AutoplanCandidate => {
+    const candidate = requireRecord(value, `autoplan candidate ${index + 1}`);
+    const id = requireString(candidate.id, `autoplan candidate ${index + 1} id`);
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(id)) {
+      throw new Error(`autoplan candidate id ${JSON.stringify(id)} is invalid`);
+    }
+    if (id === "ideal" || ids.has(id)) {
+      throw new Error(`autoplan candidate id ${JSON.stringify(id)} is reserved or duplicated`);
+    }
+    ids.add(id);
+    return {
+      id,
+      title: requireBoundedString(candidate.title, `autoplan candidate ${id} title`, 200),
+      gist: requireBoundedString(candidate.gist, `autoplan candidate ${id} gist`, 1_000),
+      solution: requireBoundedString(
+        candidate.solution,
+        `autoplan candidate ${id} solution`,
+        20_000,
+      ),
+      rationale: requireBoundedString(
+        candidate.rationale,
+        `autoplan candidate ${id} rationale`,
+        5_000,
+      ),
+      parts: requireStringArray(candidate.parts, `autoplan candidate ${id} parts`),
+      tradeoffs: requireStringArray(candidate.tradeoffs, `autoplan candidate ${id} tradeoffs`),
+    };
+  });
+
+  let previousPlan: AutoplanProposal["previousPlan"];
+  if (proposal.previousPlan !== undefined) {
+    const account = requireRecord(proposal.previousPlan, "autoplan previousPlan account");
+    if (account.status === "candidate") {
+      const candidateId = requireString(account.candidateId, "autoplan previousPlan candidateId");
+      if (!ids.has(candidateId)) {
+        throw new Error("autoplan previousPlan candidateId must name a candidate");
+      }
+      previousPlan = { status: "candidate", candidateId };
+    } else if (account.status === "rejected") {
+      previousPlan = {
+        status: "rejected",
+        reason: requireBoundedString(
+          account.reason,
+          "autoplan previousPlan rejection reason",
+          5_000,
+        ),
+      };
+    } else {
+      throw new Error("autoplan previousPlan status must be candidate or rejected");
+    }
+  }
+  if (previousPlanSupplied && previousPlan === undefined) {
+    throw new Error("autoplan proposal must account for the supplied previous plan");
+  }
+  return { candidates, ...(previousPlan !== undefined ? { previousPlan } : {}) };
+}
+
+function parseIdeal(value: unknown): AutoplanIdeal {
+  const ideal = requireRecord(value, "autoplan ideal");
+  return {
+    ideal: requireBoundedString(ideal.ideal, "autoplan ideal end state", 20_000),
+    outsideDependencies: requireStringArray(
+      ideal.outsideDependencies,
+      "autoplan ideal outsideDependencies",
+    ),
+    additionalValue: requireStringArray(ideal.additionalValue, "autoplan ideal additionalValue"),
+  };
+}
+
+function parseSelection(value: unknown, proposal: AutoplanProposal): AutoplanSelection {
   const selection = requireRecord(value, "autoplan selection");
   if (selection.status !== "ready" && selection.status !== "blocked") {
     throw new Error("autoplan selection status must be ready or blocked");
   }
-  requireString(selection.selected, "autoplan selected solution");
-  requireString(selection.why, "autoplan selection reason");
-  if (selection.status === "blocked") requireString(selection.blocker, "autoplan blocker");
-  return selection;
+  const validIds = new Set([...proposal.candidates.map((candidate) => candidate.id), "ideal"]);
+  const selectedId = requireString(selection.selectedId, "autoplan selectedId");
+  if (!validIds.has(selectedId)) throw new Error("autoplan selectedId must name a candidate");
+  if (!Array.isArray(selection.rejected)) {
+    throw new Error("autoplan rejected plans must be an array");
+  }
+  const rejectedIds = new Set<string>();
+  const rejected = selection.rejected.map((value, index) => {
+    const rejection = requireRecord(value, `autoplan rejection ${index + 1}`);
+    const id = requireString(rejection.id, `autoplan rejection ${index + 1} id`);
+    if (!validIds.has(id) || id === selectedId || rejectedIds.has(id)) {
+      throw new Error(`autoplan rejected id ${JSON.stringify(id)} is invalid or duplicated`);
+    }
+    rejectedIds.add(id);
+    return {
+      id,
+      reason: requireBoundedString(rejection.reason, `autoplan rejection ${id} reason`, 5_000),
+    };
+  });
+  const expectedRejected = [...validIds].filter((id) => id !== selectedId).sort();
+  if (JSON.stringify([...rejectedIds].sort()) !== JSON.stringify(expectedRejected)) {
+    throw new Error("autoplan selection must reject every non-selected candidate exactly once");
+  }
+  const blocker =
+    selection.status === "blocked"
+      ? requireString(selection.blocker, "autoplan blocker")
+      : undefined;
+  return {
+    status: selection.status,
+    selectedId,
+    why: requireBoundedString(selection.why, "autoplan selection reason", 5_000),
+    relationshipToIdeal: requireBoundedString(
+      selection.relationshipToIdeal,
+      "autoplan relationshipToIdeal",
+      5_000,
+    ),
+    rejected,
+    compromises: requireStringArray(selection.compromises, "autoplan compromises"),
+    ...(blocker !== undefined ? { blocker } : {}),
+  };
 }
 
 function digest(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
+
+function plainSummaryResult(value: unknown, label: string): PlainSummaryResult {
+  const included = requireRecord(value, label);
+  if (included.exit !== "completed") throw new Error(`${label} must use the completed exit`);
+  const result = requireRecord(included.output, `${label} output`);
+  return { text: requireString(result.text, `${label} text`) };
+}
+
+function candidateSummary(
+  proposal: AutoplanProposal,
+  ideal: AutoplanIdeal,
+  id: string,
+): { id: string; title: string; gist: string } {
+  if (id === "ideal") return { id, title: "Ideal end state", gist: ideal.ideal };
+  const candidate = proposal.candidates.find((item) => item.id === id);
+  if (candidate === undefined)
+    throw new Error(`autoplan candidate ${JSON.stringify(id)} is missing`);
+  return { id, title: candidate.title, gist: candidate.gist };
+}
+
+function summaryInput(
+  outputs: Record<string, unknown>,
+  blocked: boolean,
+  input: AutoplanInput,
+): PlainSummaryInput {
+  const proposal = outputs.propose as AutoplanProposal;
+  const selection = outputs.choose as AutoplanSelection;
+  const ideal = outputs.ideal as AutoplanIdeal;
+  const selected = candidateSummary(proposal, ideal, selection.selectedId);
+  return {
+    source: {
+      status: selection.status,
+      selected,
+      why: selection.why,
+      implementationPlan: blocked ? null : outputs.plan,
+      rejected: selection.rejected.map((rejection) => ({
+        ...candidateSummary(proposal, ideal, rejection.id),
+        reason: rejection.reason,
+      })),
+      relationshipToIdeal: selection.relationshipToIdeal,
+      compromises: selection.compromises,
+      ...(proposal.previousPlan !== undefined && input.previousPlan !== undefined
+        ? { previousPlan: { plan: input.previousPlan, account: proposal.previousPlan } }
+        : {}),
+      ...(selection.blocker !== undefined ? { blocker: selection.blocker } : {}),
+    },
+    purpose: blocked
+      ? "Explain plainly why planning is blocked and summarize every considered plan."
+      : "Explain the recommended plan plainly, summarize its main implementation steps, and give one-line reasons for rejecting every other plan.",
+    mustInclude: [
+      selected.title,
+      ...selection.rejected.map(
+        (rejection) => candidateSummary(proposal, ideal, rejection.id).title,
+      ),
+      ...(proposal.previousPlan !== undefined && input.previousPlan !== undefined
+        ? ["Previous plan"]
+        : []),
+      ...(blocked ? [selection.blocker as string] : ["The plan is selected for approval"]),
+    ],
+    maxChars: 2_500,
+    maxSentences: 12,
+    format: "mixed",
+  };
 }
 
 export const autoplanWorkflow = defineWorkflow({
@@ -83,13 +319,16 @@ export const autoplanWorkflow = defineWorkflow({
   name: "autoplan",
   input: parseInput,
   title: ({ input }) => `autoplan: ${input.problem.slice(0, 60)}`,
-  presentationPrompt: [
-    "Present the selected practical solution and its implementation plan.",
-    "Briefly state how the ideal informed the choice and what was excluded as outside scope.",
-    "Do not ask the user to choose between the options.",
-  ].join("\n"),
   startAt: "frame",
-  maxSteps: 10,
+  maxSteps: 16,
+  includes: {
+    readySummary: includeWorkflow(plainSummaryWorkflow, {
+      input: ({ outputs, input }) => summaryInput(outputs, false, input as AutoplanInput),
+    }),
+    blockedSummary: includeWorkflow(plainSummaryWorkflow, {
+      input: ({ outputs, input }) => summaryInput(outputs, true, input as AutoplanInput),
+    }),
+  },
   exits: {
     ready: {
       from: "finalize",
@@ -119,32 +358,36 @@ export const autoplanWorkflow = defineWorkflow({
       validate: (value) => requireRecord(value, "autoplan frame"),
     }),
     propose: agent({
-      statusDetail: "devising a solution",
-      prompt: ({ outputs }) =>
+      statusDetail: "devising candidate solutions",
+      prompt: ({ outputs, input }) =>
         [
-          "Devise the most elegant, long-term production-ready solution within the framed scope.",
+          "Devise two through four distinct practical solutions within the framed scope.",
+          "Each candidate needs a stable lowercase id, short title, plain gist, full solution, rationale, parts, and trade-offs.",
           "Prefer a small number of general parts, clear ownership boundaries, and existing public interfaces.",
           "Avoid one-off mechanisms and unnecessary infrastructure.",
+          "When a previous plan exists, mark it as a candidate or reject it with a reason.",
           "Do not implement anything.",
           `Problem frame: ${JSON.stringify(outputs.frame)}`,
+          `Previous plan: ${JSON.stringify((input as AutoplanInput).previousPlan ?? null)}`,
         ].join("\n"),
-      expectedOutput: `{ "solution": "proposal", "rationale": "why", "parts": ["part"], "tradeoffs": ["trade-off"] }`,
-      validate: (value) => requireRecord(value, "autoplan proposal"),
+      expectedOutput: `{ "candidates": [{ "id": "stable-id", "title": "short title", "gist": "plain gist", "solution": "full proposal", "rationale": "why", "parts": ["part"], "tradeoffs": ["trade-off"] }], "previousPlan": { "status": "candidate", "candidateId": "id" } | { "status": "rejected", "reason": "reason" } }`,
+      validate: (value, { input }) =>
+        parseProposal(value, (input as AutoplanInput).previousPlan !== undefined),
     }),
     ideal: agent({
       statusDetail: "describing the ideal end state",
       prompt: ({ outputs, input }) =>
         [
-          "Set the proposal aside and describe the holy grail for this problem.",
-          "The holy grail can match the proposal or exceed the current scope.",
+          "Set the practical candidates aside and describe the holy grail for this problem.",
+          "The holy grail can match a candidate or exceed the current scope.",
           "Name dependencies outside our authority instead of assuming they can change.",
-          "Explain the practical value beyond the proposal.",
+          "Explain the practical value beyond the candidates.",
           `Problem frame: ${JSON.stringify(outputs.frame)}`,
-          `Proposal: ${JSON.stringify(outputs.propose)}`,
+          `Candidates: ${JSON.stringify(outputs.propose)}`,
           `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
       expectedOutput: `{ "ideal": "ideal end state", "outsideDependencies": ["dependency"], "additionalValue": ["benefit"] }`,
-      validate: (value) => requireRecord(value, "autoplan ideal"),
+      validate: parseIdeal,
     }),
     choose: agent({
       statusDetail: "choosing the practical solution",
@@ -152,17 +395,19 @@ export const autoplanWorkflow = defineWorkflow({
         [
           "Choose the right solution without asking the user to decide.",
           "Choose the ideal when it is production-ready, proportionate, in scope, and implementable through interfaces we control.",
-          "Otherwise choose the strongest practical in-scope solution with a clear path toward the ideal.",
+          "Otherwise choose the strongest practical in-scope candidate with a clear path toward the ideal.",
           "Do not block only because the ideal depends on work outside our authority.",
           "Do not make an upstream change, unrelated repository, new service, or unapproved resource a requirement.",
           "Prefer the simpler choice when options give materially equivalent results.",
+          "Return one rejection reason for every non-selected candidate, including the ideal when it is not selected.",
           "Return blocked only when no truthful in-scope solution can meet the success criteria.",
           `Frame: ${JSON.stringify(outputs.frame)}`,
-          `Proposal: ${JSON.stringify(outputs.propose)}`,
+          `Candidates: ${JSON.stringify(outputs.propose)}`,
+          `Ideal candidate id: ideal`,
           `Ideal: ${JSON.stringify(outputs.ideal)}`,
         ].join("\n"),
-      expectedOutput: `{ "status": "ready" | "blocked", "selected": "solution", "why": "reason", "relationshipToIdeal": "relationship", "excluded": ["excluded work"], "compromises": ["compromise"], "blocker": "required only when blocked" }`,
-      validate: parseSelection,
+      expectedOutput: `{ "status": "ready" | "blocked", "selectedId": "candidate-id-or-ideal", "why": "reason", "relationshipToIdeal": "relationship", "rejected": [{ "id": "other-id", "reason": "why it lost" }], "compromises": ["compromise"], "blocker": "required only when blocked" }`,
+      validate: (value, { outputs }) => parseSelection(value, outputs.propose as AutoplanProposal),
     }),
     plan: agent({
       timeoutMs: 30 * 60_000,
@@ -177,6 +422,7 @@ export const autoplanWorkflow = defineWorkflow({
           "Do not implement the plan.",
           `Frame: ${JSON.stringify(outputs.frame)}`,
           `Selection: ${JSON.stringify(outputs.choose)}`,
+          `Candidates: ${JSON.stringify(outputs.propose)}`,
           `Previous plan: ${JSON.stringify((input as AutoplanInput).previousPlan ?? null)}`,
           `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
@@ -185,13 +431,14 @@ export const autoplanWorkflow = defineWorkflow({
     }),
     blocked: compute({
       run: ({ outputs }) => {
-        const selection = outputs.choose as Record<string, unknown>;
+        const selection = outputs.choose as AutoplanSelection;
         return {
           status: "blocked",
           frame: outputs.frame,
-          proposal: outputs.propose,
-          ideal: outputs.ideal,
+          proposal: outputs.propose as AutoplanProposal,
+          ideal: outputs.ideal as AutoplanIdeal,
           selection,
+          plainSummary: plainSummaryResult(outputs.blockedSummary, "autoplan blocked summary"),
           reason: requireString(selection.blocker, "autoplan blocker"),
         } satisfies AutoplanBlocked;
       },
@@ -205,10 +452,11 @@ export const autoplanWorkflow = defineWorkflow({
         return {
           status: "ready",
           frame: outputs.frame,
-          proposal: outputs.propose,
-          ideal: outputs.ideal,
-          selection: outputs.choose,
+          proposal: outputs.propose as AutoplanProposal,
+          ideal: outputs.ideal as AutoplanIdeal,
+          selection: outputs.choose as AutoplanSelection,
           plan: outputs.plan,
+          plainSummary: plainSummaryResult(outputs.readySummary, "autoplan ready summary"),
           planDigest,
           ...(previousPlanDigest !== undefined ? { previousPlanDigest } : {}),
           changed: previousPlanDigest === undefined || previousPlanDigest !== planDigest,
@@ -222,9 +470,11 @@ export const autoplanWorkflow = defineWorkflow({
     { from: "ideal", to: "choose" },
     {
       from: "choose",
-      switch: { on: "$.status", cases: { ready: "plan", blocked: "blocked" } },
+      switch: { on: "$.status", cases: { ready: "plan", blocked: "blockedSummary" } },
     },
-    { from: "plan", to: "finalize" },
+    { from: "plan", to: "readySummary" },
+    { from: "readySummary.completed", to: "finalize" },
+    { from: "blockedSummary.completed", to: "blocked" },
   ],
 });
 

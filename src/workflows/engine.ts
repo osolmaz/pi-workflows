@@ -31,8 +31,11 @@ import {
 } from "./store.js";
 import type {
   ResolvedHumanDecision,
+  AgentExpectedOutput,
   AgentNodeDefinition,
   AgentStepExecutor,
+  AssistantMessageOutput,
+  AssistantMessageReceipt,
   ActionNodeDefinition,
   CheckpointNodeDefinition,
   ConversationRange,
@@ -69,6 +72,7 @@ type NodeExecution = {
   output: unknown;
   promptText: string | null;
   action?: WorkflowActionReceipt;
+  assistantMessage?: AssistantMessageReceipt;
   conversation?: ConversationRange;
 };
 
@@ -85,6 +89,12 @@ type NodeAttempt = {
   result: WorkflowNodeResult;
   execution: NodeExecution | null;
   error?: unknown;
+};
+
+type ResumedNodeAttempt = {
+  nodeId: string;
+  attemptId: string;
+  startedAt: string;
 };
 
 /**
@@ -302,19 +312,37 @@ export class WorkflowEngine {
     }
 
     const point = this.resumePointFor(workflow, state, "wait");
-    // A resumed run starts unpaused; the operator can pause again. The
-    // interrupted node's stale in-flight markers go away before the resume
-    // event so the projection matches what the engine is about to do.
+    const interruptedNode =
+      state.currentNode !== undefined ? workflow.nodes[state.currentNode] : undefined;
+    const resumedAttempt: ResumedNodeAttempt | undefined =
+      state.currentNode !== undefined &&
+      state.currentAttemptId !== undefined &&
+      state.currentNodeStartedAt !== undefined &&
+      interruptedNode?.nodeType === "agent" &&
+      assistantMessageConfig(interruptedNode) !== undefined
+        ? {
+            nodeId: state.currentNode,
+            attemptId: state.currentAttemptId,
+            startedAt: state.currentNodeStartedAt,
+          }
+        : undefined;
+    // A resumed run starts unpaused. Submitted and non-agent nodes discard
+    // stale in-flight markers and start a new attempt. Assistant-message
+    // nodes keep their attempt id so the origin session can adopt an already
+    // visible response without showing it twice.
     delete state.paused;
-    delete state.currentNode;
-    delete state.currentAttemptId;
-    delete state.currentNodeStartedAt;
-    delete state.statusDetail;
+    if (resumedAttempt === undefined) {
+      delete state.currentNode;
+      delete state.currentAttemptId;
+      delete state.currentNodeStartedAt;
+      delete state.statusDetail;
+    }
     await this.persist(runId, state, {
       scope: "run",
       type: "run_resumed",
       payload: {
         ...(point.nodeId !== null ? { resumeAt: point.nodeId } : {}),
+        ...(resumedAttempt !== undefined ? { resumedAttemptId: resumedAttempt.attemptId } : {}),
         replayedSteps: state.steps.length,
         ...(sourceMismatch ? { workflowSourceMismatch: true, forced: true } : {}),
       },
@@ -349,6 +377,7 @@ export class WorkflowEngine {
         point.nodeId,
         countExecutableSteps(workflow, state.steps),
         point.lastOutput,
+        resumedAttempt,
       );
     } catch (error) {
       if (isRunParkedError(error) || this.parked) {
@@ -650,6 +679,7 @@ export class WorkflowEngine {
     startNodeId: string | null = workflow.startAt,
     executedStepsBase = 0,
     initialLastOutput?: unknown,
+    resumedAttempt?: ResumedNodeAttempt,
   ): Promise<void> {
     const maxSteps = workflow.maxSteps ?? this.maxSteps;
     const composition = compositionMetadata(workflow);
@@ -677,7 +707,16 @@ export class WorkflowEngine {
         throw new Error(`Workflow node is missing: ${currentNodeId}`);
       }
 
-      const attempt = await this.executeNode(workflow, state, runId, currentNodeId, node);
+      const activeResume = resumedAttempt?.nodeId === currentNodeId ? resumedAttempt : undefined;
+      resumedAttempt = undefined;
+      const attempt = await this.executeNode(
+        workflow,
+        state,
+        runId,
+        currentNodeId,
+        node,
+        activeResume,
+      );
       if (this.parked) {
         // Do not record the aborted attempt: the projection keeps the node
         // as in-flight, and resume reruns it with a fresh attempt.
@@ -697,6 +736,9 @@ export class WorkflowEngine {
           ...(attempt.result.outcome === "ok" ? { output: attempt.result.output ?? null } : {}),
           ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
           ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
+          ...(attempt.execution?.assistantMessage !== undefined
+            ? { assistantMessage: attempt.execution.assistantMessage }
+            : {}),
           ...(attempt.execution?.conversation !== undefined
             ? { conversation: attempt.execution.conversation }
             : {}),
@@ -838,6 +880,9 @@ export class WorkflowEngine {
       output: attempt.result.output ?? null,
       ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
       ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
+      ...(attempt.execution?.assistantMessage !== undefined
+        ? { assistantMessage: attempt.execution.assistantMessage }
+        : {}),
       ...(attempt.execution?.conversation !== undefined
         ? { conversation: attempt.execution.conversation }
         : {}),
@@ -855,22 +900,25 @@ export class WorkflowEngine {
     runId: string,
     nodeId: string,
     node: WorkflowNodeDefinition,
+    resumedAttempt?: ResumedNodeAttempt,
   ): Promise<NodeAttempt> {
-    const attemptId = randomUUID();
-    const startedAt = new Date().toISOString();
+    const attemptId = resumedAttempt?.attemptId ?? randomUUID();
+    const startedAt = resumedAttempt?.startedAt ?? new Date().toISOString();
     state.currentNode = nodeId;
     state.currentAttemptId = attemptId;
     state.currentNodeStartedAt = startedAt;
     if (node.statusDetail !== undefined) {
       state.statusDetail = node.statusDetail;
     }
-    await this.persist(runId, state, {
-      scope: "node",
-      type: "node_started",
-      nodeId,
-      attemptId,
-      payload: { nodeType: node.nodeType },
-    });
+    if (resumedAttempt === undefined) {
+      await this.persist(runId, state, {
+        scope: "node",
+        type: "node_started",
+        nodeId,
+        attemptId,
+        payload: { nodeType: node.nodeType },
+      });
+    }
 
     const meta: NodeExecutionMeta = { promptText: null };
     try {
@@ -1134,6 +1182,25 @@ export class WorkflowEngine {
     signal: AbortSignal,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
+    const assistant = assistantMessageConfig(node);
+    if (assistant !== undefined) {
+      if (this.executor.assistantMessageMode === "park") {
+        state.statusDetail = "waiting for origin Pi session";
+        await this.persist(runId, state, {
+          scope: "agent",
+          type: "agent_session_required",
+          nodeId,
+          attemptId,
+          payload: { completion: "assistant" },
+        });
+        this.parked = true;
+        throw new RunParkedError();
+      }
+      if (this.executor.assistantMessageMode !== "visible") {
+        throw new Error("Assistant completion requires an origin Pi session");
+      }
+    }
+
     const basePrompt = await node.prompt(context);
     if (signal.aborted) {
       // The node timed out or the run was cancelled while the async prompt
@@ -1154,7 +1221,7 @@ export class WorkflowEngine {
       type: "agent_prompt_sent",
       nodeId,
       attemptId,
-      payload: { prompt },
+      payload: { prompt, completion: assistant === undefined ? "submit" : "assistant" },
     });
 
     const submission = await this.executor.runAgentStep(
@@ -1164,7 +1231,11 @@ export class WorkflowEngine {
           workflowName: workflow.name,
           nodeId,
           attemptId,
-          ...(node.expectedOutput !== undefined ? { expectedOutput: node.expectedOutput } : {}),
+          completion: assistant === undefined ? "submit" : "assistant",
+          ...(typeof node.expectedOutput === "string"
+            ? { expectedOutput: node.expectedOutput }
+            : {}),
+          ...(assistant?.maxChars !== undefined ? { maxOutputChars: assistant.maxChars } : {}),
         },
         prompt,
         ...(state.runTitle !== undefined || node.statusDetail !== undefined
@@ -1184,6 +1255,9 @@ export class WorkflowEngine {
     return {
       output: submission.output,
       promptText: prompt,
+      ...(submission.assistantMessage !== undefined
+        ? { assistantMessage: submission.assistantMessage }
+        : {}),
       ...(submission.conversation !== undefined ? { conversation: submission.conversation } : {}),
     };
   }
@@ -1193,6 +1267,13 @@ export class WorkflowEngine {
     context: WorkflowNodeContext,
     output: unknown,
   ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+    if (assistantMessageConfig(node) !== undefined) {
+      return {
+        ok: false,
+        error:
+          "This step completes with a normal assistant response. Do not submit workflow output.",
+      };
+    }
     try {
       const normalized = normalizeAgentOutput(output);
       const validated = node.validate ? await node.validate(normalized, context) : normalized;
@@ -1514,6 +1595,18 @@ function normalizeAgentOutput(output: unknown): unknown {
   }
 }
 
+function assistantMessageOutput(
+  expectedOutput: AgentExpectedOutput | undefined,
+): AssistantMessageOutput | undefined {
+  return typeof expectedOutput === "object" && expectedOutput?.kind === "assistant-message"
+    ? expectedOutput
+    : undefined;
+}
+
+function assistantMessageConfig(node: AgentNodeDefinition): AssistantMessageOutput | undefined {
+  return assistantMessageOutput(node.expectedOutput);
+}
+
 /**
  * The step contract appended to every agent-node prompt. This is the
  * documented standard for how the model completes a workflow step.
@@ -1523,8 +1616,24 @@ export function appendStepContract(
   workflowName: string,
   nodeId: string,
   attemptId: string,
-  expectedOutput: string | undefined,
+  expectedOutput: AgentExpectedOutput | undefined,
 ): string {
+  const assistant = assistantMessageOutput(expectedOutput);
+  if (assistant !== undefined) {
+    return [
+      prompt.trimEnd(),
+      "",
+      "---",
+      `Workflow step contract (workflow: ${workflowName}, step: ${nodeId}, attempt: ${attemptId})`,
+      "",
+      "Reply with a normal assistant message.",
+      "Do not call the workflow tool to complete this step.",
+      "Your visible reply becomes the workflow step output after the turn settles.",
+      ...(assistant.maxChars !== undefined
+        ? [`Keep the visible reply within ${assistant.maxChars} characters.`]
+        : []),
+    ].join("\n");
+  }
   return [
     prompt.trimEnd(),
     "",
@@ -1535,7 +1644,7 @@ export function appendStepContract(
     `{"action": "update", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "update": {"type": "...", "key": "...", "data": {...}}}`,
     "Complete this step by calling the `workflow` tool exactly once with:",
     `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
-    `Expected output: ${expectedOutput ?? "a JSON object with your result"}`,
+    `Expected output: ${typeof expectedOutput === "string" ? expectedOutput : "a JSON object with your result"}`,
     "The step is complete only after the workflow tool accepts the output.",
     "If the tool reports a validation error, correct the output and call it again.",
   ].join("\n");

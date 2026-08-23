@@ -43,6 +43,8 @@ export type RpcStepExecutorOptions = {
   env?: Record<string, string>;
   /** Extra pi arguments, for example a model override. */
   piArgs?: string[];
+  /** Park assistant-message nodes for a visible origin session. */
+  assistantMessageMode?: "park";
 };
 
 /**
@@ -53,6 +55,7 @@ export type RpcStepExecutorOptions = {
  * the model sees the same tool contract as an in-session run.
  */
 export class RpcStepExecutor implements AgentStepExecutor {
+  readonly assistantMessageMode: "park" | "unsupported";
   private readonly options: RpcStepExecutorOptions;
   private child: ChildProcess | null = null;
   private childExited: { code: number | null; signal: string | null } | null = null;
@@ -63,6 +66,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
 
   constructor(options: RpcStepExecutorOptions) {
     this.options = options;
+    this.assistantMessageMode = options.assistantMessageMode ?? "unsupported";
   }
 
   async runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission> {

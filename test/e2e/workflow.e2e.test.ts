@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
-import { listWorkflowRuns, workflowStateDatabasePath } from "../../src/workflows/store.js";
+import {
+  listWorkflowRuns,
+  readWorkflowRun,
+  workflowStateDatabasePath,
+} from "../../src/workflows/store.js";
 import type { WorkflowRunState, WorkflowSessionEventRecord } from "../../src/workflows/types.js";
 import { makeTempDir } from "../helpers.js";
 import { startMockOpenAiServer } from "./mock-openai.js";
@@ -92,6 +96,22 @@ export default defineWorkflow({
     }),
   },
   edges: [],
+});
+`;
+
+const ASSISTANT_OUTPUT_E2E_WORKFLOW = `import { agent, assistantMessage, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "assistant-output-e2e",
+  startAt: "present",
+  nodes: {
+    present: agent({
+      prompt: () => "Write the assistant-output fixture response.",
+      expectedOutput: assistantMessage(),
+    }),
+    finish: compute({ run: ({ outputs }) => ({ text: outputs.present }) }),
+  },
+  edges: [{ from: "present", to: "finish" }],
 });
 `;
 
@@ -680,6 +700,13 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        if (
+          /workflow step contract \(workflow: assistant-output-e2e, step: present/i.test(
+            lastUserText,
+          )
+        ) {
+          return { kind: "text", text: "This is one normal visible assistant response." };
+        }
         const timeoutStepMatch = lastUserText.match(
           /workflow step contract \(workflow: timeout-e2e, step: work, attempt: ([a-z0-9-]+)\)/i,
         );
@@ -784,6 +811,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "composed-e2e.workflow.ts"),
       COMPOSED_PARENT_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "assistant-output-e2e.workflow.ts"),
+      ASSISTANT_OUTPUT_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -1369,6 +1401,45 @@ describe.sequential("pi-workflows end to end", () => {
     ).toBe(terminalProjection);
   }, 120_000);
 
+  it("uses one normal assistant message as node output before continuing", async () => {
+    pi.send({
+      id: "assistant-output-1",
+      type: "prompt",
+      message: "/workflow assistant-output-e2e",
+    });
+
+    const { state, runId } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "assistant-output-e2e" && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+
+    expect(state.steps.map((step) => step.nodeId)).toEqual(["present", "finish"]);
+    expect(state.outputs.present).toBe("This is one normal visible assistant response.");
+    expect(state.finalOutput).toEqual({ text: "This is one normal visible assistant response." });
+    expect(state.steps[0]).toMatchObject({
+      assistantMessage: { sha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
+    });
+    const records = readWorkflowRun(runId, { databasePath: runsDir })?.sessionEntries ?? [];
+    const visible = records.filter(
+      (record) =>
+        record.entry.type === "message" &&
+        contentText((record.entry.message as { content?: unknown } | undefined)?.content) ===
+          "This is one normal visible assistant response.",
+    );
+    expect(visible).toHaveLength(1);
+    const request = mock.requests.find((candidate) =>
+      candidate.messages.some((message) =>
+        contentText(message.content)
+          .toLowerCase()
+          .includes("workflow step contract (workflow: assistant-output-e2e, step: present"),
+      ),
+    );
+    expect(request).toBeDefined();
+    expect(JSON.stringify(request?.messages)).not.toContain('"action":"submit"');
+  }, 90_000);
+
   it("stops the real Pi turn when an agent node times out", async () => {
     pi.send({ id: "timeout-1", type: "prompt", message: "/workflow timeout-e2e" });
 
@@ -1491,7 +1562,7 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.status, state.error).toBe("completed");
     expect(state.workflowName).toBe("monitor");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "10" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "monitor", revision: "11" });
     expect(state.workflowPath).toBeUndefined();
     expect(state.workflowHash).toBeUndefined();
     expect(state.finalOutput).toMatchObject({

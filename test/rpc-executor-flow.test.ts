@@ -6,9 +6,13 @@ import { RpcStepExecutor } from "../src/host/rpc-executor.js";
 import type { AgentStepRequest } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
-function requestFor(nodeId: string, attemptId: string, accept?: AgentStepRequest["accept"]) {
+function requestFor(
+  nodeId: string,
+  attemptId: string,
+  accept?: AgentStepRequest["accept"],
+): AgentStepRequest {
   return {
-    contract: { runId: "r", workflowName: "w", nodeId, attemptId },
+    contract: { runId: "r", workflowName: "w", nodeId, attemptId, completion: "submit" },
     prompt: "do the step",
     accept: accept ?? (async () => ({ ok: true as const, value: null })),
   };

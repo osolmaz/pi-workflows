@@ -112,6 +112,14 @@ Foreign keys join projects, runs, attempts, decisions, controllers, effects, and
 
 Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping large prompts, outputs, errors, session payloads, and rendered channel text deduplicated.
 
+### Assistant-message attempts
+
+An agent definition records `expectedOutput` as either a submitted-output description or `{ "kind": "assistant-message", "maxChars"?: number }`. Omitted `maxChars` means that Pi Workflows adds no character limit.
+
+A completed assistant-message attempt stores the exact text through the normal output blob. Its result record also stores a receipt with the text digest, final Pi session entry ID when available, optional author-supplied limit, and whether recovery adopted an existing response. Session tables keep the prompt-to-response entry range and the normal Pi message events.
+
+An interrupted assistant-message attempt keeps its attempt ID when the origin Pi session resumes it. The executor adopts a matching completed assistant child from the active Pi branch instead of displaying the response twice. Submitted and non-agent attempts keep their normal fresh-attempt resume behavior.
+
 ## Write contract
 
 A write command uses this order:

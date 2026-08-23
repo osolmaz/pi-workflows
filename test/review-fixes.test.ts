@@ -324,7 +324,7 @@ describe("prompt delivery failures", () => {
       },
     });
     const request = (nodeId: string): AgentStepRequest => ({
-      contract: { runId: "r", workflowName: "w", nodeId, attemptId: nodeId },
+      contract: { runId: "r", workflowName: "w", nodeId, attemptId: nodeId, completion: "submit" },
       prompt: nodeId,
       accept: async (output) => ({ ok: true, value: output }),
     });
@@ -344,7 +344,13 @@ describe("hung validation after the step is cleared", () => {
   it("unblocks the submit call when the step times out mid-validation", async () => {
     const executor = new ConversationStepExecutor({ sendPrompt: () => {} });
     const request: AgentStepRequest = {
-      contract: { runId: "r", workflowName: "w", nodeId: "step", attemptId: "a1" },
+      contract: {
+        runId: "r",
+        workflowName: "w",
+        nodeId: "step",
+        attemptId: "a1",
+        completion: "submit",
+      },
       prompt: "step",
       accept: () => new Promise(() => {}), // validation never settles
     };
@@ -419,7 +425,13 @@ describe("stale submissions after a step is replaced", () => {
 
     let releaseAccept: (() => void) | undefined;
     const slowRequest: AgentStepRequest = {
-      contract: { runId: "r", workflowName: "w", nodeId: "first", attemptId: "a1" },
+      contract: {
+        runId: "r",
+        workflowName: "w",
+        nodeId: "first",
+        attemptId: "a1",
+        completion: "submit",
+      },
       prompt: "first",
       accept: () =>
         new Promise((resolve) => {
@@ -437,7 +449,13 @@ describe("stale submissions after a step is replaced", () => {
     await expect(firstStep).rejects.toThrow(/timed out/);
 
     const secondRequest: AgentStepRequest = {
-      contract: { runId: "r", workflowName: "w", nodeId: "first", attemptId: "a2" },
+      contract: {
+        runId: "r",
+        workflowName: "w",
+        nodeId: "first",
+        attemptId: "a2",
+        completion: "submit",
+      },
       prompt: "retry",
       accept: async (output) => ({ ok: true, value: output }),
     };
@@ -615,7 +633,13 @@ describe("nudge delivery failures", () => {
       },
     });
     const request: AgentStepRequest = {
-      contract: { runId: "r", workflowName: "w", nodeId: "step", attemptId: "a1" },
+      contract: {
+        runId: "r",
+        workflowName: "w",
+        nodeId: "step",
+        attemptId: "a1",
+        completion: "submit",
+      },
       prompt: "step",
       accept: async (output) => ({ ok: true, value: output }),
     };

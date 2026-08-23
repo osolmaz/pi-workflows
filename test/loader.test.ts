@@ -50,6 +50,7 @@ describe("discoverWorkflows", () => {
     expect(discovered.map((w) => [w.name, w.source])).toEqual([
       ["local", "project"],
       ["global", "global"],
+      ["plain-summary", "builtin"],
       ["autoplan", "builtin"],
       ["autodoc", "builtin"],
       ["autoimplement", "builtin"],
@@ -66,9 +67,10 @@ describe("discoverWorkflows", () => {
 
     const discovered = await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog);
 
-    expect(discovered).toHaveLength(7);
+    expect(discovered).toHaveLength(8);
     expect(discovered[0]?.source).toBe("project");
     expect(discovered.slice(1).map((item) => item.name)).toEqual([
+      "plain-summary",
       "autoplan",
       "autodoc",
       "autoimplement",
@@ -83,7 +85,15 @@ describe("discoverWorkflows", () => {
     const homeDir = await makeTempDir("pi-workflows-empty-home");
     expect(
       (await discoverWorkflows({ cwd, homeDir }, builtinWorkflowCatalog)).map((item) => item.name),
-    ).toEqual(["autoplan", "autodoc", "autoimplement", "plan-approval", "sanity-check", "monitor"]);
+    ).toEqual([
+      "plain-summary",
+      "autoplan",
+      "autodoc",
+      "autoimplement",
+      "plan-approval",
+      "sanity-check",
+      "monitor",
+    ]);
   });
 
   it("lets a project workflow override the built-in monitor", async () => {
@@ -130,7 +140,7 @@ describe("resolveWorkflowRef", () => {
     const resolved = await resolveWorkflowRef("monitor", { cwd, homeDir }, builtinWorkflowCatalog);
 
     expect(resolved.sourceKind).toBe("builtin");
-    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "10" });
+    expect(resolved.source).toEqual({ kind: "builtin", id: "monitor", revision: "11" });
     expect(resolved.definition.name).toBe("monitor");
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
       "implementation",
@@ -138,10 +148,14 @@ describe("resolveWorkflowRef", () => {
       "implementation/redesign",
       "implementation/redesign/approval",
       "implementation/redesign/design",
+      "implementation/redesign/design/blockedSummary",
+      "implementation/redesign/design/readySummary",
       "implementation/redesign/documentation",
       "planChange",
       "planChange/approval",
       "planChange/design",
+      "planChange/design/blockedSummary",
+      "planChange/design/readySummary",
       "planChange/documentation",
     ]);
   });

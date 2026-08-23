@@ -3,6 +3,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
   buildWorkflowAgentStepView,
+  recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
   WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
   WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
@@ -22,6 +23,7 @@ const details: WorkflowAgentStepMessageDetails = {
     workflowName: "monitor",
     nodeId: "check",
     attemptId: "attempt-1",
+    completion: "submit",
     expectedOutput: `{ "route": "continue" }`,
   },
   presentation: {
@@ -60,6 +62,116 @@ describe("workflow agent-step messages", () => {
     expect(view.expandedText).toContain(`Expected output: { "route": "continue" }`);
     expect(view.expandedText).toContain("First line\nSecond line");
     expect(view.expandedText).not.toContain("\u001b");
+  });
+
+  it("describes assistant response completion in the expanded view", () => {
+    const view = buildWorkflowAgentStepView(
+      {
+        content: "Reply normally",
+        details: {
+          ...details,
+          contract: {
+            runId: details.contract.runId,
+            workflowName: details.contract.workflowName,
+            nodeId: details.contract.nodeId,
+            attemptId: details.contract.attemptId,
+            completion: "assistant",
+            maxOutputChars: 2000,
+          },
+        },
+      },
+      true,
+    );
+
+    expect(view.expandedText).toContain("Completion: assistant response");
+    expect(view.expandedText).toContain(
+      "Expected output: normal assistant response (maximum 2000 characters)",
+    );
+  });
+
+  it("recovers only the visible response for the exact attempt", () => {
+    const assistantDetails: WorkflowAgentStepMessageDetails = {
+      schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
+      kind: "step",
+      contract: {
+        runId: "run-1",
+        workflowName: "monitor",
+        nodeId: "summary",
+        attemptId: "attempt-2",
+        completion: "assistant",
+      },
+    };
+    const entries = [
+      {
+        id: "prompt-other",
+        type: "custom_message",
+        customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+        details: {
+          ...assistantDetails,
+          contract: { ...assistantDetails.contract, attemptId: "old" },
+        },
+      },
+      {
+        id: "answer-other",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "old answer" }],
+          stopReason: "stop",
+        },
+      },
+      {
+        id: "prompt-2",
+        type: "custom_message",
+        customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+        details: assistantDetails,
+      },
+      {
+        id: "tool-only",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "read" }],
+          stopReason: "toolUse",
+        },
+      },
+      {
+        id: "answer-2",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "visible answer" }],
+          stopReason: "stop",
+        },
+      },
+      {
+        id: "later-user",
+        type: "message",
+        message: { role: "user", content: "unrelated question" },
+      },
+      {
+        id: "later-answer",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "unrelated answer" }],
+          stopReason: "stop",
+        },
+      },
+    ];
+
+    expect(recoverAssistantStep(entries, assistantDetails.contract)).toMatchObject({
+      output: "visible answer",
+      conversation: { firstEntryId: "prompt-2", lastEntryId: "answer-2" },
+      assistantMessage: {
+        entryId: "answer-2",
+        recovered: true,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expect(
+      recoverAssistantStep(entries, { ...assistantDetails.contract, attemptId: "missing" }),
+    ).toBeUndefined();
   });
 
   it("renders malformed details safely", () => {

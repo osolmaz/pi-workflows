@@ -1,0 +1,114 @@
+{
+  "name": "example-plain-summary",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "plain-summary",
+    "contractId": "pi-workflows.plain-summary.v1",
+    "startAt": "summarize",
+    "nodes": {
+      "summarize": {
+        "nodeType": "agent",
+        "statusDetail": "writing a plain summary",
+        "expectedOutput": {
+          "kind": "assistant-message",
+          "maxChars": 10000
+        }
+      },
+      "finish": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "summarize",
+        "to": "finish"
+      }
+    ],
+    "composition": {
+      "mounts": []
+    }
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "summarize"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "finish"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "summarize->finish#0.0",
+        "from": "summarize",
+        "to": "finish",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "summarize->finish#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      }
+    ],
+    "rankOfNode": {
+      "summarize": 0,
+      "finish": 1
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-plain-summary",
+    "workflowName": "plain-summary",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "▶ · summarize [agent] not visited",
+        "                 │",
+        "                 ▼",
+        "  · finish [compute] not visited ■"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "  ┌──────────────────────────────┐",
+        "▶ │          summarize           │",
+        "  ├──────────────────────────────┤",
+        "  │ ● agent             · queued │",
+        "  │ ↻ 0                      ◷ — │",
+        "  │ … assistant response · writ… │",
+        "  └──────────────────────────────┘",
+        "                  │",
+        "                  ▼",
+        "  ┌──────────────────────────────┐",
+        "  │            finish            │ ■",
+        "  ├──────────────────────────────┤",
+        "  │ ƒ compute           · queued │",
+        "  │ ↻ 0                      ◷ — │",
+        "  │                              │",
+        "  └──────────────────────────────┘"
+      ]
+    }
+  ]
+}

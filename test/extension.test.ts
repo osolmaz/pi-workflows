@@ -296,6 +296,27 @@ export default defineWorkflow({
   );
 }
 
+async function writeAssistantWorkflow(cwd: string): Promise<void> {
+  const dir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "assistant.workflow.ts"),
+    `import { agent, assistantMessage, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "assistant",
+  startAt: "present",
+  nodes: {
+    present: agent({ prompt: () => "Explain it.", expectedOutput: assistantMessage() }),
+    finish: compute({ run: ({ outputs }) => ({ captured: outputs.present }) }),
+  },
+  edges: [{ from: "present", to: "finish" }],
+});
+`,
+    "utf8",
+  );
+}
+
 async function writeTimeoutWorkflow(cwd: string): Promise<void> {
   const dir = path.join(cwd, ".pi", "workflows");
   await fs.mkdir(dir, { recursive: true });
@@ -484,6 +505,55 @@ describe("pi-workflows extension", () => {
       } finally {
         queue.close();
       }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps one normal assistant response visible and continues the graph", async () => {
+    const cwd = await makeTempDir("pi-workflows-assistant-output");
+    const runsDir = await makeTempDir("pi-workflows-assistant-output-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      await writeAssistantWorkflow(cwd);
+      let harness: ReturnType<typeof makeHarness>;
+      harness = makeHarness({
+        cwd,
+        respond: (prompt) => {
+          if (!prompt.includes("Reply with a normal assistant message.")) return;
+          queueMicrotask(() => {
+            harness.setIdle(true);
+            const message = {
+              role: "assistant",
+              content: [{ type: "text", text: "A plain visible answer." }],
+              stopReason: "stop",
+            };
+            void harness
+              .emitAsync("message_end", { message })
+              .then(async () => await harness.emitAsync("turn_end", { turnIndex: 0, message }))
+              .then(async () => await harness.emitAsync("agent_settled", {}));
+          });
+        },
+      });
+
+      await harness.command.handler("assistant", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+
+      expect(harness.sentMessages).toHaveLength(1);
+      expect(harness.sentMessages[0]?.message.content).toContain(
+        "Reply with a normal assistant message.",
+      );
+      expect(harness.sentMessages[0]?.message.content).not.toContain('"action": "submit"');
+      const [run] = listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) });
+      const bundle = readWorkflowRun(run?.runId ?? "", {
+        databasePath: workflowStateDatabasePath(runsDir),
+      });
+      expect(bundle?.state.finalOutput).toEqual({ captured: "A plain visible answer." });
+      expect(bundle?.state.steps[0]).toMatchObject({
+        nodeId: "present",
+        output: "A plain visible answer.",
+        assistantMessage: { sha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      });
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1012,13 +1082,13 @@ describe("pi-workflows extension", () => {
       const harness = makeHarness({ cwd, respond: () => {} });
 
       const first = await harness.tool.execute("list-first", { action: "list" });
-      expect(first.details).toMatchObject({ total: 66, offset: 0, omitted: 16, nextOffset: 50 });
+      expect(first.details).toMatchObject({ total: 67, offset: 0, omitted: 17, nextOffset: 50 });
       expect(first.details.workflows).toHaveLength(50);
-      expect(first.content[0]?.text).toContain("16 more omitted; list again with offset 50");
+      expect(first.content[0]?.text).toContain("17 more omitted; list again with offset 50");
 
       const second = await harness.tool.execute("list-second", { action: "list", offset: 50 });
-      expect(second.details).toMatchObject({ total: 66, offset: 50, omitted: 0 });
-      expect(second.details.workflows).toHaveLength(16);
+      expect(second.details).toMatchObject({ total: 67, offset: 50, omitted: 0 });
+      expect(second.details.workflows).toHaveLength(17);
       expect(second.details).not.toHaveProperty("nextOffset");
 
       await expect(
@@ -1028,7 +1098,7 @@ describe("pi-workflows extension", () => {
         harness.tool.execute("list-negative", { action: "list", offset: -1 }),
       ).rejects.toThrow(/offset must be >= 0/);
       await expect(
-        harness.tool.execute("list-too-large", { action: "list", offset: 67 }),
+        harness.tool.execute("list-too-large", { action: "list", offset: 68 }),
       ).rejects.toThrow(/offset must be an integer/);
     } finally {
       vi.unstubAllEnvs();

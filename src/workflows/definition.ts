@@ -9,6 +9,9 @@ import {
 } from "./schema.js";
 import type {
   AgentNodeDefinition,
+  AssistantAgentNodeDefinition,
+  AssistantMessageOutput,
+  SubmittedAgentNodeDefinition,
   ActionNodeDefinition,
   CheckpointNodeDefinition,
   ComputeNodeDefinition,
@@ -154,11 +157,41 @@ export function isWorkflowDefinition(value: unknown): value is WorkflowDefinitio
   );
 }
 
+export function assistantMessage(options: { maxChars?: number } = {}): AssistantMessageOutput {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new Error("Invalid workflow definition: assistantMessage options must be an object");
+  }
+  const unknown = Object.keys(options).filter((key) => key !== "maxChars");
+  if (unknown.length > 0) {
+    throw new Error(
+      `Invalid workflow definition: assistantMessage has unknown option ${JSON.stringify(unknown[0])}`,
+    );
+  }
+  if (
+    options.maxChars !== undefined &&
+    (!Number.isInteger(options.maxChars) || options.maxChars <= 0)
+  ) {
+    throw new Error(
+      "Invalid workflow definition: assistantMessage maxChars must be a positive integer",
+    );
+  }
+  return Object.freeze({
+    kind: "assistant-message" as const,
+    ...(options.maxChars !== undefined ? { maxChars: options.maxChars } : {}),
+  });
+}
+
+export function agent(
+  definition: Omit<SubmittedAgentNodeDefinition, "nodeType">,
+): SubmittedAgentNodeDefinition;
+export function agent(
+  definition: Omit<AssistantAgentNodeDefinition, "nodeType">,
+): AssistantAgentNodeDefinition;
 export function agent(definition: Omit<AgentNodeDefinition, "nodeType">): AgentNodeDefinition {
-  const node: AgentNodeDefinition = {
-    nodeType: "agent",
+  const node = {
+    nodeType: "agent" as const,
     ...definition,
-  };
+  } as AgentNodeDefinition;
   assertValidAgentNode(node);
   return node;
 }

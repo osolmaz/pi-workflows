@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
   AgentStepExecutor,
   AgentStepRequest,
@@ -27,6 +29,7 @@ export type PromptDelivery = {
  */
 export type ConversationHooks = {
   beginAttempt?: (contract: AgentStepRequest["contract"]) => void;
+  recoverAssistant?: (contract: AgentStepRequest["contract"]) => AgentStepSubmission | undefined;
   mark: () => number;
   rangeSince: (mark: number) => ConversationRange | undefined;
 };
@@ -49,6 +52,8 @@ type PendingStep = {
   nudgesSent: number;
   /** Conversation mark taken when the prompt was first delivered. */
   mark: number | null;
+  /** Latest finalized assistant message observed for this attempt. */
+  assistantMessage?: AssistantMessage;
   cleanup: () => void;
   /** Resolves when this step stops being the pending step. */
   cleared: Promise<void>;
@@ -65,6 +70,7 @@ const DEFAULT_MAX_NUDGES = 2;
  * bounded number of times before failing the step.
  */
 export class ConversationStepExecutor implements AgentStepExecutor {
+  readonly assistantMessageMode = "visible" as const;
   private readonly sendPrompt: (delivery: PromptDelivery) => void;
   private readonly maxNudges: number;
   private readonly conversation: ConversationHooks | undefined;
@@ -87,6 +93,10 @@ export class ConversationStepExecutor implements AgentStepExecutor {
 
   get pendingStepId(): string | null {
     return this.pending?.request.contract.nodeId ?? null;
+  }
+
+  get pendingCompletion(): "submit" | "assistant" | null {
+    return this.pending === null ? null : completionKind(this.pending.request);
   }
 
   /**
@@ -126,6 +136,12 @@ export class ConversationStepExecutor implements AgentStepExecutor {
   async runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission> {
     if (this.pending) {
       throw new Error("Another workflow step is already awaiting output");
+    }
+    if (completionKind(request) === "assistant") {
+      const recovered = this.conversation?.recoverAssistant?.(request.contract);
+      if (recovered !== undefined) {
+        return recovered;
+      }
     }
     return await new Promise<AgentStepSubmission>((resolve, reject) => {
       const onAbort = () => {
@@ -199,6 +215,13 @@ export class ConversationStepExecutor implements AgentStepExecutor {
         )}; the pending attempt is ${JSON.stringify(expectedAttempt)}. Use the attempt id from the latest step contract.`,
       };
     }
+    if (completionKind(pending.request) === "assistant") {
+      return {
+        accepted: false,
+        message:
+          "This step completes with a normal assistant response. Do not submit workflow output.",
+      };
+    }
     // Race validation against the step being cleared: a hung `validate`
     // callback must not leave this tool call (and therefore pi) blocked after
     // a timeout or cancel already resolved the run.
@@ -237,10 +260,22 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     };
   }
 
+  /** Keep the latest finalized assistant message for an assistant-output step. */
+  handleMessageEnd(message: unknown): void {
+    const pending = this.pending;
+    if (pending === null || completionKind(pending.request) !== "assistant") {
+      return;
+    }
+    const assistant = assistantMessageLike(message);
+    if (assistant !== undefined) {
+      pending.assistantMessage = assistant as AssistantMessage;
+    }
+  }
+
   /**
    * Called when the agent settles. Returns true when a nudge was sent, false
-   * when there was nothing to do. Fails the pending step once the nudge
-   * budget is exhausted.
+   * when there was nothing to do. Submitted steps use bounded nudges;
+   * assistant-output steps accept or fail the one visible response.
    */
   handleAgentSettled(): boolean {
     const pending = this.pending;
@@ -250,6 +285,33 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     if (this.heldByUser) {
       // The user interrupted deliberately; reminding the model now would
       // steal the conversation back. The step waits for an explicit resume.
+      return false;
+    }
+    if (completionKind(pending.request) === "assistant") {
+      try {
+        const output = visibleAssistantText(
+          pending.assistantMessage,
+          pending.request.contract.maxOutputChars,
+        );
+        const conversation =
+          pending.mark !== null ? this.conversation?.rangeSince(pending.mark) : undefined;
+        const assistantMessage = {
+          sha256: createHash("sha256").update(output).digest("hex"),
+          ...(conversation?.lastEntryId !== undefined ? { entryId: conversation.lastEntryId } : {}),
+          ...(pending.request.contract.maxOutputChars !== undefined
+            ? { maxChars: pending.request.contract.maxOutputChars }
+            : {}),
+        };
+        this.clearPending();
+        pending.resolve({
+          output,
+          assistantMessage,
+          ...(conversation !== undefined ? { conversation } : {}),
+        });
+      } catch (error) {
+        this.clearPending();
+        pending.reject(error);
+      }
       return false;
     }
     if (pending.nudgesSent >= this.maxNudges) {
@@ -308,4 +370,45 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     this.pending?.markCleared();
     this.pending = null;
   }
+}
+
+function completionKind(request: AgentStepRequest): "submit" | "assistant" {
+  return request.contract.completion;
+}
+
+function assistantMessageLike(
+  message: unknown,
+): Pick<AssistantMessage, "role" | "content" | "stopReason" | "errorMessage"> | undefined {
+  if (message === null || typeof message !== "object") return undefined;
+  const candidate = message as Partial<AssistantMessage>;
+  if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) return undefined;
+  if (typeof candidate.stopReason !== "string") return undefined;
+  return candidate as Pick<AssistantMessage, "role" | "content" | "stopReason" | "errorMessage">;
+}
+
+/** Extract the exact visible text blocks from one finalized assistant message. */
+export function visibleAssistantText(message: unknown, maxChars?: number): string {
+  const assistant = assistantMessageLike(message);
+  if (assistant === undefined) {
+    throw new Error("Assistant step settled without a final assistant message");
+  }
+  if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+    throw new Error(
+      assistant.errorMessage?.trim() ||
+        `Assistant step stopped with ${JSON.stringify(assistant.stopReason)}`,
+    );
+  }
+  const text = assistant.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  if (text.trim().length === 0) {
+    throw new Error("Assistant step returned no visible text");
+  }
+  if (maxChars !== undefined && text.length > maxChars) {
+    throw new Error(
+      `Assistant response has ${text.length} characters, above the configured limit of ${maxChars}`,
+    );
+  }
+  return text;
 }

@@ -340,15 +340,22 @@ function renderCellText(
         : selected !== undefined
           ? `human: ${sanitizeText(selected.label)}`
           : undefined;
-  const detail =
-    humanDetail ??
-    (atLatestStep && state.currentNode === nodeId && state.statusDetail
+  const configuredDetail =
+    atLatestStep && state.currentNode === nodeId && state.statusDetail
       ? sanitizeText(state.statusDetail)
       : node?.statusDetail
         ? sanitizeText(node.statusDetail)
         : node?.summary
           ? sanitizeText(node.summary)
-          : "");
+          : "";
+  const assistantDetail =
+    node?.nodeType === "agent" &&
+    typeof node.expectedOutput === "object" &&
+    node.expectedOutput.kind === "assistant-message"
+      ? "assistant response"
+      : "";
+  const nodeDetail = [assistantDetail, configuredDetail].filter(Boolean).join(" · ");
+  const detail = humanDetail ?? nodeDetail;
   const branchLines = Array.from({ length: metrics.branchRows }, (_, index) =>
     labels[index] ? `◇ ${labels[index]}` : "",
   );

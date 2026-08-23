@@ -15,8 +15,10 @@ function fixture(name = "fixture") {
 
 describe("BuiltinWorkflowCatalog", () => {
   it("ships stable built-in revisions", () => {
-    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("8");
-    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("10");
+    expect(builtinWorkflowCatalog.get("plain-summary")?.revision).toBe("1");
+    expect(builtinWorkflowCatalog.get("autoplan")?.revision).toBe("2");
+    expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("9");
+    expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("11");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
     expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("3");
   });

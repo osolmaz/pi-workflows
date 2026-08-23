@@ -24,6 +24,12 @@ export {
   type MonitorObservation,
 } from "./monitor.workflow.js";
 export {
+  plainSummaryWorkflow,
+  type PlainSummaryFormat,
+  type PlainSummaryInput,
+  type PlainSummaryResult,
+} from "./plain-summary.workflow.js";
+export {
   planChangeWorkflow,
   type PlanChangeBlocked,
   type PlanChangeInput,

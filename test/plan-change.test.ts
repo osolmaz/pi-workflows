@@ -18,10 +18,27 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
     })
     .respond("design/propose", {
       output: {
-        solution: "use the selected plan",
-        rationale: "it is in scope",
-        parts: ["implement"],
-        tradeoffs: [],
+        candidates: [
+          {
+            id: "selected-plan",
+            title: "Selected plan",
+            gist: "Use the selected plan.",
+            solution: "use the selected plan",
+            rationale: "it is in scope",
+            parts: ["implement"],
+            tradeoffs: [],
+          },
+          {
+            id: "larger-plan",
+            title: "Larger plan",
+            gist: "Use a larger change.",
+            solution: "use a larger change",
+            rationale: "it can work",
+            parts: ["redesign"],
+            tradeoffs: ["more work"],
+          },
+        ],
+        previousPlan: { status: "candidate", candidateId: "selected-plan" },
       },
     })
     .respond("design/ideal", {
@@ -30,14 +47,21 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
     .respond("design/choose", {
       output: {
         status: "ready",
-        selected: "use the selected plan",
+        selectedId: "selected-plan",
         why: "it is practical",
         relationshipToIdeal: "same result",
-        excluded: [],
+        rejected: [
+          { id: "larger-plan", reason: "it adds unnecessary work" },
+          { id: "ideal", reason: "the selected plan already meets the goal" },
+        ],
         compromises: [],
       },
     })
     .respond("design/plan", { output: plan })
+    .respond("design/readySummary/summarize", () => ({
+      output: "Use the selected plan. The larger and ideal options are unnecessary.",
+      assistantMessage: { sha256: "a".repeat(64) },
+    }))
     .respond("documentation/inspectDocumentation", {
       output: {
         route: "current",

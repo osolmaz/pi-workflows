@@ -209,7 +209,29 @@ describe("autoimplement existing-plan startup", () => {
         },
       })
       .respond("redesign/design/propose", {
-        output: { solution: "revised", rationale: "in scope", parts: ["code"], tradeoffs: [] },
+        output: {
+          candidates: [
+            {
+              id: "revised",
+              title: "Revised",
+              gist: "Use the revised plan.",
+              solution: "revised",
+              rationale: "in scope",
+              parts: ["code"],
+              tradeoffs: [],
+            },
+            {
+              id: "rewrite",
+              title: "Rewrite",
+              gist: "Rewrite the feature.",
+              solution: "rewrite",
+              rationale: "possible",
+              parts: ["rewrite"],
+              tradeoffs: ["larger"],
+            },
+          ],
+          previousPlan: { status: "rejected", reason: "API evidence invalidated it" },
+        },
       })
       .respond("redesign/design/ideal", {
         output: { ideal: "revised", outsideDependencies: [], additionalValue: [] },
@@ -217,14 +239,21 @@ describe("autoimplement existing-plan startup", () => {
       .respond("redesign/design/choose", {
         output: {
           status: "ready",
-          selected: "revised",
+          selectedId: "revised",
           why: "in scope",
           relationshipToIdeal: "same",
-          excluded: [],
+          rejected: [
+            { id: "rewrite", reason: "larger than needed" },
+            { id: "ideal", reason: "the revised plan reaches it" },
+          ],
           compromises: [],
         },
       })
       .respond("redesign/design/plan", { output: revised })
+      .respond("redesign/design/readySummary/summarize", () => ({
+        output: "Use the revised plan. The rewrite and ideal add no value.",
+        assistantMessage: { sha256: "a".repeat(64) },
+      }))
       .respond("redesign/documentation/inspectDocumentation", {
         output: {
           route: "update",
