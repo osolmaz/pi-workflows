@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
-import { makeTempDir } from "./helpers.js";
+import { compileWorkflowDefinition } from "../src/workflows/composition.js";
+import { checkpoint, defineWorkflow } from "../src/workflows/definition.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
+import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
+import { makeTempDir, ScriptedExecutor, waitUntil } from "./helpers.js";
 
 describe("WorkflowHost SQLite", () => {
   it("opens the canonical database and shuts down cleanly", async () => {
@@ -43,6 +49,75 @@ describe("WorkflowHost SQLite", () => {
     await second.start();
     await second.stop();
     await first.stop();
+  });
+
+  it("leaves a parked human-decision run available to its session owner", async () => {
+    const cwd = await makeTempDir("host-waiting-project");
+    const databasePath = path.join(await makeTempDir("host-waiting-state"), "state.sqlite");
+    const workflow = compileWorkflowDefinition(
+      defineWorkflow({
+        name: "host-waiting",
+        startAt: "approval",
+        nodes: { approval: checkpoint({ summary: "approve" }) },
+        edges: [],
+      }),
+    );
+    const snapshot = createDefinitionSnapshot(workflow);
+    const digest = `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+    const queue = new SqliteControllerStore(databasePath, { projectPath: cwd });
+    queue.enqueueWorkflowRun({
+      runId: "waiting-run",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:host-waiting",
+      workflowSource: { kind: "builtin", id: "host-waiting", revision: "test" },
+      definitionDigest: digest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-owner",
+      claimToken: "session-token",
+      leaseMs: 60_000,
+      originSessionId: "session-owner",
+    });
+    const runStore = new WorkflowRunStore(databasePath, {
+      state: queue.state,
+      authorityProvider: () => queue.workflowRunAuthority("waiting-run", "session-token"),
+    });
+    const result = await new WorkflowEngine({
+      store: runStore,
+      executor: new ScriptedExecutor(),
+    }).run(
+      workflow,
+      {},
+      {
+        runId: "waiting-run",
+        workflowSource: { kind: "builtin", id: "host-waiting", revision: "test" },
+      },
+    );
+    expect(result.state.status).toBe("waiting");
+    expect(queue.parkWorkflowRun({ runId: "waiting-run", claimToken: "session-token" })).toBe(true);
+    queue.close();
+
+    const logs: string[] = [];
+    const host = new WorkflowHost({
+      cwd,
+      databasePath,
+      runnerId: "host-waiting",
+      claimPollMs: 10,
+      onLog: (message) => logs.push(message),
+    });
+    await host.start();
+    await waitUntil(() =>
+      logs.some((message) => message.includes("waiting for its decision owner")),
+    );
+    await host.stop();
+
+    const inspection = new SqliteControllerStore(databasePath, { projectPath: cwd });
+    expect(inspection.getWorkflowRun("waiting-run")?.status).toBe("parked");
+    expect(
+      new WorkflowRunStore(databasePath, { state: inspection.state }).readRun("waiting-run")?.state
+        .status,
+    ).toBe("waiting");
+    inspection.close();
   });
 
   it("refuses a second active host for the same state directory", async () => {

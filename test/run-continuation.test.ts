@@ -32,6 +32,9 @@ describe("WorkflowEngine.continueRun", () => {
     const parent = await first.run(waitWorkflow, { change: "big" }, { runId: "parent-1" });
     expect(parent.state.status).toBe("waiting");
     expect(parent.state.waitingOn).toBe("approval");
+    const parentAttemptId = parent.state.steps[0]?.attemptId;
+    if (parentAttemptId === undefined) throw new Error("parent attempt missing");
+    const parentStep = parent.state.steps[0];
 
     const second = makeEngine(store);
     const continued = await second.continueRun(waitWorkflow, "parent-1", { approved: true });
@@ -47,6 +50,17 @@ describe("WorkflowEngine.continueRun", () => {
     const bundle = readWorkflowRun(continued.runId, { databasePath });
     const lastOutputs = bundle?.state.outputs ?? {};
     expect(lastOutputs.approval).toBeDefined();
+    expect(readWorkflowRun("parent-1", { databasePath })?.state.steps[0]).toEqual(parentStep);
+    expect(
+      store.state.connection
+        .prepare("SELECT run_id AS runId FROM node_attempts WHERE attempt_id = ?")
+        .get(parentAttemptId),
+    ).toEqual({ runId: "parent-1" });
+    expect(
+      store.state.connection
+        .prepare("SELECT node_id AS nodeId FROM node_attempts WHERE run_id = ? ORDER BY node_id")
+        .all(continued.runId),
+    ).toEqual([{ nodeId: "apply" }]);
   });
 
   it("completes immediately when the checkpoint is the final node", async () => {
