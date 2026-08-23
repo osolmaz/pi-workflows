@@ -1611,7 +1611,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const launchOptions = parsePreparedLaunchOptions(claimed.launchOptions);
       started = await startRun(ctx, sourceRef, claimed.input, {
         ...launchOptions,
-        resume: bundle !== null,
+        resume: claimed.initialized,
         runId: claimed.runId,
         claimToken,
       });

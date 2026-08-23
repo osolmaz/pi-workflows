@@ -44,6 +44,7 @@ describe("workflow run queue in canonical SQLite", () => {
       runId: "run-1",
       workflowName: "echo",
       workflowSourceRef: "builtin:echo",
+      initialized: false,
       status: "queued",
       originSessionId: "session-1",
     });

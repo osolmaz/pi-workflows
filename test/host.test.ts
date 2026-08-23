@@ -96,6 +96,7 @@ describe("WorkflowHost SQLite", () => {
       },
     );
     expect(result.state.status).toBe("waiting");
+    expect(queue.getWorkflowRun("waiting-run")?.initialized).toBe(true);
     expect(queue.parkWorkflowRun({ runId: "waiting-run", claimToken: "session-token" })).toBe(true);
     queue.close();
 
