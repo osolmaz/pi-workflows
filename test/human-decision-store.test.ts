@@ -117,6 +117,53 @@ describe("HumanDecisionStore SQLite", () => {
     store.close();
   });
 
+  it("rechecks the deadline after the acceptance transaction acquires its write lock", async () => {
+    const databasePath = await makeStateDatabasePath("decision-deadline-race");
+    const { request, store } = await waitingDecision(databasePath);
+    const before = new Date("2030-01-01T00:00:00.000Z");
+    const expiring = createHumanDecisionRequest({
+      runId: request.runId,
+      workflowName: request.workflowName,
+      nodeId: request.nodeId,
+      attemptId: request.attemptId,
+      contract: { audience: request.audience, choices: request.choices },
+      prompt: {
+        title: request.title,
+        subject: request.subject,
+        presentation: request.presentation,
+        revision: request.revision,
+      },
+      timeout: { afterMs: 1_000, response: { choice: "continue" } },
+      createdAt: before.toISOString(),
+    });
+    await store.createRequest(expiring);
+    vi.useFakeTimers();
+    vi.setSystemTime(before);
+    const transaction = store.state.transaction.bind(store.state);
+    vi.spyOn(store.state, "transaction").mockImplementation((operation) =>
+      transaction(() => {
+        vi.setSystemTime(new Date(before.getTime() + 2_000));
+        return operation();
+      }),
+    );
+    try {
+      await expect(
+        store.accept(expiring, {
+          decisionId: expiring.decisionId,
+          requestDigest: expiring.requestDigest,
+          choice: "continue",
+          source: { channel: "pi", actorId: "operator", eventId: "deadline-race" },
+          idempotencyKey: "deadline-race",
+        }),
+      ).rejects.toThrow(/expired before the answer was accepted/);
+      expect(await store.readResolved(expiring.decisionId)).toBeNull();
+      expect(await store.readCancellation(expiring.decisionId)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      store.close();
+    }
+  });
+
   it("rejects reuse of one answer idempotency key with different evidence", async () => {
     const databasePath = await makeStateDatabasePath("decision-idempotency");
     const { request, store } = await waitingDecision(databasePath);

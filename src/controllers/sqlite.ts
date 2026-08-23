@@ -156,6 +156,7 @@ type RunRow = {
   workflowSourceHash: Buffer;
   definitionDigest: Buffer;
   inputHash: Buffer;
+  outputHash: Buffer | null;
   launchOptionsHash: Buffer;
   status: WorkflowRunLaunchStatus;
   availableAt: number;
@@ -2413,26 +2414,87 @@ export class SqliteControllerStore implements ControllerStore {
     error: string,
     nowValue?: string,
   ): boolean {
-    const row = this.workflowRunRow(runId);
-    if (row === undefined) return false;
-    if (
-      claimToken !== undefined &&
-      !this.verifyWorkflowRunClaim({
-        runId,
-        claimToken,
-        ...(nowValue === undefined ? {} : { now: nowValue }),
-      })
-    )
-      return false;
     const now = epoch(validTimestamp(nowValue));
-    const errorHash = this.state.putText(error, now);
-    this.state.connection
-      .prepare(
-        "UPDATE run_queue SET status = ?, error_code = ?, error_hash = ?, updated_at = ?, finished_at = ? WHERE run_id = ?",
-      )
-      .run(status, code, errorHash, now, now, runId);
-    if (claimToken !== undefined) this.releaseRunClaim(runId, claimToken, status, nowValue);
-    return true;
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(runId);
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) return false;
+      const lease = this.requireLease(row.resourceId);
+      if (claimToken === undefined) {
+        if (!(["queued", "starting"] as WorkflowRunLaunchStatus[]).includes(row.status)) {
+          return false;
+        }
+        if (lease.ownerId !== null) return false;
+      } else if (
+        lease.ownerId === null ||
+        lease.tokenHash === null ||
+        lease.expiresAt === null ||
+        lease.expiresAt <= now ||
+        !lease.tokenHash.equals(tokenHash(claimToken))
+      ) {
+        return false;
+      }
+      if (row.outputHash === null) throw new Error(`Workflow run ${runId} has no state projection`);
+      const projected = this.state.readJson(row.outputHash);
+      if (!isRecord(projected)) throw new Error(`Workflow run ${runId} state is invalid`);
+      const revision = this.resourceRevision(row.resourceId);
+      const at = new Date(now).toISOString();
+      const terminalState: Record<string, unknown> = {
+        ...projected,
+        traceSeq: revision + 1,
+        status,
+        updatedAt: at,
+        finishedAt: at,
+        error,
+      };
+      delete terminalState.currentNode;
+      delete terminalState.currentAttemptId;
+      delete terminalState.currentNodeStartedAt;
+      delete terminalState.statusDetail;
+      delete terminalState.paused;
+      delete terminalState.waitingOn;
+      const errorHash = this.state.putText(error, now);
+      const outputHash = this.state.putJson(terminalState, now);
+      const queueUpdate = this.state.connection
+        .prepare(
+          `UPDATE run_queue
+           SET status = ?, error_code = ?, error_hash = ?, updated_at = ?, finished_at = ?
+           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
+        )
+        .run(status, code, errorHash, now, now, runId);
+      if (queueUpdate.changes !== 1) return false;
+      if (claimToken !== undefined) {
+        const leaseUpdate = this.state.connection
+          .prepare(
+            `UPDATE leases
+             SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+                 acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+             WHERE resource_id = ? AND token_hash = ? AND generation = ? AND expires_at > ?`,
+          )
+          .run(row.resourceId, tokenHash(claimToken), lease.generation, now);
+        if (leaseUpdate.changes !== 1) {
+          throw new Error(`Workflow run ${runId} claim changed during terminal transition`);
+        }
+      }
+      this.state.connection
+        .prepare(
+          `UPDATE runs
+           SET status = ?, output_hash = ?, error_hash = ?, updated_at = ?, finished_at = ?
+           WHERE run_id = ?`,
+        )
+        .run(status, outputHash, errorHash, now, now, runId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        `run.queue_${status}`,
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status, code, error },
+        now,
+        lease.generation || undefined,
+      );
+      return true;
+    });
   }
 
   private turnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
@@ -2720,7 +2782,8 @@ function workflowRunSelect(clause: string): string {
   return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
     d.workflow_name AS workflowName, r.workflow_ref AS workflowRef,
     r.workflow_source_hash AS workflowSourceHash, r.definition_digest AS definitionDigest,
-    r.input_hash AS inputHash, r.launch_options_hash AS launchOptionsHash,
+    r.input_hash AS inputHash, r.output_hash AS outputHash,
+    r.launch_options_hash AS launchOptionsHash,
     q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
     q.error_hash AS errorHash, b.origin_session_id AS originSessionId,
