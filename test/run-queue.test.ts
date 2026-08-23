@@ -5,7 +5,7 @@ import rawWorkflow from "../examples/workflows/echo.workflow.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
-import { createDefinitionSnapshot } from "../src/workflows/store.js";
+import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir } from "./helpers.js";
 
 const workflow = compileWorkflowDefinition(rawWorkflow);
@@ -46,12 +46,72 @@ describe("workflow run queue in canonical SQLite", () => {
       status: "queued",
       originSessionId: "session-1",
     });
+    const queuedState = new WorkflowRunStore(store.filePath, { state: store.state }).readRun(
+      "run-1",
+    )?.state;
+    expect(queuedState?.workflowSource).toEqual({
+      kind: "builtin",
+      id: "echo",
+      revision: "test",
+    });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({
       count: 1,
     });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM run_queue").get()).toEqual(
       { count: 1 },
     );
+    store.close();
+  });
+
+  it("preserves mounted source identity in an uninitialized reservation", async () => {
+    const { store } = await setup();
+    store.reserveWorkflowRun({
+      runId: "composed-run",
+      workflowName: "echo",
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [
+          {
+            mountPath: ["child"],
+            workflowName: "child",
+            source: { kind: "file", path: "/tmp/child.ts", hash: "child-hash" },
+          },
+        ],
+      },
+      definitionDigest: `sha256:${definitionDigest}`,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-mounted",
+      originSessionId: "session-mounted",
+    });
+    const queued = new WorkflowRunStore(store.filePath, { state: store.state }).readRun(
+      "composed-run",
+    )?.state;
+    expect(queued?.workflowSource).toEqual({ kind: "builtin", id: "echo", revision: "test" });
+    expect(queued?.workflowSources).toHaveLength(1);
+    expect(queued?.definitionDigest).toBe(`sha256:${definitionDigest}`);
+    store.close();
+  });
+
+  it("rejects an invalid source identity before reserving the run", async () => {
+    const { store } = await setup();
+    expect(() =>
+      store.reserveWorkflowRun({
+        runId: "invalid-source",
+        workflowName: "echo",
+        workflowSourceRef: "builtin:echo",
+        workflowSource: { unexpected: true },
+        definitionDigest,
+        definitionSnapshot: snapshot,
+        input: {},
+        runnerId: "session-invalid",
+        originSessionId: "session-invalid",
+      }),
+    ).toThrow("Stored workflow source identity is invalid");
+    expect(store.state.connection.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({
+      count: 0,
+    });
     store.close();
   });
 
