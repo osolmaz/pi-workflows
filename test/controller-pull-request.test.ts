@@ -103,7 +103,7 @@ describe("pull request controller example", () => {
 
 async function makeStore(): Promise<SqliteControllerStore> {
   const dir = await makeTempDir("pi-controller-pr");
-  const store = new SqliteControllerStore(path.join(dir, "controller.sqlite"));
+  const store = new SqliteControllerStore(path.join(dir, "state.sqlite"));
   stores.push(store);
   return store;
 }

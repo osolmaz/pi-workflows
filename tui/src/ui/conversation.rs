@@ -1,11 +1,11 @@
 //! Conversation pane: formats verbatim Pi session entries (see
-//! docs/run-bundles.md, `session/entries.ndjson`) into display lines, with
+//! docs/run-database runs.md, `session/entries.ndjson`) into display lines, with
 //! progressive reveal while replaying and highlighting of the entry range
 //! that belongs to the selected step.
 
-use crate::bundle::types::{ConversationRange, SessionEntryRecord, SessionEventRecord, StepRecord};
 use crate::format::sanitize_text;
 use crate::session::{SessionReplayIndex, TemporalMessage, TemporalSessionState};
+use crate::state::types::{ConversationRange, SessionEntryRecord, SessionEventRecord, StepRecord};
 use crate::theme::Palette;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -144,7 +144,7 @@ pub struct ConversationRenderOptions<'a> {
     pub through_event_seq: Option<u64>,
     pub width: usize,
     pub palette: &'a Palette,
-    pub bundle_dir: Option<&'a Path>,
+    pub run_dir: Option<&'a Path>,
     pub remote_artifacts: &'a HashMap<String, std::result::Result<String, String>>,
     pub selected_entry: Option<usize>,
     pub payload_expanded: bool,
@@ -162,7 +162,7 @@ pub fn conversation_lines(
         through_event_seq,
         width,
         palette,
-        bundle_dir,
+        run_dir,
         remote_artifacts,
         selected_entry,
         payload_expanded,
@@ -175,7 +175,7 @@ pub fn conversation_lines(
             TemporalRenderContext {
                 width,
                 palette,
-                bundle_dir,
+                run_dir,
                 remote_artifacts,
                 selected_entry,
                 payload_expanded,
@@ -254,7 +254,7 @@ pub fn conversation_lines(
 struct TemporalRenderContext<'a> {
     width: usize,
     palette: &'a Palette,
-    bundle_dir: Option<&'a Path>,
+    run_dir: Option<&'a Path>,
     remote_artifacts: &'a HashMap<String, std::result::Result<String, String>>,
     selected_entry: Option<usize>,
     payload_expanded: bool,
@@ -304,7 +304,7 @@ fn render_temporal_state(
         .map(|index| index.min(state.messages.len().saturating_sub(1)));
     let body_width = context.width.saturating_sub(3).max(20);
     let palette = context.palette;
-    let bundle_dir = context.bundle_dir;
+    let run_dir = context.run_dir;
     let remote_artifacts = context.remote_artifacts;
     let payload_expanded = context.payload_expanded;
     let mut lines = Vec::new();
@@ -323,7 +323,7 @@ fn render_temporal_state(
                 gutter,
                 body_width,
                 palette,
-                bundle_dir,
+                run_dir,
                 remote_artifacts,
             );
         }
@@ -353,7 +353,7 @@ fn render_temporal_state(
                     gutter,
                     &format!(
                         "args: {}",
-                        super::preview_value(args, bundle_dir, remote_artifacts)
+                        super::preview_value(args, run_dir, remote_artifacts)
                     ),
                     body_width,
                     Style::default().fg(palette.subtext),
@@ -366,7 +366,7 @@ fn render_temporal_state(
                     gutter,
                     &format!(
                         "result: {}",
-                        super::preview_value(result, bundle_dir, remote_artifacts)
+                        super::preview_value(result, run_dir, remote_artifacts)
                     ),
                     body_width,
                     Style::default().fg(palette.subtext),
@@ -376,7 +376,7 @@ fn render_temporal_state(
         }
         if selected == Some(index) && payload_expanded {
             let value = serde_json::to_value(message).unwrap_or(Value::Null);
-            let resolved = super::resolve_detail_value(&value, bundle_dir, remote_artifacts);
+            let resolved = super::resolve_detail_value(&value, run_dir, remote_artifacts);
             let raw = serde_json::to_string_pretty(&resolved).unwrap_or_default();
             for logical_line in raw.lines() {
                 push_body_line(
@@ -444,7 +444,7 @@ fn push_temporal_message(
     gutter: &str,
     body_width: usize,
     palette: &Palette,
-    bundle_dir: Option<&Path>,
+    run_dir: Option<&Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) {
     let role = sanitize_text(&message.role);
@@ -478,7 +478,7 @@ fn push_temporal_message(
         let value = block
             .value
             .as_ref()
-            .map(|value| super::preview_value(value, bundle_dir, remote_artifacts))
+            .map(|value| super::preview_value(value, run_dir, remote_artifacts))
             .filter(|value| !value.is_empty());
         let body = match (block.text.is_empty(), value) {
             (false, Some(value)) => format!("{label}{} {value}", sanitize_text(&block.text)),
@@ -545,7 +545,7 @@ mod tests {
                 through_event_seq,
                 width: 100,
                 palette: &Palette::catppuccin(),
-                bundle_dir: None,
+                run_dir: None,
                 remote_artifacts: &HashMap::new(),
                 selected_entry: None,
                 payload_expanded: false,
@@ -586,7 +586,7 @@ mod tests {
                 through_event_seq: None,
                 width: 80,
                 palette: &Palette::catppuccin(),
-                bundle_dir: None,
+                run_dir: None,
                 remote_artifacts: &HashMap::new(),
                 selected_entry: None,
                 payload_expanded: false,

@@ -2,8 +2,8 @@
 //! The background task treats subscriptions and artifact requests as desired
 //! state, so reconnects cannot replay stale commands.
 
-use crate::bundle::types::{DefinitionSnapshot, Manifest, RunState};
 use crate::protocol::{apply_patch, ClientMessage, ServerMessage, PROTOCOL_ID};
+use crate::state::types::{DefinitionSnapshot, Manifest, RunState};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;

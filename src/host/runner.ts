@@ -5,12 +5,12 @@ import { builtinWorkflowCatalog } from "../builtins/catalog.js";
 import {
   ControllerManager,
   loadDiscoveredControllers,
-  projectControllerStorePath,
   SqliteControllerStore,
   WorkflowEngineScheduler,
   type WorkflowRunQueueRecord,
 } from "../controllers/index.js";
 import type { JsonObject } from "../controllers/types.js";
+import { workflowStatePath } from "../state/database.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import {
   ClaimLostError,
@@ -19,8 +19,7 @@ import {
   WorkflowSourceChangedError,
 } from "../workflows/errors.js";
 import { resolveWorkflowRef, resolveWorkflowSource } from "../workflows/loader.js";
-import { migrateLegacyWorkflowSources } from "../workflows/migrate-sources.js";
-import { WorkflowRunStore, readRunBundle } from "../workflows/store.js";
+import { WorkflowRunStore } from "../workflows/store.js";
 import type { WorkflowDefinition } from "../workflows/types.js";
 import { HostProcessRegistry } from "./processes.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
@@ -32,10 +31,8 @@ const RUN_CLAIM_RENEW_MS = 10_000;
 export type WorkflowHostOptions = {
   cwd: string;
   runnerId?: string;
-  /** Explicit store path; defaults to the project-scoped controller store. */
-  storeFile?: string;
-  /** Explicit run-bundle root; defaults to the shared runs directory. */
-  runsDir?: string;
+  /** Explicit database path; defaults to the canonical workflow state database. */
+  databasePath?: string;
   registry?: HostProcessRegistry;
   piArgs?: string[];
   /** Extra environment for headless children (for example a test provider). */
@@ -49,7 +46,7 @@ export type WorkflowHostOptions = {
  * The always-on runner: claims parked workflow runs and reconciles durable
  * controllers without a Pi session. Conversation nodes execute in headless
  * `pi --mode rpc` children. Everything the host does is recoverable: claims
- * expire, bundles fence stale writers, and child processes are reaped by
+ * expire, SQLite leases fence stale writers, and child processes are reaped by
  * the next host.
  */
 export class WorkflowHost {
@@ -61,7 +58,6 @@ export class WorkflowHost {
   private manager: ControllerManager | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly activeRuns = new Map<string, Promise<void>>();
-  private readonly migrationBlockedRuns = new Set<string>();
   private readonly schedulerExecutors = new Map<WorkflowEngine, RpcStepExecutor>();
   /** Runs whose resume refused (edited source); skipped until a host restart. */
   private readonly skippedRuns = new Set<string>();
@@ -72,14 +68,11 @@ export class WorkflowHost {
   constructor(options: WorkflowHostOptions) {
     this.options = options;
     this.runnerId = options.runnerId ?? `host-${randomUUID().slice(0, 8)}`;
-    this.store = new SqliteControllerStore(
-      options.storeFile ?? projectControllerStorePath(options.cwd),
-    );
+    const databasePath = options.databasePath ?? workflowStatePath();
+    this.store = new SqliteControllerStore(databasePath, { projectPath: options.cwd });
     this.stateDir = path.dirname(this.store.filePath);
     this.registry = options.registry ?? new HostProcessRegistry(this.stateDir);
-    this.childRunStore = new WorkflowRunStore(
-      options.runsDir ?? process.env.PI_WORKFLOWS_RUNS_DIR ?? undefined,
-    );
+    this.childRunStore = new WorkflowRunStore(databasePath);
   }
 
   private log(message: string): void {
@@ -95,16 +88,6 @@ export class WorkflowHost {
     const reaped = this.registry.reapOrphans();
     if (reaped.length > 0) {
       this.log(`reaped ${reaped.length} orphaned headless session(s): ${reaped.join(", ")}`);
-    }
-
-    const migration = await migrateLegacyWorkflowSources({
-      catalog: builtinWorkflowCatalog,
-      store: this.childRunStore,
-      queue: this.store,
-    });
-    for (const blocked of migration.blocked) {
-      this.migrationBlockedRuns.add(blocked.runId);
-      this.log(`run ${blocked.runId} parked: ${blocked.reason}`);
     }
 
     const definitions = await loadDiscoveredControllers({ cwd: this.options.cwd });
@@ -192,7 +175,7 @@ export class WorkflowHost {
         runnerId: this.runnerId,
         claimToken: randomUUID(),
         leaseMs: RUN_CLAIM_LEASE_MS,
-        excludeRunIds: [...this.skippedRuns, ...this.migrationBlockedRuns],
+        excludeRunIds: [...this.skippedRuns],
       });
     } catch (error) {
       // Store contention or corruption must not kill the host's loop.
@@ -215,7 +198,7 @@ export class WorkflowHost {
     let workflow: WorkflowDefinition;
     let workflowSource: import("../workflows/types.js").WorkflowSource;
     try {
-      const bundle = await readRunBundle(this.childRunStore.runDirFor(runId));
+      const bundle = this.childRunStore.readRun(runId);
       if (bundle?.state.workflowSource === undefined) {
         throw new Error(`Workflow run ${runId} has no canonical workflow source`);
       }
@@ -260,8 +243,8 @@ export class WorkflowHost {
         throw new ClaimLostError(runId);
       }
     };
-    const fencedStore = new WorkflowRunStore(this.childRunStore.outputRoot, {
-      fenceProvider: () => fence,
+    const fencedStore = new WorkflowRunStore(this.childRunStore.databasePath, {
+      authorityProvider: () => store.workflowRunAuthority(runId, claimToken),
     });
     const executor = new RpcStepExecutor({
       cwd: this.options.cwd,
@@ -313,11 +296,13 @@ export class WorkflowHost {
       if (result.state.status === "running") {
         // Parked again mid-drain: leave it claimable for the next runner.
         this.store.parkWorkflowRun({ runId, claimToken });
+        this.store.settleRunEffect(runId, "run.park_queue");
         this.recordEvent(runId, record.workflowName, "parked", {});
         this.log(`parked ${record.workflowName} run ${runId}`);
         return;
       }
       this.store.completeWorkflowRun({ runId, claimToken });
+      this.store.settleRunEffect(runId, "run.settle_queue");
       this.recordEvent(runId, record.workflowName, result.state.status, {
         ...(result.state.error !== undefined ? { error: result.state.error } : {}),
         ...(result.state.waitingOn !== undefined ? { waitingOn: result.state.waitingOn } : {}),
@@ -365,17 +350,18 @@ export class WorkflowHost {
     let heldClaim = false;
     try {
       // The interruption write obeys the same fencing rule as every other
-      // bundle write: without a live claim, the current owner decides.
+      // state write: without a live claim, the current owner decides.
       heldClaim = this.store.verifyWorkflowRunClaim({ runId: record.runId, claimToken });
       if (heldClaim) {
         const bundle = await this.childRunStore.markRunInterrupted(record.runId, message);
         actualStatus = bundle?.state.status;
       }
     } catch {
-      // The bundle may be unreadable; the queue row still needs closure.
+      // The run state may be unreadable; the queue row still needs closure.
     }
     try {
       this.store.completeWorkflowRun({ runId: record.runId, claimToken });
+      this.store.settleRunEffect(record.runId, "run.settle_queue");
     } catch {
       // Best-effort.
     }
@@ -384,8 +370,8 @@ export class WorkflowHost {
       this.log(`run ${record.runId} continues under another runner`);
       return;
     }
-    // Report the bundle's real terminal state when the interruption was a
-    // no-op (the bundle was already waiting or completed), so the feed
+    // Report the run's real terminal state when the interruption was a
+    // no-op (the run was already waiting or completed), so the feed
     // stays truthful for sessions syncing from it.
     if (actualStatus !== undefined && actualStatus !== "failed") {
       this.recordEvent(record.runId, record.workflowName, actualStatus, {});

@@ -10,7 +10,7 @@ import {
 } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
-import { decisionPrompt, makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, decisionPrompt, ScriptedExecutor } from "./helpers.js";
 
 const choices = defineHumanChoices({
   continue: choice({ label: "Continue" }),
@@ -44,7 +44,7 @@ function engine(store: WorkflowRunStore) {
 
 describe("human decision engine continuation", () => {
   it("stores the request, waits, preserves input, and routes from the accepted answer", async () => {
-    const runs = await makeTempDir("human-decision-engine");
+    const runs = await makeStateDatabasePath("human-decision-engine");
     const store = new WorkflowRunStore(runs);
     const parent = await engine(store).run(
       workflow,
@@ -91,7 +91,7 @@ describe("human decision engine continuation", () => {
   });
 
   it("rejects a forged accepted object that is not in the durable decision store", async () => {
-    const runs = await makeTempDir("human-decision-engine-forged");
+    const runs = await makeStateDatabasePath("human-decision-engine-forged");
     const store = new WorkflowRunStore(runs);
     const parent = await engine(store).run(
       workflow,
@@ -125,7 +125,7 @@ describe("human decision engine continuation", () => {
   });
 
   it("rejects a continuation without the verified accepted decision", async () => {
-    const runs = await makeTempDir("human-decision-engine-reject");
+    const runs = await makeStateDatabasePath("human-decision-engine-reject");
     const store = new WorkflowRunStore(runs);
     await engine(store).run(workflow, { audience: "operator" }, { runId: "human-parent-reject" });
     await expect(engine(store).continueRun(workflow, "human-parent-reject", {})).rejects.toThrow(
@@ -134,7 +134,7 @@ describe("human decision engine continuation", () => {
   });
 
   it("rejects an accepted answer for a different request revision", async () => {
-    const runs = await makeTempDir("human-decision-engine-stale");
+    const runs = await makeStateDatabasePath("human-decision-engine-stale");
     const store = new WorkflowRunStore(runs);
     const parent = await engine(store).run(
       workflow,

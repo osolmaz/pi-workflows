@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import planChangeWorkflow from "../src/builtins/plan-change.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import type { HumanDecisionRequest } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function planningExecutor(plan: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
@@ -56,7 +56,7 @@ describe("plan-change workflow", () => {
 
   it("rejects unknown input fields before applying approval defaults", async () => {
     const engine = new WorkflowEngine({
-      outputRoot: await makeTempDir("plan-change-invalid"),
+      databasePath: await makeStateDatabasePath("plan-change-invalid"),
       executor: planningExecutor({ summary: "plan", steps: ["one"] }),
     });
     await expect(
@@ -69,7 +69,7 @@ describe("plan-change workflow", () => {
 
   it("uses the shared skip policy without creating a human decision", async () => {
     const result = await new WorkflowEngine({
-      outputRoot: await makeTempDir("plan-change-skip"),
+      databasePath: await makeStateDatabasePath("plan-change-skip"),
       executor: planningExecutor({ summary: "plan", steps: ["one"] }),
     }).run(planChangeWorkflow, {
       task: "change the implementation",
@@ -87,7 +87,7 @@ describe("plan-change workflow", () => {
 
   it("uses the default autonomous policy for a new plan", async () => {
     const result = await new WorkflowEngine({
-      outputRoot: await makeTempDir("plan-change-auto"),
+      databasePath: await makeStateDatabasePath("plan-change-auto"),
       executor: planningExecutor({ summary: "plan", steps: ["one"] }),
     }).run(planChangeWorkflow, { task: "change the implementation" });
     expect(result.state.status).toBe("waiting");
@@ -102,7 +102,7 @@ describe("plan-change workflow", () => {
   it("blocks an unchanged plan before documentation or approval", async () => {
     const plan = { summary: "same", steps: ["one"] };
     const result = await new WorkflowEngine({
-      outputRoot: await makeTempDir("plan-change-unchanged"),
+      databasePath: await makeStateDatabasePath("plan-change-unchanged"),
       executor: planningExecutor(plan),
     }).run(planChangeWorkflow, {
       task: "change the implementation",

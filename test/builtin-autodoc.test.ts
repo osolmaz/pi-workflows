@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import autodocWorkflow from "../src/builtins/autodoc.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function run(executor: ScriptedExecutor, input: unknown) {
   return await new WorkflowEngine({
     executor,
-    outputRoot: await makeTempDir("builtin-autodoc"),
+    databasePath: await makeStateDatabasePath("builtin-autodoc"),
   }).run(autodocWorkflow, input);
 }
 

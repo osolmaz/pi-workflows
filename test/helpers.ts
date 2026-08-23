@@ -1,15 +1,120 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { canonicalJson } from "../src/state/json.js";
+import { resourceIdFor } from "../src/state/mutation.js";
+import type { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import type {
   AgentStepExecutor,
   AgentStepRequest,
   AgentStepSubmission,
   HumanDecisionPrompt,
+  HumanDecisionRequest,
 } from "../src/workflows/types.js";
 
 export async function makeTempDir(prefix: string): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
+}
+
+export async function makeStateDatabasePath(prefix: string): Promise<string> {
+  return path.join(await makeTempDir(prefix), "state.sqlite");
+}
+
+export async function seedHumanDecisionRequest(
+  store: HumanDecisionStore,
+  request: HumanDecisionRequest,
+): Promise<void> {
+  const state = store.state;
+  if (
+    state.connection.prepare("SELECT 1 FROM runs WHERE run_id = ?").get(request.runId) === undefined
+  ) {
+    state.transaction(() => {
+      const now = Date.parse(request.createdAt);
+      const runResourceId = resourceIdFor("run", request.runId);
+      const snapshot = {
+        schema: "pi-workflows.definition-snapshot.v1",
+        name: request.workflowName,
+        startAt: request.nodeId,
+        nodes: { [request.nodeId]: { nodeType: "checkpoint" } },
+        edges: [],
+      };
+      const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest();
+      const definitionHash = state.putJson(snapshot, now);
+      const inputHash = state.putJson({}, now);
+      const sourceHash = state.putJson(
+        { kind: "file", path: `inline:${request.workflowName}`, hash: "test" },
+        now,
+      );
+      const launchHash = state.putJson({}, now);
+      const runState = {
+        schema: "pi-workflows.run-state.v1",
+        traceSeq: 1,
+        runId: request.runId,
+        workflowName: request.workflowName,
+        startedAt: request.createdAt,
+        updatedAt: request.createdAt,
+        finishedAt: request.createdAt,
+        status: "waiting",
+        input: {},
+        outputs: {},
+        results: {},
+        steps: [],
+        waitingOn: request.nodeId,
+        finalOutput: request,
+      };
+      const stateHash = state.putJson(runState, now);
+      state.connection
+        .prepare(
+          `INSERT INTO workflow_definitions(
+             definition_digest, workflow_name, definition_hash, created_at
+           ) VALUES (?, ?, ?, ?)`,
+        )
+        .run(definitionDigest, request.workflowName, definitionHash, now);
+      state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'run', ?, 1, ?, ?)`,
+        )
+        .run(runResourceId, request.runId, now, now);
+      state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(runResourceId);
+      state.connection
+        .prepare(
+          `INSERT INTO runs(
+             run_id, resource_id, definition_digest, workflow_ref,
+             workflow_source_hash, launch_options_hash,
+             source_type, source_ref, source_revision, status, paused,
+             input_hash, output_hash, created_at, updated_at, finished_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'file', ?, 'test', 'waiting', 0, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          request.runId,
+          runResourceId,
+          definitionDigest,
+          request.workflowName,
+          sourceHash,
+          launchHash,
+          `inline:${request.workflowName}`,
+          inputHash,
+          stateHash,
+          now,
+          now,
+          now,
+        );
+      state.connection
+        .prepare(
+          `INSERT INTO node_attempts(
+             attempt_id, run_id, node_id, attempt_number, node_type, status,
+             started_at, created_at, updated_at
+           ) VALUES (?, ?, ?, 1, 'checkpoint', 'waiting', ?, ?, ?)`,
+        )
+        .run(request.attemptId, request.runId, request.nodeId, now, now, now);
+    });
+  }
+  await store.createRequest(request);
 }
 
 export function decisionPrompt(

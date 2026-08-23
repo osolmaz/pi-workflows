@@ -3,10 +3,10 @@ import fs, { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SqliteControllerStore } from "../controllers/sqlite.js";
-import { projectControllerStoreBaseDir } from "../controllers/store.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
 import { sanitizeText } from "../render/ansi.js";
-import { listRunBundles, readRunBundle, workflowRunsBaseDir } from "../workflows/store.js";
+import { StateDatabase } from "../state/database.js";
+import { WorkflowRunStore, workflowStateDatabasePath } from "../workflows/store.js";
 import {
   formatDuration,
   renderRunDetailLines,
@@ -19,28 +19,17 @@ import { runViewer } from "./tui.js";
 const USAGE = `pi-workflows — workflow runs and controller resources
 
 Usage:
-  pi-workflows view [runId] [--dir <runsDir>] [--once]
-  pi-workflows runs [--dir <runsDir>]
-  pi-workflows controllers [--controller-dir <dir>]
-  pi-workflows controller <controller> <key> [--controller-dir <dir>]
+  pi-workflows view [runId] [--once]
+  pi-workflows runs
+  pi-workflows controllers
+  pi-workflows controller <controller> <key>
+  pi-workflows state status|verify
+  pi-workflows state backup <destination>
   pi-workflows host [--project <dir>] [-- <extra pi args>]
   pi-workflows herdr sync [--json]
   pi-workflows herdr setup [--json]
 
-Commands:
-  view          Open the live workflow TUI. With --once, print a snapshot.
-  runs          List recent workflow runs.
-  controllers   List durable controller resources.
-  controller    Show one resource, its effects, child workflows, and events.
-  host          Run the always-on workflow host in the foreground.
-  herdr         Synchronize the bundled Herdr plugin. setup is an alias for sync.
-
-Options:
-  --dir <runsDir>          Runs directory (default: ~/.pi/agent/workflows/runs)
-  --controller-dir <dir>  Controller directory (default: project-scoped local store)
-  --once                   Render once without the interactive TUI
-  --project <dir>          Project directory for the host (default: cwd)
-  --json                   Print a versioned JSON result for herdr sync
+All commands use ~/.pi/agent/workflows/state.sqlite.
 `;
 
 export type CliArgs = {
@@ -49,8 +38,8 @@ export type CliArgs = {
   controllerName?: string;
   resourceKey?: string;
   herdrAction?: string;
-  dir: string;
-  controllerDir: string;
+  stateAction?: "status" | "verify" | "backup";
+  backupDestination?: string;
   once: boolean;
   json: boolean;
   project?: string | undefined;
@@ -60,123 +49,114 @@ export type CliArgs = {
 export function parseCliArgs(argv: string[]): CliArgs {
   const args = [...argv];
   const command = args[0] && !args[0].startsWith("-") ? (args.shift() as string) : "view";
-  let dir = workflowRunsBaseDir();
-  let controllerDir = projectControllerStoreBaseDir(process.cwd());
   let once = false;
   let json = false;
-  const positionals: string[] = [];
   let project: string | undefined;
+  const positionals: string[] = [];
   const piArgs: string[] = [];
 
   while (args.length > 0) {
     const arg = args.shift() as string;
-    if (arg === "--dir") {
-      dir = requiredValue(args, "--dir");
-    } else if (arg === "--controller-dir") {
-      controllerDir = requiredValue(args, "--controller-dir");
-    } else if (arg === "--project") {
-      project = requiredValue(args, "--project");
-    } else if (arg === "--once") {
-      once = true;
-    } else if (arg === "--json") {
-      json = true;
-    } else if (arg === "--help" || arg === "-h") {
-      return { command: "help", dir, controllerDir, once, json };
-    } else if (arg === "--") {
-      piArgs.push(...args.splice(0));
-    } else if (arg.startsWith("-")) {
-      throw new Error(`Unknown argument: ${arg}`);
-    } else {
-      positionals.push(arg);
-    }
+    if (arg === "--project") project = requiredValue(args, "--project");
+    else if (arg === "--once") once = true;
+    else if (arg === "--json") json = true;
+    else if (arg === "--help" || arg === "-h") return { command: "help", once, json };
+    else if (arg === "--") piArgs.push(...args.splice(0));
+    else if (arg.startsWith("-")) throw new Error(`Unknown argument: ${arg}`);
+    else positionals.push(arg);
   }
 
-  if (command !== "herdr" && json) {
-    throw new Error("--json is available only for herdr sync");
-  }
-
-  if (command === "host") {
-    return { command, dir, controllerDir, once, json, project, piArgs };
-  }
-
+  if (command !== "herdr" && json) throw new Error("--json is available only for herdr sync");
+  if (command === "host") return { command, once, json, project, piArgs };
   if (command === "controller") {
-    if (positionals.length !== 2) {
-      throw new Error("controller requires <controller> and <key>");
-    }
+    if (positionals.length !== 2) throw new Error("controller requires <controller> and <key>");
     return {
       command,
       controllerName: positionals[0] as string,
       resourceKey: positionals[1] as string,
-      dir,
-      controllerDir,
       once,
       json,
     };
   }
+  if (command === "state") {
+    const action = positionals[0];
+    if (action !== "status" && action !== "verify" && action !== "backup") {
+      throw new Error("state requires status, verify, or backup");
+    }
+    if (action === "backup") {
+      if (positionals.length !== 2) throw new Error("state backup requires <destination>");
+      return {
+        command,
+        stateAction: action,
+        backupDestination: positionals[1] as string,
+        once,
+        json,
+      };
+    }
+    if (positionals.length !== 1) throw new Error(`state ${action} accepts no other arguments`);
+    return { command, stateAction: action, once, json };
+  }
   if (command === "herdr") {
-    if (positionals.length !== 1 || (positionals[0] !== "sync" && positionals[0] !== "setup")) {
+    if (positionals.length !== 1 || !["sync", "setup"].includes(positionals[0] as string)) {
       throw new Error("herdr requires the sync action");
     }
-    return { command, herdrAction: positionals[0], dir, controllerDir, once, json };
+    return { command, herdrAction: positionals[0] as string, once, json };
   }
-  if (positionals.length > 1) {
-    throw new Error(`Unexpected argument: ${positionals[1]}`);
-  }
+  if (positionals.length > 1) throw new Error(`Unexpected argument: ${positionals[1]}`);
   return {
     command,
-    ...(positionals[0] !== undefined ? { runId: positionals[0] } : {}),
-    dir,
-    controllerDir,
+    ...(positionals[0] === undefined ? {} : { runId: positionals[0] }),
     once,
     json,
   };
 }
 
-async function printRuns(dir: string): Promise<void> {
-  const bundles = await listRunBundles(dir);
-  if (bundles.length === 0) {
-    process.stdout.write(`No workflow runs found in ${dir}\n`);
-    return;
-  }
-  for (const bundle of bundles) {
-    const state = bundle.state;
-    const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
-    process.stdout.write(
-      `${statusLabel(state.status)}  ${sanitizeText(state.workflowName)}${title}  ${state.runId}  ${formatDuration(
-        runElapsedMs(state),
-      )}\n`,
-    );
+function printRuns(databasePath: string): void {
+  const store = new WorkflowRunStore(databasePath, { readOnly: true });
+  try {
+    const runs = store.listRuns();
+    if (runs.length === 0) {
+      process.stdout.write("No workflow runs found.\n");
+      return;
+    }
+    for (const run of runs) {
+      const state = run.state;
+      const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
+      process.stdout.write(
+        `${statusLabel(state.status)}  ${sanitizeText(state.workflowName)}${title}  ${state.runId}  ${formatDuration(runElapsedMs(state))}\n`,
+      );
+    }
+  } finally {
+    store.close();
   }
 }
 
-async function printOnce(dir: string, runId: string | undefined): Promise<void> {
-  const bundles = await listRunBundles(dir);
-  const size = { width: process.stdout.columns ?? 100, height: 1_000 };
-  if (runId === undefined) {
-    process.stdout.write(`${renderRunListLines(bundles, 0, size).join("\n")}\n`);
-    return;
+function printOnce(databasePath: string, runId: string | undefined): void {
+  const store = new WorkflowRunStore(databasePath, { readOnly: true });
+  try {
+    const size = { width: process.stdout.columns ?? 100, height: 1_000 };
+    if (runId === undefined) {
+      process.stdout.write(`${renderRunListLines(store.listRuns(), 0, size).join("\n")}\n`);
+      return;
+    }
+    const run = store.readRun(runId, { includeTrace: true });
+    if (run === null) throw new Error(`Run not found: ${runId}`);
+    process.stdout.write(`${renderRunDetailLines(run, size).join("\n")}\n`);
+  } finally {
+    store.close();
   }
-  const match = bundles.find((bundle) => bundle.state.runId === runId);
-  if (!match) {
-    throw new Error(`Run not found: ${runId}`);
-  }
-  const bundle = await readRunBundle(match.runDir, { includeTrace: true });
-  if (!bundle) {
-    throw new Error(`Run bundle unreadable: ${match.runDir}`);
-  }
-  process.stdout.write(`${renderRunDetailLines(bundle, size).join("\n")}\n`);
 }
 
-function printControllers(controllerDir: string): void {
-  const store = openControllerStore(controllerDir);
+function printControllers(databasePath: string): void {
+  const store = openControllerStore(databasePath);
   if (store === undefined) {
-    process.stdout.write(`No controller resources found in ${controllerDir}\n`);
+    process.stdout.write("No controller resources found.\n");
     return;
   }
   try {
     const resources = store.listResources();
     if (resources.length === 0) {
-      process.stdout.write(`No controller resources found in ${controllerDir}\n`);
+      process.stdout.write("No controller resources found.\n");
       return;
     }
     for (const resource of resources) {
@@ -196,29 +176,31 @@ function printControllers(controllerDir: string): void {
   }
 }
 
-function printController(controllerDir: string, controller: string, key: string): void {
-  const store = openControllerStore(controllerDir);
-  if (store === undefined) {
-    throw new Error(`Controller store not found in ${controllerDir}`);
-  }
+function printController(databasePath: string, controller: string, key: string): void {
+  const store = openControllerStore(databasePath);
+  if (store === undefined) throw new Error("Controller state database not found");
   try {
     const resource = store.getResource({ controller, key });
-    if (resource === undefined) {
+    if (resource === undefined)
       throw new Error(`Controller resource not found: ${controller}/${key}`);
-    }
-    const value = {
-      resource,
-      effects: store.listEffects(resource.metadata.uid),
-      workflows: store.listWorkflows(resource.metadata.uid),
-      events: store.listEvents({ controller, key, limit: 50 }),
-    };
-    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          resource,
+          effects: store.listEffects(resource.metadata.uid),
+          workflows: store.listWorkflows(resource.metadata.uid),
+          events: store.listEvents({ controller, key, limit: 50 }),
+        },
+        null,
+        2,
+      )}\n`,
+    );
   } finally {
     store.close();
   }
 }
 
-export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   let args: CliArgs;
   try {
     args = parseCliArgs(argv);
@@ -226,42 +208,38 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
     return 2;
   }
+  if (args.command === "help") {
+    process.stdout.write(USAGE);
+    return 0;
+  }
 
+  const databasePath = workflowStateDatabasePath();
   try {
-    if (args.command === "help") {
-      process.stdout.write(USAGE);
-      return 0;
-    }
     if (args.command === "runs") {
-      await printRuns(args.dir);
+      printRuns(databasePath);
       return 0;
     }
     if (args.command === "controllers") {
-      printControllers(args.controllerDir);
+      printControllers(databasePath);
       return 0;
     }
     if (args.command === "controller") {
-      printController(
-        args.controllerDir,
-        args.controllerName as string,
-        args.resourceKey as string,
-      );
+      printController(databasePath, args.controllerName as string, args.resourceKey as string);
       return 0;
     }
-    if (args.command === "host") {
-      return await runHost(args.project ?? process.cwd(), args.piArgs);
+    if (args.command === "state") {
+      await runStateCommand(databasePath, args);
+      return 0;
     }
+    if (args.command === "host") return await runHost(args.project ?? process.cwd(), args.piArgs);
     if (args.command === "herdr") {
       const result = syncHerdrPlugin(packageRoot());
       process.stdout.write(args.json ? `${JSON.stringify(result)}\n` : `${result.message}\n`);
       return 0;
     }
     if (args.command === "view") {
-      if (args.once || !process.stdout.isTTY) {
-        await printOnce(args.dir, args.runId);
-        return 0;
-      }
-      await runViewer({ runsDir: args.dir, runId: args.runId });
+      if (args.once || !process.stdout.isTTY) printOnce(databasePath, args.runId);
+      else await runViewer({ databasePath, runId: args.runId });
       return 0;
     }
     process.stderr.write(`Unknown command: ${args.command}\n\n${USAGE}`);
@@ -269,6 +247,42 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
+  }
+}
+
+async function runStateCommand(databasePath: string, args: CliArgs): Promise<void> {
+  if (args.stateAction === "backup") {
+    const state = new StateDatabase({ filePath: databasePath });
+    try {
+      await state.backup(path.resolve(args.backupDestination as string));
+      process.stdout.write(`Backup verified: ${path.resolve(args.backupDestination as string)}\n`);
+    } finally {
+      state.close();
+    }
+    return;
+  }
+  const state = new StateDatabase({ filePath: databasePath, mode: "read-only" });
+  try {
+    state.integrityCheck();
+    if (args.stateAction === "verify") {
+      process.stdout.write("SQLite state is valid.\n");
+      return;
+    }
+    const counts = state.connection
+      .prepare(
+        `SELECT
+           (SELECT count(*) FROM runs) AS runs,
+           (SELECT count(*) FROM controller_resources) AS controllers,
+           (SELECT count(*) FROM human_decisions) AS decisions,
+           (SELECT count(*) FROM effects WHERE status IN ('pending', 'applying', 'ambiguous')) AS unsettledEffects,
+           (SELECT count(*) FROM leases WHERE owner_id IS NOT NULL) AS activeLeases`,
+      )
+      .get();
+    process.stdout.write(
+      `Database: ${databasePath}\nSize: ${fs.statSync(databasePath).size} bytes\n${JSON.stringify(counts)}\n`,
+    );
+  } finally {
+    state.close();
   }
 }
 
@@ -281,21 +295,16 @@ async function runHost(project: string, piArgs: string[] | undefined): Promise<n
   });
   await host.start();
   await new Promise<void>((resolve) => {
-    const shutdown = () => {
-      void host.stop().then(() => resolve());
-    };
+    const shutdown = () => void host.stop().then(resolve);
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
   });
   return 0;
 }
 
-function openControllerStore(controllerDir: string): SqliteControllerStore | undefined {
-  const file = path.join(controllerDir, "controller.sqlite");
-  if (!fs.existsSync(file)) {
-    return undefined;
-  }
-  return new SqliteControllerStore(file, { readOnly: true });
+function openControllerStore(databasePath: string): SqliteControllerStore | undefined {
+  if (!fs.existsSync(databasePath)) return undefined;
+  return new SqliteControllerStore(databasePath, { readOnly: true });
 }
 
 function packageRoot(): string {
@@ -304,14 +313,12 @@ function packageRoot(): string {
 
 function requiredValue(args: string[], option: string): string {
   const value = args.shift();
-  if (!value) {
-    throw new Error(`${option} requires a path`);
-  }
+  if (!value) throw new Error(`${option} requires a path`);
   return value;
 }
 
 const entryPath = process.argv[1];
-const resolvedEntry = entryPath !== undefined ? realpathSyncSafe(entryPath) : undefined;
+const resolvedEntry = entryPath === undefined ? undefined : realpathSyncSafe(entryPath);
 if (resolvedEntry !== undefined && import.meta.url === pathToFileURL(resolvedEntry).href) {
   main().then((code) => {
     process.exitCode = code;

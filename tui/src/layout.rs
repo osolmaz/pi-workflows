@@ -4,7 +4,7 @@
 //! against the golden fixtures in `fixtures/layout/` — any divergence is a
 //! bug in this port, not a stylistic choice.
 
-use crate::bundle::types::{DefinitionSnapshot, EdgeDef};
+use crate::state::types::{DefinitionSnapshot, EdgeDef};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -78,7 +78,7 @@ pub fn expand_edges(snapshot: &DefinitionSnapshot) -> Vec<GraphEdge> {
                         edge_id: format!("{from}->{target}#{index}.{branch}"),
                         from: from.clone(),
                         to: target,
-                        // Case keys are author-controlled text from the bundle;
+                        // Case keys are author-controlled text from the run;
                         // scrub them so drawing a label can't emit escapes.
                         label: Some(crate::format::sanitize_text(case_key)),
                         is_back_edge: false,

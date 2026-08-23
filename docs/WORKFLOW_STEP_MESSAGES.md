@@ -105,7 +105,7 @@ The two message types must not share delivery code that can accidentally change 
 
 New interactive step deliveries replace `sendUserMessage` with `sendMessage`. Existing session entries remain readable and are not rewritten.
 
-The custom message is a normal documented Pi session message. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. Run bundles keep the existing full prompt and structured step contract, so this change does not alter the run-bundle schema.
+The custom message is a normal documented Pi session message. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores the existing full prompt and structured step contract in content-addressed blobs, so this behavior does not add another durable format.
 
 If the renderer is unavailable, Pi still retains the custom message content. pi-workflows does not add a fallback path that sends a duplicate user message.
 

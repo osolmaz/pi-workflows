@@ -238,7 +238,7 @@ When implementation ships, update:
 - `docs/WORKFLOW_COMPOSITION.md` for the shared plan-change workflow;
 - `docs/workflows.md` for the public API and Autoimplement behavior;
 - `docs/MONITOR.md` for repair-plan decisions;
-- `docs/run-bundles.md` for request, resolution, continuation, and snapshot fields;
+- `docs/SQLITE_STATE.md` for request, resolution, continuation, and snapshot fields;
 - Autoimplement and Monitor skill text and examples; and
 - package examples and generated layout fixtures affected by the graph change.
 

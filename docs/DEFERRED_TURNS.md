@@ -246,7 +246,7 @@ Store leases prevent concurrent processes from sending the same resolution. Bran
 
 ## Claim transfer
 
-Claim loss stops the old runner's work and all fenced run-bundle writes. The intent stays pending and fallback-ineligible while another runner can resume the run.
+Claim loss stops the old runner's work and all fenced SQLite writes. The intent stays pending and fallback-ineligible while another runner can resume the run.
 
 The new runner's next workflow prompt can resolve the intent. If durable state later proves a terminal outcome with no natural successor, terminal handling makes the intent eligible for fallback to its target session.
 
@@ -281,7 +281,7 @@ This is an alpha hard cutover.
 - Add `workflow_turn_intents` to the existing database.
 - Remove the launch-trigger runtime path.
 - Add no v2 schema, compatibility reader, dual write, alias, or feature flag.
-- Keep historical terminal run bundles readable because their contract does not change.
+- Keep historical terminal SQLite runs readable because their contract does not change.
 
 ## Conformance
 

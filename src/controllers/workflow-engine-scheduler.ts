@@ -1,5 +1,5 @@
 import { WorkflowEngine } from "../workflows/engine.js";
-import { readLastTraceEvent, readRunBundle, type WorkflowRunStore } from "../workflows/store.js";
+import type { WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowDefinition,
   WorkflowRunResult,
@@ -47,17 +47,14 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       return { state: "running", runId: active.runId };
     }
 
-    const bundle = await readRunBundle(this.options.store.runDirFor(request.runId));
+    const bundle = this.options.store.readRun(request.runId, { includeTrace: true });
     if (bundle !== null) {
       const recovered =
         bundle.state.status === "running"
           ? await this.options.store.markRunInterrupted(request.runId)
           : bundle;
       if (recovered !== null) {
-        const lastTraceEvent = await readLastTraceEvent(
-          recovered.runDir,
-          recovered.manifest.paths.trace,
-        );
+        const lastTraceEvent = recovered.traceEvents?.at(-1) ?? null;
         return resultFromStatus(
           recovered.state.status,
           request.runId,
@@ -68,7 +65,6 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       return { state: "pending" };
     }
 
-    await this.options.store.quarantineIncompleteRun(request.runId);
     const resolved = await this.options.resolveWorkflow(request.workflow);
     if (signal.aborted) {
       throw signal.reason ?? new Error("Workflow scheduling aborted");
@@ -112,7 +108,7 @@ function callCompletion(
   try {
     callback(result);
   } catch {
-    // A later reconciliation recovers completion from the immutable run bundle.
+    // A later reconciliation recovers completion from the immutable run event.
   }
 }
 

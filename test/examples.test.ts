@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { loadWorkflowFile } from "../src/workflows/loader.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 /**
  * Every workflow shipped in examples/ must load, validate, and — for the
@@ -65,7 +65,7 @@ describe("shipped examples", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoresearch"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoresearch"),
     });
 
     const { state } = await engine.run(workflow, { goal: "separate group A from group B" });

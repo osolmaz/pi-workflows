@@ -1,12 +1,10 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { SessionRecorder } from "../src/extension/recorder.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowRunStore, createRunId } from "../src/workflows/store.js";
 import type { WorkflowRunState, WorkflowSessionEventRecord } from "../src/workflows/types.js";
-import { makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath } from "./helpers.js";
 
 type FakeEntry = {
   id: string;
@@ -28,15 +26,15 @@ function makeCtx(branch: FakeEntry[]): ExtensionContext {
   } as unknown as ExtensionContext;
 }
 
-async function makeRun(): Promise<{ store: WorkflowRunStore; runDir: string; runId: string }> {
-  const outputRoot = await makeTempDir("pi-workflows-recorder");
-  const store = new WorkflowRunStore(outputRoot);
+async function makeRun(): Promise<{ store: WorkflowRunStore; runId: string }> {
+  const databasePath = await makeStateDatabasePath("pi-workflows-recorder");
+  const store = new WorkflowRunStore(databasePath);
   return await makeRunWithStore(store);
 }
 
 async function makeRunWithStore(
   store: WorkflowRunStore,
-): Promise<{ store: WorkflowRunStore; runDir: string; runId: string }> {
+): Promise<{ store: WorkflowRunStore; runId: string }> {
   const workflow = defineWorkflow({
     name: "demo",
     startAt: "one",
@@ -58,37 +56,39 @@ async function makeRunWithStore(
     results: {},
     steps: [],
   };
-  const runDir = await store.initializeRunBundle(workflow, state);
-  return { store, runDir, runId };
+  await store.initializeRun(workflow, state);
+  storesByRun.set(runId, store);
+  return { store, runId };
 }
 
-async function readEntries(runDir: string): Promise<Array<{ seq: number; entry: FakeEntry }>> {
-  const raw = await fs.readFile(path.join(runDir, "session/entries.ndjson"), "utf8");
-  return raw
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as { seq: number; entry: FakeEntry });
+const storesByRun = new Map<string, WorkflowRunStore>();
+
+async function readEntries(runId: string): Promise<Array<{ seq: number; entry: FakeEntry }>> {
+  return (storesByRun.get(runId)?.readRun(runId)?.sessionEntries ?? []).map((record) => ({
+    seq: record.seq,
+    entry: record.entry as FakeEntry,
+  }));
 }
 
-async function readEvents(runDir: string): Promise<Array<Record<string, unknown>>> {
-  const raw = await fs.readFile(path.join(runDir, "session/events.ndjson"), "utf8");
-  return raw
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+async function readEvents(runId: string): Promise<Array<Record<string, unknown>>> {
+  return (storesByRun.get(runId)?.readRun(runId)?.sessionEvents ?? []) as Array<
+    Record<string, unknown>
+  >;
+}
+
+function readCapture(runId: string) {
+  return storesByRun.get(runId)?.readRun(runId)?.sessionCapture;
 }
 
 describe("SessionRecorder", () => {
   it("binds once and skips entries that predate the run", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [{ id: "e1", type: "message" }];
     await recorder.bind(makeCtx(branch));
     await recorder.bind(makeCtx(branch));
 
-    const binding = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/binding.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const binding = store.readRun(runId)?.sessionBinding as Record<string, unknown>;
     expect(binding).toMatchObject({
       schema: "pi-workflows.session-binding.v1",
       runId,
@@ -99,12 +99,12 @@ describe("SessionRecorder", () => {
     // e1 existed before the run started, so it is not part of the record.
     branch.push({ id: "e2", type: "message" });
     await recorder.record(makeCtx(branch));
-    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["e2"]);
+    expect((await readEntries(runId)).map((record) => record.entry.id)).toEqual(["e2"]);
   });
 
   it("records growing branches verbatim with sequential seq", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     await recorder.bind(makeCtx(branch));
 
@@ -116,7 +116,7 @@ describe("SessionRecorder", () => {
     // No growth: recording again adds nothing.
     await recorder.record(makeCtx(branch));
 
-    const records = await readEntries(runDir);
+    const records = await readEntries(runId);
     expect(records.map((record) => [record.seq, record.entry.id])).toEqual([
       [1, "e1"],
       [2, "e2"],
@@ -126,8 +126,8 @@ describe("SessionRecorder", () => {
   });
 
   it("brackets attempts with marks", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     await recorder.bind(makeCtx(branch));
 
@@ -145,8 +145,8 @@ describe("SessionRecorder", () => {
   });
 
   it("stops recording: pending and later flushes never touch the bundle", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     await recorder.bind(makeCtx(branch));
 
@@ -161,12 +161,12 @@ describe("SessionRecorder", () => {
     branch.push({ id: "e3", type: "message" });
     await recorder.record(makeCtx(branch));
 
-    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["e1", "e2"]);
+    expect((await readEntries(runId)).map((record) => record.entry.id)).toEqual(["e1", "e2"]);
   });
 
   it("records normalized temporal events with stable ownership and entry linkage", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     const ctx = makeCtx(branch);
     await recorder.bind(ctx);
@@ -237,7 +237,7 @@ describe("SessionRecorder", () => {
     await finishing;
     expect(finished).toBe(true);
 
-    const events = await readEvents(runDir);
+    const events = await readEvents(runId);
     expect(events.map((event) => event.seq)).toEqual(
       Array.from({ length: events.length }, (_, index) => index + 1),
     );
@@ -262,9 +262,7 @@ describe("SessionRecorder", () => {
       entryId: "entry-1",
     });
 
-    const capture = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({
       schema: "pi-workflows.session-capture.v1",
       eventSchema: "pi-workflows.session-event.v1",
@@ -276,8 +274,8 @@ describe("SessionRecorder", () => {
   });
 
   it("does not attribute ordinary turns after an attempt settles", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const ctx = makeCtx([]);
     await recorder.bind(ctx);
     const contract = { runId, workflowName: "demo", nodeId: "one", attemptId: "a1" };
@@ -292,7 +290,7 @@ describe("SessionRecorder", () => {
     await recorder.handleTurnEnd({ turnIndex: 2, message: { role: "assistant" } }, ctx);
     await recorder.stop();
 
-    expect((await readEvents(runDir)).map((event) => event.type)).toEqual([
+    expect((await readEvents(runId)).map((event) => event.type)).toEqual([
       "turn_started",
       "turn_finished",
       "turn_started",
@@ -303,8 +301,8 @@ describe("SessionRecorder", () => {
   it("fails capture instead of holding terminal persistence on an unfinished turn", async () => {
     vi.useFakeTimers();
     try {
-      const { store, runDir, runId } = await makeRun();
-      const recorder = new SessionRecorder(store, runDir, runId);
+      const { store, runId } = await makeRun();
+      const recorder = new SessionRecorder(store, runId);
       await recorder.bind(makeCtx([]));
       recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
       recorder.handleTurnStart({ turnIndex: 0 });
@@ -312,9 +310,7 @@ describe("SessionRecorder", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       await finishing;
 
-      const capture = JSON.parse(
-        await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-      ) as Record<string, unknown>;
+      const capture = readCapture(runId) as Record<string, unknown>;
       expect(capture).toMatchObject({
         status: "failed",
         failure: { code: "turn_settle_timeout" },
@@ -330,10 +326,10 @@ describe("SessionRecorder", () => {
         throw new Error("injected entry failure");
       }
     }
-    const outputRoot = await makeTempDir("pi-workflows-recorder-entry-failure");
-    const store = new FailingEntryStore(outputRoot);
-    const { runDir, runId } = await makeRunWithStore(store);
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const databasePath = await makeStateDatabasePath("pi-workflows-recorder-entry-failure");
+    const store = new FailingEntryStore(databasePath);
+    const { runId } = await makeRunWithStore(store);
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     const ctx = makeCtx(branch);
     await recorder.bind(ctx);
@@ -348,18 +344,16 @@ describe("SessionRecorder", () => {
       recorder.handleTurnEnd({ turnIndex: 0, message: assistant }, ctx),
     ).resolves.toBeUndefined();
     await recorder.finish();
-    const capture = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({
       status: "failed",
       failure: { code: "entry_write_failed", message: "injected entry failure" },
     });
   });
 
-  it("externalizes large tool payloads before enforcing the event limit", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+  it("stores large tool payloads in the content-addressed blob table", async () => {
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     const ctx = makeCtx([]);
     await recorder.bind(ctx);
     recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
@@ -382,18 +376,24 @@ describe("SessionRecorder", () => {
     await recorder.handleTurnEnd({ turnIndex: 0, message: assistant }, ctx);
     await recorder.stop();
 
-    const events = await readEvents(runDir);
+    const events = await readEvents(runId);
     const toolCall = events.find(
       (event) =>
         event.type === "assistant_event" &&
         (event.payload as Record<string, unknown>).type === "toolcall_end",
     );
-    expect(toolCall?.payload).toMatchObject({
-      toolCall: { arguments: { text: { $artifact: { mediaType: "text/plain" } } } },
+    expect(
+      (
+        (toolCall?.payload as { toolCall?: { arguments?: { text?: string } } })?.toolCall?.arguments
+          ?.text ?? ""
+      ).length,
+    ).toBe(1_100_000);
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM blobs").get(),
+    ).toMatchObject({
+      count: expect.any(Number),
     });
-    const capture = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({ status: "complete", eventCount: 4 });
   });
 
@@ -403,8 +403,8 @@ describe("SessionRecorder", () => {
         throw new Error("injected event failure");
       }
     }
-    const outputRoot = await makeTempDir("pi-workflows-recorder-failure");
-    const store = new FailingEventStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-workflows-recorder-failure");
+    const store = new FailingEventStore(databasePath);
     const workflow = defineWorkflow({
       name: "demo",
       startAt: "one",
@@ -426,8 +426,9 @@ describe("SessionRecorder", () => {
       results: {},
       steps: [],
     };
-    const runDir = await store.initializeRunBundle(workflow, state);
-    const recorder = new SessionRecorder(store, runDir, runId);
+    await store.initializeRun(workflow, state);
+    storesByRun.set(runId, store);
+    const recorder = new SessionRecorder(store, runId);
     const branch: FakeEntry[] = [];
     await recorder.bind(makeCtx(branch));
     recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
@@ -435,9 +436,7 @@ describe("SessionRecorder", () => {
     await recorder.handleTurnEnd({ turnIndex: 0, message: { role: "assistant" } }, makeCtx(branch));
     await recorder.stop();
 
-    const capture = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({
       status: "failed",
       eventCount: 0,
@@ -445,7 +444,7 @@ describe("SessionRecorder", () => {
       failure: { code: "event_write_failed", message: "injected event failure" },
     });
     await expect(
-      store.writeSnapshot(runDir, state, { scope: "run", type: "still_runs", payload: {} }),
+      store.writeSnapshot(runId, state, { scope: "run", type: "still_runs", payload: {} }),
     ).resolves.toBeDefined();
   });
 
@@ -458,18 +457,18 @@ describe("SessionRecorder", () => {
       private firstWrite = true;
 
       override async appendSessionEventBatch(
-        runDir: string,
+        runId: string,
         records: WorkflowSessionEventRecord[],
       ): Promise<void> {
         if (this.firstWrite) {
           this.firstWrite = false;
           await firstWriteGate;
         }
-        await super.appendSessionEventBatch(runDir, records);
+        await super.appendSessionEventBatch(runId, records);
       }
     }
-    const outputRoot = await makeTempDir("pi-workflows-recorder-overflow");
-    const store = new BlockingEventStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-workflows-recorder-overflow");
+    const store = new BlockingEventStore(databasePath);
     const workflow = defineWorkflow({
       name: "demo",
       startAt: "one",
@@ -491,8 +490,9 @@ describe("SessionRecorder", () => {
       results: {},
       steps: [],
     };
-    const runDir = await store.initializeRunBundle(workflow, state);
-    const recorder = new SessionRecorder(store, runDir, runId);
+    await store.initializeRun(workflow, state);
+    storesByRun.set(runId, store);
+    const recorder = new SessionRecorder(store, runId);
     await recorder.bind(makeCtx([]));
     recorder.beginAttempt({ runId, workflowName: "demo", nodeId: "one", attemptId: "a1" });
     for (let index = 0; index < 8_300; index += 1) {
@@ -501,12 +501,10 @@ describe("SessionRecorder", () => {
     releaseFirstWrite();
     await recorder.stop();
 
-    const events = await readEvents(runDir);
+    const events = await readEvents(runId);
     expect(events).toHaveLength(8_192);
     expect(events.at(-1)?.seq).toBe(8_192);
-    const capture = JSON.parse(
-      await fs.readFile(path.join(runDir, "session/capture.json"), "utf8"),
-    ) as Record<string, unknown>;
+    const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({
       status: "failed",
       eventCount: 8_192,
@@ -516,18 +514,18 @@ describe("SessionRecorder", () => {
   });
 
   it("re-anchors when the user branches away mid-run", async () => {
-    const { store, runDir, runId } = await makeRun();
-    const recorder = new SessionRecorder(store, runDir, runId);
+    const { store, runId } = await makeRun();
+    const recorder = new SessionRecorder(store, runId);
     await recorder.bind(makeCtx([{ id: "e1", type: "message" }]));
 
     // A different branch that no longer contains the cursor entry.
     const other: FakeEntry[] = [{ id: "x1", type: "message" }];
     await recorder.record(makeCtx(other));
-    await expect(readEntries(runDir)).rejects.toThrow();
+    expect(await readEntries(runId)).toEqual([]);
 
     // Entries appended after the re-anchor are captured again.
     other.push({ id: "x2", type: "message" });
     await recorder.record(makeCtx(other));
-    expect((await readEntries(runDir)).map((record) => record.entry.id)).toEqual(["x2"]);
+    expect((await readEntries(runId)).map((record) => record.entry.id)).toEqual(["x2"]);
   });
 });

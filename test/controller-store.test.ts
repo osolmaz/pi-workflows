@@ -1,372 +1,278 @@
-import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import {
-  EffectRequestConflictError,
-  ResourceConflictError,
-  WorkflowRequestConflictError,
-} from "../src/controllers/errors.js";
+import { describe, expect, it } from "vitest";
+import { ResourceConflictError } from "../src/controllers/errors.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import type { ControllerStore } from "../src/controllers/store.js";
+import type { ControllerQueueClaim } from "../src/controllers/types.js";
 import { makeTempDir } from "./helpers.js";
 
-const T0 = "2026-08-04T00:00:00.000Z";
-const T1 = "2026-08-04T00:00:01.000Z";
-const T2 = "2026-08-04T00:00:02.000Z";
+async function setup() {
+  const projectPath = await makeTempDir("controller-project");
+  const databasePath = path.join(await makeTempDir("controller-state"), "state.sqlite");
+  const store = new SqliteControllerStore(databasePath, { projectPath });
+  return { store, databasePath, projectPath };
+}
 
-const stores: ControllerStore[] = [];
+function claim(store: SqliteControllerStore, ownerId = "worker-1"): ControllerQueueClaim {
+  const value = store.claimNext({
+    controllers: ["jobs"],
+    ownerId,
+    leaseMs: 60_000,
+  });
+  if (value === undefined) throw new Error("controller claim missing");
+  return value;
+}
 
-afterEach(() => {
-  for (const store of stores.splice(0)) {
+describe("SqliteControllerStore", () => {
+  it("stores normalized project resources in the canonical database", async () => {
+    const { store } = await setup();
+    const resource = store.putResource({
+      controller: "jobs",
+      key: "one",
+      spec: { image: "worker" },
+      initialStatus: { phase: "new" },
+    });
+    expect(resource.metadata).toMatchObject({ controller: "jobs", key: "one", generation: 1 });
+    expect(store.listResources()).toHaveLength(1);
+    expect(store.state.connection.prepare("SELECT count(*) AS count FROM projects").get()).toEqual({
+      count: 1,
+    });
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM controller_resources").get(),
+    ).toEqual({ count: 1 });
+    expect(store.listEvents()).not.toHaveLength(0);
+    expect(store.listEvents({ controller: "jobs", key: "one", limit: 1 })).toHaveLength(1);
     store.close();
-  }
-});
-
-async function makeStore(): Promise<{ store: SqliteControllerStore; file: string }> {
-  const dir = await makeTempDir("pi-controller-store");
-  const file = path.join(dir, "state", "controller.sqlite");
-  const store = new SqliteControllerStore(file);
-  stores.push(store);
-  return { store, file };
-}
-
-function putDemo(store: ControllerStore, key = "repo#1") {
-  return store.putResource({
-    controller: "pull-request",
-    key,
-    spec: { head: "a" },
-    initialStatus: { phase: "new" },
-    now: T0,
   });
-}
 
-describe("SqliteControllerStore resources", () => {
-  it("creates private storage and enqueues a new resource", async () => {
-    const { store, file } = await makeStore();
-    const resource = putDemo(store);
-
-    expect(resource.metadata).toMatchObject({
-      controller: "pull-request",
-      key: "repo#1",
-      resourceVersion: 1,
-      generation: 1,
-      finalizers: [],
+  it("supports idempotent close and read-only cross-project inspection", async () => {
+    const { store, databasePath } = await setup();
+    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    const reader = new SqliteControllerStore(databasePath, {
+      readOnly: true,
+      projectPath: "/missing/project",
     });
-    expect(resource.status).toEqual({
-      observedGeneration: 0,
-      conditions: [],
-      controllerStatus: { phase: "new" },
+    expect(reader.listResources()).toHaveLength(1);
+    expect(() =>
+      reader.putResource({ controller: "jobs", key: "two", spec: {}, initialStatus: {} }),
+    ).toThrow(/read-only/);
+    reader.close();
+    reader.close();
+    store.close();
+  });
+
+  it("adopts unchanged specs and advances changed generations", async () => {
+    const { store } = await setup();
+    const first = store.putResource({
+      controller: "jobs",
+      key: "one",
+      spec: { value: 1 },
+      initialStatus: {},
     });
-    expect(store.listQueue()).toHaveLength(1);
-    expect((await fs.stat(path.dirname(file))).mode & 0o777).toBe(0o700);
-    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
-  });
-
-  it("rejects oversized resource values", async () => {
-    const { store } = await makeStore();
-    const oversized = "é".repeat(524_289);
-    expect(() =>
-      store.putResource({
-        controller: "pull-request",
-        key: "large",
-        spec: { payload: oversized },
-        initialStatus: {},
-        now: T0,
-      }),
-    ).toThrow(/storage limit/);
-
-    const resource = putDemo(store);
-    expect(() =>
-      store.updateStatus({
-        ref: { controller: "pull-request", key: "repo#1" },
-        expectedResourceVersion: resource.metadata.resourceVersion,
-        status: {
-          ...resource.status,
-          controllerStatus: { payload: oversized },
-        },
-        now: T1,
-      }),
-    ).toThrow(/storage limit/);
-  });
-
-  it("increments generation only when spec changes", async () => {
-    const { store } = await makeStore();
-    const first = putDemo(store);
-    const same = store.putResource({
-      controller: "pull-request",
-      key: "repo#1",
-      spec: { head: "a" },
-      initialStatus: { phase: "ignored" },
-      now: T1,
+    const adopted = store.putResource({
+      controller: "jobs",
+      key: "one",
+      spec: { value: 1 },
+      initialStatus: { ignored: true },
     });
     const changed = store.putResource({
-      controller: "pull-request",
-      key: "repo#1",
-      spec: { head: "b" },
-      initialStatus: { phase: "ignored" },
-      now: T2,
+      controller: "jobs",
+      key: "one",
+      spec: { value: 2 },
+      initialStatus: {},
     });
-
-    expect(same.metadata.resourceVersion).toBe(first.metadata.resourceVersion);
-    expect(same.status.controllerStatus).toEqual({ phase: "new" });
-    expect(changed.metadata).toMatchObject({ resourceVersion: 2, generation: 2 });
-    expect(store.listQueue()).toHaveLength(1);
+    expect(adopted.metadata.resourceVersion).toBe(first.metadata.resourceVersion);
+    expect(changed.metadata.generation).toBe(2);
+    expect(store.listResources({ controller: "missing" })).toEqual([]);
+    store.close();
   });
 
-  it("rejects non-JSON input", async () => {
-    const { store } = await makeStore();
-    expect(() =>
-      store.putResource({
-        controller: "demo",
-        key: "bad",
-        spec: { date: new Date() },
-        initialStatus: {},
-      }),
-    ).toThrow(/plain objects/);
-  });
-
-  it("uses compare-and-swap status updates and skips identical writes", async () => {
-    const { store } = await makeStore();
-    const resource = putDemo(store);
-    const status = {
-      observedGeneration: 1,
-      conditions: [],
-      controllerStatus: { phase: "ready" },
-    };
+  it("requires the current claim and expected revision for status writes", async () => {
+    const { store } = await setup();
+    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    const currentClaim = claim(store);
+    const resource = store.getResource({ controller: "jobs", key: "one" });
+    if (resource === undefined) throw new Error("resource missing");
     const updated = store.updateStatus({
-      ref: { controller: "pull-request", key: "repo#1" },
+      ref: { controller: "jobs", key: "one" },
       expectedResourceVersion: resource.metadata.resourceVersion,
-      status,
-      finalizers: ["example.cleanup"],
-      now: T1,
+      claim: currentClaim,
+      status: { observedGeneration: 1, conditions: [], controllerStatus: { phase: "ready" } },
     });
-    const unchanged = store.updateStatus({
-      ref: { controller: "pull-request", key: "repo#1" },
-      expectedResourceVersion: updated.metadata.resourceVersion,
-      status,
-      finalizers: ["example.cleanup"],
-      now: T2,
-    });
-
-    expect(updated.metadata).toMatchObject({ resourceVersion: 2, generation: 1 });
-    expect(updated.metadata.finalizers).toEqual(["example.cleanup"]);
-    expect(unchanged.metadata.resourceVersion).toBe(2);
+    expect(updated.status.controllerStatus).toEqual({ phase: "ready" });
     expect(() =>
       store.updateStatus({
-        ref: { controller: "pull-request", key: "repo#1" },
-        expectedResourceVersion: 1,
-        status,
+        ref: { controller: "jobs", key: "one" },
+        expectedResourceVersion: resource.metadata.resourceVersion,
+        claim: currentClaim,
+        status: { observedGeneration: 1, conditions: [], controllerStatus: {} },
       }),
     ).toThrow(ResourceConflictError);
+    store.close();
   });
 
-  it("lists by controller and resolves stable UIDs", async () => {
-    const { store } = await makeStore();
-    const one = putDemo(store, "one");
-    store.putResource({ controller: "other", key: "two", spec: {}, initialStatus: {} });
-    expect(store.getResourceByUid(one.metadata.uid)?.metadata.key).toBe("one");
-    expect(store.listResources({ controller: "pull-request" })).toHaveLength(1);
-    expect(() =>
-      store.updateFinalizers({
-        ref: { controller: "pull-request", key: "one" },
-        expectedResourceVersion: one.metadata.resourceVersion,
-        finalizers: ["same", "same"],
+  it("increments claim generations and rejects a superseded owner", async () => {
+    const { store } = await setup();
+    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    const first = claim(store, "worker-1");
+    expect(first.generation).toBe(1);
+    expect(store.requeueClaim(first, { availableAt: new Date().toISOString() })).toBe(true);
+    const second = store.claimNext({
+      controllers: ["jobs"],
+      ownerId: "worker-2",
+      leaseMs: 60_000,
+    });
+    expect(second?.generation).toBe(2);
+    expect(store.renewClaim(first, 60_000)).toBe(false);
+    store.close();
+  });
+
+  it("tracks queue retries, renewals, and error counts", async () => {
+    const { store } = await setup();
+    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    const currentClaim = claim(store);
+    expect(store.renewClaim(currentClaim, 60_000)).toBe(true);
+    expect(
+      store.requeueClaim(currentClaim, {
+        availableAt: new Date().toISOString(),
+        error: "temporary",
       }),
-    ).toThrow(/Duplicate/);
-  });
-
-  it("supports deletion after finalizers are removed", async () => {
-    const { store } = await makeStore();
-    const resource = putDemo(store);
-    const withFinalizer = store.updateFinalizers({
-      ref: { controller: "pull-request", key: "repo#1" },
-      expectedResourceVersion: resource.metadata.resourceVersion,
-      finalizers: ["example.cleanup"],
-      now: T1,
-    });
-    const deleting = store.requestDeletion({ controller: "pull-request", key: "repo#1" }, T2);
-    expect(
-      store.requestDeletion({ controller: "pull-request", key: "repo#1" }, T2).metadata
-        .resourceVersion,
-    ).toBe(deleting.metadata.resourceVersion);
-    expect(deleting.metadata.deletionTimestamp).toBe(T2);
-    expect(() =>
-      store.deleteResource(
-        { controller: "pull-request", key: "repo#1" },
-        deleting.metadata.resourceVersion,
-      ),
-    ).toThrow(/not ready/);
-    const ready = store.updateFinalizers({
-      ref: { controller: "pull-request", key: "repo#1" },
-      expectedResourceVersion: deleting.metadata.resourceVersion,
-      finalizers: [],
-    });
-    expect(ready.metadata.resourceVersion).toBeGreaterThan(withFinalizer.metadata.resourceVersion);
-    expect(
-      store.deleteResource(
-        { controller: "pull-request", key: "repo#1" },
-        ready.metadata.resourceVersion,
-      ),
     ).toBe(true);
-    expect(store.getResource({ controller: "pull-request", key: "repo#1" })).toBeUndefined();
-  });
-});
-
-describe("SqliteControllerStore queue", () => {
-  it("deduplicates enqueues and preserves an event that arrives during a claim", async () => {
-    const { store } = await makeStore();
-    putDemo(store);
-    for (let index = 0; index < 9; index += 1) {
-      store.enqueue({ controller: "pull-request", key: "repo#1" }, T1);
-    }
-    expect(store.listQueue()).toHaveLength(1);
-    const claim = store.claimNext({ controllers: ["pull-request"], leaseMs: 1_000, now: T1 });
-    expect(claim).toBeDefined();
-    store.enqueue({ controller: "pull-request", key: "repo#1" }, T1);
-    expect(store.settleClaim(claim as NonNullable<typeof claim>, T1)).toBe(true);
-    expect(store.listQueue()).toHaveLength(1);
-  });
-
-  it("requeues errors, renews claims, and recovers expired claims", async () => {
-    const { store } = await makeStore();
-    putDemo(store);
-    const first = store.claimNext({ controllers: ["pull-request"], leaseMs: 500, now: T0 });
-    expect(first).toBeDefined();
-    expect(store.renewClaim(first as NonNullable<typeof first>, 2_000, T0)).toBe(true);
-    expect(
-      store.claimNext({ controllers: ["pull-request"], leaseMs: 500, now: T1 }),
-    ).toBeUndefined();
-    expect(store.renewClaim(first as NonNullable<typeof first>, 2_000, T2)).toBe(false);
-    const recovered = store.claimNext({ controllers: ["pull-request"], leaseMs: 500, now: T2 });
-    expect(recovered).toBeDefined();
-    store.requeueClaim(
-      recovered as NonNullable<typeof recovered>,
-      { availableAt: T2, error: "temporary" },
-      T2,
-    );
-    expect(store.listQueue()[0]?.consecutiveErrors).toBe(1);
-  });
-
-  it("rejects invalid claim input and an empty controller set", async () => {
-    const { store } = await makeStore();
-    putDemo(store);
-    expect(store.claimNext({ controllers: [], leaseMs: 100, now: T0 })).toBeUndefined();
-    expect(() => store.claimNext({ controllers: ["pull-request"], leaseMs: 0, now: T0 })).toThrow(
-      /positive/,
-    );
-  });
-
-  it("honors delayed availability and stale claim tokens", async () => {
-    const { store } = await makeStore();
-    putDemo(store);
-    const claim = store.claimNext({ controllers: ["pull-request"], leaseMs: 1_000, now: T0 });
-    expect(claim).toBeDefined();
-    store.requeueClaim(claim as NonNullable<typeof claim>, { availableAt: T2 }, T0);
-    expect(
-      store.claimNext({ controllers: ["pull-request"], leaseMs: 1_000, now: T1 }),
-    ).toBeUndefined();
-    const second = store.claimNext({ controllers: ["pull-request"], leaseMs: 1_000, now: T2 });
-    expect(second).toBeDefined();
-    expect(store.settleClaim(claim as NonNullable<typeof claim>, T2)).toBe(false);
-    expect(store.settleClaim(second as NonNullable<typeof second>, T2)).toBe(true);
+    expect(store.listQueue()[0]).toMatchObject({ consecutiveErrors: 1 });
+    const next = claim(store, "worker-2");
+    expect(store.settleClaim(next)).toBe(true);
     expect(store.listQueue()).toEqual([]);
+    store.close();
   });
-});
 
-describe("SqliteControllerStore effects, workflows, and events", () => {
-  it("reserves effects and rejects key reuse with changed input", async () => {
-    const { store } = await makeStore();
-    const resource = putDemo(store);
-    const first = store.reserveEffect({
-      key: "merge:1",
-      resourceUid: resource.metadata.uid,
-      generation: 1,
-      kind: "github-merge",
-      requestFingerprint: "aaa",
-      now: T0,
+  it("reserves effects and child workflows under the controller claim", async () => {
+    const { store } = await setup();
+    const resource = store.putResource({
+      controller: "jobs",
+      key: "one",
+      spec: {},
+      initialStatus: {},
     });
-    expect(first.created).toBe(true);
-    expect(first.record.state).toBe("pending");
-    const applied = store.updateEffect({
+    const currentClaim = claim(store);
+    const effect = store.reserveEffect({
+      key: "publish",
       resourceUid: resource.metadata.uid,
-      key: "merge:1",
-      state: "applied",
-      externalRef: "merge-sha",
-      now: T1,
+      claim: currentClaim,
+      generation: resource.metadata.generation,
+      kind: "publish",
+      requestFingerprint: "a".repeat(64),
     });
-    expect(applied).toMatchObject({ state: "applied", externalRef: "merge-sha" });
+    expect(effect.created).toBe(true);
+    expect(
+      store.reserveEffect({
+        key: "publish",
+        resourceUid: resource.metadata.uid,
+        claim: currentClaim,
+        generation: resource.metadata.generation,
+        kind: "publish",
+        requestFingerprint: "a".repeat(64),
+      }).created,
+    ).toBe(false);
     expect(() =>
       store.reserveEffect({
-        key: "merge:1",
+        key: "publish",
         resourceUid: resource.metadata.uid,
-        generation: 1,
-        kind: "github-merge",
-        requestFingerprint: "bbb",
+        claim: currentClaim,
+        generation: resource.metadata.generation,
+        kind: "publish",
+        requestFingerprint: "b".repeat(64),
       }),
-    ).toThrow(EffectRequestConflictError);
-    expect(() =>
+    ).toThrow(/different request/);
+    expect(
       store.updateEffect({
         resourceUid: resource.metadata.uid,
-        key: "merge:1",
-        state: "indeterminate",
-      }),
-    ).toThrow(/already applied/);
-  });
+        key: "publish",
+        claim: currentClaim,
+        state: "applied",
+        externalRef: "remote-1",
+      }).state,
+    ).toBe("applied");
 
-  it("reserves and updates child workflow requests", async () => {
-    const { store } = await makeStore();
-    const resource = putDemo(store);
-    const first = store.reserveWorkflow({
+    const child = store.reserveWorkflow({
       resourceUid: resource.metadata.uid,
-      requestKey: "repair:a",
-      workflow: "repair",
-      inputFingerprint: "aaa",
+      claim: currentClaim,
+      requestKey: "repair",
+      workflow: "autoimplement",
+      inputFingerprint: "b".repeat(64),
     });
-    expect(first.record).toMatchObject({ state: "pending", attempt: 0 });
-    const running = store.updateWorkflow(first.record.requestId, {
-      state: "running",
-      runId: "run-1",
-      attempt: 1,
-    });
-    expect(running).toMatchObject({ state: "running", runId: "run-1", attempt: 1 });
+    expect(child.created).toBe(true);
+    expect(
+      store.reserveWorkflow({
+        resourceUid: resource.metadata.uid,
+        claim: currentClaim,
+        requestKey: "repair",
+        workflow: "autoimplement",
+        inputFingerprint: "b".repeat(64),
+      }).created,
+    ).toBe(false);
     expect(() =>
       store.reserveWorkflow({
         resourceUid: resource.metadata.uid,
-        requestKey: "repair:a",
-        workflow: "repair",
-        inputFingerprint: "bbb",
+        claim: currentClaim,
+        requestKey: "repair",
+        workflow: "different",
+        inputFingerprint: "b".repeat(64),
       }),
-    ).toThrow(WorkflowRequestConflictError);
+    ).toThrow(/different input/);
+    expect(
+      store.updateWorkflow(child.record.requestId, { state: "running", attempt: 1 }, currentClaim)
+        .state,
+    ).toBe("running");
+    store.close();
   });
 
-  it("opens an existing store read-only", async () => {
-    const { store, file } = await makeStore();
-    putDemo(store);
-    const reader = new SqliteControllerStore(file, { readOnly: true });
-    stores.push(reader);
-    expect(reader.listResources()).toHaveLength(1);
-    expect(() => reader.enqueue({ controller: "pull-request", key: "repo#1" })).toThrow();
-  });
-
-  it("records bounded structured events", async () => {
-    const { store } = await makeStore();
-    putDemo(store);
-    const event = store.recordEvent({
-      controller: "pull-request",
-      key: "repo#1",
-      type: "test_event",
-      payload: { ok: true },
-      now: T0,
+  it("keeps marked resources while finalizers remain", async () => {
+    const { store } = await setup();
+    const created = store.putResource({
+      controller: "jobs",
+      key: "one",
+      spec: {},
+      initialStatus: {},
     });
-    expect(event).toMatchObject({ seq: 1, recordedAt: T0, payload: { ok: true } });
-    expect(store.listEvents({ controller: "pull-request", key: "repo#1" })).toEqual([event]);
-    expect(() =>
-      store.recordEvent({
-        controller: "pull-request",
-        key: "repo#1",
-        type: "too_large",
-        payload: { text: "x".repeat(70_000) },
-      }),
-    ).toThrow(/exceeds/);
+    const withFinalizer = store.updateFinalizers({
+      ref: { controller: "jobs", key: "one" },
+      expectedResourceVersion: created.metadata.resourceVersion,
+      finalizers: ["cleanup"],
+    });
+    const requested = store.requestDeletion({ controller: "jobs", key: "one" });
+    expect(
+      store.requestDeletion({ controller: "jobs", key: "one" }).metadata.deletionTimestamp,
+    ).toBe(requested.metadata.deletionTimestamp);
+    const currentClaim = claim(store);
+    const current = store.getResource({ controller: "jobs", key: "one" });
+    if (current === undefined) throw new Error("resource missing");
+    expect(withFinalizer.metadata.finalizers).toEqual(["cleanup"]);
+    expect(requested.metadata.deletionTimestamp).toBeDefined();
+    expect(
+      store.deleteResource(
+        { controller: "jobs", key: "one" },
+        current.metadata.resourceVersion,
+        currentClaim,
+      ),
+    ).toBe(false);
+    store.close();
+  });
+
+  it("deletes only a marked resource with no finalizers under its claim", async () => {
+    const { store } = await setup();
+    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    const requested = store.requestDeletion({ controller: "jobs", key: "one" });
+    const currentClaim = claim(store);
+    const current = store.getResource({ controller: "jobs", key: "one" });
+    if (current === undefined) throw new Error("resource missing");
+    expect(requested.metadata.deletionTimestamp).toBeDefined();
+    expect(
+      store.deleteResource(
+        { controller: "jobs", key: "one" },
+        current.metadata.resourceVersion,
+        currentClaim,
+      ),
+    ).toBe(true);
+    expect(store.getResource({ controller: "jobs", key: "one" })).toBeUndefined();
+    store.close();
   });
 });

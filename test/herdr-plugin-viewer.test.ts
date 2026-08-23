@@ -11,16 +11,13 @@ const viewerScript = path.resolve(
 );
 
 describe("Herdr piw plugin launcher", () => {
-  it("sets a discoverable title and opens the exact run bundle with argv", async () => {
+  it("sets a discoverable title and opens the exact run id with argv", async () => {
     const temp = await makeTempDir("pi-workflows-herdr-viewer");
     const bin = path.join(temp, "bin");
     const runId = "20260818T120000Z-monitor-a1b2c3d4";
-    const runDir = path.join(temp, runId);
     const herdrArgs = path.join(temp, "herdr-args.json");
     const piwArgs = path.join(temp, "piw-args.json");
     await fs.mkdir(bin);
-    await fs.mkdir(runDir);
-    await fs.writeFile(path.join(runDir, "manifest.json"), "{}\n");
     const herdr = path.join(bin, "herdr");
     const piw = path.join(bin, "piw");
     await fs.writeFile(
@@ -44,7 +41,6 @@ describe("Herdr piw plugin launcher", () => {
         HERDR_ARGS_FILE: herdrArgs,
         PIW_ARGS_FILE: piwArgs,
         PI_WORKFLOWS_RUN_ID: runId,
-        PI_WORKFLOWS_RUN_DIR: runDir,
       },
     });
 
@@ -55,20 +51,19 @@ describe("Herdr piw plugin launcher", () => {
       "w1:p2",
       `piw · ${runId}`,
     ]);
-    await expect(fs.readFile(piwArgs, "utf8").then(JSON.parse)).resolves.toEqual([runDir]);
+    await expect(fs.readFile(piwArgs, "utf8").then(JSON.parse)).resolves.toEqual([runId]);
   });
 
-  it("rejects a run directory that does not match the run id", async () => {
+  it("rejects an invalid run id", () => {
     const result = spawnSync(process.execPath, [viewerScript], {
       encoding: "utf8",
       env: {
         ...process.env,
-        PI_WORKFLOWS_RUN_ID: "run-one",
-        PI_WORKFLOWS_RUN_DIR: "/tmp/run-two",
+        PI_WORKFLOWS_RUN_ID: "../bad",
       },
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("absolute bundle directory for the selected run");
+    expect(result.stderr).toContain("PI_WORKFLOWS_RUN_ID is missing or invalid");
   });
 });

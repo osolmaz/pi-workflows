@@ -2,16 +2,17 @@ import { describe, expect, it } from "vitest";
 import planApprovalWorkflow, {
   parsePlanApprovalPolicy,
 } from "../src/builtins/plan-approval.workflow.js";
+import { StateMutationStore, resourceIdFor } from "../src/state/mutation.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 const planDigest = `sha256:${"a".repeat(64)}`;
 
 async function runChoice(response: HumanDecisionResponse) {
-  const runs = await makeTempDir("plan-approval");
+  const runs = await makeStateDatabasePath("plan-approval");
   const store = new WorkflowRunStore(runs);
   const makeEngine = () => new WorkflowEngine({ store, executor: new ScriptedExecutor() });
   const parent = await makeEngine().run(
@@ -64,7 +65,7 @@ describe("plan-approval workflow", () => {
   });
 
   it("stores the typed plan separately from its readable presentation", async () => {
-    const runs = await makeTempDir("plan-approval-presentation");
+    const runs = await makeStateDatabasePath("plan-approval-presentation");
     const store = new WorkflowRunStore(runs);
     const parent = await new WorkflowEngine({ store, executor: new ScriptedExecutor() }).run(
       planApprovalWorkflow,
@@ -99,7 +100,7 @@ describe("plan-approval workflow", () => {
   });
 
   it("uses a durable timeout response in auto mode", async () => {
-    const runs = await makeTempDir("plan-approval-timeout");
+    const runs = await makeStateDatabasePath("plan-approval-timeout");
     const store = new WorkflowRunStore(runs);
     const makeEngine = () => new WorkflowEngine({ store, executor: new ScriptedExecutor() });
     const parent = await makeEngine().run(
@@ -111,10 +112,26 @@ describe("plan-approval workflow", () => {
     expect(request.defaultResponse).toEqual({ choice: "continue" });
     expect(Date.parse(request.expiresAt ?? "") - Date.parse(request.createdAt)).toBe(600_000);
 
-    const resolved = await new HumanDecisionStore(runs).resolveTimeout(
-      request,
-      new Date(request.expiresAt!),
-    );
+    const claim = new StateMutationStore(store.state).claim({
+      resourceId: resourceIdFor("run", parent.runId),
+      ownerType: "session",
+      ownerId: "approval-test",
+      expectedRevision: parent.state.traceSeq,
+      leaseMs: 60_000,
+      now: Date.parse(request.expiresAt!) - 1,
+    });
+    if (claim === undefined) throw new Error("approval claim missing");
+    const decisionStore = new HumanDecisionStore(runs, {
+      state: store.state,
+      authorityProvider: () => ({
+        actor: { type: "session", id: claim.ownerId },
+        ownerType: claim.ownerType,
+        ownerId: claim.ownerId,
+        token: claim.token,
+        generation: claim.generation,
+      }),
+    });
+    const resolved = await decisionStore.resolveTimeout(request, new Date(request.expiresAt!));
     expect(resolved.decision).toMatchObject({
       provenance: "timeout",
       response: { choice: "continue" },
@@ -136,7 +153,7 @@ describe("plan-approval workflow", () => {
 
   it("continues immediately without a decision in skip mode", async () => {
     const result = await new WorkflowEngine({
-      store: new WorkflowRunStore(await makeTempDir("plan-approval-skip")),
+      store: new WorkflowRunStore(await makeStateDatabasePath("plan-approval-skip")),
       executor: new ScriptedExecutor(),
     }).run(planApprovalWorkflow, {
       task: "demo",
@@ -155,7 +172,7 @@ describe("plan-approval workflow", () => {
   it("rejects malformed input and missing continuation receipts", async () => {
     await expect(
       new WorkflowEngine({
-        store: new WorkflowRunStore(await makeTempDir("plan-approval-invalid")),
+        store: new WorkflowRunStore(await makeStateDatabasePath("plan-approval-invalid")),
         executor: new ScriptedExecutor(),
       }).run(planApprovalWorkflow, {
         task: "demo",

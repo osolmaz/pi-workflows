@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import autoplanWorkflow from "../src/builtins/autoplan.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function commonExecutor(selection: Record<string, unknown>) {
   return new ScriptedExecutor()
@@ -55,7 +55,7 @@ describe("built-in autoplan", () => {
     });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoplan"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoplan"),
     });
 
     const { state } = await engine.run(autoplanWorkflow, {
@@ -85,7 +85,7 @@ describe("built-in autoplan", () => {
     });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoplan-blocked"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoplan-blocked"),
     });
 
     const { state } = await engine.run(autoplanWorkflow, { problem: "solve demo" });

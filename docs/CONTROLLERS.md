@@ -159,11 +159,11 @@ Mutation policy stays in deterministic effect drivers. Agent workflows return fi
 
 ## Child workflows
 
-`ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key. The controller store reserves and saves each attempt's run ID before the scheduler starts it, so restart recovery can find the bundle.
+`ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key. The controller transaction reserves and saves each attempt's run ID before the scheduler starts it, so recovery can find the run row.
 
-A child run is one immutable attempt. Its existing run bundle remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can record an abandoned attempt and create another attempt for the same stable request.
+A child run is one immutable attempt. Its existing SQLite run state remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can record an abandoned attempt and create another attempt for the same stable request.
 
-The workflow scheduler records an abandoned running bundle as `failed` with a final `run_interrupted` trace event. The controller store treats that child attempt as `interrupted`, so the next reconciliation starts another immutable attempt. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
+The workflow scheduler records an abandoned running run as `failed` with a final `run_interrupted` event. The controller store treats that child attempt as `interrupted`, so the next reconciliation starts another immutable attempt. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
 
 ## Deletion and cleanup
 
@@ -183,7 +183,7 @@ The Pi extension starts local workers during `session_start` and closes them dur
 
 Every reconciliation emits structured records with the controller name, resource key, generation, reconcile ID, outcome and duration, plus the requeue reason. Effect state changes and child workflow links are also recorded. Logs and viewer projections remain secondary to the resource and effect stores.
 
-`pi-workflows controllers` lists resources and their current readiness condition. `pi-workflows controller <controller> <key>` prints one resource together with its effects, child workflows, and recent events. Existing run views continue to read immutable bundles.
+`pi-workflows controllers` lists resources and their current readiness condition. `pi-workflows controller <controller> <key>` prints one resource together with its effects, child workflows, and recent events. Run views read the same database through query-only connections.
 
 ## Safety rules
 
@@ -196,7 +196,7 @@ A production controller must follow these rules:
 - Reconcile again after each consequential external effect.
 - Keep model output separate from mutation authority.
 - Bound worker counts and retry rates. Also bound timeouts and stored payload sizes.
-- Redact credentials and private provider responses from logs and run bundles.
+- Redact credentials and private provider responses from logs and SQLite runs.
 
 ## Package and Pi integration
 
@@ -204,11 +204,13 @@ The controller API is exported from `@osolmaz/pi-workflows/controllers`. Control
 
 The implementation uses documented Pi extension APIs only. Commands and tools use `registerCommand` and `registerTool`. Session lifecycle uses `session_start` and `session_shutdown`. Workflow prompts use `sendUserMessage`, while status uses `setWidget` and `setStatus`.
 
-The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Stopping workers records an active child as interrupted, so starting workers again can create another attempt. Project stores live under `~/.pi/agent/workflows/controllers/projects/<scope>/controller.sqlite`. The scope is a hash of the canonical project directory. `PI_WORKFLOWS_CONTROLLER_DIR` overrides the controller root while preserving project scopes.
+The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Stopping workers records an active child as interrupted, so a later worker can create another attempt.
 
-The same store also backs the standalone host (`pi-workflows host`). The host reconciles controllers without a Pi session and claims parked interactive runs from the `workflow_run_queue` table. Conversation children execute in headless `pi --mode rpc` sessions. A Pi session and the host can share one store safely because claims and compare-and-swap writes arbitrate, but run only one set of controller workers at a time to avoid competing work. The host takes an advisory lock against other hosts; the embedded runner in Pi does not take it.
+Controller resources use the canonical [SQLite state](SQLITE_STATE.md) database. `projects` separates repository-local resources by canonical project path. Controller claims use the shared lease generation, token, expiry, and expected resource revision. Effects and child workflows use the shared transactional outbox and deterministic receipts.
 
-Normal workflow prompts, tool calls, and replies remain part of the Pi session. Controller resources, queue rows, and effects live in the controller store. No Pi internal type, private API, or persistent Pi schema changes.
+The same database backs the standalone host (`pi-workflows host`). The host reconciles controllers without a Pi session and claims parked interactive runs from `run_queue`. Conversation children execute in headless `pi --mode rpc` sessions. A Pi session and the host can share the database safely because SQLite transactions and durable leases arbitrate ownership, but only one owner can mutate a resource at a time.
+
+Normal workflow prompts, tool calls, and replies remain part of the Pi session. No Pi internal type, private API, or persistent Pi schema changes.
 
 ## Exclusions
 

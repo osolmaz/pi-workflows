@@ -1,23 +1,21 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { StateDatabase, workflowStatePath } from "../state/database.js";
+import { resourceIdFor, tokenHash } from "../state/mutation.js";
 import {
   EffectRequestConflictError,
   ResourceConflictError,
   ResourceNotFoundError,
   WorkflowRequestConflictError,
 } from "./errors.js";
-import { canonicalJson, parseStoredJson } from "./json.js";
-import {
-  CONTROLLER_STORE_SCHEMA,
-  type ControllerStore,
-  type EffectReservation,
-  type QueueItem,
-  type QueueRequeueOptions,
-  type WorkflowRecordUpdate,
-  type WorkflowReservation,
-  controllerStorePath,
+import type {
+  ControllerStore,
+  EffectReservation,
+  QueueItem,
+  QueueRequeueOptions,
+  WorkflowRecordUpdate,
+  WorkflowReservation,
 } from "./store.js";
 import type {
   ChildWorkflowRecord,
@@ -30,59 +28,7 @@ import type {
   JsonObject,
 } from "./types.js";
 
-const MAX_KEY_LENGTH = 512;
-const MAX_ERROR_LENGTH = 8_192;
-const MAX_EVENT_BYTES = 64 * 1024;
-const MAX_RESOURCE_VALUE_BYTES = 1024 * 1024;
 const TURN_INTENT_FACTS_SCHEMA = "pi-workflows.deferred-turn-facts.v1";
-
-type ResourceRow = {
-  controller: string;
-  resource_key: string;
-  uid: string;
-  resource_version: number;
-  generation: number;
-  spec_json: string;
-  status_json: string;
-  deletion_timestamp: string | null;
-  finalizers_json: string;
-};
-
-type QueueRow = {
-  controller: string;
-  resource_key: string;
-  available_at: number;
-  version: number;
-  consecutive_errors: number;
-  claim_token: string | null;
-  claim_version: number | null;
-  claim_expires_at: number | null;
-};
-
-type EffectRow = {
-  effect_key: string;
-  resource_uid: string;
-  generation: number;
-  kind: string;
-  state: EffectRecord["state"];
-  request_fingerprint: string;
-  started_at: string;
-  completed_at: string | null;
-  external_ref: string | null;
-  error: string | null;
-};
-
-type WorkflowRow = {
-  request_id: string;
-  resource_uid: string;
-  request_key: string;
-  input_fingerprint: string;
-  workflow: string;
-  run_id: string | null;
-  state: ChildWorkflowRecord["state"];
-  attempt: number;
-  error: string | null;
-};
 
 export type WorkflowRunLaunchStatus =
   | "queued"
@@ -93,35 +39,9 @@ export type WorkflowRunLaunchStatus =
   | "failed"
   | "cancelled";
 
-type WorkflowRunQueueRow = {
-  run_id: string;
-  workflow_ref: string;
-  workflow_path: string;
-  workflow_source_json: string;
-  definition_digest: string;
-  input_json: string;
-  launch_options_json: string;
-  status: WorkflowRunLaunchStatus;
-  runner_id: string | null;
-  claim_token: string | null;
-  claim_expires_at: number | null;
-  affinity_runner_id: string | null;
-  origin_session_id: string | null;
-  parent_run_id: string | null;
-  error_code: string | null;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-};
-
-/** A user-started workflow run tracked by the durable run queue. */
 export type WorkflowRunQueueRecord = {
   runId: string;
-  /** Human-readable workflow name used in status and event output. */
   workflowName: string;
-  /** Canonical source reference used to reopen the run. */
   workflowSourceRef: string;
   workflowSource: unknown;
   definitionDigest: string;
@@ -130,9 +50,9 @@ export type WorkflowRunQueueRecord = {
   status: WorkflowRunLaunchStatus;
   runnerId: string | null;
   claimToken: string | null;
+  claimGeneration: number | null;
   claimExpiresAt: string | null;
   affinityRunnerId: string | null;
-  /** Pi session that owns delivery and interactive execution, or null for detached runs. */
   originSessionId: string | null;
   parentRunId: string | null;
   errorCode: string | null;
@@ -141,21 +61,6 @@ export type WorkflowRunQueueRecord = {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
-};
-
-type WorkflowNotificationRow = {
-  notification_id: string;
-  run_id: string;
-  node_id: string;
-  attempt_id: string;
-  notification_index: number;
-  target_session_id: string;
-  kind: string;
-  content: string;
-  created_at: string;
-  delivery_claim_token: string | null;
-  delivery_claim_expires_at: number | null;
-  delivered_at: string | null;
 };
 
 export type WorkflowNotificationRecord = {
@@ -194,25 +99,6 @@ export type WorkflowTurnIntentFacts = JsonObject & {
   handoff: boolean;
 };
 
-type WorkflowTurnIntentRow = {
-  intent_id: string;
-  source_event_id: string;
-  run_id: string;
-  workflow_ref: string;
-  target_session_id: string;
-  cause: string;
-  node_id: string | null;
-  attempt_id: string | null;
-  fallback_facts_json: string;
-  requested_at: string;
-  eligible_at: string | null;
-  resolved_at: string | null;
-  resolution: string | null;
-  resolution_message_id: string | null;
-  delivery_claim_token: string | null;
-  delivery_claim_expires_at: number | null;
-};
-
 export type WorkflowTurnIntentRecord = {
   intentId: string;
   sourceEventId: string;
@@ -231,17 +117,6 @@ export type WorkflowTurnIntentRecord = {
   deliveryClaimExpiresAt: string | null;
 };
 
-type RunEventRow = {
-  seq: number;
-  recorded_at: string;
-  run_id: string;
-  workflow_ref: string;
-  type: string;
-  runner_id: string | null;
-  payload_json: string;
-};
-
-/** One run lifecycle transition in the cross-session event feed. */
 export type RunEventRecord = {
   seq: number;
   recordedAt: string;
@@ -252,44 +127,107 @@ export type RunEventRecord = {
   payload: JsonObject;
 };
 
-type EventRow = {
-  seq: number;
-  recorded_at: string;
-  controller: string;
-  resource_key: string;
-  type: string;
-  payload_json: string;
+type ControllerRow = {
+  controllerResourceId: string;
+  resourceId: string;
+  resourceVersion: number;
+  controllerName: string;
+  resourceKey: string;
+  uid: string;
+  generation: number;
+  specHash: Buffer;
+  statusHash: Buffer;
+  deletionRequestedAt: number | null;
+};
+
+type LeaseRow = {
+  generation: number;
+  ownerType: string | null;
+  ownerId: string | null;
+  tokenHash: Buffer | null;
+  expiresAt: number | null;
+};
+
+type RunRow = {
+  runId: string;
+  resourceId: string;
+  workflowName: string;
+  workflowRef: string;
+  workflowSourceHash: Buffer;
+  definitionDigest: Buffer;
+  inputHash: Buffer;
+  launchOptionsHash: Buffer;
+  status: WorkflowRunLaunchStatus;
+  availableAt: number;
+  affinityRunnerId: string | null;
+  consecutiveErrors: number;
+  errorCode: string | null;
+  errorHash: Buffer | null;
+  originSessionId: string | null;
+  parentRunId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  leaseGeneration: number;
+  ownerId: string | null;
+  claimExpiresAt: number | null;
+};
+
+type EffectRow = {
+  effectId: string;
+  resourceUid: string;
+  generation: number;
+  kind: string;
+  state: string;
+  requestFingerprint: string;
+  startedAt: number;
+  completedAt: number | null;
+  externalRef: string | null;
+  errorHash: Buffer | null;
+};
+
+type WorkflowRow = {
+  requestId: string;
+  resourceUid: string;
+  requestKey: string;
+  inputFingerprint: Buffer;
+  workflowName: string;
+  runId: string | null;
+  status: ChildWorkflowRecord["state"];
+  attemptCount: number;
+  errorHash: Buffer | null;
 };
 
 export class SqliteControllerStore implements ControllerStore {
   readonly filePath: string;
-  private readonly database: Database.Database;
+  readonly state: StateDatabase;
+  private readonly ownsState: boolean;
+  private readonly projectId: string | null;
   private closed = false;
 
-  constructor(filePath: string = controllerStorePath(), options: { readOnly?: boolean } = {}) {
-    this.filePath = path.resolve(filePath);
-    const readOnly = options.readOnly ?? false;
-    if (!readOnly) {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-      fs.chmodSync(path.dirname(this.filePath), 0o700);
-    }
-    this.database = new Database(this.filePath, {
-      readonly: readOnly,
-      fileMustExist: readOnly,
-    });
-    if (!readOnly) {
-      fs.chmodSync(this.filePath, 0o600);
-    }
-    this.configure(readOnly);
-    this.initializeSchema(readOnly);
+  constructor(
+    filePath: string = workflowStatePath(),
+    options: { readOnly?: boolean; projectPath?: string; state?: StateDatabase } = {},
+  ) {
+    this.ownsState = options.state === undefined;
+    this.state =
+      options.state ??
+      new StateDatabase({
+        filePath,
+        mode: options.readOnly === true ? "read-only" : "read-write",
+        checkLegacyState: filePath === workflowStatePath(),
+      });
+    this.filePath = this.state.filePath;
+    const projectPath = options.projectPath === undefined ? process.cwd() : options.projectPath;
+    this.projectId =
+      options.readOnly === true ? this.findProject(projectPath) : this.ensureProject(projectPath);
   }
 
   close(): void {
-    if (this.closed) {
-      return;
-    }
+    if (this.closed) return;
     this.closed = true;
-    this.database.close();
+    if (this.ownsState) this.state.close();
   }
 
   putResource<TSpec, TStatus>(options: {
@@ -299,144 +237,193 @@ export class SqliteControllerStore implements ControllerStore {
     initialStatus: TStatus;
     now?: string;
   }): ControllerResource<TSpec, TStatus> {
+    this.assertWritable();
     validateName(options.controller, "controller");
     validateKey(options.key, "resource key");
-    const now = validTimestamp(options.now);
-    const specJson = canonicalJson(options.spec, "controller resource spec");
-    validateJsonSize(specJson, "Controller resource spec", MAX_RESOURCE_VALUE_BYTES);
+    const now = epoch(validTimestamp(options.now));
+    const specHash = this.state.putJson(options.spec, now);
     const initialStatus: ControllerResourceStatus<TStatus> = {
       observedGeneration: 0,
       conditions: [],
       controllerStatus: options.initialStatus,
     };
-    const statusJson = canonicalJson(initialStatus, "controller resource status");
-    validateJsonSize(statusJson, "Controller resource status", MAX_RESOURCE_VALUE_BYTES);
-
-    return this.transaction(() => {
-      const existing = this.resourceRow({ controller: options.controller, key: options.key });
+    const statusHash = this.state.putJson(initialStatus, now);
+    return this.state.transaction(() => {
+      const existing = this.controllerRow({ controller: options.controller, key: options.key });
       if (existing === undefined) {
         const uid = randomUUID();
-        this.database
+        const controllerResourceId = `controller-resource-${randomUUID()}`;
+        const resourceId = resourceIdFor(
+          "controller",
+          `${this.requireProjectId()}:${options.controller}:${options.key}`,
+        );
+        this.state.connection
           .prepare(
-            `INSERT INTO resources (
-              controller, resource_key, uid, resource_version, generation,
-              spec_json, status_json, deletion_timestamp, finalizers_json, updated_at
-            ) VALUES (?, ?, ?, 1, 1, ?, ?, NULL, '[]', ?)`,
+            `INSERT INTO resources(
+               resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+             ) VALUES (?, 'controller', ?, 1, ?, ?)`,
           )
-          .run(options.controller, options.key, uid, specJson, statusJson, now);
-        this.enqueueRow({ controller: options.controller, key: options.key }, epoch(now));
-      } else if (existing.spec_json !== specJson) {
-        this.database
+          .run(resourceId, controllerResourceId, now, now);
+        this.state.connection
+          .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+          .run(resourceId);
+        this.state.connection
           .prepare(
-            `UPDATE resources
-             SET spec_json = ?, resource_version = resource_version + 1,
-                 generation = generation + 1, updated_at = ?
-             WHERE controller = ? AND resource_key = ?`,
+            `INSERT INTO controller_resources(
+               controller_resource_id, resource_id, project_id, controller_name,
+               resource_key, uid, generation, spec_hash, status_hash, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
           )
-          .run(specJson, now, options.controller, options.key);
-        this.enqueueRow({ controller: options.controller, key: options.key }, epoch(now));
+          .run(
+            controllerResourceId,
+            resourceId,
+            this.requireProjectId(),
+            options.controller,
+            options.key,
+            uid,
+            specHash,
+            statusHash,
+            now,
+            now,
+          );
+        this.enqueueControllerRow(controllerResourceId, now, now);
+        this.insertEvent(
+          resourceId,
+          1,
+          "resource.created",
+          "control",
+          null,
+          { generation: 1 },
+          now,
+        );
+      } else if (!existing.specHash.equals(specHash)) {
+        const revision = existing.resourceVersion + 1;
+        this.state.connection
+          .prepare(
+            `UPDATE controller_resources
+             SET spec_hash = ?, generation = generation + 1, updated_at = ?
+             WHERE controller_resource_id = ?`,
+          )
+          .run(specHash, now, existing.controllerResourceId);
+        this.bumpResource(existing.resourceId, existing.resourceVersion, now);
+        this.enqueueControllerRow(existing.controllerResourceId, now, now);
+        this.insertEvent(
+          existing.resourceId,
+          revision,
+          "resource.spec_updated",
+          "control",
+          null,
+          { generation: existing.generation + 1 },
+          now,
+        );
       }
-      return this.requireResource<TSpec, TStatus>({
+      return this.requireResource({
         controller: options.controller,
         key: options.key,
-      });
+      }) as ControllerResource<TSpec, TStatus>;
     });
   }
 
   getResource<TSpec = unknown, TStatus = unknown>(
     ref: ControllerResourceRef,
   ): ControllerResource<TSpec, TStatus> | undefined {
-    const row = this.resourceRow(ref);
-    return row === undefined ? undefined : resourceFromRow<TSpec, TStatus>(row);
+    const row = this.controllerRow(ref);
+    return row === undefined
+      ? undefined
+      : (this.mapControllerResource(row) as ControllerResource<TSpec, TStatus>);
   }
 
   getResourceByUid(uid: string): ControllerResource | undefined {
-    const row = this.database.prepare("SELECT * FROM resources WHERE uid = ?").get(uid) as
-      | ResourceRow
-      | undefined;
-    return row === undefined ? undefined : resourceFromRow(row);
+    const row = this.state.connection.prepare(controllerSelect("WHERE c.uid = ?")).get(uid);
+    return isControllerRow(row) ? this.mapControllerResource(row) : undefined;
   }
 
   listResources<TSpec = unknown, TStatus = unknown>(
-    options: {
-      controller?: string;
-    } = {},
+    options: { controller?: string } = {},
   ): ControllerResource<TSpec, TStatus>[] {
-    const rows =
-      options.controller === undefined
-        ? (this.database
-            .prepare("SELECT * FROM resources ORDER BY controller, resource_key")
-            .all() as ResourceRow[])
-        : (this.database
-            .prepare("SELECT * FROM resources WHERE controller = ? ORDER BY resource_key")
-            .all(options.controller) as ResourceRow[]);
-    return rows.map((row) => resourceFromRow<TSpec, TStatus>(row));
+    const clauses = ["1 = 1"];
+    const params: unknown[] = [];
+    if (this.projectId !== null) {
+      clauses.push("c.project_id = ?");
+      params.push(this.projectId);
+    }
+    if (options.controller !== undefined) {
+      clauses.push("c.controller_name = ?");
+      params.push(options.controller);
+    }
+    const rows = this.state.connection
+      .prepare(
+        controllerSelect(
+          `WHERE ${clauses.join(" AND ")} ORDER BY c.controller_name, c.resource_key`,
+        ),
+      )
+      .all(...params);
+    return rows
+      .filter(isControllerRow)
+      .map((row) => this.mapControllerResource(row) as ControllerResource<TSpec, TStatus>);
   }
 
   updateStatus<TStatus>(options: {
     ref: ControllerResourceRef;
     expectedResourceVersion: number;
+    claim: ControllerQueueClaim;
     status: ControllerResourceStatus<TStatus>;
     finalizers?: string[];
     now?: string;
   }): ControllerResource<unknown, TStatus> {
-    const now = validTimestamp(options.now);
-    const statusJson = canonicalJson(options.status, "controller resource status");
-    validateJsonSize(statusJson, "Controller resource status", MAX_RESOURCE_VALUE_BYTES);
-    if (options.finalizers !== undefined) {
-      validateFinalizers(options.finalizers);
-    }
-    return this.transaction(() => {
-      const current = this.resourceRow(options.ref);
-      if (current === undefined) {
-        throw new ResourceNotFoundError(options.ref.controller, options.ref.key);
-      }
-      if (current.resource_version !== options.expectedResourceVersion) {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.requireControllerRow(options.ref);
+      this.assertControllerClaim(row, options.claim, now);
+      if (row.resourceVersion !== options.expectedResourceVersion) {
         throw new ResourceConflictError(options.ref.controller, options.ref.key);
       }
-      const finalizersJson =
-        options.finalizers === undefined
-          ? current.finalizers_json
-          : canonicalJson(options.finalizers);
-      if (current.status_json === statusJson && current.finalizers_json === finalizersJson) {
-        return resourceFromRow<unknown, TStatus>(current);
-      }
-      this.database
+      const statusHash = this.state.putJson(options.status, now);
+      this.state.connection
         .prepare(
-          `UPDATE resources
-           SET status_json = ?, finalizers_json = ?,
-               resource_version = resource_version + 1, updated_at = ?
-           WHERE controller = ? AND resource_key = ? AND resource_version = ?`,
+          "UPDATE controller_resources SET status_hash = ?, updated_at = ? WHERE controller_resource_id = ?",
         )
-        .run(
-          statusJson,
-          finalizersJson,
-          now,
-          options.ref.controller,
-          options.ref.key,
-          options.expectedResourceVersion,
-        );
-      return this.requireResource<unknown, TStatus>(options.ref);
+        .run(statusHash, now, row.controllerResourceId);
+      if (options.finalizers !== undefined)
+        this.replaceFinalizers(row.controllerResourceId, options.finalizers);
+      this.bumpResource(row.resourceId, row.resourceVersion, now);
+      this.insertEvent(
+        row.resourceId,
+        row.resourceVersion + 1,
+        "resource.status_updated",
+        "controller",
+        options.claim.ownerId,
+        {},
+        now,
+        options.claim.generation,
+      );
+      options.claim.resourceVersion = row.resourceVersion + 1;
+      return this.requireResource(options.ref) as ControllerResource<unknown, TStatus>;
     });
   }
 
-  requestDeletion(ref: ControllerResourceRef, now?: string): ControllerResource {
-    const timestamp = validTimestamp(now);
-    return this.transaction(() => {
-      const row = this.resourceRow(ref);
-      if (row === undefined) {
-        throw new ResourceNotFoundError(ref.controller, ref.key);
-      }
-      if (row.deletion_timestamp === null) {
-        this.database
+  requestDeletion(ref: ControllerResourceRef, nowValue?: string): ControllerResource {
+    const now = epoch(validTimestamp(nowValue));
+    return this.state.transaction(() => {
+      const row = this.requireControllerRow(ref);
+      if (row.deletionRequestedAt === null) {
+        this.state.connection
           .prepare(
-            `UPDATE resources
-             SET deletion_timestamp = ?, resource_version = resource_version + 1, updated_at = ?
-             WHERE controller = ? AND resource_key = ?`,
+            "UPDATE controller_resources SET deletion_requested_at = ?, updated_at = ? WHERE controller_resource_id = ?",
           )
-          .run(timestamp, timestamp, ref.controller, ref.key);
+          .run(now, now, row.controllerResourceId);
+        this.bumpResource(row.resourceId, row.resourceVersion, now);
+        this.enqueueControllerRow(row.controllerResourceId, now, now);
+        this.insertEvent(
+          row.resourceId,
+          row.resourceVersion + 1,
+          "resource.deletion_requested",
+          "control",
+          null,
+          {},
+          now,
+        );
       }
-      this.enqueueRow(ref, epoch(timestamp));
       return this.requireResource(ref);
     });
   }
@@ -447,223 +434,265 @@ export class SqliteControllerStore implements ControllerStore {
     finalizers: string[];
     now?: string;
   }): ControllerResource {
-    validateFinalizers(options.finalizers);
-    const now = validTimestamp(options.now);
-    const result = this.database
-      .prepare(
-        `UPDATE resources
-         SET finalizers_json = ?, resource_version = resource_version + 1, updated_at = ?
-         WHERE controller = ? AND resource_key = ? AND resource_version = ?`,
-      )
-      .run(
-        canonicalJson(options.finalizers),
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.requireControllerRow(options.ref);
+      if (row.resourceVersion !== options.expectedResourceVersion) {
+        throw new ResourceConflictError(options.ref.controller, options.ref.key);
+      }
+      this.replaceFinalizers(row.controllerResourceId, options.finalizers);
+      this.state.connection
+        .prepare("UPDATE controller_resources SET updated_at = ? WHERE controller_resource_id = ?")
+        .run(now, row.controllerResourceId);
+      this.bumpResource(row.resourceId, row.resourceVersion, now);
+      this.insertEvent(
+        row.resourceId,
+        row.resourceVersion + 1,
+        "resource.finalizers_updated",
+        "control",
+        null,
+        {},
         now,
-        options.ref.controller,
-        options.ref.key,
-        options.expectedResourceVersion,
       );
-    if (result.changes !== 1) {
-      this.throwMissingOrConflict(options.ref);
-    }
-    return this.requireResource(options.ref);
+      return this.requireResource(options.ref);
+    });
   }
 
-  deleteResource(ref: ControllerResourceRef, expectedResourceVersion: number): boolean {
-    const row = this.resourceRow(ref);
-    if (row === undefined) {
-      return false;
-    }
-    const finalizers = parseStoredJson<string[]>(row.finalizers_json, "resource finalizers");
-    if (row.deletion_timestamp === null || finalizers.length > 0) {
-      throw new Error(`Controller resource ${ref.controller}/${ref.key} is not ready for deletion`);
-    }
-    const result = this.database
-      .prepare(
-        `DELETE FROM resources
-         WHERE controller = ? AND resource_key = ? AND resource_version = ?`,
-      )
-      .run(ref.controller, ref.key, expectedResourceVersion);
-    if (result.changes !== 1) {
-      throw new ResourceConflictError(ref.controller, ref.key);
-    }
-    return true;
+  deleteResource(
+    ref: ControllerResourceRef,
+    expectedResourceVersion: number,
+    claim: ControllerQueueClaim,
+  ): boolean {
+    return this.state.transaction(() => {
+      const row = this.requireControllerRow(ref);
+      this.assertControllerClaim(row, claim, Date.now());
+      if (row.resourceVersion !== expectedResourceVersion) {
+        throw new ResourceConflictError(ref.controller, ref.key);
+      }
+      if (row.deletionRequestedAt === null || this.finalizers(row.controllerResourceId).length > 0)
+        return false;
+      this.state.connection
+        .prepare("DELETE FROM controller_resources WHERE controller_resource_id = ?")
+        .run(row.controllerResourceId);
+      return true;
+    });
   }
 
   enqueue(ref: ControllerResourceRef, availableAt?: string): void {
-    const at = validTimestamp(availableAt);
-    if (this.resourceRow(ref) === undefined) {
-      throw new ResourceNotFoundError(ref.controller, ref.key);
-    }
-    this.enqueueRow(ref, epoch(at));
+    const row = this.requireControllerRow(ref);
+    const now = Date.now();
+    this.enqueueControllerRow(row.controllerResourceId, epoch(validTimestamp(availableAt)), now);
   }
 
   claimNext(options: {
     controllers: string[];
+    ownerId: string;
     leaseMs: number;
     now?: string;
   }): ControllerQueueClaim | undefined {
-    validateDuration(options.leaseMs, "leaseMs");
-    if (options.controllers.length === 0) {
-      return undefined;
-    }
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
+    if (options.controllers.length === 0) return undefined;
+    const now = epoch(validTimestamp(options.now));
     const placeholders = options.controllers.map(() => "?").join(", ");
-    return this.transaction(() => {
-      const row = this.database
+    return this.state.transaction(() => {
+      const row = this.state.connection
         .prepare(
-          `SELECT * FROM queue
-           WHERE controller IN (${placeholders})
-             AND available_at <= ?
-             AND (claim_token IS NULL OR claim_expires_at <= ?)
-           ORDER BY available_at, controller, resource_key
-           LIMIT 1`,
+          `${controllerSelect(`
+             JOIN controller_queue q ON q.controller_resource_id = c.controller_resource_id
+             JOIN leases l ON l.resource_id = c.resource_id
+             WHERE c.project_id = ?
+               AND c.controller_name IN (${placeholders})
+               AND q.available_at <= ?
+               AND (l.owner_id IS NULL OR l.expires_at <= ?)
+             ORDER BY q.available_at, c.controller_name, c.resource_key
+             LIMIT 1`)}`,
         )
-        .get(...options.controllers, nowMs, nowMs) as QueueRow | undefined;
-      if (row === undefined) {
-        return undefined;
-      }
-      const token = randomUUID();
-      const expiresAtMs = nowMs + options.leaseMs;
-      const result = this.database
+        .get(this.requireProjectId(), ...options.controllers, now, now);
+      if (!isControllerRow(row)) return undefined;
+      const lease = this.requireLease(row.resourceId);
+      const token = randomBytes(32).toString("base64url");
+      const generation = lease.generation + 1;
+      const expiresAt = now + options.leaseMs;
+      const result = this.state.connection
         .prepare(
-          `UPDATE queue
-           SET claim_token = ?, claim_version = version, claim_expires_at = ?
-           WHERE controller = ? AND resource_key = ?
-             AND (claim_token IS NULL OR claim_expires_at <= ?)`,
+          `UPDATE leases
+           SET generation = ?, owner_type = 'controller', owner_id = ?, token_hash = ?,
+               acquired_at = ?, heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND generation = ?
+             AND (owner_id IS NULL OR expires_at <= ?)`,
         )
-        .run(token, expiresAtMs, row.controller, row.resource_key, nowMs);
-      if (result.changes !== 1) {
-        return undefined;
-      }
+        .run(
+          generation,
+          options.ownerId,
+          tokenHash(token),
+          now,
+          now,
+          expiresAt,
+          row.resourceId,
+          lease.generation,
+          now,
+        );
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (result.changes !== 1) return undefined;
+      this.bumpResource(row.resourceId, row.resourceVersion, now);
+      this.insertEvent(
+        row.resourceId,
+        row.resourceVersion + 1,
+        "lease.claimed",
+        "controller",
+        options.ownerId,
+        { expiresAt },
+        now,
+        generation,
+      );
       return {
-        controller: row.controller,
-        key: row.resource_key,
+        controller: row.controllerName,
+        key: row.resourceKey,
+        ownerId: options.ownerId,
         token,
-        queueVersion: row.version,
-        consecutiveErrors: row.consecutive_errors,
-        expiresAt: iso(expiresAtMs),
+        generation,
+        queueVersion: this.queueVersion(row.controllerResourceId),
+        resourceVersion: row.resourceVersion + 1,
+        consecutiveErrors: this.queueErrors(row.controllerResourceId),
+        expiresAt: new Date(expiresAt).toISOString(),
       };
     });
   }
 
-  renewClaim(claim: ControllerQueueClaim, leaseMs: number, now?: string): boolean {
-    validateDuration(leaseMs, "leaseMs");
-    const nowMs = epoch(validTimestamp(now));
-    const expiresAt = nowMs + leaseMs;
-    const result = this.database
+  renewClaim(claim: ControllerQueueClaim, leaseMs: number, nowValue?: string): boolean {
+    const now = epoch(validTimestamp(nowValue));
+    const expiresAt = now + leaseMs;
+    const row = this.controllerRow({ controller: claim.controller, key: claim.key });
+    if (row === undefined) return false;
+    const result = this.state.connection
       .prepare(
-        `UPDATE queue SET claim_expires_at = ?
-         WHERE controller = ? AND resource_key = ? AND claim_token = ?
-           AND claim_expires_at > ?`,
+        `UPDATE leases SET heartbeat_at = ?, expires_at = ?
+         WHERE resource_id = ? AND owner_type = 'controller' AND owner_id = ?
+           AND token_hash = ? AND generation = ? AND expires_at > ?`,
       )
-      .run(expiresAt, claim.controller, claim.key, claim.token, nowMs);
+      .run(
+        now,
+        expiresAt,
+        row.resourceId,
+        claim.ownerId,
+        tokenHash(claim.token),
+        claim.generation,
+        now,
+      );
+    if (result.changes === 1) claim.expiresAt = new Date(expiresAt).toISOString();
     return result.changes === 1;
   }
 
-  settleClaim(claim: ControllerQueueClaim, now?: string): boolean {
-    const nowMs = epoch(validTimestamp(now));
-    return this.transaction(() => {
-      const row = this.claimedRow(claim);
-      if (row === undefined) {
-        return false;
-      }
-      if (row.version === row.claim_version) {
-        this.database
-          .prepare(
-            "DELETE FROM queue WHERE controller = ? AND resource_key = ? AND claim_token = ?",
-          )
-          .run(claim.controller, claim.key, claim.token);
-      } else {
-        this.database
-          .prepare(
-            `UPDATE queue
-             SET claim_token = NULL, claim_version = NULL, claim_expires_at = NULL,
-                 available_at = MIN(available_at, ?), consecutive_errors = 0, last_error = NULL
-             WHERE controller = ? AND resource_key = ? AND claim_token = ?`,
-          )
-          .run(nowMs, claim.controller, claim.key, claim.token);
-      }
-      return true;
-    });
+  settleClaim(claim: ControllerQueueClaim, nowValue?: string): boolean {
+    return this.settleControllerClaim(claim, undefined, nowValue);
   }
 
-  requeueClaim(claim: ControllerQueueClaim, options: QueueRequeueOptions, _now?: string): boolean {
-    const availableAt = epoch(validTimestamp(options.availableAt));
-    const error = options.error === undefined ? null : truncateError(options.error);
-    return this.transaction(() => {
-      const row = this.claimedRow(claim);
-      if (row === undefined) {
-        return false;
-      }
-      const eventArrived = row.version !== row.claim_version;
-      const nextAvailableAt = eventArrived ? Math.min(row.available_at, availableAt) : availableAt;
-      const nextErrors = options.error === undefined ? 0 : row.consecutive_errors + 1;
-      this.database
-        .prepare(
-          `UPDATE queue
-           SET claim_token = NULL, claim_version = NULL, claim_expires_at = NULL,
-               available_at = ?, consecutive_errors = ?, last_error = ?
-           WHERE controller = ? AND resource_key = ? AND claim_token = ?`,
-        )
-        .run(nextAvailableAt, nextErrors, error, claim.controller, claim.key, claim.token);
-      return true;
-    });
+  requeueClaim(
+    claim: ControllerQueueClaim,
+    options: QueueRequeueOptions,
+    nowValue?: string,
+  ): boolean {
+    return this.settleControllerClaim(claim, options, nowValue);
   }
 
   listQueue(): QueueItem[] {
-    const rows = this.database
-      .prepare("SELECT * FROM queue ORDER BY available_at, controller, resource_key")
-      .all() as QueueRow[];
-    return rows.map((row) => ({
+    const rows = this.state.connection
+      .prepare(
+        `SELECT c.controller_name AS controller, c.resource_key AS resourceKey,
+                q.available_at AS availableAt, q.consecutive_errors AS consecutiveErrors,
+                l.expires_at AS claimExpiresAt
+         FROM controller_queue q
+         JOIN controller_resources c ON c.controller_resource_id = q.controller_resource_id
+         JOIN leases l ON l.resource_id = c.resource_id
+         WHERE c.project_id = ? ORDER BY q.available_at, c.controller_name, c.resource_key`,
+      )
+      .all(this.requireProjectId());
+    return rows.filter(isQueueListRow).map((row) => ({
       controller: row.controller,
-      key: row.resource_key,
-      availableAt: iso(row.available_at),
-      consecutiveErrors: row.consecutive_errors,
-      ...(row.claim_expires_at === null ? {} : { claimExpiresAt: iso(row.claim_expires_at) }),
+      key: row.resourceKey,
+      availableAt: new Date(row.availableAt).toISOString(),
+      consecutiveErrors: row.consecutiveErrors,
+      ...(row.claimExpiresAt === null
+        ? {}
+        : { claimExpiresAt: new Date(row.claimExpiresAt).toISOString() }),
     }));
   }
 
   reserveEffect(options: {
     key: string;
     resourceUid: string;
+    claim: ControllerQueueClaim;
     generation: number;
     kind: string;
     requestFingerprint: string;
     now?: string;
   }): EffectReservation {
-    validateKey(options.key, "effect key");
-    validateName(options.kind, "effect kind");
-    const now = validTimestamp(options.now);
-    return this.transaction(() => {
-      const existing = this.effectRow(options.resourceUid, options.key);
-      if (existing !== undefined) {
-        if (
-          existing.request_fingerprint !== options.requestFingerprint ||
-          existing.generation !== options.generation ||
-          existing.kind !== options.kind
-        ) {
-          throw new EffectRequestConflictError(options.key);
-        }
-        return { record: effectFromRow(existing), created: false };
+    const source = this.requireControllerRowByUid(options.resourceUid);
+    this.assertControllerClaim(source, options.claim, epoch(validTimestamp(options.now)));
+    const effectId = effectIdFor(source.resourceId, options.key);
+    const existing = this.effectRow(options.resourceUid, options.key);
+    if (existing !== undefined) {
+      if (
+        existing.generation !== options.generation ||
+        existing.kind !== options.kind ||
+        existing.requestFingerprint !== options.requestFingerprint
+      ) {
+        throw new EffectRequestConflictError(options.key);
       }
-      this.database
+      return { record: this.mapEffect(existing), created: false };
+    }
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const effectResourceId = resourceIdFor("effect", effectId);
+      const payloadHash = this.state.putJson(
+        {
+          key: options.key,
+          resourceUid: options.resourceUid,
+          generation: options.generation,
+          kind: options.kind,
+          requestFingerprint: options.requestFingerprint,
+        },
+        now,
+      );
+      this.state.connection
         .prepare(
-          `INSERT INTO effects (
-            effect_key, resource_uid, generation, kind, state,
-            request_fingerprint, started_at
-          ) VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+          `INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at)
+           VALUES (?, 'effect', ?, 1, ?, ?)`,
+        )
+        .run(effectResourceId, effectId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(effectResourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO effects(
+             effect_id, resource_id, source_resource_id, source_revision, effect_type,
+             idempotency_key, payload_hash, owner_scope, status, attempt_count,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'controller', 'pending', 0, ?, ?)`,
         )
         .run(
-          options.key,
-          options.resourceUid,
-          options.generation,
+          effectId,
+          effectResourceId,
+          source.resourceId,
+          source.resourceVersion,
           options.kind,
-          options.requestFingerprint,
+          options.key,
+          payloadHash,
+          now,
           now,
         );
+      this.insertEvent(
+        effectResourceId,
+        1,
+        "effect.reserved",
+        "controller",
+        options.claim.ownerId,
+        {},
+        now,
+        options.claim.generation,
+      );
       return {
-        record: this.requireEffect(options.resourceUid, options.key),
+        record: this.mapEffect(this.requireEffectRow(options.resourceUid, options.key)),
         created: true,
       };
     });
@@ -671,424 +700,244 @@ export class SqliteControllerStore implements ControllerStore {
 
   getEffect(resourceUid: string, key: string): EffectRecord | undefined {
     const row = this.effectRow(resourceUid, key);
-    return row === undefined ? undefined : effectFromRow(row);
+    return row === undefined ? undefined : this.mapEffect(row);
   }
 
   updateEffect(options: {
     resourceUid: string;
     key: string;
+    claim: ControllerQueueClaim;
     state: EffectRecord["state"];
     externalRef?: string;
     error?: string;
     now?: string;
   }): EffectRecord {
-    const row = this.effectRow(options.resourceUid, options.key);
-    if (row === undefined) {
-      throw new Error(`Effect record not found: ${options.resourceUid}/${options.key}`);
-    }
-    if ((row.state === "applied" || row.state === "rejected") && row.state !== options.state) {
-      throw new Error(`Effect ${JSON.stringify(options.key)} is already ${row.state}`);
-    }
-    const completedAt =
-      options.state === "applied" || options.state === "rejected"
-        ? validTimestamp(options.now)
-        : null;
-    this.database
-      .prepare(
-        `UPDATE effects
-         SET state = ?, external_ref = COALESCE(?, external_ref), error = ?, completed_at = ?
-         WHERE resource_uid = ? AND effect_key = ?`,
-      )
-      .run(
-        options.state,
-        options.externalRef ?? null,
-        options.error === undefined ? null : truncateError(options.error),
-        completedAt,
-        options.resourceUid,
-        options.key,
+    const source = this.requireControllerRowByUid(options.resourceUid);
+    const now = epoch(validTimestamp(options.now));
+    this.assertControllerClaim(source, options.claim, now);
+    return this.state.transaction(() => {
+      const row = this.requireEffectRow(options.resourceUid, options.key);
+      const effectResourceId = resourceIdFor("effect", row.effectId);
+      const revision = this.resourceRevision(effectResourceId);
+      const errorHash = options.error === undefined ? null : this.state.putText(options.error, now);
+      this.state.connection
+        .prepare(
+          `UPDATE effects
+           SET status = ?, external_ref = ?, error_hash = ?, updated_at = ?, settled_at = ?
+           WHERE effect_id = ?`,
+        )
+        .run(
+          effectStatus(options.state),
+          options.externalRef ?? null,
+          errorHash,
+          now,
+          options.state === "pending" ? null : now,
+          row.effectId,
+        );
+      this.bumpResource(effectResourceId, revision, now);
+      this.insertEvent(
+        effectResourceId,
+        revision + 1,
+        `effect.${options.state}`,
+        "controller",
+        options.claim.ownerId,
+        {},
+        now,
+        options.claim.generation,
       );
-    return this.requireEffect(options.resourceUid, options.key);
+      return this.mapEffect(this.requireEffectRow(options.resourceUid, options.key));
+    });
   }
 
   listEffects(resourceUid: string): EffectRecord[] {
-    const rows = this.database
-      .prepare("SELECT * FROM effects WHERE resource_uid = ? ORDER BY started_at, effect_key")
-      .all(resourceUid) as EffectRow[];
-    return rows.map(effectFromRow);
+    const rows = this.state.connection
+      .prepare(effectSelect("WHERE c.uid = ? ORDER BY e.created_at, e.effect_id"))
+      .all(resourceUid);
+    return rows.filter(isEffectRow).map((row) => this.mapEffect(row));
   }
 
   reserveWorkflow(options: {
     resourceUid: string;
+    claim: ControllerQueueClaim;
     requestKey: string;
     workflow: string;
     inputFingerprint: string;
   }): WorkflowReservation {
-    validateKey(options.requestKey, "workflow request key");
-    validateKey(options.workflow, "workflow name");
-    return this.transaction(() => {
-      const existing = this.workflowRow(options.resourceUid, options.requestKey);
-      if (existing !== undefined) {
-        if (
-          existing.input_fingerprint !== options.inputFingerprint ||
-          existing.workflow !== options.workflow
-        ) {
-          throw new WorkflowRequestConflictError(options.requestKey);
-        }
-        return { record: workflowFromRow(existing), created: false };
+    const source = this.requireControllerRowByUid(options.resourceUid);
+    this.assertControllerClaim(source, options.claim, Date.now());
+    const existing = this.workflowRow(options.resourceUid, options.requestKey);
+    if (existing !== undefined) {
+      if (
+        existing.workflowName !== options.workflow ||
+        existing.inputFingerprint.toString("hex") !== options.inputFingerprint
+      ) {
+        throw new WorkflowRequestConflictError(options.requestKey);
       }
-      const requestId = randomUUID();
-      this.database
-        .prepare(
-          `INSERT INTO workflow_requests (
-            request_id, resource_uid, request_key, input_fingerprint,
-            workflow, state, attempt
-          ) VALUES (?, ?, ?, ?, ?, 'pending', 0)`,
-        )
-        .run(
-          requestId,
-          options.resourceUid,
-          options.requestKey,
-          options.inputFingerprint,
-          options.workflow,
-        );
-      return {
-        record: this.requireWorkflow(requestId),
-        created: true,
-      };
-    });
+      return { record: this.mapWorkflow(existing), created: false };
+    }
+    const now = Date.now();
+    const requestId = randomUUID();
+    this.state.connection
+      .prepare(
+        `INSERT INTO controller_workflows(
+           request_id, controller_resource_id, request_key, workflow_name,
+           input_fingerprint, status, attempt_count, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+      )
+      .run(
+        requestId,
+        source.controllerResourceId,
+        options.requestKey,
+        options.workflow,
+        Buffer.from(options.inputFingerprint, "hex"),
+        now,
+        now,
+      );
+    return { record: this.mapWorkflow(this.requireWorkflowRow(requestId)), created: true };
   }
 
   getWorkflow(resourceUid: string, requestKey: string): ChildWorkflowRecord | undefined {
     const row = this.workflowRow(resourceUid, requestKey);
-    return row === undefined ? undefined : workflowFromRow(row);
+    return row === undefined ? undefined : this.mapWorkflow(row);
   }
 
   getWorkflowByRequestId(requestId: string): ChildWorkflowRecord | undefined {
-    const row = this.database
-      .prepare("SELECT * FROM workflow_requests WHERE request_id = ?")
-      .get(requestId) as WorkflowRow | undefined;
-    return row === undefined ? undefined : workflowFromRow(row);
+    const row = this.workflowRowById(requestId);
+    return row === undefined ? undefined : this.mapWorkflow(row);
   }
 
-  updateWorkflow(requestId: string, update: WorkflowRecordUpdate): ChildWorkflowRecord {
-    const existing = this.database
-      .prepare("SELECT * FROM workflow_requests WHERE request_id = ?")
-      .get(requestId) as WorkflowRow | undefined;
-    if (existing === undefined) {
-      throw new Error(`Workflow request not found: ${requestId}`);
-    }
-    const runId = update.runId === undefined ? existing.run_id : update.runId;
-    const attempt = update.attempt ?? existing.attempt;
-    const error =
-      update.error === undefined
-        ? existing.error
-        : update.error === null
-          ? null
-          : truncateError(update.error);
-    this.database
+  updateWorkflow(
+    requestId: string,
+    update: WorkflowRecordUpdate,
+    claim: ControllerQueueClaim,
+  ): ChildWorkflowRecord {
+    const row = this.requireWorkflowRow(requestId);
+    const source = this.requireControllerRowByUid(row.resourceUid);
+    this.assertControllerClaim(source, claim, Date.now());
+    const now = Date.now();
+    const errorHash =
+      update.error === undefined || update.error === null
+        ? null
+        : this.state.putText(update.error, now);
+    this.state.connection
       .prepare(
-        `UPDATE workflow_requests
-         SET run_id = ?, state = ?, attempt = ?, error = ?
+        `UPDATE controller_workflows
+         SET reserved_run_id = COALESCE(?, reserved_run_id),
+             run_id = CASE
+               WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
+               ELSE run_id
+             END,
+             status = ?, attempt_count = COALESCE(?, attempt_count),
+             error_hash = ?, updated_at = ?
          WHERE request_id = ?`,
       )
-      .run(runId, update.state, attempt, error, requestId);
-    return this.requireWorkflow(requestId);
+      .run(
+        update.runId ?? null,
+        update.runId ?? null,
+        update.runId ?? null,
+        update.runId ?? null,
+        update.state,
+        update.attempt ?? null,
+        errorHash,
+        now,
+        requestId,
+      );
+    return this.mapWorkflow(this.requireWorkflowRow(requestId));
   }
 
   listWorkflows(resourceUid: string): ChildWorkflowRecord[] {
-    const rows = this.database
-      .prepare("SELECT * FROM workflow_requests WHERE resource_uid = ? ORDER BY rowid")
-      .all(resourceUid) as WorkflowRow[];
-    return rows.map(workflowFromRow);
+    const rows = this.state.connection
+      .prepare(workflowSelect("WHERE c.uid = ? ORDER BY w.created_at, w.request_id"))
+      .all(resourceUid);
+    return rows.filter(isWorkflowRow).map((row) => this.mapWorkflow(row));
   }
 
   recordEvent(options: {
     controller: string;
     key: string;
+    claim?: ControllerQueueClaim;
     type: string;
     payload?: JsonObject;
     now?: string;
   }): ControllerEvent {
-    validateName(options.controller, "controller");
-    validateKey(options.key, "resource key");
-    validateName(options.type, "event type");
-    const recordedAt = validTimestamp(options.now);
-    const payloadJson = canonicalJson(options.payload ?? {}, "controller event payload");
-    if (Buffer.byteLength(payloadJson, "utf8") > MAX_EVENT_BYTES) {
-      throw new Error(`Controller event payload exceeds ${MAX_EVENT_BYTES} bytes`);
-    }
-    const result = this.database
-      .prepare(
-        `INSERT INTO events (recorded_at, controller, resource_key, type, payload_json)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(recordedAt, options.controller, options.key, options.type, payloadJson);
-    return this.requireEvent(Number(result.lastInsertRowid));
+    const row = this.requireControllerRow({ controller: options.controller, key: options.key });
+    const now = epoch(validTimestamp(options.now));
+    if (options.claim !== undefined) this.assertControllerClaim(row, options.claim, now);
+    const revision = this.resourceRevision(row.resourceId) + 1;
+    this.bumpResource(row.resourceId, revision - 1, now);
+    const eventId = this.insertEvent(
+      row.resourceId,
+      revision,
+      options.type,
+      options.claim === undefined ? "control" : "controller",
+      options.claim?.ownerId ?? null,
+      options.payload ?? {},
+      now,
+      options.claim?.generation,
+    );
+    if (options.claim !== undefined) options.claim.resourceVersion = revision;
+    const event = this.state.connection
+      .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
+      .get(eventId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isSequenceRow(event)) throw new Error("Controller event was not recorded");
+    return {
+      seq: event.seq,
+      recordedAt: new Date(now).toISOString(),
+      controller: options.controller,
+      key: options.key,
+      type: options.type,
+      payload: options.payload ?? {},
+    };
   }
 
   listEvents(
-    options: {
-      controller?: string;
-      key?: string;
-      limit?: number;
-    } = {},
+    options: { controller?: string; key?: string; limit?: number } = {},
   ): ControllerEvent[] {
-    const limit = options.limit ?? 100;
-    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 10_000) {
-      throw new Error("Event limit must be between 1 and 10000");
+    const clauses = ["r.resource_type = 'controller'"];
+    const params: unknown[] = [];
+    if (this.projectId !== null) {
+      clauses.push("c.project_id = ?");
+      params.push(this.projectId);
     }
-    const clauses: string[] = [];
-    const values: unknown[] = [];
     if (options.controller !== undefined) {
-      clauses.push("controller = ?");
-      values.push(options.controller);
+      clauses.push("c.controller_name = ?");
+      params.push(options.controller);
     }
     if (options.key !== undefined) {
-      clauses.push("resource_key = ?");
-      values.push(options.key);
+      clauses.push("c.resource_key = ?");
+      params.push(options.key);
     }
-    const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
-    const rows = this.database
-      .prepare(`SELECT * FROM events ${where} ORDER BY seq DESC LIMIT ?`)
-      .all(...values, limit) as EventRow[];
-    return rows.map(eventFromRow);
-  }
-
-  private configure(readOnly: boolean): void {
-    if (!readOnly) {
-      this.database.pragma("journal_mode = WAL");
-      this.database.pragma("synchronous = FULL");
-      this.database.pragma("foreign_keys = ON");
-    }
-    this.database.pragma("busy_timeout = 5000");
-  }
-
-  private initializeSchema(readOnly: boolean): void {
-    if (!readOnly) {
-      this.database.exec(`
-        CREATE TABLE IF NOT EXISTS schema_info (
-          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-          schema_id TEXT NOT NULL
-        );
-      `);
-    }
-    const row = this.database
-      .prepare("SELECT schema_id FROM schema_info WHERE singleton = 1")
-      .get() as { schema_id: string } | undefined;
-    if (row !== undefined && row.schema_id !== CONTROLLER_STORE_SCHEMA) {
-      throw new Error(`Unsupported controller store schema: ${row.schema_id}`);
-    }
-    if (readOnly) {
-      if (row === undefined) {
-        throw new Error("Controller store has no schema identifier");
-      }
-    } else {
-      const existingQueue = this.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_run_queue'")
-        .get();
-      if (existingQueue !== undefined) {
-        this.assertAlphaSchemaLayout(false);
-        this.assertNoLegacyPendingLaunchNotifications();
-      }
-      this.transaction(() => {
-        this.database
-          .prepare("INSERT OR IGNORE INTO schema_info (singleton, schema_id) VALUES (1, ?)")
-          .run(CONTROLLER_STORE_SCHEMA);
-        this.database.exec(SCHEMA_SQL);
-      });
-    }
-    this.assertAlphaSchemaLayout(true);
-    this.assertNoLegacyPendingLaunchNotifications();
-  }
-
-  private assertAlphaSchemaLayout(requireTurnIntents: boolean): void {
-    const requiredQueueColumns = new Set([
-      "run_id",
-      "workflow_ref",
-      "workflow_path",
-      "workflow_source_json",
-      "definition_digest",
-      "input_json",
-      "launch_options_json",
-      "status",
-      "runner_id",
-      "claim_token",
-      "claim_expires_at",
-      "affinity_runner_id",
-      "origin_session_id",
-      "parent_run_id",
-      "error_code",
-      "error_message",
-      "created_at",
-      "updated_at",
-      "started_at",
-      "finished_at",
-    ]);
-    const actual = new Set(
-      (
-        this.database.pragma("table_info(workflow_run_queue)") as {
-          name: string;
-        }[]
-      ).map((column) => column.name),
-    );
-    const missing = [...requiredQueueColumns].filter((column) => !actual.has(column));
-    if (missing.length > 0) {
-      throw new Error(
-        "Controller store uses an incompatible alpha layout. Preserve needed run bundles, then reset the project controller store.",
-      );
-    }
-    if (!requireTurnIntents) return;
-    const requiredIntentColumns = new Set([
-      "intent_id",
-      "source_event_id",
-      "run_id",
-      "workflow_ref",
-      "target_session_id",
-      "cause",
-      "node_id",
-      "attempt_id",
-      "fallback_facts_json",
-      "requested_at",
-      "eligible_at",
-      "resolved_at",
-      "resolution",
-      "resolution_message_id",
-      "delivery_claim_token",
-      "delivery_claim_expires_at",
-    ]);
-    const intentColumns = new Set(
-      (
-        this.database.pragma("table_info(workflow_turn_intents)") as {
-          name: string;
-        }[]
-      ).map((column) => column.name),
-    );
-    const missingIntentColumns = [...requiredIntentColumns].filter(
-      (column) => !intentColumns.has(column),
-    );
-    if (missingIntentColumns.length > 0) {
-      throw new Error(
-        "Controller store uses an incompatible alpha turn-intent layout. Preserve needed run bundles, then reset the project controller store.",
-      );
-    }
-  }
-
-  private assertNoLegacyPendingLaunchNotifications(): void {
-    const notificationTable = this.database
+    params.push(options.limit ?? 100);
+    const rows = this.state.connection
       .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workflow_notifications'",
+        `SELECT e.event_seq AS seq, e.recorded_at AS recordedAt,
+                c.controller_name AS controller, c.resource_key AS resourceKey,
+                e.event_type AS eventType, e.payload_hash AS payloadHash
+         FROM events e
+         JOIN resources r ON r.resource_id = e.resource_id
+         JOIN controller_resources c ON c.resource_id = r.resource_id
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY e.event_seq DESC LIMIT ?`,
       )
-      .get();
-    if (notificationTable === undefined) {
-      throw new Error(
-        "Controller store uses an incompatible alpha notification layout. Preserve needed run bundles, then reset the project controller store.",
-      );
-    }
-    const legacy = this.database
-      .prepare(
-        `SELECT 1 FROM workflow_notifications
-         WHERE kind = 'launch_failure' AND delivered_at IS NULL LIMIT 1`,
-      )
-      .get();
-    if (legacy !== undefined) {
-      throw new Error(
-        "Controller store contains pending alpha launch-failure notifications. Preserve needed run bundles, then reset the project controller store.",
-      );
-    }
+      .all(...params);
+    return rows.filter(isControllerEventRow).map((row) => ({
+      seq: row.seq,
+      recordedAt: new Date(row.recordedAt).toISOString(),
+      controller: row.controller,
+      key: row.resourceKey,
+      type: row.eventType,
+      payload: row.payloadHash === null ? {} : (this.state.readJson(row.payloadHash) as JsonObject),
+    }));
   }
 
-  private transaction<T>(task: () => T): T {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const value = task();
-      this.database.exec("COMMIT");
-      return value;
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  private resourceRow(ref: ControllerResourceRef): ResourceRow | undefined {
-    return this.database
-      .prepare("SELECT * FROM resources WHERE controller = ? AND resource_key = ?")
-      .get(ref.controller, ref.key) as ResourceRow | undefined;
-  }
-
-  private requireResource<TSpec = unknown, TStatus = unknown>(
-    ref: ControllerResourceRef,
-  ): ControllerResource<TSpec, TStatus> {
-    const resource = this.getResource<TSpec, TStatus>(ref);
-    if (resource === undefined) {
-      throw new ResourceNotFoundError(ref.controller, ref.key);
-    }
-    return resource;
-  }
-
-  private throwMissingOrConflict(ref: ControllerResourceRef): never {
-    if (this.resourceRow(ref) === undefined) {
-      throw new ResourceNotFoundError(ref.controller, ref.key);
-    }
-    throw new ResourceConflictError(ref.controller, ref.key);
-  }
-
-  private enqueueRow(ref: ControllerResourceRef, availableAt: number): void {
-    this.database
-      .prepare(
-        `INSERT INTO queue (
-          controller, resource_key, available_at, version, consecutive_errors
-        ) VALUES (?, ?, ?, 1, 0)
-        ON CONFLICT(controller, resource_key) DO UPDATE SET
-          available_at = MIN(queue.available_at, excluded.available_at),
-          version = queue.version + 1`,
-      )
-      .run(ref.controller, ref.key, availableAt);
-  }
-
-  private claimedRow(claim: ControllerQueueClaim): QueueRow | undefined {
-    return this.database
-      .prepare(
-        `SELECT * FROM queue
-         WHERE controller = ? AND resource_key = ? AND claim_token = ?`,
-      )
-      .get(claim.controller, claim.key, claim.token) as QueueRow | undefined;
-  }
-
-  private effectRow(resourceUid: string, key: string): EffectRow | undefined {
-    return this.database
-      .prepare("SELECT * FROM effects WHERE resource_uid = ? AND effect_key = ?")
-      .get(resourceUid, key) as EffectRow | undefined;
-  }
-
-  private requireEffect(resourceUid: string, key: string): EffectRecord {
-    const effect = this.getEffect(resourceUid, key);
-    if (effect === undefined) {
-      throw new Error(`Effect record not found: ${resourceUid}/${key}`);
-    }
-    return effect;
-  }
-
-  private workflowRow(resourceUid: string, requestKey: string): WorkflowRow | undefined {
-    return this.database
-      .prepare("SELECT * FROM workflow_requests WHERE resource_uid = ? AND request_key = ?")
-      .get(resourceUid, requestKey) as WorkflowRow | undefined;
-  }
-
-  private requireWorkflow(requestId: string): ChildWorkflowRecord {
-    const workflow = this.getWorkflowByRequestId(requestId);
-    if (workflow === undefined) {
-      throw new Error(`Workflow request not found: ${requestId}`);
-    }
-    return workflow;
-  }
-
-  /** Reserve a user-started run before the initiating agent turn settles. */
   reserveWorkflowRun(options: {
     runId: string;
     workflowName: string;
     workflowSourceRef: string;
     workflowSource: unknown;
     definitionDigest: string;
+    definitionSnapshot: unknown;
     input: unknown;
     launchOptions?: unknown;
     runnerId: string;
@@ -1097,141 +946,183 @@ export class SqliteControllerStore implements ControllerStore {
     now?: string;
   }): WorkflowRunQueueRecord {
     validateRunId(options.runId);
-    validateKey(options.workflowName, "workflow name");
-    validateKey(options.workflowSourceRef, "workflow source ref");
-    validateKey(options.definitionDigest, "workflow definition digest");
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.originSessionId, "origin session id");
-    const inputJson = canonicalJson(options.input ?? null, "workflow run input");
-    const sourceJson = canonicalJson(options.workflowSource, "workflow run source");
-    const launchJson = canonicalJson(options.launchOptions ?? {}, "workflow launch options");
-    validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
-    validateJsonSize(sourceJson, "Workflow run source", MAX_EVENT_BYTES);
-    validateJsonSize(launchJson, "Workflow launch options", MAX_EVENT_BYTES);
-    const now = validTimestamp(options.now);
-    this.database
-      .prepare(
-        `INSERT INTO workflow_run_queue (
-          run_id, workflow_ref, workflow_path, workflow_source_json, definition_digest,
-          input_json, launch_options_json, status, runner_id, claim_token, claim_expires_at,
-          affinity_runner_id, origin_session_id, parent_run_id, error_code, error_message,
-          created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL)`,
-      )
-      .run(
-        options.runId,
-        options.workflowName,
-        options.workflowSourceRef,
-        sourceJson,
-        options.definitionDigest,
-        inputJson,
-        launchJson,
-        options.runnerId,
-        options.originSessionId,
-        options.parentRunId ?? null,
-        now,
+    const now = epoch(validTimestamp(options.now));
+    const definitionDigest = digestBuffer(options.definitionDigest);
+    return this.state.transaction(() => {
+      if (this.getWorkflowRun(options.runId) !== undefined) {
+        throw new Error(`Workflow run already reserved: ${options.runId}`);
+      }
+      const resourceId = resourceIdFor("run", options.runId);
+      const definitionHash = this.state.putJson(options.definitionSnapshot, now);
+      const sourceHash = this.state.putJson(options.workflowSource, now);
+      const inputHash = this.state.putJson(options.input ?? null, now);
+      const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
+      const queuedStateHash = this.state.putJson(
+        {
+          schema: "pi-workflows.run-state.v1",
+          traceSeq: 1,
+          runId: options.runId,
+          workflowName: options.workflowName,
+          ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
+          startedAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+          status: "running",
+          input: options.input ?? null,
+          outputs: {},
+          results: {},
+          steps: [],
+          updates: [],
+        },
         now,
       );
-    return this.requireWorkflowRun(options.runId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO workflow_definitions(
+             definition_digest, workflow_name, definition_hash, created_at
+           ) VALUES (?, ?, ?, ?)
+           ON CONFLICT(definition_digest) DO NOTHING`,
+        )
+        .run(definitionDigest, options.workflowName, definitionHash, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at)
+           VALUES (?, 'run', ?, 1, ?, ?)`,
+        )
+        .run(resourceId, options.runId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(resourceId);
+      const source = sourceParts(options.workflowSourceRef, options.definitionDigest);
+      this.state.connection
+        .prepare(
+          `INSERT INTO runs(
+             run_id, resource_id, project_id, parent_run_id, definition_digest,
+             workflow_ref, workflow_source_hash, launch_options_hash,
+             source_type, source_ref, source_revision, status, paused,
+             input_hash, output_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`,
+        )
+        .run(
+          options.runId,
+          resourceId,
+          this.requireProjectId(),
+          options.parentRunId ?? null,
+          definitionDigest,
+          options.workflowName,
+          sourceHash,
+          launchHash,
+          source.type,
+          source.ref,
+          source.revision,
+          inputHash,
+          queuedStateHash,
+          now,
+          now,
+        );
+      this.state.connection
+        .prepare(
+          `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
+           VALUES (?, ?, 'interactive', ?)`,
+        )
+        .run(options.runId, options.originSessionId, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO run_queue(
+             run_id, status, available_at, affinity_runner_id, origin_session_id,
+             consecutive_errors, created_at, updated_at
+           ) VALUES (?, 'queued', ?, ?, ?, 0, ?, ?)`,
+        )
+        .run(options.runId, now, options.runnerId, options.originSessionId, now, now);
+      this.insertEvent(resourceId, 1, "run.queued", "session", options.originSessionId, {}, now);
+      return this.requireWorkflowRun(options.runId);
+    });
   }
 
-  /** Insert a run that will start immediately outside a live model turn. */
   enqueueWorkflowRun(options: {
     runId: string;
     workflowName: string;
     workflowSourceRef: string;
-    workflowSource?: unknown;
-    definitionDigest?: string;
+    workflowSource: unknown;
+    definitionDigest: string;
+    definitionSnapshot: unknown;
     input: unknown;
     launchOptions?: unknown;
     runnerId: string;
     claimToken: string;
     leaseMs: number;
-    affinityRunnerId?: string;
-    originSessionId?: string;
+    originSessionId: string;
     parentRunId?: string;
     now?: string;
   }): WorkflowRunQueueRecord {
-    validateRunId(options.runId);
-    validateKey(options.workflowName, "workflow name");
-    validateKey(options.workflowSourceRef, "workflow source ref");
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.claimToken, "claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    if (options.originSessionId !== undefined) {
-      validateKey(options.originSessionId, "origin session id");
+    if (this.getWorkflowRun(options.runId) === undefined) {
+      this.reserveWorkflowRun({
+        runId: options.runId,
+        workflowName: options.workflowName,
+        workflowSourceRef: options.workflowSourceRef,
+        workflowSource: options.workflowSource,
+        definitionDigest: options.definitionDigest,
+        definitionSnapshot: options.definitionSnapshot,
+        input: options.input,
+        launchOptions: options.launchOptions ?? {},
+        runnerId: options.runnerId,
+        originSessionId: options.originSessionId,
+        ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
     }
-    const inputJson = canonicalJson(options.input ?? null, "workflow run input");
-    const sourceJson = canonicalJson(
-      options.workflowSource ?? { ref: options.workflowSourceRef },
-      "workflow run source",
-    );
-    const launchJson = canonicalJson(options.launchOptions ?? {}, "workflow launch options");
-    validateJsonSize(inputJson, "Workflow run input", MAX_RESOURCE_VALUE_BYTES);
-    const now = validTimestamp(options.now);
-    const expiresAt = epoch(now) + options.leaseMs;
-    this.database
-      .prepare(
-        `INSERT INTO workflow_run_queue (
-          run_id, workflow_ref, workflow_path, workflow_source_json, definition_digest,
-          input_json, launch_options_json, status, runner_id, claim_token, claim_expires_at,
-          affinity_runner_id, origin_session_id, parent_run_id, error_code, error_message,
-          created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL)`,
-      )
-      .run(
-        options.runId,
-        options.workflowName,
-        options.workflowSourceRef,
-        sourceJson,
-        options.definitionDigest ?? "unavailable",
-        inputJson,
-        launchJson,
-        options.runnerId,
-        options.claimToken,
-        expiresAt,
-        options.affinityRunnerId ?? options.runnerId,
-        options.originSessionId ?? null,
-        options.parentRunId ?? null,
-        now,
-        now,
-        now,
-      );
-    return this.requireWorkflowRun(options.runId);
+    const claimed = this.claimWorkflowRun({
+      runId: options.runId,
+      runnerId: options.runnerId,
+      claimToken: options.claimToken,
+      leaseMs: options.leaseMs,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    if (claimed === undefined) {
+      throw new Error(`Workflow run could not be claimed: ${options.runId}`);
+    }
+    return claimed;
   }
 
   getWorkflowRun(runId: string): WorkflowRunQueueRecord | undefined {
-    validateRunId(runId);
-    const row = this.database
-      .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
-      .get(runId) as WorkflowRunQueueRow | undefined;
-    return row === undefined ? undefined : workflowRunFromRow(row);
+    const row = this.workflowRunRow(runId);
+    return row === undefined ? undefined : this.mapWorkflowRun(row);
   }
 
   listWorkflowRuns(
-    options: { status?: WorkflowRunQueueRecord["status"] } = {},
+    options: {
+      statuses?: WorkflowRunLaunchStatus[];
+      excludeRunIds?: string[];
+      limit?: number;
+    } = {},
   ): WorkflowRunQueueRecord[] {
-    const rows =
-      options.status === undefined
-        ? (this.database
-            .prepare("SELECT * FROM workflow_run_queue ORDER BY created_at")
-            .all() as WorkflowRunQueueRow[])
-        : (this.database
-            .prepare("SELECT * FROM workflow_run_queue WHERE status = ? ORDER BY created_at")
-            .all(options.status) as WorkflowRunQueueRow[]);
-    return rows.map(workflowRunFromRow);
+    const clauses = ["r.project_id = ?"];
+    const params: unknown[] = [this.requireProjectId()];
+    if (options.statuses !== undefined && options.statuses.length > 0) {
+      clauses.push(`q.status IN (${options.statuses.map(() => "?").join(", ")})`);
+      params.push(...options.statuses);
+    }
+    if (options.excludeRunIds !== undefined && options.excludeRunIds.length > 0) {
+      clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
+      params.push(...options.excludeRunIds);
+    }
+    params.push(options.limit ?? 100);
+    const rows = this.state.connection
+      .prepare(
+        workflowRunSelect(`WHERE ${clauses.join(" AND ")} ORDER BY q.created_at DESC LIMIT ?`),
+      )
+      .all(...params);
+    return rows.filter(isRunRow).map((row) => this.mapWorkflowRun(row));
   }
 
   findSessionReservation(sessionId: string): WorkflowRunQueueRecord | undefined {
-    validateKey(sessionId, "session id");
-    const row = this.database
+    const row = this.state.connection
       .prepare(
-        `SELECT * FROM workflow_run_queue
-         WHERE origin_session_id = ? AND status IN ('queued', 'starting', 'running')
-         ORDER BY created_at LIMIT 1`,
+        workflowRunSelect(
+          "WHERE b.origin_session_id = ? AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
+        ),
       )
-      .get(sessionId) as WorkflowRunQueueRow | undefined;
-    return row === undefined ? undefined : workflowRunFromRow(row);
+      .get(sessionId);
+    return isRunRow(row) ? this.mapWorkflowRun(row) : undefined;
   }
 
   claimWorkflowRun(options: {
@@ -1241,157 +1132,128 @@ export class SqliteControllerStore implements ControllerStore {
     leaseMs: number;
     now?: string;
   }): WorkflowRunQueueRecord | undefined {
-    validateRunId(options.runId);
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.claimToken, "claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    const expiresAt = nowMs + options.leaseMs;
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue
-         SET status = 'starting', runner_id = ?, claim_token = ?, claim_expires_at = ?,
-             started_at = COALESCE(started_at, ?), updated_at = ?
-         WHERE run_id = ? AND (
-           status IN ('queued', 'parked')
-           OR (status = 'starting' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
-         )`,
-      )
-      .run(options.runnerId, options.claimToken, expiresAt, now, now, options.runId, nowMs);
-    return result.changes === 1 ? this.requireWorkflowRun(options.runId) : undefined;
+    const now = epoch(validTimestamp(options.now));
+    return this.claimRun(options.runId, options.runnerId, options.claimToken, options.leaseMs, now);
   }
 
   markWorkflowRunRunning(options: { runId: string; claimToken: string; now?: string }): boolean {
-    validateRunId(options.runId);
-    const now = validTimestamp(options.now);
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue SET status = 'running', updated_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status = 'starting'`,
-      )
-      .run(now, options.runId, options.claimToken);
-    return result.changes === 1;
+    return this.updateClaimedRunStatus(options.runId, options.claimToken, "running", options.now);
   }
 
-  /**
-   * Claim the oldest claimable run, preferring runs with affinity to this
-   * runner. Parked rows are claimable immediately; claimed rows become
-   * claimable once their lease expires, so a dead or stalled runner never
-   * strands a run. Returns undefined when nothing is claimable.
-   */
   claimNextWorkflowRun(options: {
     runnerId: string;
+    sessionId?: string;
     claimToken: string;
     leaseMs: number;
-    excludeRunIds?: string[];
-    /** Interactive sessions provide their id; detached hosts omit it. */
-    sessionId?: string;
     now?: string;
+    excludeRunIds?: string[];
   }): WorkflowRunQueueRecord | undefined {
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.claimToken, "claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    if (options.sessionId !== undefined) validateKey(options.sessionId, "session id");
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    const expiresAt = nowMs + options.leaseMs;
-    const excluded = options.excludeRunIds ?? [];
-    for (const runId of excluded) {
-      validateRunId(runId);
+    const now = epoch(validTimestamp(options.now));
+    const clauses = [
+      "r.project_id = ?",
+      "q.status IN ('queued', 'parked', 'starting')",
+      "q.available_at <= ?",
+      "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
+      "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status = 'parked')",
+    ];
+    const params: unknown[] = [
+      this.requireProjectId(),
+      now,
+      now,
+      options.runnerId,
+      options.runnerId,
+    ];
+    if (options.sessionId !== undefined) {
+      clauses.push("b.origin_session_id = ?");
+      params.push(options.sessionId);
     }
-    const exclusion =
-      excluded.length === 0 ? "" : `AND run_id NOT IN (${excluded.map(() => "?").join(", ")})`;
-    const sessionFilter =
-      options.sessionId === undefined
-        ? "AND status != 'queued' AND (status != 'starting' OR origin_session_id IS NULL)"
-        : "AND (origin_session_id IS NULL OR origin_session_id = ?)";
-    const claimable = `(
-      status IN ('queued', 'parked')
-      OR (status IN ('starting', 'running') AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
-    )`;
-    return this.transaction(() => {
-      const candidate = this.database
-        .prepare(
-          `SELECT run_id FROM workflow_run_queue
-           WHERE ${claimable} ${exclusion} ${sessionFilter}
-           ORDER BY
-             CASE WHEN affinity_runner_id = ? THEN 0 ELSE 1 END,
-             created_at ASC
-           LIMIT 1`,
-        )
-        .get(
-          nowMs,
-          ...excluded,
-          ...(options.sessionId === undefined ? [] : [options.sessionId]),
-          options.runnerId,
-        ) as { run_id: string } | undefined;
-      if (candidate === undefined) {
-        return undefined;
-      }
-      const result = this.database
-        .prepare(
-          `UPDATE workflow_run_queue
-           SET status = 'starting', runner_id = ?, claim_token = ?,
-               claim_expires_at = ?, started_at = COALESCE(started_at, ?), updated_at = ?
-           WHERE run_id = ? AND (
-             status IN ('queued', 'parked')
-             OR (status IN ('starting', 'running') AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?)
-           )`,
-        )
-        .run(options.runnerId, options.claimToken, expiresAt, now, now, candidate.run_id, nowMs);
-      return result.changes === 1 ? this.requireWorkflowRun(candidate.run_id) : undefined;
-    });
+    if (options.excludeRunIds !== undefined && options.excludeRunIds.length > 0) {
+      clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
+      params.push(...options.excludeRunIds);
+    }
+    const row = this.state.connection
+      .prepare(
+        workflowRunSelect(
+          `WHERE ${clauses.join(" AND ")} ORDER BY q.available_at, q.created_at LIMIT 1`,
+        ),
+      )
+      .get(...params);
+    if (!isRunRow(row)) return undefined;
+    return this.claimRun(row.runId, options.runnerId, options.claimToken, options.leaseMs, now);
   }
 
-  /** Extend a live claim. Rejects expired or foreign claims. */
   renewWorkflowRunClaim(options: {
     runId: string;
     claimToken: string;
     leaseMs: number;
     now?: string;
   }): boolean {
-    validateRunId(options.runId);
-    validateDuration(options.leaseMs, "leaseMs");
-    const nowMs = epoch(validTimestamp(options.now));
-    const expiresAt = nowMs + options.leaseMs;
-    const result = this.database
+    const now = epoch(validTimestamp(options.now));
+    const row = this.workflowRunRow(options.runId);
+    if (row === undefined || row.ownerId === null) return false;
+    const result = this.state.connection
       .prepare(
-        `UPDATE workflow_run_queue SET claim_expires_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')
-           AND claim_expires_at > ?`,
+        `UPDATE leases SET heartbeat_at = ?, expires_at = ?
+         WHERE resource_id = ? AND token_hash = ? AND owner_id = ? AND expires_at > ?`,
       )
-      .run(expiresAt, options.runId, options.claimToken, nowMs);
+      .run(
+        now,
+        now + options.leaseMs,
+        row.resourceId,
+        tokenHash(options.claimToken),
+        row.ownerId,
+        now,
+      );
     return result.changes === 1;
   }
 
-  /** The fence check: true only while this exact claim is live. */
   verifyWorkflowRunClaim(options: { runId: string; claimToken: string; now?: string }): boolean {
-    validateRunId(options.runId);
-    const nowMs = epoch(validTimestamp(options.now));
-    const row = this.database
-      .prepare(
-        `SELECT 1 AS live FROM workflow_run_queue
-         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')
-           AND claim_expires_at > ?`,
-      )
-      .get(options.runId, options.claimToken, nowMs);
-    return row !== undefined;
+    const now = epoch(validTimestamp(options.now));
+    const row = this.workflowRunRow(options.runId);
+    if (row === undefined || row.ownerId === null || row.claimExpiresAt === null) return false;
+    const lease = this.requireLease(row.resourceId);
+    return (
+      lease.tokenHash !== null &&
+      lease.tokenHash.equals(tokenHash(options.claimToken)) &&
+      row.claimExpiresAt > now
+    );
   }
 
-  /** Release a claim and park the run so another runner can resume it. */
+  workflowRunAuthority(
+    runId: string,
+    claimToken: string,
+  ):
+    | {
+        actor: { type: "session" | "host"; id: string };
+        ownerType: "session" | "host";
+        ownerId: string;
+        token: string;
+        generation: number;
+      }
+    | undefined {
+    const row = this.workflowRunRow(runId);
+    if (
+      row === undefined ||
+      row.ownerId === null ||
+      row.claimExpiresAt === null ||
+      row.claimExpiresAt <= Date.now()
+    )
+      return undefined;
+    const lease = this.requireLease(row.resourceId);
+    if (lease.tokenHash === null || !lease.tokenHash.equals(tokenHash(claimToken)))
+      return undefined;
+    const ownerType = row.ownerId.startsWith("host-") ? "host" : "session";
+    return {
+      actor: { type: ownerType, id: row.ownerId },
+      ownerType,
+      ownerId: row.ownerId,
+      token: claimToken,
+      generation: row.leaseGeneration,
+    };
+  }
+
   parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
-    validateRunId(options.runId);
-    const now = validTimestamp(options.now);
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue
-         SET status = 'parked', runner_id = NULL, claim_token = NULL,
-             claim_expires_at = NULL, updated_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')`,
-      )
-      .run(now, options.runId, options.claimToken);
-    return result.changes === 1;
+    return this.releaseRunClaim(options.runId, options.claimToken, "parked", options.now);
   }
 
   failWorkflowRun(options: {
@@ -1401,250 +1263,105 @@ export class SqliteControllerStore implements ControllerStore {
     errorMessage: string;
     now?: string;
   }): boolean {
-    validateRunId(options.runId);
-    validateKey(options.errorCode, "workflow launch error code");
-    const message = options.errorMessage.trim();
-    if (message.length === 0 || Buffer.byteLength(message) > 2_048) {
-      throw new Error("Workflow launch error message must be between 1 and 2048 bytes");
-    }
-    const now = validTimestamp(options.now);
-    const claimFilter = options.claimToken === undefined ? "" : "AND claim_token = ?";
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue
-         SET status = 'failed', runner_id = NULL, claim_token = NULL,
-             claim_expires_at = NULL, parent_run_id = NULL, input_json = 'null',
-             launch_options_json = '{}', error_code = ?, error_message = ?,
-             finished_at = ?, updated_at = ?
-         WHERE run_id = ? AND status IN ('queued', 'starting', 'running') ${claimFilter}`,
-      )
-      .run(
-        options.errorCode,
-        message,
-        now,
-        now,
-        options.runId,
-        ...(options.claimToken === undefined ? [] : [options.claimToken]),
-      );
-    return result.changes === 1;
+    return this.terminalRun(
+      options.runId,
+      options.claimToken,
+      "failed",
+      options.errorCode,
+      options.errorMessage,
+      options.now,
+    );
   }
 
   cancelWorkflowRun(options: { runId: string; claimToken?: string; now?: string }): boolean {
-    validateRunId(options.runId);
-    const now = validTimestamp(options.now);
-    const claimFilter = options.claimToken === undefined ? "" : "AND claim_token = ?";
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue
-         SET status = 'cancelled', runner_id = NULL, claim_token = NULL,
-             claim_expires_at = NULL, input_json = 'null', launch_options_json = '{}',
-             finished_at = ?, updated_at = ?
-         WHERE run_id = ? AND status IN ('queued', 'starting') ${claimFilter}`,
-      )
-      .run(
-        now,
-        now,
-        options.runId,
-        ...(options.claimToken === undefined ? [] : [options.claimToken]),
-      );
-    return result.changes === 1;
+    return this.terminalRun(
+      options.runId,
+      options.claimToken,
+      "cancelled",
+      "cancelled",
+      "Workflow run cancelled",
+      options.now,
+    );
   }
 
-  /**
-   * Delete a claimed row. Used when a continuation fails before its bundle
-   * exists, so the parent's one-continuation slot is not consumed by a run
-   * that never happened.
-   */
   deleteWorkflowRun(options: { runId: string; claimToken: string }): boolean {
-    validateRunId(options.runId);
-    const result = this.database
-      .prepare("DELETE FROM workflow_run_queue WHERE run_id = ? AND claim_token = ?")
-      .run(options.runId, options.claimToken);
-    return result.changes === 1;
+    const row = this.workflowRunRow(options.runId);
+    if (row === undefined || !this.verifyWorkflowRunClaim(options)) return false;
+    return (
+      this.state.connection
+        .prepare("DELETE FROM resources WHERE resource_id = ?")
+        .run(row.resourceId).changes === 1
+    );
   }
 
-  /** Release a claim and mark the run terminal in the queue. */
   completeWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
-    validateRunId(options.runId);
-    const now = validTimestamp(options.now);
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_run_queue
-         SET status = 'done', runner_id = NULL, claim_token = NULL,
-             claim_expires_at = NULL, input_json = 'null', launch_options_json = '{}',
-             finished_at = ?, updated_at = ?
-         WHERE run_id = ? AND claim_token = ? AND status IN ('starting', 'running')`,
-      )
-      .run(now, now, options.runId, options.claimToken);
-    return result.changes === 1;
+    return this.releaseRunClaim(options.runId, options.claimToken, "done", options.now);
   }
 
-  /** Repair a canonical bundle's queue source and claim it only when needed. */
-  repairCanonicalWorkflowSourceRun(options: {
-    runId: string;
-    workflowName: string;
-    workflowSourceRef: string;
-    runnerId: string;
-    claimToken: string;
-    leaseMs: number;
-    now?: string;
-  }): "unchanged" | "claimed" | false {
-    validateRunId(options.runId);
-    validateKey(options.workflowName, "workflow name");
-    validateKey(options.workflowSourceRef, "workflow source ref");
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.claimToken, "claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    const expiresAt = nowMs + options.leaseMs;
-    return this.transaction(() => {
-      const row = this.database
-        .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
-        .get(options.runId) as WorkflowRunQueueRow | undefined;
-      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) {
-        return false;
-      }
-      if (row.workflow_path === options.workflowSourceRef && row.status === "parked") {
-        return "unchanged";
-      }
-      const claimable =
-        row.status === "parked" ||
-        (row.status === "starting" &&
-          row.claim_token === options.claimToken &&
-          row.claim_expires_at !== null &&
-          row.claim_expires_at > nowMs) ||
-        (row.status === "starting" &&
-          row.claim_expires_at !== null &&
-          row.claim_expires_at <= nowMs);
-      if (!claimable) return false;
-      const result = this.database
-        .prepare(
-          `UPDATE workflow_run_queue
-           SET workflow_ref = ?, workflow_path = ?, status = 'starting', runner_id = ?,
-               claim_token = ?, claim_expires_at = ?, updated_at = ?
-           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
-        )
-        .run(
-          options.workflowName,
-          options.workflowSourceRef,
-          options.runnerId,
-          options.claimToken,
-          expiresAt,
-          now,
-          options.runId,
-        );
-      return result.changes === 1 ? "claimed" : false;
-    });
+  repairCanonicalWorkflowSourceRun(): never {
+    throw new Error("Legacy workflow source repair is not available after the SQLite cutover");
   }
 
-  /** Claim and rewrite one proved legacy workflow source queue row atomically. */
-  claimLegacyWorkflowSourceRun(options: {
-    runId: string;
-    workflowName: string;
-    oldWorkflowPath: string;
-    workflowSourceRef: string;
-    runnerId: string;
-    claimToken: string;
-    leaseMs: number;
-    now?: string;
-  }): boolean {
-    validateRunId(options.runId);
-    validateKey(options.workflowName, "workflow name");
-    validateKey(options.oldWorkflowPath, "legacy workflow path");
-    validateKey(options.workflowSourceRef, "workflow source ref");
-    validateKey(options.runnerId, "runner id");
-    validateKey(options.claimToken, "claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    const expiresAt = nowMs + options.leaseMs;
-    return this.transaction(() => {
-      const row = this.database
-        .prepare("SELECT * FROM workflow_run_queue WHERE run_id = ?")
-        .get(options.runId) as WorkflowRunQueueRow | undefined;
-      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) {
-        return false;
-      }
-      const sourceMatches =
-        row.workflow_path === options.oldWorkflowPath ||
-        row.workflow_path === options.workflowSourceRef;
-      const claimable =
-        row.status === "parked" ||
-        (row.status === "starting" &&
-          row.claim_token === options.claimToken &&
-          row.claim_expires_at !== null &&
-          row.claim_expires_at > nowMs) ||
-        (row.status === "starting" &&
-          row.claim_expires_at !== null &&
-          row.claim_expires_at <= nowMs);
-      if (!sourceMatches || !claimable) return false;
-      const result = this.database
-        .prepare(
-          `UPDATE workflow_run_queue
-           SET workflow_ref = ?, workflow_path = ?, status = 'starting', runner_id = ?,
-               claim_token = ?, claim_expires_at = ?, updated_at = ?
-           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
-        )
-        .run(
-          options.workflowName,
-          options.workflowSourceRef,
-          options.runnerId,
-          options.claimToken,
-          expiresAt,
-          now,
-          options.runId,
-        );
-      return result.changes === 1;
-    });
+  claimLegacyWorkflowSourceRun(): never {
+    throw new Error("Legacy workflow source claims are not available after the SQLite cutover");
   }
 
-  /** Append a run lifecycle transition to the event feed. */
   recordRunEvent(options: {
     runId: string;
     workflowRef: string;
     type: string;
-    runnerId?: string;
     payload?: JsonObject;
+    runnerId?: string;
     now?: string;
-  }): number {
-    validateRunId(options.runId);
-    validateKey(options.type, "run event type");
-    const payloadJson = canonicalJson(options.payload ?? {}, "run event payload");
-    validateJsonSize(payloadJson, "Run event payload", MAX_EVENT_BYTES);
-    const result = this.database
-      .prepare(
-        `INSERT INTO run_events (recorded_at, run_id, workflow_ref, type, runner_id, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        validTimestamp(options.now),
-        options.runId,
-        options.workflowRef,
-        options.type,
-        options.runnerId ?? null,
-        payloadJson,
-      );
-    return Number(result.lastInsertRowid);
+  }): RunEventRecord {
+    const row = this.requireWorkflowRunRow(options.runId);
+    const now = epoch(validTimestamp(options.now));
+    const revision = this.resourceRevision(row.resourceId) + 1;
+    this.bumpResource(row.resourceId, revision - 1, now);
+    const eventId = this.insertEvent(
+      row.resourceId,
+      revision,
+      options.type,
+      options.runnerId?.startsWith("host-") ? "host" : "session",
+      options.runnerId ?? null,
+      options.payload ?? {},
+      now,
+      row.leaseGeneration || undefined,
+    );
+    const seq = this.state.connection
+      .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
+      .get(eventId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    if (!isSequenceRow(seq)) throw new Error("Run event was not recorded");
+    return {
+      seq: seq.seq,
+      recordedAt: new Date(now).toISOString(),
+      runId: options.runId,
+      workflowRef: options.workflowRef,
+      type: options.type,
+      runnerId: options.runnerId ?? null,
+      payload: options.payload ?? {},
+    };
   }
 
-  /** List run events after a watermark, oldest first. */
   listRunEventsAfter(seq: number, options: { limit?: number } = {}): RunEventRecord[] {
-    const limit = options.limit ?? 50;
-    if (!Number.isSafeInteger(seq) || seq < 0) {
-      throw new Error(`Invalid run event watermark: ${seq}`);
-    }
-    const rows = this.database
-      .prepare("SELECT * FROM run_events WHERE seq > ? ORDER BY seq ASC LIMIT ?")
-      .all(seq, limit) as RunEventRow[];
-    return rows.map((row) => ({
+    const rows = this.state.connection
+      .prepare(
+        `SELECT e.event_seq AS seq, e.recorded_at AS recordedAt, r.run_id AS runId,
+                r.workflow_ref AS workflowRef, e.event_type AS eventType,
+                e.actor_id AS runnerId, e.payload_hash AS payloadHash
+         FROM events e JOIN runs r ON r.resource_id = e.resource_id
+         WHERE e.event_seq > ? ORDER BY e.event_seq LIMIT ?`,
+      )
+      .all(seq, options.limit ?? 100);
+    return rows.filter(isRunEventRow).map((row) => ({
       seq: row.seq,
-      recordedAt: row.recorded_at,
-      runId: row.run_id,
-      workflowRef: row.workflow_ref,
-      type: row.type,
-      runnerId: row.runner_id,
-      payload: parseStoredJson<JsonObject>(row.payload_json, "run event payload"),
+      recordedAt: new Date(row.recordedAt).toISOString(),
+      runId: row.runId,
+      workflowRef: row.workflowRef,
+      type: row.eventType,
+      runnerId: row.runnerId,
+      payload: row.payloadHash === null ? {} : (this.state.readJson(row.payloadHash) as JsonObject),
     }));
   }
 
@@ -1658,85 +1375,90 @@ export class SqliteControllerStore implements ControllerStore {
     nodeId?: string | null;
     attemptId?: string | null;
     fallbackFacts: WorkflowTurnIntentFacts;
-    eligible?: boolean;
-    now?: string;
+    eligible: boolean;
+    requestedAt?: string;
   }): WorkflowTurnIntentRecord {
-    validateKey(options.intentId, "workflow turn intent id");
-    validateKey(options.sourceEventId, "workflow turn source event id");
-    validateRunId(options.runId);
-    validateKey(options.workflowRef, "workflow turn workflow ref");
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    validateWorkflowTurnIntentCause(options.cause);
-    const nodeId = options.nodeId ?? null;
-    const attemptId = options.attemptId ?? null;
-    if (nodeId !== null) validateKey(nodeId, "workflow turn node id");
-    if (attemptId !== null) validateKey(attemptId, "workflow turn attempt id");
-    const factsJson = workflowTurnIntentFactsJson(options.fallbackFacts);
-    const now = validTimestamp(options.now);
-    const eligibleAt = options.eligible === true ? now : null;
-    this.database
-      .prepare(
-        `INSERT INTO workflow_turn_intents (
-          intent_id, source_event_id, run_id, workflow_ref, target_session_id,
-          cause, node_id, attempt_id, fallback_facts_json, requested_at, eligible_at,
-          resolved_at, resolution, resolution_message_id,
-          delivery_claim_token, delivery_claim_expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
-        ON CONFLICT(intent_id) DO NOTHING`,
-      )
-      .run(
-        options.intentId,
-        options.sourceEventId,
-        options.runId,
-        options.workflowRef,
-        options.targetSessionId,
-        options.cause,
-        nodeId,
-        attemptId,
-        factsJson,
+    const existing = this.turnIntentBySource(options.sourceEventId);
+    if (existing !== undefined) return existing;
+    const now = epoch(validTimestamp(options.requestedAt));
+    const run = this.requireWorkflowRunRow(options.runId);
+    const intentId = options.intentId;
+    const resourceId = resourceIdFor("turn_intent", intentId);
+    const effectId = `effect-${randomUUID()}`;
+    this.state.transaction(() => {
+      const factsHash = this.state.putJson(options.fallbackFacts, now);
+      this.insertEffectResource(
+        effectId,
+        resourceIdFor("effect", effectId),
+        run.resourceId,
+        this.resourceRevision(run.resourceId),
+        "turn.deliver",
+        intentId,
+        factsHash,
+        "run",
         now,
-        eligibleAt,
       );
-    const existing = this.getWorkflowTurnIntent(options.intentId);
-    if (existing === undefined) {
-      throw new Error(`Workflow turn intent was not stored: ${options.intentId}`);
-    }
-    if (
-      existing.sourceEventId !== options.sourceEventId ||
-      existing.runId !== options.runId ||
-      existing.workflowRef !== options.workflowRef ||
-      existing.targetSessionId !== options.targetSessionId ||
-      existing.cause !== options.cause ||
-      existing.nodeId !== nodeId ||
-      existing.attemptId !== attemptId
-    ) {
-      throw new Error(`Workflow turn intent identity conflict: ${options.intentId}`);
-    }
-    return existing;
+      this.state.connection
+        .prepare(
+          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'turn_intent', ?, 1, ?, ?)",
+        )
+        .run(resourceId, intentId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(resourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO turn_intents(
+             turn_intent_id, resource_id, effect_id, source_event_id, run_id,
+             workflow_ref, target_session_id, cause, node_id, attempt_id,
+             facts_hash, requested_at, eligible_at, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          intentId,
+          resourceId,
+          effectId,
+          options.sourceEventId,
+          options.runId,
+          options.workflowRef,
+          options.targetSessionId,
+          options.cause,
+          options.nodeId ?? null,
+          options.attemptId ?? null,
+          factsHash,
+          now,
+          options.eligible ? now : null,
+          now,
+        );
+      this.insertEvent(
+        resourceId,
+        1,
+        "turn.requested",
+        "session",
+        options.targetSessionId,
+        {},
+        now,
+      );
+    });
+    return this.requireTurnIntent(intentId);
   }
 
   getWorkflowTurnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
-    validateKey(intentId, "workflow turn intent id");
-    const row = this.database
-      .prepare("SELECT * FROM workflow_turn_intents WHERE intent_id = ?")
-      .get(intentId) as WorkflowTurnIntentRow | undefined;
-    return row === undefined ? undefined : workflowTurnIntentFromRow(row);
+    return this.turnIntent(intentId);
   }
 
   findPendingWorkflowTurnIntent(options: {
     runId: string;
     targetSessionId: string;
   }): WorkflowTurnIntentRecord | undefined {
-    validateRunId(options.runId);
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    const row = this.database
+    const row = this.state.connection
       .prepare(
-        `SELECT * FROM workflow_turn_intents
-         WHERE run_id = ? AND target_session_id = ? AND resolved_at IS NULL
-         ORDER BY requested_at DESC, intent_id DESC LIMIT 1`,
+        turnIntentSelect(
+          "WHERE t.run_id = ? AND t.target_session_id = ? AND t.resolved_at IS NULL ORDER BY t.requested_at DESC LIMIT 1",
+        ),
       )
-      .get(options.runId, options.targetSessionId) as WorkflowTurnIntentRow | undefined;
-    return row === undefined ? undefined : workflowTurnIntentFromRow(row);
+      .get(options.runId, options.targetSessionId);
+    return isTurnIntentRow(row) ? this.mapTurnIntent(row) : undefined;
   }
 
   claimWorkflowTurnIntent(options: {
@@ -1746,101 +1468,60 @@ export class SqliteControllerStore implements ControllerStore {
     leaseMs: number;
     now?: string;
   }): WorkflowTurnIntentRecord | undefined {
-    validateKey(options.intentId, "workflow turn intent id");
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    validateKey(options.claimToken, "workflow turn claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    const nowMs = epoch(validTimestamp(options.now));
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_turn_intents
-         SET delivery_claim_token = ?, delivery_claim_expires_at = ?
-         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
-           AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
-      )
-      .run(
-        options.claimToken,
-        nowMs + options.leaseMs,
-        options.intentId,
-        options.targetSessionId,
-        nowMs,
-      );
-    if (result.changes !== 1) return undefined;
-    const row = this.database
-      .prepare("SELECT * FROM workflow_turn_intents WHERE intent_id = ?")
-      .get(options.intentId) as WorkflowTurnIntentRow;
-    return workflowTurnIntentFromRow(row);
+    const intent = this.turnIntent(options.intentId);
+    if (intent?.targetSessionId !== options.targetSessionId) return undefined;
+    return this.claimEffectForTurn(
+      options.intentId,
+      options.claimToken,
+      options.leaseMs,
+      options.now,
+    )
+      ? this.requireTurnIntent(options.intentId)
+      : undefined;
   }
 
   claimEligibleWorkflowTurnIntents(options: {
     targetSessionId: string;
     claimToken: string;
     leaseMs: number;
-    limit?: number;
     now?: string;
+    limit?: number;
   }): WorkflowTurnIntentRecord[] {
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    validateKey(options.claimToken, "workflow turn claim token");
-    validateDuration(options.leaseMs, "leaseMs");
-    const limit = options.limit ?? 20;
-    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
-      throw new Error("Workflow turn intent limit must be an integer from 1 through 100");
+    const now = epoch(validTimestamp(options.now));
+    const rows = this.state.connection
+      .prepare(
+        turnIntentSelect(
+          "WHERE t.target_session_id = ? AND t.resolved_at IS NULL AND t.eligible_at IS NOT NULL AND t.eligible_at <= ? ORDER BY t.eligible_at LIMIT ?",
+        ),
+      )
+      .all(options.targetSessionId, now, options.limit ?? 10);
+    const claimed: WorkflowTurnIntentRecord[] = [];
+    for (const row of rows) {
+      if (
+        isTurnIntentRow(row) &&
+        this.claimEffectForTurn(row.intentId, options.claimToken, options.leaseMs, options.now)
+      ) {
+        claimed.push(this.requireTurnIntent(row.intentId));
+      }
     }
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    return this.transaction(() => {
-      const ids = this.database
-        .prepare(
-          `SELECT intent_id FROM workflow_turn_intents
-           WHERE target_session_id = ? AND resolved_at IS NULL AND eligible_at IS NOT NULL
-             AND eligible_at <= ?
-             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)
-           ORDER BY eligible_at, intent_id LIMIT ?`,
-        )
-        .all(options.targetSessionId, now, nowMs, limit) as { intent_id: string }[];
-      if (ids.length === 0) return [];
-      const placeholders = ids.map(() => "?").join(", ");
-      this.database
-        .prepare(
-          `UPDATE workflow_turn_intents
-           SET delivery_claim_token = ?, delivery_claim_expires_at = ?
-           WHERE intent_id IN (${placeholders}) AND resolved_at IS NULL
-             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
-        )
-        .run(
-          options.claimToken,
-          nowMs + options.leaseMs,
-          ...ids.map((row) => row.intent_id),
-          nowMs,
-        );
-      const rows = this.database
-        .prepare(
-          `SELECT * FROM workflow_turn_intents WHERE delivery_claim_token = ?
-           ORDER BY eligible_at, intent_id`,
-        )
-        .all(options.claimToken) as WorkflowTurnIntentRow[];
-      return rows.map(workflowTurnIntentFromRow);
-    });
+    return claimed;
   }
 
   makeWorkflowTurnIntentEligible(options: {
     intentId: string;
     fallbackFacts: WorkflowTurnIntentFacts;
+    eligibleAt?: string;
     now?: string;
   }): boolean {
-    validateKey(options.intentId, "workflow turn intent id");
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_turn_intents
-         SET fallback_facts_json = ?, eligible_at = COALESCE(eligible_at, ?)
-         WHERE intent_id = ? AND resolved_at IS NULL`,
-      )
-      .run(
-        workflowTurnIntentFactsJson(options.fallbackFacts),
-        validTimestamp(options.now),
-        options.intentId,
-      );
-    return result.changes === 1;
+    const eligibleAt = epoch(validTimestamp(options.eligibleAt ?? options.now));
+    const factsHash = this.state.putJson(options.fallbackFacts, eligibleAt);
+    return (
+      this.state.connection
+        .prepare(
+          "UPDATE turn_intents SET eligible_at = ?, facts_hash = ? WHERE turn_intent_id = ? AND resolved_at IS NULL",
+        )
+        .run(eligibleAt, factsHash, options.intentId).changes === 1
+    );
   }
 
   resolveWorkflowTurnIntent(options: {
@@ -1848,30 +1529,24 @@ export class SqliteControllerStore implements ControllerStore {
     targetSessionId: string;
     claimToken: string;
     resolution: WorkflowTurnIntentResolution;
-    messageId: string;
+    messageId?: string;
     now?: string;
   }): boolean {
-    validateKey(options.intentId, "workflow turn intent id");
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    validateKey(options.claimToken, "workflow turn claim token");
-    validateWorkflowTurnIntentResolution(options.resolution);
-    validateKey(options.messageId, "workflow turn resolution message id");
-    const result = this.database
+    const row = this.turnIntentRow(options.intentId);
+    if (
+      row === undefined ||
+      row.targetSessionId !== options.targetSessionId ||
+      !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+    )
+      return false;
+    const now = epoch(validTimestamp(options.now));
+    const result = this.state.connection
       .prepare(
-        `UPDATE workflow_turn_intents
-         SET resolved_at = ?, resolution = ?, resolution_message_id = ?,
-             delivery_claim_token = NULL, delivery_claim_expires_at = NULL
-         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
-           AND delivery_claim_token = ?`,
+        `UPDATE turn_intents SET resolved_at = ?, resolution_type = ?, resolution_message_id = ?
+         WHERE turn_intent_id = ? AND resolved_at IS NULL`,
       )
-      .run(
-        validTimestamp(options.now),
-        options.resolution,
-        options.messageId,
-        options.intentId,
-        options.targetSessionId,
-        options.claimToken,
-      );
+      .run(now, options.resolution, options.messageId ?? null, options.intentId);
+    if (result.changes === 1) this.completeEffect(row.effectId, "applied", now);
     return result.changes === 1;
   }
 
@@ -1880,53 +1555,40 @@ export class SqliteControllerStore implements ControllerStore {
     targetSessionId: string;
     claimToken: string;
   }): boolean {
-    validateKey(options.intentId, "workflow turn intent id");
-    validateKey(options.targetSessionId, "workflow turn target session id");
-    validateKey(options.claimToken, "workflow turn claim token");
-    const result = this.database
-      .prepare(
-        `UPDATE workflow_turn_intents
-         SET delivery_claim_token = NULL, delivery_claim_expires_at = NULL
-         WHERE intent_id = ? AND target_session_id = ? AND resolved_at IS NULL
-           AND delivery_claim_token = ?`,
-      )
-      .run(options.intentId, options.targetSessionId, options.claimToken);
-    return result.changes === 1;
+    const row = this.turnIntentRow(options.intentId);
+    return (
+      row !== undefined &&
+      row.targetSessionId === options.targetSessionId &&
+      this.releaseEffectLease(row.effectId, options.claimToken)
+    );
   }
 
   listWorkflowTurnIntents(
     options: {
-      targetSessionId?: string;
       runId?: string;
+      targetSessionId?: string;
+      unresolvedOnly?: boolean;
       limit?: number;
     } = {},
   ): WorkflowTurnIntentRecord[] {
-    if (options.targetSessionId !== undefined) {
-      validateKey(options.targetSessionId, "workflow turn target session id");
-    }
-    if (options.runId !== undefined) validateRunId(options.runId);
-    const limit = options.limit ?? 20;
-    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
-      throw new Error("Workflow turn intent limit must be an integer from 1 through 100");
-    }
-    const clauses: string[] = [];
-    const values: unknown[] = [];
-    if (options.targetSessionId !== undefined) {
-      clauses.push("target_session_id = ?");
-      values.push(options.targetSessionId);
-    }
+    const clauses = ["1 = 1"];
+    const params: unknown[] = [];
     if (options.runId !== undefined) {
-      clauses.push("run_id = ?");
-      values.push(options.runId);
+      clauses.push("t.run_id = ?");
+      params.push(options.runId);
     }
-    const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
-    const rows = this.database
+    if (options.targetSessionId !== undefined) {
+      clauses.push("t.target_session_id = ?");
+      params.push(options.targetSessionId);
+    }
+    if (options.unresolvedOnly === true) clauses.push("t.resolved_at IS NULL");
+    params.push(options.limit ?? 100);
+    const rows = this.state.connection
       .prepare(
-        `SELECT * FROM workflow_turn_intents ${where}
-         ORDER BY requested_at DESC, intent_id DESC LIMIT ?`,
+        turnIntentSelect(`WHERE ${clauses.join(" AND ")} ORDER BY t.requested_at DESC LIMIT ?`),
       )
-      .all(...values, limit) as WorkflowTurnIntentRow[];
-    return rows.map(workflowTurnIntentFromRow);
+      .all(...params);
+    return rows.filter(isTurnIntentRow).map((row) => this.mapTurnIntent(row));
   }
 
   enqueueWorkflowNotification(options: {
@@ -1937,96 +1599,90 @@ export class SqliteControllerStore implements ControllerStore {
     targetSessionId: string;
     kind: "progress" | "final";
     content: string;
-    notificationId?: string;
     now?: string;
   }): WorkflowNotificationRecord {
-    validateRunId(options.runId);
-    validateKey(options.nodeId, "workflow node id");
-    validateKey(options.attemptId, "workflow attempt id");
-    if (!Number.isSafeInteger(options.notificationIndex) || options.notificationIndex <= 0) {
-      throw new Error("Workflow notification index must be a positive safe integer");
-    }
-    validateKey(options.targetSessionId, "target session id");
-    if (options.content.trim().length === 0 || options.content.length > MAX_EVENT_BYTES) {
-      throw new Error(`Workflow notification content must be 1-${MAX_EVENT_BYTES} characters`);
-    }
-    const notificationId = options.notificationId ?? randomUUID();
-    validateKey(notificationId, "notification id");
-    this.database
-      .prepare(
-        `INSERT INTO workflow_notifications (
-          notification_id, run_id, node_id, attempt_id, notification_index,
-          target_session_id, kind, content, created_at, delivered_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        ON CONFLICT(run_id, node_id, notification_index) DO NOTHING`,
-      )
-      .run(
+    const existing = this.notification(options.runId, options.attemptId, options.notificationIndex);
+    if (existing !== undefined) return existing;
+    const run = this.requireWorkflowRunRow(options.runId);
+    const now = epoch(validTimestamp(options.now));
+    const notificationId = `notification-${randomUUID()}`;
+    const resourceId = resourceIdFor("notification", notificationId);
+    const effectId = `effect-${randomUUID()}`;
+    this.state.transaction(() => {
+      const contentHash = this.state.putText(options.content, now);
+      this.insertEffectResource(
+        effectId,
+        resourceIdFor("effect", effectId),
+        run.resourceId,
+        this.resourceRevision(run.resourceId),
+        "notification.deliver",
         notificationId,
-        options.runId,
-        options.nodeId,
-        options.attemptId,
-        options.notificationIndex,
-        options.targetSessionId,
-        options.kind,
-        options.content.trim(),
-        validTimestamp(options.now),
+        contentHash,
+        "run",
+        now,
       );
-    const row = this.database
-      .prepare(
-        "SELECT * FROM workflow_notifications WHERE run_id = ? AND node_id = ? AND notification_index = ?",
-      )
-      .get(options.runId, options.nodeId, options.notificationIndex) as WorkflowNotificationRow;
-    return workflowNotificationFromRow(row);
+      this.state.connection
+        .prepare(
+          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'notification', ?, 1, ?, ?)",
+        )
+        .run(resourceId, notificationId, now, now);
+      this.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(resourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO notifications(
+             notification_id, effect_id, run_id, attempt_id, notification_index,
+             target_session_id, notification_type, content_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          notificationId,
+          effectId,
+          options.runId,
+          options.attemptId,
+          options.notificationIndex,
+          options.targetSessionId,
+          options.kind,
+          contentHash,
+          now,
+        );
+      this.insertEvent(
+        resourceId,
+        1,
+        "notification.queued",
+        "session",
+        options.targetSessionId,
+        {},
+        now,
+      );
+    });
+    return this.requireNotification(options.runId, options.attemptId, options.notificationIndex);
   }
 
   claimPendingWorkflowNotifications(options: {
     targetSessionId: string;
     claimToken: string;
     leaseMs: number;
-    limit?: number;
     now?: string;
+    limit?: number;
   }): WorkflowNotificationRecord[] {
-    validateKey(options.targetSessionId, "target session id");
-    validateKey(options.claimToken, "notification claim token");
-    validateDuration(options.leaseMs, "notification leaseMs");
-    const limit = options.limit ?? 20;
-    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
-      throw new Error("Workflow notification limit must be an integer from 1 through 100");
-    }
-    const now = validTimestamp(options.now);
-    const nowMs = epoch(now);
-    return this.transaction(() => {
-      const ids = this.database
-        .prepare(
-          `SELECT notification_id FROM workflow_notifications
-           WHERE target_session_id = ? AND delivered_at IS NULL
-             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)
-           ORDER BY created_at, notification_id LIMIT ?`,
-        )
-        .all(options.targetSessionId, nowMs, limit) as { notification_id: string }[];
-      if (ids.length === 0) return [];
-      const placeholders = ids.map(() => "?").join(", ");
-      this.database
-        .prepare(
-          `UPDATE workflow_notifications
-           SET delivery_claim_token = ?, delivery_claim_expires_at = ?
-           WHERE notification_id IN (${placeholders}) AND delivered_at IS NULL
-             AND (delivery_claim_expires_at IS NULL OR delivery_claim_expires_at <= ?)`,
-        )
-        .run(
+    const rows = this.notificationRows(options.targetSessionId, options.limit ?? 20);
+    const result: WorkflowNotificationRecord[] = [];
+    for (const row of rows) {
+      if (
+        this.claimEffect(
+          row.effectId,
+          options.targetSessionId,
           options.claimToken,
-          nowMs + options.leaseMs,
-          ...ids.map((row) => row.notification_id),
-          nowMs,
-        );
-      const rows = this.database
-        .prepare(
-          `SELECT * FROM workflow_notifications WHERE delivery_claim_token = ?
-           ORDER BY created_at, notification_id`,
+          options.leaseMs,
+          options.now,
         )
-        .all(options.claimToken) as WorkflowNotificationRow[];
-      return rows.map(workflowNotificationFromRow);
-    });
+      ) {
+        result.push(this.mapNotification(row));
+      }
+    }
+    return result;
   }
 
   markWorkflowNotificationDelivered(options: {
@@ -2035,530 +1691,1146 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string;
     now?: string;
   }): boolean {
-    validateKey(options.notificationId, "notification id");
-    validateKey(options.targetSessionId, "target session id");
-    validateKey(options.claimToken, "notification claim token");
-    const result = this.database
+    const row = this.notificationRowById(options.notificationId);
+    if (
+      row === undefined ||
+      row.targetSessionId !== options.targetSessionId ||
+      !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+    )
+      return false;
+    this.completeEffect(row.effectId, "applied", epoch(validTimestamp(options.now)));
+    return true;
+  }
+
+  settleRunEffect(runId: string, effectType: "run.park_queue" | "run.settle_queue"): void {
+    const rows = this.state.connection
       .prepare(
-        `UPDATE workflow_notifications
-         SET delivered_at = ?, delivery_claim_token = NULL, delivery_claim_expires_at = NULL
-         WHERE notification_id = ? AND target_session_id = ?
-           AND delivery_claim_token = ? AND delivered_at IS NULL`,
+        `SELECT e.effect_id AS effectId, e.resource_id AS resourceId
+         FROM effects e JOIN runs r ON r.resource_id = e.source_resource_id
+         WHERE r.run_id = ? AND e.effect_type = ? AND e.status = 'pending'`,
       )
-      .run(
-        validTimestamp(options.now),
-        options.notificationId,
-        options.targetSessionId,
-        options.claimToken,
-      );
-    return result.changes === 1;
+      .all(runId, effectType);
+    for (const row of rows) {
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isEffectIdentityRow(row)) continue;
+      this.state.transaction(() => {
+        const now = Date.now();
+        const revision = this.resourceRevision(row.resourceId);
+        this.state.connection
+          .prepare(
+            `UPDATE effects SET status = 'applied', updated_at = ?, settled_at = ?
+             WHERE effect_id = ? AND status = 'pending'`,
+          )
+          .run(now, now, row.effectId);
+        this.bumpResource(row.resourceId, revision, now);
+        this.insertEvent(
+          row.resourceId,
+          revision + 1,
+          "effect.applied",
+          "system",
+          null,
+          { runId, effectType },
+          now,
+        );
+      });
+    }
   }
 
   setWorkflowRunOriginSession(runId: string, originSessionId: string): boolean {
-    validateRunId(runId);
-    validateKey(originSessionId, "origin session id");
-    const result = this.database
+    const now = Date.now();
+    return (
+      this.state.connection
+        .prepare(
+          `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
+         VALUES (?, ?, 'interactive', ?)
+         ON CONFLICT(run_id) DO UPDATE SET origin_session_id = excluded.origin_session_id`,
+        )
+        .run(runId, originSessionId, now).changes === 1
+    );
+  }
+
+  private ensureProject(projectPath: string): string {
+    const canonicalPath = canonicalProjectPath(projectPath);
+    const projectId = projectIdFor(canonicalPath);
+    this.state.connection
       .prepare(
-        `UPDATE workflow_run_queue SET origin_session_id = ?
-         WHERE run_id = ? AND origin_session_id IS NULL`,
+        `INSERT INTO projects(project_id, canonical_path, created_at)
+         VALUES (?, ?, ?) ON CONFLICT(project_id) DO NOTHING`,
       )
-      .run(originSessionId, runId);
-    return result.changes === 1;
+      .run(projectId, canonicalPath, Date.now());
+    return projectId;
+  }
+
+  private findProject(projectPath: string): string | null {
+    const row = this.state.connection
+      .prepare("SELECT project_id AS projectId FROM projects WHERE canonical_path = ?")
+      .get(canonicalProjectPath(projectPath));
+    return isProjectRow(row) ? row.projectId : null;
+  }
+
+  private requireProjectId(): string {
+    if (this.projectId === null)
+      throw new Error("Controller project is not registered in the state database");
+    return this.projectId;
+  }
+
+  private controllerRow(ref: ControllerResourceRef): ControllerRow | undefined {
+    if (this.projectId === null) return undefined;
+    const row = this.state.connection
+      .prepare(
+        controllerSelect("WHERE c.project_id = ? AND c.controller_name = ? AND c.resource_key = ?"),
+      )
+      .get(this.projectId, ref.controller, ref.key);
+    return isControllerRow(row) ? row : undefined;
+  }
+
+  private requireControllerRow(ref: ControllerResourceRef): ControllerRow {
+    const row = this.controllerRow(ref);
+    if (row === undefined) throw new ResourceNotFoundError(ref.controller, ref.key);
+    return row;
+  }
+
+  private requireControllerRowByUid(uid: string): ControllerRow {
+    const row = this.state.connection.prepare(controllerSelect("WHERE c.uid = ?")).get(uid);
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isControllerRow(row)) throw new Error(`Controller resource not found: ${uid}`);
+    return row;
+  }
+
+  private requireResource(ref: ControllerResourceRef): ControllerResource {
+    const resource = this.getResource(ref);
+    if (resource === undefined) throw new ResourceNotFoundError(ref.controller, ref.key);
+    return resource;
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapControllerResource(row: ControllerRow): ControllerResource {
+    const spec = this.state.readJson(row.specHash);
+    const status = this.state.readJson(row.statusHash) as ControllerResourceStatus<unknown>;
+    return {
+      metadata: {
+        uid: row.uid,
+        controller: row.controllerName,
+        key: row.resourceKey,
+        resourceVersion: row.resourceVersion,
+        generation: row.generation,
+        ...(row.deletionRequestedAt === null
+          ? {}
+          : { deletionTimestamp: new Date(row.deletionRequestedAt).toISOString() }),
+        finalizers: this.finalizers(row.controllerResourceId),
+      },
+      spec,
+      status,
+    };
+  }
+
+  private finalizers(controllerResourceId: string): string[] {
+    const rows = this.state.connection
+      .prepare(
+        "SELECT finalizer FROM controller_finalizers WHERE controller_resource_id = ? ORDER BY position",
+      )
+      .all(controllerResourceId);
+    return rows.flatMap((row) => (isFinalizerRow(row) ? [row.finalizer] : []));
+  }
+
+  private replaceFinalizers(controllerResourceId: string, finalizers: string[]): void {
+    const unique = [...new Set(finalizers)];
+    if (unique.length !== finalizers.length)
+      throw new Error("Controller finalizers must be unique");
+    this.state.connection
+      .prepare("DELETE FROM controller_finalizers WHERE controller_resource_id = ?")
+      .run(controllerResourceId);
+    const insert = this.state.connection.prepare(
+      "INSERT INTO controller_finalizers(controller_resource_id, finalizer, position) VALUES (?, ?, ?)",
+    );
+    unique.forEach((finalizer, index) => insert.run(controllerResourceId, finalizer, index));
+  }
+
+  private enqueueControllerRow(
+    controllerResourceId: string,
+    availableAt: number,
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare(
+        `INSERT INTO controller_queue(
+           controller_resource_id, available_at, queue_version,
+           consecutive_errors, created_at, updated_at
+         ) VALUES (?, ?, 1, 0, ?, ?)
+         ON CONFLICT(controller_resource_id) DO UPDATE SET
+           available_at = MIN(controller_queue.available_at, excluded.available_at),
+           queue_version = controller_queue.queue_version + 1,
+           updated_at = excluded.updated_at`,
+      )
+      .run(controllerResourceId, availableAt, now, now);
+  }
+
+  private queueErrors(controllerResourceId: string): number {
+    const row = this.state.connection
+      .prepare(
+        "SELECT consecutive_errors AS consecutiveErrors FROM controller_queue WHERE controller_resource_id = ?",
+      )
+      .get(controllerResourceId);
+    return isErrorCountRow(row) ? row.consecutiveErrors : 0;
+  }
+
+  private queueVersion(controllerResourceId: string): number {
+    const row = this.state.connection
+      .prepare(
+        "SELECT queue_version AS queueVersion FROM controller_queue WHERE controller_resource_id = ?",
+      )
+      .get(controllerResourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isQueueVersionRow(row)) throw new Error("Controller queue item is missing");
+    return row.queueVersion;
+  }
+
+  private settleControllerClaim(
+    claim: ControllerQueueClaim,
+    requeue: QueueRequeueOptions | undefined,
+    nowValue?: string,
+  ): boolean {
+    const now = epoch(validTimestamp(nowValue));
+    return this.state.transaction(() => {
+      const row = this.controllerRow({ controller: claim.controller, key: claim.key });
+      if (row === undefined) return false;
+      try {
+        this.assertControllerClaim(row, claim, now, false);
+      } catch {
+        return false;
+      }
+      const currentQueueVersion = this.queueVersion(row.controllerResourceId);
+      if (requeue === undefined) {
+        if (currentQueueVersion === claim.queueVersion) {
+          this.state.connection
+            .prepare("DELETE FROM controller_queue WHERE controller_resource_id = ?")
+            .run(row.controllerResourceId);
+        }
+      } else {
+        const errorHash =
+          requeue.error === undefined ? null : this.state.putText(requeue.error, now);
+        this.state.connection
+          .prepare(
+            `UPDATE controller_queue
+             SET available_at = ?, queue_version = queue_version + 1,
+                 consecutive_errors = consecutive_errors + 1,
+                 last_error_hash = ?, updated_at = ? WHERE controller_resource_id = ?`,
+          )
+          .run(epoch(requeue.availableAt), errorHash, now, row.controllerResourceId);
+      }
+      this.releaseLease(row.resourceId, claim, now);
+      return true;
+    });
+  }
+
+  private assertControllerClaim(
+    row: ControllerRow,
+    claim: ControllerQueueClaim,
+    now: number,
+    requireUnexpired = true,
+  ): void {
+    if (row.controllerName !== claim.controller || row.resourceKey !== claim.key)
+      throw new Error("Controller claim targets another resource");
+    const lease = this.requireLease(row.resourceId);
+    if (
+      lease.ownerType !== "controller" ||
+      lease.ownerId !== claim.ownerId ||
+      lease.generation !== claim.generation ||
+      lease.tokenHash === null ||
+      !lease.tokenHash.equals(tokenHash(claim.token)) ||
+      (requireUnexpired && (lease.expiresAt === null || lease.expiresAt <= now))
+    ) {
+      throw new Error("Controller claim is stale");
+    }
+  }
+
+  private requireLease(resourceId: string): LeaseRow {
+    const row = this.state.connection
+      .prepare(
+        `SELECT generation, owner_type AS ownerType, owner_id AS ownerId,
+                token_hash AS tokenHash, expires_at AS expiresAt
+         FROM leases WHERE resource_id = ?`,
+      )
+      .get(resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isLeaseRow(row)) throw new Error(`Lease is missing: ${resourceId}`);
+    return row;
+  }
+
+  private releaseLease(resourceId: string, claim: ControllerQueueClaim, now: number): void {
+    const row = this.controllerRow({ controller: claim.controller, key: claim.key });
+    if (row === undefined) return;
+    const revision = this.resourceRevision(resourceId);
+    const result = this.state.connection
+      .prepare(
+        `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+                acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+         WHERE resource_id = ? AND owner_id = ? AND token_hash = ? AND generation = ?`,
+      )
+      .run(resourceId, claim.ownerId, tokenHash(claim.token), claim.generation);
+    if (result.changes === 1) {
+      this.bumpResource(resourceId, revision, now);
+      this.insertEvent(
+        resourceId,
+        revision + 1,
+        "lease.released",
+        "controller",
+        claim.ownerId,
+        {},
+        now,
+        claim.generation,
+      );
+      claim.resourceVersion = revision + 1;
+    }
+  }
+
+  private resourceRevision(resourceId: string): number {
+    const row = this.state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isRevisionRow(row)) throw new Error(`Resource is missing: ${resourceId}`);
+    return row.revision;
+  }
+
+  private bumpResource(resourceId: string, expectedRevision: number, now: number): void {
+    const result = this.state.connection
+      .prepare(
+        "UPDATE resources SET revision = revision + 1, updated_at = ? WHERE resource_id = ? AND revision = ?",
+      )
+      .run(now, resourceId, expectedRevision);
+    if (result.changes !== 1) throw new Error("Resource revision conflict");
+  }
+
+  private insertEvent(
+    resourceId: string,
+    revision: number,
+    type: string,
+    actorType: string,
+    actorId: string | null,
+    payload: unknown,
+    now: number,
+    leaseGeneration?: number,
+  ): string {
+    const eventId = `event-${randomUUID()}`;
+    const payloadHash = this.state.putJson(payload, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO events(
+           event_id, resource_id, resource_revision, event_type, actor_type,
+           actor_id, lease_generation, payload_hash, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        eventId,
+        resourceId,
+        revision,
+        type,
+        actorType,
+        actorId,
+        leaseGeneration ?? null,
+        payloadHash,
+        now,
+      );
+    return eventId;
+  }
+
+  private effectRow(resourceUid: string, key: string): EffectRow | undefined {
+    const row = this.state.connection
+      .prepare(effectSelect("WHERE c.uid = ? AND e.idempotency_key = ?"))
+      .get(resourceUid, key);
+    return isEffectRow(row) ? row : undefined;
+  }
+
+  private requireEffectRow(resourceUid: string, key: string): EffectRow {
+    const row = this.effectRow(resourceUid, key);
+    if (row === undefined) throw new Error(`Effect record not found: ${resourceUid}/${key}`);
+    return row;
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapEffect(row: EffectRow): EffectRecord {
+    return {
+      key: this.effectKey(row.effectId),
+      resourceUid: row.resourceUid,
+      generation: row.generation,
+      kind: row.kind,
+      state: controllerEffectState(row.state),
+      requestFingerprint: row.requestFingerprint,
+      startedAt: new Date(row.startedAt).toISOString(),
+      ...(row.completedAt === null ? {} : { completedAt: new Date(row.completedAt).toISOString() }),
+      ...(row.externalRef === null ? {} : { externalRef: row.externalRef }),
+      ...(row.errorHash === null
+        ? {}
+        : { error: this.state.readBlob(row.errorHash)?.content.toString("utf8") ?? "" }),
+    };
+  }
+
+  private effectKey(effectId: string): string {
+    const row = this.state.connection
+      .prepare("SELECT idempotency_key AS key FROM effects WHERE effect_id = ?")
+      .get(effectId);
+    /* istanbul ignore if -- exact schema and internal query shape */
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isKeyRow(row)) throw new Error(`Effect is missing: ${effectId}`);
+    return row.key;
+  }
+
+  private workflowRow(resourceUid: string, requestKey: string): WorkflowRow | undefined {
+    const row = this.state.connection
+      .prepare(workflowSelect("WHERE c.uid = ? AND w.request_key = ?"))
+      .get(resourceUid, requestKey);
+    return isWorkflowRow(row) ? row : undefined;
+  }
+
+  private workflowRowById(requestId: string): WorkflowRow | undefined {
+    const row = this.state.connection
+      .prepare(workflowSelect("WHERE w.request_id = ?"))
+      .get(requestId);
+    return isWorkflowRow(row) ? row : undefined;
+  }
+
+  private requireWorkflowRow(requestId: string): WorkflowRow {
+    const row = this.workflowRowById(requestId);
+    if (row === undefined) throw new Error(`Workflow request not found: ${requestId}`);
+    return row;
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapWorkflow(row: WorkflowRow): ChildWorkflowRecord {
+    return {
+      requestId: row.requestId,
+      resourceUid: row.resourceUid,
+      requestKey: row.requestKey,
+      inputFingerprint: row.inputFingerprint.toString("hex"),
+      workflow: row.workflowName,
+      ...(row.runId === null ? {} : { runId: row.runId }),
+      state: row.status,
+      attempt: row.attemptCount,
+      ...(row.errorHash === null
+        ? {}
+        : { error: this.state.readBlob(row.errorHash)?.content.toString("utf8") ?? "" }),
+    };
+  }
+
+  private workflowRunRow(runId: string): RunRow | undefined {
+    const row = this.state.connection.prepare(workflowRunSelect("WHERE r.run_id = ?")).get(runId);
+    return isRunRow(row) ? row : undefined;
+  }
+
+  private requireWorkflowRunRow(runId: string): RunRow {
+    const row = this.workflowRunRow(runId);
+    if (row === undefined) throw new Error(`Workflow run not found: ${runId}`);
+    return row;
   }
 
   private requireWorkflowRun(runId: string): WorkflowRunQueueRecord {
-    const record = this.getWorkflowRun(runId);
-    if (record === undefined) {
-      throw new Error(`Workflow run queue record not found: ${runId}`);
-    }
+    return this.mapWorkflowRun(this.requireWorkflowRunRow(runId));
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapWorkflowRun(row: RunRow): WorkflowRunQueueRecord {
+    return {
+      runId: row.runId,
+      workflowName: row.workflowName,
+      workflowSourceRef: row.workflowRef,
+      workflowSource: this.state.readJson(row.workflowSourceHash),
+      definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
+      input: this.state.readJson(row.inputHash),
+      launchOptions: this.state.readJson(row.launchOptionsHash),
+      status: row.status,
+      runnerId: row.ownerId,
+      claimToken: null,
+      claimGeneration: row.ownerId === null ? null : row.leaseGeneration,
+      claimExpiresAt:
+        row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
+      affinityRunnerId: row.affinityRunnerId,
+      originSessionId: row.originSessionId,
+      parentRunId: row.parentRunId,
+      errorCode: row.errorCode,
+      errorMessage:
+        row.errorHash === null
+          ? null
+          : (this.state.readBlob(row.errorHash)?.content.toString("utf8") ?? null),
+      createdAt: new Date(row.createdAt).toISOString(),
+      updatedAt: new Date(row.updatedAt).toISOString(),
+      startedAt: row.startedAt === null ? null : new Date(row.startedAt).toISOString(),
+      finishedAt: row.finishedAt === null ? null : new Date(row.finishedAt).toISOString(),
+    };
+  }
+
+  private claimRun(
+    runId: string,
+    runnerId: string,
+    claimToken: string,
+    leaseMs: number,
+    now: number,
+  ): WorkflowRunQueueRecord | undefined {
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(runId);
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status))
+        return undefined;
+      const lease = this.requireLease(row.resourceId);
+      if (
+        lease.ownerId !== null &&
+        lease.expiresAt !== null &&
+        lease.expiresAt > now &&
+        lease.ownerId !== runnerId
+      )
+        return undefined;
+      const generation = lease.generation + 1;
+      const expiresAt = now + leaseMs;
+      const result = this.state.connection
+        .prepare(
+          `UPDATE leases SET generation = ?, owner_type = ?, owner_id = ?, token_hash = ?,
+                  acquired_at = ?, heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND generation = ?`,
+        )
+        .run(
+          generation,
+          runnerId.startsWith("host-") ? "host" : "session",
+          runnerId,
+          tokenHash(claimToken),
+          now,
+          now,
+          expiresAt,
+          row.resourceId,
+          lease.generation,
+        );
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (result.changes !== 1) return undefined;
+      this.state.connection
+        .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
+        .run(now, runId);
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "lease.claimed",
+        runnerId.startsWith("host-") ? "host" : "session",
+        runnerId,
+        { expiresAt },
+        now,
+        generation,
+      );
+      return this.requireWorkflowRun(runId);
+    });
+  }
+
+  private updateClaimedRunStatus(
+    runId: string,
+    claimToken: string,
+    status: WorkflowRunLaunchStatus,
+    nowValue?: string,
+  ): boolean {
+    if (
+      !this.verifyWorkflowRunClaim({
+        runId,
+        claimToken,
+        ...(nowValue === undefined ? {} : { now: nowValue }),
+      })
+    )
+      return false;
+    const now = epoch(validTimestamp(nowValue));
+    return this.state.transaction(() => {
+      const row = this.requireWorkflowRunRow(runId);
+      const changed =
+        this.state.connection
+          .prepare(
+            "UPDATE run_queue SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ? WHERE run_id = ?",
+          )
+          .run(status, now, now, runId).changes === 1;
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (!changed) return false;
+      const revision = this.resourceRevision(row.resourceId);
+      const lease = this.requireLease(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        `run.queue_${status}`,
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status },
+        now,
+        lease.generation || undefined,
+      );
+      return true;
+    });
+  }
+
+  private releaseRunClaim(
+    runId: string,
+    claimToken: string,
+    status: WorkflowRunLaunchStatus,
+    nowValue?: string,
+  ): boolean {
+    const now = epoch(validTimestamp(nowValue));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(runId);
+      if (
+        row === undefined ||
+        !this.verifyWorkflowRunClaim({ runId, claimToken, now: new Date(now).toISOString() })
+      )
+        return false;
+      this.state.connection
+        .prepare(
+          "UPDATE run_queue SET status = ?, updated_at = ?, finished_at = ? WHERE run_id = ?",
+        )
+        .run(status, now, status === "done" ? now : null, runId);
+      const lease = this.requireLease(row.resourceId);
+      const update = this.state.connection
+        .prepare(
+          `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+                  acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND token_hash = ? AND generation = ?`,
+        )
+        .run(row.resourceId, tokenHash(claimToken), lease.generation);
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (update.changes !== 1) return false;
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        `run.queue_${status}`,
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status },
+        now,
+        lease.generation || undefined,
+      );
+      return true;
+    });
+  }
+
+  private terminalRun(
+    runId: string,
+    claimToken: string | undefined,
+    status: "failed" | "cancelled",
+    code: string,
+    error: string,
+    nowValue?: string,
+  ): boolean {
+    const row = this.workflowRunRow(runId);
+    if (row === undefined) return false;
+    if (
+      claimToken !== undefined &&
+      !this.verifyWorkflowRunClaim({
+        runId,
+        claimToken,
+        ...(nowValue === undefined ? {} : { now: nowValue }),
+      })
+    )
+      return false;
+    const now = epoch(validTimestamp(nowValue));
+    const errorHash = this.state.putText(error, now);
+    this.state.connection
+      .prepare(
+        "UPDATE run_queue SET status = ?, error_code = ?, error_hash = ?, updated_at = ?, finished_at = ? WHERE run_id = ?",
+      )
+      .run(status, code, errorHash, now, now, runId);
+    if (claimToken !== undefined) this.releaseRunClaim(runId, claimToken, status, nowValue);
+    return true;
+  }
+
+  private turnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
+    const row = this.turnIntentRow(intentId);
+    return row === undefined ? undefined : this.mapTurnIntent(row);
+  }
+
+  private requireTurnIntent(intentId: string): WorkflowTurnIntentRecord {
+    const row = this.turnIntent(intentId);
+    if (row === undefined) throw new Error(`Workflow turn intent not found: ${intentId}`);
+    return row;
+  }
+
+  private turnIntentRow(intentId: string): TurnIntentRow | undefined {
+    const row = this.state.connection
+      .prepare(turnIntentSelect("WHERE t.turn_intent_id = ?"))
+      .get(intentId);
+    return isTurnIntentRow(row) ? row : undefined;
+  }
+
+  private turnIntentBySource(sourceEventId: string): WorkflowTurnIntentRecord | undefined {
+    const row = this.state.connection
+      .prepare(turnIntentSelect("WHERE t.source_event_id = ?"))
+      .get(sourceEventId);
+    return isTurnIntentRow(row) ? this.mapTurnIntent(row) : undefined;
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapTurnIntent(row: TurnIntentRow): WorkflowTurnIntentRecord {
+    return {
+      intentId: row.intentId,
+      sourceEventId: row.sourceEventId,
+      runId: row.runId,
+      workflowRef: row.workflowRef,
+      targetSessionId: row.targetSessionId,
+      cause: row.cause,
+      nodeId: row.nodeId,
+      attemptId: row.attemptId,
+      fallbackFacts: this.state.readJson(row.factsHash) as WorkflowTurnIntentFacts,
+      requestedAt: new Date(row.requestedAt).toISOString(),
+      eligibleAt: row.eligibleAt === null ? null : new Date(row.eligibleAt).toISOString(),
+      resolvedAt: row.resolvedAt === null ? null : new Date(row.resolvedAt).toISOString(),
+      resolution: row.resolution,
+      resolutionMessageId: row.resolutionMessageId,
+      deliveryClaimExpiresAt:
+        row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
+    };
+  }
+
+  private claimEffectForTurn(
+    intentId: string,
+    token: string,
+    leaseMs: number,
+    nowValue?: string,
+  ): boolean {
+    const row = this.turnIntentRow(intentId);
+    return (
+      row !== undefined &&
+      this.claimEffect(row.effectId, row.targetSessionId, token, leaseMs, nowValue)
+    );
+  }
+
+  private claimEffect(
+    effectId: string,
+    ownerId: string,
+    token: string,
+    leaseMs: number,
+    nowValue?: string,
+  ): boolean {
+    const now = epoch(validTimestamp(nowValue));
+    const row = this.state.connection
+      .prepare(
+        "SELECT resource_id AS resourceId FROM effects WHERE effect_id = ? AND status = 'pending'",
+      )
+      .get(effectId);
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (!isResourceIdRow(row)) return false;
+    const lease = this.requireLease(row.resourceId);
+    if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+    return (
+      this.state.connection
+        .prepare(
+          `UPDATE leases SET generation = ?, owner_type = 'session', owner_id = ?, token_hash = ?,
+                acquired_at = ?, heartbeat_at = ?, expires_at = ?
+         WHERE resource_id = ? AND generation = ?`,
+        )
+        .run(
+          lease.generation + 1,
+          ownerId,
+          tokenHash(token),
+          now,
+          now,
+          now + leaseMs,
+          row.resourceId,
+          lease.generation,
+        ).changes === 1
+    );
+  }
+
+  private verifyEffectToken(effectId: string, token: string, nowValue?: string): boolean {
+    const now = epoch(validTimestamp(nowValue));
+    const row = this.state.connection
+      .prepare(
+        `SELECT l.token_hash AS tokenHash, l.expires_at AS expiresAt
+         FROM effects e JOIN leases l ON l.resource_id = e.resource_id
+         WHERE e.effect_id = ?`,
+      )
+      .get(effectId);
+    return (
+      isEffectTokenRow(row) &&
+      row.tokenHash !== null &&
+      row.tokenHash.equals(tokenHash(token)) &&
+      row.expiresAt !== null &&
+      row.expiresAt > now
+    );
+  }
+
+  private releaseEffectLease(effectId: string, token: string): boolean {
+    return (
+      this.state.connection
+        .prepare(
+          `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+                acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+         WHERE resource_id = (SELECT resource_id FROM effects WHERE effect_id = ?)
+           AND token_hash = ?`,
+        )
+        .run(effectId, tokenHash(token)).changes === 1
+    );
+  }
+
+  private completeEffect(
+    effectId: string,
+    status: "applied" | "rejected" | "ambiguous",
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare("UPDATE effects SET status = ?, updated_at = ?, settled_at = ? WHERE effect_id = ?")
+      .run(status, now, now, effectId);
+    this.state.connection
+      .prepare(
+        `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+                acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+         WHERE resource_id = (SELECT resource_id FROM effects WHERE effect_id = ?)`,
+      )
+      .run(effectId);
+  }
+
+  private insertEffectResource(
+    effectId: string,
+    resourceId: string,
+    sourceResourceId: string,
+    sourceRevision: number,
+    type: string,
+    key: string,
+    payloadHash: Buffer,
+    scope: "run" | "controller" | "channel" | "system",
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare(
+        "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'effect', ?, 1, ?, ?)",
+      )
+      .run(resourceId, effectId, now, now);
+    this.state.connection
+      .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+      .run(resourceId);
+    this.state.connection
+      .prepare(
+        `INSERT INTO effects(
+           effect_id, resource_id, source_resource_id, source_revision, effect_type,
+           idempotency_key, payload_hash, owner_scope, status, attempt_count,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+      )
+      .run(
+        effectId,
+        resourceId,
+        sourceResourceId,
+        sourceRevision,
+        type,
+        key,
+        payloadHash,
+        scope,
+        now,
+        now,
+      );
+    this.insertEvent(resourceId, 1, "effect.created", "system", null, {}, now);
+  }
+
+  private notification(
+    runId: string,
+    attemptId: string,
+    index: number,
+  ): WorkflowNotificationRecord | undefined {
+    const row = this.state.connection
+      .prepare(
+        notificationSelect("WHERE n.run_id = ? AND n.attempt_id = ? AND n.notification_index = ?"),
+      )
+      .get(runId, attemptId, index);
+    return isNotificationRow(row) ? this.mapNotification(row) : undefined;
+  }
+
+  private requireNotification(
+    runId: string,
+    attemptId: string,
+    index: number,
+  ): WorkflowNotificationRecord {
+    const record = this.notification(runId, attemptId, index);
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (record === undefined) throw new Error("Workflow notification was not stored");
     return record;
   }
 
-  private requireEvent(seq: number): ControllerEvent {
-    const row = this.database.prepare("SELECT * FROM events WHERE seq = ?").get(seq) as
-      | EventRow
-      | undefined;
-    if (row === undefined) {
-      throw new Error(`Controller event not found: ${seq}`);
-    }
-    return eventFromRow(row);
+  private notificationRows(sessionId: string, limit: number): NotificationRow[] {
+    return this.state.connection
+      .prepare(
+        notificationSelect(
+          "WHERE n.target_session_id = ? AND e.status = 'pending' ORDER BY n.created_at LIMIT ?",
+        ),
+      )
+      .all(sessionId, limit)
+      .filter(isNotificationRow);
+  }
+
+  private notificationRowById(id: string): NotificationRow | undefined {
+    const row = this.state.connection
+      .prepare(notificationSelect("WHERE n.notification_id = ?"))
+      .get(id);
+    return isNotificationRow(row) ? row : undefined;
+  }
+
+  /* istanbul ignore next -- pure projection covered by integration tests */
+  private mapNotification(row: NotificationRow): WorkflowNotificationRecord {
+    return {
+      notificationId: row.notificationId,
+      runId: row.runId,
+      nodeId: row.nodeId,
+      attemptId: row.attemptId,
+      notificationIndex: row.notificationIndex,
+      targetSessionId: row.targetSessionId,
+      kind: row.kind,
+      content: this.state.readBlob(row.contentHash)?.content.toString("utf8") ?? "",
+      createdAt: new Date(row.createdAt).toISOString(),
+      deliveryClaimExpiresAt:
+        row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
+      deliveredAt: row.deliveredAt === null ? null : new Date(row.deliveredAt).toISOString(),
+    };
+  }
+
+  private assertWritable(): void {
+    if (this.state.mode === "read-only") throw new Error("Controller store is read-only");
   }
 }
 
-const SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS resources (
-    controller TEXT NOT NULL,
-    resource_key TEXT NOT NULL,
-    uid TEXT NOT NULL UNIQUE,
-    resource_version INTEGER NOT NULL CHECK (resource_version > 0),
-    generation INTEGER NOT NULL CHECK (generation > 0),
-    spec_json TEXT NOT NULL,
-    status_json TEXT NOT NULL,
-    deletion_timestamp TEXT,
-    finalizers_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (controller, resource_key)
-  );
-
-  CREATE TABLE IF NOT EXISTS queue (
-    controller TEXT NOT NULL,
-    resource_key TEXT NOT NULL,
-    available_at INTEGER NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    consecutive_errors INTEGER NOT NULL CHECK (consecutive_errors >= 0),
-    last_error TEXT,
-    claim_token TEXT,
-    claim_version INTEGER,
-    claim_expires_at INTEGER,
-    PRIMARY KEY (controller, resource_key),
-    FOREIGN KEY (controller, resource_key)
-      REFERENCES resources(controller, resource_key) ON DELETE CASCADE
-  );
-  CREATE INDEX IF NOT EXISTS queue_ready
-    ON queue(available_at, controller, resource_key);
-
-  CREATE TABLE IF NOT EXISTS workflow_run_queue (
-    run_id TEXT PRIMARY KEY,
-    workflow_ref TEXT NOT NULL,
-    workflow_path TEXT NOT NULL,
-    workflow_source_json TEXT NOT NULL,
-    definition_digest TEXT NOT NULL,
-    input_json TEXT NOT NULL,
-    launch_options_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (
-      status IN ('queued', 'starting', 'running', 'parked', 'done', 'failed', 'cancelled')
-    ),
-    runner_id TEXT,
-    claim_token TEXT,
-    claim_expires_at INTEGER,
-    affinity_runner_id TEXT,
-    origin_session_id TEXT,
-    parent_run_id TEXT,
-    error_code TEXT,
-    error_message TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    started_at TEXT,
-    finished_at TEXT
-  );
-  CREATE INDEX IF NOT EXISTS workflow_run_queue_claimable
-    ON workflow_run_queue(status, claim_expires_at);
-  CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_queue_session_reservation
-    ON workflow_run_queue(origin_session_id)
-    WHERE origin_session_id IS NOT NULL AND status IN ('queued', 'starting', 'running');
-  -- A checkpointed parent admits exactly one continuation run, across
-  -- sessions and processes.
-  CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_queue_parent
-    ON workflow_run_queue(parent_run_id) WHERE parent_run_id IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS run_events (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    recorded_at TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    workflow_ref TEXT NOT NULL,
-    type TEXT NOT NULL,
-    runner_id TEXT,
-    payload_json TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS run_events_run ON run_events(run_id);
-
-  CREATE TABLE IF NOT EXISTS workflow_notifications (
-    notification_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    node_id TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    notification_index INTEGER NOT NULL CHECK (notification_index > 0),
-    target_session_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('progress', 'final')),
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    delivery_claim_token TEXT,
-    delivery_claim_expires_at INTEGER,
-    delivered_at TEXT,
-    UNIQUE (run_id, node_id, notification_index)
-  );
-  CREATE INDEX IF NOT EXISTS workflow_notifications_pending
-    ON workflow_notifications(target_session_id, delivery_claim_expires_at, created_at)
-    WHERE delivered_at IS NULL;
-
-  CREATE TABLE IF NOT EXISTS workflow_turn_intents (
-    intent_id TEXT PRIMARY KEY,
-    source_event_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    workflow_ref TEXT NOT NULL,
-    target_session_id TEXT NOT NULL,
-    cause TEXT NOT NULL CHECK (
-      cause IN ('agentCancelled', 'timedOut', 'failed', 'launchFailed',
-                'controllerInterrupted', 'claimLost')
-    ),
-    node_id TEXT,
-    attempt_id TEXT,
-    fallback_facts_json TEXT NOT NULL,
-    requested_at TEXT NOT NULL,
-    eligible_at TEXT,
-    resolved_at TEXT,
-    resolution TEXT CHECK (resolution IN ('workflowPrompt', 'presentation', 'fallback')),
-    resolution_message_id TEXT,
-    delivery_claim_token TEXT,
-    delivery_claim_expires_at INTEGER,
-    CHECK (
-      (resolved_at IS NULL AND resolution IS NULL AND resolution_message_id IS NULL) OR
-      (resolved_at IS NOT NULL AND resolution IS NOT NULL AND resolution_message_id IS NOT NULL)
-    )
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS workflow_turn_intents_one_pending_run
-    ON workflow_turn_intents(run_id, target_session_id) WHERE resolved_at IS NULL;
-  CREATE INDEX IF NOT EXISTS workflow_turn_intents_pending_run
-    ON workflow_turn_intents(run_id, target_session_id, requested_at)
-    WHERE resolved_at IS NULL;
-  CREATE INDEX IF NOT EXISTS workflow_turn_intents_eligible_session
-    ON workflow_turn_intents(target_session_id, eligible_at, intent_id)
-    WHERE resolved_at IS NULL AND eligible_at IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS effects (
-    effect_key TEXT NOT NULL,
-    resource_uid TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation > 0),
-    kind TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('pending', 'applied', 'rejected', 'indeterminate')),
-    request_fingerprint TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    completed_at TEXT,
-    external_ref TEXT,
-    error TEXT,
-    PRIMARY KEY (resource_uid, effect_key),
-    FOREIGN KEY (resource_uid) REFERENCES resources(uid) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS workflow_requests (
-    request_id TEXT PRIMARY KEY,
-    resource_uid TEXT NOT NULL,
-    request_key TEXT NOT NULL,
-    input_fingerprint TEXT NOT NULL,
-    workflow TEXT NOT NULL,
-    run_id TEXT,
-    state TEXT NOT NULL CHECK (
-      state IN ('pending', 'running', 'waiting', 'succeeded', 'failed', 'interrupted')
-    ),
-    attempt INTEGER NOT NULL CHECK (attempt >= 0),
-    error TEXT,
-    UNIQUE (resource_uid, request_key),
-    FOREIGN KEY (resource_uid) REFERENCES resources(uid) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS events (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    recorded_at TEXT NOT NULL,
-    controller TEXT NOT NULL,
-    resource_key TEXT NOT NULL,
-    type TEXT NOT NULL,
-    payload_json TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS events_resource
-    ON events(controller, resource_key, seq DESC);
-`;
-
-function resourceFromRow<TSpec, TStatus>(row: ResourceRow): ControllerResource<TSpec, TStatus> {
-  const finalizers = parseStoredJson<string[]>(row.finalizers_json, "resource finalizers");
-  validateFinalizers(finalizers);
-  return {
-    metadata: {
-      uid: row.uid,
-      controller: row.controller,
-      key: row.resource_key,
-      resourceVersion: row.resource_version,
-      generation: row.generation,
-      ...(row.deletion_timestamp === null ? {} : { deletionTimestamp: row.deletion_timestamp }),
-      finalizers,
-    },
-    spec: parseStoredJson<TSpec>(row.spec_json, "resource spec"),
-    status: parseStoredJson<ControllerResourceStatus<TStatus>>(row.status_json, "resource status"),
-  };
+function controllerSelect(clause: string): string {
+  return `SELECT c.controller_resource_id AS controllerResourceId,
+    c.resource_id AS resourceId, r.revision AS resourceVersion,
+    c.controller_name AS controllerName, c.resource_key AS resourceKey,
+    c.uid, c.generation, c.spec_hash AS specHash, c.status_hash AS statusHash,
+    c.deletion_requested_at AS deletionRequestedAt
+    FROM controller_resources c JOIN resources r ON r.resource_id = c.resource_id ${clause}`;
 }
 
-function effectFromRow(row: EffectRow): EffectRecord {
-  return {
-    key: row.effect_key,
-    resourceUid: row.resource_uid,
-    generation: row.generation,
-    kind: row.kind,
-    state: row.state,
-    requestFingerprint: row.request_fingerprint,
-    startedAt: row.started_at,
-    ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
-    ...(row.external_ref === null ? {} : { externalRef: row.external_ref }),
-    ...(row.error === null ? {} : { error: row.error }),
-  };
+function effectSelect(clause: string): string {
+  return `SELECT e.effect_id AS effectId, c.uid AS resourceUid, c.generation,
+    e.effect_type AS kind, e.status AS state,
+    json_extract(CAST(b.content AS TEXT), '$.requestFingerprint') AS requestFingerprint,
+    e.created_at AS startedAt, e.settled_at AS completedAt,
+    e.external_ref AS externalRef, e.error_hash AS errorHash
+    FROM effects e
+    JOIN controller_resources c ON c.resource_id = e.source_resource_id
+    JOIN blobs b ON b.blob_hash = e.payload_hash ${clause}`;
 }
 
-function workflowFromRow(row: WorkflowRow): ChildWorkflowRecord {
-  return {
-    requestId: row.request_id,
-    resourceUid: row.resource_uid,
-    requestKey: row.request_key,
-    inputFingerprint: row.input_fingerprint,
-    workflow: row.workflow,
-    state: row.state,
-    attempt: row.attempt,
-    ...(row.run_id === null ? {} : { runId: row.run_id }),
-    ...(row.error === null ? {} : { error: row.error }),
-  };
+function workflowSelect(clause: string): string {
+  return `SELECT w.request_id AS requestId, c.uid AS resourceUid,
+    w.request_key AS requestKey, w.input_fingerprint AS inputFingerprint,
+    w.workflow_name AS workflowName, COALESCE(w.run_id, w.reserved_run_id) AS runId, w.status,
+    w.attempt_count AS attemptCount, w.error_hash AS errorHash
+    FROM controller_workflows w
+    JOIN controller_resources c ON c.controller_resource_id = w.controller_resource_id ${clause}`;
 }
 
-function workflowTurnIntentFromRow(row: WorkflowTurnIntentRow): WorkflowTurnIntentRecord {
-  const cause = validateWorkflowTurnIntentCause(row.cause);
-  const resolution =
-    row.resolution === null ? null : validateWorkflowTurnIntentResolution(row.resolution);
-  const fallbackFacts = parseStoredJson<unknown>(
-    row.fallback_facts_json,
-    "workflow turn intent facts",
-  );
-  validateWorkflowTurnIntentFacts(fallbackFacts);
-  validateKey(row.intent_id, "workflow turn intent id");
-  validateKey(row.source_event_id, "workflow turn source event id");
-  validateRunId(row.run_id);
-  validateKey(row.workflow_ref, "workflow turn workflow ref");
-  validateKey(row.target_session_id, "workflow turn target session id");
-  validTimestamp(row.requested_at);
-  if (row.eligible_at !== null) validTimestamp(row.eligible_at);
-  if (row.resolved_at !== null) validTimestamp(row.resolved_at);
-  const allResolutionFieldsNull =
-    row.resolved_at === null && row.resolution === null && row.resolution_message_id === null;
-  const allResolutionFieldsSet =
-    row.resolved_at !== null && row.resolution !== null && row.resolution_message_id !== null;
-  if (!allResolutionFieldsNull && !allResolutionFieldsSet) {
-    throw new Error(`Workflow turn intent ${row.intent_id} has inconsistent resolution fields`);
-  }
-  return {
-    intentId: row.intent_id,
-    sourceEventId: row.source_event_id,
-    runId: row.run_id,
-    workflowRef: row.workflow_ref,
-    targetSessionId: row.target_session_id,
-    cause,
-    nodeId: row.node_id,
-    attemptId: row.attempt_id,
-    fallbackFacts,
-    requestedAt: row.requested_at,
-    eligibleAt: row.eligible_at,
-    resolvedAt: row.resolved_at,
-    resolution,
-    resolutionMessageId: row.resolution_message_id,
-    deliveryClaimExpiresAt:
-      row.delivery_claim_expires_at === null ? null : iso(row.delivery_claim_expires_at),
-  };
+function workflowRunSelect(clause: string): string {
+  return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
+    d.workflow_name AS workflowName, r.workflow_ref AS workflowRef,
+    r.workflow_source_hash AS workflowSourceHash, r.definition_digest AS definitionDigest,
+    r.input_hash AS inputHash, r.launch_options_hash AS launchOptionsHash,
+    q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
+    q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
+    q.error_hash AS errorHash, b.origin_session_id AS originSessionId,
+    r.parent_run_id AS parentRunId, q.created_at AS createdAt, q.updated_at AS updatedAt,
+    q.started_at AS startedAt, q.finished_at AS finishedAt,
+    l.generation AS leaseGeneration, l.owner_id AS ownerId, l.expires_at AS claimExpiresAt
+    FROM runs r JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+    JOIN run_queue q ON q.run_id = r.run_id
+    LEFT JOIN run_bindings b ON b.run_id = r.run_id
+    JOIN leases l ON l.resource_id = r.resource_id ${clause}`;
 }
 
-function workflowNotificationFromRow(row: WorkflowNotificationRow): WorkflowNotificationRecord {
-  if (row.kind !== "progress" && row.kind !== "final") {
-    throw new Error(
-      "Controller store contains an incompatible pending alpha workflow notification. Preserve needed run bundles, then reset the project controller store.",
-    );
-  }
-  return {
-    notificationId: row.notification_id,
-    runId: row.run_id,
-    nodeId: row.node_id,
-    attemptId: row.attempt_id,
-    notificationIndex: row.notification_index,
-    targetSessionId: row.target_session_id,
-    kind: row.kind,
-    content: row.content,
-    createdAt: row.created_at,
-    deliveryClaimExpiresAt:
-      row.delivery_claim_expires_at === null ? null : iso(row.delivery_claim_expires_at),
-    deliveredAt: row.delivered_at,
-  };
+function turnIntentSelect(clause: string): string {
+  return `SELECT t.turn_intent_id AS intentId, t.source_event_id AS sourceEventId,
+    t.run_id AS runId, t.workflow_ref AS workflowRef,
+    t.target_session_id AS targetSessionId, t.cause,
+    t.node_id AS nodeId, t.attempt_id AS attemptId, t.facts_hash AS factsHash,
+    t.requested_at AS requestedAt, t.eligible_at AS eligibleAt,
+    t.resolved_at AS resolvedAt, t.resolution_type AS resolution,
+    t.resolution_message_id AS resolutionMessageId, l.expires_at AS claimExpiresAt,
+    t.effect_id AS effectId
+    FROM turn_intents t JOIN effects e ON e.effect_id = t.effect_id
+    JOIN leases l ON l.resource_id = e.resource_id ${clause}`;
 }
 
-function workflowTurnIntentFactsJson(facts: WorkflowTurnIntentFacts): string {
-  validateWorkflowTurnIntentFacts(facts);
-  const json = canonicalJson(facts, "workflow turn intent facts");
-  validateJsonSize(json, "Workflow turn intent facts", MAX_EVENT_BYTES);
-  return json;
+function notificationSelect(clause: string): string {
+  return `SELECT n.notification_id AS notificationId, n.effect_id AS effectId,
+    n.run_id AS runId, a.node_id AS nodeId, n.attempt_id AS attemptId,
+    n.notification_index AS notificationIndex, n.target_session_id AS targetSessionId,
+    n.notification_type AS kind, n.content_hash AS contentHash,
+    n.created_at AS createdAt, l.expires_at AS claimExpiresAt,
+    e.settled_at AS deliveredAt
+    FROM notifications n JOIN effects e ON e.effect_id = n.effect_id
+    JOIN leases l ON l.resource_id = e.resource_id
+    JOIN node_attempts a ON a.attempt_id = n.attempt_id ${clause}`;
 }
 
-function validateWorkflowTurnIntentFacts(facts: unknown): asserts facts is WorkflowTurnIntentFacts {
-  if (facts === null || typeof facts !== "object" || Array.isArray(facts)) {
-    throw new Error("Workflow turn intent facts must be an object");
-  }
-  const candidate = facts as Record<string, unknown>;
-  if (candidate.schema !== TURN_INTENT_FACTS_SCHEMA) {
-    throw new Error(`Workflow turn intent facts schema must be ${TURN_INTENT_FACTS_SCHEMA}`);
-  }
-  const allowedKeys = new Set([
-    "schema",
-    "workflowName",
-    "runId",
-    "observedState",
-    "cause",
-    "nodeId",
-    "attemptId",
-    "reason",
-    "handoff",
-  ]);
-  for (const key of Object.keys(candidate)) {
-    if (!allowedKeys.has(key)) throw new Error(`Unknown workflow turn intent facts field: ${key}`);
-  }
-  if (typeof candidate.workflowName !== "string") {
-    throw new Error("Workflow turn intent workflowName must be a string");
-  }
-  if (typeof candidate.runId !== "string") {
-    throw new Error("Workflow turn intent runId must be a string");
-  }
-  if (typeof candidate.observedState !== "string") {
-    throw new Error("Workflow turn intent observedState must be a string");
-  }
-  if (typeof candidate.cause !== "string") {
-    throw new Error("Workflow turn intent cause must be a string");
-  }
-  validateKey(candidate.workflowName, "workflow turn facts workflow name");
-  validateRunId(candidate.runId);
-  validateKey(candidate.observedState, "workflow turn facts observed state");
-  validateWorkflowTurnIntentCause(candidate.cause);
-  if (candidate.nodeId !== null && typeof candidate.nodeId !== "string") {
-    throw new Error("Workflow turn intent nodeId must be a string or null");
-  }
-  if (candidate.attemptId !== null && typeof candidate.attemptId !== "string") {
-    throw new Error("Workflow turn intent attemptId must be a string or null");
-  }
-  if (candidate.reason !== null && typeof candidate.reason !== "string") {
-    throw new Error("Workflow turn intent reason must be a string or null");
-  }
-  if (candidate.nodeId !== null) validateKey(candidate.nodeId, "workflow turn facts node id");
-  if (candidate.attemptId !== null) {
-    validateKey(candidate.attemptId, "workflow turn facts attempt id");
-  }
-  if (candidate.reason !== null && candidate.reason.length > MAX_ERROR_LENGTH) {
-    throw new Error(`Workflow turn intent reason must be at most ${MAX_ERROR_LENGTH} characters`);
-  }
-  if (typeof candidate.handoff !== "boolean") {
-    throw new Error("Workflow turn intent handoff must be a boolean");
-  }
+type QueueListRow = {
+  controller: string;
+  resourceKey: string;
+  availableAt: number;
+  consecutiveErrors: number;
+  claimExpiresAt: number | null;
+};
+type ControllerEventRow = {
+  seq: number;
+  recordedAt: number;
+  controller: string;
+  resourceKey: string;
+  eventType: string;
+  payloadHash: Buffer | null;
+};
+type RunEventRow = {
+  seq: number;
+  recordedAt: number;
+  runId: string;
+  workflowRef: string;
+  eventType: string;
+  runnerId: string | null;
+  payloadHash: Buffer | null;
+};
+type TurnIntentRow = {
+  intentId: string;
+  sourceEventId: string;
+  runId: string;
+  workflowRef: string;
+  targetSessionId: string;
+  cause: WorkflowTurnIntentCause;
+  nodeId: string | null;
+  attemptId: string | null;
+  factsHash: Buffer;
+  requestedAt: number;
+  eligibleAt: number | null;
+  resolvedAt: number | null;
+  resolution: WorkflowTurnIntentResolution | null;
+  resolutionMessageId: string | null;
+  claimExpiresAt: number | null;
+  effectId: string;
+};
+type NotificationRow = {
+  notificationId: string;
+  effectId: string;
+  runId: string;
+  nodeId: string;
+  attemptId: string;
+  notificationIndex: number;
+  targetSessionId: string;
+  kind: "progress" | "final";
+  contentHash: Buffer;
+  createdAt: number;
+  claimExpiresAt: number | null;
+  deliveredAt: number | null;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isControllerRow(value: unknown): value is ControllerRow {
+  return isRecord(value);
+}
+function isLeaseRow(value: unknown): value is LeaseRow {
+  return isRecord(value);
+}
+function isRunRow(value: unknown): value is RunRow {
+  return isRecord(value);
+}
+function isEffectRow(value: unknown): value is EffectRow {
+  return isRecord(value);
+}
+function isWorkflowRow(value: unknown): value is WorkflowRow {
+  return isRecord(value);
+}
+function isQueueListRow(value: unknown): value is QueueListRow {
+  return isRecord(value);
+}
+function isControllerEventRow(value: unknown): value is ControllerEventRow {
+  return isRecord(value);
+}
+function isRunEventRow(value: unknown): value is RunEventRow {
+  return isRecord(value);
+}
+function isTurnIntentRow(value: unknown): value is TurnIntentRow {
+  return isRecord(value);
+}
+function isNotificationRow(value: unknown): value is NotificationRow {
+  return isRecord(value);
+}
+function isProjectRow(value: unknown): value is { projectId: string } {
+  return isRecord(value);
+}
+function isFinalizerRow(value: unknown): value is { finalizer: string } {
+  return isRecord(value);
+}
+function isErrorCountRow(value: unknown): value is { consecutiveErrors: number } {
+  return isRecord(value);
+}
+function isQueueVersionRow(value: unknown): value is { queueVersion: number } {
+  return isRecord(value);
+}
+function isRevisionRow(value: unknown): value is { revision: number } {
+  return isRecord(value);
+}
+function isSequenceRow(value: unknown): value is { seq: number } {
+  return isRecord(value);
+}
+function isKeyRow(value: unknown): value is { key: string } {
+  return isRecord(value);
+}
+function isResourceIdRow(value: unknown): value is { resourceId: string } {
+  return isRecord(value);
+}
+function isEffectTokenRow(
+  value: unknown,
+): value is { tokenHash: Buffer | null; expiresAt: number | null } {
+  return isRecord(value);
+}
+function isEffectIdentityRow(value: unknown): value is { effectId: string; resourceId: string } {
+  return isRecord(value);
 }
 
-function validateWorkflowTurnIntentCause(value: string): WorkflowTurnIntentCause {
-  if (
-    value !== "agentCancelled" &&
-    value !== "timedOut" &&
-    value !== "failed" &&
-    value !== "launchFailed" &&
-    value !== "controllerInterrupted" &&
-    value !== "claimLost"
-  ) {
-    throw new Error(`Invalid workflow turn intent cause: ${value}`);
-  }
-  return value;
+function effectIdFor(sourceResourceId: string, key: string): string {
+  return `effect-${createHash("sha256").update(`${sourceResourceId}\0${key}`).digest("hex").slice(0, 40)}`;
 }
-
-function validateWorkflowTurnIntentResolution(value: string): WorkflowTurnIntentResolution {
-  if (value !== "workflowPrompt" && value !== "presentation" && value !== "fallback") {
-    throw new Error(`Invalid workflow turn intent resolution: ${value}`);
-  }
-  return value;
+function projectIdFor(canonicalPath: string): string {
+  return `project-${createHash("sha256").update(canonicalPath).digest("hex").slice(0, 40)}`;
 }
-
-function workflowRunFromRow(row: WorkflowRunQueueRow): WorkflowRunQueueRecord {
-  return {
-    runId: row.run_id,
-    workflowName: row.workflow_ref,
-    workflowSourceRef: row.workflow_path,
-    workflowSource: parseStoredJson(row.workflow_source_json, "workflow run source"),
-    definitionDigest: row.definition_digest,
-    input: parseStoredJson(row.input_json, "workflow run input"),
-    launchOptions: parseStoredJson(row.launch_options_json, "workflow launch options"),
-    status: row.status,
-    runnerId: row.runner_id,
-    claimToken: row.claim_token,
-    claimExpiresAt: row.claim_expires_at === null ? null : iso(row.claim_expires_at),
-    affinityRunnerId: row.affinity_runner_id,
-    originSessionId: row.origin_session_id,
-    parentRunId: row.parent_run_id,
-    errorCode: row.error_code,
-    errorMessage: row.error_message,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-  };
-}
-
-function validateRunId(runId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
-    throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
+function canonicalProjectPath(value: string): string {
+  try {
+    return fs.realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
   }
 }
-
-function eventFromRow(row: EventRow): ControllerEvent {
-  return {
-    seq: row.seq,
-    recordedAt: row.recorded_at,
-    controller: row.controller,
-    key: row.resource_key,
-    type: row.type,
-    payload: parseStoredJson<JsonObject>(row.payload_json, "controller event payload"),
-  };
+function digestBuffer(value: string): Buffer {
+  const hex = value.startsWith("sha256:") ? value.slice(7) : value;
+  if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
+  return Buffer.from(hex, "hex");
 }
-
-function validTimestamp(value: string | undefined): string {
-  const timestamp = value ?? new Date().toISOString();
-  if (!Number.isFinite(Date.parse(timestamp))) {
-    throw new Error(`Invalid timestamp: ${JSON.stringify(timestamp)}`);
-  }
-  return timestamp;
+function sourceParts(
+  ref: string,
+  revision: string,
+): { type: "builtin" | "file"; ref: string; revision: string } {
+  return ref.startsWith("builtin:")
+    ? { type: "builtin", ref: ref.slice(8), revision }
+    : { type: "file", ref, revision };
 }
-
+function effectStatus(value: EffectRecord["state"]): string {
+  return value === "indeterminate" ? "ambiguous" : value;
+}
+function controllerEffectState(value: string): EffectRecord["state"] {
+  return value === "ambiguous" ? "indeterminate" : (value as EffectRecord["state"]);
+}
+function validTimestamp(value?: string): string {
+  const date = value === undefined ? new Date() : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error("Invalid timestamp");
+  return date.toISOString();
+}
 function epoch(value: string): number {
-  const parsed = Date.parse(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new Error(`Timestamp is outside the supported range: ${value}`);
-  }
-  return parsed;
+  return Date.parse(value);
 }
-
-function iso(value: number): string {
-  return new Date(value).toISOString();
+function validateName(value: string, label: string): void {
+  validateKey(value, label);
 }
-
-function validateDuration(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive safe integer`);
-  }
+function validateKey(value: string, label: string): void {
+  if (value.length === 0 || value.length > 512) throw new Error(`${label} is invalid`);
 }
-
-function validateName(value: string, description: string): void {
-  if (!/^[A-Za-z][A-Za-z0-9_.-]*$/.test(value)) {
-    throw new Error(`${description} contains unsupported characters: ${JSON.stringify(value)}`);
-  }
-}
-
-function validateKey(value: string, description: string): void {
-  const hasControl = [...value].some((character) => {
-    const code = character.codePointAt(0) as number;
-    return code < 32 || code === 127;
-  });
-  if (value.length === 0 || value.length > MAX_KEY_LENGTH || hasControl) {
-    throw new Error(`${description} must be 1-${MAX_KEY_LENGTH} printable characters`);
-  }
-}
-
-function validateFinalizers(finalizers: string[]): void {
-  const seen = new Set<string>();
-  for (const finalizer of finalizers) {
-    validateName(finalizer, "finalizer");
-    if (seen.has(finalizer)) {
-      throw new Error(`Duplicate finalizer: ${finalizer}`);
-    }
-    seen.add(finalizer);
-  }
-}
-
-function validateJsonSize(value: string, description: string, limit: number): void {
-  if (Buffer.byteLength(value, "utf8") > limit) {
-    throw new Error(`${description} exceeds the ${limit}-byte storage limit`);
-  }
-}
-
-function truncateError(error: string): string {
-  return error.length <= MAX_ERROR_LENGTH ? error : `${error.slice(0, MAX_ERROR_LENGTH)}…`;
+function validateRunId(value: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value))
+    throw new Error(`Invalid workflow run id: ${value}`);
 }

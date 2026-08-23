@@ -4,6 +4,7 @@ import { StateDatabase } from "./database.js";
 
 export type ResourceType =
   | "run"
+  | "session"
   | "decision"
   | "controller"
   | "effect"
@@ -82,7 +83,12 @@ export class StateMutationStore {
          FROM resources WHERE resource_id = ?`,
       )
       .get(resourceId);
-    if (!isResourceIdentity(row) || row.resourceType !== type || row.aggregateKey !== aggregateKey) {
+    /* istanbul ignore if -- deterministic identity makes this a collision guard */
+    if (
+      !isResourceIdentity(row) ||
+      row.resourceType !== type ||
+      row.aggregateKey !== aggregateKey
+    ) {
       throw new Error(`Resource identity conflict for ${type}:${aggregateKey}`);
     }
     this.state.connection
@@ -160,7 +166,12 @@ export class StateMutationStore {
     });
   }
 
-  renew(claim: LeaseClaim, expectedRevision: number, leaseMs: number, now: number = Date.now()): LeaseClaim {
+  renew(
+    claim: LeaseClaim,
+    expectedRevision: number,
+    leaseMs: number,
+    now: number = Date.now(),
+  ): LeaseClaim {
     return this.state.transaction(() => {
       const resource = requireResource(this.state.connection, claim.resourceId);
       if (resource.revision !== expectedRevision) {
@@ -185,6 +196,7 @@ export class StateMutationStore {
           claim.generation,
           now,
         );
+      /* istanbul ignore if -- BEGIN IMMEDIATE keeps this compare stable */
       if (update.changes !== 1) {
         throw new StaleResourceError("Lease is no longer current");
       }
@@ -224,6 +236,7 @@ export class StateMutationStore {
           tokenHash(claim.token),
           claim.generation,
         );
+      /* istanbul ignore if -- BEGIN IMMEDIATE keeps this compare stable */
       if (update.changes !== 1) {
         throw new StaleResourceError("Lease is no longer current");
       }
@@ -267,9 +280,7 @@ export class StateMutationStore {
         revision: nextRevision,
         type: eventType,
         actor: permit.actor,
-        ...(permit.lease !== undefined
-          ? { leaseGeneration: permit.lease.generation }
-          : {}),
+        ...(permit.lease !== undefined ? { leaseGeneration: permit.lease.generation } : {}),
         ...(options.payload !== undefined ? { payload: options.payload } : {}),
         now,
       });
@@ -289,7 +300,13 @@ export function tokenHash(token: string): Buffer {
 
 type ResourceRow = { revision: number };
 type ResourceIdentityRow = { resourceId: string; resourceType: string; aggregateKey: string };
-type LeaseRow = { generation: number; ownerType: string | null; ownerId: string | null; tokenHash: Buffer | null; expiresAt: number | null };
+type LeaseRow = {
+  generation: number;
+  ownerType: string | null;
+  ownerId: string | null;
+  tokenHash: Buffer | null;
+  expiresAt: number | null;
+};
 
 function requireResource(database: Database.Database, resourceId: string): ResourceRow {
   const row = database
@@ -309,6 +326,7 @@ function requireLease(database: Database.Database, resourceId: string): LeaseRow
        FROM leases WHERE resource_id = ?`,
     )
     .get(resourceId);
+  /* istanbul ignore if -- every resource transaction creates its lease row */
   if (!isLeaseRow(row)) {
     throw new Error(`Resource has no lease row: ${resourceId}`);
   }
@@ -346,6 +364,7 @@ function updateResourceRevision(
        WHERE resource_id = ? AND revision = ?`,
     )
     .run(now, resourceId, expectedRevision);
+  /* istanbul ignore if -- revision was checked under BEGIN IMMEDIATE */
   if (update.changes !== 1) {
     throw new StaleResourceError("Resource revision changed during mutation");
   }
@@ -364,7 +383,8 @@ function insertEvent(
   },
 ): string {
   const eventId = `event-${randomUUID()}`;
-  const payloadHash = options.payload === undefined ? null : state.putJson(options.payload, options.now);
+  const payloadHash =
+    options.payload === undefined ? null : state.putJson(options.payload, options.now);
   state.connection
     .prepare(
       `INSERT INTO events(

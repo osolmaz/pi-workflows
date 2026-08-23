@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { RpcStepExecutor } from "../src/host/rpc-executor.js";
-import { makeTempDir } from "./helpers.js";
+import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("RpcStepExecutor spawn", () => {
   it("spawns children with extension isolation", async () => {
@@ -104,6 +104,14 @@ describe("RpcStepExecutor.close", () => {
     abort.abort(new Error("done"));
     await stepPromise;
     // The entire group is gone: a group probe fails, and the registry is empty.
+    await waitUntil(() => {
+      try {
+        process.kill(-(pid as number), 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
     expect(() => process.kill(-(pid as number), 0)).toThrow();
     expect(registry.size).toBe(0);
   });

@@ -176,7 +176,7 @@ Keys are case-sensitive. A publisher must reuse the same key for the same item t
 
 The generic update layer allows fields it does not understand inside `data`. A package-defined update type may reject unknown fields.
 
-The encoded object must not exceed 64 KiB. Large logs and binary data do not belong in updates. Nodes should return large final values through normal outputs, where the run-bundle artifact rules apply.
+The encoded object must not exceed 64 KiB. Large logs and binary data do not belong in updates. Nodes should return large final values through normal outputs, which the content-addressed SQLite blob store handles.
 
 ### Runtime-owned fields
 
@@ -256,7 +256,8 @@ Controller resource events remain controller events. They become workflow update
 
 ## Persistence
 
-Each accepted update appends one `update_published` event to `trace.ndjson`:
+Each accepted update transaction inserts one `workflow_updates` row and one
+`update_published` event:
 
 ```json
 {
@@ -282,17 +283,17 @@ Each accepted update appends one `update_published` event to `trace.ndjson`:
 }
 ```
 
-`state.json` adds an optional `updates` array containing only the latest record for each `(type, key)` pair. The array is sorted by `seq`. Omission means that the run has never published an update. New runs write an empty array from their first state projection. The trace remains the full history and source of truth.
+The `runs` state blob contains only the latest record for each `(type, key)` pair. The array is sorted by event revision. `workflow_updates` and `events` retain the complete history.
 
-A resumed run keeps its latest projection and appends new update events. A checkpoint continuation starts a new run with an empty update projection. Updates are scoped to one run and are not carried into continuation bundles.
+A continued run keeps its latest projection and appends new update events. A checkpoint continuation starts a new run with an empty update projection. Updates are scoped to one run and are not carried into continuation runs.
 
-The state projection supports at most 1,024 current `(type, key)` pairs. A publication that would exceed the limit is rejected. Trace history remains append-only.
+The state projection supports at most 1,024 current `(type, key)` pairs. A publication that would exceed the limit is rejected. Event history remains append-only.
 
-The update envelope is an additive part of `pi-workflows.trace-event.v1` and `pi-workflows.run-state.v1`. Existing bundles without `updates` remain valid under the omission rule. The implementation uses one current schema and does not add migration files, fallback formats, or dual writes. New bundles that contain updates are not required to work with older package releases.
+The update envelope remains part of `pi-workflows.run-state.v1`. The SQLite schema is the only live durable format.
 
 ## Ordering and limits
 
-Updates use the run store's existing serialized write chain and claim fence. Their trace sequence defines their total order.
+Updates use one `BEGIN IMMEDIATE` transaction with the run's expected revision and claim fence. Their accepted update sequence defines their total order.
 
 Default safety limits per run are:
 
@@ -442,6 +443,6 @@ Validation errors must identify the field and rule. They must not include unrela
 
 Updates are data. They do not grant permission to execute a command, retry work, change a target, publish an artifact, or increase spending.
 
-Run bundles are private and may contain update data from external systems. Existing bundle permissions and export warnings apply.
+SQLite runs are private and may contain update data from external systems. The database permission and export warnings in [SQLite state](SQLITE_STATE.md) apply.
 
 This feature does not add remote transports, a metrics database, global aggregation, automatic polling, or a new Pi core API. Workflow authors remain responsible for the trust and cost of their agent, action, shell, and controller code.

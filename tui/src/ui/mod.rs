@@ -1,6 +1,6 @@
 //! The interactive TUI (see docs/tui-viewer.md): a runs sidebar, the graph
 //! pane, an inspector with steps/trace/conversation/info tabs, and a replay
-//! transport. Works against a local runs directory, a single bundle, or a
+//! transport. Works against a local runs directory, a single run, or a
 //! `piw serve` WebSocket server; all three feed the same view model.
 
 mod controls;
@@ -9,16 +9,16 @@ mod graph;
 mod theme_picker;
 mod timeline;
 
-use crate::bundle::reader::with_artifact_placeholders;
-use crate::bundle::types::{
-    DefinitionSnapshot, NodeOutcome, RunState, RunStatus, SessionCapture, SessionEntryRecord,
-    SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
-};
 use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::render::{render_graph, GraphNodeStyle, GraphView, NodeBounds};
 use crate::session::{assess_capture, CaptureIntegrity};
 use crate::source::RunSource;
+use crate::state::reader::with_artifact_placeholders;
+use crate::state::types::{
+    DefinitionSnapshot, NodeOutcome, RunState, RunStatus, SessionCapture, SessionEntryRecord,
+    SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
+};
 use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
 use crossterm::event::{
@@ -70,7 +70,7 @@ pub struct RunData<'a> {
     pub possibly_interrupted: bool,
     /// Bundle directory when reading the filesystem directly; lets previews
     /// inline small artifacts instead of showing placeholders.
-    pub bundle_dir: Option<&'a std::path::Path>,
+    pub run_dir: Option<&'a std::path::Path>,
     pub remote_artifacts: HashMap<String, std::result::Result<String, String>>,
 }
 
@@ -130,7 +130,7 @@ impl Provider {
                 .summaries()
                 .iter()
                 .filter_map(|summary| {
-                    let manifest: crate::bundle::types::Manifest =
+                    let manifest: crate::state::types::Manifest =
                         serde_json::from_value(summary.get("manifest")?.clone()).ok()?;
                     Some(RunSummary {
                         run_id: manifest.run_id,
@@ -169,7 +169,7 @@ impl Provider {
                     session_capture: entry.session_capture.as_ref(),
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
-                    bundle_dir: Some(&entry.dir),
+                    run_dir: Some(&entry.dir),
                     remote_artifacts: HashMap::new(),
                 })
             }
@@ -188,7 +188,7 @@ impl Provider {
                     session_capture: view.session_capture.as_ref(),
                     live: view.live,
                     possibly_interrupted: view.possibly_interrupted,
-                    bundle_dir: None,
+                    run_dir: None,
                     remote_artifacts,
                 })
             }
@@ -304,7 +304,7 @@ enum DragTarget {
 
 struct App {
     provider: Provider,
-    /// Whether the sidebar is shown (single-bundle mode hides it).
+    /// Whether the sidebar is shown (single-run mode hides it).
     show_sidebar: bool,
     sidebar_collapsed: bool,
     sidebar_explicit: bool,
@@ -354,8 +354,8 @@ struct App {
     quit: bool,
 }
 
-pub fn run_local(runs_dir: &Path, cli_theme: Option<&str>) -> Result<()> {
-    let source = RunSource::new(runs_dir);
+pub fn run_local(database_path: &Path, cli_theme: Option<&str>) -> Result<()> {
+    let source = RunSource::new(database_path);
     run_app(
         Provider::Local {
             source,
@@ -366,8 +366,8 @@ pub fn run_local(runs_dir: &Path, cli_theme: Option<&str>) -> Result<()> {
     )
 }
 
-pub fn run_single(bundle_dir: &Path, cli_theme: Option<&str>) -> Result<()> {
-    let source = RunSource::single(bundle_dir)?;
+pub fn run_single(database_path: &Path, run_id: &str, cli_theme: Option<&str>) -> Result<()> {
+    let source = RunSource::single(database_path, run_id)?;
     run_app(
         Provider::Local {
             source,
@@ -1705,7 +1705,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
                 through_event_seq,
                 width: content_rect.width as usize,
                 palette: &palette,
-                bundle_dir: data.bundle_dir,
+                run_dir: data.run_dir,
                 remote_artifacts: &data.remote_artifacts,
                 selected_entry: Some(conversation_selected),
                 payload_expanded: conversation_payload_expanded,
@@ -1929,11 +1929,11 @@ const PREVIEW_ARTIFACT_MAX_BYTES: u64 = 64 * 1024;
 const DETAIL_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
-    if let Some(artifact) = crate::bundle::types::as_artifact_ref(value) {
+    if let Some(artifact) = crate::state::types::as_artifact_ref(value) {
         paths.push(artifact.path);
         return;
     }
-    if let Some(escaped) = crate::bundle::types::as_escaped(value) {
+    if let Some(escaped) = crate::state::types::as_escaped(value) {
         if let Some(object) = escaped.as_object() {
             for item in object.values() {
                 collect_artifact_paths(item, paths);
@@ -1960,14 +1960,14 @@ fn resolve_remote_artifacts(
     value: &Value,
     artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> Value {
-    if let Some(artifact) = crate::bundle::types::as_artifact_ref(value) {
+    if let Some(artifact) = crate::state::types::as_artifact_ref(value) {
         return match artifacts.get(&artifact.path) {
             Some(Ok(content)) => Value::String(content.clone()),
             Some(Err(error)) => Value::String(format!("«artifact error: {error}»")),
             None => with_artifact_placeholders(value),
         };
     }
-    if let Some(escaped) = crate::bundle::types::as_escaped(value) {
+    if let Some(escaped) = crate::state::types::as_escaped(value) {
         return match escaped.as_object() {
             Some(object) => Value::Object(
                 object
@@ -1997,13 +1997,11 @@ fn resolve_remote_artifacts(
 
 fn resolve_detail_value(
     value: &Value,
-    bundle_dir: Option<&std::path::Path>,
+    run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> Value {
-    match bundle_dir {
-        Some(dir) => {
-            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
-        }
+    match run_dir {
+        Some(dir) => crate::state::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES),
         None => resolve_remote_artifacts(value, remote_artifacts),
     }
 }
@@ -2012,12 +2010,12 @@ fn resolve_detail_value(
 /// local checked reads or the bounded remote artifact cache.
 fn preview_value(
     value: &Value,
-    bundle_dir: Option<&std::path::Path>,
+    run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> String {
-    let decoded = match bundle_dir {
+    let decoded = match run_dir {
         Some(dir) => {
-            crate::bundle::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
+            crate::state::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
         }
         None => resolve_remote_artifacts(value, remote_artifacts),
     };
@@ -2069,13 +2067,11 @@ fn push_detail_line(
 
 fn resolved_detail_value(
     value: &Value,
-    bundle_dir: Option<&std::path::Path>,
+    run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> Value {
-    match bundle_dir {
-        Some(dir) => {
-            crate::bundle::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES)
-        }
+    match run_dir {
+        Some(dir) => crate::state::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES),
         None => resolve_remote_artifacts(value, remote_artifacts),
     }
 }
@@ -2084,12 +2080,12 @@ fn push_value_lines(
     lines: &mut Vec<Line<'static>>,
     label: &str,
     value: &Value,
-    bundle_dir: Option<&std::path::Path>,
+    run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
     width: usize,
     palette: &Palette,
 ) {
-    let decoded = resolved_detail_value(value, bundle_dir, remote_artifacts);
+    let decoded = resolved_detail_value(value, run_dir, remote_artifacts);
     let rendered = match decoded {
         Value::String(text) => text,
         other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string()),
@@ -2111,12 +2107,12 @@ fn push_value_lines(
 fn push_human_decision_presentation(
     lines: &mut Vec<Line<'static>>,
     value: &Value,
-    bundle_dir: Option<&std::path::Path>,
+    run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
     width: usize,
     palette: &Palette,
 ) -> bool {
-    let decoded = resolved_detail_value(value, bundle_dir, remote_artifacts);
+    let decoded = resolved_detail_value(value, run_dir, remote_artifacts);
     if decoded.get("schema").and_then(Value::as_str)
         != Some("pi-workflows.human-decision-request.v1")
     {
@@ -2278,7 +2274,7 @@ fn steps_lines(
                     &mut lines,
                     "prompt",
                     &step.prompt,
-                    data.bundle_dir,
+                    data.run_dir,
                     &data.remote_artifacts,
                     width,
                     palette,
@@ -2287,7 +2283,7 @@ fn steps_lines(
             if !push_human_decision_presentation(
                 &mut lines,
                 &step.output,
-                data.bundle_dir,
+                data.run_dir,
                 &data.remote_artifacts,
                 width,
                 palette,
@@ -2296,7 +2292,7 @@ fn steps_lines(
                     &mut lines,
                     "output",
                     &step.output,
-                    data.bundle_dir,
+                    data.run_dir,
                     &data.remote_artifacts,
                     width,
                     palette,
@@ -2358,7 +2354,7 @@ fn steps_lines(
                     Span::styled("prompt: ", Style::default().fg(palette.accent)),
                     Span::raw(preview_value(
                         &step.prompt,
-                        data.bundle_dir,
+                        data.run_dir,
                         &data.remote_artifacts,
                     )),
                 ]));
@@ -2367,7 +2363,7 @@ fn steps_lines(
                 Span::styled("output: ", Style::default().fg(palette.accent)),
                 Span::raw(preview_value(
                     &step.output,
-                    data.bundle_dir,
+                    data.run_dir,
                     &data.remote_artifacts,
                 )),
             ]));
@@ -2533,7 +2529,7 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
     let state = data.state;
     let label =
         |text: &str| Span::styled(format!("{text:<14}"), Style::default().fg(palette.accent));
-    // Everything below except the derived counts is bundle-derived text.
+    // Everything below except the derived counts is run-derived text.
     let mut lines = vec![
         Line::from(vec![label("run"), Span::raw(sanitize_text(run_id))]),
         Line::from(vec![
@@ -2628,11 +2624,7 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             label("final output"),
-            Span::raw(preview_value(
-                output,
-                data.bundle_dir,
-                &data.remote_artifacts,
-            )),
+            Span::raw(preview_value(output, data.run_dir, &data.remote_artifacts)),
         ]));
     }
     lines
@@ -3011,7 +3003,7 @@ mod tests {
             attempt_id: "a1".into(),
             node_id: "agent".into(),
             node_type: "agent".into(),
-            outcome: crate::bundle::types::NodeOutcome::Ok,
+            outcome: crate::state::types::NodeOutcome::Ok,
             started_at: "2026-01-01T00:00:01.000Z".into(),
             finished_at: "2026-01-01T00:00:05.000Z".into(),
             prompt: serde_json::Value::Null,

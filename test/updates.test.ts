@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { action, agent, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -12,20 +10,18 @@ import {
   progressRecordsFromTrace,
   progressTracksFromRecords,
 } from "../src/workflows/progress.js";
-import type { WorkflowTraceEvent } from "../src/workflows/types.js";
+import { readWorkflowRun } from "../src/workflows/store.js";
 import { validateWorkflowUpdate } from "../src/workflows/updates.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function engine(executor = new ScriptedExecutor()) {
-  return {
-    executor,
-    engine: new WorkflowEngine({ executor, outputRoot: await makeTempDir("workflow-updates") }),
-  };
+  const databasePath = await makeStateDatabasePath("workflow-updates");
+  return { executor, databasePath, engine: new WorkflowEngine({ executor, databasePath }) };
 }
 
 describe("workflow updates", () => {
   it("persists function-action updates in trace order and projects the latest value", async () => {
-    const { engine: runtime } = await engine();
+    const { engine: runtime, databasePath } = await engine();
     const workflow = defineWorkflow({
       name: "function-updates",
       startAt: "work",
@@ -44,17 +40,15 @@ describe("workflow updates", () => {
     const result = await runtime.run(workflow, {});
     expect(result.state.updates).toHaveLength(1);
     expect(result.state.updates?.[0]?.data.completed).toBe(2);
-    const trace = (await fs.readFile(path.join(result.runDir, "trace.ndjson"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as WorkflowTraceEvent);
+    const trace =
+      readWorkflowRun(result.runId, { databasePath, includeTrace: true })?.traceEvents ?? [];
     const updates = trace.filter((event) => event.type === "update_published");
     expect(updates).toHaveLength(2);
-    expect(updates.map((event) => event.seq)).toEqual([3, 4]);
+    expect(updates[1]?.seq).toBe((updates[0]?.seq ?? 0) + 1);
   });
 
   it("snapshots mutable update data before retaining it", async () => {
-    const { engine: runtime } = await engine();
+    const { engine: runtime, databasePath } = await engine();
     const workflow = defineWorkflow({
       name: "mutable-update-data",
       startAt: "work",
@@ -75,11 +69,9 @@ describe("workflow updates", () => {
 
     const result = await runtime.run(workflow, {});
     expect(result.state.updates?.[0]?.data.completed).toBe(2);
-    const trace = (await fs.readFile(path.join(result.runDir, "trace.ndjson"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as WorkflowTraceEvent)
-      .filter((event) => event.type === "update_published");
+    const trace = (
+      readWorkflowRun(result.runId, { databasePath, includeTrace: true })?.traceEvents ?? []
+    ).filter((event) => event.type === "update_published");
     expect(trace.map((event) => (event.payload.data as { completed: number }).completed)).toEqual([
       1, 2,
     ]);

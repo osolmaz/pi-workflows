@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
-import { readRunBundle, WorkflowRunStore } from "../src/workflows/store.js";
-import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { readWorkflowRun, WorkflowRunStore } from "../src/workflows/store.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function makeEngine(store: WorkflowRunStore) {
   return new WorkflowEngine({ executor: new ScriptedExecutor(), store });
@@ -26,8 +26,8 @@ const waitWorkflow = defineWorkflow({
 
 describe("WorkflowEngine.continueRun", () => {
   it("continues a checkpointed run with carried outputs and step accounting", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-continuation-runs");
+    const store = new WorkflowRunStore(databasePath);
     const first = makeEngine(store);
     const parent = await first.run(waitWorkflow, { change: "big" }, { runId: "parent-1" });
     expect(parent.state.status).toBe("waiting");
@@ -44,14 +44,14 @@ describe("WorkflowEngine.continueRun", () => {
     expect(continued.state.steps.length).toBeGreaterThanOrEqual(2);
     expect(continued.state.steps[0]?.nodeId).toBe("approval");
 
-    const bundle = await readRunBundle(continued.runDir);
+    const bundle = readWorkflowRun(continued.runId, { databasePath });
     const lastOutputs = bundle?.state.outputs ?? {};
     expect(lastOutputs.approval).toBeDefined();
   });
 
   it("completes immediately when the checkpoint is the final node", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-continuation-runs");
+    const store = new WorkflowRunStore(databasePath);
     const terminalCheckpoint = defineWorkflow({
       name: "terminal-approval",
       startAt: "approval",
@@ -66,8 +66,8 @@ describe("WorkflowEngine.continueRun", () => {
   });
 
   it("rejects continuation from runs that are not waiting", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-continuation-runs");
+    const store = new WorkflowRunStore(databasePath);
     const plain = defineWorkflow({
       name: "plain",
       startAt: "work",
@@ -81,25 +81,16 @@ describe("WorkflowEngine.continueRun", () => {
   });
 
   it("refuses to continue against changed source unless forced", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-continuation-runs");
+    const store = new WorkflowRunStore(databasePath);
     const first = makeEngine(store);
-    const parent = await first.run(waitWorkflow, {}, { runId: "parent-3" });
-    // Simulate an edited workflow file after the checkpoint.
-    const runDir = parent.runDir;
-    const bundle = await readRunBundle(runDir);
-    expect(bundle?.state.workflowHash).toBeUndefined();
-    const state = bundle?.state;
-    if (state === undefined) {
-      throw new Error("missing state");
-    }
-    state.workflowSource = { kind: "file", path: "/demo.ts", hash: "old-hash" };
-    const { promises: fs } = await import("node:fs");
-    const path = await import("node:path");
-    await fs.writeFile(
-      path.join(runDir, "state.json"),
-      `${JSON.stringify(state, null, 2)}\n`,
-      "utf8",
+    await first.run(
+      waitWorkflow,
+      {},
+      {
+        runId: "parent-3",
+        workflowSource: { kind: "file", path: "/demo.ts", hash: "old-hash" },
+      },
     );
 
     const second = makeEngine(store);
@@ -125,36 +116,9 @@ describe("WorkflowEngine.continueRun", () => {
     expect(forced.state.status).toBe("completed");
   });
 
-  it("refuses a changed legacy parent file hash", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const parent = await makeEngine(store).run(waitWorkflow, {}, { runId: "legacy-parent" });
-    const bundle = await readRunBundle(parent.runDir);
-    if (bundle === null) throw new Error("missing parent bundle");
-    bundle.state.workflowHash = "old-hash";
-    const { promises: fs } = await import("node:fs");
-    const path = await import("node:path");
-    await fs.writeFile(
-      path.join(parent.runDir, "state.json"),
-      `${JSON.stringify(bundle.state, null, 2)}\n`,
-      "utf8",
-    );
-
-    await expect(
-      makeEngine(store).continueRun(
-        waitWorkflow,
-        "legacy-parent",
-        {},
-        {
-          workflowSource: { kind: "file", path: "/demo.ts", hash: "new-hash" },
-        },
-      ),
-    ).rejects.toThrow(WorkflowSourceChangedError);
-  });
-
   it("counts carried steps against maxSteps", async () => {
-    const outputRoot = await makeTempDir("pi-continuation-runs");
-    const store = new WorkflowRunStore(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-continuation-runs");
+    const store = new WorkflowRunStore(databasePath);
     const capped = defineWorkflow({
       name: "capped",
       maxSteps: 1,

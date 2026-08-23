@@ -4,18 +4,18 @@ import { stripAnsi } from "../src/render/ansi.js";
 import { renderRunListLines, statusLabel } from "../src/viewer/render.js";
 import { action, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { ScriptedExecutor, makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function makeEngine() {
-  const outputRoot = await makeTempDir("pi-workflows-engine-more");
-  return new WorkflowEngine({ executor: new ScriptedExecutor(), outputRoot });
+  const databasePath = await makeStateDatabasePath("pi-workflows-engine-more");
+  return new WorkflowEngine({ executor: new ScriptedExecutor(), databasePath });
 }
 
 describe("WorkflowEngine additional paths", () => {
   it("exposes its output root", async () => {
-    const outputRoot = await makeTempDir("pi-workflows-root");
-    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), outputRoot });
-    expect(engine.outputRoot).toBe(outputRoot);
+    const databasePath = await makeStateDatabasePath("pi-workflows-root");
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), databasePath });
+    expect(engine.databasePath).toBe(databasePath);
   });
 
   it("runs function action nodes and records receipts", async () => {
@@ -127,16 +127,7 @@ describe("render status colors", () => {
 
   it("scrolls long run lists around the selection", () => {
     const bundles = Array.from({ length: 30 }, (_ignored, index) => ({
-      runDir: `/tmp/run-${index}`,
-      manifest: {
-        schema: "pi-workflows.run-bundle.v1" as const,
-        runId: `run-${index}`,
-        workflowName: "demo",
-        startedAt: "2026-07-19T00:00:00.000Z",
-        status: "completed" as const,
-        traceSchema: "pi-workflows.trace-event.v1" as const,
-        paths: { workflow: "workflow.json", state: "state.json", trace: "trace.ndjson" },
-      },
+      runId: `run-${index}`,
       state: {
         schema: "pi-workflows.run-state.v1" as const,
         traceSeq: 1,
@@ -152,7 +143,13 @@ describe("render status colors", () => {
         results: {},
         steps: [],
       },
-      snapshot: null,
+      snapshot: {
+        schema: "pi-workflows.definition-snapshot.v1" as const,
+        name: "demo",
+        startAt: "done",
+        nodes: {},
+        edges: [],
+      },
       sessionBinding: null,
       sessionEntries: [],
       sessionEvents: [],

@@ -296,7 +296,7 @@ export function reduceSessionEvents(
 
 /**
  * In-memory seek index. Checkpoints are viewer-only cache state and are never
- * persisted into a run bundle.
+ * persisted into a SQLite run state.
  */
 export class SessionReplayIndex {
   private readonly entries: WorkflowSessionEntryRecord[];

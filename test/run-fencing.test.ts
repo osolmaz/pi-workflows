@@ -1,108 +1,93 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import rawWorkflow from "../examples/workflows/echo.workflow.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { canonicalJson } from "../src/state/json.js";
+import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { ClaimLostError, isClaimLostError } from "../src/workflows/errors.js";
-import { readLastTraceEvent, readRunBundle, WorkflowRunStore } from "../src/workflows/store.js";
+import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeTempDir } from "./helpers.js";
 
-const stores: SqliteControllerStore[] = [];
+const workflow = compileWorkflowDefinition(rawWorkflow);
+const snapshot = createDefinitionSnapshot(workflow);
+const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
 
-afterEach(() => {
-  for (const store of stores.splice(0)) {
-    store.close();
-  }
-});
-
-async function makeQueueStore(): Promise<SqliteControllerStore> {
-  const dir = await makeTempDir("pi-run-fence");
-  const store = new SqliteControllerStore(path.join(dir, "state", "controller.sqlite"));
-  stores.push(store);
-  return store;
+async function setup() {
+  const projectPath = await makeTempDir("run-fence-project");
+  const databasePath = path.join(await makeTempDir("run-fence-state"), "state.sqlite");
+  const queue = new SqliteControllerStore(databasePath, { projectPath });
+  return { queue, databasePath };
 }
 
-describe("run bundle fencing", () => {
-  it("lets the claim holder write and fences out a stale writer", async () => {
-    const queue = await makeQueueStore();
-    const outputRoot = await makeTempDir("pi-run-fence-runs");
+describe("run ownership fencing", () => {
+  it("allows the current claim to write", async () => {
+    const { queue, databasePath } = await setup();
+    const runId = "owned-run";
+    const token = "token-1";
     queue.enqueueWorkflowRun({
-      runId: "fenced-run",
-      workflowName: "demo",
-      workflowSourceRef: "/demo.ts",
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+      definitionDigest,
+      definitionSnapshot: snapshot,
       input: {},
-      runnerId: "runner-a",
-      claimToken: "token-a",
+      runnerId: "session-1",
+      claimToken: token,
       leaseMs: 60_000,
+      originSessionId: "session-1",
     });
-
-    let live = true;
-    const fence = () => {
-      if (!live || !queue.verifyWorkflowRunClaim({ runId: "fenced-run", claimToken: "token-a" })) {
-        throw new ClaimLostError("fenced-run");
-      }
-    };
-    const fencedStore = new WorkflowRunStore(outputRoot, { fenceProvider: () => fence });
-    const workflow = defineWorkflow({
-      name: "demo",
-      startAt: "one",
-      nodes: {
-        one: compute({
-          run: () => {
-            // The claim is lost while this node executes: the next persist
-            // must be refused.
-            live = false;
-            return { done: true };
-          },
-        }),
-      },
-      edges: [],
+    const store = new WorkflowRunStore(databasePath, {
+      authorityProvider: () => queue.workflowRunAuthority(runId, token),
     });
-    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store: fencedStore });
-    const failure = await engine.run(workflow, {}, { runId: "fenced-run" }).then(
-      () => undefined,
-      (error: unknown) => error,
+    const result = await new WorkflowEngine({
+      store,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "ok" } }),
+    }).run(
+      workflow,
+      {},
+      { runId, workflowSource: { kind: "builtin", id: "echo", revision: "test" } },
     );
-    expect(isClaimLostError(failure)).toBe(true);
-
-    // The bundle has no terminal event; recovery owns its future now.
-    const runDir = fencedStore.runDirFor("fenced-run");
-    const last = await readLastTraceEvent(runDir);
-    expect(last?.type).not.toBe("run_finished");
-    expect(last?.type).not.toBe("run_failed");
-
-    // A new claim holder (different token) can write through its own fence.
-    queue.parkWorkflowRun({ runId: "fenced-run", claimToken: "token-a" });
-    const claimed = queue.claimNextWorkflowRun({
-      runnerId: "runner-b",
-      claimToken: "token-b",
-      leaseMs: 60_000,
-    });
-    expect(claimed?.runId).toBe("fenced-run");
-    const recoveredStore = new WorkflowRunStore(outputRoot, {
-      fenceProvider: () => () => {
-        if (!queue.verifyWorkflowRunClaim({ runId: "fenced-run", claimToken: "token-b" })) {
-          throw new ClaimLostError("fenced-run");
-        }
-      },
-    });
-    const interrupted = await recoveredStore.markRunInterrupted("fenced-run");
-    expect(interrupted?.state.status).toBe("failed");
-    const trace = (await readRunBundle(runDir))?.state.traceSeq ?? 0;
-    expect(trace).toBeGreaterThan(0);
+    expect(result.state.status).toBe("completed");
+    store.close();
+    queue.close();
   });
 
-  it("keeps unfenced stores working exactly as before", async () => {
-    const outputRoot = await makeTempDir("pi-run-fence-runs");
-    const store = new WorkflowRunStore(outputRoot);
-    const workflow = defineWorkflow({
-      name: "plain",
-      startAt: "work",
-      nodes: { work: compute({ run: () => 1 }) },
-      edges: [],
+  it("rejects the old writer after claim handoff", async () => {
+    const { queue, databasePath } = await setup();
+    const runId = "handoff-run";
+    queue.enqueueWorkflowRun({
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-1",
+      claimToken: "old",
+      leaseMs: 1,
+      originSessionId: "session-1",
+      now: "2026-08-23T00:00:00.000Z",
     });
-    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
-    const result = await engine.run(workflow, {});
-    expect(result.state.status).toBe("completed");
+    queue.claimWorkflowRun({
+      runId,
+      runnerId: "host-2",
+      claimToken: "new",
+      leaseMs: 60_000,
+      now: "2026-08-23T00:00:01.000Z",
+    });
+    const stale = new WorkflowRunStore(databasePath, {
+      authorityProvider: () => queue.workflowRunAuthority(runId, "old"),
+    });
+    await expect(
+      new WorkflowEngine({
+        store: stale,
+        executor: new ScriptedExecutor().respond("reply", { output: { reply: "no" } }),
+      }).run(workflow, {}, { runId }),
+    ).rejects.toThrow(/ownership changed/);
+    stale.close();
+    queue.close();
   });
 });

@@ -2,7 +2,7 @@
 title: Move durable workflow state to SQLite
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-23
-status: accepted
+status: implemented
 ---
 
 # SQLite state plan
@@ -19,7 +19,7 @@ This database becomes the only live source of workflow state. It stores workflow
 
 The replacement must also fix the broader ownership problem. Finding shared state never grants permission to change it. Every write checks the actor, current owner when ownership is required, ownership generation, expected resource revision, and requested state transition in the same transaction.
 
-The current formats are specified in [Run bundle format](../run-bundles.md), [Human decisions](../HUMAN_DECISIONS.md), and [Controller runtime specification](../CONTROLLERS.md). This plan replaces their storage sections. Workflow authoring behavior stays the same unless this plan names a required contract change.
+The current formats are specified in [Run bundle format](../SQLITE_STATE.md), [Human decisions](../HUMAN_DECISIONS.md), and [Controller runtime specification](../CONTROLLERS.md). This plan replaces their storage sections. Workflow authoring behavior stays the same unless this plan names a required contract change.
 
 ## Boundaries
 
@@ -221,26 +221,29 @@ Run-specific source identity stays on `runs` because two sources can resolve to 
 
 `runs` is the current run snapshot. It is updated with the matching event in one transaction.
 
-| Field               | Type      | Rules                                                                              |
-| ------------------- | --------- | ---------------------------------------------------------------------------------- |
-| `run_id`            | `TEXT`    | Primary key                                                                        |
-| `resource_id`       | `TEXT`    | Unique foreign key to a `run` resource                                             |
-| `project_id`        | `TEXT`    | Nullable foreign key to `projects`                                                 |
-| `parent_run_id`     | `TEXT`    | Nullable self-reference                                                            |
-| `definition_digest` | `BLOB`    | Foreign key to `workflow_definitions`                                              |
-| `source_type`       | `TEXT`    | `builtin` or `file`                                                                |
-| `source_ref`        | `TEXT`    | Built-in ID or absolute file path                                                  |
-| `source_revision`   | `TEXT`    | Built-in revision or file hash                                                     |
-| `title`             | `TEXT`    | Optional display title                                                             |
-| `status`            | `TEXT`    | `queued`, `running`, `waiting`, `completed`, `failed`, `timed_out`, or `cancelled` |
-| `paused`            | `INTEGER` | Constrained boolean                                                                |
-| `status_detail`     | `TEXT`    | Optional current detail                                                            |
-| `input_hash`        | `BLOB`    | Required foreign key to `blobs`                                                    |
-| `output_hash`       | `BLOB`    | Nullable foreign key to `blobs`                                                    |
-| `error_hash`        | `BLOB`    | Nullable foreign key to `blobs`                                                    |
-| `created_at`        | `INTEGER` | Creation time                                                                      |
-| `updated_at`        | `INTEGER` | Last state change                                                                  |
-| `finished_at`       | `INTEGER` | Set for terminal status                                                            |
+| Field                  | Type      | Rules                                                                              |
+| ---------------------- | --------- | ---------------------------------------------------------------------------------- |
+| `run_id`               | `TEXT`    | Primary key                                                                        |
+| `resource_id`          | `TEXT`    | Unique foreign key to a `run` resource                                             |
+| `project_id`           | `TEXT`    | Nullable foreign key to `projects`                                                 |
+| `parent_run_id`        | `TEXT`    | Nullable self-reference                                                            |
+| `definition_digest`    | `BLOB`    | Foreign key to `workflow_definitions`                                              |
+| `workflow_ref`         | `TEXT`    | Workflow name or requested catalog reference                                       |
+| `workflow_source_hash` | `BLOB`    | Canonical source identity in `blobs`                                               |
+| `launch_options_hash`  | `BLOB`    | Canonical launch options in `blobs`                                                |
+| `source_type`          | `TEXT`    | `builtin` or `file`                                                                |
+| `source_ref`           | `TEXT`    | Built-in ID or absolute file path                                                  |
+| `source_revision`      | `TEXT`    | Built-in revision or file hash                                                     |
+| `title`                | `TEXT`    | Optional display title                                                             |
+| `status`               | `TEXT`    | `queued`, `running`, `waiting`, `completed`, `failed`, `timed_out`, or `cancelled` |
+| `paused`               | `INTEGER` | Constrained boolean                                                                |
+| `status_detail`        | `TEXT`    | Optional current detail                                                            |
+| `input_hash`           | `BLOB`    | Required foreign key to `blobs`                                                    |
+| `output_hash`          | `BLOB`    | Nullable foreign key to `blobs`                                                    |
+| `error_hash`           | `BLOB`    | Nullable foreign key to `blobs`                                                    |
+| `created_at`           | `INTEGER` | Creation time                                                                      |
+| `updated_at`           | `INTEGER` | Last state change                                                                  |
+| `finished_at`          | `INTEGER` | Set for terminal status                                                            |
 
 Do not store a second root-run ID. It can be found through `parent_run_id`. Do not store the current node separately. The one active node attempt identifies it.
 
@@ -267,6 +270,7 @@ This table records the Pi session that owns interactive execution.
 | `status`             | `TEXT`    | `queued`, `starting`, `running`, `parked`, `done`, `failed`, or `cancelled` |
 | `available_at`       | `INTEGER` | Earliest claim time                                                         |
 | `affinity_runner_id` | `TEXT`    | Optional preferred owner                                                    |
+| `origin_session_id`  | `TEXT`    | Session reservation copied for an enforceable partial unique index          |
 | `consecutive_errors` | `INTEGER` | Non-negative retry count                                                    |
 | `error_code`         | `TEXT`    | Optional stable code                                                        |
 | `error_hash`         | `BLOB`    | Optional detail in `blobs`                                                  |
@@ -323,18 +327,21 @@ Each node execution gets one row.
 
 One row represents one Pi capture segment for a run owner tenure.
 
-| Field          | Type      | Rules                                   |
-| -------------- | --------- | --------------------------------------- |
-| `segment_id`   | `TEXT`    | Primary key                             |
-| `run_id`       | `TEXT`    | Foreign key to `runs`                   |
-| `attempt_id`   | `TEXT`    | Optional foreign key to `node_attempts` |
-| `session_id`   | `TEXT`    | Pi session ID                           |
-| `status`       | `TEXT`    | `recording`, `complete`, or `failed`    |
-| `entry_count`  | `INTEGER` | Non-negative accepted count             |
-| `event_count`  | `INTEGER` | Non-negative accepted count             |
-| `failure_hash` | `BLOB`    | Optional failure in `blobs`             |
-| `created_at`   | `INTEGER` | Segment start                           |
-| `finished_at`  | `INTEGER` | Segment end                             |
+| Field          | Type      | Rules                                    |
+| -------------- | --------- | ---------------------------------------- |
+| `segment_id`   | `TEXT`    | Primary key                              |
+| `run_id`       | `TEXT`    | Foreign key to `runs`                    |
+| `attempt_id`   | `TEXT`    | Optional foreign key to `node_attempts`  |
+| `capture_key`  | `TEXT`    | Stable key for a later owner segment     |
+| `session_id`   | `TEXT`    | Pi session ID                            |
+| `resource_id`  | `TEXT`    | Unique foreign key to a session resource |
+| `binding_hash` | `BLOB`    | Complete session binding in `blobs`      |
+| `status`       | `TEXT`    | `recording`, `complete`, or `failed`     |
+| `entry_count`  | `INTEGER` | Non-negative accepted count              |
+| `event_count`  | `INTEGER` | Non-negative accepted count              |
+| `failure_hash` | `BLOB`    | Optional failure in `blobs`              |
+| `created_at`   | `INTEGER` | Segment start                            |
+| `finished_at`  | `INTEGER` | Segment end                              |
 
 ### `session_entries`
 
@@ -386,6 +393,7 @@ The request row is immutable after insertion.
 | `presentation_revision` | `INTEGER` | Positive revision                         |
 | `deadline_at`           | `INTEGER` | Optional deadline                         |
 | `default_response_hash` | `BLOB`    | Optional validated policy response        |
+| `request_hash`          | `BLOB`    | Complete immutable request in `blobs`     |
 | `created_at`            | `INTEGER` | Creation time                             |
 
 Indexes cover `run_id` and `deadline_at`.
@@ -480,6 +488,7 @@ The primary key is `(controller_resource_id, finalizer)`.
 | ------------------------ | --------- | -------------------------------------------------- |
 | `controller_resource_id` | `TEXT`    | Primary key, foreign key to `controller_resources` |
 | `available_at`           | `INTEGER` | Earliest claim time                                |
+| `queue_version`          | `INTEGER` | Monotonic enqueue generation                       |
 | `consecutive_errors`     | `INTEGER` | Non-negative retry count                           |
 | `last_error_hash`        | `BLOB`    | Optional error in `blobs`                          |
 | `created_at`             | `INTEGER` | Enqueue time                                       |
@@ -496,6 +505,7 @@ Ownership uses the controller resource lease.
 | `request_key`            | `TEXT`    | Stable key from controller code                                          |
 | `workflow_name`          | `TEXT`    | Requested workflow                                                       |
 | `input_fingerprint`      | `BLOB`    | 32-byte digest                                                           |
+| `reserved_run_id`        | `TEXT`    | Deterministic run ID before the run row exists                           |
 | `run_id`                 | `TEXT`    | Optional foreign key to `runs`                                           |
 | `status`                 | `TEXT`    | `pending`, `running`, `waiting`, `succeeded`, `failed`, or `interrupted` |
 | `attempt_count`          | `INTEGER` | Non-negative count                                                       |
@@ -638,13 +648,16 @@ The primary key is `(channel_id, external_event_id)`.
 
 ### `channel_message_parts`
 
-| Field                  | Type      | Rules                             |
-| ---------------------- | --------- | --------------------------------- |
-| `message_id`           | `TEXT`    | Foreign key to `channel_messages` |
-| `part_index`           | `INTEGER` | Zero-based part number            |
-| `external_message_ref` | `TEXT`    | Provider message reference        |
+| Field                       | Type      | Rules                             |
+| --------------------------- | --------- | --------------------------------- |
+| `message_id`                | `TEXT`    | Foreign key to `channel_messages` |
+| `recipient_index`           | `INTEGER` | Zero-based recipient number       |
+| `part_index`                | `INTEGER` | Zero-based part number            |
+| `content_hash`              | `BLOB`    | Part digest or content in `blobs` |
+| `external_conversation_ref` | `TEXT`    | Provider conversation reference   |
+| `external_message_ref`      | `TEXT`    | Provider message reference        |
 
-The primary key is `(message_id, part_index)`.
+The primary key is `(message_id, recipient_index, part_index)`.
 
 ## Write contract
 
@@ -861,7 +874,7 @@ Do not add automatic destructive cleanup in this change. A later retention featu
 
 After code behavior matches this plan:
 
-- replace [Run bundle format](../run-bundles.md) with the SQLite state specification or retire it in favor of `SQLITE_STATE.md`
+- replace [Run bundle format](../SQLITE_STATE.md) with the SQLite state specification or retire it in favor of `SQLITE_STATE.md`
 - update [Human decisions](../HUMAN_DECISIONS.md)
 - update [Controller runtime specification](../CONTROLLERS.md)
 - update [Workflow authoring reference](../workflows.md)

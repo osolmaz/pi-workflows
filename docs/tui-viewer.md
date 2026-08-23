@@ -16,18 +16,16 @@ cargo install pi-workflows
 
 ## Modes
 
-- `piw` browses the local runs directory (`PI_WORKFLOWS_RUNS_DIR` or
-  `~/.pi/agent/workflows/runs`).
-- `piw <runId|runDir>` opens one run. A bare run id resolves inside the default
-  runs directory.
-- `piw serve [--runs-dir <dir>] [--bind 127.0.0.1:9377]` exposes the runs
-  directory over the [live replay protocol](live-replay-protocol.md). Only
+- `piw` browses `~/.pi/agent/workflows/state.sqlite` through a read-only SQLite connection.
+- `piw <runId>` opens one run from that database.
+- `piw serve [--bind 127.0.0.1:9377]` exposes database-backed run views over the
+  [live replay protocol](live-replay-protocol.md). Only
   loopback addresses are accepted; use an SSH tunnel for remote viewing.
 - `piw --connect ws://…` reads from another `piw serve` process.
 - `piw --theme <name>` selects a theme for this invocation.
 - `piw --list-themes` prints the built-in theme names.
 
-Direct filesystem mode and connected mode use the same semantic run view.
+Direct database mode and connected mode use the same semantic run view.
 The protocol is the network form of that view.
 
 ## Herdr
@@ -36,7 +34,7 @@ The npm package contains a native Herdr plugin. Link the installed package with
 `pi-workflows herdr setup`. A workflow running in Pi inside Herdr then shows
 `Ctrl+Shift+R piw` in its widget. When rows are hidden, the call to action shares
 the scroll-controls line. The shortcut and `/piw` command open
-the current bundle directly in a managed Herdr pane. The placement menu supports
+the current run directly in a managed Herdr pane. The placement menu supports
 right, below, left, above, a new tab, and a new workspace.
 
 The integration resolves the calling pane at invocation time and uses returned
@@ -54,7 +52,7 @@ border to resize the bottom panel. PIW saves both sizes in its viewer config and
 clamps them when the terminal is smaller. A directly opened single run hides
 the browser.
 
-- **Run browser:** every bundle, newest first, with status, title, elapsed time,
+- **Run browser:** every run, newest first, with status, title, elapsed time,
   and a `?` marker for a possibly interrupted run.
 - **Graph:** the complete workflow definition using the same layered layout as
   the TypeScript renderer. Full bordered cards are the default. Every card in
@@ -184,10 +182,10 @@ including nodes at the graph edges and graphs smaller than the viewport. `f`
 toggles follow. Keyboard or mouse panning turns it off; `f`, `0`, or returning
 to the latest position turns it back on.
 
-The conversation folds `session/events.ndjson` through the temporal cursor.
+The conversation folds `session_events` rows through the temporal cursor.
 Unsealed messages stay visible as partial output. A settled `message_finished`
-with `entryId` switches that message to the matching verbatim record from
-`session/entries.ndjson`. Capture failures, sequence gaps, count mismatches,
+with `entryId` switches that message to the matching verbatim `session_entries`
+row. Capture failures, sequence gaps, count mismatches,
 and reconciliation diagnostics remain visible. Conversation auto-follow stays
 at the bottom until the user moves to an older message and returns with End.
 
@@ -198,9 +196,9 @@ listing and selected-run subscription after the server returns. Cached content
 stays visible but is labeled reconnecting or disconnected, never current.
 Revision gaps still force a fresh snapshot.
 
-Expanded remote prompt and output fields fetch artifact content on demand.
-The client caches bounded responses while the server enforces bundle path,
-symlink, and 4 MiB limits.
+Expanded prompt and output fields come from content-addressed SQLite blobs.
+The local reader uses query-only mode. Remote snapshots carry the same bounded
+semantic view and do not expose a filesystem path.
 
 ## Interaction
 

@@ -16,9 +16,9 @@ export class CancelledError extends Error {
 }
 
 /**
- * Thrown when a runner writes to a run bundle after losing its queue claim.
+ * Thrown when a runner writes to a SQLite run state after losing its queue claim.
  * The current claim holder owns the run from that point on, so the fenced
- * writer must stop touching the bundle immediately.
+ * writer must stop changing the run immediately.
  */
 export class ClaimLostError extends Error {
   readonly runId: string;
@@ -32,7 +32,7 @@ export class ClaimLostError extends Error {
 
 /**
  * Internal stop signal for close-to-park: the engine halts without writing
- * a terminal event, leaving a resumable bundle for the next claim holder.
+ * a terminal event, leaving resumable state for the next claim holder.
  */
 export class RunParkedError extends Error {
   constructor() {

@@ -3,16 +3,15 @@ use clap::{Parser, Subcommand};
 use piw::{server, ui};
 use std::path::PathBuf;
 
-/// Terminal viewer and live replay server for pi-workflows run bundles.
+/// Terminal viewer and replay server for pi-workflows SQLite state.
 #[derive(Parser)]
 #[command(name = "piw", version, about)]
 struct Cli {
-    /// Runs directory or a single run bundle directory
-    /// (default: ~/.pi/agent/workflows/runs).
-    path: Option<PathBuf>,
+    /// Optional run id. Without one, show all runs.
+    run_id: Option<String>,
 
-    /// Connect to a `piw serve` server instead of reading the filesystem.
-    #[arg(long, value_name = "URL", conflicts_with = "path")]
+    /// Connect to a `piw serve` server instead of reading local state.
+    #[arg(long, value_name = "URL", conflicts_with = "run_id")]
     connect: Option<String>,
 
     /// Viewer theme name. Overrides PIW_THEME and the config file.
@@ -29,27 +28,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve run views over the live replay protocol (WebSocket).
+    /// Serve run views over the local replay protocol.
     Serve {
-        /// Runs directory to watch (default: ~/.pi/agent/workflows/runs).
-        #[arg(long, value_name = "DIR")]
-        runs_dir: Option<PathBuf>,
-        /// Address to bind. Bundles contain private data; keep this local.
+        /// Address to bind. Workflow state can contain private data; keep this local.
         #[arg(long, default_value = "127.0.0.1:9377")]
         bind: String,
     },
 }
 
-fn default_runs_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PI_WORKFLOWS_RUNS_DIR") {
-        return PathBuf::from(dir);
-    }
+fn default_database() -> PathBuf {
     std::env::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".pi")
         .join("agent")
         .join("workflows")
-        .join("runs")
+        .join("state.sqlite")
 }
 
 fn main() -> Result<()> {
@@ -60,47 +53,28 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    let database = default_database();
+    anyhow::ensure!(
+        database.is_file(),
+        "Pi Workflows database {} does not exist",
+        database.display()
+    );
     let cli_theme = cli.theme.clone();
     match cli.command {
-        Some(Command::Serve { runs_dir, bind }) => {
-            let runs_dir = runs_dir.unwrap_or_else(default_runs_dir);
-            anyhow::ensure!(
-                runs_dir.is_dir(),
-                "runs directory {} does not exist",
-                runs_dir.display()
-            );
+        Some(Command::Serve { bind }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(server::serve(server::ServeOptions { runs_dir, bind }))
+            runtime.block_on(server::serve(server::ServeOptions {
+                database_path: database,
+                bind,
+            }))
         }
         None => {
             if let Some(url) = cli.connect {
                 return ui::run_remote(&url, cli_theme.as_deref());
             }
-            let path = match cli.path {
-                Some(path) if path.is_dir() => path,
-                // A bare run id resolves inside the default runs directory.
-                Some(path) => {
-                    let candidate = default_runs_dir().join(&path);
-                    anyhow::ensure!(
-                        candidate.is_dir(),
-                        "{} is neither a directory nor a run id under {}",
-                        path.display(),
-                        default_runs_dir().display()
-                    );
-                    candidate
-                }
-                None => {
-                    let dir = default_runs_dir();
-                    anyhow::ensure!(dir.is_dir(), "{} does not exist", dir.display());
-                    dir
-                }
-            };
-            // A directory containing manifest.json is a single bundle;
-            // anything else is treated as a runs directory.
-            if path.join("manifest.json").is_file() {
-                ui::run_single(&path, cli_theme.as_deref())
-            } else {
-                ui::run_local(&path, cli_theme.as_deref())
+            match cli.run_id {
+                Some(run_id) => ui::run_single(&database, &run_id, cli_theme.as_deref()),
+                None => ui::run_local(&database, cli_theme.as_deref()),
             }
         }
     }

@@ -7,7 +7,7 @@ import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
-import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 let originalPath = "";
 let commandDir = "";
@@ -1135,7 +1135,7 @@ describe("built-in autoimplement", () => {
     ]);
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-bob"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-bob"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1197,7 +1197,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-confirmed-blocker"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-confirmed-blocker"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1247,7 +1247,7 @@ describe("built-in autoimplement", () => {
     ]);
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-challenge-limit"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-challenge-limit"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1354,7 +1354,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-p2"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-p2"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1441,7 +1441,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-p1"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-p1"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1504,7 +1504,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-command"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-command"),
     });
 
     const { state } = await engine.run(autoimplementWorkflow, {
@@ -1617,7 +1617,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-parallel-review"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-parallel-review"),
     });
     const { state } = await engine.run(autoimplementWorkflow, {
       task: "implement in two repositories",
@@ -1713,7 +1713,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-fallback"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-fallback"),
     });
 
     const { state } = await engine.run(autoimplementWithTimeout("implement", 20), {
@@ -1762,7 +1762,7 @@ describe("built-in autoimplement", () => {
       );
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-limit"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-limit"),
     });
 
     const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
@@ -1804,7 +1804,7 @@ describe("built-in autoimplement", () => {
       });
     const engine = new WorkflowEngine({
       executor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-timeout-blocked"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-blocked"),
     });
 
     const { state } = await engine.run(autoimplementWithTimeout("implement", 10), {
@@ -1875,7 +1875,7 @@ describe("built-in autoimplement", () => {
   it("keeps failed implementation and cancellation out of timeout fallback", async () => {
     const failedEngine = new WorkflowEngine({
       executor: new ScriptedExecutor().respond("implement", { error: "implementation failed" }),
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-failed"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-failed"),
     });
     const failed = await failedEngine.run(autoimplementWorkflow, {
       task: "implement demo",
@@ -1890,7 +1890,7 @@ describe("built-in autoimplement", () => {
     const cancelledExecutor = new ScriptedExecutor().respond("implement", { hang: true });
     const cancelledEngine = new WorkflowEngine({
       executor: cancelledExecutor,
-      outputRoot: await makeTempDir("pi-workflows-autoimplement-cancelled"),
+      databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-cancelled"),
     });
     const cancelledPromise = cancelledEngine.run(autoimplementWithTimeout("implement", 1_000), {
       task: "implement demo",

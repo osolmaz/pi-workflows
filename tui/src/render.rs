@@ -4,16 +4,16 @@
 //! loop edges route through a right-hand gutter. Output is pinned to the
 //! TypeScript renderer through the golden fixtures.
 
-use crate::bundle::types::{
-    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, StepRecord,
-};
 use crate::canvas::{CanvasStyle, CharCanvas};
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::layout::{layout_graph, GraphCell, GraphEdge, GraphLayout, GraphSegment};
+use crate::state::types::{
+    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, StepRecord,
+};
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// Everything the graph needs from a loaded bundle.
+/// Everything the graph needs from a loaded run.
 pub struct GraphView<'a> {
     pub state: &'a RunState,
     pub snapshot: Option<&'a DefinitionSnapshot>,

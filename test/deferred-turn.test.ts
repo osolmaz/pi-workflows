@@ -21,7 +21,32 @@ afterEach(() => {
 
 async function makeStore(): Promise<SqliteControllerStore> {
   const dir = await makeTempDir("pi-deferred-turn");
-  const store = new SqliteControllerStore(path.join(dir, "controller.sqlite"));
+  const store = new SqliteControllerStore(path.join(dir, "state.sqlite"), {
+    projectPath: dir,
+  });
+  const definitionSnapshot = {
+    schema: "pi-workflows.definition-snapshot.v1",
+    name: "autoimplement",
+    startAt: "implement",
+    nodes: { implement: { nodeType: "agent" } },
+    edges: [],
+  };
+  for (const [runId, sessionId] of [
+    ["run-1", "session-a"],
+    ["run-2", "session-b"],
+  ] as const) {
+    store.reserveWorkflowRun({
+      runId,
+      workflowName: "autoimplement",
+      workflowSourceRef: "builtin:autoimplement",
+      workflowSource: { kind: "builtin", id: "autoimplement", revision: "test" },
+      definitionDigest: "a".repeat(64),
+      definitionSnapshot,
+      input: {},
+      runnerId: sessionId,
+      originSessionId: sessionId,
+    });
+  }
   stores.push(store);
   return store;
 }

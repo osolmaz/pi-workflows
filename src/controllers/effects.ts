@@ -2,6 +2,7 @@ import { jsonFingerprint } from "./json.js";
 import type { ControllerStore } from "./store.js";
 import type {
   ControllerEffects,
+  ControllerQueueClaim,
   ControllerResource,
   EffectApplication,
   EffectDefinition,
@@ -16,6 +17,7 @@ export class ControllerEffectService implements ControllerEffects {
   constructor(
     private readonly store: ControllerStore,
     private readonly resource: ControllerResource,
+    private readonly claim: ControllerQueueClaim,
     private readonly signal: AbortSignal,
   ) {}
 
@@ -28,6 +30,7 @@ export class ControllerEffectService implements ControllerEffects {
     const reservation = this.store.reserveEffect({
       key: definition.key,
       resourceUid: this.resource.metadata.uid,
+      claim: this.claim,
       generation: this.resource.metadata.generation,
       kind: definition.kind,
       requestFingerprint,
@@ -67,6 +70,7 @@ export class ControllerEffectService implements ControllerEffects {
     const record = this.store.updateEffect({
       resourceUid: this.resource.metadata.uid,
       key,
+      claim: this.claim,
       state: observation.state === "applied" ? "applied" : "indeterminate",
       ...("externalRef" in observation && observation.externalRef !== undefined
         ? { externalRef: observation.externalRef }
@@ -88,6 +92,7 @@ export class ControllerEffectService implements ControllerEffects {
       const record = this.store.updateEffect({
         resourceUid: this.resource.metadata.uid,
         key: definition.key,
+        claim: this.claim,
         state: "indeterminate",
         error: message,
       });
@@ -97,6 +102,7 @@ export class ControllerEffectService implements ControllerEffects {
     const record = this.store.updateEffect({
       resourceUid: this.resource.metadata.uid,
       key: definition.key,
+      claim: this.claim,
       state: result.state,
       ...(result.state === "applied" && result.externalRef !== undefined
         ? { externalRef: result.externalRef }
@@ -111,6 +117,7 @@ export class ControllerEffectService implements ControllerEffects {
     this.store.recordEvent({
       controller: this.resource.metadata.controller,
       key: this.resource.metadata.key,
+      claim: this.claim,
       type,
       payload: { effectKey, ...extra },
     });

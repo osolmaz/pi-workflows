@@ -1,10 +1,10 @@
 //! Deterministic reducer for `session/events.ndjson`.
 
-use crate::bundle::types::{
+use crate::format::parse_timestamp_ms;
+use crate::state::types::{
     SessionCapture, SessionCaptureStatus, SessionEntryRecord, SessionEventRecord,
     SESSION_CAPTURE_SCHEMA, SESSION_EVENT_SCHEMA,
 };
-use crate::format::parse_timestamp_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -761,7 +761,7 @@ mod tests {
         );
 
         let unexpected_failure = SessionCapture {
-            failure: Some(crate::bundle::types::SessionCaptureFailure {
+            failure: Some(crate::state::types::SessionCaptureFailure {
                 failed_at: "2026-01-01T00:00:00.000Z".into(),
                 code: "failed".into(),
                 message: "failed".into(),

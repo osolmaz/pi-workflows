@@ -167,8 +167,11 @@ export type AnyControllerDefinition = {
 export type ControllerQueueClaim = {
   controller: string;
   key: string;
+  ownerId: string;
   token: string;
+  generation: number;
   queueVersion: number;
+  resourceVersion: number;
   consecutiveErrors: number;
   expiresAt: string;
 };

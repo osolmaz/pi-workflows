@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   action,
   agent,
@@ -15,11 +15,7 @@ import {
   errorMessage,
   isAbortLikeError,
 } from "../src/workflows/errors.js";
-import {
-  createDefinitionSnapshot,
-  readRunBundle,
-  workflowRunsBaseDir,
-} from "../src/workflows/store.js";
+import { createDefinitionSnapshot, workflowStateDatabasePath } from "../src/workflows/store.js";
 import type { WorkflowDefinition, WorkflowEdge } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -223,17 +219,8 @@ describe("definition snapshots", () => {
 });
 
 describe("store misc", () => {
-  it("honors the PI_WORKFLOWS_RUNS_DIR override", () => {
-    vi.stubEnv("PI_WORKFLOWS_RUNS_DIR", "/tmp/custom-runs");
-    try {
-      expect(workflowRunsBaseDir()).toBe("/tmp/custom-runs");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
-  it("returns null for unreadable bundles", async () => {
-    const dir = await makeTempDir("pi-workflows-junk");
-    expect(await readRunBundle(dir)).toBeNull();
+  it("uses one canonical database path under the selected home", async () => {
+    const home = await makeTempDir("pi-workflows-home");
+    expect(workflowStateDatabasePath(home)).toBe(`${home}/.pi/agent/workflows/state.sqlite`);
   });
 });

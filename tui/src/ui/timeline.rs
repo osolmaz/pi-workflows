@@ -1,5 +1,5 @@
 use super::controls;
-use crate::bundle::types::RunStatus;
+use crate::state::types::RunStatus;
 use crate::theme::Palette;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};

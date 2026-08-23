@@ -19,7 +19,7 @@ afterEach(() => {
 
 async function fixture() {
   const dir = await makeTempDir("pi-controller-services");
-  const store = new SqliteControllerStore(path.join(dir, "controller.sqlite"));
+  const store = new SqliteControllerStore(path.join(dir, "state.sqlite"));
   stores.push(store);
   const resource = store.putResource({
     controller: "demo",
@@ -27,15 +27,26 @@ async function fixture() {
     spec: {},
     initialStatus: {},
   });
-  return { store, resource };
+  const claim = store.claimNext({
+    controllers: ["demo"],
+    ownerId: "test-worker",
+    leaseMs: 60_000,
+  });
+  if (claim === undefined) throw new Error("controller claim missing");
+  return { store, resource, claim };
 }
 
 describe("ControllerEffectService", () => {
   it("applies a new effect and returns a saved receipt", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     const observe = vi.fn(() => ({ state: "not_applied" as const }));
     const apply = vi.fn(() => ({ state: "applied" as const, externalRef: "sha" }));
-    const effects = new ControllerEffectService(store, resource, new AbortController().signal);
+    const effects = new ControllerEffectService(
+      store,
+      resource,
+      claim,
+      new AbortController().signal,
+    );
 
     const record = await effects.ensure({
       key: "merge:one",
@@ -51,8 +62,8 @@ describe("ControllerEffectService", () => {
   });
 
   it("records an uncertain call and observes it before retrying", async () => {
-    const { store, resource } = await fixture();
-    const first = new ControllerEffectService(store, resource, new AbortController().signal);
+    const { store, resource, claim } = await fixture();
+    const first = new ControllerEffectService(store, resource, claim, new AbortController().signal);
     const uncertain = await first.ensure({
       key: "merge:one",
       kind: "merge",
@@ -70,6 +81,7 @@ describe("ControllerEffectService", () => {
     const recovered = await new ControllerEffectService(
       store,
       resource,
+      claim,
       new AbortController().signal,
     ).ensure({
       key: "merge:one",
@@ -83,8 +95,9 @@ describe("ControllerEffectService", () => {
   });
 
   it("retries only after observation reports that the effect is absent", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     store.reserveEffect({
+      claim,
       key: "merge:one",
       resourceUid: resource.metadata.uid,
       generation: 1,
@@ -95,6 +108,7 @@ describe("ControllerEffectService", () => {
     const record = await new ControllerEffectService(
       store,
       resource,
+      claim,
       new AbortController().signal,
     ).ensure({
       key: "merge:one",
@@ -108,8 +122,13 @@ describe("ControllerEffectService", () => {
   });
 
   it("returns terminal effects and handles rejected or uncertain observations", async () => {
-    const { store, resource } = await fixture();
-    const applied = new ControllerEffectService(store, resource, new AbortController().signal);
+    const { store, resource, claim } = await fixture();
+    const applied = new ControllerEffectService(
+      store,
+      resource,
+      claim,
+      new AbortController().signal,
+    );
     await applied.ensure({
       key: "applied",
       kind: "test",
@@ -120,7 +139,12 @@ describe("ControllerEffectService", () => {
     const observe = vi.fn();
     const apply = vi.fn();
     expect(
-      await new ControllerEffectService(store, resource, new AbortController().signal).ensure({
+      await new ControllerEffectService(
+        store,
+        resource,
+        claim,
+        new AbortController().signal,
+      ).ensure({
         key: "applied",
         kind: "test",
         request: {},
@@ -132,6 +156,7 @@ describe("ControllerEffectService", () => {
     expect(apply).not.toHaveBeenCalled();
 
     store.reserveEffect({
+      claim,
       key: "uncertain",
       resourceUid: resource.metadata.uid,
       generation: 1,
@@ -141,6 +166,7 @@ describe("ControllerEffectService", () => {
     const uncertain = await new ControllerEffectService(
       store,
       resource,
+      claim,
       new AbortController().signal,
     ).ensure({
       key: "uncertain",
@@ -154,6 +180,7 @@ describe("ControllerEffectService", () => {
     const rejected = await new ControllerEffectService(
       store,
       resource,
+      claim,
       new AbortController().signal,
     ).ensure({
       key: "rejected",
@@ -166,8 +193,9 @@ describe("ControllerEffectService", () => {
   });
 
   it("retries when effect observation fails", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     store.reserveEffect({
+      claim,
       key: "observe-error",
       resourceUid: resource.metadata.uid,
       generation: 1,
@@ -175,7 +203,7 @@ describe("ControllerEffectService", () => {
       requestFingerprint: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     });
     await expect(
-      new ControllerEffectService(store, resource, new AbortController().signal).ensure({
+      new ControllerEffectService(store, resource, claim, new AbortController().signal).ensure({
         key: "observe-error",
         kind: "test",
         request: {},
@@ -188,8 +216,13 @@ describe("ControllerEffectService", () => {
   });
 
   it("allows one effect per pass", async () => {
-    const { store, resource } = await fixture();
-    const effects = new ControllerEffectService(store, resource, new AbortController().signal);
+    const { store, resource, claim } = await fixture();
+    const effects = new ControllerEffectService(
+      store,
+      resource,
+      claim,
+      new AbortController().signal,
+    );
     const definition = {
       key: "first",
       kind: "test",
@@ -204,7 +237,7 @@ describe("ControllerEffectService", () => {
 
 describe("ControllerWorkflowCoordinator", () => {
   it("keeps a stable child request and reports completion to the parent", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     const scheduler: ControllerWorkflowScheduler = {
       ensure: vi.fn(async (request) => {
         expect(store.getWorkflowByRequestId(request.requestId)).toMatchObject({
@@ -215,7 +248,7 @@ describe("ControllerWorkflowCoordinator", () => {
       }),
     };
     const coordinator = new ControllerWorkflowCoordinator(store, scheduler);
-    const workflows = coordinator.forResource(resource, new AbortController().signal);
+    const workflows = coordinator.forResource(resource, claim, new AbortController().signal);
     const first = await workflows.ensure({
       requestKey: "repair:a",
       workflow: "repair",
@@ -233,16 +266,20 @@ describe("ControllerWorkflowCoordinator", () => {
       attempt: 1,
     });
     expect(second.requestId).toBe(first.requestId);
-    const completed = coordinator.complete(first.requestId, {
-      state: "succeeded",
-      ...(first.runId !== undefined ? { runId: first.runId } : {}),
-    });
+    const completed = coordinator.complete(
+      first.requestId,
+      {
+        state: "succeeded",
+        ...(first.runId !== undefined ? { runId: first.runId } : {}),
+      },
+      claim,
+    );
     expect(completed.state).toBe("succeeded");
     expect(store.listQueue()).toHaveLength(1);
   });
 
   it("persists a run ID before scheduler startup and reuses it after failure", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     let reservedRunId: string | undefined;
     const firstCoordinator = new ControllerWorkflowCoordinator(store, {
       ensure: async (request) => {
@@ -253,7 +290,9 @@ describe("ControllerWorkflowCoordinator", () => {
     });
     const childRequest = { requestKey: "repair:a", workflow: "repair", input: {} };
     await expect(
-      firstCoordinator.forResource(resource, new AbortController().signal).ensure(childRequest),
+      firstCoordinator
+        .forResource(resource, claim, new AbortController().signal)
+        .ensure(childRequest),
     ).rejects.toThrow(/host stopped/);
     expect(reservedRunId).toEqual(expect.any(String));
 
@@ -264,7 +303,7 @@ describe("ControllerWorkflowCoordinator", () => {
       },
     });
     const recovered = await secondCoordinator
-      .forResource(resource, new AbortController().signal)
+      .forResource(resource, claim, new AbortController().signal)
       .ensure(childRequest);
     expect(recovered).toMatchObject({
       state: "interrupted",
@@ -274,21 +313,25 @@ describe("ControllerWorkflowCoordinator", () => {
   });
 
   it("starts another attempt after interruption", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     const scheduler: ControllerWorkflowScheduler = {
       ensure: async (request) => ({ state: "running", runId: request.runId }),
     };
     const coordinator = new ControllerWorkflowCoordinator(store, scheduler);
-    const workflows = coordinator.forResource(resource, new AbortController().signal);
+    const workflows = coordinator.forResource(resource, claim, new AbortController().signal);
     const first = await workflows.ensure({
       requestKey: "repair:a",
       workflow: "repair",
       input: {},
     });
-    coordinator.complete(first.requestId, {
-      state: "interrupted",
-      ...(first.runId !== undefined ? { runId: first.runId } : {}),
-    });
+    coordinator.complete(
+      first.requestId,
+      {
+        state: "interrupted",
+        ...(first.runId !== undefined ? { runId: first.runId } : {}),
+      },
+      claim,
+    );
     const second = await workflows.ensure({
       requestKey: "repair:a",
       workflow: "repair",
@@ -303,11 +346,11 @@ describe("ControllerWorkflowCoordinator", () => {
   });
 
   it("returns terminal requests and rejects unknown completion IDs", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     const coordinator = new ControllerWorkflowCoordinator(store, {
       ensure: async () => ({ state: "failed", error: "failed to start" }),
     });
-    const workflows = coordinator.forResource(resource, new AbortController().signal);
+    const workflows = coordinator.forResource(resource, claim, new AbortController().signal);
     const first = await workflows.ensure({ requestKey: "repair:a", workflow: "repair", input: {} });
     const second = await workflows.ensure({
       requestKey: "repair:a",
@@ -316,13 +359,15 @@ describe("ControllerWorkflowCoordinator", () => {
     });
     expect(first.state).toBe("failed");
     expect(second.state).toBe("failed");
-    expect(() => coordinator.complete("missing", { state: "succeeded" })).toThrow(/not found/);
+    expect(() => coordinator.complete("missing", { state: "succeeded" }, claim)).toThrow(
+      /not found/,
+    );
   });
 
   it("leaves requests pending when the host has no scheduler", async () => {
-    const { store, resource } = await fixture();
+    const { store, resource, claim } = await fixture();
     const record = await new ControllerWorkflowCoordinator(store)
-      .forResource(resource, new AbortController().signal)
+      .forResource(resource, claim, new AbortController().signal)
       .ensure({ requestKey: "repair:a", workflow: "repair", input: {} });
     expect(record).toMatchObject({ state: "pending", attempt: 0 });
   });

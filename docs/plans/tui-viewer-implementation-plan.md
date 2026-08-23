@@ -30,7 +30,7 @@ way whether they come from the local filesystem or a WebSocket.
 1. **Scaffold** — Cargo crate (ratatui, crossterm, tokio, tokio-tungstenite,
    notify, serde, clap), rustfmt/clippy config, CI job alongside the npm
    checks.
-2. **Bundle module** — serde types mirroring `docs/run-bundles.md`, bundle
+2. **Bundle module** — serde types mirroring `docs/SQLITE_STATE.md`, bundle
    reader (manifest-first, schema check, skip unknown), incremental NDJSON
    tailer tolerating torn lines, runs-directory watcher with polling
    fallback, artifact resolution with path containment.
