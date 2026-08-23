@@ -231,7 +231,13 @@ export class ControllerManager {
         await sleep(this.pollIntervalMs, signal);
         continue;
       }
-      await this.processClaim(claim);
+      try {
+        await this.processClaim(claim);
+      } catch {
+        if (signal.aborted) return;
+        // A stale claim means another owner now controls that resource. Keep
+        // this worker alive so it can reconcile other queued resources.
+      }
     }
   }
 

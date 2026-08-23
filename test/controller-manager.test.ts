@@ -223,6 +223,46 @@ describe("ControllerManager", () => {
     expect(maxActive).toBe(1);
   });
 
+  it("keeps polling after a reconciliation loses its claim", async () => {
+    const store = await makeStore();
+    let completedOther = 0;
+    const controller = defineController<{}, {}>({
+      name: "stale-claim",
+      initialStatus: () => ({}),
+      reconcile: (ctx, resource) => {
+        if (resource.metadata.key === "a") {
+          const now = Date.now();
+          store.state.connection
+            .prepare(
+              `UPDATE leases
+               SET generation = generation + 1, owner_type = 'controller',
+                   owner_id = 'replacement', token_hash = zeroblob(32),
+                   acquired_at = ?, heartbeat_at = ?, expires_at = ?
+               WHERE resource_id = (
+                 SELECT resource_id FROM controller_resources WHERE resource_key = 'a'
+               )`,
+            )
+            .run(now, now, now + 60_000);
+        } else {
+          completedOther += 1;
+        }
+        return ctx.settled();
+      },
+    });
+    const manager = new ControllerManager({
+      store,
+      controllers: [controller],
+      maxConcurrent: 1,
+      pollIntervalMs: 5,
+    });
+    manager.putResource(controller, "a", {});
+    manager.putResource(controller, "b", {});
+    manager.start();
+    await waitUntil(() => completedOther === 1);
+    await manager.stop();
+    expect(completedOther).toBe(1);
+  });
+
   it("rejects invalid results and bounds immediate loops", async () => {
     const store = await makeStore();
     const invalid = defineController<{}, {}>({
