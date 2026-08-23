@@ -864,6 +864,12 @@ export class WorkflowRunStore {
     state: WorkflowRunState,
     now: number,
   ): void {
+    if (
+      this.state.connection.prepare("SELECT 1 FROM run_queue WHERE run_id = ?").get(state.runId) ===
+      undefined
+    ) {
+      return;
+    }
     const effectType = state.status === "waiting" ? "run.park_queue" : "run.settle_queue";
     const idempotencyKey = `${state.runId}:${state.status}`;
     const effectId = `effect-${createHash("sha256")

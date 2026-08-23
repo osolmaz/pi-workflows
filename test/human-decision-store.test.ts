@@ -112,7 +112,7 @@ describe("HumanDecisionStore SQLite", () => {
         .get(),
     ).toEqual({ count: 1 });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
-      count: 3,
+      count: 2,
     });
     store.close();
   });

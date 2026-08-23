@@ -85,7 +85,7 @@ A domain row and its event are written in one transaction. Normal APIs never upd
 
 `effect_attempts` records each application attempt and ownership generation. A matching repeated request adopts the existing effect. A different request under the same key is a conflict.
 
-Local effects use deterministic transactions. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
+Local effects use deterministic transactions. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and controller-child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
 
 ## Domain tables
 
@@ -174,7 +174,7 @@ Read paths do not repair state. Owner reconcilers apply pending effects and writ
 
 ## Projects and concurrency
 
-All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key.
+All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key. Standalone host lock and child-process registry files use a project hash under the workflow state directory, so different projects can run hosts concurrently while two hosts for one project still conflict.
 
 SQLite WAL permits concurrent readers while one writer commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions.
 
