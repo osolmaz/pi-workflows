@@ -104,7 +104,7 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Pi delivery         | `notifications`, `turn_intents`                                                                  |
 | Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`      |
 
-Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one active run reservation per Pi session, one decision winner, and one deterministic effect key.
+Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
 ## Content-addressed values
 

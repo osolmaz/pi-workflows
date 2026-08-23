@@ -626,22 +626,22 @@ export class SqliteControllerStore implements ControllerStore {
     requestFingerprint: string;
     now?: string;
   }): EffectReservation {
-    const source = this.requireControllerRowByUid(options.resourceUid);
-    this.assertControllerClaim(source, options.claim, epoch(validTimestamp(options.now)));
-    const effectId = effectIdFor(source.resourceId, options.key);
-    const existing = this.effectRow(options.resourceUid, options.key);
-    if (existing !== undefined) {
-      if (
-        existing.generation !== options.generation ||
-        existing.kind !== options.kind ||
-        existing.requestFingerprint !== options.requestFingerprint
-      ) {
-        throw new EffectRequestConflictError(options.key);
-      }
-      return { record: this.mapEffect(existing), created: false };
-    }
     const now = epoch(validTimestamp(options.now));
     return this.state.transaction(() => {
+      const source = this.requireControllerRowByUid(options.resourceUid);
+      this.assertControllerClaim(source, options.claim, now);
+      const effectId = effectIdFor(source.resourceId, options.key);
+      const existing = this.effectRow(options.resourceUid, options.key);
+      if (existing !== undefined) {
+        if (
+          existing.generation !== options.generation ||
+          existing.kind !== options.kind ||
+          existing.requestFingerprint !== options.requestFingerprint
+        ) {
+          throw new EffectRequestConflictError(options.key);
+        }
+        return { record: this.mapEffect(existing), created: false };
+      }
       const effectResourceId = resourceIdFor("effect", effectId);
       const payloadHash = this.state.putJson(
         {
@@ -712,10 +712,10 @@ export class SqliteControllerStore implements ControllerStore {
     error?: string;
     now?: string;
   }): EffectRecord {
-    const source = this.requireControllerRowByUid(options.resourceUid);
     const now = epoch(validTimestamp(options.now));
-    this.assertControllerClaim(source, options.claim, now);
     return this.state.transaction(() => {
+      const source = this.requireControllerRowByUid(options.resourceUid);
+      this.assertControllerClaim(source, options.claim, now);
       const row = this.requireEffectRow(options.resourceUid, options.key);
       const effectResourceId = resourceIdFor("effect", row.effectId);
       const revision = this.resourceRevision(effectResourceId);
@@ -763,37 +763,39 @@ export class SqliteControllerStore implements ControllerStore {
     workflow: string;
     inputFingerprint: string;
   }): WorkflowReservation {
-    const source = this.requireControllerRowByUid(options.resourceUid);
-    this.assertControllerClaim(source, options.claim, Date.now());
-    const existing = this.workflowRow(options.resourceUid, options.requestKey);
-    if (existing !== undefined) {
-      if (
-        existing.workflowName !== options.workflow ||
-        existing.inputFingerprint.toString("hex") !== options.inputFingerprint
-      ) {
-        throw new WorkflowRequestConflictError(options.requestKey);
-      }
-      return { record: this.mapWorkflow(existing), created: false };
-    }
     const now = Date.now();
-    const requestId = randomUUID();
-    this.state.connection
-      .prepare(
-        `INSERT INTO controller_workflows(
-           request_id, controller_resource_id, request_key, workflow_name,
-           input_fingerprint, status, attempt_count, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
-      )
-      .run(
-        requestId,
-        source.controllerResourceId,
-        options.requestKey,
-        options.workflow,
-        Buffer.from(options.inputFingerprint, "hex"),
-        now,
-        now,
-      );
-    return { record: this.mapWorkflow(this.requireWorkflowRow(requestId)), created: true };
+    return this.state.transaction(() => {
+      const source = this.requireControllerRowByUid(options.resourceUid);
+      this.assertControllerClaim(source, options.claim, now);
+      const existing = this.workflowRow(options.resourceUid, options.requestKey);
+      if (existing !== undefined) {
+        if (
+          existing.workflowName !== options.workflow ||
+          existing.inputFingerprint.toString("hex") !== options.inputFingerprint
+        ) {
+          throw new WorkflowRequestConflictError(options.requestKey);
+        }
+        return { record: this.mapWorkflow(existing), created: false };
+      }
+      const requestId = randomUUID();
+      this.state.connection
+        .prepare(
+          `INSERT INTO controller_workflows(
+             request_id, controller_resource_id, request_key, workflow_name,
+             input_fingerprint, status, attempt_count, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+        )
+        .run(
+          requestId,
+          source.controllerResourceId,
+          options.requestKey,
+          options.workflow,
+          Buffer.from(options.inputFingerprint, "hex"),
+          now,
+          now,
+        );
+      return { record: this.mapWorkflow(this.requireWorkflowRow(requestId)), created: true };
+    });
   }
 
   getWorkflow(resourceUid: string, requestKey: string): ChildWorkflowRecord | undefined {
@@ -811,38 +813,40 @@ export class SqliteControllerStore implements ControllerStore {
     update: WorkflowRecordUpdate,
     claim: ControllerQueueClaim,
   ): ChildWorkflowRecord {
-    const row = this.requireWorkflowRow(requestId);
-    const source = this.requireControllerRowByUid(row.resourceUid);
-    this.assertControllerClaim(source, claim, Date.now());
     const now = Date.now();
-    const errorHash =
-      update.error === undefined || update.error === null
-        ? null
-        : this.state.putText(update.error, now);
-    this.state.connection
-      .prepare(
-        `UPDATE controller_workflows
-         SET reserved_run_id = COALESCE(?, reserved_run_id),
-             run_id = CASE
-               WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
-               ELSE run_id
-             END,
-             status = ?, attempt_count = COALESCE(?, attempt_count),
-             error_hash = ?, updated_at = ?
-         WHERE request_id = ?`,
-      )
-      .run(
-        update.runId ?? null,
-        update.runId ?? null,
-        update.runId ?? null,
-        update.runId ?? null,
-        update.state,
-        update.attempt ?? null,
-        errorHash,
-        now,
-        requestId,
-      );
-    return this.mapWorkflow(this.requireWorkflowRow(requestId));
+    return this.state.transaction(() => {
+      const row = this.requireWorkflowRow(requestId);
+      const source = this.requireControllerRowByUid(row.resourceUid);
+      this.assertControllerClaim(source, claim, now);
+      const errorHash =
+        update.error === undefined || update.error === null
+          ? null
+          : this.state.putText(update.error, now);
+      this.state.connection
+        .prepare(
+          `UPDATE controller_workflows
+           SET reserved_run_id = COALESCE(?, reserved_run_id),
+               run_id = CASE
+                 WHEN ? IS NOT NULL AND EXISTS(SELECT 1 FROM runs WHERE run_id = ?) THEN ?
+                 ELSE run_id
+               END,
+               status = ?, attempt_count = COALESCE(?, attempt_count),
+               error_hash = ?, updated_at = ?
+           WHERE request_id = ?`,
+        )
+        .run(
+          update.runId ?? null,
+          update.runId ?? null,
+          update.runId ?? null,
+          update.runId ?? null,
+          update.state,
+          update.attempt ?? null,
+          errorHash,
+          now,
+          requestId,
+        );
+      return this.mapWorkflow(this.requireWorkflowRow(requestId));
+    });
   }
 
   completeWorkflow(requestId: string, update: WorkflowRecordUpdate): ChildWorkflowRecord {
@@ -911,35 +915,37 @@ export class SqliteControllerStore implements ControllerStore {
     payload?: JsonObject;
     now?: string;
   }): ControllerEvent {
-    const row = this.requireControllerRow({ controller: options.controller, key: options.key });
     const now = epoch(validTimestamp(options.now));
-    if (options.claim !== undefined) this.assertControllerClaim(row, options.claim, now);
-    const revision = this.resourceRevision(row.resourceId) + 1;
-    this.bumpResource(row.resourceId, revision - 1, now);
-    const eventId = this.insertEvent(
-      row.resourceId,
-      revision,
-      options.type,
-      options.claim === undefined ? "control" : "controller",
-      options.claim?.ownerId ?? null,
-      options.payload ?? {},
-      now,
-      options.claim?.generation,
-    );
-    if (options.claim !== undefined) options.claim.resourceVersion = revision;
-    const event = this.state.connection
-      .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
-      .get(eventId);
-    /* istanbul ignore if -- exact schema and internal query shape */
-    if (!isSequenceRow(event)) throw new Error("Controller event was not recorded");
-    return {
-      seq: event.seq,
-      recordedAt: new Date(now).toISOString(),
-      controller: options.controller,
-      key: options.key,
-      type: options.type,
-      payload: options.payload ?? {},
-    };
+    return this.state.transaction(() => {
+      const row = this.requireControllerRow({ controller: options.controller, key: options.key });
+      if (options.claim !== undefined) this.assertControllerClaim(row, options.claim, now);
+      const revision = this.resourceRevision(row.resourceId) + 1;
+      this.bumpResource(row.resourceId, revision - 1, now);
+      const eventId = this.insertEvent(
+        row.resourceId,
+        revision,
+        options.type,
+        options.claim === undefined ? "control" : "controller",
+        options.claim?.ownerId ?? null,
+        options.payload ?? {},
+        now,
+        options.claim?.generation,
+      );
+      if (options.claim !== undefined) options.claim.resourceVersion = revision;
+      const event = this.state.connection
+        .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
+        .get(eventId);
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isSequenceRow(event)) throw new Error("Controller event was not recorded");
+      return {
+        seq: event.seq,
+        recordedAt: new Date(now).toISOString(),
+        controller: options.controller,
+        key: options.key,
+        type: options.type,
+        payload: options.payload ?? {},
+      };
+    });
   }
 
   listEvents(
@@ -1002,6 +1008,38 @@ export class SqliteControllerStore implements ControllerStore {
     return this.state.transaction(() => {
       if (this.getWorkflowRun(options.runId) !== undefined) {
         throw new Error(`Workflow run already reserved: ${options.runId}`);
+      }
+      if (options.parentRunId !== undefined) {
+        const parent = this.requireWorkflowRunRow(options.parentRunId);
+        if (parent.originSessionId !== options.originSessionId) {
+          throw new Error("Continuation parent belongs to another Pi session");
+        }
+        if (parent.status === "parked") {
+          const parentLease = this.requireLease(parent.resourceId);
+          if (parentLease.ownerId !== null) {
+            throw new Error("Continuation parent still has an active owner");
+          }
+          this.state.connection
+            .prepare(
+              `UPDATE run_queue
+               SET status = 'done', updated_at = ?, finished_at = ?
+               WHERE run_id = ? AND status = 'parked'`,
+            )
+            .run(now, now, parent.runId);
+          const parentRevision = this.resourceRevision(parent.resourceId);
+          this.bumpResource(parent.resourceId, parentRevision, now);
+          this.insertEvent(
+            parent.resourceId,
+            parentRevision + 1,
+            "run.queue_done_for_continuation",
+            "session",
+            options.originSessionId,
+            { continuationRunId: options.runId },
+            now,
+          );
+        } else if (parent.status !== "done") {
+          throw new Error(`Continuation parent queue is ${parent.status}`);
+        }
       }
       const resourceId = resourceIdFor("run", options.runId);
       const definitionHash = this.state.putJson(options.definitionSnapshot, now);

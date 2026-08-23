@@ -544,6 +544,7 @@ export class WorkflowRunStore {
   ): Promise<number> {
     const segment = this.requireSegment(segmentIdFor(runId, attemptId));
     return this.state.transaction(() => {
+      this.assertSessionWriteAuthority(runId);
       const revision = this.requireResourceRevision(segmentResourceId(segment));
       const sequence = segment.entryCount + 1;
       const now = Date.now();
@@ -581,6 +582,7 @@ export class WorkflowRunStore {
     if (records.length === 0) return;
     const segment = this.requireSegment(segmentIdFor(runId, attemptId));
     this.state.transaction(() => {
+      this.assertSessionWriteAuthority(runId);
       const current = this.requireSegment(segment.segmentId);
       if (current.status !== "recording") throw new Error("Session event capture has stopped");
       let expected = current.eventCount + 1;
@@ -643,6 +645,7 @@ export class WorkflowRunStore {
     validateSessionCapture(capture);
     const segment = this.requireSegment(segmentIdFor(runId, attemptId));
     this.state.transaction(() => {
+      this.assertSessionWriteAuthority(runId);
       const current = this.requireSegment(segment.segmentId);
       if (current.status === "failed" && capture.status !== "failed") return;
       if (current.status === "complete" && capture.status !== "complete") return;
@@ -758,6 +761,11 @@ export class WorkflowRunStore {
     } finally {
       release?.();
     }
+  }
+
+  private assertSessionWriteAuthority(runId: string): void {
+    const run = this.requireRunRow(runId);
+    this.assertWriteAuthority(run, this.contextFor(runId).revision);
   }
 
   private resourceRevision(runId: string): number {
@@ -1228,6 +1236,7 @@ export class WorkflowRunStore {
       };
       const now = Date.now();
       this.state.transaction(() => {
+        this.assertSessionWriteAuthority(runId);
         const failureHash = this.state.putJson(capture.failure, now);
         this.state.connection
           .prepare(

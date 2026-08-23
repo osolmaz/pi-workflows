@@ -146,7 +146,7 @@ CREATE TABLE run_queue (
 
 CREATE INDEX run_queue_claim_idx ON run_queue(status, available_at, created_at);
 CREATE UNIQUE INDEX run_queue_active_session_idx ON run_queue(origin_session_id)
-WHERE status NOT IN ('done', 'failed', 'cancelled');
+WHERE status IN ('queued', 'starting', 'running');
 
 CREATE TABLE node_attempts (
   attempt_id TEXT PRIMARY KEY,

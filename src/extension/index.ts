@@ -2134,20 +2134,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
         };
       }
     }
-    {
-      const queue = ensureRunQueueStore(ctx.cwd);
-      const token = randomUUID();
-      const claim = queue.claimWorkflowRun({
-        runId: waiting.parentRunId,
-        runnerId: ctx.sessionManager.getSessionId(),
-        claimToken: token,
-        leaseMs: RUN_CLAIM_LEASE_MS,
-      });
-      if (claim === undefined) {
-        throw new Error("The waiting workflow is owned by another session.");
-      }
-      queue.completeWorkflowRun({ runId: waiting.parentRunId, claimToken: token });
-    }
     const decisionStore = humanDecisionStore(ctx.cwd);
     if (continuationRunId !== undefined) {
       const existingContinuation = readWorkflowRun(continuationRunId);
@@ -2354,7 +2340,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         runId,
         createdAt: resolved.acceptedAt,
       };
-      recoveryQueue.completeWorkflowRun({
+      recoveryQueue.parkWorkflowRun({
         runId: request.runId,
         claimToken: recoveryToken,
       });
