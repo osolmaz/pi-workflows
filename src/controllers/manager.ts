@@ -138,7 +138,12 @@ export class ControllerManager {
       resource.metadata.generation === 1 ? "resource_applied" : "resource_updated",
       { generation: resource.metadata.generation },
     );
-    return resource;
+    const current = this.store.getResource<TSpec, TStatus>({
+      controller: definition.name,
+      key,
+    });
+    if (current === undefined) throw new Error("Controller resource disappeared after its event");
+    return current;
   }
 
   putResourceByName(controller: string, key: string, spec: unknown): ControllerResource {
@@ -159,13 +164,17 @@ export class ControllerManager {
       resource.metadata.generation === 1 ? "resource_applied" : "resource_updated",
       { generation: resource.metadata.generation },
     );
-    return resource;
+    const current = this.store.getResource({ controller, key });
+    if (current === undefined) throw new Error("Controller resource disappeared after its event");
+    return current;
   }
 
   requestDeletion(ref: ControllerResourceRef): ControllerResource {
-    const resource = this.store.requestDeletion(ref, this.now().toISOString());
+    this.store.requestDeletion(ref, this.now().toISOString());
     this.recordEvent(ref, "deletion_requested");
-    return resource;
+    const current = this.store.getResource(ref);
+    if (current === undefined) throw new Error("Controller resource disappeared after its event");
+    return current;
   }
 
   enqueue(ref: ControllerResourceRef, afterMs = 0): void {
