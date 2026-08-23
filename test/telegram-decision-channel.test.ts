@@ -695,11 +695,13 @@ describe("TelegramDecisionChannel SQLite", () => {
     store.close();
   });
 
-  it("allows only one channel owner for a profile", async () => {
+  it("routes delivery from a non-owner process to the profile lease holder", async () => {
     const databasePath = await makeStateDatabasePath("telegram-lease");
     const request = fullRequest();
     const firstStore = new HumanDecisionStore(databasePath);
-    await seedHumanDecisionRequest(firstStore, request);
+    const secondStore = new HumanDecisionStore(databasePath);
+    const firstBot = fakeBot();
+    const secondBot = fakeBot();
     const first = new TelegramDecisionChannel({
       profileName: "approval",
       token: "test-token-not-real",
@@ -707,7 +709,7 @@ describe("TelegramDecisionChannel SQLite", () => {
       allowedChatIds: ["-200"],
       store: firstStore,
       onAnswer: async () => {},
-      fetchFn: fakeBot().fetchFn,
+      fetchFn: firstBot.fetchFn,
       ownerId: "owner-a",
     });
     const second = new TelegramDecisionChannel({
@@ -715,9 +717,9 @@ describe("TelegramDecisionChannel SQLite", () => {
       token: "test-token-not-real",
       allowedUserIds: ["100"],
       allowedChatIds: ["-200"],
-      store: new HumanDecisionStore(databasePath),
+      store: secondStore,
       onAnswer: async () => {},
-      fetchFn: fakeBot().fetchFn,
+      fetchFn: secondBot.fetchFn,
       ownerId: "owner-b",
     });
     await first.start();
@@ -728,9 +730,19 @@ describe("TelegramDecisionChannel SQLite", () => {
           .prepare("SELECT owner_id AS ownerId FROM leases WHERE resource_id LIKE 'channel-%'")
           .get() !== undefined,
     );
-    await expect(second.deliver(humanDecisionChannelRequest(request))).rejects.toThrow(/not owned/);
+    await seedHumanDecisionRequest(secondStore, request);
+    expect(await second.deliver(humanDecisionChannelRequest(request))).toMatchObject({
+      status: "unknown",
+      attemptId: expect.stringMatching(/^queued-/),
+      errorCode: "queued_for_channel_owner",
+    });
+    await waitUntil(
+      () => firstBot.calls.filter((call) => call.method === "sendMessage").length === 1,
+    );
+    expect(secondBot.calls.filter((call) => call.method === "sendMessage")).toHaveLength(0);
     await second.stop();
     await first.stop();
+    secondStore.close();
     firstStore.close();
   });
 });

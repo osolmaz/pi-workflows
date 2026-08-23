@@ -90,8 +90,8 @@ export class StateDatabase {
 
     try {
       this.configure(existed);
-      if (!existed) {
-        this.initialize();
+      if (this.mode === "read-write") {
+        this.prepareSchema(!existed);
       }
       this.verifySchema();
       if (this.mode === "read-only") {
@@ -222,6 +222,25 @@ export class StateDatabase {
       this.connection.pragma(`journal_size_limit = ${JOURNAL_SIZE_LIMIT}`);
     } else if (existed) {
       this.connection.pragma("synchronous = FULL");
+    }
+  }
+
+  private prepareSchema(allowInitialize: boolean): void {
+    this.connection.exec("BEGIN EXCLUSIVE");
+    try {
+      const schema = this.connection
+        .prepare(
+          "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+        )
+        .get();
+      if (schema === undefined) {
+        if (!allowInitialize) throw new Error(RESET_INSTRUCTION);
+        this.initialize();
+      }
+      this.connection.exec("COMMIT");
+    } catch (error) {
+      if (this.connection.inTransaction) this.connection.exec("ROLLBACK");
+      throw error;
     }
   }
 
