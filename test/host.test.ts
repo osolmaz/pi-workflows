@@ -23,6 +23,28 @@ describe("WorkflowHost SQLite", () => {
     await host.stop();
   });
 
+  it("allows concurrent hosts for different projects in one database", async () => {
+    const firstCwd = await makeTempDir("host-project-a");
+    const secondCwd = await makeTempDir("host-project-b");
+    const databasePath = path.join(await makeTempDir("host-state"), "state.sqlite");
+    const first = new WorkflowHost({
+      cwd: firstCwd,
+      databasePath,
+      runnerId: "host-project-a",
+      claimPollMs: 10,
+    });
+    const second = new WorkflowHost({
+      cwd: secondCwd,
+      databasePath,
+      runnerId: "host-project-b",
+      claimPollMs: 10,
+    });
+    await first.start();
+    await second.start();
+    await second.stop();
+    await first.stop();
+  });
+
   it("refuses a second active host for the same state directory", async () => {
     const cwd = await makeTempDir("host-project");
     const databasePath = path.join(await makeTempDir("host-state"), "state.sqlite");

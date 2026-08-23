@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
@@ -70,7 +70,11 @@ export class WorkflowHost {
     this.runnerId = options.runnerId ?? `host-${randomUUID().slice(0, 8)}`;
     const databasePath = options.databasePath ?? workflowStatePath();
     this.store = new SqliteControllerStore(databasePath, { projectPath: options.cwd });
-    this.stateDir = path.dirname(this.store.filePath);
+    this.stateDir = path.join(
+      path.dirname(this.store.filePath),
+      "hosts",
+      hostProjectScope(options.cwd),
+    );
     this.registry = options.registry ?? new HostProcessRegistry(this.stateDir);
     this.childRunStore = new WorkflowRunStore(databasePath);
   }
@@ -353,7 +357,11 @@ export class WorkflowHost {
       // state write: without a live claim, the current owner decides.
       heldClaim = this.store.verifyWorkflowRunClaim({ runId: record.runId, claimToken });
       if (heldClaim) {
-        const bundle = await this.childRunStore.markRunInterrupted(record.runId, message);
+        const claimedStore = new WorkflowRunStore(this.store.filePath, {
+          state: this.store.state,
+          authorityProvider: () => this.store.workflowRunAuthority(record.runId, claimToken),
+        });
+        const bundle = await claimedStore.markRunInterrupted(record.runId, message);
         actualStatus = bundle?.state.status;
       }
     } catch {
@@ -388,6 +396,16 @@ export class WorkflowHost {
       // The event feed is best-effort.
     }
   }
+}
+
+function hostProjectScope(cwd: string): string {
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync.native(cwd);
+  } catch {
+    canonical = path.resolve(cwd);
+  }
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 24);
 }
 
 function hostLockPath(stateDir: string): string {
