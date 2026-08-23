@@ -1383,13 +1383,26 @@ export class SqliteControllerStore implements ControllerStore {
   }
 
   deleteWorkflowRun(options: { runId: string; claimToken: string }): boolean {
-    const row = this.workflowRunRow(options.runId);
-    if (row === undefined || !this.verifyWorkflowRunClaim(options)) return false;
-    return (
-      this.state.connection
-        .prepare("DELETE FROM resources WHERE resource_id = ?")
-        .run(row.resourceId).changes === 1
-    );
+    const now = Date.now();
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (row === undefined) return false;
+      const lease = this.requireLease(row.resourceId);
+      if (
+        lease.ownerId === null ||
+        lease.tokenHash === null ||
+        lease.expiresAt === null ||
+        lease.expiresAt <= now ||
+        !lease.tokenHash.equals(tokenHash(options.claimToken))
+      ) {
+        return false;
+      }
+      return (
+        this.state.connection
+          .prepare("DELETE FROM resources WHERE resource_id = ?")
+          .run(row.resourceId).changes === 1
+      );
+    });
   }
 
   completeWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
@@ -1630,22 +1643,25 @@ export class SqliteControllerStore implements ControllerStore {
     messageId?: string;
     now?: string;
   }): boolean {
-    const row = this.turnIntentRow(options.intentId);
-    if (
-      row === undefined ||
-      row.targetSessionId !== options.targetSessionId ||
-      !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-    )
-      return false;
     const now = epoch(validTimestamp(options.now));
-    const result = this.state.connection
-      .prepare(
-        `UPDATE turn_intents SET resolved_at = ?, resolution_type = ?, resolution_message_id = ?
-         WHERE turn_intent_id = ? AND resolved_at IS NULL`,
-      )
-      .run(now, options.resolution, options.messageId ?? null, options.intentId);
-    if (result.changes === 1) this.completeEffect(row.effectId, "applied", now);
-    return result.changes === 1;
+    return this.state.transaction(() => {
+      const row = this.turnIntentRow(options.intentId);
+      if (
+        row === undefined ||
+        row.targetSessionId !== options.targetSessionId ||
+        !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+      ) {
+        return false;
+      }
+      const result = this.state.connection
+        .prepare(
+          `UPDATE turn_intents SET resolved_at = ?, resolution_type = ?, resolution_message_id = ?
+           WHERE turn_intent_id = ? AND resolved_at IS NULL`,
+        )
+        .run(now, options.resolution, options.messageId ?? null, options.intentId);
+      if (result.changes === 1) this.completeEffect(row.effectId, "applied", now);
+      return result.changes === 1;
+    });
   }
 
   releaseWorkflowTurnIntentClaim(options: {
@@ -1789,15 +1805,19 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string;
     now?: string;
   }): boolean {
-    const row = this.notificationRowById(options.notificationId);
-    if (
-      row === undefined ||
-      row.targetSessionId !== options.targetSessionId ||
-      !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-    )
-      return false;
-    this.completeEffect(row.effectId, "applied", epoch(validTimestamp(options.now)));
-    return true;
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.notificationRowById(options.notificationId);
+      if (
+        row === undefined ||
+        row.targetSessionId !== options.targetSessionId ||
+        !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+      ) {
+        return false;
+      }
+      this.completeEffect(row.effectId, "applied", now);
+      return true;
+    });
   }
 
   settleRunEffect(runId: string, effectType: "run.park_queue" | "run.settle_queue"): void {
@@ -2325,16 +2345,17 @@ export class SqliteControllerStore implements ControllerStore {
     status: WorkflowRunLaunchStatus,
     nowValue?: string,
   ): boolean {
-    if (
-      !this.verifyWorkflowRunClaim({
-        runId,
-        claimToken,
-        ...(nowValue === undefined ? {} : { now: nowValue }),
-      })
-    )
-      return false;
     const now = epoch(validTimestamp(nowValue));
     return this.state.transaction(() => {
+      if (
+        !this.verifyWorkflowRunClaim({
+          runId,
+          claimToken,
+          now: new Date(now).toISOString(),
+        })
+      ) {
+        return false;
+      }
       const row = this.requireWorkflowRunRow(runId);
       const changed =
         this.state.connection
@@ -2565,33 +2586,35 @@ export class SqliteControllerStore implements ControllerStore {
     nowValue?: string,
   ): boolean {
     const now = epoch(validTimestamp(nowValue));
-    const row = this.state.connection
-      .prepare(
-        "SELECT resource_id AS resourceId FROM effects WHERE effect_id = ? AND status = 'pending'",
-      )
-      .get(effectId);
-    /* istanbul ignore if -- impossible after exact schema and transaction checks */
-    if (!isResourceIdRow(row)) return false;
-    const lease = this.requireLease(row.resourceId);
-    if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
-    return (
-      this.state.connection
+    return this.state.transaction(() => {
+      const row = this.state.connection
         .prepare(
-          `UPDATE leases SET generation = ?, owner_type = 'session', owner_id = ?, token_hash = ?,
-                acquired_at = ?, heartbeat_at = ?, expires_at = ?
-         WHERE resource_id = ? AND generation = ?`,
+          "SELECT resource_id AS resourceId FROM effects WHERE effect_id = ? AND status = 'pending'",
         )
-        .run(
-          lease.generation + 1,
-          ownerId,
-          tokenHash(token),
-          now,
-          now,
-          now + leaseMs,
-          row.resourceId,
-          lease.generation,
-        ).changes === 1
-    );
+        .get(effectId);
+      /* istanbul ignore if -- impossible after exact schema and transaction checks */
+      if (!isResourceIdRow(row)) return false;
+      const lease = this.requireLease(row.resourceId);
+      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+      return (
+        this.state.connection
+          .prepare(
+            `UPDATE leases SET generation = ?, owner_type = 'session', owner_id = ?, token_hash = ?,
+                  acquired_at = ?, heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND generation = ?`,
+          )
+          .run(
+            lease.generation + 1,
+            ownerId,
+            tokenHash(token),
+            now,
+            now,
+            now + leaseMs,
+            row.resourceId,
+            lease.generation,
+          ).changes === 1
+      );
+    });
   }
 
   private verifyEffectToken(effectId: string, token: string, nowValue?: string): boolean {

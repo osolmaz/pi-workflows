@@ -592,6 +592,15 @@ export class HumanDecisionStore {
         throw new Error(`Human decision was already accepted by ${winner.decision.provenance}`);
       }
       const now = Date.now();
+      if (reason === "expired") {
+        if (request.expiresAt === undefined) {
+          throw new Error("Human decision request has no expiry");
+        }
+        if (Date.parse(request.expiresAt) > now) {
+          throw new Error("Human decision expiry cancellation is not eligible yet");
+        }
+        this.assertRunOwner(request.runId, now);
+      }
       const record: HumanDecisionCancellationRecord = {
         schema: "pi-workflows.human-decision-cancellation.v1",
         decisionId: request.decisionId,
@@ -758,6 +767,7 @@ export class HumanDecisionStore {
       ) {
         throw new Error("Human decision timeout default is not eligible yet");
       }
+      if (attempt.source === "policy") this.assertRunOwner(request.runId, arbitrationTime);
       const candidateHash = this.state.putJson(attempt.candidate);
       const existingSubmission = this.state.connection
         .prepare(

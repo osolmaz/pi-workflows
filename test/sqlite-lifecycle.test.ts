@@ -175,17 +175,27 @@ describe("SQLite delivery lifecycle", () => {
         leaseMs: 10_000,
       }),
     ).toEqual([]);
+    const now = Date.now();
     const claimed = store.claimPendingWorkflowNotifications({
       targetSessionId: "session-a",
       claimToken: "delivery-token",
-      leaseMs: 10_000,
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
     });
     expect(claimed).toHaveLength(1);
+    const reclaimed = store.claimPendingWorkflowNotifications({
+      targetSessionId: "session-a",
+      claimToken: "replacement-token",
+      leaseMs: 10_000,
+      now: new Date(now + 2_000).toISOString(),
+    });
+    expect(reclaimed).toHaveLength(1);
     expect(
       store.markWorkflowNotificationDelivered({
         notificationId: first.notificationId,
         targetSessionId: "session-b",
-        claimToken: "delivery-token",
+        claimToken: "replacement-token",
+        now: new Date(now + 2_000).toISOString(),
       }),
     ).toBe(false);
     expect(
@@ -193,6 +203,15 @@ describe("SQLite delivery lifecycle", () => {
         notificationId: first.notificationId,
         targetSessionId: "session-a",
         claimToken: "delivery-token",
+        now: new Date(now + 2_000).toISOString(),
+      }),
+    ).toBe(false);
+    expect(
+      store.markWorkflowNotificationDelivered({
+        notificationId: first.notificationId,
+        targetSessionId: "session-a",
+        claimToken: "replacement-token",
+        now: new Date(now + 2_000).toISOString(),
       }),
     ).toBe(true);
     expect(

@@ -217,6 +217,8 @@ describe("workflow run queue in canonical SQLite", () => {
         now: new Date(now + 3_000).toISOString(),
       }),
     ).toBe(true);
+    expect(store.deleteWorkflowRun({ runId: "run-1", claimToken: "old" })).toBe(false);
+    expect(store.getWorkflowRun("run-1")).toBeDefined();
     store.close();
   });
 
