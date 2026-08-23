@@ -16,7 +16,7 @@ Shared behavior should usually start as a data format or pure helper used by a w
 
 ## Explicit behavior
 
-The graph should show what runs and where it can go. Agent results should be structured and validated. Commands and other side effects should be declared by the workflow author.
+The graph should show what runs and where it can go. Use structured, validated agent results when the graph must inspect fields or choose a route. Use a declared assistant-message result when exact visible text belongs inside the graph. Commands and other side effects should be declared by the workflow author.
 
 Avoid hidden polling, implicit retries, automatic command generation, and state changes that the graph cannot explain.
 

@@ -2,7 +2,7 @@
 title: Make Monitor finish authorized goals
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-22
-status: accepted
+status: implemented
 ---
 
 # Goal-finishing Monitor plan

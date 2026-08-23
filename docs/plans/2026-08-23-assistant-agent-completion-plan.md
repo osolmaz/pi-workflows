@@ -2,7 +2,7 @@
 title: Add assistant completion to agent workflows
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-23
-status: accepted
+status: implemented
 ---
 
 ## Selected design

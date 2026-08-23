@@ -20,7 +20,7 @@ Use the smallest applicable action:
 - `pause`, `resume`, and `cancel` control the current active run.
 - `answer` supplies input to an ordinary waiting checkpoint. It cannot satisfy a protected `humanDecision()` gate.
 - `update` publishes a non-completing durable update for the active step attempt.
-- `submit` completes the active agent step with its required output.
+- `submit` completes an active submitted agent step with its required output. An assistant-message step completes through its normal visible reply instead.
 
 Use `start` only once for one requested run. Before starting, load the matching workflow skill when one exists and build its complete input. Include scope, authority, constraints, identifiers, and finish criteria required by that skill. Do not start with placeholders that still need user or model repair.
 
@@ -43,10 +43,10 @@ Do not build a manual polling loop around a workflow that already schedules its 
 When a workflow step message arrives:
 
 1. Do the requested work with the available tools.
-2. Produce output that matches the exact expected shape.
-3. Call `workflow` with `action: "submit"` exactly once, using the step and attempt ids from that message.
-4. If validation rejects the output, correct it and submit again with the same current ids.
-5. After acceptance, end the turn. The workflow sends the next step or presentation message when needed.
+2. Follow the completion form in the current step contract.
+3. For a submitted step, produce the exact expected shape and call `workflow` with `action: "submit"` exactly once, using the current step and attempt ids. If validation rejects the output, correct it and submit again with the same ids.
+4. For an assistant-message step, reply with the requested normal assistant message. Do not call `workflow submit`; the settled visible reply is the node output.
+5. After completion, do not add another response. The workflow sends the next step or final presentation when needed.
 
 A node id can run more than once in a loop. Each run has a new attempt id. Never reuse an attempt id from conversation history.
 
@@ -70,13 +70,13 @@ Follow these rules:
 - Reuse a finite workflow with a direct typed `includeWorkflow()` mount. Use a controller only when the child needs an independent run or indefinite reconciliation.
 - Give included workflows named exits, map their input explicitly, and keep parent edges out of child internals.
 - Keep `compute` pure. Put external effects in agent, function-action, or shell-action nodes.
-- Use structured node outputs for routing.
+- Use structured node outputs when the graph must inspect fields or choose a route. Use `expectedOutput: assistantMessage()` when exact visible text is the node result.
 - Use an ordinary checkpoint for external continuation data that the model may submit. Use `humanDecision()` for a verified human choice. Use its typed `onTimeout` policy only when the workflow may supply a named automatic response after a durable deadline. A timeout response is recorded as policy provenance, not as a human answer.
 - Use the shared internal plan-change workflow for Autoplan, Autodoc, plan approval, and bounded exact-text replanning. Do not copy that sequence into Autoimplement, Monitor, or another workflow.
 - Set explicit step and command timeouts.
 - Bound ordinary loops with `maxSteps` or another clear finish rule.
 - Use a controller instead of a workflow for indefinite resource reconciliation.
-- Keep presentation separate from execution. Use `presentationPrompt` only when a final assistant response is needed.
+- Keep presentation separate from execution. Use `presentationPrompt` for one root response after the run. Use an assistant-message agent when the visible response belongs inside the graph and a parent must continue after it.
 - Preserve the single active workflow rule in one Pi session.
 
 Read [../../docs/workflows.md](../../docs/workflows.md) before creating or changing a workflow. Read [../../docs/WORKFLOW_COMPOSITION.md](../../docs/WORKFLOW_COMPOSITION.md) for nested workflows. Read [../../docs/HUMAN_DECISIONS.md](../../docs/HUMAN_DECISIONS.md) before adding a human gate or channel. Read [../../docs/DESIGN_PHILOSOPHY.md](../../docs/DESIGN_PHILOSOPHY.md) before adding public primitives. Use the examples under [../../examples/workflows](../../examples/workflows) as starting points.

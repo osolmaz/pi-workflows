@@ -2,7 +2,8 @@
 title: Run Sanity Check with Provider Extensions
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-21
-updated: 2026-08-22
+updated: 2026-08-23
+status: implemented
 ---
 
 # Run Sanity Check with Provider Extensions

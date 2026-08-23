@@ -2,13 +2,11 @@
 
 This specification defines how pi-workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded.
 
-This contract is implemented for the release after `0.5.3`.
-
 ## Goal
 
 Agent-step prompts contain the task, workflow identity, attempt identity, output form, and completion rules. Submitted steps call the workflow tool. Assistant-message steps reply normally. This information is required by the model, but showing it as a large user message makes the conversation hard to read.
 
-pi-workflows will send the same prompt as a custom Pi message. A custom renderer will show a compact summary by default and the full content when expanded.
+pi-workflows sends the same prompt as a custom Pi message. A custom renderer shows a compact summary by default and the full content when expanded.
 
 Both output forms use the existing `agent` node. The completion form changes through `expectedOutput`; no new node type is added.
 
@@ -104,7 +102,7 @@ The two message types must not share delivery code that can accidentally change 
 
 ## Session and persistence impact
 
-New interactive step deliveries replace `sendUserMessage` with `sendMessage`. Existing session entries remain readable and are not rewritten.
+Interactive step deliveries use `sendMessage` instead of `sendUserMessage`. Existing session entries remain readable and are not rewritten.
 
 The custom prompt and visible assistant response are normal documented Pi session messages. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores the full prompt, exact assistant text, conversation range, and additive digest receipt in existing content-addressed records, so this behavior adds no durable format.
 
@@ -120,7 +118,7 @@ The workflow package adds `assistantMessage()` as an `expectedOutput` value for 
 
 ## Validation and tests
 
-The implementation must verify:
+Tests verify:
 
 - interactive and RPC executors give the model the same complete prompt
 - one step message starts one model turn
@@ -136,7 +134,7 @@ The implementation must verify:
 - notifications still enter context without starting a model turn
 - no duplicate prompt or assistant response is sent
 
-The end-to-end test must inspect the provider-facing prompt as well as the TUI message record. A correct card with missing model instructions is a failure.
+The end-to-end test inspects the provider-facing prompt as well as the TUI message record. A correct card with missing model instructions is a failure.
 
 ## Security
 

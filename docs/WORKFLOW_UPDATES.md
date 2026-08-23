@@ -50,7 +50,7 @@ An agent publishes the same update through the existing `workflow` tool:
 }
 ```
 
-The `update` tool action does not complete the agent step. The agent still calls `submit` once with the final step output.
+The `update` tool action does not complete the agent step. A submitted agent still calls `submit` once with its final output. An assistant-message agent completes with its settled visible reply instead.
 
 ## Place in the workflow model
 

@@ -11,11 +11,11 @@ live in a standalone terminal viewer.
 
 The workflow model is a port of [openclaw/acpx](https://github.com/openclaw/acpx)
 flows into pi itself. Agent steps run inside your current pi conversation, so
-the model keeps everything it already knows from the discussion. The model
-completes each step by calling a JSON `workflow` tool, which gives the engine
-structured, validated output to route on. See the
-[design philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the
-engine and its public parts. Running steps can publish durable [workflow
+the model keeps everything it already knows from the discussion. A submitted
+agent calls the JSON `workflow` tool with structured output. An assistant agent
+writes a normal visible response that becomes the node output. See the [design
+philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the engine and
+its public parts. Running steps can publish durable [workflow
 updates](docs/WORKFLOW_UPDATES.md), including progress counts and ETA data.
 Agent instructions use compact [workflow step
 messages](docs/WORKFLOW_STEP_MESSAGES.md), and the built-in
@@ -170,6 +170,12 @@ structured run ends to request one normal, human-readable assistant response.
 Workflows without it remain silent after their final structured output, which
 keeps shell-only and machine-consumed workflows model-free.
 
+Use `expectedOutput: assistantMessage()` when a normal assistant response must
+be a node inside the graph rather than a presentation after the run. Its exact
+visible text becomes the node output after the turn settles. The helper has no
+default character limit; a workflow can set one explicitly with
+`assistantMessage({ maxChars: 2_000 })`.
+
 ## Compose workflows
 
 A workflow can import another workflow and connect its named exits without copying its nodes:
@@ -204,8 +210,9 @@ Direct imports check child input and exit names in TypeScript. Names and paths r
 ## Agent-managed workflows
 
 The model can use the same `workflow` tool to list, start, inspect, pause,
-resume, cancel, and answer workflows. Step contracts use the tool's `submit`
-action. Slash commands and model actions share one lifecycle implementation.
+resume, cancel, and answer workflows. Submitted-step contracts use the tool's
+`submit` action. Assistant-step contracts require a normal assistant response
+instead. Slash commands and model actions share one lifecycle implementation.
 
 pi-workflows includes a `monitor` workflow for plain-language requests such as:
 
@@ -228,14 +235,15 @@ discussion first and then trigger a workflow that builds on it. The
 an elegant production-ready solution, and compares it with the holy grail. It
 then selects the best practical in-scope solution without asking the user to
 resolve the gap. The ideal can win when it is feasible, but work outside the
-current authority cannot block a valid practical solution. The workflow ends
-with a detailed implementation plan. `autoplan` replaces the earlier
-`autodevise` name; the old command and export are not retained.
+current authority cannot block a valid practical solution. The workflow keeps
+the detailed implementation plan and shows one short assistant response with
+the selected plan and a gist of every rejected option. `autoplan` replaces the
+earlier `autodevise` name; the old command and export are not retained.
 
 ## Watching a run
 
-Runs persist to `~/.pi/agent/workflows/runs/` as they execute. The viewer
-tails that directory and re-renders on every state change:
+Runs persist in `~/.pi/agent/workflows/state.sqlite` as they execute. The
+viewer reads that database and re-renders on every state change:
 
 ```bash
 pi-workflows view          # interactive picker, live updates
@@ -292,15 +300,17 @@ full boxed graph and its edges.
 ## Node types
 
 A workflow is a graph of named nodes with exactly one entry point. Each node
-finishes with a JSON output, and edges decide what runs next.
+finishes with an output, and edges decide what runs next.
 
-An `agent` node sends a prompt into the pi conversation and waits for the
-model to submit its output through the `workflow` tool. A `compute` node runs
-a pure TypeScript function. A `notify` node writes a durable message for the
-Pi session that started the run. An `action` node performs a side effect,
-either a TypeScript function (`action({ run })`) or a runtime-owned shell
-command (`shell({ exec, parse })`). A `checkpoint` node ends the run in a
-`waiting` state so a human can pick it up. On top of `agent`, the `decision` helper asks
+An `agent` node sends a prompt into the pi conversation. By default, it waits
+for structured output through the `workflow` tool. With
+`expectedOutput: assistantMessage()`, it waits for a normal visible assistant
+response and uses the exact text as its output. A `compute` node runs a pure
+TypeScript function. A `notify` node writes a durable message for the Pi
+session that started the run. An `action` node performs a side effect, either a
+TypeScript function (`action({ run })`) or a runtime-owned shell command
+(`shell({ exec, parse })`). A `checkpoint` node ends the run in a `waiting`
+state so a human can pick it up. On top of `agent`, the `decision` helper asks
 the model to pick from a fixed set of choices and validates the answer, and
 `decisionEdge` routes on the result with compile-time case checking.
 
@@ -353,8 +363,8 @@ The host claims parked runs and reconciles controllers without a Pi session. Con
 
 ## Examples
 
-The [examples/workflows/](examples/workflows/) directory mirrors the acpx
-example set. Copy any of them into `.pi/workflows/` to use them:
+The [examples/workflows/](examples/workflows/) directory contains complete
+workflow examples. Copy any of them into `.pi/workflows/` to use them:
 
 - `echo` is the smallest possible workflow, one agent step.
 - `branch` classifies a task with a `decision` and routes to either a
@@ -364,9 +374,12 @@ example set. Copy any of them into `.pi/workflows/` to use them:
   while they run.
 - `two-turn` chains three agent steps that build on each other's outputs in
   the same conversation.
+- `plain-summary` turns structured source data into one short visible assistant
+  response. It is also a built-in workflow that other workflows can include.
 - `autoplan` turns the current problem into a chosen practical solution and
   a detailed implementation plan, using the ideal end state as guidance rather
-  than an out-of-scope requirement.
+  than an out-of-scope requirement. It also shows a short assistant response
+  with the selected plan and each rejected option.
 - `autoimplement` finds a clear existing plan, documents it when needed,
   implements and verifies it, writes and runs the exact pi-reviewer command,
   tracks P0 through P2, handles PR comments and CI, and

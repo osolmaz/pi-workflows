@@ -295,11 +295,11 @@ The shared plan-change workflow creates, records, and gates each repair plan. It
 
 A protected change to model choice, benchmark method, credentials, hardware, spending authority, or another user decision exits as blocked. The workflow never changes the protected part of the task silently.
 
-## Compatibility and release
+## Compatibility
 
 Workflows without inputs, exits, or includes run unchanged. Existing controller child workflows remain unchanged. Existing terminal SQLite runs remain readable.
 
-This is a compatible public API addition under the project's pre-1.0 policy. It targets `0.10.0` if no earlier release changes the next version.
+Composition and assistant-message output are compatible public API additions under the project's pre-1.0 policy.
 
 ## Contract impact
 

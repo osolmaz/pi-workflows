@@ -15,8 +15,8 @@ Repository rules:
 - Respect the dependency boundaries in `slophammer.yml`: `src/workflows` never
   imports pi or the other layers; `src/extension` and `src/viewer` may import
   `src/workflows` and never each other.
-- Persisted JSON is camelCase with versioned `schema` identifiers
-  (see `docs/run-bundles.md`).
+- Persisted structured values use camelCase fields and versioned `schema`
+  identifiers. Live durable state follows `docs/SQLITE_STATE.md`.
 - Tests must not write outside temp directories, call real models, or perform
   destructive actions.
 - New engine features need unit tests and a section in `docs/workflows.md`.
