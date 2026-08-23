@@ -272,7 +272,7 @@ function safeLaunchError(error: unknown): { code: string; message: string } {
     .replace(/(token|api[_-]?key|secret|password)(\s*[:=]\s*)\S+/giu, "$1$2[redacted]")
     .replaceAll("\n", " ")
     .trim();
-  const code = /not found|cannot find|unknown workflow/iu.test(raw)
+  const code = /not found|cannot find|unknown workflow|no such file or directory/iu.test(raw)
     ? "workflow_not_found"
     : /source changed|source mismatch/iu.test(raw)
       ? "source_changed"

@@ -1105,7 +1105,7 @@ export class SqliteControllerStore implements ControllerStore {
           this.requireProjectId(),
           options.parentRunId ?? null,
           definitionDigest,
-          options.workflowName,
+          options.workflowSourceRef,
           sourceHash,
           launchHash,
           source.type,
@@ -1248,7 +1248,7 @@ export class SqliteControllerStore implements ControllerStore {
     const now = epoch(validTimestamp(options.now));
     const clauses = [
       "r.project_id = ?",
-      "q.status IN ('queued', 'parked', 'starting')",
+      "q.status IN ('queued', 'parked', 'starting', 'running')",
       "q.available_at <= ?",
       "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
       "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status = 'parked')",
@@ -2314,7 +2314,7 @@ export class SqliteControllerStore implements ControllerStore {
         now,
         generation,
       );
-      return this.requireWorkflowRun(runId);
+      return { ...this.requireWorkflowRun(runId), claimToken };
     });
   }
 
