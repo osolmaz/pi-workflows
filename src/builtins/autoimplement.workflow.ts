@@ -849,6 +849,25 @@ function parseVerificationForContext(
   return plan;
 }
 
+function parsePublishedForContext(
+  value: unknown,
+  context: WorkflowNodeContext,
+): PublishedRepositories {
+  const result = parsePublishedRepositories(value);
+  const workspace = preparedWorkspace(context);
+  const expected = path.resolve(workspace.worktreePath ?? workspace.repository);
+  if (result.repositories[0]?.repository !== expected) {
+    throw new Error(`publication repository must match the prepared workspace: ${expected}`);
+  }
+  if (
+    workspace.worktreePath !== undefined &&
+    result.repositories.some((repository) => repository.repository !== expected)
+  ) {
+    throw new Error("worktree publication cannot include an unprepared repository");
+  }
+  return result;
+}
+
 function currentPublishedRepositories(context: WorkflowNodeContext): PublishedRepositories {
   return latestOutput<PublishedRepositories>(context, ["verifyP2", "publish"]);
 }
@@ -1670,7 +1689,7 @@ export const autoimplementWorkflow = defineWorkflow({
         ].join("\n");
       },
       expectedOutput: `{ "repositories": [{ "repository": "/absolute/repository", "branch": "branch", "baseBranch": "base", "headRevision": "revision", "pr": "URL", "pushed": true, "dependencyFingerprint": "optional digest" }] }`,
-      validate: parsePublishedRepositories,
+      validate: parsePublishedForContext,
     }),
     selectReviewCommands: compute({
       run: selectReviewCommands,

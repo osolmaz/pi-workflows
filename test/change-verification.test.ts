@@ -259,6 +259,63 @@ describe("change verification", () => {
     });
   });
 
+  it("does not reuse candidate dependencies when dependency inputs differ", async () => {
+    const { repository, workspace } = await fixture("change-verification-dependencies");
+    await fs.writeFile(path.join(repository, "package.json"), '{"dependencies":{"demo":"2"}}\n');
+    await fs.mkdir(path.join(repository, "node_modules"));
+    const executor = new ScriptedExecutor().respond("judge", {
+      output: {
+        route: "blocked",
+        reason: "Equivalent base dependencies are unavailable.",
+        evidence: ["The candidate dependency inputs differ from the base revision."],
+      },
+    });
+    const { state } = await run(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "localVerification",
+        workspace,
+        checks: [check(repository, 'console.error("dependency failure"); process.exit(1)')],
+      },
+      executor,
+    );
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      unrelatedFailures: [],
+      unknownFailures: [{ checkId: "docs" }],
+      evidence: [
+        expect.stringContaining("Created detached base worktree"),
+        expect.stringContaining("dependency inputs differ from the base revision"),
+        expect.stringContaining("Removed detached base worktree"),
+        "The candidate dependency inputs differ from the base revision.",
+      ],
+    });
+  });
+
+  it("reuses candidate dependencies only when dependency inputs match", async () => {
+    const { repository, workspace } = await fixture("change-verification-matching-dependencies");
+    await fs.writeFile(path.join(repository, "package.json"), '{"dependencies":{"demo":"1"}}\n');
+    await git(repository, ["add", "package.json"]);
+    await git(repository, ["commit", "-m", "add dependencies"]);
+    workspace.baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+    await fs.mkdir(path.join(repository, "node_modules"));
+    const { state } = await run({
+      originatingWorkflow: "autoimplement",
+      qualifiedNode: "localVerification",
+      workspace,
+      checks: [check(repository, 'console.error("existing failure"); process.exit(1)')],
+    });
+    expect(state.finalOutput).toMatchObject({
+      route: "ready",
+      unrelatedFailures: [{ checkId: "docs" }],
+      evidence: [
+        expect.stringContaining("Created detached base worktree"),
+        expect.stringContaining("dependency inputs match the base revision"),
+        expect.stringContaining("Removed detached base worktree"),
+      ],
+    });
+  });
+
   it("classifies a candidate-only failure as related", async () => {
     const { repository, workspace } = await fixture("change-verification-related");
     await fs.writeFile(path.join(repository, "candidate.txt"), "bad\n");

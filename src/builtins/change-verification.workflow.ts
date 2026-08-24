@@ -286,6 +286,37 @@ function candidateRoot(workspace: PreparedWorkspace): string {
   return workspace.worktreePath ?? workspace.repository;
 }
 
+const NODE_DEPENDENCY_INPUT_PATHS = [
+  ":(glob)**/package.json",
+  ":(glob)**/package-lock.json",
+  ":(glob)**/npm-shrinkwrap.json",
+  ":(glob)**/yarn.lock",
+  ":(glob)**/pnpm-lock.yaml",
+  ":(glob)**/pnpm-workspace.yaml",
+  ":(glob)**/bun.lock",
+  ":(glob)**/bun.lockb",
+  ":(glob)**/.npmrc",
+  ":(glob)**/.yarnrc",
+  ":(glob)**/.yarnrc.yml",
+  ":(glob)**/.pnpmfile.cjs",
+  ":(glob)**/patches/**",
+] as const;
+
+async function nodeDependencyInputsChanged(workspace: PreparedWorkspace): Promise<boolean> {
+  const root = candidateRoot(workspace);
+  const [tracked, untracked] = await Promise.all([
+    git(root, [
+      "diff",
+      "--name-only",
+      workspace.baseRevision,
+      "--",
+      ...NODE_DEPENDENCY_INPUT_PATHS,
+    ]),
+    git(root, ["ls-files", "--others", "--exclude-standard", "--", ...NODE_DEPENDENCY_INPUT_PATHS]),
+  ]);
+  return tracked.length > 0 || untracked.length > 0;
+}
+
 async function runCandidate(
   context: WorkflowActionContext,
   checks: VerificationCheck[],
@@ -314,16 +345,40 @@ async function runBase(
     await git(repository, ["worktree", "add", "--detach", worktree, input.workspace.baseRevision]);
     baseEvidence.push(`Created detached base worktree at ${worktree}`);
     const candidateModules = path.join(candidateRoot(input.workspace), "node_modules");
+    let candidateModulesAvailable = false;
     try {
-      const stat = await fs.stat(candidateModules);
-      if (stat.isDirectory()) {
+      candidateModulesAvailable = (await fs.stat(candidateModules)).isDirectory();
+      if (!candidateModulesAvailable) {
+        baseEvidence.push("The candidate node_modules path is not a directory.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        baseEvidence.push("No candidate dependency installation was available for reuse.");
+      } else {
+        baseEvidence.push(
+          `Candidate dependency inspection failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { batch: emptyBatch(), baseEvidence, cleanupEvidence };
+      }
+    }
+    if (candidateModulesAvailable) {
+      try {
+        if (await nodeDependencyInputsChanged(input.workspace)) {
+          baseEvidence.push(
+            "Candidate dependencies were not reused because dependency inputs differ from the base revision.",
+          );
+          return { batch: emptyBatch(), baseEvidence, cleanupEvidence };
+        }
         await fs.symlink(candidateModules, path.join(worktree, "node_modules"), "dir");
         baseEvidence.push(
-          "Reused the candidate dependency installation for the detached base check.",
+          "Reused the candidate dependency installation after confirming that dependency inputs match the base revision.",
         );
+      } catch (error) {
+        baseEvidence.push(
+          `Equivalent dependency reuse could not be established: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { batch: emptyBatch(), baseEvidence, cleanupEvidence };
       }
-    } catch {
-      baseEvidence.push("No reusable candidate dependency installation was available.");
     }
     const batch = await runBatch(context, eligible, worktree);
     return { batch, baseEvidence, cleanupEvidence };
