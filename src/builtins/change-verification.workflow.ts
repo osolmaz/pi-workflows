@@ -13,6 +13,7 @@ import {
 } from "../workflows/command-batch.js";
 import { action, agent, compute, defineWorkflow } from "../workflows/definition.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
+import { validateVerificationCommandSafety } from "./autoimplement-command-batches.js";
 import {
   parsePreparedWorkspace,
   type PreparedWorkspace,
@@ -21,23 +22,6 @@ import {
 const execFileAsync = promisify(execFile);
 export const CHANGE_VERIFICATION_SCHEMA = "pi-workflows.change-verification.v1";
 const MAX_REPAIR_ATTEMPTS = 2;
-const FORBIDDEN_EXECUTABLES = new Set([
-  "ash",
-  "bash",
-  "cmd",
-  "cmd.exe",
-  "csh",
-  "dash",
-  "fish",
-  "ksh",
-  "powershell",
-  "powershell.exe",
-  "pwsh",
-  "pwsh.exe",
-  "sh",
-  "tcsh",
-  "zsh",
-]);
 
 export type FindingFormat = "text" | "json";
 export type MechanicalFix = {
@@ -140,13 +124,8 @@ function positiveInteger(value: unknown, label: string, maximum: number): number
   return value as number;
 }
 
-function executableName(command: string): string {
-  return path.win32.basename(path.basename(command)).toLowerCase();
-}
-
 function validateDirectCommand(command: string, args: string[], label: string): void {
-  if (FORBIDDEN_EXECUTABLES.has(executableName(command)))
-    throw new Error(`${label} cannot use a shell wrapper`);
+  validateVerificationCommandSafety(command, args, label);
   if (args.some((arg) => arg.includes("\0")))
     throw new Error(`${label} arguments cannot contain NUL`);
 }

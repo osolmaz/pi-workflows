@@ -125,7 +125,15 @@ describe("change verification", () => {
         workspace,
         checks: [{ ...base, command: "bash" }],
       }),
-    ).toThrow(/shell wrapper/);
+    ).toThrow(/not allowed/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...base, command: "git", args: ["status"] }],
+      }),
+    ).toThrow(/not allowed/);
     expect(() =>
       parseChangeVerificationInput({
         originatingWorkflow: "autodoc",
@@ -186,6 +194,26 @@ describe("change verification", () => {
         ],
       }),
     ).toThrow(/stay inside/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [
+          {
+            ...base,
+            mechanicalFix: {
+              command: "rm",
+              args: ["doc.txt"],
+              files: ["doc.txt"],
+              timeoutMs: 1_000,
+              maxOutputChars: 1_000,
+              expectedDiff: "remove stale output",
+            },
+          },
+        ],
+      }),
+    ).toThrow(/not allowed/);
     expect(() =>
       parseChangeVerificationInput({
         originatingWorkflow: "autodoc",

@@ -73,6 +73,10 @@ type DocumentationAssessment = {
   evidence: unknown;
 };
 
+type WorkspaceGuard =
+  | { route: "ready"; repository: string }
+  | { route: "blocked"; reason: string; evidence: string[] };
+
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -187,6 +191,14 @@ function currentPlan(context: WorkflowNodeContext): unknown {
   throw new Error("autodoc does not have a selected plan");
 }
 
+function mutationRepository(request: AutodocInput): string {
+  if (request.repository !== undefined) return request.repository;
+  if (request.preparedWorkspace !== undefined) {
+    return request.preparedWorkspace.worktreePath ?? request.preparedWorkspace.repository;
+  }
+  throw new Error("autodoc mutation requires an explicit repository");
+}
+
 function preparedWorkspace(context: WorkflowNodeContext): PreparedWorkspace {
   const request = context.input as AutodocInput;
   if (request.preparedWorkspace !== undefined) return request.preparedWorkspace;
@@ -212,6 +224,16 @@ function blockedReason(context: WorkflowNodeContext): AutodocBlocked {
       reason: result.output.reason,
       evidence: result.output,
       sourceNode: result.output.qualifiedNode,
+    };
+  }
+  const guard = context.outputs.workspaceGuard as WorkspaceGuard | undefined;
+  if (guard?.route === "blocked") {
+    return {
+      status: "blocked",
+      task: request.task,
+      reason: guard.reason,
+      evidence: guard.evidence,
+      sourceNode: "autodoc/workspaceGuard",
     };
   }
   if (context.outputs.workspace !== undefined) {
@@ -254,7 +276,7 @@ export const autodocWorkflow = defineWorkflow({
       input: (context): WorkspacePreparationInput => {
         const request = context.input as AutodocInput;
         return {
-          repository: request.repository ?? process.cwd(),
+          repository: mutationRepository(request),
           ...(request.baseBranch === undefined ? {} : { baseBranch: request.baseBranch }),
           ...(request.scope === undefined ? {} : { scope: request.scope }),
           ...(request.workspaceMode === undefined ? {} : { workspaceMode: request.workspaceMode }),
@@ -317,6 +339,19 @@ export const autodocWorkflow = defineWorkflow({
       expectedOutput:
         '{ "route": "found" | "blocked", "plan": {} (required when found), "sources": ["source"], "reason": "reason", "evidence": "evidence" }',
       validate: parseLocatedPlan,
+    }),
+    workspaceGuard: compute({
+      run: ({ input }): WorkspaceGuard => {
+        const request = input as AutodocInput;
+        if (request.repository !== undefined || request.preparedWorkspace !== undefined) {
+          return { route: "ready", repository: mutationRepository(request) };
+        }
+        return {
+          route: "blocked",
+          reason: "Updating canonical documentation requires an explicit repository path.",
+          evidence: ["repository was not supplied", "preparedWorkspace was not supplied"],
+        };
+      },
     }),
     inspectDocumentation: agent({
       statusDetail: "checking canonical documentation",
@@ -425,8 +460,12 @@ export const autodocWorkflow = defineWorkflow({
       from: "inspectDocumentation",
       switch: {
         on: "$.route",
-        cases: { current: "finalize", update: "workspace", blocked: "blocked" },
+        cases: { current: "finalize", update: "workspaceGuard", blocked: "blocked" },
       },
+    },
+    {
+      from: "workspaceGuard",
+      switch: { on: "$.route", cases: { ready: "workspace", blocked: "blocked" } },
     },
     { from: "workspace.ready", to: "updateDocumentation" },
     { from: "workspace.blocked", to: "blocked" },
