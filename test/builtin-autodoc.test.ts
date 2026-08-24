@@ -53,6 +53,7 @@ describe("built-in autodoc", () => {
     expect(() => parse(null)).toThrow(/object/);
     expect(() => parse({ task: "" })).toThrow(/non-empty/);
     expect(() => parse({ task: "demo", documents: "bad" })).toThrow(/array/);
+    expect(() => parse({ task: "demo", repository: "relative" })).toThrow(/absolute/);
     expect(() => parse({ task: "demo", workspaceMode: "legacy" })).toThrow(/workspaceMode/);
 
     const validate = async (nodeId: string, value: unknown) => {

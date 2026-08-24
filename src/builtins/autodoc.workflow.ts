@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   agent,
   compute,
@@ -86,6 +87,12 @@ function requireString(value: unknown, label: string): string {
   return value.trim();
 }
 
+function requireAbsolutePath(value: unknown, label: string): string {
+  const result = requireString(value, label);
+  if (!path.isAbsolute(result)) throw new Error(`${label} must be absolute`);
+  return path.resolve(result);
+}
+
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
     throw new Error(`${label} must be an array of strings`);
@@ -118,7 +125,7 @@ function parseInput(value: unknown): AutodocInput {
     task: requireString(input.task, "autodoc task"),
     ...(input.plan !== undefined ? { plan: input.plan } : {}),
     ...(input.repository !== undefined
-      ? { repository: requireString(input.repository, "autodoc repository") }
+      ? { repository: requireAbsolutePath(input.repository, "autodoc repository") }
       : {}),
     ...(input.baseBranch !== undefined
       ? { baseBranch: requireString(input.baseBranch, "autodoc baseBranch") }

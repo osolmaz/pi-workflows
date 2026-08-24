@@ -215,6 +215,12 @@ function requireString(value: unknown, label: string): string {
   return value.trim();
 }
 
+function requireAbsolutePath(value: unknown, label: string): string {
+  const result = requireString(value, label);
+  if (!path.isAbsolute(result)) throw new Error(`${label} must be absolute`);
+  return path.resolve(result);
+}
+
 function requireStringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
     throw new Error(`${label} must be an array of strings`);
@@ -546,7 +552,7 @@ function parseInput(value: unknown): AutoimplementInput {
     ...(input.plan !== undefined ? { plan: input.plan } : {}),
     ...(input.scope !== undefined ? { scope: requireString(input.scope, "scope") } : {}),
     ...(constraints !== undefined ? { constraints: [...constraints] as string[] } : {}),
-    repository: requireString(input.repository, "repository"),
+    repository: requireAbsolutePath(input.repository, "repository"),
     ...(input.baseBranch !== undefined
       ? { baseBranch: requireString(input.baseBranch, "baseBranch") }
       : {}),
