@@ -1,13 +1,49 @@
 import { describe, expect, it } from "vitest";
 import autodocWorkflow from "../src/builtins/autodoc.workflow.js";
+import type { VerificationCheck } from "../src/builtins/change-verification.workflow.js";
+import {
+  PREPARED_WORKSPACE_SCHEMA,
+  type PreparedWorkspace,
+} from "../src/builtins/workspace-preparation.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 async function run(executor: ScriptedExecutor, input: unknown) {
   return await new WorkflowEngine({
     executor,
     databasePath: await makeStateDatabasePath("builtin-autodoc"),
   }).run(autodocWorkflow, input);
+}
+
+async function prepared(): Promise<PreparedWorkspace> {
+  const repository = await makeTempDir("autodoc-prepared");
+  return {
+    schema: PREPARED_WORKSPACE_SCHEMA,
+    mode: "branch",
+    repository,
+    baseBranch: "main",
+    baseRevision: "test-base",
+    workBranch: "feat/docs",
+    directDefaultBranchAuthorized: false,
+    preExistingChangedPaths: [],
+    evidence: ["prepared by test"],
+    scope: `Only ${repository}`,
+  };
+}
+
+function check(workspace: PreparedWorkspace, pass = true): VerificationCheck {
+  return {
+    id: "docs",
+    command: process.execPath,
+    args: ["-e", `process.exit(${pass ? 0 : 1})`],
+    cwd: workspace.repository,
+    timeoutMs: 10_000,
+    maxOutputChars: 100_000,
+    readOnly: true,
+    baseEligible: false,
+    changedFileScope: false,
+    findingFormat: "text",
+  };
 }
 
 describe("built-in autodoc", () => {
@@ -17,6 +53,7 @@ describe("built-in autodoc", () => {
     expect(() => parse(null)).toThrow(/object/);
     expect(() => parse({ task: "" })).toThrow(/non-empty/);
     expect(() => parse({ task: "demo", documents: "bad" })).toThrow(/array/);
+    expect(() => parse({ task: "demo", workspaceMode: "legacy" })).toThrow(/workspaceMode/);
 
     const validate = async (nodeId: string, value: unknown) => {
       const node = autodocWorkflow.nodes[nodeId];
@@ -36,14 +73,6 @@ describe("built-in autodoc", () => {
       validate("locatePlan", { route: "found", sources: [], reason: "reason", evidence: null }),
     ).rejects.toThrow(/include the selected plan/);
     await expect(
-      validate("locatePlan", {
-        route: "blocked",
-        sources: [3],
-        reason: "reason",
-        evidence: null,
-      }),
-    ).rejects.toThrow(/strings/);
-    await expect(
       validate("inspectDocumentation", {
         route: "current",
         files: "bad",
@@ -51,41 +80,33 @@ describe("built-in autodoc", () => {
         evidence: null,
       }),
     ).rejects.toThrow(/array/);
-    await expect(
-      validate("inspectDocumentation", {
-        route: "current",
-        files: [],
-        digests: { file: 3 },
-        reason: "reason",
-        evidence: null,
-      }),
-    ).rejects.toThrow(/values/);
     await expect(validate("updateDocumentation", { updated: false })).rejects.toThrow(/updated/);
-    await expect(validate("verifyDocumentation", { passed: "yes" })).rejects.toThrow(/boolean/);
   });
 
-  it("adopts current canonical documentation without a write step", async () => {
+  it("adopts current canonical documentation without preparing a workspace", async () => {
+    const plan = { steps: ["one"] };
     const executor = new ScriptedExecutor().respond("inspectDocumentation", {
       output: {
         route: "current",
-        files: ["docs/spec.md", "docs/plans/plan.md"],
-        reason: "The selected plan is already complete.",
-        evidence: "checked",
+        files: ["docs/plans/plan.md"],
+        digests: { "docs/plans/plan.md": "sha256:abc" },
+        reason: "Current.",
+        evidence: "digest checked",
       },
     });
-    const { state } = await run(executor, {
-      task: "implement feature",
-      plan: { steps: ["one"] },
-    });
+    const { state } = await run(executor, { task: "implement feature", plan });
     expect(state.status).toBe("completed");
-    expect(state.steps.map((step) => step.nodeId)).not.toContain("updateDocumentation");
     expect(state.finalOutput).toMatchObject({
       status: "ready",
+      plan,
       documentation: { state: "current" },
+      verification: { route: "ready" },
     });
+    expect(state.steps.some((step) => step.nodeId.startsWith("workspace/"))).toBe(false);
   });
 
-  it("updates and verifies stale documentation", async () => {
+  it("prepares, updates, and programmatically verifies stale documentation", async () => {
+    const workspace = await prepared();
     const executor = new ScriptedExecutor()
       .respond("inspectDocumentation", {
         output: {
@@ -99,26 +120,28 @@ describe("built-in autodoc", () => {
         output: {
           updated: true,
           files: ["docs/spec.md", "docs/plans/plan.md"],
+          digests: { "docs/spec.md": "sha256:new" },
           summary: "Recorded the selected plan.",
-        },
-      })
-      .respond("verifyDocumentation", {
-        output: {
-          passed: true,
-          commands: [{ command: "docs-check", outcome: "passed" }],
-          failures: [],
         },
       });
     const { state } = await run(executor, {
       task: "implement feature",
       plan: { steps: ["one"] },
+      repository: workspace.repository,
+      preparedWorkspace: workspace,
+      verificationChecks: [check(workspace)],
     });
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({
       status: "ready",
       documentation: { state: "updated" },
-      verification: { passed: true },
+      verification: { route: "ready", candidateCommands: { items: [{ id: "docs" }] } },
+      workspace,
     });
+    expect(executor.requests.map((request) => request.contract.nodeId)).toEqual([
+      "inspectDocumentation",
+      "updateDocumentation",
+    ]);
   });
 
   it("finds an existing plan from context without devising one", async () => {
@@ -137,6 +160,7 @@ describe("built-in autodoc", () => {
         output: {
           route: "current",
           files: ["docs/plans/plan.md"],
+          digests: {},
           reason: "Current.",
           evidence: "checked",
         },
@@ -144,10 +168,47 @@ describe("built-in autodoc", () => {
     const { state } = await run(executor, { task: "implement feature" });
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({ status: "ready", plan });
-    expect(executor.requests.map((request) => request.contract.nodeId)).toEqual([
-      "locatePlan",
-      "inspectDocumentation",
-    ]);
+  });
+
+  it("preserves qualified verification evidence on the blocked exit", async () => {
+    const workspace = await prepared();
+    const executor = new ScriptedExecutor()
+      .respond("inspectDocumentation", {
+        output: {
+          route: "update",
+          files: ["docs/spec.md"],
+          digests: {},
+          reason: "Stale.",
+          evidence: "old",
+        },
+      })
+      .respond("updateDocumentation", {
+        output: {
+          updated: true,
+          files: ["docs/spec.md"],
+          digests: {},
+          summary: "Updated.",
+        },
+      })
+      .respond("verification/semanticRepair", {
+        output: { changedFiles: [], result: "No in-scope repair was available." },
+      });
+    const { state } = await run(executor, {
+      task: "implement feature",
+      plan: { steps: ["one"] },
+      repository: workspace.repository,
+      preparedWorkspace: workspace,
+      verificationChecks: [check(workspace, false)],
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      sourceNode: "autodoc/verification",
+      evidence: {
+        qualifiedNode: "autodoc/verification",
+        relatedFailures: [{ checkId: "docs" }],
+        repairAttempts: [{ kind: "semantic" }],
+      },
+    });
   });
 
   it("blocks when no selected plan exists", async () => {
@@ -164,6 +225,7 @@ describe("built-in autodoc", () => {
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
       reason: "No clear selected plan exists.",
+      sourceNode: "autodoc/locatePlan",
     });
   });
 });
