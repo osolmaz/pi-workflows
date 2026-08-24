@@ -355,7 +355,7 @@ function timeoutFallbackTarget(context: WorkflowNodeContext): { route: string } 
   const fallback = context.outputs.timeoutFallback as TimeoutFallbackResult;
   if (fallback.route !== "retry") {
     const routes: Record<Exclude<TimeoutFallbackRoute, "retry">, string> = {
-      verify: "planVerification",
+      verify: "selectVerificationPath",
       review: "selectReviewCommands",
       ci: "inspectCi",
       deliver: "finalizeDelivery",
@@ -548,6 +548,9 @@ function parseInput(value: unknown): AutoimplementInput {
       : parsePreparedWorkspace(input.preparedWorkspace);
   if (input.verificationChecks !== undefined && !Array.isArray(input.verificationChecks)) {
     throw new Error("autoimplement verificationChecks must be an array");
+  }
+  if (Array.isArray(input.verificationChecks) && input.verificationChecks.length === 0) {
+    throw new Error("autoimplement verificationChecks must be non-empty when supplied");
   }
   return {
     task: requireString(input.task, "autoimplement task"),
@@ -791,9 +794,20 @@ function createBlockerClaim(context: WorkflowNodeContext): BlockerClaim {
   };
 }
 
-function challengeTarget(context: WorkflowNodeContext): { route: BlockerStage | "blocked" } {
+function challengeTarget(context: WorkflowNodeContext): { route: string } {
   const challenge = context.outputs.challengeBlocker as BlockerChallenge;
-  return { route: challenge.route === "blocked" ? "blocked" : (challenge.nextStage ?? "blocked") };
+  if (challenge.route === "blocked" || challenge.nextStage === null) return { route: "blocked" };
+  if (challenge.nextStage !== "planDiscovery" && currentPlan(context) === undefined) {
+    return { route: "planDiscovery" };
+  }
+  if (["documentation", "implementation", "repair", "redesign"].includes(challenge.nextStage)) {
+    try {
+      preparedWorkspace(context);
+    } catch {
+      return { route: "workspace" };
+    }
+  }
+  return { route: challenge.nextStage };
 }
 
 function recentWorkflowAttempts(context: WorkflowNodeContext): unknown[] {
@@ -1341,7 +1355,10 @@ export const autoimplementWorkflow = defineWorkflow({
     localVerification: includeWorkflow(changeVerificationWorkflow, {
       input: (context): ChangeVerificationInput => {
         const request = context.input as AutoimplementInput;
-        const plan = latestOutput<VerificationCommandPlan>(context, ["planVerification"]);
+        const plan =
+          request.verificationChecks === undefined
+            ? latestOutput<VerificationCommandPlan>(context, ["planVerification"])
+            : { commands: [], untested: [] };
         const implementation = latestOutput<Record<string, unknown>>(context, ["implement"]);
         return {
           originatingWorkflow: "autoimplement",
@@ -1611,6 +1628,11 @@ export const autoimplementWorkflow = defineWorkflow({
       validate: parseBlockerChallenge,
     }),
     routeChallenge: compute({ run: challengeTarget }),
+    selectVerificationPath: compute({
+      run: ({ input }) => ({
+        route: (input as AutoimplementInput).verificationChecks === undefined ? "plan" : "verify",
+      }),
+    }),
     planVerification: agent({
       timeoutMs: 15 * 60_000,
       statusDetail: "planning independent verification commands",
@@ -2039,7 +2061,7 @@ export const autoimplementWorkflow = defineWorkflow({
       switch: {
         on: "$.route",
         cases: {
-          verify: "planVerification",
+          verify: "selectVerificationPath",
           redesign: "redesign",
           fix: "fix",
           blocked: "createBlockerClaim",
@@ -2071,6 +2093,7 @@ export const autoimplementWorkflow = defineWorkflow({
         on: "$.route",
         cases: {
           planDiscovery: "findPlan",
+          workspace: "workspace",
           documentation: "documentation",
           implementation: "implement",
           repair: "fix",
@@ -2081,6 +2104,10 @@ export const autoimplementWorkflow = defineWorkflow({
           blocked: "blocked",
         },
       },
+    },
+    {
+      from: "selectVerificationPath",
+      switch: { on: "$.route", cases: { plan: "planVerification", verify: "localVerification" } },
     },
     {
       from: "planVerification",
@@ -2125,7 +2152,7 @@ export const autoimplementWorkflow = defineWorkflow({
       switch: {
         on: "$result.outcome",
         cases: {
-          ok: "planVerification",
+          ok: "selectVerificationPath",
           timed_out: "timeoutFallbackGuard",
           failed: "timeoutFallbackGuard",
         },

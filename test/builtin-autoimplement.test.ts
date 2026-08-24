@@ -344,6 +344,9 @@ describe("built-in autoimplement", () => {
     expect(() => parseInput({ task: "demo", constraints: "bad" })).toThrow("constraints");
     expect(() => parseInput({ task: "demo", constraints: [3] })).toThrow("constraints");
     expect(() => parseInput({ task: "demo", merge: "yes" })).toThrow("boolean");
+    expect(() => parseInput({ task: "demo", repository, verificationChecks: [] })).toThrow(
+      "non-empty",
+    );
     expect(() =>
       parseInput({
         task: "demo",
@@ -966,6 +969,37 @@ describe("built-in autoimplement", () => {
         signal: new AbortController().signal,
         ...overrides,
       }) as never;
+
+    const routeChallenge = autoimplementWorkflow.nodes.routeChallenge;
+    if (routeChallenge?.nodeType !== "compute") {
+      throw new Error("routeChallenge must be compute");
+    }
+    const documentationChallenge = continueChallenge(
+      "Documentation must be updated.",
+      "Update the canonical document.",
+      "documentation",
+    );
+    expect(
+      await routeChallenge.run(
+        makeContext({
+          input: { task: "demo", repository },
+          outputs: { challengeBlocker: documentationChallenge },
+        }),
+      ),
+    ).toEqual({ route: "planDiscovery" });
+    expect(
+      await routeChallenge.run(
+        makeContext({
+          input: { task: "demo", plan: { ready: true }, repository },
+          outputs: { challengeBlocker: documentationChallenge },
+        }),
+      ),
+    ).toEqual({ route: "workspace" });
+    expect(
+      await routeChallenge.run(
+        makeContext({ outputs: { challengeBlocker: documentationChallenge } }),
+      ),
+    ).toEqual({ route: "documentation" });
 
     const documentation = autoimplementWorkflow.includes?.documentation;
     if (documentation?.input === undefined) {
@@ -2235,6 +2269,9 @@ describe("built-in autoimplement", () => {
       delivery: { pr: "none", merged: false },
     });
     expect(executor.requests.some((request) => request.contract.nodeId === "publish")).toBe(false);
+    expect(
+      executor.requests.some((request) => request.contract.nodeId === "planVerification"),
+    ).toBe(false);
     expect(
       state.steps
         .filter((step) => step.nodeId === "finalizeDefaultBranch")
