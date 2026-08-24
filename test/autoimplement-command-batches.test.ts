@@ -106,7 +106,7 @@ describe("autoimplement command batch contracts", () => {
     ).toThrow(/non-empty string/);
   });
 
-  it("accepts independent verification and rejects duplicate cwd or mutation commands", async () => {
+  it("accepts multiple verification commands per cwd and rejects mutation commands", async () => {
     const first = await makeTempDir("verification-one");
     const second = await makeTempDir("verification-two");
     const command = (id: string, cwd: string) => ({
@@ -124,9 +124,16 @@ describe("autoimplement command batch contracts", () => {
       }),
     ).toMatchObject({ commands: [{ id: "one" }, { id: "two" }] });
     expect(() => parseVerificationCommandPlan({ commands: [] })).toThrow(/non-empty/);
-    expect(() =>
-      parseVerificationCommandPlan({ commands: [command("one", first), command("two", first)] }),
-    ).toThrow(/distinct working directories/);
+    expect(
+      parseVerificationCommandPlan({
+        commands: [command("one", first), command("two", first)],
+      }),
+    ).toMatchObject({
+      commands: [
+        { id: "one", cwd: first },
+        { id: "two", cwd: first },
+      ],
+    });
     expect(() =>
       parseVerificationCommandPlan({
         commands: [{ ...command("bad", first), command: "git", args: ["push"] }],

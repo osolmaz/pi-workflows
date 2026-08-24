@@ -98,6 +98,12 @@ describe("workspace preparation", () => {
         worktreePath: "/tmp/demo-worktrees/feat-x",
       }),
     ).toMatchObject({ mode: "worktree", worktreePath: "/tmp/demo-worktrees/feat-x" });
+    expect(() =>
+      parsePreparedWorkspace({
+        ...basePrepared,
+        worktreePath: "/tmp/demo-worktrees/feat-x",
+      }),
+    ).toThrow(/only in worktree mode/);
   });
 
   it("adopts an existing non-default task branch", async () => {
@@ -260,6 +266,30 @@ describe("workspace preparation", () => {
     });
   });
 
+  it("rejects a worktree receipt that belongs to another repository", async () => {
+    const repo = await repository("workspace-owner");
+    const unrelated = await repository("workspace-unrelated-worktree");
+    await git(unrelated, ["switch", "-c", "feat/unrelated"]);
+    const prepared = {
+      schema: "pi-workflows.prepared-workspace.v1" as const,
+      mode: "worktree" as const,
+      repository: repo,
+      worktreePath: unrelated,
+      baseBranch: "main",
+      baseRevision: await git(unrelated, ["rev-parse", "main"]),
+      workBranch: "feat/unrelated",
+      directDefaultBranchAuthorized: false,
+      preExistingChangedPaths: [],
+      evidence: ["untrusted receipt"],
+      scope: `Only ${repo}`,
+    };
+    const result = await inspectWorkspace({ repository: repo, preparedWorkspace: prepared });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("does not belong to the requested repository"),
+    });
+  });
+
   it("adopts the same prepared workspace after restart", async () => {
     const repo = await repository("workspace-restart");
     await git(repo, ["switch", "-c", "feat/restart"]);
@@ -325,18 +355,28 @@ describe("workspace preparation", () => {
       workspaceMode: "defaultBranch",
       directDefaultBranchAuthorized: true,
     });
-    const prepared = {
-      ...parsePreparedWorkspace(first.preparedWorkspace),
-      directDefaultBranchAuthorized: false,
-    };
-    const result = await inspectWorkspace({
+    const retained = parsePreparedWorkspace(first.preparedWorkspace);
+    const missingRequestAuthority = await inspectWorkspace({
       repository: repo,
       baseBranch: "main",
-      preparedWorkspace: prepared,
+      preparedWorkspace: retained,
     });
-    expect(result).toMatchObject({
+    expect(missingRequestAuthority).toMatchObject({
       route: "blocked",
       reason: expect.stringContaining("direct-work authority"),
+      evidence: expect.arrayContaining(["requestAuthorized=false"]),
+    });
+
+    const missingReceiptAuthority = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      directDefaultBranchAuthorized: true,
+      preparedWorkspace: { ...retained, directDefaultBranchAuthorized: false },
+    });
+    expect(missingReceiptAuthority).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("direct-work authority"),
+      evidence: expect.arrayContaining(["receiptAuthorized=false"]),
     });
   });
 

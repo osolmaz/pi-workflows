@@ -131,17 +131,10 @@ export function parseVerificationCommandPlan(value: unknown): VerificationComman
   if (!Array.isArray(result.commands) || result.commands.length === 0) {
     throw new Error("verification commands must be a non-empty array");
   }
-  const directories = new Set<string>();
   const commands = result.commands.map((entry, index) => {
     const command = parseCommandItem(entry, `verification commands[${index}]`, {
       maxTimeoutMs: VERIFICATION_TIMEOUT_MS,
     });
-    if (directories.has(command.cwd)) {
-      throw new Error(
-        `verification commands must use distinct working directories: ${command.cwd}`,
-      );
-    }
-    directories.add(command.cwd);
     validateVerificationCommand(command, index);
     return command;
   });

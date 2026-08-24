@@ -335,6 +335,9 @@ describe("change verification", () => {
       executor,
     );
     expect(state.status).toBe("completed");
+    expect(
+      executor.requests.find((request) => request.contract.nodeId === "semanticRepair")?.prompt,
+    ).toContain(`Authorized scope: ${workspace.scope}`);
     expect(state.finalOutput).toMatchObject({
       route: "blocked",
       relatedFailures: [{ checkId: "docs" }],
