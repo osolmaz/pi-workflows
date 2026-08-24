@@ -230,9 +230,10 @@ describe("sanity-check workflow", () => {
     expect(detailed).toContain("Required changes:");
     expect(detailed).toContain("Questions for the contributor:");
     expect(detailed).toContain("Unknowns:");
-    const bounded = formatSanityCheckReport({ ...result, summary: "x".repeat(20_000) });
-    expect(bounded).toContain("[report truncated]");
-    expect(bounded.length).toBeLessThanOrEqual(12_000);
+    const longSummary = "x".repeat(20_000);
+    const complete = formatSanityCheckReport({ ...result, summary: longSummary });
+    expect(complete).toContain(longSummary);
+    expect(complete).not.toContain("[report truncated]");
 
     const prompt = buildDetailedSanityCheckPrompt(result);
     expect(prompt).toContain("Reply with the report below verbatim");
@@ -253,8 +254,9 @@ describe("sanity-check workflow", () => {
     expect(sanityCheckWorkflow.maxSteps).toBe(8);
     expect(sanityCheckWorkflow.nodes.detailedReport).toMatchObject({
       nodeType: "agent",
-      expectedOutput: { kind: "assistant-message", maxChars: 12_000 },
+      expectedOutput: { kind: "assistant-message" },
     });
+    expect(sanityCheckWorkflow.nodes.detailedReport.expectedOutput).not.toHaveProperty("maxChars");
     expect(Object.keys(sanityCheckWorkflow.includes ?? {})).toEqual(["plainSummary"]);
     expect(sanityCheckWorkflow.nodes.finish).toMatchObject({ nodeType: "compute" });
     expect(sanityCheckWorkflow.edges).toEqual([

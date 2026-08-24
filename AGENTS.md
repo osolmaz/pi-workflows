@@ -19,6 +19,8 @@ Repository rules:
   identifiers. Live durable state follows `docs/SQLITE_STATE.md`.
 - Tests must not write outside temp directories, call real models, or perform
   destructive actions.
+- Do not add arbitrary limits to user-visible output. Add a limit only when a named external
+  interface requires it. Document that requirement and keep the complete result available.
 - New engine features need unit tests and a section in `docs/workflows.md`.
 
 ## Built-in workflow skill style

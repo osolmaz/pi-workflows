@@ -1894,7 +1894,7 @@ describe.sequential("pi-workflows end to end", () => {
       45_000,
     );
     expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "4" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "5" });
     expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
     expect(state.outputs.review).toHaveLength(1);
     expect(state.outputs.detailedReport).toBe(SANITY_DETAILED_RESPONSE);

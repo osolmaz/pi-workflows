@@ -21,7 +21,7 @@ describe("BuiltinWorkflowCatalog", () => {
     expect(builtinWorkflowCatalog.get("autoimplement")?.revision).toBe("10");
     expect(builtinWorkflowCatalog.get("monitor")?.revision).toBe("11");
     expect(builtinWorkflowCatalog.get("plan-approval")?.revision).toBe("4");
-    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("4");
+    expect(builtinWorkflowCatalog.get("sanity-check")?.revision).toBe("5");
   });
 
   it("rejects unfinished Sanity Check revision 3 with restart guidance", () => {
