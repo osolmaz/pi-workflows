@@ -89,6 +89,36 @@ describe("plan-change workflow", () => {
         approvals: { mode: "required" },
       }),
     ).rejects.toThrow(/unknown field approvals/);
+    await expect(
+      engine.run(planChangeWorkflow, {
+        task: "change the implementation",
+        directDefaultBranchAuthorized: "yes",
+      }),
+    ).rejects.toThrow(/directDefaultBranchAuthorized must be a boolean/);
+  });
+
+  it("propagates direct-default authority to documentation", async () => {
+    const documentation = planChangeWorkflow.includes?.documentation;
+    if (documentation?.input === undefined) {
+      throw new Error("documentation input mapper is missing");
+    }
+    expect(
+      documentation.input({
+        input: {
+          task: "change the implementation",
+          directDefaultBranchAuthorized: true,
+          approval: { mode: "skip", audience: "operator", timeoutMinutes: 10 },
+        },
+        outputs: { design: { exit: "ready", output: { plan: { revised: true } } } },
+        results: {},
+        state: { steps: [] },
+        signal: new AbortController().signal,
+      } as never),
+    ).toMatchObject({
+      task: "change the implementation",
+      plan: { revised: true },
+      directDefaultBranchAuthorized: true,
+    });
   });
 
   it("uses the shared skip policy without creating a human decision", async () => {

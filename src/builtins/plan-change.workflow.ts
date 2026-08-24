@@ -31,6 +31,7 @@ export type PlanChangeInput = {
   newEvidence?: unknown;
   approval?: PlanApprovalPolicy;
   preparedWorkspace?: PreparedWorkspace;
+  directDefaultBranchAuthorized?: boolean;
   verificationChecks?: VerificationCheck[];
 };
 
@@ -99,12 +100,19 @@ function parseInput(value: unknown): NormalizedPlanChangeInput {
       "newEvidence",
       "approval",
       "preparedWorkspace",
+      "directDefaultBranchAuthorized",
       "verificationChecks",
     ],
     "plan change input",
   );
   const constraints = parseStringArray(input.constraints, "plan change constraints");
   const documents = parseStringArray(input.documents, "plan change documents");
+  if (
+    input.directDefaultBranchAuthorized !== undefined &&
+    typeof input.directDefaultBranchAuthorized !== "boolean"
+  ) {
+    throw new Error("plan change directDefaultBranchAuthorized must be a boolean");
+  }
   return {
     task: requireString(input.task, "plan change task"),
     ...(input.scope !== undefined
@@ -120,6 +128,9 @@ function parseInput(value: unknown): NormalizedPlanChangeInput {
     ...(input.preparedWorkspace === undefined
       ? {}
       : { preparedWorkspace: parsePreparedWorkspace(input.preparedWorkspace) }),
+    ...(input.directDefaultBranchAuthorized === undefined
+      ? {}
+      : { directDefaultBranchAuthorized: input.directDefaultBranchAuthorized }),
     ...(input.verificationChecks === undefined
       ? {}
       : { verificationChecks: input.verificationChecks as VerificationCheck[] }),
@@ -234,6 +245,9 @@ export const planChangeWorkflow = defineWorkflow({
           ...(request.preparedWorkspace === undefined
             ? {}
             : { preparedWorkspace: request.preparedWorkspace }),
+          ...(request.directDefaultBranchAuthorized === undefined
+            ? {}
+            : { directDefaultBranchAuthorized: request.directDefaultBranchAuthorized }),
           ...(request.verificationChecks === undefined
             ? {}
             : { verificationChecks: request.verificationChecks }),
