@@ -285,35 +285,48 @@ function parseCommandItem(
   return { id, command, args: [...raw.args] as string[], cwd, timeoutMs, maxOutputChars };
 }
 
-function validateVerificationCommand(command: CommandBatchItem, index: number): void {
-  const forbiddenCommands = new Set([
-    "ash",
-    "bash",
-    "cmd",
-    "cmd.exe",
-    "csh",
-    "dash",
-    "fish",
-    "gh",
-    "git",
-    "ksh",
-    "powershell",
-    "powershell.exe",
-    "pwsh",
-    "pwsh.exe",
-    "rm",
-    "sh",
-    "tcsh",
-    "zsh",
-  ]);
-  const executable = path.win32.basename(path.basename(command.command)).toLowerCase();
-  if (forbiddenCommands.has(executable)) {
-    throw new Error(`verification commands[${index}].command is not allowed`);
+const FORBIDDEN_VERIFICATION_EXECUTABLES = new Set([
+  "ash",
+  "bash",
+  "cmd",
+  "cmd.exe",
+  "csh",
+  "dash",
+  "fish",
+  "gh",
+  "git",
+  "ksh",
+  "powershell",
+  "powershell.exe",
+  "pwsh",
+  "pwsh.exe",
+  "rm",
+  "sh",
+  "tcsh",
+  "zsh",
+]);
+
+export function validateVerificationCommandSafety(
+  command: string,
+  args: readonly string[],
+  label: string,
+): void {
+  const executable = path.win32.basename(path.basename(command)).toLowerCase();
+  if (FORBIDDEN_VERIFICATION_EXECUTABLES.has(executable)) {
+    throw new Error(`${label}.command is not allowed`);
   }
-  const joined = command.args.join(" ").toLowerCase();
+  const joined = args.join(" ").toLowerCase();
   if (/\b(publish|release|deploy|push|merge)\b/.test(joined)) {
-    throw new Error(`verification commands[${index}] contains a mutation or publication action`);
+    throw new Error(`${label} contains a mutation or publication action`);
   }
+}
+
+function validateVerificationCommand(command: CommandBatchItem, index: number): void {
+  validateVerificationCommandSafety(
+    command.command,
+    command.args,
+    `verification commands[${index}]`,
+  );
 }
 
 function concurrencyValue(value: unknown, field: string): number {

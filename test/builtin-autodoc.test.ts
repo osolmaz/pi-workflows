@@ -147,7 +147,6 @@ describe("built-in autodoc", () => {
     const { state } = await run(executor, {
       task: "implement feature",
       plan: { steps: ["one"] },
-      repository: workspace.repository,
       preparedWorkspace: workspace,
       verificationChecks: [check(workspace)],
     });
@@ -188,6 +187,30 @@ describe("built-in autodoc", () => {
     const { state } = await run(executor, { task: "implement feature" });
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({ status: "ready", plan });
+  });
+
+  it("blocks a stale-document mutation when no repository was supplied", async () => {
+    const executor = new ScriptedExecutor().respond("inspectDocumentation", {
+      output: {
+        route: "update",
+        files: ["docs/spec.md"],
+        digests: {},
+        reason: "Stale.",
+        evidence: "old",
+      },
+    });
+    const { state } = await run(executor, {
+      task: "document feature",
+      plan: { steps: ["one"] },
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      sourceNode: "autodoc/workspaceGuard",
+      reason: expect.stringContaining("explicit repository"),
+      evidence: ["repository was not supplied", "preparedWorkspace was not supplied"],
+    });
+    expect(state.steps.map((step) => step.nodeId)).not.toContain("updateDocumentation");
+    expect(state.steps.some((step) => step.nodeId.startsWith("workspace/"))).toBe(false);
   });
 
   it("preserves qualified verification evidence on the blocked exit", async () => {
