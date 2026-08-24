@@ -15,9 +15,11 @@ const execFileAsync = promisify(execFile);
 let originalPath = "";
 let commandDir = "";
 let repository = "";
+let baseRevision = "";
 
-async function git(cwd: string, args: string[]): Promise<void> {
-  await execFileAsync("git", args, { cwd });
+async function git(cwd: string, args: string[]): Promise<string> {
+  const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
+  return result.stdout.trim();
 }
 
 async function installCommand(name: string, body: string): Promise<void> {
@@ -40,7 +42,7 @@ function preparedWorkspaceFor(target = repository) {
     mode: "branch" as const,
     repository: target,
     baseBranch: "main",
-    baseRevision: "test-base",
+    baseRevision,
     workBranch: "feat/demo",
     directDefaultBranchAuthorized: false,
     preExistingChangedPaths: [],
@@ -302,6 +304,7 @@ beforeEach(async () => {
   await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
   await git(repository, ["add", "README.md"]);
   await git(repository, ["commit", "-m", "fixture"]);
+  baseRevision = await git(repository, ["rev-parse", "HEAD"]);
   await git(repository, ["switch", "-c", "feat/demo"]);
   await installCommand("pi-reviewer", "printf '%s\\n' \"review complete\"");
   await installCommand("gh", "printf '%s\\n' \"checks complete\"");

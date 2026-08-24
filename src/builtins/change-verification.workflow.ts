@@ -665,31 +665,159 @@ function latestClassification(context: WorkflowNodeContext): ChangeVerificationR
   return classifyVerification(context.input as ChangeVerificationInput, latestExecution(context));
 }
 
+function statusPaths(output: string): string[] {
+  const entries = output.split("\0").filter(Boolean);
+  const files: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const status = entry.slice(0, 2);
+    files.push(entry.slice(3));
+    if ((status.includes("R") || status.includes("C")) && entries[index + 1] !== undefined) {
+      files.push(entries[index + 1]!);
+      index += 1;
+    }
+  }
+  return [...new Set(files)].sort();
+}
+
+function workspacePath(root: string, file: string): string {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, file);
+  if (resolved === resolvedRoot || !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`Workspace path escapes the repository: ${file}`);
+  }
+  return resolved;
+}
+
+async function pathFingerprint(root: string, file: string): Promise<string> {
+  try {
+    const target = workspacePath(root, file);
+    const stat = await fs.lstat(target);
+    const hash = createHash("sha256").update(`${stat.mode}:${stat.isSymbolicLink()}:`);
+    if (stat.isSymbolicLink()) hash.update(await fs.readlink(target));
+    else if (stat.isFile()) hash.update(await fs.readFile(target));
+    else hash.update("directory");
+    return hash.digest("hex");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
 async function gitState(root: string): Promise<Map<string, string>> {
   const status = await execFileAsync(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     { cwd: root, encoding: "utf8", maxBuffer: 5_000_000, timeout: 60_000 },
   );
-  const output = status.stdout;
-  const files =
-    output.length === 0
-      ? []
-      : output
-          .split("\0")
-          .filter(Boolean)
-          .map((entry) => entry.slice(3))
-          .sort();
   const state = new Map<string, string>();
-  for (const file of files) {
-    try {
-      const content = await fs.readFile(path.join(root, file));
-      state.set(file, createHash("sha256").update(content).digest("hex"));
-    } catch {
-      state.set(file, "missing");
-    }
+  for (const file of statusPaths(status.stdout)) {
+    state.set(file, await pathFingerprint(root, file));
   }
   return state;
+}
+
+type PathBackup = { existed: false } | { existed: true; backupPath: string };
+
+type WorkspaceBackup = {
+  directory: string;
+  paths: Map<string, PathBackup>;
+};
+
+async function backupPaths(root: string, files: Iterable<string>): Promise<WorkspaceBackup> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-repair-"));
+  const snapshots = new Map<string, PathBackup>();
+  let index = 0;
+  try {
+    for (const file of files) {
+      const source = workspacePath(root, file);
+      const backupPath = path.join(directory, String(index));
+      index += 1;
+      try {
+        await fs.lstat(source);
+        await fs.cp(source, backupPath, {
+          recursive: true,
+          dereference: false,
+          preserveTimestamps: true,
+          verbatimSymlinks: true,
+        });
+        snapshots.set(file, { existed: true, backupPath });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        snapshots.set(file, { existed: false });
+      }
+    }
+    return { directory, paths: snapshots };
+  } catch (error) {
+    await fs.rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function gitBlob(root: string, object: string): Promise<Buffer> {
+  return await new Promise<Buffer>((resolve, reject) => {
+    execFile(
+      "git",
+      ["cat-file", "blob", object],
+      { cwd: root, encoding: "buffer", maxBuffer: 100_000_000, timeout: 60_000 },
+      (error, stdout) => {
+        if (error !== null) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+async function restoreFromRevision(root: string, file: string, revision: string): Promise<void> {
+  const target = workspacePath(root, file);
+  const tree = await execFileAsync("git", ["ls-tree", "-z", revision, "--", file], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 5_000_000,
+    timeout: 60_000,
+  });
+  if (tree.stdout.length === 0) {
+    await fs.rm(target, { recursive: true, force: true });
+    return;
+  }
+  const metadata = tree.stdout.slice(0, tree.stdout.indexOf("\t")).split(" ");
+  const mode = metadata[0];
+  const type = metadata[1];
+  const object = metadata[2];
+  if (mode === undefined || type !== "blob" || object === undefined) {
+    throw new Error(`Cannot restore unsupported Git entry ${file}`);
+  }
+  const content = await gitBlob(root, object);
+  await fs.rm(target, { recursive: true, force: true });
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  if (mode === "120000") await fs.symlink(content.toString(), target);
+  else {
+    const permissions = mode === "100755" ? 0o755 : 0o644;
+    await fs.writeFile(target, content, { mode: permissions });
+    await fs.chmod(target, permissions);
+  }
+}
+
+async function restorePath(
+  root: string,
+  file: string,
+  backup: PathBackup | undefined,
+  revision: string,
+): Promise<void> {
+  const target = workspacePath(root, file);
+  if (backup === undefined) {
+    await restoreFromRevision(root, file, revision);
+    return;
+  }
+  await fs.rm(target, { recursive: true, force: true });
+  if (!backup.existed) return;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.cp(backup.backupPath, target, {
+    recursive: true,
+    dereference: false,
+    preserveTimestamps: true,
+    verbatimSymlinks: true,
+  });
 }
 
 function changedState(before: Map<string, string>, after: Map<string, string>): string[] {
@@ -708,38 +836,63 @@ async function runMechanicalRepair(context: WorkflowActionContext): Promise<Repa
   if (target === undefined) throw new Error("No mechanical repair is available");
   const fix = checks.find((check) => check.id === target.checkId)?.mechanicalFix;
   if (fix === undefined) throw new Error("Mechanical repair disappeared");
+  const beforeRevision = await git(root, ["rev-parse", "HEAD"]);
   const before = await gitState(root);
-  const result = await runCommandBatch(
-    {
-      items: [
-        {
-          id: `fix-${target.checkId}`,
-          command: fix.command,
-          args: fix.args,
-          cwd: root,
-          timeoutMs: fix.timeoutMs,
-          maxOutputChars: fix.maxOutputChars,
-        },
-      ],
-      maxConcurrency: 1,
-    },
-    { signal: context.signal },
-  );
-  const after = await gitState(root);
-  const changedFiles = changedState(before, after);
-  const outside = changedFiles.filter((file) => !fix.files.includes(file));
-  return {
-    attempt: attempts.length + 1,
-    kind: "mechanical",
-    fingerprint: classification.failureFingerprint,
-    changedFiles: [...after.keys()].sort(),
-    result:
-      outside.length > 0
-        ? `Rejected mechanical fixer: changed undeclared files ${outside.join(", ")}`
-        : result.items[0]?.outcome === "succeeded"
+  const backup = await backupPaths(root, before.keys());
+  let retainBackup = false;
+  try {
+    const result = await runCommandBatch(
+      {
+        items: [
+          {
+            id: `fix-${target.checkId}`,
+            command: fix.command,
+            args: fix.args,
+            cwd: root,
+            timeoutMs: fix.timeoutMs,
+            maxOutputChars: fix.maxOutputChars,
+          },
+        ],
+        maxConcurrency: 1,
+      },
+      { signal: context.signal },
+    );
+    const after = await gitState(root);
+    const changedFiles = changedState(before, after);
+    const outside = changedFiles.filter((file) => !fix.files.includes(file));
+    let rejection: string | undefined;
+    if (outside.length > 0) {
+      const restorationFailures: string[] = [];
+      for (const file of outside) {
+        try {
+          await restorePath(root, file, backup.paths.get(file), beforeRevision);
+        } catch (error) {
+          restorationFailures.push(`${file}: ${String(error)}`);
+        }
+      }
+      const restored = await gitState(root);
+      const unrestored = outside.filter((file) => before.get(file) !== restored.get(file));
+      if (restorationFailures.length > 0 || unrestored.length > 0) {
+        retainBackup = true;
+        rejection = `Rejected mechanical fixer: changed undeclared files ${outside.join(", ")}; restoration failed for ${[...restorationFailures, ...unrestored].join(", ")}; backup retained at ${backup.directory}`;
+      } else {
+        rejection = `Rejected mechanical fixer: changed undeclared files ${outside.join(", ")}; restored all undeclared paths`;
+      }
+    }
+    return {
+      attempt: attempts.length + 1,
+      kind: "mechanical",
+      fingerprint: classification.failureFingerprint,
+      changedFiles,
+      result:
+        rejection ??
+        (result.items[0]?.outcome === "succeeded"
           ? fix.expectedDiff
-          : JSON.stringify(result.items[0]),
-  };
+          : JSON.stringify(result.items[0])),
+    };
+  } finally {
+    if (!retainBackup) await fs.rm(backup.directory, { recursive: true, force: true });
+  }
 }
 
 function parseSemanticRepair(value: unknown, context: WorkflowNodeContext): RepairAttempt {

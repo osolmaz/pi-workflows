@@ -1,8 +1,19 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
+
+const execFileAsync = promisify(execFile);
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
+  return result.stdout.trim();
+}
 
 function documentedPlan(plan: unknown) {
   return {
@@ -43,6 +54,14 @@ function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
 
 async function run(executor: ScriptedExecutor, input: unknown) {
   const repository = await makeTempDir("autoimplement-plan-discovery-repo");
+  await git(repository, ["init", "-b", "main"]);
+  await git(repository, ["config", "user.name", "Test"]);
+  await git(repository, ["config", "user.email", "test@example.com"]);
+  await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
+  await git(repository, ["add", "README.md"]);
+  await git(repository, ["commit", "-m", "fixture"]);
+  const baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+  await git(repository, ["switch", "-c", "feat/test"]);
   const request = input as Record<string, unknown>;
   return await new WorkflowEngine({
     executor,
@@ -55,7 +74,7 @@ async function run(executor: ScriptedExecutor, input: unknown) {
       mode: "branch",
       repository,
       baseBranch: "main",
-      baseRevision: "test-base",
+      baseRevision,
       workBranch: "feat/test",
       directDefaultBranchAuthorized: false,
       preExistingChangedPaths: [],

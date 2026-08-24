@@ -199,28 +199,119 @@ export async function inspectWorkspace(
 ): Promise<WorkspaceInspection> {
   if (input.preparedWorkspace !== undefined) {
     const value = parsePreparedWorkspace(input.preparedWorkspace);
-    if (value.repository !== input.repository && value.worktreePath !== input.repository) {
-      return {
-        route: "blocked",
-        repository: input.repository,
-        baseBranch: input.baseBranch ?? value.baseBranch,
-        preExistingChangedPaths: [],
-        reason: "The supplied prepared workspace does not own the requested repository path.",
-        evidence: [value.repository, value.worktreePath ?? "no worktree path"],
-      };
-    }
-    return {
-      route: "ready",
-      selectedMode: value.mode,
-      preparedWorkspace: value,
-      repository: value.repository,
-      baseBranch: value.baseBranch,
+    const candidatePath = value.worktreePath ?? value.repository;
+    const blocked = (
+      reason: string,
+      evidence: string[],
+      currentBranch?: string,
+    ): WorkspaceInspection => ({
+      route: "blocked",
+      repository: input.repository,
+      baseBranch: input.baseBranch ?? value.baseBranch,
       baseRevision: value.baseRevision,
-      currentBranch: value.workBranch,
-      preExistingChangedPaths: value.preExistingChangedPaths,
-      reason: "The prepared workspace was validated and adopted.",
-      evidence: value.evidence,
-    };
+      ...(currentBranch === undefined ? {} : { currentBranch }),
+      preExistingChangedPaths: [],
+      reason,
+      evidence,
+    });
+    if (value.repository !== input.repository && value.worktreePath !== input.repository) {
+      return blocked(
+        "The supplied prepared workspace does not own the requested repository path.",
+        [value.repository, value.worktreePath ?? "no worktree path"],
+      );
+    }
+    if (input.baseBranch !== undefined && input.baseBranch !== value.baseBranch) {
+      return blocked("The supplied prepared workspace uses a different base branch.", [
+        `requested=${input.baseBranch}`,
+        `prepared=${value.baseBranch}`,
+      ]);
+    }
+    try {
+      const topLevel = path.resolve(await git(candidatePath, ["rev-parse", "--show-toplevel"]));
+      const currentBranch = await git(candidatePath, [
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+      ]);
+      const headRevision = await git(candidatePath, ["rev-parse", "HEAD"]);
+      await git(candidatePath, ["cat-file", "-e", `${value.baseRevision}^{commit}`]);
+      await git(candidatePath, ["show-ref", "--verify", `refs/heads/${value.workBranch}`]);
+      const branchRevision = await git(candidatePath, [
+        "rev-parse",
+        `refs/heads/${value.workBranch}`,
+      ]);
+      await git(candidatePath, ["merge-base", "--is-ancestor", value.baseRevision, headRevision]);
+      if (topLevel !== path.resolve(candidatePath)) {
+        return blocked("The prepared workspace path no longer names its Git worktree.", [
+          `prepared=${candidatePath}`,
+          `actual=${topLevel}`,
+        ]);
+      }
+      if (currentBranch !== value.workBranch || branchRevision !== headRevision) {
+        return blocked(
+          "The prepared workspace is no longer on its recorded task branch.",
+          [
+            `preparedBranch=${value.workBranch}`,
+            `currentBranch=${currentBranch}`,
+            `branchRevision=${branchRevision}`,
+            `headRevision=${headRevision}`,
+          ],
+          currentBranch,
+        );
+      }
+      if (
+        value.mode === "defaultBranch" &&
+        (value.workBranch !== value.baseBranch || !value.directDefaultBranchAuthorized)
+      ) {
+        return blocked(
+          "The prepared default-branch receipt no longer proves direct-work authority.",
+          [
+            `baseBranch=${value.baseBranch}`,
+            `workBranch=${value.workBranch}`,
+            `authorized=${value.directDefaultBranchAuthorized}`,
+          ],
+          currentBranch,
+        );
+      }
+      if (value.mode === "worktree") {
+        const listing = await git(candidatePath, ["worktree", "list", "--porcelain"]);
+        const registered = listing.split("\n\n").some((entry) => {
+          const lines = entry.split("\n");
+          return (
+            lines.includes(`worktree ${path.resolve(candidatePath)}`) &&
+            lines.includes(`branch refs/heads/${value.workBranch}`)
+          );
+        });
+        if (!registered) {
+          return blocked(
+            "The prepared worktree is no longer registered for its recorded task branch.",
+            [`worktree=${candidatePath}`, `branch=${value.workBranch}`],
+            currentBranch,
+          );
+        }
+      }
+      return {
+        route: "ready",
+        selectedMode: value.mode,
+        preparedWorkspace: value,
+        repository: value.repository,
+        baseBranch: value.baseBranch,
+        baseRevision: value.baseRevision,
+        currentBranch,
+        preExistingChangedPaths: value.preExistingChangedPaths,
+        reason: "The prepared workspace was revalidated and adopted.",
+        evidence: [
+          ...value.evidence,
+          `worktree=${topLevel}`,
+          `branch=${currentBranch}`,
+          `head=${headRevision}`,
+          `baseRevision=${value.baseRevision}`,
+        ],
+      };
+    } catch (error) {
+      return blocked("The supplied prepared workspace is stale or unavailable.", [String(error)]);
+    }
   }
 
   try {
