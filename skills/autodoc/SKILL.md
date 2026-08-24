@@ -15,6 +15,10 @@ Build the input as follows:
 - `task`: State what selected plan must be recorded and that this run is documentation-only.
 - `plan`: Pass the complete selected plan. Autodoc does not devise or improve it.
 - `repository`: Use the absolute path of the repository that owns the canonical documentation.
+- `baseBranch`: Use the requested base or the repository default branch.
+- `scope`: Name the allowed repository and documentation edits. Exclude implementation and unauthorized remote actions.
+- `workspaceMode`: Use `auto` unless the conversation requires `branch`, `worktree`, or explicitly authorized `defaultBranch` work. Autodoc prepares the workspace only when documentation needs an update.
+- `preparedWorkspace`: Include a previously confirmed `pi-workflows.prepared-workspace.v1` result when a parent workflow already prepared the workspace. Omit it otherwise.
 - `documents`: Include every known canonical specification or plan candidate. Use an empty array when none is known.
 - `evidence`: Include implementation evidence or current-document evidence when it affects whether documentation is current.
 
@@ -31,6 +35,9 @@ Replace the example values below with facts from the conversation, then make one
       "requirements": ["Keep cancellation terminal."]
     },
     "repository": "/absolute/path/to/repository",
+    "baseBranch": "main",
+    "scope": "Only /absolute/path/to/repository. May update canonical documentation and run documentation checks. Must not implement, push, merge, release, or deploy.",
+    "workspaceMode": "auto",
     "documents": ["docs/plans/timeout-fallback-plan.md"],
     "evidence": {
       "currentBehavior": "A timeout ends the run."

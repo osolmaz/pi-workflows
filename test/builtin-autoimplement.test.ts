@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
@@ -9,9 +11,14 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
+const execFileAsync = promisify(execFile);
 let originalPath = "";
 let commandDir = "";
 let repository = "";
+
+async function git(cwd: string, args: string[]): Promise<void> {
+  await execFileAsync("git", args, { cwd });
+}
 
 async function installCommand(name: string, body: string): Promise<void> {
   const target = path.join(commandDir, name);
@@ -24,6 +31,21 @@ function reviewerCommand(cwd = repository) {
     args: ["--base", "main"],
     cwd,
     timeoutMs: 600_000,
+  };
+}
+
+function preparedWorkspaceFor(target = repository) {
+  return {
+    schema: "pi-workflows.prepared-workspace.v1" as const,
+    mode: "branch" as const,
+    repository: target,
+    baseBranch: "main",
+    baseRevision: "test-base",
+    workBranch: "feat/demo",
+    directDefaultBranchAuthorized: false,
+    preExistingChangedPaths: [],
+    evidence: ["test fixture"],
+    scope: `Only ${target}`,
   };
 }
 
@@ -158,7 +180,19 @@ function commonExecutor(publication: unknown = published()): ScriptedExecutor {
     .respond("publish", { output: publication });
 }
 
-function continueChallenge(reason: string, nextAction: string) {
+function continueChallenge(
+  reason: string,
+  nextAction: string,
+  nextStage:
+    | "planDiscovery"
+    | "documentation"
+    | "implementation"
+    | "repair"
+    | "review"
+    | "ci"
+    | "delivery"
+    | "redesign" = "redesign",
+) {
   return {
     route: "continue",
     blockingNow: false,
@@ -166,6 +200,7 @@ function continueChallenge(reason: string, nextAction: string) {
     canProceed: true,
     reason,
     nextAction,
+    nextStage,
     alternativesChecked: ["Use the supported path", "Keep rollback ready"],
     evidence: ["The task authorizes the required local and rollout work"],
   };
@@ -179,6 +214,7 @@ function confirmedChallenge(reason: string) {
     canProceed: false,
     reason,
     nextAction: "",
+    nextStage: null,
     alternativesChecked: ["Complete without the prohibited remote mutation"],
     evidence: ["The required external authorization is absent"],
   };
@@ -260,6 +296,13 @@ beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
   commandDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-commands-"));
   repository = await makeTempDir("pi-workflows-autoimplement-repo");
+  await git(repository, ["init", "-b", "main"]);
+  await git(repository, ["config", "user.name", "Test"]);
+  await git(repository, ["config", "user.email", "test@example.com"]);
+  await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
+  await git(repository, ["add", "README.md"]);
+  await git(repository, ["commit", "-m", "fixture"]);
+  await git(repository, ["switch", "-c", "feat/demo"]);
   await installCommand("pi-reviewer", "printf '%s\\n' \"review complete\"");
   await installCommand("gh", "printf '%s\\n' \"checks complete\"");
   process.env.PATH = `${commandDir}:${originalPath}`;
@@ -273,16 +316,7 @@ describe("built-in autoimplement", () => {
   it("validates input, reviewer severities, repair commands, and CI tracking", async () => {
     const parseInput = autoimplementWorkflow.input;
     if (parseInput === undefined) throw new Error("autoimplement input parser is missing");
-    expect(await parseInput({ task: "demo" })).toMatchObject({
-      task: "demo",
-      merge: false,
-      approval: {
-        mode: "auto",
-        audience: "operator",
-        timeoutMinutes: 10,
-        maxReplans: 3,
-      },
-    });
+    expect(() => parseInput({ task: "demo" })).toThrow(/repository/);
     expect(
       await parseInput({
         task: "demo",
@@ -291,9 +325,16 @@ describe("built-in autoimplement", () => {
         constraints: ["keep API"],
         repository,
         baseBranch: "main",
+        workspaceMode: "auto",
         merge: false,
       }),
-    ).toMatchObject({ task: "demo", scope: "repo", merge: false });
+    ).toMatchObject({
+      task: "demo",
+      scope: "repo",
+      workspaceMode: "auto",
+      merge: false,
+      approval: { mode: "auto" },
+    });
     expect(() => parseInput(null)).toThrow("object");
     expect(() => parseInput({ task: "" })).toThrow("non-empty");
     expect(() => parseInput({ task: "demo", constraints: "bad" })).toThrow("constraints");
@@ -323,7 +364,7 @@ describe("built-in autoimplement", () => {
         throw new Error(`${nodeId} must be a validated agent node`);
       }
       return await node.validate(output, {
-        input: { task: "demo", plan: {} },
+        input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
         outputs: {},
         results: {},
         state: { steps: [] },
@@ -777,7 +818,7 @@ describe("built-in autoimplement", () => {
     };
     await expect(
       validate("planVerification", safeVerification, {
-        input: { task: "demo", plan: {}, repository },
+        input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
         outputs: { implement: { repositories: "bad" } },
       }),
     ).resolves.toMatchObject({ commands: [{ id: "verify" }] });
@@ -789,14 +830,14 @@ describe("built-in autoimplement", () => {
           commands: [{ ...safeVerification.commands[0]!, cwd: path.join(repository, "other") }],
         },
         {
-          input: { task: "demo", plan: {}, repository },
+          input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
           outputs: { implement: { repositories: [repository] } },
         },
       ),
     ).rejects.toThrow("was not reported by implementation");
     await expect(
       validate("planVerification", safeVerification, {
-        input: { task: "demo", plan: {}, repository },
+        input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
         outputs: {
           implement: { repositories: [repository, path.join(repository, "second")] },
         },
@@ -844,7 +885,14 @@ describe("built-in autoimplement", () => {
   it("projects redesign evidence, plan changes, blocked reasons, and command history", async () => {
     const makeContext = (overrides: Record<string, unknown> = {}) =>
       ({
-        input: { task: "demo", scope: "repo", constraints: ["safe"], plan: { old: true } },
+        input: {
+          task: "demo",
+          scope: "repo",
+          constraints: ["safe"],
+          plan: { old: true },
+          repository,
+          preparedWorkspace: preparedWorkspaceFor(),
+        },
         outputs: {},
         results: {},
         state: { steps: [] },
@@ -1179,6 +1227,9 @@ describe("built-in autoimplement", () => {
     expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
     expect(state.steps.map((step) => step.nodeId)).toContain("redesign/design/frame");
     expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(2);
+    const nodeIds = state.steps.map((step) => step.nodeId);
+    expect(nodeIds.indexOf("workspace/ready")).toBeGreaterThanOrEqual(0);
+    expect(nodeIds.indexOf("workspace/ready")).toBeLessThan(nodeIds.indexOf("implement"));
 
     const challengeRequest = executor.requests.find(
       (request) => request.contract.nodeId === "challengeBlocker",
@@ -1192,6 +1243,9 @@ describe("built-in autoimplement", () => {
       "Are you getting stuck on something trivial, procedural, reversible, or already authorized?",
     );
     expect(challengeRequest?.prompt).toContain("Bob artifact mismatch");
+    expect(
+      executor.requests.find((request) => request.contract.nodeId === "implement")?.prompt,
+    ).toContain(`"repository":"${repository}"`);
 
     const redesignRequest = executor.requests.find(
       (request) => request.contract.nodeId === "redesign/design/frame",
@@ -1239,7 +1293,7 @@ describe("built-in autoimplement", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
-      reason: "The required remote mutation is outside current authority.",
+      reason: "Required remote mutation lacks authorization.",
     });
   });
 
@@ -1297,43 +1351,117 @@ describe("built-in autoimplement", () => {
     });
   });
 
+  it("challenges a missing-plan claim with qualified evidence", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("findPlan", {
+        output: {
+          route: "blocked",
+          documents: [],
+          reason: "No clear selected plan exists.",
+          evidence: "The referenced plan was not found.",
+        },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("No plan can be adopted without inventing one."),
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-missing-plan-challenge"),
+    });
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Implement an existing plan",
+      repository,
+      merge: false,
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "No clear selected plan exists.",
+      evidence: {
+        schema: "pi-workflows.blocker-claim.v1",
+        sourceNode: "findPlan",
+        evidence: "The referenced plan was not found.",
+      },
+    });
+    expect(executor.requests.map((request) => request.contract.nodeId)).toContain(
+      "challengeBlocker",
+    );
+  });
+
+  it("routes an included Autodoc blocker through the shared challenge", async () => {
+    const executor = new ScriptedExecutor()
+      .respond("documentation/inspectDocumentation", {
+        output: {
+          route: "blocked",
+          files: [],
+          digests: {},
+          reason: "Repository rules prohibit this documentation target.",
+          evidence: "No safe canonical file exists.",
+        },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The repository rule is outside current authority."),
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-autodoc-blocker"),
+    });
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Implement the documented plan",
+      plan: { steps: ["one"] },
+      repository,
+      merge: false,
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "Repository rules prohibit this documentation target.",
+      evidence: {
+        sourceNode: "autodoc/inspectDocumentation",
+        evidence: {
+          sourceNode: "autodoc/inspectDocumentation",
+          evidence: "No safe canonical file exists.",
+        },
+      },
+    });
+    expect(executor.requests.map((request) => request.contract.nodeId)).toContain(
+      "challengeBlocker",
+    );
+  });
+
   it("routes model blockers through the challenge and preserves hard stops", () => {
     const edge = (from: string) =>
       autoimplementWorkflow.edges.find((candidate) => candidate.from === from);
 
     expect(edge("classifyImplementation")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
-    expect(edge("classifyVerification")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
-    });
+    expect(edge("localVerification.blocked")).toMatchObject({ to: "createBlockerClaim" });
     expect(edge("repairReviewCommand")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
     expect(edge("routeInspectCommentsResult")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
     expect(edge("routeInspectCiResult")).toMatchObject({
-      switch: { cases: { unavailable: "challengeBlockerGuard" } },
+      switch: { cases: { unavailable: "createBlockerClaim" } },
     });
     expect(edge("repairCiCommand")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
     expect(edge("assessTrackedCi")).toMatchObject({
-      switch: { cases: { unavailable: "challengeBlockerGuard" } },
+      switch: { cases: { unavailable: "createBlockerClaim" } },
     });
     expect(edge("classifyCi")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
     expect(edge("routeFinalizeDeliveryResult")).toMatchObject({
-      switch: { cases: { blocked: "challengeBlockerGuard" } },
+      switch: { cases: { blocked: "createBlockerClaim" } },
     });
 
     expect(Object.hasOwn(autoimplementWorkflow.includes ?? {}, "approval")).toBe(false);
     expect(edge("redesign.blocked")).toMatchObject({ to: "blocked" });
-    expect(edge("documentation.blocked")).toMatchObject({ to: "blocked" });
+    expect(edge("documentation.blocked")).toMatchObject({ to: "createBlockerClaim" });
     expect(edge("challengeBlocker")).toMatchObject({
-      switch: { cases: { continue: "redesign", blocked: "blocked" } },
+      switch: { cases: { continue: "routeChallenge", blocked: "blocked" } },
     });
   });
 
@@ -1665,7 +1793,7 @@ describe("built-in autoimplement", () => {
     expect(active).toBe(0);
     expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(1);
     const updates = state.updates?.filter((update) => update.type === "command-batch.item") ?? [];
-    expect(updates).toHaveLength(3);
+    expect(updates).toHaveLength(2);
     expect(
       updates.every((update) => !("stdout" in update.data) && !("stderr" in update.data)),
     ).toBe(true);
@@ -1786,7 +1914,10 @@ describe("built-in autoimplement", () => {
             evidence: ["The current diff remains incomplete."],
           },
         },
-      );
+      )
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The bounded recovery limit is exhausted."),
+      });
     const engine = new WorkflowEngine({
       executor,
       databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-limit"),
@@ -1805,21 +1936,15 @@ describe("built-in autoimplement", () => {
     expect(state.steps.filter((step) => step.nodeId === "implement")).toHaveLength(4);
     expect(state.finalOutput).toMatchObject({
       evidence: {
-        evidence: {
-          attempts: 3,
-          limit: 3,
-          timeouts: [
-            { nodeId: "implement", error: "Timed out after 10ms" },
-            { nodeId: "implement", error: "Timed out after 10ms" },
-            { nodeId: "implement", error: "Timed out after 10ms" },
-            { nodeId: "implement", error: "Timed out after 10ms" },
-          ],
-        },
+        schema: "pi-workflows.blocker-claim.v1",
+        sourceNode: "timeoutFallbackGuard",
+        reason: expect.stringContaining("safety limit"),
       },
     });
+    expect(state.steps.filter((step) => step.nodeId === "challengeBlocker")).toHaveLength(1);
   });
 
-  it("keeps a fallback blocked result terminal and rejects stale forward routes", async () => {
+  it("challenges a fallback blocker and rejects stale forward routes", async () => {
     const executor = new ScriptedExecutor()
       .respond("implement", { hang: true })
       .respond("timeoutFallback", {
@@ -1828,6 +1953,9 @@ describe("built-in autoimplement", () => {
           reason: "No safe route exists.",
           evidence: ["Repository inspection found an unresolved conflict."],
         },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The unresolved conflict is outside current authority."),
       });
     const engine = new WorkflowEngine({
       executor,
@@ -1845,7 +1973,7 @@ describe("built-in autoimplement", () => {
     expect(state.finalOutput).toMatchObject({ status: "blocked", reason: "No safe route exists." });
     expect(
       executor.requests.some((request) => request.contract.nodeId === "challengeBlocker"),
-    ).toBe(false);
+    ).toBe(true);
 
     const fallback = autoimplementWorkflow.nodes.timeoutFallback;
     if (fallback?.nodeType !== "agent" || fallback.validate === undefined) {
@@ -1899,9 +2027,21 @@ describe("built-in autoimplement", () => {
     ).rejects.toThrow("without a current published head");
   });
 
-  it("keeps failed implementation and cancellation out of timeout fallback", async () => {
+  it("recovers ordinary implementation failures but keeps cancellation terminal", async () => {
+    const failedExecutor = new ScriptedExecutor()
+      .respond("implement", { error: "implementation failed" })
+      .respond("timeoutFallback", {
+        output: {
+          route: "blocked",
+          reason: "The failed mutation cannot be replayed safely.",
+          evidence: ["Repository inspection was inconclusive."],
+        },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The uncertain mutation is outside current authority."),
+      });
     const failedEngine = new WorkflowEngine({
-      executor: new ScriptedExecutor().respond("implement", { error: "implementation failed" }),
+      executor: failedExecutor,
       databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-failed"),
     });
     const failed = await failedEngine.run(autoimplementWorkflow, {
@@ -1910,9 +2050,12 @@ describe("built-in autoimplement", () => {
       repository,
       merge: false,
     });
-    expect(failed.state.status).toBe("failed");
-    expect(failed.state.error).toBe("implementation failed");
-    expect(failed.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
+    expect(failed.state.status).toBe("completed");
+    expect(failed.state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "The failed mutation cannot be replayed safely.",
+    });
+    expect(failed.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(true);
 
     const cancelledExecutor = new ScriptedExecutor().respond("implement", { hang: true });
     const cancelledEngine = new WorkflowEngine({
@@ -1932,16 +2075,87 @@ describe("built-in autoimplement", () => {
     expect(cancelled.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
   });
 
+  it("finishes authorized default-branch work without opening a pull request to itself", async () => {
+    await git(repository, ["switch", "main"]);
+    const prepared = {
+      ...preparedWorkspaceFor(),
+      mode: "defaultBranch" as const,
+      workBranch: "main",
+      directDefaultBranchAuthorized: true,
+    };
+    const verificationCheck = {
+      id: "verify",
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: repository,
+      timeoutMs: 10_000,
+      maxOutputChars: 100_000,
+      readOnly: true,
+      baseEligible: false,
+      changedFileScope: false,
+      findingFormat: "text" as const,
+    };
+    const executor = new ScriptedExecutor()
+      .respond("implement", {
+        output: {
+          status: "implemented",
+          summary: "done",
+          files: [],
+          repositories: [repository],
+          issueKind: null,
+          evidence: "done",
+        },
+      })
+      .respond("classifyImplementation", {
+        output: { route: "verify", summary: "ready", evidence: "done" },
+      })
+      .respond("planVerification", {
+        output: {
+          commands: [verificationCheck],
+          untested: [],
+        },
+      })
+      .respond("finalizeDefaultBranch", {
+        output: {
+          status: "completed",
+          committed: false,
+          pushed: false,
+          merged: false,
+          pr: "none",
+          reportComment: "Verified local change retained.",
+          reason: "No commit or push authority.",
+        },
+      });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-default-branch"),
+    });
+    const { state } = await engine.run(autoimplementWorkflow, {
+      task: "Verify direct default-branch work",
+      ...documentedPlan({ steps: ["verify"] }),
+      repository,
+      preparedWorkspace: prepared,
+      verificationChecks: [verificationCheck],
+      merge: false,
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "completed",
+      reviewRounds: [],
+      ci: { route: "notApplicable" },
+      delivery: { pr: "none", merged: false },
+    });
+    expect(executor.requests.some((request) => request.contract.nodeId === "publish")).toBe(false);
+  });
+
   it("uses the eight-hour implementation timeout and shared outcome routes", () => {
     expect(autoimplementWorkflow.nodes.implement?.timeoutMs).toBe(8 * 60 * 60_000);
     const compiled = compileWorkflowDefinition(autoimplementWorkflow);
     expect(
       compiled.edges.find((candidate) => candidate.from === "routeTimeoutFallback"),
-    ).toMatchObject({ switch: { cases: { blocked: "blocked" } } });
+    ).toMatchObject({ switch: { cases: { blocked: "createBlockerClaim" } } });
     for (const nodeId of [
       "implement",
       "planVerification",
-      "verify",
       "fix",
       "publish",
       "addressP2",
@@ -1957,7 +2171,7 @@ describe("built-in autoimplement", () => {
           on: "$result.outcome",
           cases: {
             timed_out: "timeoutFallbackGuard",
-            failed: "propagateSupportedFailure",
+            failed: "timeoutFallbackGuard",
           },
         },
       });

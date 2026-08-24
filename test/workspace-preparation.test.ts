@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import {
   inspectWorkspace,
   parsePreparedWorkspace,
+  parseWorkspacePreparationInput,
   prepareWorkspace,
+  validateBranchName,
   workspacePreparationWorkflow,
   type WorkspacePreparationInput,
 } from "../src/builtins/workspace-preparation.workflow.js";
@@ -41,6 +43,57 @@ async function run(input: WorkspacePreparationInput, executor = new ScriptedExec
 }
 
 describe("workspace preparation", () => {
+  it("validates workspace inputs and prepared receipts", () => {
+    expect(() => parseWorkspacePreparationInput(null)).toThrow(/object/);
+    expect(() => parseWorkspacePreparationInput({ repository: "relative" })).toThrow(/absolute/);
+    expect(() =>
+      parseWorkspacePreparationInput({ repository: "/tmp/demo", workspaceMode: "legacy" }),
+    ).toThrow(/workspaceMode/);
+    expect(() => parsePreparedWorkspace({ schema: "wrong" })).toThrow(/schema/);
+    const basePrepared = {
+      schema: "pi-workflows.prepared-workspace.v1",
+      mode: "branch",
+      repository: "/tmp/demo",
+      baseBranch: "main",
+      baseRevision: "abc",
+      workBranch: "feat/x",
+      directDefaultBranchAuthorized: false,
+      preExistingChangedPaths: [],
+      evidence: [],
+      scope: "Only /tmp/demo",
+    };
+    expect(() => parsePreparedWorkspace({ ...basePrepared, mode: "legacy" })).toThrow(/mode/);
+    expect(() =>
+      parsePreparedWorkspace({ ...basePrepared, directDefaultBranchAuthorized: "yes" }),
+    ).toThrow(/boolean/);
+    expect(() => parsePreparedWorkspace({ ...basePrepared, preExistingChangedPaths: [1] })).toThrow(
+      /preExistingChangedPaths/,
+    );
+    expect(() => parsePreparedWorkspace({ ...basePrepared, evidence: [1] })).toThrow(/evidence/);
+    expect(() => parsePreparedWorkspace({ ...basePrepared, scope: "" })).toThrow(/scope/);
+    expect(() =>
+      parsePreparedWorkspace({
+        schema: "pi-workflows.prepared-workspace.v1",
+        mode: "worktree",
+        repository: "/tmp/demo",
+        baseBranch: "main",
+        baseRevision: "abc",
+        workBranch: "feat/x",
+        directDefaultBranchAuthorized: false,
+        preExistingChangedPaths: [],
+        evidence: [],
+        scope: "Only /tmp/demo",
+      }),
+    ).toThrow(/worktreePath/);
+    expect(
+      parsePreparedWorkspace({
+        ...basePrepared,
+        mode: "worktree",
+        worktreePath: "/tmp/demo-worktrees/feat-x",
+      }),
+    ).toMatchObject({ mode: "worktree", worktreePath: "/tmp/demo-worktrees/feat-x" });
+  });
+
   it("adopts an existing non-default task branch", async () => {
     const repo = await repository("workspace-existing-branch");
     await git(repo, ["switch", "-c", "feat/current"]);
@@ -131,6 +184,63 @@ describe("workspace preparation", () => {
     );
     expect(result.route).toBe("blocked");
     expect(await git(repo, ["branch", "--show-current"])).toBe("main");
+  });
+
+  it("handles explicit worktree mode and rejects branch conflicts", async () => {
+    const repo = await repository("workspace-explicit-worktree");
+    const inspection = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      workspaceMode: "worktree",
+    });
+    const created = await prepareWorkspace(
+      { repository: repo, baseBranch: "main", workspaceMode: "worktree" },
+      inspection,
+      { branchName: "feat/explicit-worktree", reason: "Explicit isolation." },
+    );
+    expect(created.preparedWorkspace).toMatchObject({ mode: "worktree" });
+    await git(repo, ["worktree", "remove", "--force", created.preparedWorkspace!.worktreePath!]);
+    await git(repo, ["branch", "feat/existing"]);
+    await expect(validateBranchName(repo, "feat/existing", "main")).rejects.toThrow(/exists/);
+    await git(repo, ["update-ref", "refs/remotes/origin/feat/remote", "HEAD"]);
+    await expect(validateBranchName(repo, "feat/remote", "main")).rejects.toThrow(/exists/);
+  });
+
+  it("blocks dirty explicit branch mode and invalid repositories", async () => {
+    const repo = await repository("workspace-dirty-branch");
+    await fs.writeFile(path.join(repo, "dirty.txt"), "keep\n");
+    const dirty = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      workspaceMode: "branch",
+    });
+    expect(dirty).toMatchObject({ route: "blocked", preExistingChangedPaths: ["dirty.txt"] });
+    const invalid = await inspectWorkspace({
+      repository: path.join(repo, "missing"),
+      baseBranch: "main",
+    });
+    expect(invalid).toMatchObject({ route: "blocked", reason: "Workspace inspection failed." });
+  });
+
+  it("rejects a prepared workspace owned by another path", async () => {
+    const repo = await repository("workspace-wrong-prepared");
+    const prepared = {
+      schema: "pi-workflows.prepared-workspace.v1" as const,
+      mode: "branch" as const,
+      repository: "/tmp/other",
+      baseBranch: "main",
+      baseRevision: "abc",
+      workBranch: "feat/other",
+      directDefaultBranchAuthorized: false,
+      preExistingChangedPaths: [],
+      evidence: ["other"],
+      scope: "Only /tmp/other",
+    };
+    const result = await inspectWorkspace({ repository: repo, preparedWorkspace: prepared });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("does not own"),
+    });
   });
 
   it("adopts the same prepared workspace after restart", async () => {

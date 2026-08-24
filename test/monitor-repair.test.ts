@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
@@ -10,6 +12,7 @@ import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowNotificationRequest } from "../src/workflows/types.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
+const execFileAsync = promisify(execFile);
 let originalPath = "";
 let repository = "";
 
@@ -249,6 +252,13 @@ beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
   const commandDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-monitor-commands-"));
   repository = await makeTempDir("pi-workflows-monitor-repo");
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: repository });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repository });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
+  await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
+  await execFileAsync("git", ["add", "README.md"], { cwd: repository });
+  await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: repository });
+  await execFileAsync("git", ["switch", "-c", "feat/repair"], { cwd: repository });
   await fs.writeFile(path.join(commandDir, "pi-reviewer"), "#!/bin/sh\necho clean\n", {
     mode: 0o755,
   });
@@ -301,18 +311,26 @@ describe("monitor automatic repair", () => {
     expect(state.workflowSources?.map((item) => item.mountPath.join("/"))).toEqual([
       "implementation",
       "implementation/documentation",
+      "implementation/documentation/verification",
+      "implementation/documentation/workspace",
+      "implementation/localVerification",
       "implementation/redesign",
       "implementation/redesign/approval",
       "implementation/redesign/design",
       "implementation/redesign/design/blockedSummary",
       "implementation/redesign/design/readySummary",
       "implementation/redesign/documentation",
+      "implementation/redesign/documentation/verification",
+      "implementation/redesign/documentation/workspace",
+      "implementation/workspace",
       "planChange",
       "planChange/approval",
       "planChange/design",
       "planChange/design/blockedSummary",
       "planChange/design/readySummary",
       "planChange/documentation",
+      "planChange/documentation/verification",
+      "planChange/documentation/workspace",
     ]);
     expect(state.definitionDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });

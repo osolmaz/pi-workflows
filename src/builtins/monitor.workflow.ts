@@ -795,6 +795,11 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
         const request = actionFrom(outputs);
         const documented = currentRepairPlan(outputs);
         if (request.kind !== "repair") throw new Error("monitor repair action is missing");
+        if (request.authority.repository === undefined) {
+          throw new Error(
+            "monitor repair requires an absolute repository for workspace preparation",
+          );
+        }
         const implementationInput: AutoimplementInput = {
           task: request.nextAction,
           plan: documented.plan,
@@ -805,9 +810,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
           },
           scope: authorityScope(request),
           constraints: authorityConstraints(request),
-          ...(request.authority.repository !== undefined
-            ? { repository: request.authority.repository }
-            : {}),
+          repository: request.authority.repository,
           ...(request.authority.baseBranch !== undefined
             ? { baseBranch: request.authority.baseBranch }
             : {}),
