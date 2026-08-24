@@ -872,11 +872,8 @@ function parsePublishedForContext(
   if (result.repositories[0]?.repository !== expected) {
     throw new Error(`publication repository must match the prepared workspace: ${expected}`);
   }
-  if (
-    workspace.worktreePath !== undefined &&
-    result.repositories.some((repository) => repository.repository !== expected)
-  ) {
-    throw new Error("worktree publication cannot include an unprepared repository");
+  if (result.repositories.some((repository) => repository.repository !== expected)) {
+    throw new Error("publication cannot include an unprepared repository");
   }
   return result;
 }

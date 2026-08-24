@@ -396,6 +396,18 @@ describe("built-in autoimplement", () => {
     };
     const publicationRecord = published().repositories[0]!;
     await expect(
+      validate("publish", {
+        repositories: [
+          publicationRecord,
+          {
+            ...publicationRecord,
+            repository: path.join(repository, "unprepared"),
+            pr: "https://example.test/pr/2",
+          },
+        ],
+      }),
+    ).rejects.toThrow("cannot include an unprepared repository");
+    await expect(
       validate("publish", published(), {
         input: {
           task: "demo",
@@ -1788,7 +1800,7 @@ describe("built-in autoimplement", () => {
     expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(2);
   });
 
-  it("runs independent repository reviews in a bounded parallel batch", async () => {
+  it("rejects publication of an unprepared second repository before review", async () => {
     const secondRepository = await makeTempDir("pi-workflows-autoimplement-second-repo");
     const eventsPath = path.join(commandDir, "review-events.log");
     await installCommand(
@@ -1816,6 +1828,16 @@ describe("built-in autoimplement", () => {
       ],
     };
     const executor = commonExecutor(publication)
+      .respond("timeoutFallback", {
+        output: {
+          route: "blocked",
+          reason: "Publication included an unprepared repository.",
+          evidence: ["The second repository did not match the prepared workspace."],
+        },
+      })
+      .respond("challengeBlocker", {
+        output: confirmedChallenge("The publication scope mismatch cannot proceed safely."),
+      })
       .respond("assessReview", {
         output: {
           repositories: [repository, secondRepository].map((cwd) => ({
@@ -1893,22 +1915,12 @@ describe("built-in autoimplement", () => {
       concurrency: { reviewer: 2 },
       merge: false,
     });
-    expect(state.status, state.error).toBe("completed");
-    const events = (await fs.readFile(eventsPath, "utf8")).trim().split("\n");
-    let active = 0;
-    let maximum = 0;
-    for (const event of events) {
-      active += event.startsWith("start ") ? 1 : -1;
-      maximum = Math.max(maximum, active);
-    }
-    expect(maximum).toBe(2);
-    expect(active).toBe(0);
-    expect(state.steps.filter((step) => step.nodeId === "runReview")).toHaveLength(1);
-    const updates = state.updates?.filter((update) => update.type === "command-batch.item") ?? [];
-    expect(updates).toHaveLength(2);
-    expect(
-      updates.every((update) => !("stdout" in update.data) && !("stderr" in update.data)),
-    ).toBe(true);
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({
+      status: "blocked",
+      reason: "Publication included an unprepared repository.",
+    });
+    expect(state.steps.some((step) => step.nodeId === "runReview")).toBe(false);
   });
 
   it("routes a timed-out implementation through the shared fallback", async () => {
