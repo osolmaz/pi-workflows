@@ -560,7 +560,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   };
   let activeRun: ActiveRun | null = null;
   let systemTurnAbort: { contract: AgentStepContract; intentId?: string } | null = null;
-  let suppressWorkflowAssistantTail = false;
   let lastExpiredAttempt: { contract: AgentStepContract; reason: string } | null = null;
   // The interactive run currently parked at a checkpoint, if any.
   let lastWaitingRunId: string | null = null;
@@ -999,7 +998,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
           resolution: "presentation",
           send: (turnIntentId) => {
             presentationPending = run.generation;
-            suppressWorkflowAssistantTail = false;
             pi.sendMessage(
               {
                 customType: PRESENTATION_MESSAGE_TYPE,
@@ -2916,7 +2914,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
           if (!result.accepted) {
             throw new Error(result.message);
           }
-          suppressWorkflowAssistantTail = true;
           return {
             content: [{ type: "text", text: result.message }],
             details: { action: "submit", step: params.step, accepted: true },
@@ -2994,7 +2991,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
-    suppressWorkflowAssistantTail = false;
     if (!activeRun && presentationPending === null && presentationAbort) {
       // A normal user turn started while an async presentation prompt was
       // still resolving. The user's new request supersedes that old result.
@@ -3005,7 +3001,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (event, ctx) => {
-    suppressWorkflowAssistantTail = false;
     const aborted = event.messages.some(
       (message) =>
         typeof message === "object" &&
@@ -3057,14 +3052,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
   });
 
   pi.on("message_end", (event) => {
-    if (suppressWorkflowAssistantTail && event.message.role === "assistant") {
-      const message = {
-        ...event.message,
-        content: event.message.content.filter((part) => part.type !== "text"),
-      };
-      activeRun?.recorder?.handleMessageEnd({ ...event, message });
-      return { message };
-    }
     activeRun?.recorder?.handleMessageEnd(event);
   });
 
@@ -3127,7 +3114,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     sessionClosed = true;
     herdrProbeGeneration += 1;
     systemTurnAbort = null;
-    suppressWorkflowAssistantTail = false;
     turnCoordinator.clearDeferred();
     supersedePresentation();
     const run = activeRun;

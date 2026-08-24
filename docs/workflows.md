@@ -684,7 +684,7 @@ possible. Defaults worth knowing:
   is explicit user control. When no run is live but the widget still shows a parked or finished run,
   the command clears the widget.
 - One workflow runs per session at a time.
-- After the workflow tool accepts an agent-step submission, the extension removes any assistant tail text from the rest of that agent run. The next workflow message is the visible continuation. A deferred intent makes a workflow prompt, presentation, and factual fallback compete to provide one successor turn, so an abort cannot produce two continuation turns.
+- After the workflow tool accepts an agent-step submission, any assistant text that follows remains visible. The next workflow message continues the graph. A deferred intent makes a workflow prompt, presentation, and factual fallback compete to provide one successor turn, so an abort cannot produce two continuation turns.
 - Agent nudges: if the model ends its turn without submitting the pending
   step, it gets a reminder, twice by default, then the step fails.
 
