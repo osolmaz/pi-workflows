@@ -317,6 +317,7 @@ describe("built-in autoimplement", () => {
     const parseInput = autoimplementWorkflow.input;
     if (parseInput === undefined) throw new Error("autoimplement input parser is missing");
     expect(() => parseInput({ task: "demo" })).toThrow(/repository/);
+    expect(() => parseInput({ task: "demo", repository: "relative" })).toThrow(/absolute/);
     expect(
       await parseInput({
         task: "demo",
