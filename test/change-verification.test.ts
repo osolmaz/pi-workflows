@@ -382,8 +382,80 @@ describe("change verification", () => {
           summary: expect.stringContaining("outside.txt"),
         },
       ],
-      repairAttempts: [{ kind: "mechanical" }],
+      repairAttempts: [
+        {
+          kind: "mechanical",
+          result: expect.stringContaining("restored all undeclared paths"),
+        },
+      ],
     });
+    await expect(fs.readFile(path.join(repository, "outside.txt"), "utf8")).resolves.toBe(
+      "user work\n",
+    );
+    await expect(fs.readFile(path.join(repository, "doc.txt"), "utf8")).resolves.toBe("good\n");
+  });
+
+  it("restores every supported undeclared path state after a rejected fixer", async () => {
+    const { repository, workspace } = await fixture("change-verification-fixer-restoration");
+    await fs.writeFile(path.join(repository, "doc.txt"), "good\n");
+    await fs.writeFile(path.join(repository, "outside.txt"), "base\n");
+    await fs.writeFile(path.join(repository, "executable.sh"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    await fs.writeFile(path.join(repository, "deleted.txt"), "delete me\n");
+    await git(repository, ["add", "doc.txt", "outside.txt", "executable.sh", "deleted.txt"]);
+    await git(repository, ["commit", "-m", "restoration baseline"]);
+    workspace.baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+    await fs.writeFile(path.join(repository, "doc.txt"), "bad\n");
+    await fs.rm(path.join(repository, "deleted.txt"));
+    await fs.symlink("outside.txt", path.join(repository, "outside-link.txt"));
+    const source =
+      'const fs=require("fs"); if(fs.readFileSync("doc.txt","utf8").trim()!=="good"){process.exit(1)}';
+    const fixer = [
+      'const fs=require("fs")',
+      'fs.writeFileSync("doc.txt","good\\n")',
+      'fs.writeFileSync("outside.txt","overwritten\\n")',
+      'fs.writeFileSync("executable.sh","broken\\n")',
+      'fs.chmodSync("executable.sh",0o644)',
+      'fs.writeFileSync("created.txt","created\\n")',
+      'fs.unlinkSync("outside-link.txt")',
+      'fs.writeFileSync("outside-link.txt","not a link\\n")',
+      'fs.writeFileSync("deleted.txt","recreated\\n")',
+    ].join(";");
+    const { state } = await run({
+      originatingWorkflow: "autodoc",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(repository, source, {
+          command: process.execPath,
+          args: ["-e", fixer],
+          files: ["doc.txt"],
+          timeoutMs: 10_000,
+          maxOutputChars: 100_000,
+          expectedDiff: "doc.txt formatted",
+        }),
+      ],
+      changedFiles: ["doc.txt"],
+    });
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      repairAttempts: [
+        {
+          result: expect.stringContaining("restored all undeclared paths"),
+        },
+      ],
+    });
+    await expect(fs.readFile(path.join(repository, "outside.txt"), "utf8")).resolves.toBe("base\n");
+    await expect(fs.readFile(path.join(repository, "executable.sh"), "utf8")).resolves.toBe(
+      "#!/bin/sh\nexit 0\n",
+    );
+    expect((await fs.stat(path.join(repository, "executable.sh"))).mode & 0o777).toBe(0o755);
+    expect((await fs.lstat(path.join(repository, "outside-link.txt"))).isSymbolicLink()).toBe(true);
+    expect(await fs.readlink(path.join(repository, "outside-link.txt"))).toBe("outside.txt");
+    await expect(fs.access(path.join(repository, "created.txt"))).rejects.toThrow();
+    await expect(fs.access(path.join(repository, "deleted.txt"))).rejects.toThrow();
+    await expect(fs.readFile(path.join(repository, "doc.txt"), "utf8")).resolves.toBe("good\n");
   });
 
   it("classifies complete direct evidence across related and unknown routes", () => {

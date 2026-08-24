@@ -46,6 +46,12 @@ describe("workspace preparation", () => {
   it("validates workspace inputs and prepared receipts", () => {
     expect(() => parseWorkspacePreparationInput(null)).toThrow(/object/);
     expect(() => parseWorkspacePreparationInput({ repository: "relative" })).toThrow(/absolute/);
+    expect(
+      parseWorkspacePreparationInput({
+        repository: "/tmp/demo",
+        directDefaultBranchAuthorized: true,
+      }),
+    ).toMatchObject({ directDefaultBranchAuthorized: true });
     expect(() =>
       parseWorkspacePreparationInput({ repository: "/tmp/demo", workspaceMode: "legacy" }),
     ).toThrow(/workspaceMode/);
@@ -199,7 +205,18 @@ describe("workspace preparation", () => {
       { branchName: "feat/explicit-worktree", reason: "Explicit isolation." },
     );
     expect(created.preparedWorkspace).toMatchObject({ mode: "worktree" });
-    await git(repo, ["worktree", "remove", "--force", created.preparedWorkspace!.worktreePath!]);
+    const prepared = parsePreparedWorkspace(created.preparedWorkspace);
+    const adopted = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      preparedWorkspace: prepared,
+    });
+    expect(adopted).toMatchObject({
+      route: "ready",
+      selectedMode: "worktree",
+      currentBranch: "feat/explicit-worktree",
+    });
+    await git(repo, ["worktree", "remove", "--force", prepared.worktreePath!]);
     await git(repo, ["branch", "feat/existing"]);
     await expect(validateBranchName(repo, "feat/existing", "main")).rejects.toThrow(/exists/);
     await git(repo, ["update-ref", "refs/remotes/origin/feat/remote", "HEAD"]);
@@ -260,5 +277,106 @@ describe("workspace preparation", () => {
     });
     expect(second.route).toBe("ready");
     expect(second.preparedWorkspace).toEqual(prepared);
+  });
+
+  it("rejects a prepared workspace after its task branch changes", async () => {
+    const repo = await repository("workspace-stale-branch");
+    await git(repo, ["switch", "-c", "feat/recorded"]);
+    const first = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      workspaceMode: "auto",
+    });
+    const prepared = parsePreparedWorkspace(first.preparedWorkspace);
+    await git(repo, ["switch", "-c", "feat/other"]);
+    const result = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      preparedWorkspace: prepared,
+    });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("recorded task branch"),
+      currentBranch: "feat/other",
+    });
+  });
+
+  it("rejects a prepared workspace with a different requested base", async () => {
+    const repo = await repository("workspace-base-mismatch");
+    await git(repo, ["switch", "-c", "feat/recorded"]);
+    const first = await inspectWorkspace({ repository: repo, baseBranch: "main" });
+    const prepared = parsePreparedWorkspace(first.preparedWorkspace);
+    const result = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "release",
+      preparedWorkspace: prepared,
+    });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("different base branch"),
+    });
+  });
+
+  it("rejects a prepared default-branch receipt without retained authority", async () => {
+    const repo = await repository("workspace-default-receipt-authority");
+    const first = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      workspaceMode: "defaultBranch",
+      directDefaultBranchAuthorized: true,
+    });
+    const prepared = {
+      ...parsePreparedWorkspace(first.preparedWorkspace),
+      directDefaultBranchAuthorized: false,
+    };
+    const result = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      preparedWorkspace: prepared,
+    });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("direct-work authority"),
+    });
+  });
+
+  it("rejects a prepared path that is only a directory inside the worktree", async () => {
+    const repo = await repository("workspace-nested-receipt");
+    await git(repo, ["switch", "-c", "feat/recorded"]);
+    const first = await inspectWorkspace({ repository: repo, baseBranch: "main" });
+    const nested = path.join(repo, "nested");
+    await fs.mkdir(nested);
+    const prepared = {
+      ...parsePreparedWorkspace(first.preparedWorkspace),
+      repository: nested,
+    };
+    const result = await inspectWorkspace({ repository: nested, preparedWorkspace: prepared });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: expect.stringContaining("no longer names its Git worktree"),
+    });
+  });
+
+  it("rejects a prepared workspace when its recorded base revision is unavailable", async () => {
+    const repo = await repository("workspace-stale-base");
+    await git(repo, ["switch", "-c", "feat/recorded"]);
+    const first = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      workspaceMode: "auto",
+    });
+    const prepared = {
+      ...parsePreparedWorkspace(first.preparedWorkspace),
+      baseRevision: "0000000000000000000000000000000000000000",
+    };
+    const result = await inspectWorkspace({
+      repository: repo,
+      baseBranch: "main",
+      preparedWorkspace: prepared,
+    });
+    expect(result).toMatchObject({
+      route: "blocked",
+      reason: "The supplied prepared workspace is stale or unavailable.",
+    });
   });
 });
