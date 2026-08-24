@@ -549,7 +549,11 @@ describe.sequential("pi-workflows end to end", () => {
     // workflow tool and ends its turn after each tool result.
     mock = await startMockOpenAiServer(
       ({ messages, lastUserText, lastRole }) => {
-        if (lastUserText.includes("Verify and combine the Sanity Check reviews.")) {
+        if (
+          lastUserText.includes(
+            "Check the review claims against the collected evidence and combine the supported findings into one result.",
+          )
+        ) {
           return {
             kind: "text",
             text: JSON.stringify({
@@ -573,7 +577,7 @@ describe.sequential("pi-workflows end to end", () => {
             }),
           };
         }
-        if (lastUserText.includes("Review the contribution in the current repository.")) {
+        if (lastUserText.includes("Review the change in the current repository.")) {
           const requested = ["necessity", "duplication", "contracts", "scope_tests"].filter(
             (area) => lastUserText.includes(area),
           );
@@ -598,7 +602,9 @@ describe.sequential("pi-workflows end to end", () => {
             }),
           };
         }
-        if (lastUserText.includes("Show the full verified Sanity Check report")) {
+        if (
+          lastUserText.includes("Print the verified Sanity Check report below exactly as written")
+        ) {
           return { kind: "text", text: SANITY_DETAILED_RESPONSE };
         }
         if (
@@ -1894,7 +1900,7 @@ describe.sequential("pi-workflows end to end", () => {
       45_000,
     );
     expect(state.status, state.error).toBe("completed");
-    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "5" });
+    expect(state.workflowSource).toEqual({ kind: "builtin", id: "sanity-check", revision: "6" });
     expect(state.outputs.verify).toMatchObject({ verdict: "keep" });
     expect(state.outputs.review).toHaveLength(1);
     expect(state.outputs.detailedReport).toBe(SANITY_DETAILED_RESPONSE);
@@ -1925,7 +1931,7 @@ describe.sequential("pi-workflows end to end", () => {
         .slice(requestsBefore)
         .filter(({ messages }) =>
           JSON.stringify(messages).match(
-            /Review the contribution in the current repository|Verify and combine the Sanity Check reviews/u,
+            /Review the change in the current repository|Check the review claims against the collected evidence/u,
           ),
         ),
     ).toHaveLength(2);

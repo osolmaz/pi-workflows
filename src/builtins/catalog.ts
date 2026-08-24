@@ -8,12 +8,12 @@ import planApprovalWorkflow from "./plan-approval.workflow.js";
 import sanityCheckWorkflow from "./sanity-check.workflow.js";
 
 export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
-  { id: "plain-summary", revision: "2", definition: plainSummaryWorkflow },
-  { id: "autoplan", revision: "3", definition: autoplanWorkflow },
+  { id: "plain-summary", revision: "3", definition: plainSummaryWorkflow },
+  { id: "autoplan", revision: "4", definition: autoplanWorkflow },
   { id: "autodoc", revision: "2", definition: autodocWorkflow },
   { id: "autoimplement", revision: "10", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "4", definition: planApprovalWorkflow },
-  { id: "sanity-check", revision: "5", definition: sanityCheckWorkflow },
+  { id: "sanity-check", revision: "6", definition: sanityCheckWorkflow },
   {
     id: "monitor",
     revision: "11",

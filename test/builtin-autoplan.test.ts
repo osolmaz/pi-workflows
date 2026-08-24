@@ -131,6 +131,17 @@ describe("built-in autoplan", () => {
       planDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       previousPlanDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
+    const prompts = new Map(
+      executor.requests.map((request) => [request.contract.nodeId, request.prompt]),
+    );
+    expect(prompts.get("frame")).toContain("State the goal and describe what success looks like");
+    expect(prompts.get("propose")).toContain("Give two to four practical options");
+    expect(prompts.get("ideal")).toContain("Describe the best possible end state");
+    expect(prompts.get("choose")).toContain("Select one option");
+    expect(prompts.get("plan")).toContain("plan that another engineer can implement");
+    expect([...prompts.values()].join("\n")).not.toMatch(
+      /holy grail|materially equivalent|implementation-ready/u,
+    );
     expect(autoplanWorkflow.presentationPrompt).toBeUndefined();
     expect(
       executor.requests.filter((request) => request.contract.completion === "assistant"),
