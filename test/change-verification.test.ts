@@ -155,6 +155,19 @@ describe("change verification", () => {
         originatingWorkflow: "autodoc",
         qualifiedNode: "verify",
         workspace,
+        checks: [
+          {
+            ...base,
+            args: ["-e", "process.exit(0)", `--project=${path.join(repository, "tsconfig.json")}`],
+          },
+        ],
+      }),
+    ).toThrow(/must not reference the prepared workspace/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
         checks: [{ ...base, findingFormat: "xml" }],
       }),
     ).toThrow(/findingFormat/);

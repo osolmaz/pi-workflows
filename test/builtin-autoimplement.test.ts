@@ -958,6 +958,7 @@ describe("built-in autoimplement", () => {
           plan: { old: true },
           repository,
           preparedWorkspace: preparedWorkspaceFor(),
+          directDefaultBranchAuthorized: true,
         },
         outputs: {},
         results: {},
@@ -965,6 +966,16 @@ describe("built-in autoimplement", () => {
         signal: new AbortController().signal,
         ...overrides,
       }) as never;
+
+    const documentation = autoimplementWorkflow.includes?.documentation;
+    if (documentation?.input === undefined) {
+      throw new Error("documentation input mapper is missing");
+    }
+    expect(await documentation.input(makeContext())).toMatchObject({
+      task: "demo",
+      plan: { old: true },
+      directDefaultBranchAuthorized: true,
+    });
 
     const redesign = autoimplementWorkflow.includes?.redesign;
     if (redesign?.input === undefined) throw new Error("redesign input mapper is missing");
@@ -986,6 +997,7 @@ describe("built-in autoimplement", () => {
       task: "demo",
       scope: "repo",
       constraints: ["safe"],
+      directDefaultBranchAuthorized: true,
       previousPlan: { revised: true },
       newEvidence: { route: "redesign", evidence: "new failure" },
       approval: { mode: "auto", audience: "operator", timeoutMinutes: 10 },

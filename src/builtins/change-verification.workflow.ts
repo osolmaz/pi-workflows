@@ -184,6 +184,14 @@ function parseCheck(
   }
   if (record.baseEligible === true && record.readOnly !== true)
     throw new Error(`verification checks[${index}] base comparison requires readOnly=true`);
+  if (
+    record.baseEligible === true &&
+    batch.args.some((arg) => arg.includes(path.resolve(candidateRoot)))
+  ) {
+    throw new Error(
+      `verification checks[${index}] base comparison arguments must not reference the prepared workspace`,
+    );
+  }
   if (record.findingFormat !== "text" && record.findingFormat !== "json")
     throw new Error(`verification checks[${index}].findingFormat must be text or json`);
   return {

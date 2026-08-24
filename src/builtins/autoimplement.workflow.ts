@@ -1325,6 +1325,9 @@ export const autoimplementWorkflow = defineWorkflow({
           ...(request.repository !== undefined ? { repository: request.repository } : {}),
           ...(request.baseBranch !== undefined ? { baseBranch: request.baseBranch } : {}),
           ...(request.scope !== undefined ? { scope: request.scope } : {}),
+          ...(request.directDefaultBranchAuthorized === undefined
+            ? {}
+            : { directDefaultBranchAuthorized: request.directDefaultBranchAuthorized }),
           preparedWorkspace: preparedWorkspace(context),
           ...(request.verificationChecks === undefined
             ? {}
@@ -1371,6 +1374,9 @@ export const autoimplementWorkflow = defineWorkflow({
           ...(request.constraints !== undefined ? { constraints: request.constraints } : {}),
           repository: request.repository,
           preparedWorkspace: preparedWorkspace(context),
+          ...(request.directDefaultBranchAuthorized === undefined
+            ? {}
+            : { directDefaultBranchAuthorized: request.directDefaultBranchAuthorized }),
           ...(request.verificationChecks === undefined
             ? {}
             : { verificationChecks: request.verificationChecks }),
