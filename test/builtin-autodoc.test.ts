@@ -50,12 +50,39 @@ async function prepared(): Promise<PreparedWorkspace> {
   };
 }
 
+async function preparedWorktree(): Promise<PreparedWorkspace> {
+  const repository = await makeTempDir("autodoc-prepared-owner");
+  const worktreePath = await makeTempDir("autodoc-prepared-worktree");
+  await fs.rm(worktreePath, { recursive: true });
+  await git(repository, ["init", "-b", "main"]);
+  await git(repository, ["config", "user.name", "Test"]);
+  await git(repository, ["config", "user.email", "test@example.com"]);
+  await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
+  await git(repository, ["add", "README.md"]);
+  await git(repository, ["commit", "-m", "fixture"]);
+  const baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+  await git(repository, ["worktree", "add", "-b", "feat/docs-worktree", worktreePath, "main"]);
+  return {
+    schema: PREPARED_WORKSPACE_SCHEMA,
+    mode: "worktree",
+    repository,
+    worktreePath,
+    baseBranch: "main",
+    baseRevision,
+    workBranch: "feat/docs-worktree",
+    directDefaultBranchAuthorized: false,
+    preExistingChangedPaths: [],
+    evidence: ["prepared worktree by test"],
+    scope: `Only ${repository}`,
+  };
+}
+
 function check(workspace: PreparedWorkspace, pass = true): VerificationCheck {
   return {
     id: "docs",
     command: process.execPath,
     args: ["-e", `process.exit(${pass ? 0 : 1})`],
-    cwd: workspace.repository,
+    cwd: workspace.worktreePath ?? workspace.repository,
     timeoutMs: 10_000,
     maxOutputChars: 100_000,
     readOnly: true,
@@ -161,6 +188,36 @@ describe("built-in autodoc", () => {
       "inspectDocumentation",
       "updateDocumentation",
     ]);
+  });
+
+  it("adopts a prepared worktree without a redundant repository input", async () => {
+    const workspace = await preparedWorktree();
+    const executor = new ScriptedExecutor()
+      .respond("inspectDocumentation", {
+        output: {
+          route: "update",
+          files: ["docs/spec.md"],
+          reason: "The plan changed.",
+          evidence: "stale digest",
+        },
+      })
+      .respond("updateDocumentation", {
+        output: {
+          updated: true,
+          files: ["docs/spec.md"],
+          digests: { "docs/spec.md": "sha256:new" },
+          summary: "Recorded the selected plan.",
+        },
+      });
+    const { state } = await run(executor, {
+      task: "implement feature",
+      plan: { steps: ["one"] },
+      preparedWorkspace: workspace,
+      verificationChecks: [check(workspace)],
+    });
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ status: "ready", workspace });
+    await git(workspace.repository, ["worktree", "remove", "--force", workspace.worktreePath!]);
   });
 
   it("finds an existing plan from context without devising one", async () => {

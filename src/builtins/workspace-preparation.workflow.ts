@@ -157,13 +157,21 @@ async function changedPaths(repository: string): Promise<string[]> {
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     { cwd: repository, encoding: "utf8", maxBuffer: 2_000_000, timeout: 30_000 },
   );
-  const output = status.stdout;
-  if (output.length === 0) return [];
-  return output
-    .split("\0")
-    .filter(Boolean)
-    .map((entry) => entry.slice(3))
-    .sort();
+  const entries = status.stdout.split("\0").filter(Boolean);
+  const files: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const statusCode = entry.slice(0, 2);
+    files.push(entry.slice(3));
+    if (
+      (statusCode.includes("R") || statusCode.includes("C")) &&
+      entries[index + 1] !== undefined
+    ) {
+      files.push(entries[index + 1]!);
+      index += 1;
+    }
+  }
+  return [...new Set(files)].sort();
 }
 
 function workspaceScope(input: WorkspacePreparationInput): string {

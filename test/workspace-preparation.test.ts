@@ -142,8 +142,9 @@ describe("workspace preparation", () => {
     expect(await git(repo, ["branch", "--show-current"])).toBe("feat/change-checks");
   });
 
-  it("creates a standard sibling worktree when the default checkout is dirty", async () => {
+  it("creates a standard sibling worktree and records both paths of a dirty rename", async () => {
     const repo = await repository("workspace-dirty-default");
+    await git(repo, ["mv", "README.md", "RENAMED.md"]);
     await fs.writeFile(path.join(repo, "notes.txt"), "keep\n");
     const executor = new ScriptedExecutor().respond("propose", {
       output: { branchName: "feat/isolated", reason: "Keep shared work isolated." },
@@ -157,7 +158,7 @@ describe("workspace preparation", () => {
     expect(result.worktreePath).toBe(
       path.join(path.dirname(repo), "demo-worktrees", "feat-isolated"),
     );
-    expect(result.preExistingChangedPaths).toEqual(["notes.txt"]);
+    expect(result.preExistingChangedPaths).toEqual(["README.md", "RENAMED.md", "notes.txt"]);
     await expect(fs.readFile(path.join(repo, "notes.txt"), "utf8")).resolves.toBe("keep\n");
     await git(repo, ["worktree", "remove", "--force", result.worktreePath!]);
   });
