@@ -385,6 +385,59 @@ describe("built-in autoimplement", () => {
       headRevision: "abc123",
       pr: "https://example.test/pr/1",
     };
+    const preparedWorktree = path.join(repository, "prepared-worktree");
+    const worktreeWorkspace = {
+      ...preparedWorkspaceFor(),
+      mode: "worktree" as const,
+      worktreePath: preparedWorktree,
+    };
+    const publicationRecord = published().repositories[0]!;
+    await expect(
+      validate("publish", published(), {
+        input: {
+          task: "demo",
+          plan: {},
+          repository,
+          preparedWorkspace: worktreeWorkspace,
+        },
+      }),
+    ).rejects.toThrow("must match the prepared workspace");
+    await expect(
+      validate(
+        "publish",
+        {
+          repositories: [{ ...publicationRecord, repository: preparedWorktree }],
+        },
+        {
+          input: {
+            task: "demo",
+            plan: {},
+            repository,
+            preparedWorkspace: worktreeWorkspace,
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ repositories: [{ repository: preparedWorktree }] });
+    await expect(
+      validate(
+        "publish",
+        {
+          repositories: [
+            { ...publicationRecord, repository: preparedWorktree },
+            { ...publicationRecord, repository, pr: "https://example.test/pr/2" },
+          ],
+        },
+        {
+          input: {
+            task: "demo",
+            plan: {},
+            repository,
+            preparedWorkspace: worktreeWorkspace,
+          },
+        },
+      ),
+    ).rejects.toThrow("cannot include an unprepared repository");
+
     const reviewSelection = {
       route: "run",
       repositories: [normalizedPublished],
