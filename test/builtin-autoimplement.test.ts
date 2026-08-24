@@ -835,18 +835,28 @@ describe("built-in autoimplement", () => {
         },
         {
           input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
-          outputs: { implement: { repositories: [repository] } },
         },
       ),
-    ).rejects.toThrow("was not reported by implementation");
+    ).rejects.toThrow("must match the prepared workspace");
     await expect(
-      validate("planVerification", safeVerification, {
-        input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
-        outputs: {
-          implement: { repositories: [repository, path.join(repository, "second")] },
+      validate(
+        "planVerification",
+        {
+          ...safeVerification,
+          commands: [
+            safeVerification.commands[0]!,
+            {
+              ...safeVerification.commands[0]!,
+              id: "verify-second",
+              cwd: path.join(repository, "second"),
+            },
+          ],
         },
-      }),
-    ).rejects.toThrow("missing reported repositories");
+        {
+          input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
+        },
+      ),
+    ).rejects.toThrow("exactly one prepared-workspace command");
     await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
     ).rejects.toThrow("one of retry, blocked");
@@ -2079,7 +2089,7 @@ describe("built-in autoimplement", () => {
     expect(cancelled.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(false);
   });
 
-  it("finishes authorized default-branch work without opening a pull request to itself", async () => {
+  it("recovers timed-out default-branch delivery without opening a pull request", async () => {
     await git(repository, ["switch", "main"]);
     const prepared = {
       ...preparedWorkspaceFor(),
@@ -2119,22 +2129,33 @@ describe("built-in autoimplement", () => {
           untested: [],
         },
       })
-      .respond("finalizeDefaultBranch", {
+      .respond(
+        "finalizeDefaultBranch",
+        { hang: true },
+        {
+          output: {
+            status: "completed",
+            committed: false,
+            pushed: false,
+            merged: false,
+            pr: "none",
+            reportComment: "Verified local change retained.",
+            reason: "No commit or push authority.",
+          },
+        },
+      )
+      .respond("timeoutFallback", {
         output: {
-          status: "completed",
-          committed: false,
-          pushed: false,
-          merged: false,
-          pr: "none",
-          reportComment: "Verified local change retained.",
-          reason: "No commit or push authority.",
+          route: "retry",
+          reason: "Default-branch delivery needs a verified retry.",
+          evidence: ["The repository still has the verified local change and no new commit."],
         },
       });
     const engine = new WorkflowEngine({
       executor,
       databasePath: await makeStateDatabasePath("autoimplement-default-branch"),
     });
-    const { state } = await engine.run(autoimplementWorkflow, {
+    const { state } = await engine.run(autoimplementWithTimeout("finalizeDefaultBranch", 20), {
       task: "Verify direct default-branch work",
       ...documentedPlan({ steps: ["verify"] }),
       repository,
@@ -2149,6 +2170,12 @@ describe("built-in autoimplement", () => {
       delivery: { pr: "none", merged: false },
     });
     expect(executor.requests.some((request) => request.contract.nodeId === "publish")).toBe(false);
+    expect(
+      state.steps
+        .filter((step) => step.nodeId === "finalizeDefaultBranch")
+        .map((step) => step.outcome),
+    ).toEqual(["timed_out", "ok"]);
+    expect(state.steps.filter((step) => step.nodeId === "timeoutFallback")).toHaveLength(1);
   });
 
   it("uses the eight-hour implementation timeout and shared outcome routes", () => {
@@ -2167,6 +2194,7 @@ describe("built-in autoimplement", () => {
       "inspectComments",
       "inspectCi",
       "opportunisticTest",
+      "finalizeDefaultBranch",
       "finalizeDelivery",
     ]) {
       const edge = compiled.edges.find((candidate) => candidate.from === nodeId);

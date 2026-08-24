@@ -173,6 +173,7 @@ const TIMEOUT_FALLBACK_SOURCES = [
   "inspectComments",
   "inspectCi",
   "opportunisticTest",
+  "finalizeDefaultBranch",
   "finalizeDelivery",
 ] as const;
 
@@ -192,6 +193,7 @@ const TIMEOUT_FALLBACK_ROUTES: Record<TimeoutFallbackSource, readonly TimeoutFal
   inspectComments: ["retry", "review", "ci", "replan", "blocked"],
   inspectCi: ["retry", "ci", "deliver", "replan", "blocked"],
   opportunisticTest: ["retry", "ci", "deliver", "replan", "blocked"],
+  finalizeDefaultBranch: ["retry", "replan", "blocked"],
   finalizeDelivery: ["retry", "deliver", "replan", "blocked"],
 };
 
@@ -837,24 +839,12 @@ function parseVerificationForContext(
   context: WorkflowNodeContext,
 ): VerificationCommandPlan {
   const plan = parseVerificationCommandPlan(value);
-  const implementation = latestOutput<Record<string, unknown>>(context, ["implement"]);
-  const reported = Array.isArray(implementation.repositories)
-    ? implementation.repositories.filter((entry): entry is string => typeof entry === "string")
-    : [];
-  const root = preparedWorkspace(context).worktreePath ?? preparedWorkspace(context).repository;
-  const roots = new Set(
-    (reported.length > 0 ? reported : [root]).map((entry) => path.resolve(entry)),
-  );
-  for (const command of plan.commands) {
-    const cwd = path.resolve(command.cwd);
-    if (!roots.delete(cwd)) {
-      throw new Error(
-        `verification command cwd was not reported by implementation: ${command.cwd}`,
-      );
-    }
+  if (plan.commands.length !== 1) {
+    throw new Error("verification plan must contain exactly one prepared-workspace command");
   }
-  if (roots.size > 0) {
-    throw new Error(`verification plan is missing reported repositories: ${[...roots].join(", ")}`);
+  const root = preparedWorkspace(context).worktreePath ?? preparedWorkspace(context).repository;
+  if (path.resolve(plan.commands[0]!.cwd) !== path.resolve(root)) {
+    throw new Error(`verification command cwd must match the prepared workspace: ${root}`);
   }
   return plan;
 }
@@ -1602,10 +1592,10 @@ export const autoimplementWorkflow = defineWorkflow({
       statusDetail: "planning independent verification commands",
       prompt: (context) =>
         [
-          "Select the required local verification commands for the implementation.",
-          "Return one command per independent repository working directory.",
+          "Select the required local verification command for the implementation.",
+          "Return exactly one command for the prepared repository workspace.",
           "Use exact executables and argument arrays without shell wrappers, environment overrides, stdin, Git or GitHub mutations, package publication, deployment, merge, or release commands.",
-          "Use the prepared absolute workspace path, explicit timeouts no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
+          "Use the prepared absolute workspace path as cwd, an explicit timeout no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
           "List checks that cannot run locally under untested.",
           `Prepared workspace: ${JSON.stringify(preparedWorkspace(context))}`,
         ].join("\n"),
@@ -1617,6 +1607,9 @@ export const autoimplementWorkflow = defineWorkflow({
         route:
           preparedWorkspace(context).mode === "defaultBranch" ? "defaultBranch" : "pullRequest",
       }),
+    }),
+    routeFinalizeDefaultBranchResult: compute({
+      run: ({ outputs }) => outputs.finalizeDefaultBranch,
     }),
     finalizeDefaultBranch: agent({
       timeoutMs: 30 * 60_000,
@@ -1998,6 +1991,7 @@ export const autoimplementWorkflow = defineWorkflow({
           inspectComments: "inspectComments",
           inspectCi: "inspectCi",
           opportunisticTest: "opportunisticTest",
+          finalizeDefaultBranch: "finalizeDefaultBranch",
           finalizeDelivery: "finalizeDelivery",
           selectReviewCommands: "selectReviewCommands",
           redesign: "redesign",
@@ -2086,6 +2080,17 @@ export const autoimplementWorkflow = defineWorkflow({
     },
     {
       from: "finalizeDefaultBranch",
+      switch: {
+        on: "$result.outcome",
+        cases: {
+          ok: "routeFinalizeDefaultBranchResult",
+          timed_out: "timeoutFallbackGuard",
+          failed: "timeoutFallbackGuard",
+        },
+      },
+    },
+    {
+      from: "routeFinalizeDefaultBranchResult",
       switch: {
         on: "$.status",
         cases: { completed: "finalize", blocked: "createBlockerClaim" },
