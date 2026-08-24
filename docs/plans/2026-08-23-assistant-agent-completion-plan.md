@@ -195,7 +195,7 @@ For assistant completion:
 9. Record the conversation range.
 10. Resolve the node with the exact assistant text.
 
-Do not set `suppressWorkflowAssistantTail` for this mode. The response must stay visible.
+Pi Workflows does not remove assistant text after a workflow submission. The response stays visible.
 
 When the model calls `workflow submit` during an assistant step, return a clear error:
 

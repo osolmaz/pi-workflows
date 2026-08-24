@@ -885,7 +885,7 @@ describe("pi-workflows extension", () => {
     expect(harness.shortcuts.has("ctrl+shift+r")).toBe(false);
   });
 
-  it("removes assistant tail text after an accepted workflow submission", async () => {
+  it("keeps assistant text visible after an accepted workflow submission", async () => {
     const cwd = await makeTempDir("pi-workflows-tail");
     const runsDir = await makeTempDir("pi-workflows-tail-runs");
     vi.stubEnv("HOME", runsDir);
@@ -912,23 +912,11 @@ describe("pi-workflows extension", () => {
         role: "assistant",
         content: [
           { type: "thinking", thinking: "The workflow submission is complete." },
-          { type: "text", text: "This reply must not appear." },
+          { type: "text", text: "The workflow submission is complete." },
         ],
       };
-      await harness.emitAsync("turn_end", { message: assistantMessage, toolResults: [] });
-      const [replacement] = await harness.emitAsync("message_end", {
-        message: assistantMessage,
-      });
-      expect(replacement).toEqual({
-        message: {
-          ...assistantMessage,
-          content: [{ type: "thinking", thinking: "The workflow submission is complete." }],
-        },
-      });
-
-      await harness.emitAsync("agent_end", { messages: [] });
-      const [normal] = await harness.emitAsync("message_end", { message: assistantMessage });
-      expect(normal).toBeUndefined();
+      const [result] = await harness.emitAsync("message_end", { message: assistantMessage });
+      expect(result).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }

@@ -116,15 +116,23 @@ const ASSISTANT_OUTPUT_E2E_WORKFLOW = `import { agent, assistantMessage, compute
 
 export default defineWorkflow({
   name: "assistant-output-e2e",
-  startAt: "present",
+  startAt: "prepare",
   nodes: {
+    prepare: agent({
+      prompt: () => "Submit the assistant-output fixture input.",
+      expectedOutput: '{ "ready": true }',
+    }),
     present: agent({
-      prompt: () => "Write the assistant-output fixture response.",
+      prompt: ({ outputs }) =>
+        \`Write the assistant-output fixture response for: \${JSON.stringify(outputs.prepare)}\`,
       expectedOutput: assistantMessage(),
     }),
     finish: compute({ run: ({ outputs }) => ({ text: outputs.present }) }),
   },
-  edges: [{ from: "present", to: "finish" }],
+  edges: [
+    { from: "prepare", to: "present" },
+    { from: "present", to: "finish" },
+  ],
 });
 `;
 
@@ -762,11 +770,22 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
-        if (
-          /workflow step contract \(workflow: assistant-output-e2e, step: present/i.test(
-            lastUserText,
-          )
-        ) {
+        const assistantOutputStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: assistant-output-e2e, step: (prepare|present), attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (assistantOutputStepMatch?.[1] === "prepare") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "prepare",
+              attempt: assistantOutputStepMatch[2] ?? "",
+              output: { ready: true },
+            },
+          };
+        }
+        if (assistantOutputStepMatch?.[1] === "present") {
           return { kind: "text", text: "This is one normal visible assistant response." };
         }
         const timeoutStepMatch = lastUserText.match(
@@ -1477,29 +1496,38 @@ describe.sequential("pi-workflows end to end", () => {
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
 
-    expect(state.steps.map((step) => step.nodeId)).toEqual(["present", "finish"]);
+    expect(state.steps.map((step) => step.nodeId)).toEqual(["prepare", "present", "finish"]);
+    expect(state.outputs.prepare).toEqual({ ready: true });
     expect(state.outputs.present).toBe("This is one normal visible assistant response.");
     expect(state.finalOutput).toEqual({ text: "This is one normal visible assistant response." });
-    expect(state.steps[0]).toMatchObject({
+    expect(state.steps[1]).toMatchObject({
       assistantMessage: { sha256: expect.stringMatching(/^[0-9a-f]{64}$/) },
     });
     const records = readWorkflowRun(runId, { databasePath: runsDir })?.sessionEntries ?? [];
-    const visible = records.filter(
-      (record) =>
-        record.entry.type === "message" &&
-        contentText((record.entry.message as { content?: unknown } | undefined)?.content) ===
-          "This is one normal visible assistant response.",
-    );
-    expect(visible).toHaveLength(1);
-    const request = mock.requests.find((candidate) =>
+    const visibleText = records.flatMap((record) => {
+      if (record.entry.type !== "message") return [];
+      return [contentText((record.entry.message as { content?: unknown } | undefined)?.content)];
+    });
+    expect(
+      visibleText.filter((text) => text === "This is one normal visible assistant response."),
+    ).toHaveLength(1);
+    const requests = mock.requests.filter((candidate) =>
       candidate.messages.some((message) =>
         contentText(message.content)
           .toLowerCase()
-          .includes("workflow step contract (workflow: assistant-output-e2e, step: present"),
+          .includes("workflow step contract (workflow: assistant-output-e2e"),
       ),
     );
-    expect(request).toBeDefined();
-    expect(JSON.stringify(request?.messages)).not.toContain('"action":"submit"');
+    expect(
+      requests.some((request) =>
+        JSON.stringify(request.messages).includes("assistant-output-e2e, step: prepare"),
+      ),
+    ).toBe(true);
+    const presentationRequest = requests.find((request) =>
+      JSON.stringify(request.messages).includes("assistant-output-e2e, step: present"),
+    );
+    expect(presentationRequest).toBeDefined();
+    expect(JSON.stringify(presentationRequest?.messages)).not.toContain('"action":"submit"');
   }, 90_000);
 
   it("stops the real Pi turn when an agent node times out", async () => {

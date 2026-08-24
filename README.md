@@ -167,8 +167,9 @@ While a run is on screen, the footer status bar shows a compact
 
 `presentationPrompt` is optional. When present, pi-workflows uses it after the
 structured run ends to request one normal, human-readable assistant response.
-Workflows without it remain silent after their final structured output, which
-keeps shell-only and machine-consumed workflows model-free.
+Without it, pi-workflows does not request a separate final response. If the
+model writes text after submitting its last agent step, that text stays visible.
+Shell-only and machine-consumed workflows remain model-free.
 
 Use `expectedOutput: assistantMessage()` when a normal assistant response must
 be a node inside the graph rather than a presentation after the run. Its exact

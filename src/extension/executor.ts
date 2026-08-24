@@ -253,10 +253,7 @@ export class ConversationStepExecutor implements AgentStepExecutor {
     });
     return {
       accepted: true,
-      message: [
-        `Output accepted for step ${JSON.stringify(stepId)}.`,
-        "If the workflow continues, the next step arrives as a new workflow message. End your turn now.",
-      ].join(" "),
+      message: `Output accepted for step ${JSON.stringify(stepId)}.`,
     };
   }
 
