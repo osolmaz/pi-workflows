@@ -749,7 +749,7 @@ async function pathFingerprint(root: string, file: string): Promise<string> {
 async function gitState(root: string): Promise<Map<string, string>> {
   const status = await execFileAsync(
     "git",
-    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=traditional"],
     { cwd: root, encoding: "utf8", maxBuffer: 5_000_000, timeout: 60_000 },
   );
   const state = new Map<string, string>();
