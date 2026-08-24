@@ -496,6 +496,56 @@ describe("change verification", () => {
     await expect(fs.readFile(path.join(repository, "doc.txt"), "utf8")).resolves.toBe("good\n");
   });
 
+  it("rejects and restores an undeclared ignored file changed by a mechanical fixer", async () => {
+    const { repository, workspace } = await fixture("change-verification-ignored-boundary");
+    await fs.writeFile(path.join(repository, ".gitignore"), ".env\n");
+    await fs.writeFile(path.join(repository, "doc.txt"), "good\n");
+    await git(repository, ["add", ".gitignore", "doc.txt"]);
+    await git(repository, ["commit", "-m", "ignored boundary baseline"]);
+    workspace.baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+    await fs.writeFile(path.join(repository, "doc.txt"), "bad\n");
+    await fs.writeFile(path.join(repository, ".env"), "user setting\n");
+    const source =
+      'const fs=require("fs"); if(fs.readFileSync("doc.txt","utf8").trim()!=="good"){process.exit(1)}';
+    const fixer =
+      'const fs=require("fs"); fs.writeFileSync("doc.txt","good\\n"); fs.writeFileSync(".env","overwritten\\n")';
+    const { state } = await run({
+      originatingWorkflow: "autodoc",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(repository, source, {
+          command: process.execPath,
+          args: ["-e", fixer],
+          files: ["doc.txt"],
+          timeoutMs: 10_000,
+          maxOutputChars: 100_000,
+          expectedDiff: "doc.txt formatted",
+        }),
+      ],
+      changedFiles: ["doc.txt"],
+    });
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      unknownFailures: [
+        {
+          checkId: "mechanical-fix-boundary",
+          summary: expect.stringContaining(".env"),
+        },
+      ],
+      repairAttempts: [
+        {
+          kind: "mechanical",
+          result: expect.stringContaining("restored all undeclared paths"),
+        },
+      ],
+    });
+    await expect(fs.readFile(path.join(repository, ".env"), "utf8")).resolves.toBe(
+      "user setting\n",
+    );
+    await expect(fs.readFile(path.join(repository, "doc.txt"), "utf8")).resolves.toBe("good\n");
+  });
+
   it("restores every supported undeclared path state after a rejected fixer", async () => {
     const { repository, workspace } = await fixture("change-verification-fixer-restoration");
     await fs.writeFile(path.join(repository, "doc.txt"), "good\n");
