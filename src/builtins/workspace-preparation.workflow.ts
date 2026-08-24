@@ -149,7 +149,12 @@ async function git(cwd: string, args: string[]): Promise<string> {
 }
 
 async function changedPaths(repository: string): Promise<string[]> {
-  const output = await git(repository, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const status = await execFileAsync(
+    "git",
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { cwd: repository, encoding: "utf8", maxBuffer: 2_000_000, timeout: 30_000 },
+  );
+  const output = status.stdout;
   if (output.length === 0) return [];
   return output
     .split("\0")
@@ -221,12 +226,30 @@ export async function inspectWorkspace(
   try {
     const repository = input.repository;
     const currentBranch = await git(repository, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    const baseBranch = input.baseBranch ?? (await git(repository, ["branch", "--show-current"]));
+    const localBranches = (
+      await git(repository, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+    )
+      .split("\n")
+      .filter(Boolean);
+    let discoveredDefault = localBranches.includes("main")
+      ? "main"
+      : localBranches.includes("master")
+        ? "master"
+        : currentBranch;
+    try {
+      discoveredDefault = (
+        await git(repository, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+      ).replace(/^origin\//, "");
+    } catch {
+      // A local-only repository has no remote default-branch reference.
+    }
+    const baseBranch = input.baseBranch ?? discoveredDefault;
     const baseRevision = await git(repository, ["rev-parse", baseBranch]);
     const changes = await changedPaths(repository);
     const requested = input.workspaceMode ?? "auto";
     if (requested === "defaultBranch") {
       if (
+        baseBranch !== discoveredDefault ||
         currentBranch !== baseBranch ||
         input.directDefaultBranchAuthorized !== true ||
         changes.length > 0
@@ -241,6 +264,7 @@ export async function inspectWorkspace(
           reason:
             "Direct default-branch work requires explicit authority, the actual base branch, and no pre-existing changes.",
           evidence: [
+            `actualDefault=${discoveredDefault}`,
             `branch=${currentBranch}`,
             `authorized=${input.directDefaultBranchAuthorized === true}`,
             `changes=${changes.join(",") || "none"}`,
@@ -271,6 +295,20 @@ export async function inspectWorkspace(
       };
     }
     if ((requested === "auto" || requested === "branch") && currentBranch !== baseBranch) {
+      try {
+        await git(repository, ["merge-base", "--is-ancestor", baseRevision, "HEAD"]);
+      } catch {
+        return {
+          route: "blocked",
+          repository,
+          baseBranch,
+          baseRevision,
+          currentBranch,
+          preExistingChangedPaths: changes,
+          reason: "The current task branch is not based on the selected base revision.",
+          evidence: [`baseRevision=${baseRevision}`, `branch=${currentBranch}`],
+        };
+      }
       const value = prepared(
         input,
         "branch",
@@ -343,11 +381,13 @@ export async function validateBranchName(
     throw new Error("branch proposal is reserved or conflicts with the base branch");
   }
   await git(repository, ["check-ref-format", "--branch", branch]);
-  try {
-    await git(repository, ["show-ref", "--verify", `refs/heads/${branch}`]);
-    throw new Error(`branch already exists: ${branch}`);
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith("branch already exists:")) throw error;
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    try {
+      await git(repository, ["show-ref", "--verify", ref]);
+      throw new Error(`branch already exists: ${branch}`);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("branch already exists:")) throw error;
+    }
   }
   return branch;
 }

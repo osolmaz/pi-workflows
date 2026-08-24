@@ -3,8 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { repositoryId } from "../../src/builtins/autoimplement-command-batches.js";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
+import { digest } from "../../src/workflows/human-decision.js";
 import {
   listWorkflowRuns,
   readWorkflowRun,
@@ -539,6 +541,8 @@ describe.sequential("pi-workflows end to end", () => {
   let agentDir: string;
   let controllerFile: string;
   let timeoutMarker: string;
+  let commandDir: string;
+  let defaultBranch: string;
 
   beforeAll(async () => {
     // The scripted "model": answers each workflow step contract through the
@@ -700,6 +704,109 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const autoimplementStep = lastUserText.match(
+          /workflow step contract \(workflow: autoimplement, step: ([^,]+), attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (autoimplementStep) {
+          const step = autoimplementStep[1] ?? "";
+          const attempt = autoimplementStep[2] ?? "";
+          const submit = (output: unknown) => ({
+            kind: "tool" as const,
+            toolName: "workflow",
+            args: { action: "submit", step, attempt, output },
+          });
+          if (step === "workspace/propose") {
+            return submit({
+              branchName: "feat/change-scoped-e2e",
+              reason: "Isolate the real-Pi fixture.",
+            });
+          }
+          if (step === "implement") {
+            return submit({
+              status: "implemented",
+              summary: "The fixture implementation is ready for verification.",
+              files: ["fixture-change.txt"],
+              repositories: [projectDir],
+              issueKind: null,
+              evidence: "fixture implementation",
+            });
+          }
+          if (step === "classifyImplementation") {
+            return submit({ route: "verify", summary: "Ready for checks.", evidence: "fixture" });
+          }
+          if (step === "planVerification") {
+            return submit({
+              commands: [
+                {
+                  id: "simpledoc-baseline",
+                  command: process.execPath,
+                  args: ["baseline-check.cjs"],
+                  cwd: projectDir,
+                  timeoutMs: 60_000,
+                  maxOutputChars: 100_000,
+                },
+              ],
+              untested: [],
+            });
+          }
+          if (step === "publish") {
+            return submit({
+              repositories: [
+                {
+                  repository: projectDir,
+                  branch: "feat/change-scoped-e2e",
+                  baseBranch: defaultBranch,
+                  headRevision: "fixture-head",
+                  pr: "https://example.test/pi-workflows/pull/1",
+                  pushed: true,
+                },
+              ],
+            });
+          }
+          if (step === "assessReview") {
+            return submit({
+              repositories: [
+                {
+                  id: repositoryId(projectDir),
+                  invocationSucceeded: true,
+                  p0: [],
+                  p1: [],
+                  p2: [],
+                  lower: [],
+                  reason: "No findings.",
+                },
+              ],
+              reason: "Review passed.",
+            });
+          }
+          if (step === "inspectComments") {
+            return submit({ route: "ci", summary: "No comments.", evidence: [] });
+          }
+          if (step === "inspectCi") {
+            return submit({
+              targets: [
+                {
+                  repository: projectDir,
+                  headRevision: "fixture-head",
+                  pr: "https://example.test/pi-workflows/pull/1",
+                  route: "green",
+                  reason: "Fixture CI is green.",
+                  relatedFailures: [],
+                  unrelatedFailures: [],
+                },
+              ],
+            });
+          }
+          if (step === "finalizeDelivery") {
+            return submit({
+              status: "completed",
+              merged: false,
+              pr: "https://example.test/pi-workflows/pull/1",
+              reportComment: "fixture report",
+              reason: "Ready without merge.",
+            });
+          }
+        }
         if (lastRole === "tool") {
           return {
             kind: "text",
@@ -846,6 +953,17 @@ describe.sequential("pi-workflows end to end", () => {
     runsDir = workflowStateDatabasePath(agentDir);
     controllerFile = runsDir;
     timeoutMarker = path.join(projectDir, "timeout-marker.txt");
+    commandDir = await makeTempDir("pi-workflows-e2e-commands");
+    await fs.writeFile(
+      path.join(commandDir, "pi-reviewer"),
+      "#!/bin/sh\nprintf '%s\\n' 'Overall: patch is correct' 'No findings.'\n",
+      { mode: 0o755 },
+    );
+    await fs.writeFile(
+      path.join(projectDir, "baseline-check.cjs"),
+      "console.error('30 renames, 32 frontmatter insertions, 8 reference updates'); process.exit(1);\n",
+      "utf8",
+    );
 
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
     await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
@@ -988,6 +1106,12 @@ describe.sequential("pi-workflows end to end", () => {
     });
     await execFileAsync("git", ["add", "."], { cwd: projectDir });
     await execFileAsync("git", ["commit", "-q", "-m", "test fixtures"], { cwd: projectDir });
+    defaultBranch = (
+      await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: projectDir,
+        encoding: "utf8",
+      })
+    ).stdout.trim();
 
     pi = startPiRpc({
       cwd: projectDir,
@@ -996,6 +1120,7 @@ describe.sequential("pi-workflows end to end", () => {
         PI_CODING_AGENT_DIR: agentDir,
         PI_AGENT_FIXTURE_BASE_URL: mock.baseUrl,
         PI_AGENT_FIXTURE_API_KEY: "e2e-provider-key",
+        PATH: `${commandDir}:${process.env.PATH ?? ""}`,
       },
     });
   }, 60_000);
@@ -1821,4 +1946,71 @@ describe.sequential("pi-workflows end to end", () => {
       () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
   }, 90_000);
+
+  it("continues Autoimplement when the same repository-wide failure exists on the base", async () => {
+    await waitForPiIdle(pi);
+    const plan = {
+      summary: "Exercise change-scoped verification.",
+      requirements: ["Keep the baseline backlog visible and continue."],
+    };
+    pi.send({
+      id: "autoimplement-change-scoped-e2e",
+      type: "prompt",
+      message: `/workflow autoimplement --input-json ${JSON.stringify({
+        task: "Run the change-scoped verification fixture.",
+        plan,
+        repository: projectDir,
+        baseBranch: defaultBranch,
+        scope: `Only ${projectDir}. Test and report without merge.`,
+        constraints: ["Do not merge."],
+        documentation: {
+          status: "current",
+          planDigest: digest(plan),
+          documents: ["baseline-check.cjs"],
+        },
+        workspaceMode: "auto",
+        merge: false,
+      })}`,
+    });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "autoimplement" &&
+        ["completed", "failed", "cancelled"].includes(candidate.status),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-30).join("\n")}`,
+      120_000,
+    );
+    expect(state.status, state.error).toBe("completed");
+    expect(state.workflowSource).toEqual({
+      kind: "builtin",
+      id: "autoimplement",
+      revision: "10",
+    });
+    expect(state.steps.map((step) => step.nodeId)).toEqual(
+      expect.arrayContaining([
+        "workspace/propose",
+        "workspace/apply",
+        "implement",
+        "localVerification/runCandidate",
+        "localVerification/runBase",
+        "publish",
+      ]),
+    );
+    const verification = state.outputs.localVerification as {
+      exit?: string;
+      output?: { relatedFailures?: unknown[]; unrelatedFailures?: unknown[]; route?: string };
+    };
+    expect(verification).toMatchObject({
+      exit: "ready",
+      output: {
+        route: "ready",
+        relatedFailures: [],
+        unrelatedFailures: [{ checkId: "simpledoc-baseline" }],
+      },
+    });
+    expect(state.finalOutput).toMatchObject({
+      status: "completed",
+      delivery: { merged: false },
+    });
+  }, 150_000);
 });

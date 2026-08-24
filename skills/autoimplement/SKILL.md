@@ -18,6 +18,9 @@ Build the input as follows:
 - `scope`: Always include a concrete authority statement. Name every allowed repository and the allowed edit, test, commit, push, pull-request, merge, and release actions. Carry forward exclusions from the conversation. A repository path alone is not a scope.
 - `constraints`: Include all applicable user and repository constraints. Use an empty array when none apply.
 - `baseBranch`: Use the requested base or the repository default branch.
+- `workspaceMode`: Use `auto` unless the user or repository requires `branch`, `worktree`, or `defaultBranch`. `auto` keeps a correct task branch, creates a task branch from a clean default branch, and isolates a dirty default checkout in a standard sibling worktree. Use `defaultBranch` only with explicit direct-work authority.
+- `preparedWorkspace`: Include a previously confirmed `pi-workflows.prepared-workspace.v1` result when the workspace was prepared before the run. Omit it otherwise.
+- `directDefaultBranchAuthorized`: Set `true` only when direct work on the actual default branch is explicit. It does not grant commit, push, merge, or release authority.
 - `merge`: Set `true` only when the user explicitly requested merge or an applicable standing instruction authorizes it. Otherwise set `false`.
 - `documents`: Include known canonical plan or specification paths. Use an empty array when none are known.
 - `approval`: Omit it for the default behavior: ask on each new plan and continue after 10 minutes without an answer. Use `{ "mode": "required" }` when the user says to block on plan changes. Use `{ "mode": "skip" }` when the user says to continue without asking about plan changes.
@@ -46,6 +49,7 @@ Replace the example values below with facts from the conversation, then make one
     "scope": "Only /absolute/path/to/repository. May edit and test task-related files, create commits, push the task branch, and open or update its pull request. Must not modify other repositories, merge, release, deploy, change credentials, or change repository policy.",
     "constraints": ["Preserve immediate cancellation.", "Keep deferred-turn work separate."],
     "baseBranch": "main",
+    "workspaceMode": "auto",
     "merge": false,
     "documents": ["docs/plans/timeout-fallback-plan.md"]
   }

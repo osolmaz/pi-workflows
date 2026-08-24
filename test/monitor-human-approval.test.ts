@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { repositoryId } from "../src/builtins/autoimplement-command-batches.js";
 import { builtinWorkflowCatalog } from "../src/builtins/catalog.js";
@@ -11,6 +13,7 @@ import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
+const execFileAsync = promisify(execFile);
 let originalPath = "";
 let repository = "";
 
@@ -310,6 +313,13 @@ async function answer(
 beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
   repository = await makeTempDir("monitor-approval-repository");
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: repository });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repository });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
+  await fs.writeFile(path.join(repository, "README.md"), "fixture\n");
+  await execFileAsync("git", ["add", "README.md"], { cwd: repository });
+  await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: repository });
+  await execFileAsync("git", ["switch", "-c", "feat/repair"], { cwd: repository });
   const commands = await fs.mkdtemp(path.join(os.tmpdir(), "monitor-approval-commands-"));
   await fs.writeFile(path.join(commands, "pi-reviewer"), "#!/bin/sh\necho clean\n", {
     mode: 0o755,

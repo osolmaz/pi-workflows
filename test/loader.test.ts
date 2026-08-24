@@ -145,18 +145,26 @@ describe("resolveWorkflowRef", () => {
     expect(resolved.sources.map((item) => item.mountPath.join("/"))).toEqual([
       "implementation",
       "implementation/documentation",
+      "implementation/documentation/verification",
+      "implementation/documentation/workspace",
+      "implementation/localVerification",
       "implementation/redesign",
       "implementation/redesign/approval",
       "implementation/redesign/design",
       "implementation/redesign/design/blockedSummary",
       "implementation/redesign/design/readySummary",
       "implementation/redesign/documentation",
+      "implementation/redesign/documentation/verification",
+      "implementation/redesign/documentation/workspace",
+      "implementation/workspace",
       "planChange",
       "planChange/approval",
       "planChange/design",
       "planChange/design/blockedSummary",
       "planChange/design/readySummary",
       "planChange/documentation",
+      "planChange/documentation/verification",
+      "planChange/documentation/workspace",
     ]);
   });
 

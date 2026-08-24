@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   changeVerificationWorkflow,
   classifyVerification,
+  parseChangeVerificationInput,
   type ChangeVerificationInput,
   type VerificationCheck,
 } from "../src/builtins/change-verification.workflow.js";
@@ -113,6 +114,102 @@ function batch(items: CommandBatchItemResult[]): CommandBatchResult {
 }
 
 describe("change verification", () => {
+  it("validates direct command and comparison contracts", async () => {
+    const { repository, workspace } = await fixture("change-verification-validation");
+    const base = check(repository, "process.exit(0)");
+    expect(() => parseChangeVerificationInput(null)).toThrow(/object/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...base, command: "bash" }],
+      }),
+    ).toThrow(/shell wrapper/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...base, cwd: path.join(repository, "other") }],
+      }),
+    ).toThrow(/prepared workspace/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...base, readOnly: false, baseEligible: true }],
+      }),
+    ).toThrow(/readOnly/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [{ ...base, findingFormat: "xml" }],
+      }),
+    ).toThrow(/findingFormat/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [base, base],
+      }),
+    ).toThrow(/duplicated/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: "bad",
+      }),
+    ).toThrow(/array/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [
+          {
+            ...base,
+            mechanicalFix: {
+              command: process.execPath,
+              args: [],
+              files: ["/outside"],
+              timeoutMs: 1_000,
+              maxOutputChars: 1_000,
+              expectedDiff: "format",
+            },
+          },
+        ],
+      }),
+    ).toThrow(/stay inside/);
+    expect(() =>
+      parseChangeVerificationInput({
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [base],
+        maxConcurrency: 0,
+      }),
+    ).toThrow(/maxConcurrency/);
+  });
+
+  it("uses a bounded model command plan only when checks are not supplied", async () => {
+    const { repository, workspace } = await fixture("change-verification-plan-checks");
+    const executor = new ScriptedExecutor().respond("planChecks", {
+      output: { checks: [check(repository, "process.exit(0)")] },
+    });
+    const { state } = await run(
+      { originatingWorkflow: "autodoc", qualifiedNode: "verify", workspace },
+      executor,
+    );
+    expect(state.finalOutput).toMatchObject({ route: "ready" });
+    expect(executor.requests.map((request) => request.contract.nodeId)).toEqual(["planChecks"]);
+  });
+
   it("reports the same candidate and base backlog as unrelated and continues", async () => {
     const { repository, workspace } = await fixture("change-verification-baseline");
     const { state } = await run({
@@ -246,6 +343,124 @@ describe("change verification", () => {
       repairAttempts: [{ kind: "mechanical" }],
     });
     await expect(fs.readFile(path.join(repository, "doc.txt"), "utf8")).resolves.toBe("good\n");
+  });
+
+  it("rejects a mechanical fixer that changes an undeclared pre-existing file", async () => {
+    const { repository, workspace } = await fixture("change-verification-fixer-boundary");
+    await fs.writeFile(path.join(repository, "doc.txt"), "good\n");
+    await fs.writeFile(path.join(repository, "outside.txt"), "base\n");
+    await git(repository, ["add", "doc.txt", "outside.txt"]);
+    await git(repository, ["commit", "-m", "baseline"]);
+    workspace.baseRevision = await git(repository, ["rev-parse", "HEAD"]);
+    await fs.writeFile(path.join(repository, "doc.txt"), "bad\n");
+    await fs.writeFile(path.join(repository, "outside.txt"), "user work\n");
+    const source =
+      'const fs=require("fs"); if(fs.readFileSync("doc.txt","utf8").trim()!=="good"){process.exit(1)}';
+    const fixer =
+      'const fs=require("fs"); fs.writeFileSync("doc.txt","good\\n"); fs.writeFileSync("outside.txt","overwritten\\n")';
+    const { state } = await run({
+      originatingWorkflow: "autodoc",
+      qualifiedNode: "verify",
+      workspace,
+      checks: [
+        check(repository, source, {
+          command: process.execPath,
+          args: ["-e", fixer],
+          files: ["doc.txt"],
+          timeoutMs: 10_000,
+          maxOutputChars: 100_000,
+          expectedDiff: "doc.txt formatted",
+        }),
+      ],
+      changedFiles: ["doc.txt"],
+    });
+    expect(state.finalOutput).toMatchObject({
+      route: "blocked",
+      unknownFailures: [
+        {
+          checkId: "mechanical-fix-boundary",
+          summary: expect.stringContaining("outside.txt"),
+        },
+      ],
+      repairAttempts: [{ kind: "mechanical" }],
+    });
+  });
+
+  it("classifies complete direct evidence across related and unknown routes", () => {
+    const workspace: PreparedWorkspace = {
+      schema: PREPARED_WORKSPACE_SCHEMA,
+      mode: "branch",
+      repository: "/candidate",
+      baseBranch: "main",
+      baseRevision: "abc",
+      workBranch: "feat/x",
+      directDefaultBranchAuthorized: false,
+      preExistingChangedPaths: [],
+      evidence: [],
+      scope: "Only /candidate",
+    };
+    const baseCheck = check("/candidate", "");
+    const related = classifyVerification(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [baseCheck],
+      },
+      {
+        checks: [baseCheck],
+        candidate: batch([result("docs", "failed", "candidate")]),
+        base: batch([result("docs", "succeeded", "", "/base", 0)]),
+        baseEvidence: [],
+        cleanupEvidence: [],
+        repairAttempts: [],
+      },
+    );
+    expect(related).toMatchObject({ route: "repairable", relatedFailures: [{ checkId: "docs" }] });
+    const different = classifyVerification(
+      {
+        originatingWorkflow: "autoimplement",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [baseCheck],
+      },
+      {
+        checks: [baseCheck],
+        candidate: batch([result("docs", "failed", "candidate")]),
+        base: batch([result("docs", "failed", "base", "/base")]),
+        baseEvidence: [],
+        cleanupEvidence: ["Base worktree cleanup failed: busy"],
+        repairAttempts: [],
+      },
+    );
+    expect(different).toMatchObject({
+      route: "needsJudgment",
+      unknownFailures: expect.arrayContaining([
+        expect.objectContaining({ checkId: "docs" }),
+        expect.objectContaining({ checkId: "base-cleanup" }),
+      ]),
+    });
+    const untested = classifyVerification(
+      {
+        originatingWorkflow: "autodoc",
+        qualifiedNode: "verify",
+        workspace,
+        checks: [baseCheck],
+        untested: ["privacy check unavailable"],
+      },
+      {
+        checks: [baseCheck],
+        candidate: batch([result("docs", "succeeded", "")]),
+        base: batch([result("docs", "succeeded", "", "/base")]),
+        baseEvidence: [],
+        cleanupEvidence: [],
+        repairAttempts: [],
+      },
+    );
+    expect(untested).toMatchObject({
+      route: "needsJudgment",
+      untestedChecks: [{ kind: "untested" }],
+    });
   });
 
   it("normalizes finding order through stable JSON ids", () => {

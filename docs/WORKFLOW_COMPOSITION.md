@@ -6,6 +6,14 @@ Composition keeps one run, trace, pause state, cancellation state, and final pre
 
 Work is tracked in the [workflow composition plan](plans/2026-08-19-workflow-composition-plan.md).
 
+## Internal workspace and verification compositions
+
+Autodoc and Autoimplement directly include two internal workflows. Workspace preparation inspects Git state, asks the model only for a task branch name when needed, and uses a program action to validate and create the branch or standard sibling worktree. Its prepared-workspace result is the only path source for later child and parent stages.
+
+Change verification receives direct command descriptors and a prepared workspace. Program actions run candidate checks, create and clean a temporary detached base worktree, run only read-only base-eligible checks there, and compare complete results. Its named exits are `ready` and `blocked`. Related failures stay inside a bounded repair and recheck loop. Matching baseline failures remain in the child output as unrelated evidence.
+
+These compositions use ordinary `agent`, `action`, `compute`, named exits, and `includeWorkflow()` mounts. They add no engine primitive or independent child run. Their large command outputs remain on action results, while findings carry stable output references.
+
 ## TypeScript API
 
 A TypeScript workflow definition is both executable code and a typed contract. Its input parser and exit parsers provide runtime validation and TypeScript inference from one declaration.

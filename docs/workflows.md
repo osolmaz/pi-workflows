@@ -456,7 +456,7 @@ The built-in `autoplan` workflow records two through four practical candidates,
 describes the ideal separately, chooses one option, records a rejection reason
 for every other explicit option, and writes a detailed plan. It then includes
 `plain-summary` to show the chosen plan, its main steps, and the rejected options
-in one short assistant message. The detailed records remain in the run bundle. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, verifies those documents, and never devises or implements. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. It blocks when no clear plan exists. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
+in one short assistant message. The detailed records remain in the run bundle. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, and never devises or implements. It prepares a safe workspace only when documentation must change. Program actions run candidate checks, compare eligible failures with the base revision in a temporary detached worktree, and keep matching baseline failures visible without blocking the current change. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. A missing-plan claim and every other non-exempt blocker enter one bounded challenge path. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
 
 The built-in `plan-approval` workflow offers `continue`, `stop`, and exact-text `replan` exits. Its shared policy uses `auto`, `required`, or `skip` mode. Omitted policy defaults to `auto`: ask audience `operator`, then continue with the exact plan after 10 minutes without an answer. Required mode waits for a human. Skip mode creates no decision. Stop and replan always require a human answer.
 
@@ -464,18 +464,13 @@ The internal plan-change workflow composes Autoplan, Autodoc, plan approval, and
 
 Autoimplement runs independent commands through bounded command batches. A batch is an ordinary function action that calls the public `runCommandBatch` helper. Each command has a stable ID, executable, arguments, absolute working directory, timeout, and output limit. Results stay separate and return in input order. One command uses the same path with concurrency one.
 
-Autoimplement gives `implement` an eight-hour deadline. When a supported
-long-running agent node times out, one shared read-only fallback inspects the
-current repository, accepted workflow outputs, and relevant pull-request state.
-It then retries the timed-out stage or routes to verification, review, CI,
-delivery, the existing redesign workflow, or blocked. The fallback can run at
-most three times in one Autoimplement run. Its own failure or timeout is
-terminal. Cancellation remains immediate and never enters fallback. A repeated
-effect step first checks what already exists and performs only missing work.
-This graph fallback starts after the timed-out turn ends and is separate from
-successor-turn delivery.
+Autoimplement prepares the workspace before its first edit-capable node. `workspaceMode` accepts `auto`, `branch`, `worktree`, or `defaultBranch`. Auto mode adopts a current task branch, creates a model-named branch from a clean default branch, or creates a model-named standard sibling worktree when the default checkout has existing work. Program actions validate and apply names. Direct default-branch work requires explicit authority and does not imply commit, push, merge, or release authority. Every later stage uses the prepared absolute path.
 
-Autoimplement uses batches for pi-reviewer, pending CI watches, and local verification commands from independent repositories. It keeps model turns, fixes, pushes, comment changes, merges, and releases in their existing order. Reviewer commands are tied to the repository, base branch, pushed head, and relevant dependency fingerprint. A later review round includes only repositories whose head or dependency fingerprint changed. P0 or P1 work still requires another review. P2-only work can be addressed and verified without another reviewer run only because of that P2 work.
+Autoimplement gives `implement` an eight-hour deadline. When a supported step fails or times out, one shared bounded recovery step inspects accepted outputs and durable repository or pull-request state. It adopts a completed effect or retries only a missing effect. Cancellation remains immediate and never enters recovery. Unsupported or uncertain effects create a qualified blocker claim before challenge.
+
+Local verification uses the shared change-verification composition. Direct program actions run candidate checks and read-only base-eligible checks with the same command, arguments, timeout, and output limit. Results separate related, unrelated, fixed-baseline, unknown, and untested findings. Matching base failures do not block the candidate. Related failures enter a two-attempt mechanical or semantic repair loop. Unknown or incomplete evidence needs bounded judgment, and truncated, timed-out, cancelled, or spawn-failed output cannot pass.
+
+Autoimplement uses batches for pi-reviewer and pending CI watches. It keeps model turns, fixes, pushes, comment changes, merges, and releases in their existing order. Reviewer commands are tied to the repository, base branch, pushed head, and relevant dependency fingerprint. A later review round includes only repositories whose head or dependency fingerprint changed. P0 or P1 work still requires another review. P2-only work can be addressed and verified without another reviewer run only because of that P2 work.
 
 Autoimplement inspects every pull request before it waits for CI. It accepts only supported pending `gh pr checks --watch` or `gh run watch` descriptors and binds each one to the validated pull request as `gh pr checks <PR URL> --watch`. Repository and pull-request overrides are rejected. One watch lasts at most five minutes. A failed or timed-out watch affects only its pull request. When checks remain pending, the model runs more useful local tests before checking CI again. Autoimplement does not invent an ETA.
 

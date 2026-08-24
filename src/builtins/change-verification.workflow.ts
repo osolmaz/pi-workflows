@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -334,6 +334,18 @@ async function runBase(
   try {
     await git(repository, ["worktree", "add", "--detach", worktree, input.workspace.baseRevision]);
     baseEvidence.push(`Created detached base worktree at ${worktree}`);
+    const candidateModules = path.join(candidateRoot(input.workspace), "node_modules");
+    try {
+      const stat = await fs.stat(candidateModules);
+      if (stat.isDirectory()) {
+        await fs.symlink(candidateModules, path.join(worktree, "node_modules"), "dir");
+        baseEvidence.push(
+          "Reused the candidate dependency installation for the detached base check.",
+        );
+      }
+    } catch {
+      baseEvidence.push("No reusable candidate dependency installation was available.");
+    }
     const batch = await runBatch(context, eligible, worktree);
     return { batch, baseEvidence, cleanupEvidence };
   } catch (error) {
@@ -378,12 +390,7 @@ function normalizeText(value: string, basePath: string, candidatePath: string): 
   return value.replaceAll("\r\n", "\n").replaceAll(basePath, candidatePath);
 }
 
-function stableFindings(
-  result: CommandBatchItemResult,
-  format: FindingFormat,
-  basePath: string,
-  candidatePath: string,
-): string[] | null {
+function stableFindings(result: CommandBatchItemResult, format: FindingFormat): string[] | null {
   if (format !== "json") return null;
   try {
     const parsed = JSON.parse(result.stdout) as unknown;
@@ -405,7 +412,7 @@ function resultFingerprint(
   candidatePath: string,
 ): string {
   if (result === undefined) return "missing";
-  const ids = stableFindings(result, check.findingFormat, basePath, candidatePath);
+  const ids = stableFindings(result, check.findingFormat);
   const source =
     ids === null
       ? JSON.stringify({
@@ -571,6 +578,17 @@ export function classifyVerification(
       fingerprint: createHash("sha256").update(state.cleanupEvidence.join("\n")).digest("hex"),
     });
   }
+  const rejectedRepair = state.repairAttempts.find((attempt) =>
+    attempt.result.startsWith("Rejected mechanical fixer:"),
+  );
+  if (rejectedRepair !== undefined) {
+    unknown.push({
+      checkId: "mechanical-fix-boundary",
+      kind: "unknown",
+      summary: rejectedRepair.result,
+      fingerprint: createHash("sha256").update(rejectedRepair.result).digest("hex"),
+    });
+  }
   const failureFingerprint = createHash("sha256")
     .update(
       JSON.stringify({
@@ -580,20 +598,14 @@ export function classifyVerification(
       }),
     )
     .digest("hex");
-  const repairable =
-    related.length > 0 &&
-    related.every(
-      (item) =>
-        state.checks.find((check) => check.id === item.checkId)?.mechanicalFix !== undefined,
-    );
   const route =
-    unknown.length > 0 || untested.length > 0
-      ? "needsJudgment"
-      : related.length === 0
-        ? "ready"
-        : repairable || previousRepairAttempts({ state: { steps: [] } } as never).length === 0
-          ? "repairable"
-          : "blocked";
+    rejectedRepair !== undefined
+      ? "blocked"
+      : unknown.length > 0 || untested.length > 0
+        ? "needsJudgment"
+        : related.length === 0
+          ? "ready"
+          : "repairable";
   return {
     schema: CHANGE_VERIFICATION_SCHEMA,
     route,
@@ -653,15 +665,36 @@ function latestClassification(context: WorkflowNodeContext): ChangeVerificationR
   return classifyVerification(context.input as ChangeVerificationInput, latestExecution(context));
 }
 
-async function gitDiffFiles(root: string): Promise<string[]> {
-  const output = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  return output.length === 0
-    ? []
-    : output
-        .split("\0")
-        .filter(Boolean)
-        .map((entry) => entry.slice(3))
-        .sort();
+async function gitState(root: string): Promise<Map<string, string>> {
+  const status = await execFileAsync(
+    "git",
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    { cwd: root, encoding: "utf8", maxBuffer: 5_000_000, timeout: 60_000 },
+  );
+  const output = status.stdout;
+  const files =
+    output.length === 0
+      ? []
+      : output
+          .split("\0")
+          .filter(Boolean)
+          .map((entry) => entry.slice(3))
+          .sort();
+  const state = new Map<string, string>();
+  for (const file of files) {
+    try {
+      const content = await fs.readFile(path.join(root, file));
+      state.set(file, createHash("sha256").update(content).digest("hex"));
+    } catch {
+      state.set(file, "missing");
+    }
+  }
+  return state;
+}
+
+function changedState(before: Map<string, string>, after: Map<string, string>): string[] {
+  const files = new Set([...before.keys(), ...after.keys()]);
+  return [...files].filter((file) => before.get(file) !== after.get(file)).sort();
 }
 
 async function runMechanicalRepair(context: WorkflowActionContext): Promise<RepairAttempt> {
@@ -675,7 +708,7 @@ async function runMechanicalRepair(context: WorkflowActionContext): Promise<Repa
   if (target === undefined) throw new Error("No mechanical repair is available");
   const fix = checks.find((check) => check.id === target.checkId)?.mechanicalFix;
   if (fix === undefined) throw new Error("Mechanical repair disappeared");
-  const before = await gitDiffFiles(root);
+  const before = await gitState(root);
   const result = await runCommandBatch(
     {
       items: [
@@ -692,18 +725,20 @@ async function runMechanicalRepair(context: WorkflowActionContext): Promise<Repa
     },
     { signal: context.signal },
   );
-  const after = await gitDiffFiles(root);
-  const added = after.filter((file) => !before.includes(file));
-  const outside = added.filter((file) => !fix.files.includes(file));
-  if (outside.length > 0)
-    throw new Error(`Mechanical fixer changed undeclared files: ${outside.join(", ")}`);
+  const after = await gitState(root);
+  const changedFiles = changedState(before, after);
+  const outside = changedFiles.filter((file) => !fix.files.includes(file));
   return {
     attempt: attempts.length + 1,
     kind: "mechanical",
     fingerprint: classification.failureFingerprint,
-    changedFiles: after,
+    changedFiles: [...after.keys()].sort(),
     result:
-      result.items[0]?.outcome === "succeeded" ? fix.expectedDiff : JSON.stringify(result.items[0]),
+      outside.length > 0
+        ? `Rejected mechanical fixer: changed undeclared files ${outside.join(", ")}`
+        : result.items[0]?.outcome === "succeeded"
+          ? fix.expectedDiff
+          : JSON.stringify(result.items[0]),
   };
 }
 

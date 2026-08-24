@@ -7,6 +7,7 @@ import {
 import type { WorkflowNodeContext } from "../workflows/types.js";
 import autodocWorkflow, { type AutodocInput, type DocumentedPlan } from "./autodoc.workflow.js";
 import autoplanWorkflow, { type AutoplanInput, type AutoplanReady } from "./autoplan.workflow.js";
+import type { VerificationCheck } from "./change-verification.workflow.js";
 import planApprovalWorkflow, {
   parsePlanApprovalPolicy,
   type PlanApprovalContinue,
@@ -15,6 +16,10 @@ import planApprovalWorkflow, {
   type PlanApprovalResolution,
   type ResolvedPlanApprovalPolicy,
 } from "./plan-approval.workflow.js";
+import {
+  parsePreparedWorkspace,
+  type PreparedWorkspace,
+} from "./workspace-preparation.workflow.js";
 
 export type PlanChangeInput = {
   task: string;
@@ -25,6 +30,8 @@ export type PlanChangeInput = {
   previousPlan?: unknown;
   newEvidence?: unknown;
   approval?: PlanApprovalPolicy;
+  preparedWorkspace?: PreparedWorkspace;
+  verificationChecks?: VerificationCheck[];
 };
 
 export type NormalizedPlanChangeInput = Omit<PlanChangeInput, "approval"> & {
@@ -91,6 +98,8 @@ function parseInput(value: unknown): NormalizedPlanChangeInput {
       "previousPlan",
       "newEvidence",
       "approval",
+      "preparedWorkspace",
+      "verificationChecks",
     ],
     "plan change input",
   );
@@ -108,6 +117,12 @@ function parseInput(value: unknown): NormalizedPlanChangeInput {
     ...(documents !== undefined ? { documents } : {}),
     ...(input.previousPlan !== undefined ? { previousPlan: input.previousPlan } : {}),
     ...(input.newEvidence !== undefined ? { newEvidence: input.newEvidence } : {}),
+    ...(input.preparedWorkspace === undefined
+      ? {}
+      : { preparedWorkspace: parsePreparedWorkspace(input.preparedWorkspace) }),
+    ...(input.verificationChecks === undefined
+      ? {}
+      : { verificationChecks: input.verificationChecks as VerificationCheck[] }),
     approval: parsePlanApprovalPolicy(input.approval),
   };
 }
@@ -216,6 +231,12 @@ export const planChangeWorkflow = defineWorkflow({
           task: request.task,
           plan: design.plan,
           ...(request.repository !== undefined ? { repository: request.repository } : {}),
+          ...(request.preparedWorkspace === undefined
+            ? {}
+            : { preparedWorkspace: request.preparedWorkspace }),
+          ...(request.verificationChecks === undefined
+            ? {}
+            : { verificationChecks: request.verificationChecks }),
           ...(request.documents !== undefined ? { documents: request.documents } : {}),
           evidence: request.newEvidence,
         };

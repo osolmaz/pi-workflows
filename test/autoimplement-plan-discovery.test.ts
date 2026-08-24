@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
-import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 function documentedPlan(plan: unknown) {
   return {
@@ -25,14 +25,58 @@ function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
     })
     .respond("classifyImplementation", {
       output: { route: "blocked", summary: "test boundary", evidence: "done" },
+    })
+    .respond("challengeBlocker", {
+      output: {
+        route: "blocked",
+        blockingNow: true,
+        outsideAuthority: true,
+        canProceed: false,
+        reason: "The startup test intentionally stops here.",
+        nextAction: "",
+        nextStage: null,
+        alternativesChecked: ["Continue beyond the startup boundary"],
+        evidence: ["The test does not authorize later stages"],
+      },
     });
 }
 
 async function run(executor: ScriptedExecutor, input: unknown) {
+  const repository = await makeTempDir("autoimplement-plan-discovery-repo");
+  const request = input as Record<string, unknown>;
   return await new WorkflowEngine({
     executor,
     databasePath: await makeStateDatabasePath("autoimplement-plan-discovery"),
-  }).run(autoimplementWorkflow, input);
+  }).run(autoimplementWorkflow, {
+    ...request,
+    repository,
+    preparedWorkspace: {
+      schema: "pi-workflows.prepared-workspace.v1",
+      mode: "branch",
+      repository,
+      baseBranch: "main",
+      baseRevision: "test-base",
+      workBranch: "feat/test",
+      directDefaultBranchAuthorized: false,
+      preExistingChangedPaths: [],
+      evidence: ["test fixture"],
+      scope: `Only ${repository}`,
+    },
+    verificationChecks: [
+      {
+        id: "verify",
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: repository,
+        timeoutMs: 10_000,
+        maxOutputChars: 100_000,
+        readOnly: true,
+        baseEligible: false,
+        changedFileScope: false,
+        findingFormat: "text",
+      },
+    ],
+  });
 }
 
 describe("autoimplement existing-plan startup", () => {
@@ -99,14 +143,28 @@ describe("autoimplement existing-plan startup", () => {
   });
 
   it("blocks instead of devising when no clear plan exists", async () => {
-    const executor = new ScriptedExecutor().respond("findPlan", {
-      output: {
-        route: "blocked",
-        documents: [],
-        reason: "No clear selected plan exists.",
-        evidence: null,
-      },
-    });
+    const executor = new ScriptedExecutor()
+      .respond("findPlan", {
+        output: {
+          route: "blocked",
+          documents: [],
+          reason: "No clear selected plan exists.",
+          evidence: null,
+        },
+      })
+      .respond("challengeBlocker", {
+        output: {
+          route: "blocked",
+          blockingNow: true,
+          outsideAuthority: true,
+          canProceed: false,
+          reason: "No existing plan can be adopted.",
+          nextAction: "",
+          nextStage: null,
+          alternativesChecked: ["Search referenced canonical documents"],
+          evidence: ["No selected plan exists"],
+        },
+      });
     const { state } = await run(executor, { task: "implement something" });
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
