@@ -1,11 +1,34 @@
-import { agent, compute, defineWorkflow } from "../workflows/definition.js";
+import {
+  agent,
+  compute,
+  defineWorkflow,
+  includeWorkflow,
+  includedResult,
+} from "../workflows/definition.js";
 import { digest } from "../workflows/human-decision.js";
 import type { WorkflowNodeContext } from "../workflows/types.js";
+import changeVerificationWorkflow, {
+  type ChangeVerificationInput,
+  type ChangeVerificationResult,
+  type VerificationCheck,
+} from "./change-verification.workflow.js";
+import workspacePreparationWorkflow, {
+  parsePreparedWorkspace,
+  type PreparedWorkspace,
+  type WorkspaceMode,
+  type WorkspacePreparationInput,
+} from "./workspace-preparation.workflow.js";
 
 export type AutodocInput = {
   task: string;
   plan?: unknown;
   repository?: string;
+  baseBranch?: string;
+  scope?: string;
+  workspaceMode?: WorkspaceMode;
+  directDefaultBranchAuthorized?: boolean;
+  preparedWorkspace?: PreparedWorkspace;
+  verificationChecks?: VerificationCheck[];
   documents?: string[];
   evidence?: unknown;
 };
@@ -21,7 +44,8 @@ export type DocumentedPlan = {
     digests: Record<string, string>;
     evidence: unknown;
   };
-  verification: unknown;
+  verification: ChangeVerificationResult | { route: "ready"; reason: string };
+  workspace?: PreparedWorkspace;
 };
 
 export type AutodocBlocked = {
@@ -29,6 +53,7 @@ export type AutodocBlocked = {
   task: string;
   reason: string;
   evidence: unknown;
+  sourceNode?: string;
 };
 
 type LocatedPlan = {
@@ -77,15 +102,38 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
   return record as Record<string, string>;
 }
 
+function parseWorkspaceMode(value: unknown): WorkspaceMode | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "auto" && value !== "branch" && value !== "worktree" && value !== "defaultBranch") {
+    throw new Error("autodoc workspaceMode must be auto, branch, worktree, or defaultBranch");
+  }
+  return value;
+}
+
 function parseInput(value: unknown): AutodocInput {
   const input = requireRecord(value, "autodoc input");
   const documents = input.documents;
+  const workspaceMode = parseWorkspaceMode(input.workspaceMode);
   return {
     task: requireString(input.task, "autodoc task"),
     ...(input.plan !== undefined ? { plan: input.plan } : {}),
     ...(input.repository !== undefined
       ? { repository: requireString(input.repository, "autodoc repository") }
       : {}),
+    ...(input.baseBranch !== undefined
+      ? { baseBranch: requireString(input.baseBranch, "autodoc baseBranch") }
+      : {}),
+    ...(input.scope !== undefined ? { scope: requireString(input.scope, "autodoc scope") } : {}),
+    ...(workspaceMode === undefined ? {} : { workspaceMode }),
+    ...(input.directDefaultBranchAuthorized === undefined
+      ? {}
+      : { directDefaultBranchAuthorized: input.directDefaultBranchAuthorized === true }),
+    ...(input.preparedWorkspace === undefined
+      ? {}
+      : { preparedWorkspace: parsePreparedWorkspace(input.preparedWorkspace) }),
+    ...(input.verificationChecks === undefined
+      ? {}
+      : { verificationChecks: input.verificationChecks as VerificationCheck[] }),
     ...(documents !== undefined ? { documents: stringArray(documents, "autodoc documents") } : {}),
     ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
   };
@@ -132,10 +180,45 @@ function currentPlan(context: WorkflowNodeContext): unknown {
   throw new Error("autodoc does not have a selected plan");
 }
 
+function preparedWorkspace(context: WorkflowNodeContext): PreparedWorkspace {
+  const request = context.input as AutodocInput;
+  if (request.preparedWorkspace !== undefined) return request.preparedWorkspace;
+  const result = includedResult(workspacePreparationWorkflow, context.outputs.workspace);
+  if (result.exit !== "ready") throw new Error("autodoc workspace is not ready");
+  return result.output;
+}
+
+function verificationResult(context: WorkflowNodeContext): ChangeVerificationResult {
+  const result = includedResult(changeVerificationWorkflow, context.outputs.verification);
+  return result.output;
+}
+
 function blockedReason(context: WorkflowNodeContext): AutodocBlocked {
   const request = context.input as AutodocInput;
   const assessment = context.outputs.inspectDocumentation as DocumentationAssessment | undefined;
   const located = context.outputs.locatePlan as LocatedPlan | undefined;
+  if (context.outputs.verification !== undefined) {
+    const result = includedResult(changeVerificationWorkflow, context.outputs.verification);
+    return {
+      status: "blocked",
+      task: request.task,
+      reason: result.output.reason,
+      evidence: result.output,
+      sourceNode: result.output.qualifiedNode,
+    };
+  }
+  if (context.outputs.workspace !== undefined) {
+    const result = includedResult(workspacePreparationWorkflow, context.outputs.workspace);
+    if (result.exit === "blocked") {
+      return {
+        status: "blocked",
+        task: request.task,
+        reason: result.output.reason,
+        evidence: result.output,
+        sourceNode: "autodoc/workspace",
+      };
+    }
+  }
   return {
     status: "blocked",
     task: request.task,
@@ -146,6 +229,8 @@ function blockedReason(context: WorkflowNodeContext): AutodocBlocked {
           ? located.reason
           : "Autodoc could not identify a clear selected plan or canonical document target.",
     evidence: assessment?.evidence ?? located?.evidence ?? null,
+    sourceNode:
+      assessment?.route === "blocked" ? "autodoc/inspectDocumentation" : "autodoc/locatePlan",
   };
 }
 
@@ -156,7 +241,42 @@ export const autodocWorkflow = defineWorkflow({
   input: parseInput,
   title: ({ input }) => `autodoc: ${input.task.slice(0, 60)}`,
   startAt: "prepare",
-  maxSteps: 24,
+  maxSteps: 80,
+  includes: {
+    workspace: includeWorkflow(workspacePreparationWorkflow, {
+      input: (context): WorkspacePreparationInput => {
+        const request = context.input as AutodocInput;
+        return {
+          repository: request.repository ?? process.cwd(),
+          ...(request.baseBranch === undefined ? {} : { baseBranch: request.baseBranch }),
+          ...(request.scope === undefined ? {} : { scope: request.scope }),
+          ...(request.workspaceMode === undefined ? {} : { workspaceMode: request.workspaceMode }),
+          ...(request.directDefaultBranchAuthorized === undefined
+            ? {}
+            : { directDefaultBranchAuthorized: request.directDefaultBranchAuthorized }),
+          ...(request.preparedWorkspace === undefined
+            ? {}
+            : { preparedWorkspace: request.preparedWorkspace }),
+        };
+      },
+    }),
+    verification: includeWorkflow(changeVerificationWorkflow, {
+      input: (context): ChangeVerificationInput => {
+        const request = context.input as AutodocInput;
+        const update = requireRecord(context.outputs.updateDocumentation, "documentation update");
+        return {
+          originatingWorkflow: "autodoc",
+          qualifiedNode: "autodoc/verification",
+          workspace: preparedWorkspace(context),
+          ...(request.verificationChecks === undefined
+            ? {}
+            : { checks: request.verificationChecks }),
+          changedFiles: stringArray(update.files, "updated documentation files"),
+          plan: currentPlan(context),
+        };
+      },
+    }),
+  },
   exits: {
     ready: {
       from: "finalize",
@@ -184,8 +304,7 @@ export const autodocWorkflow = defineWorkflow({
           "Return blocked when no single clear selected plan exists.",
           `Task: ${request.task}`,
           `Repository: ${request.repository ?? "current repository"}`,
-          `Referenced documents: ${JSON.stringify(request.documents ?? [])}`,
-          `Evidence: ${JSON.stringify(request.evidence ?? null)}`,
+          `Preferred documents: ${JSON.stringify(request.documents ?? [])}`,
         ].join("\n");
       },
       expectedOutput:
@@ -221,6 +340,7 @@ export const autodocWorkflow = defineWorkflow({
           "Update the canonical specification and implementation plan to preserve the selected plan exactly.",
           "Use the repository documentation rules and keep the text plain and complete.",
           "Do not redesign the solution and do not implement code.",
+          `Prepared workspace: ${JSON.stringify(preparedWorkspace(context))}`,
           `Task: ${request.task}`,
           `Selected plan: ${JSON.stringify(currentPlan(context))}`,
           `Canonical files: ${JSON.stringify(assessment.files)}`,
@@ -236,26 +356,6 @@ export const autodocWorkflow = defineWorkflow({
         stringArray(result.files, "updated documentation files");
         stringRecord(result.digests, "updated documentation digests");
         requireString(result.summary, "documentation update summary");
-        return result;
-      },
-    }),
-    verifyDocumentation: agent({
-      timeoutMs: 20 * 60_000,
-      statusDetail: "verifying documentation",
-      prompt: ({ outputs }) =>
-        [
-          "Verify the changed canonical documentation.",
-          "Run the repository documentation, formatting, link, and privacy checks that apply.",
-          "Do not implement code.",
-          `Documentation update: ${JSON.stringify(outputs.updateDocumentation)}`,
-        ].join("\n"),
-      expectedOutput:
-        '{ "passed": true | false, "commands": [{ "command": "exact command", "outcome": "result" }], "failures": ["failure"] }',
-      validate: (value) => {
-        const result = requireRecord(value, "documentation verification");
-        if (typeof result.passed !== "boolean") {
-          throw new Error("documentation verification passed must be boolean");
-        }
         return result;
       },
     }),
@@ -277,7 +377,13 @@ export const autodocWorkflow = defineWorkflow({
               digests: assessment.digests,
               evidence: assessment.evidence,
             },
-            verification: { passed: true, reason: "Canonical documentation was already current." },
+            verification: {
+              route: "ready",
+              reason: "Canonical documentation was already current.",
+            },
+            ...(request.preparedWorkspace === undefined
+              ? {}
+              : { workspace: request.preparedWorkspace }),
           } satisfies DocumentedPlan;
         }
         const updateRecord = requireRecord(updated, "documentation update");
@@ -290,9 +396,10 @@ export const autodocWorkflow = defineWorkflow({
             state: "updated",
             files: stringArray(updateRecord.files, "updated documentation files"),
             digests: stringRecord(updateRecord.digests, "updated documentation digests"),
-            evidence: context.outputs.verifyDocumentation,
+            evidence: verificationResult(context),
           },
-          verification: context.outputs.verifyDocumentation,
+          verification: verificationResult(context),
+          workspace: preparedWorkspace(context),
         } satisfies DocumentedPlan;
       },
     }),
@@ -311,14 +418,14 @@ export const autodocWorkflow = defineWorkflow({
       from: "inspectDocumentation",
       switch: {
         on: "$.route",
-        cases: { current: "finalize", update: "updateDocumentation", blocked: "blocked" },
+        cases: { current: "finalize", update: "workspace", blocked: "blocked" },
       },
     },
-    { from: "updateDocumentation", to: "verifyDocumentation" },
-    {
-      from: "verifyDocumentation",
-      switch: { on: "$.passed", cases: { true: "finalize", false: "blocked" } },
-    },
+    { from: "workspace.ready", to: "updateDocumentation" },
+    { from: "workspace.blocked", to: "blocked" },
+    { from: "updateDocumentation", to: "verification" },
+    { from: "verification.ready", to: "finalize" },
+    { from: "verification.blocked", to: "blocked" },
   ],
 });
 
