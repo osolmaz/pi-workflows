@@ -4,10 +4,6 @@ const MAX_SOURCE_CHARS = 50_000;
 const MAX_PURPOSE_CHARS = 1_000;
 const MAX_REQUIRED_POINTS = 32;
 const MAX_REQUIRED_POINT_CHARS = 500;
-const DEFAULT_SUMMARY_CHARS = 2_000;
-const MAX_SUMMARY_CHARS = 10_000;
-const DEFAULT_SUMMARY_SENTENCES = 5;
-const MAX_SUMMARY_SENTENCES = 20;
 
 export type PlainSummaryFormat = "paragraphs" | "bullets" | "mixed";
 
@@ -24,8 +20,8 @@ type ResolvedPlainSummaryInput = {
   source: unknown;
   purpose: string;
   mustInclude: string[];
-  maxChars: number;
-  maxSentences: number;
+  maxChars?: number;
+  maxSentences?: number;
   format: PlainSummaryFormat;
 };
 
@@ -48,17 +44,12 @@ function boundedText(value: unknown, label: string, maxChars: number): string {
   return value;
 }
 
-function positiveInteger(value: unknown, label: string, fallback: number, maximum: number): number {
-  const resolved = value === undefined ? fallback : value;
-  if (
-    typeof resolved !== "number" ||
-    !Number.isInteger(resolved) ||
-    resolved <= 0 ||
-    resolved > maximum
-  ) {
-    throw new Error(`${label} must be an integer from 1 through ${maximum}`);
+function positiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
   }
-  return resolved;
+  return value;
 }
 
 function sentenceCount(text: string): number {
@@ -101,22 +92,14 @@ export function parsePlainSummaryInput(value: unknown): PlainSummaryInput {
   if (serializedSource.length > MAX_SOURCE_CHARS) {
     throw new Error(`plain-summary source exceeds ${MAX_SOURCE_CHARS} serialized characters`);
   }
+  const maxChars = positiveInteger(input.maxChars, "plain-summary maxChars");
+  const maxSentences = positiveInteger(input.maxSentences, "plain-summary maxSentences");
   return {
     source: input.source,
     purpose,
     mustInclude: [...mustInclude] as string[],
-    maxChars: positiveInteger(
-      input.maxChars,
-      "plain-summary maxChars",
-      DEFAULT_SUMMARY_CHARS,
-      MAX_SUMMARY_CHARS,
-    ),
-    maxSentences: positiveInteger(
-      input.maxSentences,
-      "plain-summary maxSentences",
-      DEFAULT_SUMMARY_SENTENCES,
-      MAX_SUMMARY_SENTENCES,
-    ),
+    ...(maxChars !== undefined ? { maxChars } : {}),
+    ...(maxSentences !== undefined ? { maxSentences } : {}),
     format,
   };
 }
@@ -149,13 +132,15 @@ export const plainSummaryWorkflow = defineWorkflow({
           "Do not use tools.",
           `Purpose: ${request.purpose}`,
           `Format: ${request.format}`,
-          `Maximum characters: ${request.maxChars}`,
-          `Maximum sentences: ${request.maxSentences}`,
+          ...(request.maxChars === undefined ? [] : [`Maximum characters: ${request.maxChars}`]),
+          ...(request.maxSentences === undefined
+            ? []
+            : [`Maximum sentences: ${request.maxSentences}`]),
           `Required points: ${JSON.stringify(request.mustInclude)}`,
           `Source: ${JSON.stringify(request.source)}`,
         ].join("\n");
       },
-      expectedOutput: assistantMessage({ maxChars: MAX_SUMMARY_CHARS }),
+      expectedOutput: assistantMessage(),
     }),
     finish: compute({
       run: ({ outputs, input }) => {
@@ -164,16 +149,18 @@ export const plainSummaryWorkflow = defineWorkflow({
         if (typeof text !== "string" || text.trim().length === 0) {
           throw new Error("plain-summary returned no visible text");
         }
-        if (text.length > request.maxChars) {
+        if (request.maxChars !== undefined && text.length > request.maxChars) {
           throw new Error(
             `plain-summary returned ${text.length} characters, above the requested limit of ${request.maxChars}`,
           );
         }
-        const sentences = sentenceCount(text);
-        if (sentences > request.maxSentences) {
-          throw new Error(
-            `plain-summary returned ${sentences} sentences, above the requested limit of ${request.maxSentences}`,
-          );
+        if (request.maxSentences !== undefined) {
+          const sentences = sentenceCount(text);
+          if (sentences > request.maxSentences) {
+            throw new Error(
+              `plain-summary returned ${sentences} sentences, above the requested limit of ${request.maxSentences}`,
+            );
+          }
         }
         return { text } satisfies PlainSummaryResult;
       },

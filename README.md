@@ -375,12 +375,12 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
   while they run.
 - `two-turn` chains three agent steps that build on each other's outputs in
   the same conversation.
-- `plain-summary` turns structured source data into one short visible assistant
-  response. It is also a built-in workflow that other workflows can include.
+- `plain-summary` turns structured source data into one visible assistant
+  response without a default character or sentence limit. It is also a built-in workflow that other workflows can include.
 - `autoplan` turns the current problem into a chosen practical solution and
   a detailed implementation plan, using the ideal end state as guidance rather
-  than an out-of-scope requirement. It also shows a short assistant response
-  with the selected plan and each rejected option.
+  than an out-of-scope requirement. It also shows an assistant response without
+  character or sentence limits, with the selected plan and each rejected option.
 - `autoimplement` finds a clear existing plan, prepares a safe branch or
   worktree before mutation, documents it when needed, and verifies the current
   change against eligible base-branch failures. It writes and runs the exact

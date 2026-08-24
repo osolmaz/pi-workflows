@@ -307,8 +307,6 @@ function summaryInput(
         : []),
       ...(blocked ? [selection.blocker as string] : ["The plan is selected for approval"]),
     ],
-    maxChars: 2_500,
-    maxSentences: 12,
     format: "mixed",
   };
 }

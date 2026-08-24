@@ -649,8 +649,7 @@
         "localNodeId": "summarize",
         "statusDetail": "writing a plain summary",
         "expectedOutput": {
-          "kind": "assistant-message",
-          "maxChars": 10000
+          "kind": "assistant-message"
         }
       },
       "redesign/design/readySummary/finish": {
@@ -678,8 +677,7 @@
         "localNodeId": "summarize",
         "statusDetail": "writing a plain summary",
         "expectedOutput": {
-          "kind": "assistant-message",
-          "maxChars": 10000
+          "kind": "assistant-message"
         }
       },
       "redesign/design/blockedSummary/finish": {

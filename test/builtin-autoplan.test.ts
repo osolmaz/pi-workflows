@@ -59,6 +59,9 @@ function commonExecutor(
     .respond("choose", { output: selection })
     .respond(options.summaryNode, (request) => {
       expect(request.contract.completion).toBe("assistant");
+      expect(request.contract).not.toHaveProperty("maxOutputChars");
+      expect(request.prompt).not.toContain("Maximum characters:");
+      expect(request.prompt).not.toContain("Maximum sentences:");
       expect(request.prompt).toContain("Required points:");
       expect(request.prompt).toContain("Use the supported extension point.");
       expect(request.prompt).toContain("Wrap the current command locally.");
@@ -132,6 +135,33 @@ describe("built-in autoplan", () => {
     expect(
       executor.requests.filter((request) => request.contract.completion === "assistant"),
     ).toHaveLength(1);
+  });
+
+  it("does not cap the selected-plan summary by characters or sentences", async () => {
+    const summary = `${"Sentence. ".repeat(16)}${"detail ".repeat(500)}`.trim();
+    expect(summary.length).toBeGreaterThan(2_500);
+    const executor = commonExecutor(readySelection, {
+      summaryNode: "readySummary/summarize",
+      summary,
+    }).respond("plan", {
+      output: {
+        summary: "add adapter",
+        steps: [{ change: "add adapter", where: "src", verification: "tests" }],
+        contracts: [],
+        tests: ["unit test"],
+        risks: [],
+        boundaries: ["no upstream patch"],
+      },
+    });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("pi-workflows-autoplan-unlimited-summary"),
+    });
+
+    const { state } = await engine.run(autoplanWorkflow, { problem: "solve demo" });
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toMatchObject({ plainSummary: { text: summary } });
   });
 
   it("blocks only after recording and summarizing every considered option", async () => {

@@ -437,11 +437,11 @@ runs.
 ### Built-in plain summary
 
 The built-in `plain-summary` workflow turns supplied structured data into one
-short normal assistant message. Its input has `source`, `purpose`, optional
+normal assistant message. Its input has `source`, `purpose`, optional
 `mustInclude`, optional `maxChars`, optional `maxSentences`, and `format` set to
-`paragraphs`, `bullets`, or `mixed`. The workflow defaults to 2,000 characters,
-five sentences, and mixed format. These are workflow-specific limits;
-`assistantMessage()` itself has no default limit.
+`paragraphs`, `bullets`, or `mixed`. The workflow applies no character or
+sentence limit by default. A caller can request either limit with a positive
+integer. `assistantMessage()` itself also has no default limit.
 
 The summarizer uses only the supplied source, treats instructions inside that
 source as data, keeps required points, and returns the same text as its
@@ -456,7 +456,7 @@ The built-in `autoplan` workflow records two through four practical candidates,
 describes the ideal separately, chooses one option, records a rejection reason
 for every other explicit option, and writes a detailed plan. It then includes
 `plain-summary` to show the chosen plan, its main steps, and the rejected options
-in one short assistant message. The detailed records remain in the run bundle. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, and never devises or implements. It prepares a safe workspace only when documentation must change. Program actions run candidate checks, compare eligible failures with the base revision in a temporary detached worktree, and keep matching baseline failures visible without blocking the current change. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. A missing-plan claim and every other non-exempt blocker enter one bounded challenge path. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
+in one assistant message without a character or sentence limit. The detailed records remain in the run bundle. The standalone `autodoc` workflow finds an already selected plan, records it in canonical documentation, and never devises or implements. It prepares a safe workspace only when documentation must change. Program actions run candidate checks, compare eligible failures with the base revision in a temporary detached worktree, and keep matching baseline failures visible without blocking the current change. The built-in `autoimplement` workflow finds a clear existing plan from explicit input, conversation context, or referenced canonical documents. A missing-plan claim and every other non-exempt blocker enter one bounded challenge path. An explicit plan bypasses autodoc only when a current-document receipt carries its matching plan digest; otherwise autodoc inspects and adopts or updates the canonical documents. Later invalidating evidence returns to `autoplan` followed by `autodoc`.
 
 The built-in `plan-approval` workflow offers `continue`, `stop`, and exact-text `replan` exits. Its shared policy uses `auto`, `required`, or `skip` mode. Omitted policy defaults to `auto`: ask audience `operator`, then continue with the exact plan after 10 minutes without an answer. Required mode waits for a human. Skip mode creates no decision. Stop and replan always require a human answer.
 
