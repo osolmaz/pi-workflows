@@ -193,9 +193,7 @@ function currentPlan(context: WorkflowNodeContext): unknown {
 
 function mutationRepository(request: AutodocInput): string {
   if (request.repository !== undefined) return request.repository;
-  if (request.preparedWorkspace !== undefined) {
-    return request.preparedWorkspace.worktreePath ?? request.preparedWorkspace.repository;
-  }
+  if (request.preparedWorkspace !== undefined) return request.preparedWorkspace.repository;
   throw new Error("autodoc mutation requires an explicit repository");
 }
 
