@@ -901,7 +901,6 @@ describe("built-in autoimplement", () => {
             {
               ...safeVerification.commands[0]!,
               id: "verify-second",
-              cwd: path.join(repository, "second"),
             },
           ],
         },
@@ -909,7 +908,7 @@ describe("built-in autoimplement", () => {
           input: { task: "demo", plan: {}, repository, preparedWorkspace: preparedWorkspaceFor() },
         },
       ),
-    ).rejects.toThrow("exactly one prepared-workspace command");
+    ).resolves.toMatchObject({ commands: [{ id: "verify" }, { id: "verify-second" }] });
     await expect(
       validate("repairReviewCommand", { route: "unknown", reason: "bad" }),
     ).rejects.toThrow("one of retry, blocked");
@@ -2213,6 +2212,7 @@ describe("built-in autoimplement", () => {
       ...documentedPlan({ steps: ["verify"] }),
       repository,
       preparedWorkspace: prepared,
+      directDefaultBranchAuthorized: true,
       verificationChecks: [verificationCheck],
       merge: false,
     });

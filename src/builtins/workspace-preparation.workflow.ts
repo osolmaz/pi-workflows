@@ -103,6 +103,9 @@ export function parsePreparedWorkspace(value: unknown): PreparedWorkspace {
   if (record.mode === "worktree" && worktreePath === undefined) {
     throw new Error("worktree mode requires worktreePath");
   }
+  if (record.mode !== "worktree" && worktreePath !== undefined) {
+    throw new Error("worktreePath is allowed only in worktree mode");
+  }
   return {
     schema: PREPARED_WORKSPACE_SCHEMA,
     mode: record.mode,
@@ -214,7 +217,7 @@ export async function inspectWorkspace(
       reason,
       evidence,
     });
-    if (value.repository !== input.repository && value.worktreePath !== input.repository) {
+    if (value.repository !== input.repository) {
       return blocked(
         "The supplied prepared workspace does not own the requested repository path.",
         [value.repository, value.worktreePath ?? "no worktree path"],
@@ -228,6 +231,17 @@ export async function inspectWorkspace(
     }
     try {
       const topLevel = path.resolve(await git(candidatePath, ["rev-parse", "--show-toplevel"]));
+      const repositoryTopLevel = path.resolve(
+        await git(value.repository, ["rev-parse", "--show-toplevel"]),
+      );
+      const candidateCommonDir = path.resolve(
+        candidatePath,
+        await git(candidatePath, ["rev-parse", "--git-common-dir"]),
+      );
+      const repositoryCommonDir = path.resolve(
+        value.repository,
+        await git(value.repository, ["rev-parse", "--git-common-dir"]),
+      );
       const currentBranch = await git(candidatePath, [
         "symbolic-ref",
         "--quiet",
@@ -248,6 +262,18 @@ export async function inspectWorkspace(
           `actual=${topLevel}`,
         ]);
       }
+      if (repositoryTopLevel !== path.resolve(value.repository)) {
+        return blocked("The prepared workspace owner no longer names its Git worktree.", [
+          `prepared=${value.repository}`,
+          `actual=${repositoryTopLevel}`,
+        ]);
+      }
+      if (candidateCommonDir !== repositoryCommonDir) {
+        return blocked("The prepared worktree does not belong to the requested repository.", [
+          `repositoryGitDir=${repositoryCommonDir}`,
+          `worktreeGitDir=${candidateCommonDir}`,
+        ]);
+      }
       if (currentBranch !== value.workBranch || branchRevision !== headRevision) {
         return blocked(
           "The prepared workspace is no longer on its recorded task branch.",
@@ -262,20 +288,23 @@ export async function inspectWorkspace(
       }
       if (
         value.mode === "defaultBranch" &&
-        (value.workBranch !== value.baseBranch || !value.directDefaultBranchAuthorized)
+        (value.workBranch !== value.baseBranch ||
+          !value.directDefaultBranchAuthorized ||
+          input.directDefaultBranchAuthorized !== true)
       ) {
         return blocked(
           "The prepared default-branch receipt no longer proves direct-work authority.",
           [
             `baseBranch=${value.baseBranch}`,
             `workBranch=${value.workBranch}`,
-            `authorized=${value.directDefaultBranchAuthorized}`,
+            `receiptAuthorized=${value.directDefaultBranchAuthorized}`,
+            `requestAuthorized=${input.directDefaultBranchAuthorized === true}`,
           ],
           currentBranch,
         );
       }
       if (value.mode === "worktree") {
-        const listing = await git(candidatePath, ["worktree", "list", "--porcelain"]);
+        const listing = await git(value.repository, ["worktree", "list", "--porcelain"]);
         const registered = listing.split("\n\n").some((entry) => {
           const lines = entry.split("\n");
           return (

@@ -1037,6 +1037,7 @@ export const changeVerificationWorkflow = defineWorkflow({
           "Repair only current-change failures in the prepared workspace.",
           "Do not fix unrelated baseline failures or run broad repository migrations.",
           `Prepared path: ${candidateRoot(input.workspace)}`,
+          `Authorized scope: ${input.workspace.scope}`,
           `Approved plan: ${JSON.stringify(input.plan)}`,
           `Related failures: ${JSON.stringify(result.relatedFailures)}`,
           `Unknown failures: ${JSON.stringify(result.unknownFailures)}`,

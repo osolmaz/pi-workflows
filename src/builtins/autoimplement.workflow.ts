@@ -839,12 +839,11 @@ function parseVerificationForContext(
   context: WorkflowNodeContext,
 ): VerificationCommandPlan {
   const plan = parseVerificationCommandPlan(value);
-  if (plan.commands.length !== 1) {
-    throw new Error("verification plan must contain exactly one prepared-workspace command");
-  }
   const root = preparedWorkspace(context).worktreePath ?? preparedWorkspace(context).repository;
-  if (path.resolve(plan.commands[0]!.cwd) !== path.resolve(root)) {
-    throw new Error(`verification command cwd must match the prepared workspace: ${root}`);
+  for (const command of plan.commands) {
+    if (path.resolve(command.cwd) !== path.resolve(root)) {
+      throw new Error(`verification command cwd must match the prepared workspace: ${root}`);
+    }
   }
   return plan;
 }
@@ -1611,10 +1610,10 @@ export const autoimplementWorkflow = defineWorkflow({
       statusDetail: "planning independent verification commands",
       prompt: (context) =>
         [
-          "Select the required local verification command for the implementation.",
-          "Return exactly one command for the prepared repository workspace.",
+          "Select all required local verification commands for the implementation.",
+          "Return one or more commands for the prepared repository workspace.",
           "Use exact executables and argument arrays without shell wrappers, environment overrides, stdin, Git or GitHub mutations, package publication, deployment, merge, or release commands.",
-          "Use the prepared absolute workspace path as cwd, an explicit timeout no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
+          "Use the prepared absolute workspace path as cwd for every command, explicit timeouts no longer than 2700000ms, and maxOutputChars no larger than 1000000.",
           "List checks that cannot run locally under untested.",
           `Prepared workspace: ${JSON.stringify(preparedWorkspace(context))}`,
         ].join("\n"),
