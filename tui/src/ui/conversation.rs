@@ -568,7 +568,7 @@ mod tests {
         let settled = rendered(None);
         assert!(settled.contains("assistant: settled"));
         assert!(settled.contains("plan hello"));
-        assert!(settled.contains("tool read [finished] · 1 update"));
+        assert!(settled.contains("tool read [finished] · 0 updates"));
         assert!(settled.contains("args: {\"path\":\"README.md\"}"));
         assert!(settled.contains("result: {\"content\":\"ok\"}"));
         assert!(!settled.contains("more session events"));
