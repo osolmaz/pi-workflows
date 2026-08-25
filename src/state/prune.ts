@@ -217,6 +217,13 @@ function treeHasBlocker(database: Database.Database, runIds: string[]): boolean 
        WHERE (parent_run_id IN (${values}) AND continuation_run_id NOT IN (${values}))
           OR (continuation_run_id IN (${values}) AND parent_run_id NOT IN (${values}))`,
       [...runIds, ...runIds, ...runIds, ...runIds],
+    ) ||
+    hasRow(
+      database,
+      `SELECT 1 FROM workflow_settings
+       WHERE (origin_run_id IN (${values}) AND active_run_id NOT IN (${values}))
+          OR (active_run_id IN (${values}) AND origin_run_id NOT IN (${values}))`,
+      [...runIds, ...runIds, ...runIds, ...runIds],
     )
   ) {
     return true;
@@ -299,9 +306,13 @@ function relatedResourceIds(database: Database.Database, runIds: string[]): stri
       `SELECT resource_id AS resourceId FROM runs WHERE run_id IN (${values})
        UNION SELECT resource_id FROM session_segments WHERE run_id IN (${values})
        UNION SELECT resource_id FROM human_decisions WHERE run_id IN (${values})
-       UNION SELECT resource_id FROM turn_intents WHERE run_id IN (${values})`,
+       UNION SELECT resource_id FROM turn_intents WHERE run_id IN (${values})
+       UNION SELECT resource_id FROM workflow_settings
+         WHERE origin_run_id IN (${values}) OR active_run_id IN (${values})
+       UNION SELECT resource_id FROM workflow_follow_up_queues WHERE run_id IN (${values})
+       UNION SELECT resource_id FROM workflow_follow_ups WHERE run_id IN (${values})`,
     )
-    .all(...runIds, ...runIds, ...runIds, ...runIds)
+    .all(...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds)
     .filter(isResourceRow);
   const resources = rows.map((row) => row.resourceId);
   if (resources.length === 0) return [];

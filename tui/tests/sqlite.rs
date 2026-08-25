@@ -39,7 +39,7 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
              CREATE TABLE run_sources(run_id TEXT, mount_path TEXT, source_type TEXT, source_ref TEXT, source_revision TEXT);
              CREATE TABLE leases(resource_id TEXT PRIMARY KEY, owner_id TEXT, expires_at INTEGER);
              CREATE TABLE events(resource_id TEXT, resource_revision INTEGER, event_type TEXT, payload_hash BLOB, recorded_at INTEGER);
-             CREATE TABLE node_attempts(attempt_id TEXT PRIMARY KEY, run_id TEXT, node_id TEXT, node_type TEXT, status TEXT, output_hash BLOB, receipt_hash BLOB, error_hash BLOB, started_at INTEGER, finished_at INTEGER);
+             CREATE TABLE node_attempts(attempt_id TEXT PRIMARY KEY, run_id TEXT, node_id TEXT, node_type TEXT, status TEXT, output_hash BLOB, receipt_hash BLOB, error_hash BLOB, settings_scope_id TEXT, settings_change_number INTEGER, settings_hash BLOB, started_at INTEGER, finished_at INTEGER);
              CREATE TABLE run_steps(run_id TEXT, step_index INTEGER, attempt_id TEXT, output_override_hash BLOB);
              CREATE TABLE attempt_entries(attempt_id TEXT, role TEXT, segment_id TEXT, entry_id TEXT);
              CREATE TABLE workflow_updates(update_id TEXT, run_revision INTEGER, attempt_id TEXT, update_type TEXT, update_key TEXT, data_hash BLOB, recorded_at INTEGER);
@@ -245,6 +245,30 @@ fn projects_attempt_content_from_pi_entries() {
     assert_eq!(run.state.steps[0].prompt, json!("Do the work"));
     assert_eq!(run.state.steps[0].output, json!("Done"));
     assert_eq!(run.state.outputs["work"], json!("Done"));
+}
+
+#[test]
+fn projects_the_active_settings_binding() {
+    let (_temp, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "INSERT INTO node_attempts(attempt_id, run_id, node_id, node_type, status, settings_scope_id, settings_change_number, settings_hash, started_at) VALUES ('active', 'run-1', 'work', 'compute', 'running', 'scope-1', 2, ?1, 1)",
+            [vec![0xab_u8; 32]],
+        )
+        .unwrap();
+    drop(connection);
+
+    let run = read_run(&database, "run-1").unwrap();
+    assert_eq!(
+        run.state.current_settings_scope_id.as_deref(),
+        Some("scope-1")
+    );
+    assert_eq!(run.state.current_settings_change_number, Some(2));
+    assert_eq!(
+        run.state.current_settings_hash.as_deref(),
+        Some("abababababababababababababababababababababababababababababababab")
+    );
 }
 
 #[test]

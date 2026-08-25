@@ -1066,10 +1066,10 @@ export class WorkflowRunStore {
       this.state.connection
         .prepare(
           `UPDATE node_attempts
-           SET status = 'cancelled', finished_at = ?, updated_at = ?
+           SET status = 'interrupted', updated_at = ?
            WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
         )
-        .run(now, now, runId);
+        .run(now, runId);
       insertRunEvent(this.state, row.resourceId, nextRevision, at, {
         scope: "run",
         type: "run_resume_prepared",
@@ -1082,22 +1082,6 @@ export class WorkflowRunStore {
     });
     const prepared = this.readRun(runId, { includeTrace: true });
     if (prepared === null) throw new Error(`Workflow run became unreadable: ${runId}`);
-    if (loaded.state.currentNode !== undefined && loaded.state.currentAttemptId !== undefined) {
-      prepared.state.currentNode = loaded.state.currentNode;
-      prepared.state.currentAttemptId = loaded.state.currentAttemptId;
-      if (loaded.state.currentNodeStartedAt !== undefined) {
-        prepared.state.currentNodeStartedAt = loaded.state.currentNodeStartedAt;
-      }
-      if (
-        loaded.state.currentSettingsScopeId !== undefined &&
-        loaded.state.currentSettingsChangeNumber !== undefined &&
-        loaded.state.currentSettingsHash !== undefined
-      ) {
-        prepared.state.currentSettingsScopeId = loaded.state.currentSettingsScopeId;
-        prepared.state.currentSettingsChangeNumber = loaded.state.currentSettingsChangeNumber;
-        prepared.state.currentSettingsHash = loaded.state.currentSettingsHash;
-      }
-    }
     return prepared;
   }
 
@@ -2381,6 +2365,13 @@ export class WorkflowRunStore {
     const nodeType = definition.nodes[nodeId]?.nodeType ?? "agent";
     this.state.connection
       .prepare(
+        `UPDATE node_attempts
+         SET status = 'cancelled', finished_at = COALESCE(finished_at, ?), updated_at = ?
+         WHERE run_id = ? AND status = 'interrupted'`,
+      )
+      .run(now, now, state.runId);
+    this.state.connection
+      .prepare(
         `INSERT INTO node_attempts(
            attempt_id, run_id, node_id, attempt_number, node_type, status,
            settings_scope_id, settings_change_number, settings_hash,
@@ -2707,7 +2698,7 @@ export class WorkflowRunStore {
                 settings_change_number AS settingsChangeNumber,
                 settings_hash AS settingsHash
          FROM node_attempts
-         WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
+         WHERE run_id = ? AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
       )
       .get(runId);
     return isActiveAttemptRow(row) ? row : undefined;
