@@ -1088,6 +1088,15 @@ export class WorkflowRunStore {
       if (loaded.state.currentNodeStartedAt !== undefined) {
         prepared.state.currentNodeStartedAt = loaded.state.currentNodeStartedAt;
       }
+      if (
+        loaded.state.currentSettingsScopeId !== undefined &&
+        loaded.state.currentSettingsChangeNumber !== undefined &&
+        loaded.state.currentSettingsHash !== undefined
+      ) {
+        prepared.state.currentSettingsScopeId = loaded.state.currentSettingsScopeId;
+        prepared.state.currentSettingsChangeNumber = loaded.state.currentSettingsChangeNumber;
+        prepared.state.currentSettingsHash = loaded.state.currentSettingsHash;
+      }
     }
     return prepared;
   }
@@ -2681,9 +2690,7 @@ export class WorkflowRunStore {
     return isCountRow(row) ? row.count : 0;
   }
 
-  private readActiveAttempt(
-    runId: string,
-  ):
+  private readActiveAttempt(runId: string):
     | {
         attemptId: string;
         nodeId: string;
@@ -3551,10 +3558,6 @@ function isAttemptValueRow(value: unknown): value is {
   responseEntryHash: Buffer | null;
 } {
   return isRecord(value);
-}
-
-function isCountRow(value: unknown): value is { count: number } {
-  return isRecord(value) && typeof value.count === "number";
 }
 
 function isActiveAttemptRow(value: unknown): value is {
