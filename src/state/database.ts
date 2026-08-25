@@ -97,7 +97,6 @@ export class StateDatabase {
       if (this.mode === "read-only") {
         this.connection.pragma("query_only = ON");
       } else {
-        this.pruneUnreferencedBlobs();
         fs.chmodSync(this.filePath, 0o600);
       }
     } catch (error) {
@@ -195,52 +194,6 @@ export class StateDatabase {
     if (!Array.isArray(foreignKeys) || foreignKeys.length !== 0) {
       throw new Error("Pi Workflows SQLite foreign-key check failed");
     }
-  }
-
-  pruneUnreferencedBlobs(): number {
-    if (this.mode === "read-only") {
-      throw new Error("Cannot prune blobs through a read-only Pi Workflows database");
-    }
-    return this.transaction(() => {
-      this.connection.exec(
-        "CREATE TEMP TABLE referenced_blobs(blob_hash BLOB PRIMARY KEY) WITHOUT ROWID",
-      );
-      const tables = this.connection
-        .prepare(
-          `SELECT name FROM sqlite_schema
-           WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'blobs'`,
-        )
-        .all()
-        .filter(isTableNameRow);
-      for (const table of tables) {
-        const columns = this.connection
-          .prepare(
-            `SELECT "from" AS columnName FROM pragma_foreign_key_list(?)
-             WHERE "table" = 'blobs' AND "to" = 'blob_hash'`,
-          )
-          .all(table.name)
-          .filter(isColumnNameRow);
-        for (const column of columns) {
-          this.connection
-            .prepare(
-              `INSERT OR IGNORE INTO referenced_blobs(blob_hash)
-               SELECT ${quoteIdentifier(column.columnName)} FROM ${quoteIdentifier(table.name)}
-               WHERE ${quoteIdentifier(column.columnName)} IS NOT NULL`,
-            )
-            .run();
-        }
-      }
-      const result = this.connection
-        .prepare(
-          `DELETE FROM blobs
-           WHERE NOT EXISTS (
-             SELECT 1 FROM referenced_blobs r WHERE r.blob_hash = blobs.blob_hash
-           )`,
-        )
-        .run();
-      this.connection.exec("DROP TABLE referenced_blobs");
-      return result.changes;
-    });
   }
 
   async backup(destination: string): Promise<void> {
@@ -415,18 +368,6 @@ function isBlobRow(value: unknown): value is BlobRow {
     typeof value.byteLength === "number" &&
     Buffer.isBuffer(value.content)
   );
-}
-
-function isTableNameRow(value: unknown): value is { name: string } {
-  return isRecord(value) && typeof value.name === "string";
-}
-
-function isColumnNameRow(value: unknown): value is { columnName: string } {
-  return isRecord(value) && typeof value.columnName === "string";
-}
-
-function quoteIdentifier(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

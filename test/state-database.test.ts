@@ -57,18 +57,6 @@ describe("StateDatabase", () => {
     });
   });
 
-  it("removes unreferenced blobs when a writable database opens", async () => {
-    const filePath = path.join(await makeTempDir("state-blob-prune"), "state.sqlite");
-    const first = open(filePath);
-    const orphan = first.putJson({ large: "x".repeat(100_000) });
-    expect(first.readBlob(orphan)?.byteLength).toBeGreaterThan(100_000);
-    first.close();
-    opened.splice(opened.indexOf(first), 1);
-
-    const second = open(filePath);
-    expect(second.readBlob(orphan)).toBeUndefined();
-  });
-
   it("rejects incompatible or changed schemas", async () => {
     const filePath = path.join(await makeTempDir("state-incompatible"), "state.sqlite");
     const state = open(filePath);
