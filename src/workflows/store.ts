@@ -119,6 +119,9 @@ type RunRow = {
   currentNode: string | null;
   currentAttemptId: string | null;
   currentNodeStartedAt: number | null;
+  currentSettingsScopeId: string | null;
+  currentSettingsChangeNumber: number | null;
+  currentSettingsHash: Buffer | null;
   waitingOn: string | null;
   createdAt: number;
   updatedAt: number;
@@ -138,6 +141,9 @@ type StepRow = {
   outputOverrideHash: Buffer | null;
   stepMetadataHash: Buffer | null;
   errorHash: Buffer | null;
+  settingsScopeId: string | null;
+  settingsChangeNumber: number | null;
+  settingsHash: Buffer | null;
   startedAt: number;
   finishedAt: number;
 };
@@ -515,6 +521,38 @@ export class WorkflowRunStore {
   getSettingsScope(scopeId: string): WorkflowSettingsScopeRecord | undefined {
     const row = this.settingsScopeRow(scopeId);
     return row === undefined ? undefined : this.settingsScopeRecord(row);
+  }
+
+  getSettingsScopeAtChange(
+    scopeId: string,
+    changeNumber: number,
+  ): WorkflowSettingsScopeRecord | undefined {
+    if (!Number.isInteger(changeNumber) || changeNumber < 0) {
+      throw new Error("Workflow settings change number must be a non-negative integer");
+    }
+    const row = this.settingsScopeRow(scopeId);
+    if (row === undefined) return undefined;
+    if (changeNumber > row.revision) {
+      throw new Error(`Workflow settings change ${changeNumber} does not exist for ${scopeId}`);
+    }
+    if (changeNumber === row.revision) return this.settingsScopeRecord(row);
+    const saved =
+      changeNumber === 0
+        ? this.state.connection
+            .prepare(
+              "SELECT initial_hash AS settingsHash FROM workflow_settings WHERE scope_id = ?",
+            )
+            .get(scopeId)
+        : this.state.connection
+            .prepare(
+              `SELECT after_hash AS settingsHash FROM workflow_setting_changes
+               WHERE scope_id = ? AND change_number = ?`,
+            )
+            .get(scopeId, changeNumber);
+    if (!isRecord(saved) || !Buffer.isBuffer(saved.settingsHash)) {
+      throw new Error(`Workflow settings change ${changeNumber} is missing for ${scopeId}`);
+    }
+    return this.settingsScopeRecord(row, changeNumber, saved.settingsHash);
   }
 
   listSettingsScopes(runId: string): WorkflowSettingsScopeRecord[] {
@@ -1853,16 +1891,20 @@ export class WorkflowRunStore {
     return row;
   }
 
-  private settingsScopeRecord(row: SettingsScopeRow): WorkflowSettingsScopeRecord {
+  private settingsScopeRecord(
+    row: SettingsScopeRow,
+    changeNumber = row.revision,
+    settingsHash = row.currentHash,
+  ): WorkflowSettingsScopeRecord {
     return {
       scopeId: row.scopeId,
       originRunId: row.originRunId,
       activeRunId: row.activeRunId,
       mountPath: row.mountPath,
       invocation: row.invocation,
-      changeNumber: row.revision,
-      settings: this.state.readJson(row.currentHash),
-      settingsHash: row.currentHash.toString("hex"),
+      changeNumber,
+      settings: this.state.readJson(settingsHash),
+      settingsHash: settingsHash.toString("hex"),
       createdAt: new Date(row.createdAt).toISOString(),
       updatedAt: new Date(row.updatedAt).toISOString(),
     };
@@ -2315,10 +2357,15 @@ export class WorkflowRunStore {
                 r.final_output_hash AS finalOutputHash, r.error_hash AS errorHash,
                 r.carried_step_count AS carriedStepCount, r.current_node AS currentNode,
                 r.current_attempt_id AS currentAttemptId,
-                r.current_node_started_at AS currentNodeStartedAt, r.waiting_on AS waitingOn,
+                r.current_node_started_at AS currentNodeStartedAt,
+                current_attempt.settings_scope_id AS currentSettingsScopeId,
+                current_attempt.settings_change_number AS currentSettingsChangeNumber,
+                current_attempt.settings_hash AS currentSettingsHash, r.waiting_on AS waitingOn,
                 r.created_at AS createdAt, r.updated_at AS updatedAt, r.finished_at AS finishedAt
          FROM runs r
          JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+         LEFT JOIN node_attempts current_attempt
+           ON current_attempt.attempt_id = r.current_attempt_id
          WHERE r.run_id = ?`,
       )
       .get(runId);
@@ -2382,6 +2429,11 @@ export class WorkflowRunStore {
       ...(row.currentNodeStartedAt === null
         ? {}
         : { currentNodeStartedAt: new Date(row.currentNodeStartedAt).toISOString() }),
+      ...savedCurrentSettingsBinding(
+        row.currentSettingsScopeId,
+        row.currentSettingsChangeNumber,
+        row.currentSettingsHash,
+      ),
       ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
       ...(row.humanDecisionHash === null
         ? {}
@@ -2402,6 +2454,9 @@ export class WorkflowRunStore {
                 a.node_type AS nodeType, a.status, a.prompt_hash AS promptHash,
                 a.output_hash AS outputHash, s.output_override_hash AS outputOverrideHash,
                 a.step_metadata_hash AS stepMetadataHash, a.error_hash AS errorHash,
+                a.settings_scope_id AS settingsScopeId,
+                a.settings_change_number AS settingsChangeNumber,
+                a.settings_hash AS settingsHash,
                 a.started_at AS startedAt, a.finished_at AS finishedAt
          FROM run_steps s
          JOIN node_attempts a ON a.attempt_id = s.attempt_id
@@ -2430,6 +2485,11 @@ export class WorkflowRunStore {
         prompt,
         output,
         ...(error === undefined ? {} : { error }),
+        ...savedStepSettingsBinding(
+          row.settingsScopeId,
+          row.settingsChangeNumber,
+          row.settingsHash,
+        ),
         ...metadata,
       };
     });
@@ -3109,6 +3169,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isRunRow(value: unknown): value is RunRow {
   return isRecord(value);
+}
+
+function savedCurrentSettingsBinding(
+  scopeId: string | null,
+  changeNumber: number | null,
+  settingsHash: Buffer | null,
+): Pick<
+  WorkflowRunState,
+  "currentSettingsScopeId" | "currentSettingsChangeNumber" | "currentSettingsHash"
+> {
+  if (scopeId === null && changeNumber === null && settingsHash === null) return {};
+  if (scopeId === null || changeNumber === null || settingsHash === null) {
+    throw new Error("Saved current workflow settings binding is incomplete");
+  }
+  return {
+    currentSettingsScopeId: scopeId,
+    currentSettingsChangeNumber: changeNumber,
+    currentSettingsHash: settingsHash.toString("hex"),
+  };
+}
+
+function savedStepSettingsBinding(
+  scopeId: string | null,
+  changeNumber: number | null,
+  settingsHash: Buffer | null,
+): Pick<WorkflowStepRecord, "settingsScopeId" | "settingsChangeNumber" | "settingsHash"> {
+  if (scopeId === null && changeNumber === null && settingsHash === null) return {};
+  if (scopeId === null || changeNumber === null || settingsHash === null) {
+    throw new Error("Saved workflow step settings binding is incomplete");
+  }
+  return {
+    settingsScopeId: scopeId,
+    settingsChangeNumber: changeNumber,
+    settingsHash: settingsHash.toString("hex"),
+  };
 }
 
 function isRunIdRow(value: unknown): value is { runId: string } {
