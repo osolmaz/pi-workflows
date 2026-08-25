@@ -39,7 +39,7 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
              CREATE TABLE run_sources(run_id TEXT, mount_path TEXT, source_type TEXT, source_ref TEXT, source_revision TEXT);
              CREATE TABLE leases(resource_id TEXT PRIMARY KEY, owner_id TEXT, expires_at INTEGER);
              CREATE TABLE events(resource_id TEXT, resource_revision INTEGER, event_type TEXT, payload_hash BLOB, recorded_at INTEGER);
-             CREATE TABLE node_attempts(attempt_id TEXT PRIMARY KEY, run_id TEXT, node_id TEXT, node_type TEXT, status TEXT, output_hash BLOB, receipt_hash BLOB, error_hash BLOB, settings_scope_id TEXT, settings_change_number INTEGER, settings_hash BLOB, started_at INTEGER, finished_at INTEGER);
+             CREATE TABLE node_attempts(attempt_id TEXT PRIMARY KEY, run_id TEXT, node_id TEXT, node_type TEXT, status TEXT, prompt_hash BLOB, output_hash BLOB, receipt_hash BLOB, error_hash BLOB, settings_scope_id TEXT, settings_change_number INTEGER, settings_hash BLOB, started_at INTEGER, finished_at INTEGER);
              CREATE TABLE run_steps(run_id TEXT, step_index INTEGER, attempt_id TEXT, output_override_hash BLOB);
              CREATE TABLE attempt_entries(attempt_id TEXT, role TEXT, segment_id TEXT, entry_id TEXT);
              CREATE TABLE workflow_updates(update_id TEXT, run_revision INTEGER, attempt_id TEXT, update_type TEXT, update_key TEXT, data_hash BLOB, recorded_at INTEGER);
@@ -232,9 +232,10 @@ fn projects_attempt_content_from_pi_entries() {
         &connection,
         &json!({"assistantMessage": {"sha256": "abc", "entryId": "response"}}),
     );
+    let settings_hash = vec![0xcd_u8; 32];
     connection.execute("INSERT INTO session_segments(segment_id, run_id, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', 'complete', 2, 0, 1)", []).unwrap();
     connection.execute("INSERT INTO session_entries(segment_id, entry_seq, entry_id, entry_hash, recorded_at) VALUES ('s1', 1, 'prompt', ?1, 1), ('s1', 2, 'response', ?2, 2)", params![prompt, response]).unwrap();
-    connection.execute("INSERT INTO node_attempts(attempt_id, run_id, node_id, node_type, status, receipt_hash, started_at, finished_at) VALUES ('a1', 'run-1', 'work', 'agent', 'completed', ?1, 1, 2)", [receipt]).unwrap();
+    connection.execute("INSERT INTO node_attempts(attempt_id, run_id, node_id, node_type, status, receipt_hash, settings_scope_id, settings_change_number, settings_hash, started_at, finished_at) VALUES ('a1', 'run-1', 'work', 'agent', 'completed', ?1, 'scope-complete', 3, ?2, 1, 2)", params![receipt, settings_hash]).unwrap();
     connection
         .execute("INSERT INTO run_steps VALUES ('run-1', 0, 'a1', NULL)", [])
         .unwrap();
@@ -244,6 +245,15 @@ fn projects_attempt_content_from_pi_entries() {
     let run = read_run(&database, "run-1").unwrap();
     assert_eq!(run.state.steps[0].prompt, json!("Do the work"));
     assert_eq!(run.state.steps[0].output, json!("Done"));
+    assert_eq!(
+        run.state.steps[0].settings_scope_id.as_deref(),
+        Some("scope-complete")
+    );
+    assert_eq!(run.state.steps[0].settings_change_number, Some(3));
+    assert_eq!(
+        run.state.steps[0].settings_hash.as_deref(),
+        Some("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd")
+    );
     assert_eq!(run.state.outputs["work"], json!("Done"));
 }
 

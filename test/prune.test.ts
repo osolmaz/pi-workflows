@@ -25,6 +25,11 @@ describe("state prune", () => {
     setup.state.connection
       .prepare("UPDATE runs SET parent_run_id = ? WHERE run_id = ?")
       .run(result.runId, child.runId);
+    setup.state.connection
+      .prepare(
+        "UPDATE workflow_follow_up_queues SET presentation_state = 'not-needed' WHERE run_id IN (?, ?)",
+      )
+      .run(result.runId, child.runId);
     const attemptId = result.state.steps[0]?.attemptId;
     if (attemptId === undefined) throw new Error("attempt missing");
     const runResource = setup.state.connection
@@ -167,6 +172,27 @@ describe("state prune", () => {
            acquired_at = ?, heartbeat_at = ?, expires_at = ? WHERE resource_id = ?`,
       )
       .run(Buffer.alloc(32, 1), Date.now(), Date.now(), Date.now() + 60_000, resource.resourceId);
+    store.close();
+
+    const preview = await pruneState(databasePath, {
+      before: new Date(Date.now() + 120_000).toISOString(),
+      apply: false,
+    });
+    expect(preview).toMatchObject({ candidateTrees: 1, blockedTrees: 1, selectedRuns: 0 });
+  });
+
+  it("blocks a run with pending follow-up presentation", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-follow-up");
+    const result = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
+    }).run(workflow, {});
+    const store = new WorkflowRunStore(databasePath);
+    store.state.connection
+      .prepare(
+        "UPDATE workflow_follow_up_queues SET presentation_state = 'pending' WHERE run_id = ?",
+      )
+      .run(result.runId);
     store.close();
 
     const preview = await pruneState(databasePath, {

@@ -201,6 +201,18 @@ function treeHasBlocker(database: Database.Database, runIds: string[]): boolean 
     ) ||
     hasRow(
       database,
+      `SELECT 1 FROM workflow_follow_ups
+       WHERE run_id IN (${values}) AND status IN ('queued', 'pending_presentation', 'ready')`,
+      runIds,
+    ) ||
+    hasRow(
+      database,
+      `SELECT 1 FROM workflow_follow_up_queues
+       WHERE run_id IN (${values}) AND presentation_state = 'pending'`,
+      runIds,
+    ) ||
+    hasRow(
+      database,
       `SELECT 1 FROM controller_workflows
        WHERE run_id IN (${values}) OR reserved_run_id IN (${values})`,
       [...runIds, ...runIds],

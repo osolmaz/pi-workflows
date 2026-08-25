@@ -26,6 +26,7 @@ describe("WorkflowRunStore SQLite", () => {
 
     expect(result.state.status).toBe("completed");
     expect(loaded?.state.finalOutput).toEqual({ reply: "done" });
+    expect(loaded?.state.steps[0]?.prompt).toContain("Request: reply");
     expect(loaded?.snapshot.name).toBe("echo");
     expect(loaded?.traceEvents?.map((event) => event.type)).toEqual([
       "run_created",
@@ -40,6 +41,11 @@ describe("WorkflowRunStore SQLite", () => {
     expect(
       store.state.connection.prepare("SELECT count(*) AS count FROM node_attempts").get(),
     ).toEqual({ count: 1 });
+    expect(
+      store.state.connection
+        .prepare("SELECT prompt_hash IS NOT NULL AS hasPrompt FROM node_attempts")
+        .get(),
+    ).toEqual({ hasPrompt: 1 });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM events").get()).toEqual({
       count: 7,
     });
@@ -181,8 +187,10 @@ describe("WorkflowRunStore SQLite", () => {
     const eventText = JSON.stringify(loaded?.traceEvents ?? []);
     expect(eventText).not.toContain("PROMPT-pppp");
     expect(eventText).not.toContain("RESPONSE-rrrr");
+    expect(
+      store.state.connection.prepare("SELECT prompt_hash AS promptHash FROM node_attempts").get(),
+    ).toEqual({ promptHash: null });
     for (const [table, removed] of [
-      ["node_attempts", "prompt_hash"],
       ["node_attempts", "step_metadata_hash"],
       ["runs", "current_node"],
       ["runs", "waiting_on"],

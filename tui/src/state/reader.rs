@@ -16,8 +16,8 @@ const USER_VERSION: i64 = 1;
 const SCHEMA_NAME: &str = "pi-workflows-state";
 const APP_VERSION: &str = "0.13.3";
 pub const SCHEMA_DIGEST: [u8; 32] = [
-    0x1e, 0x7e, 0xfe, 0x95, 0x98, 0xf9, 0x0f, 0xc4, 0x7c, 0x6a, 0x12, 0xe3, 0xf8, 0xba, 0x1c, 0xba,
-    0xdc, 0x19, 0xf6, 0x96, 0x44, 0xd7, 0xb0, 0x43, 0x1f, 0x1a, 0xb5, 0x17, 0xca, 0xf9, 0x97, 0x12,
+    0x46, 0x6d, 0xdb, 0xae, 0x92, 0x1f, 0x26, 0x19, 0xff, 0x81, 0xdb, 0x56, 0x73, 0x95, 0x18, 0xe7,
+    0xef, 0x68, 0xfa, 0x0a, 0x23, 0xbf, 0xf8, 0x0d, 0xf0, 0x29, 0x6b, 0x3a, 0xfd, 0x01, 0xc8, 0x56,
 ];
 const RESET_INSTRUCTION: &str = "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
 
@@ -476,9 +476,11 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
 fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "SELECT a.attempt_id, a.node_id, a.node_type, a.status,
-                a.output_hash, s.output_override_hash, a.receipt_hash, a.error_hash,
+                a.prompt_hash, a.output_hash, s.output_override_hash, a.receipt_hash, a.error_hash,
                 prompt_entry.entry_hash, response_entry.entry_hash,
-                first_link.entry_id, last_link.entry_id, a.started_at, a.finished_at
+                first_link.entry_id, last_link.entry_id,
+                a.settings_scope_id, a.settings_change_number, a.settings_hash,
+                a.started_at, a.finished_at
          FROM run_steps s JOIN node_attempts a ON a.attempt_id = s.attempt_id
          LEFT JOIN attempt_entries prompt_link
            ON prompt_link.attempt_id = a.attempt_id AND prompt_link.role = 'prompt'
@@ -506,10 +508,14 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             row.get::<_, Option<Vec<u8>>>(7)?,
             row.get::<_, Option<Vec<u8>>>(8)?,
             row.get::<_, Option<Vec<u8>>>(9)?,
-            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<Vec<u8>>>(10)?,
             row.get::<_, Option<String>>(11)?,
-            row.get::<_, i64>(12)?,
-            row.get::<_, i64>(13)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<u64>>(14)?,
+            row.get::<_, Option<Vec<u8>>>(15)?,
+            row.get::<_, i64>(16)?,
+            row.get::<_, i64>(17)?,
         ))
     })?;
     let mut steps = Vec::new();
@@ -519,6 +525,7 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             node_id,
             node_type,
             status,
+            stored_prompt_hash,
             output_hash,
             override_hash,
             receipt_hash,
@@ -527,6 +534,9 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             response_hash,
             first_entry_id,
             last_entry_id,
+            settings_scope_id,
+            settings_change_number,
+            settings_hash,
             started_at,
             finished_at,
         ) = row?;
@@ -535,13 +545,14 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             .map(|hash| read_json_blob(connection, hash))
             .transpose()?
             .unwrap_or_else(|| json!({}));
-        let prompt = prompt_hash
-            .as_deref()
-            .map(|hash| read_json_blob(connection, hash))
-            .transpose()?
-            .as_ref()
-            .and_then(prompt_from_entry)
-            .map_or(Value::Null, Value::String);
+        let prompt = if let Some(hash) = prompt_hash.as_deref() {
+            let entry = read_json_blob(connection, hash)?;
+            prompt_from_entry(&entry).map_or(Value::Null, Value::String)
+        } else if let Some(hash) = stored_prompt_hash.as_deref() {
+            Value::String(read_text_blob(connection, hash)?)
+        } else {
+            Value::Null
+        };
         let output = if let Some(hash) = override_hash.as_deref().or(output_hash.as_deref()) {
             read_json_blob(connection, hash)?
         } else if let Some(hash) = response_hash.as_deref() {
@@ -570,6 +581,15 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
         }
         if let (Some(first), Some(last)) = (first_entry_id, last_entry_id) {
             step["conversation"] = json!({ "firstEntryId": first, "lastEntryId": last });
+        }
+        match (settings_scope_id, settings_change_number, settings_hash) {
+            (Some(scope_id), Some(change_number), Some(settings_hash)) => {
+                step["settingsScopeId"] = json!(scope_id);
+                step["settingsChangeNumber"] = json!(change_number);
+                step["settingsHash"] = json!(encode_hex(&settings_hash));
+            }
+            (None, None, None) => {}
+            _ => bail!("saved workflow settings binding is incomplete"),
         }
         steps.push(step);
     }

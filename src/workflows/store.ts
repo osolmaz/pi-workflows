@@ -134,6 +134,7 @@ type StepRow = {
   nodeId: string;
   nodeType: WorkflowStepRecord["nodeType"];
   status: string;
+  promptHash: Buffer | null;
   outputHash: Buffer | null;
   outputOverrideHash: Buffer | null;
   receiptHash: Buffer | null;
@@ -2132,6 +2133,11 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     for (const step of state.steps.slice(state.carriedStepCount ?? 0)) {
+      const promptEntryId = this.findAttemptPromptEntry(state.runId, step.attemptId);
+      const promptHash =
+        promptEntryId === undefined && step.prompt !== null
+          ? this.state.putText(step.prompt, now)
+          : null;
       const receipt = attemptReceipt(step);
       const receiptHash =
         Object.keys(receipt).length === 0 ? null : this.state.putJson(receipt, now);
@@ -2146,10 +2152,10 @@ export class WorkflowRunStore {
           .prepare(
             `INSERT INTO node_attempts(
                attempt_id, run_id, node_id, attempt_number, node_type, status,
-               output_hash, receipt_hash, error_hash,
+               prompt_hash, output_hash, receipt_hash, error_hash,
                settings_scope_id, settings_change_number, settings_hash,
                started_at, finished_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             step.attemptId,
@@ -2158,6 +2164,7 @@ export class WorkflowRunStore {
             attemptNumber,
             step.nodeType,
             outcomeStatus(step.outcome),
+            promptHash,
             outputHash,
             receiptHash,
             errorHash,
@@ -2173,13 +2180,14 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `UPDATE node_attempts
-             SET status = ?, output_hash = ?, receipt_hash = ?, error_hash = ?,
+             SET status = ?, prompt_hash = ?, output_hash = ?, receipt_hash = ?, error_hash = ?,
                  settings_scope_id = ?, settings_change_number = ?,
                  settings_hash = ?, finished_at = ?, updated_at = ?
              WHERE attempt_id = ?`,
           )
           .run(
             outcomeStatus(step.outcome),
+            promptHash,
             outputHash,
             receiptHash,
             errorHash,
@@ -2191,7 +2199,7 @@ export class WorkflowRunStore {
             step.attemptId,
           );
       }
-      if (this.syncAttemptEntries(state.runId, step)) {
+      if (this.syncAttemptEntries(state.runId, step, promptEntryId)) {
         this.state.connection
           .prepare("UPDATE node_attempts SET output_hash = NULL WHERE attempt_id = ?")
           .run(step.attemptId);
@@ -2238,9 +2246,12 @@ export class WorkflowRunStore {
     }
   }
 
-  private syncAttemptEntries(runId: string, step: WorkflowStepRecord): boolean {
+  private syncAttemptEntries(
+    runId: string,
+    step: WorkflowStepRecord,
+    promptEntryId: string | undefined,
+  ): boolean {
     const links: Array<["prompt" | "response" | "first" | "last", string]> = [];
-    const promptEntryId = this.findAttemptPromptEntry(runId, step.attemptId);
     if (promptEntryId !== undefined) links.push(["prompt", promptEntryId]);
     if (step.conversation !== undefined) {
       links.push(
@@ -2562,7 +2573,8 @@ export class WorkflowRunStore {
       .prepare(
         `SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
                 a.node_type AS nodeType, a.status,
-                a.output_hash AS outputHash, s.output_override_hash AS outputOverrideHash,
+                a.prompt_hash AS promptHash, a.output_hash AS outputHash,
+                s.output_override_hash AS outputOverrideHash,
                 a.receipt_hash AS receiptHash, a.error_hash AS errorHash,
                 prompt_entry.entry_hash AS promptEntryHash,
                 response_entry.entry_hash AS responseEntryHash,
@@ -2597,9 +2609,11 @@ export class WorkflowRunStore {
       const receipt =
         row.receiptHash === null ? {} : this.readJsonAs<StoredAttemptReceipt>(row.receiptHash);
       const prompt =
-        row.promptEntryHash === null
-          ? null
-          : promptFromEntry(this.state.readJson(row.promptEntryHash));
+        row.promptEntryHash !== null
+          ? promptFromEntry(this.state.readJson(row.promptEntryHash))
+          : row.promptHash === null
+            ? null
+            : this.readText(row.promptHash);
       const outputHash = row.outputOverrideHash ?? row.outputHash;
       const output =
         outputHash !== null

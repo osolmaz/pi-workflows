@@ -250,6 +250,7 @@ CREATE TABLE node_attempts (
     'pending', 'running', 'waiting', 'interrupted',
     'completed', 'failed', 'timed_out', 'cancelled'
   )),
+  prompt_hash BLOB REFERENCES blobs(blob_hash),
   output_hash BLOB REFERENCES blobs(blob_hash),
   receipt_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
