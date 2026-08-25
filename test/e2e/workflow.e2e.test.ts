@@ -12,7 +12,7 @@ import {
   readWorkflowRun,
   workflowStateDatabasePath,
 } from "../../src/workflows/store.js";
-import type { WorkflowRunState, WorkflowSessionEventRecord } from "../../src/workflows/types.js";
+import type { WorkflowRunState } from "../../src/workflows/types.js";
 import { makeTempDir } from "../helpers.js";
 import { startMockOpenAiServer } from "./mock-openai.js";
 
@@ -1336,13 +1336,13 @@ describe.sequential("pi-workflows end to end", () => {
       async () => {
         try {
           return listWorkflowRuns({ databasePath: runsDir }).some((run) => {
-            const deltas = run.sessionEvents.filter(
+            const starts = run.sessionEvents.filter(
               (event) =>
                 event.type === "assistant_event" &&
-                event.payload.type === "toolcall_delta" &&
+                event.payload.type === "toolcall_start" &&
                 event.messageId !== undefined,
             );
-            return deltas.length >= 2;
+            return starts.length >= 1;
           });
         } catch {
           return false;
@@ -1440,106 +1440,19 @@ describe.sequential("pi-workflows end to end", () => {
     });
     expect(duplicateUserPrompts).toHaveLength(0);
 
-    const streamGroups = (deltaType: "text_delta" | "thinking_delta" | "toolcall_delta") => {
-      const groups = new Map<string, WorkflowSessionEventRecord[]>();
-      for (const event of sessionEvents) {
-        if (
-          event.type !== "assistant_event" ||
-          event.payload.type !== deltaType ||
-          event.messageId === undefined ||
-          typeof event.payload.contentIndex !== "number"
-        ) {
-          continue;
-        }
-        const key = `${event.messageId}:${event.payload.contentIndex}`;
-        const group = groups.get(key) ?? [];
-        group.push(event);
-        groups.set(key, group);
-      }
-      return groups;
-    };
-    const textGroups = streamGroups("text_delta");
-    const thinkingGroups = streamGroups("thinking_delta");
-    const toolGroups = streamGroups("toolcall_delta");
-    const fragmentedTextGroups = [...textGroups.values()].filter((group) => group.length > 1);
-    const fragmentedThinkingGroups = [...thinkingGroups.values()].filter(
-      (group) => group.length > 1,
+    const incrementalEvents = sessionEvents.filter(
+      (event) =>
+        event.type === "assistant_event" &&
+        ["text_delta", "thinking_delta", "toolcall_delta"].includes(String(event.payload.type)),
     );
-    const fragmentedToolGroups = [...toolGroups.values()].filter((group) => group.length > 1);
-    expect(fragmentedTextGroups.length).toBeGreaterThanOrEqual(1);
-    expect(fragmentedThinkingGroups.length).toBeGreaterThanOrEqual(1);
-    expect(fragmentedToolGroups.length).toBeGreaterThanOrEqual(1);
-    for (const group of [
-      ...fragmentedTextGroups,
-      ...fragmentedThinkingGroups,
-      ...fragmentedToolGroups,
-    ]) {
-      expect(new Set(group.map((event) => event.at)).size).toBeGreaterThan(1);
+    expect(incrementalEvents).toHaveLength(0);
+    for (const settledType of ["text_end", "thinking_end", "toolcall_end"]) {
+      expect(
+        sessionEvents.some(
+          (event) => event.type === "assistant_event" && event.payload.type === settledType,
+        ),
+      ).toBe(true);
     }
-
-    const textEnds = sessionEvents.filter(
-      (event) => event.type === "assistant_event" && event.payload.type === "text_end",
-    );
-    for (const end of textEnds) {
-      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
-      const deltas = textGroups.get(key) ?? [];
-      expect(deltas.map((event) => event.payload.delta).join("")).toBe(end.payload.content);
-    }
-    const thinkingEnds = sessionEvents.filter(
-      (event) => event.type === "assistant_event" && event.payload.type === "thinking_end",
-    );
-    for (const end of thinkingEnds) {
-      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
-      const deltas = thinkingGroups.get(key) ?? [];
-      expect(deltas.map((event) => event.payload.delta).join("")).toBe(end.payload.content);
-    }
-    const toolEnds = sessionEvents.filter(
-      (event) => event.type === "assistant_event" && event.payload.type === "toolcall_end",
-    );
-    for (const end of toolEnds) {
-      const key = `${end.messageId}:${String(end.payload.contentIndex)}`;
-      const deltas = toolGroups.get(key) ?? [];
-      const toolCall = end.payload.toolCall as { arguments?: unknown };
-      expect(JSON.parse(deltas.map((event) => event.payload.delta).join(""))).toEqual(
-        toolCall.arguments,
-      );
-    }
-
-    const textPrefix = fragmentedTextGroups[0]!;
-    const textReplay = reduceSessionEvents(sessionEntries, sessionEvents, textPrefix[1]!.seq);
-    const textMessage = textReplay.messages.find(
-      (message) => message.messageId === textPrefix[0]!.messageId,
-    );
-    expect(textMessage?.status).toBe("streaming");
-    expect(
-      textMessage?.blocks.find(
-        (block) => block.contentIndex === textPrefix[0]!.payload.contentIndex,
-      )?.text,
-    ).toBe(
-      textPrefix
-        .slice(0, 2)
-        .map((event) => event.payload.delta)
-        .join(""),
-    );
-    expect(textReplay.diagnostics).toEqual([]);
-
-    const toolPrefix = fragmentedToolGroups[0]!;
-    const toolReplay = reduceSessionEvents(sessionEntries, sessionEvents, toolPrefix[1]!.seq);
-    const toolMessage = toolReplay.messages.find(
-      (message) => message.messageId === toolPrefix[0]!.messageId,
-    );
-    expect(toolMessage?.status).toBe("streaming");
-    expect(
-      toolMessage?.blocks.find(
-        (block) => block.contentIndex === toolPrefix[0]!.payload.contentIndex,
-      )?.text,
-    ).toBe(
-      toolPrefix
-        .slice(0, 2)
-        .map((event) => event.payload.delta)
-        .join(""),
-    );
-    expect(toolReplay.diagnostics).toEqual([]);
 
     const finalReplay = reduceSessionEvents(sessionEntries, sessionEvents);
     expect(finalReplay.diagnostics).toEqual([]);

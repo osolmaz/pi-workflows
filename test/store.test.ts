@@ -47,6 +47,33 @@ describe("WorkflowRunStore SQLite", () => {
     store.close();
   });
 
+  it("stores a large output once instead of writing nested run snapshots", async () => {
+    const databasePath = await makeStateDatabasePath("run-store-large-output");
+    const output = { reply: "x".repeat(1024 * 1024) };
+    await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output }),
+    }).run(workflow, { task: "reply" });
+
+    const store = new WorkflowRunStore(databasePath, { readOnly: true });
+    const stats = store.state.connection
+      .prepare(
+        `SELECT COUNT(*) AS count, MAX(byte_length) AS largest,
+                SUM(byte_length) AS total
+         FROM blobs`,
+      )
+      .get() as { count: number; largest: number; total: number };
+    const outputBytes = Buffer.byteLength(JSON.stringify(output), "utf8");
+    expect(stats.largest).toBeLessThanOrEqual(outputBytes + 1_000);
+    expect(stats.total).toBeLessThan(outputBytes + 100_000);
+    expect(
+      store.state.connection
+        .prepare("SELECT 1 FROM pragma_table_info('runs') WHERE name = 'output_hash'")
+        .get(),
+    ).toBeUndefined();
+    store.close();
+  });
+
   it("publishes updates in the same transaction as the run projection", async () => {
     const databasePath = await makeStateDatabasePath("run-updates");
     const executor = new ScriptedExecutor().respond("reply", async (request) => {

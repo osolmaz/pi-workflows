@@ -156,9 +156,9 @@ type RunRow = {
   workflowRef: string;
   runStatus: string;
   workflowSourceHash: Buffer;
+  workflowSourcesHash: Buffer | null;
   definitionDigest: Buffer;
   inputHash: Buffer;
-  outputHash: Buffer | null;
   launchOptionsHash: Buffer;
   status: WorkflowRunLaunchStatus;
   availableAt: number;
@@ -1049,34 +1049,11 @@ export class SqliteControllerStore implements ControllerStore {
       const resourceId = resourceIdFor("run", options.runId);
       const definitionHash = this.state.putJson(options.definitionSnapshot, now);
       const queuedSource = queuedWorkflowSource(options.workflowSource);
-      const sourceHash = this.state.putJson(options.workflowSource, now);
+      const sourceHash = this.state.putJson(queuedSource.root, now);
+      const mountedSourcesHash =
+        queuedSource.mounted.length === 0 ? null : this.state.putJson(queuedSource.mounted, now);
       const inputHash = this.state.putJson(options.input ?? null, now);
       const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
-      const queuedStateHash = this.state.putJson(
-        {
-          schema: "pi-workflows.run-state.v1",
-          traceSeq: 1,
-          runId: options.runId,
-          workflowName: options.workflowName,
-          workflowSource: queuedSource.root,
-          ...(queuedSource.mounted.length === 0
-            ? {}
-            : {
-                workflowSources: queuedSource.mounted,
-                definitionDigest: options.definitionDigest,
-              }),
-          ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
-          startedAt: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
-          status: "running",
-          input: options.input ?? null,
-          outputs: {},
-          results: {},
-          steps: [],
-          updates: [],
-        },
-        now,
-      );
       this.state.connection
         .prepare(
           `INSERT INTO workflow_definitions(
@@ -1101,7 +1078,7 @@ export class SqliteControllerStore implements ControllerStore {
              run_id, resource_id, project_id, parent_run_id, definition_digest,
              workflow_ref, workflow_source_hash, launch_options_hash,
              source_type, source_ref, source_revision, status, paused,
-             input_hash, output_hash, created_at, updated_at
+             input_hash, workflow_sources_hash, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`,
         )
         .run(
@@ -1117,7 +1094,7 @@ export class SqliteControllerStore implements ControllerStore {
           source.ref,
           source.revision,
           inputHash,
-          queuedStateHash,
+          mountedSourcesHash,
           now,
           now,
         );
@@ -2261,7 +2238,11 @@ export class SqliteControllerStore implements ControllerStore {
       runId: row.runId,
       workflowName: row.workflowName,
       workflowSourceRef: row.workflowRef,
-      workflowSource: this.state.readJson(row.workflowSourceHash),
+      workflowSource: {
+        root: this.state.readJson(row.workflowSourceHash),
+        mounted:
+          row.workflowSourcesHash === null ? [] : this.state.readJson(row.workflowSourcesHash),
+      },
       initialized: row.runStatus !== "queued",
       definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
       input: this.state.readJson(row.inputHash),
@@ -2461,27 +2442,8 @@ export class SqliteControllerStore implements ControllerStore {
       ) {
         return false;
       }
-      if (row.outputHash === null) throw new Error(`Workflow run ${runId} has no state projection`);
-      const projected = this.state.readJson(row.outputHash);
-      if (!isRecord(projected)) throw new Error(`Workflow run ${runId} state is invalid`);
       const revision = this.resourceRevision(row.resourceId);
-      const at = new Date(now).toISOString();
-      const terminalState: Record<string, unknown> = {
-        ...projected,
-        traceSeq: revision + 1,
-        status,
-        updatedAt: at,
-        finishedAt: at,
-        error,
-      };
-      delete terminalState.currentNode;
-      delete terminalState.currentAttemptId;
-      delete terminalState.currentNodeStartedAt;
-      delete terminalState.statusDetail;
-      delete terminalState.paused;
-      delete terminalState.waitingOn;
       const errorHash = this.state.putText(error, now);
-      const outputHash = this.state.putJson(terminalState, now);
       const queueUpdate = this.state.connection
         .prepare(
           `UPDATE run_queue
@@ -2506,10 +2468,13 @@ export class SqliteControllerStore implements ControllerStore {
       this.state.connection
         .prepare(
           `UPDATE runs
-           SET status = ?, output_hash = ?, error_hash = ?, updated_at = ?, finished_at = ?
+           SET status = ?, paused = 0, status_detail = NULL, error_hash = ?,
+               current_node = NULL, current_attempt_id = NULL,
+               current_node_started_at = NULL, waiting_on = NULL,
+               updated_at = ?, finished_at = ?
            WHERE run_id = ?`,
         )
-        .run(status, outputHash, errorHash, now, now, runId);
+        .run(status, errorHash, now, now, runId);
       this.bumpResource(row.resourceId, revision, now);
       this.insertEvent(
         row.resourceId,
@@ -2811,8 +2776,9 @@ function workflowSelect(clause: string): string {
 function workflowRunSelect(clause: string): string {
   return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
     d.workflow_name AS workflowName, r.workflow_ref AS workflowRef, r.status AS runStatus,
-    r.workflow_source_hash AS workflowSourceHash, r.definition_digest AS definitionDigest,
-    r.input_hash AS inputHash, r.output_hash AS outputHash,
+    r.workflow_source_hash AS workflowSourceHash,
+    r.workflow_sources_hash AS workflowSourcesHash,
+    r.definition_digest AS definitionDigest, r.input_hash AS inputHash,
     r.launch_options_hash AS launchOptionsHash,
     q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,

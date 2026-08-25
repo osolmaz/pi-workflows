@@ -106,8 +106,15 @@ CREATE TABLE runs (
   paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
   status_detail TEXT,
   input_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  output_hash BLOB REFERENCES blobs(blob_hash),
+  workflow_sources_hash BLOB REFERENCES blobs(blob_hash),
+  human_decision_hash BLOB REFERENCES blobs(blob_hash),
+  final_output_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
+  carried_step_count INTEGER NOT NULL DEFAULT 0 CHECK (carried_step_count >= 0),
+  current_node TEXT,
+  current_attempt_id TEXT,
+  current_node_started_at INTEGER,
+  waiting_on TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
@@ -159,9 +166,9 @@ CREATE TABLE node_attempts (
   )),
   input_hash BLOB REFERENCES blobs(blob_hash),
   contract_hash BLOB REFERENCES blobs(blob_hash),
-  presentation_hash BLOB REFERENCES blobs(blob_hash),
+  prompt_hash BLOB REFERENCES blobs(blob_hash),
   output_hash BLOB REFERENCES blobs(blob_hash),
-  result_hash BLOB REFERENCES blobs(blob_hash),
+  step_metadata_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
   started_at INTEGER,
   deadline_at INTEGER,
@@ -175,10 +182,22 @@ CREATE UNIQUE INDEX node_attempts_active_idx ON node_attempts(run_id)
 WHERE status IN ('pending', 'running', 'waiting');
 CREATE INDEX node_attempts_run_idx ON node_attempts(run_id, created_at);
 
+CREATE TABLE run_steps (
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  step_index INTEGER NOT NULL CHECK (step_index >= 0),
+  attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id),
+  output_override_hash BLOB REFERENCES blobs(blob_hash),
+  PRIMARY KEY (run_id, step_index),
+  UNIQUE (run_id, attempt_id)
+) STRICT;
+
+CREATE INDEX run_steps_attempt_idx ON run_steps(attempt_id);
+
 CREATE TABLE workflow_updates (
   update_id TEXT PRIMARY KEY,
   attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
   update_seq INTEGER NOT NULL CHECK (update_seq > 0),
+  run_revision INTEGER NOT NULL CHECK (run_revision > 0),
   update_type TEXT NOT NULL,
   update_key TEXT NOT NULL,
   data_hash BLOB NOT NULL REFERENCES blobs(blob_hash),

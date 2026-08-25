@@ -246,6 +246,13 @@ export class SessionRecorder {
       return;
     }
     const normalized = normalizeAssistantEvent(event.assistantMessageEvent);
+    if (
+      normalized.type === "text_delta" ||
+      normalized.type === "thinking_delta" ||
+      normalized.type === "toolcall_delta"
+    ) {
+      return;
+    }
     const toolCallId = toolCallIdFromAssistantEvent(normalized);
     if (toolCallId) {
       this.toolOwners.set(toolCallId, owner);
@@ -295,14 +302,9 @@ export class SessionRecorder {
     });
   }
 
-  handleToolUpdate(event: ToolExecutionUpdateEventLike): void {
-    const owner = this.toolOwners.get(event.toolCallId);
-    if (!owner) {
-      return;
-    }
-    this.enqueue(owner, "tool_execution_updated", {}, undefined, {
-      toolCallId: event.toolCallId,
-    });
+  handleToolUpdate(_event: ToolExecutionUpdateEventLike): void {
+    // Incremental tool progress is transient. The recorder stores the settled
+    // tool result and the surrounding lifecycle facts.
   }
 
   handleToolEnd(event: ToolExecutionEndEventLike): void {

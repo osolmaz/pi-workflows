@@ -74,7 +74,7 @@ describe("session event reducer fixtures", () => {
         turnId: "t",
         messageId: "m",
         type: "assistant_event",
-        payload: { type: "text_delta", contentIndex: 0, delta: "a" },
+        payload: { type: "text_start", contentIndex: 0 },
       },
       {
         seq: 4,
@@ -100,9 +100,6 @@ describe("session event reducer fixtures", () => {
     const state = reduceSessionEvents(entries, events);
     expect(state.messages[0]?.blocks[0]?.text).toBe("b");
     expect(state.settledEntryIds).toEqual(["e1"]);
-    expect(state.diagnostics).toEqual([
-      "session event sequence gap at 1",
-      "text_end mismatch for m:0",
-    ]);
+    expect(state.diagnostics).toEqual(["session event sequence gap at 1"]);
   });
 });

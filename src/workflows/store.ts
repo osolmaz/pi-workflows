@@ -7,8 +7,10 @@ import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
   WorkflowNodeDefinition,
+  WorkflowNodeResult,
   WorkflowNodeSnapshot,
   WorkflowRunState,
+  WorkflowStepRecord,
   WorkflowSessionBinding,
   WorkflowSessionCapture,
   WorkflowSessionEntryRecord,
@@ -58,9 +60,57 @@ type RunContext = {
 type RunRow = {
   runId: string;
   resourceId: string;
-  stateHash: Buffer;
   definitionHash: Buffer;
+  definitionDigest: Buffer;
+  workflowRef: string;
+  sourceRef: string;
+  workflowSourceHash: Buffer;
+  workflowSourcesHash: Buffer | null;
+  parentRunId: string | null;
+  title: string | null;
   status: string;
+  paused: number;
+  statusDetail: string | null;
+  inputHash: Buffer;
+  humanDecisionHash: Buffer | null;
+  finalOutputHash: Buffer | null;
+  errorHash: Buffer | null;
+  carriedStepCount: number;
+  currentNode: string | null;
+  currentAttemptId: string | null;
+  currentNodeStartedAt: number | null;
+  waitingOn: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+};
+
+type StoredStepMetadata = Pick<WorkflowStepRecord, "action" | "assistantMessage" | "conversation">;
+
+type StepRow = {
+  stepIndex: number;
+  attemptId: string;
+  nodeId: string;
+  nodeType: WorkflowStepRecord["nodeType"];
+  status: string;
+  promptHash: Buffer | null;
+  outputHash: Buffer | null;
+  outputOverrideHash: Buffer | null;
+  stepMetadataHash: Buffer | null;
+  errorHash: Buffer | null;
+  startedAt: number;
+  finishedAt: number;
+};
+
+type UpdateRow = {
+  updateId: string;
+  runRevision: number;
+  nodeId: string;
+  attemptId: string;
+  updateType: string;
+  updateKey: string;
+  dataHash: Buffer;
+  recordedAt: number;
 };
 
 type EventRow = {
@@ -228,7 +278,14 @@ export class WorkflowRunStore {
         const inputHash = this.state.putJson(state.input, now);
         const workflowSourceHash = this.state.putJson(state.workflowSource ?? source, now);
         const launchOptionsHash = this.state.putJson({}, now);
-        const stateHash = this.state.putJson(state, now);
+        const workflowSourcesHash =
+          state.workflowSources === undefined
+            ? null
+            : this.state.putJson(state.workflowSources, now);
+        const humanDecisionHash =
+          state.humanDecision === undefined ? null : this.state.putJson(state.humanDecision, now);
+        const finalOutputHash =
+          state.finalOutput === undefined ? null : this.state.putJson(state.finalOutput, now);
         const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
         this.state.connection
           .prepare(
@@ -236,9 +293,11 @@ export class WorkflowRunStore {
                run_id, resource_id, project_id, parent_run_id, definition_digest,
                workflow_ref, workflow_source_hash, launch_options_hash,
                source_type, source_ref, source_revision, title, status, paused,
-               status_detail, input_hash, output_hash, error_hash,
+               status_detail, input_hash, workflow_sources_hash, human_decision_hash,
+               final_output_hash, error_hash, carried_step_count, current_node,
+               current_attempt_id, current_node_started_at, waiting_on,
                created_at, updated_at, finished_at
-             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             state.runId,
@@ -256,8 +315,17 @@ export class WorkflowRunStore {
             state.paused === true ? 1 : 0,
             state.statusDetail ?? null,
             inputHash,
-            stateHash,
+            workflowSourcesHash,
+            humanDecisionHash,
+            finalOutputHash,
             errorHash,
+            state.carriedStepCount ?? 0,
+            state.currentNode ?? null,
+            state.currentAttemptId ?? null,
+            state.currentNodeStartedAt === undefined
+              ? null
+              : Date.parse(state.currentNodeStartedAt),
+            state.waitingOn ?? null,
             Date.parse(state.startedAt),
             now,
             state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
@@ -393,10 +461,20 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `INSERT INTO workflow_updates(
-               update_id, attempt_id, update_seq, update_type, update_key, data_hash, recorded_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+               update_id, attempt_id, update_seq, run_revision,
+               update_type, update_key, data_hash, recorded_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(updateId, attemptId, nextUpdateSeq, update.type, update.key, dataHash, Date.now());
+          .run(
+            updateId,
+            attemptId,
+            nextUpdateSeq,
+            revision,
+            update.type,
+            update.key,
+            dataHash,
+            Date.now(),
+          );
         insertRunEvent(this.state, run.resourceId, revision, at, event);
         this.persistRunState(run, state, revision, Date.now());
         context.revision = revision;
@@ -528,7 +606,7 @@ export class WorkflowRunStore {
             ...(attemptId !== undefined ? { captureAttemptId: attemptId } : {}),
           },
         });
-        const current = this.readState(run.stateHash);
+        const current = this.readRunState(run, this.readDefinition(run.definitionHash));
         current.traceSeq = revision;
         current.updatedAt = at;
         this.persistRunState(run, current, revision, now);
@@ -616,24 +694,9 @@ export class WorkflowRunStore {
           );
         expected += 1;
       }
-      const now = Date.now();
       this.state.connection
         .prepare("UPDATE session_segments SET event_count = ? WHERE segment_id = ?")
         .run(expected - 1, current.segmentId);
-      const resourceId = segmentResourceId(current);
-      const revision = this.requireResourceRevision(resourceId);
-      this.bumpResource(resourceId, revision, now);
-      const payloadHash = this.state.putJson({ count: records.length, lastSeq: expected - 1 }, now);
-      insertGenericEvent(
-        this.state,
-        resourceId,
-        revision + 1,
-        "session.events_appended",
-        "session",
-        current.sessionId,
-        payloadHash,
-        now,
-      );
     });
   }
 
@@ -698,8 +761,8 @@ export class WorkflowRunStore {
   readRun(runId: string, options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun | null {
     const row = this.readRunRow(runId);
     if (row === undefined) return null;
-    const state = this.readState(row.stateHash);
     const snapshot = this.readDefinition(row.definitionHash);
+    const state = this.readRunState(row, snapshot);
     const segments = this.segmentRows(runId).map((segment) => this.loadSegment(segment, state));
     const flat = segments.find((segment) => segment.attemptId === "") ?? emptySegment();
     return {
@@ -831,13 +894,20 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     this.bumpResource(run.resourceId, expectedRevision - 1, now);
-    const stateHash = this.state.putJson(state, now);
+    const workflowSourcesHash =
+      state.workflowSources === undefined ? null : this.state.putJson(state.workflowSources, now);
+    const humanDecisionHash =
+      state.humanDecision === undefined ? null : this.state.putJson(state.humanDecision, now);
+    const finalOutputHash =
+      state.finalOutput === undefined ? null : this.state.putJson(state.finalOutput, now);
     const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
     const update = this.state.connection
       .prepare(
         `UPDATE runs
-         SET title = ?, status = ?, paused = ?, status_detail = ?, output_hash = ?,
-             error_hash = ?, updated_at = ?, finished_at = ?
+         SET title = ?, status = ?, paused = ?, status_detail = ?,
+             workflow_sources_hash = ?, human_decision_hash = ?, final_output_hash = ?,
+             error_hash = ?, carried_step_count = ?, current_node = ?, current_attempt_id = ?,
+             current_node_started_at = ?, waiting_on = ?, updated_at = ?, finished_at = ?
          WHERE run_id = ?`,
       )
       .run(
@@ -845,8 +915,15 @@ export class WorkflowRunStore {
         state.status,
         state.paused === true ? 1 : 0,
         state.statusDetail ?? null,
-        stateHash,
+        workflowSourcesHash,
+        humanDecisionHash,
+        finalOutputHash,
         errorHash,
+        state.carriedStepCount ?? 0,
+        state.currentNode ?? null,
+        state.currentAttemptId ?? null,
+        state.currentNodeStartedAt === undefined ? null : Date.parse(state.currentNodeStartedAt),
+        state.waitingOn ?? null,
         now,
         state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
         state.runId,
@@ -855,7 +932,6 @@ export class WorkflowRunStore {
     if (state.status !== "running") {
       this.enqueueRunSettlementEffect(run.resourceId, expectedRevision, state, now);
     }
-    run.stateHash = stateHash;
   }
 
   private enqueueRunSettlementEffect(
@@ -931,7 +1007,9 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     for (const step of state.steps.slice(state.carriedStepCount ?? 0)) {
-      const resultHash = this.state.putJson(step, now);
+      const metadata = stepMetadata(step);
+      const stepMetadataHash =
+        Object.keys(metadata).length === 0 ? null : this.state.putJson(metadata, now);
       const outputHash = step.output === undefined ? null : this.state.putJson(step.output, now);
       const errorHash = step.error === undefined ? null : this.state.putText(step.error, now);
       const promptHash = step.prompt === null ? null : this.state.putJson(step.prompt, now);
@@ -944,7 +1022,7 @@ export class WorkflowRunStore {
           .prepare(
             `INSERT INTO node_attempts(
                attempt_id, run_id, node_id, attempt_number, node_type, status,
-               presentation_hash, output_hash, result_hash, error_hash,
+               prompt_hash, output_hash, step_metadata_hash, error_hash,
                started_at, finished_at, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
@@ -957,7 +1035,7 @@ export class WorkflowRunStore {
             outcomeStatus(step.outcome),
             promptHash,
             outputHash,
-            resultHash,
+            stepMetadataHash,
             errorHash,
             Date.parse(step.startedAt),
             Date.parse(step.finishedAt),
@@ -968,7 +1046,7 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `UPDATE node_attempts
-             SET status = ?, presentation_hash = ?, output_hash = ?, result_hash = ?,
+             SET status = ?, prompt_hash = ?, output_hash = ?, step_metadata_hash = ?,
                  error_hash = ?, finished_at = ?, updated_at = ?
              WHERE attempt_id = ?`,
           )
@@ -976,7 +1054,7 @@ export class WorkflowRunStore {
             outcomeStatus(step.outcome),
             promptHash,
             outputHash,
-            resultHash,
+            stepMetadataHash,
             errorHash,
             Date.parse(step.finishedAt),
             now,
@@ -986,6 +1064,49 @@ export class WorkflowRunStore {
     }
     if (state.currentAttemptId !== undefined && state.currentNode !== undefined) {
       this.ensureAttempt(state, state.currentNode, state.currentAttemptId, now, snapshot);
+    }
+    this.syncRunSteps(state, now);
+  }
+
+  private syncRunSteps(state: WorkflowRunState, now: number): void {
+    const existingRows = this.state.connection
+      .prepare(
+        `SELECT step_index AS stepIndex, attempt_id AS attemptId
+         FROM run_steps WHERE run_id = ? ORDER BY step_index`,
+      )
+      .all(state.runId)
+      .filter(isRunStepIdentityRow);
+    if (existingRows.length > state.steps.length) {
+      throw new Error(`Workflow run steps cannot shrink: ${state.runId}`);
+    }
+    for (const existing of existingRows) {
+      if (state.steps[existing.stepIndex]?.attemptId !== existing.attemptId) {
+        throw new Error(`Workflow run step history changed at index ${existing.stepIndex}`);
+      }
+    }
+    for (let stepIndex = existingRows.length; stepIndex < state.steps.length; stepIndex += 1) {
+      const step = state.steps[stepIndex];
+      /* istanbul ignore if -- array index follows a checked bound */
+      if (step === undefined) throw new Error("Workflow run step became unavailable");
+      const attempt = this.state.connection
+        .prepare("SELECT output_hash AS outputHash FROM node_attempts WHERE attempt_id = ?")
+        .get(step.attemptId);
+      if (!isAttemptOutputRow(attempt)) {
+        throw new Error(`Workflow node attempt is missing: ${step.attemptId}`);
+      }
+      const carried = stepIndex < (state.carriedStepCount ?? 0);
+      const outputOverrideHash =
+        carried &&
+        (attempt.outputHash === null ||
+          canonicalJson(this.state.readJson(attempt.outputHash)) !== canonicalJson(step.output))
+          ? this.state.putJson(step.output, now)
+          : null;
+      this.state.connection
+        .prepare(
+          `INSERT INTO run_steps(run_id, step_index, attempt_id, output_override_hash)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(state.runId, stepIndex, step.attemptId, outputOverrideHash);
     }
   }
 
@@ -1057,8 +1178,17 @@ export class WorkflowRunStore {
     const row = this.state.connection
       .prepare(
         `SELECT r.run_id AS runId, r.resource_id AS resourceId,
-                r.output_hash AS stateHash, d.definition_hash AS definitionHash,
-                r.status
+                d.definition_hash AS definitionHash, r.definition_digest AS definitionDigest,
+                d.workflow_name AS workflowRef, r.source_ref AS sourceRef,
+                r.workflow_source_hash AS workflowSourceHash,
+                r.workflow_sources_hash AS workflowSourcesHash, r.parent_run_id AS parentRunId,
+                r.title, r.status, r.paused, r.status_detail AS statusDetail,
+                r.input_hash AS inputHash, r.human_decision_hash AS humanDecisionHash,
+                r.final_output_hash AS finalOutputHash, r.error_hash AS errorHash,
+                r.carried_step_count AS carriedStepCount, r.current_node AS currentNode,
+                r.current_attempt_id AS currentAttemptId,
+                r.current_node_started_at AS currentNodeStartedAt, r.waiting_on AS waitingOn,
+                r.created_at AS createdAt, r.updated_at AS updatedAt, r.finished_at AS finishedAt
          FROM runs r
          JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
          WHERE r.run_id = ?`,
@@ -1073,12 +1203,151 @@ export class WorkflowRunStore {
     return row;
   }
 
-  private readState(hash: Buffer): WorkflowRunState {
-    const value = this.state.readJson(hash);
-    if (!isRecord(value) || value.schema !== RUN_STATE_SCHEMA) {
-      throw new Error("Workflow run state has an incompatible schema");
+  private readRunState(row: RunRow, snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
+    const steps = this.readSteps(row.runId);
+    const outputs: Record<string, unknown> = {};
+    const results: Record<string, WorkflowNodeResult> = {};
+    for (const step of steps) {
+      const result = resultForStep(step);
+      results[step.nodeId] = result;
+      if (step.outcome === "ok") outputs[step.nodeId] = step.output;
+      else delete outputs[step.nodeId];
+      const node = snapshot.nodes[step.nodeId];
+      const mountPath =
+        node?.includeTransition === "exit" && node.mountPath !== undefined
+          ? node.mountPath.join("/")
+          : undefined;
+      if (mountPath !== undefined && step.outcome === "ok") {
+        outputs[mountPath] = step.output;
+        results[mountPath] = { ...result, nodeId: mountPath };
+      }
     }
-    return value as WorkflowRunState;
+    const revision = this.requireResourceRevision(row.resourceId);
+    return {
+      schema: RUN_STATE_SCHEMA,
+      traceSeq: revision,
+      runId: row.runId,
+      workflowName: row.workflowRef,
+      ...(row.parentRunId === null ? {} : { parentRunId: row.parentRunId }),
+      ...(row.carriedStepCount === 0 ? {} : { carriedStepCount: row.carriedStepCount }),
+      ...(row.title === null ? {} : { runTitle: row.title }),
+      ...(row.sourceRef.startsWith("inline:")
+        ? {}
+        : { workflowSource: this.readJsonAs(row.workflowSourceHash) }),
+      ...(row.workflowSourcesHash === null
+        ? {}
+        : { workflowSources: this.readJsonAs(row.workflowSourcesHash) }),
+      ...(row.workflowSourcesHash !== null || snapshot.composition?.mounts.length
+        ? { definitionDigest: `sha256:${row.definitionDigest.toString("hex")}` }
+        : {}),
+      startedAt: new Date(row.createdAt).toISOString(),
+      ...(row.finishedAt === null ? {} : { finishedAt: new Date(row.finishedAt).toISOString() }),
+      updatedAt: new Date(row.updatedAt).toISOString(),
+      status: row.status as WorkflowRunState["status"],
+      input: this.state.readJson(row.inputHash),
+      outputs,
+      results,
+      steps,
+      ...this.readUpdates(row.runId),
+      ...(row.currentNode === null ? {} : { currentNode: row.currentNode }),
+      ...(row.currentAttemptId === null ? {} : { currentAttemptId: row.currentAttemptId }),
+      ...(row.currentNodeStartedAt === null
+        ? {}
+        : { currentNodeStartedAt: new Date(row.currentNodeStartedAt).toISOString() }),
+      ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
+      ...(row.humanDecisionHash === null
+        ? {}
+        : { humanDecision: this.readJsonAs(row.humanDecisionHash) }),
+      ...(row.paused === 0 ? {} : { paused: true }),
+      ...(row.waitingOn === null ? {} : { waitingOn: row.waitingOn }),
+      ...(row.finalOutputHash === null
+        ? {}
+        : { finalOutput: this.state.readJson(row.finalOutputHash) }),
+      ...(row.errorHash === null ? {} : { error: this.readText(row.errorHash) }),
+    };
+  }
+
+  private readSteps(runId: string): WorkflowStepRecord[] {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
+                a.node_type AS nodeType, a.status, a.prompt_hash AS promptHash,
+                a.output_hash AS outputHash, s.output_override_hash AS outputOverrideHash,
+                a.step_metadata_hash AS stepMetadataHash, a.error_hash AS errorHash,
+                a.started_at AS startedAt, a.finished_at AS finishedAt
+         FROM run_steps s
+         JOIN node_attempts a ON a.attempt_id = s.attempt_id
+         WHERE s.run_id = ? ORDER BY s.step_index`,
+      )
+      .all(runId)
+      .filter(isStepRow);
+    return rows.map((row, index) => {
+      if (row.stepIndex !== index)
+        throw new Error(`Workflow run step sequence has a gap: ${runId}`);
+      const metadata =
+        row.stepMetadataHash === null
+          ? {}
+          : this.readJsonAs<StoredStepMetadata>(row.stepMetadataHash);
+      const prompt = row.promptHash === null ? null : this.readJsonAs<string>(row.promptHash);
+      const outputHash = row.outputOverrideHash ?? row.outputHash;
+      const output = outputHash === null ? null : this.state.readJson(outputHash);
+      const error = row.errorHash === null ? undefined : this.readText(row.errorHash);
+      return {
+        attemptId: row.attemptId,
+        nodeId: row.nodeId,
+        nodeType: row.nodeType,
+        outcome: outcomeForStatus(row.status),
+        startedAt: new Date(row.startedAt).toISOString(),
+        finishedAt: new Date(row.finishedAt).toISOString(),
+        prompt,
+        output,
+        ...(error === undefined ? {} : { error }),
+        ...metadata,
+      };
+    });
+  }
+
+  private readUpdates(runId: string): Pick<WorkflowRunState, "updates"> {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT u.update_id AS updateId, u.run_revision AS runRevision,
+                a.node_id AS nodeId, u.attempt_id AS attemptId,
+                u.update_type AS updateType, u.update_key AS updateKey,
+                u.data_hash AS dataHash, u.recorded_at AS recordedAt
+         FROM workflow_updates u
+         JOIN node_attempts a ON a.attempt_id = u.attempt_id
+         WHERE a.run_id = ? ORDER BY u.run_revision`,
+      )
+      .all(runId)
+      .filter(isUpdateRow);
+    if (rows.length === 0) return {};
+    let updates: WorkflowUpdateRecord[] | undefined;
+    for (const row of rows) {
+      updates = updateProjection(updates, {
+        updateId: row.updateId,
+        seq: row.runRevision,
+        at: new Date(row.recordedAt).toISOString(),
+        runId,
+        nodeId: row.nodeId,
+        attemptId: row.attemptId,
+        type: row.updateType,
+        key: row.updateKey,
+        data: this.readJsonAs<Record<string, unknown>>(row.dataHash),
+      });
+    }
+    return updates === undefined ? {} : { updates };
+  }
+
+  private readJsonAs<T>(hash: Buffer): T {
+    return this.state.readJson(hash) as T;
+  }
+
+  private readText(hash: Buffer): string {
+    const blob = this.state.readBlob(hash);
+    if (blob === undefined || blob.mediaType !== "text/plain") {
+      throw new Error("Text blob is missing or has the wrong media type");
+    }
+    return blob.content.toString("utf8");
   }
 
   private readDefinition(hash: Buffer): WorkflowDefinitionSnapshot {
@@ -1318,12 +1587,13 @@ function insertRunEvent(
   at: string,
   event: WorkflowTraceEventDraft | WorkflowTraceEvent,
 ): void {
+  const payload = compactTracePayload(event.type, event.payload);
   const payloadHash = state.putJson(
     {
       scope: event.scope,
       ...(event.nodeId === undefined ? {} : { nodeId: event.nodeId }),
       ...(event.attemptId === undefined ? {} : { attemptId: event.attemptId }),
-      payload: event.payload,
+      payload,
     },
     Date.parse(at),
   );
@@ -1337,6 +1607,25 @@ function insertRunEvent(
     payloadHash,
     Date.parse(at),
   );
+}
+
+function compactTracePayload(
+  eventType: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  if (eventType === "node_finished" && Object.hasOwn(payload, "output")) {
+    const { output: _output, ...rest } = payload;
+    return { ...rest, outputStored: true };
+  }
+  if (eventType === "run_started" && Object.hasOwn(payload, "input")) {
+    const { input: _input, ...rest } = payload;
+    return { ...rest, inputStored: true };
+  }
+  if (Object.hasOwn(payload, "finalOutput")) {
+    const { finalOutput: _finalOutput, ...rest } = payload;
+    return { ...rest, finalOutputStored: true };
+  }
+  return payload;
 }
 
 function insertGenericEvent(
@@ -1407,6 +1696,43 @@ function outcomeStatus(outcome: string): string {
   }
 }
 
+function outcomeForStatus(status: string): WorkflowStepRecord["outcome"] {
+  switch (status) {
+    case "completed":
+      return "ok";
+    case "timed_out":
+      return "timed_out";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      throw new Error(`Workflow step has nonterminal status: ${status}`);
+  }
+}
+
+function stepMetadata(step: WorkflowStepRecord): StoredStepMetadata {
+  return {
+    ...(step.action === undefined ? {} : { action: step.action }),
+    ...(step.assistantMessage === undefined ? {} : { assistantMessage: step.assistantMessage }),
+    ...(step.conversation === undefined ? {} : { conversation: step.conversation }),
+  };
+}
+
+function resultForStep(step: WorkflowStepRecord): WorkflowNodeResult {
+  return {
+    attemptId: step.attemptId,
+    nodeId: step.nodeId,
+    nodeType: step.nodeType,
+    outcome: step.outcome,
+    startedAt: step.startedAt,
+    finishedAt: step.finishedAt,
+    durationMs: Date.parse(step.finishedAt) - Date.parse(step.startedAt),
+    ...(step.outcome === "ok" ? { output: step.output } : {}),
+    ...(step.error === undefined ? {} : { error: step.error }),
+  };
+}
+
 function traceScope(value: unknown): WorkflowTraceEvent["scope"] {
   return value === "node" || value === "agent" || value === "action" || value === "session"
     ? value
@@ -1437,6 +1763,12 @@ function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
     Array.isArray(record.payload)
   ) {
     throw new Error("Session event is missing required envelope fields");
+  }
+  if (
+    record.type === "assistant_event" &&
+    ["text_delta", "thinking_delta", "toolcall_delta"].includes(String(record.payload.type))
+  ) {
+    throw new Error("Incremental assistant events are not durable session facts");
   }
 }
 
@@ -1477,6 +1809,25 @@ function isRunRow(value: unknown): value is RunRow {
 }
 
 function isRunIdRow(value: unknown): value is { runId: string } {
+  return isRecord(value);
+}
+
+function isRunStepIdentityRow(value: unknown): value is {
+  stepIndex: number;
+  attemptId: string;
+} {
+  return isRecord(value);
+}
+
+function isAttemptOutputRow(value: unknown): value is { outputHash: Buffer | null } {
+  return isRecord(value) && (value.outputHash === null || Buffer.isBuffer(value.outputHash));
+}
+
+function isStepRow(value: unknown): value is StepRow {
+  return isRecord(value);
+}
+
+function isUpdateRow(value: unknown): value is UpdateRow {
   return isRecord(value);
 }
 

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { canonicalJson } from "../state/json.js";
 import {
   compileWorkflowDefinition,
   compositionMetadata,
@@ -723,8 +724,8 @@ export class WorkflowEngine {
         throw new RunParkedError();
       }
       this.recordAttempt(workflow, state, attempt);
-      // The terminal node event carries the output, receipt, and conversation
-      // linkage so the trace alone is sufficient to reconstruct the run.
+      // The durable step row owns the output. The trace keeps the terminal fact
+      // and compact execution metadata without copying the output value.
       await this.persist(runId, state, {
         scope: "node",
         type: attempt.result.outcome === "ok" ? "node_finished" : "node_failed",
@@ -1561,7 +1562,7 @@ function workflowIdentityMismatch(
 
 function definitionDigest(workflow: WorkflowDefinition): string {
   return `sha256:${createHash("sha256")
-    .update(JSON.stringify(createDefinitionSnapshot(workflow)))
+    .update(canonicalJson(createDefinitionSnapshot(workflow)))
     .digest("hex")}`;
 }
 

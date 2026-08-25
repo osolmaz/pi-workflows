@@ -33,16 +33,6 @@
     },
     {
       "seq": 4,
-      "at": "2026-07-30T11:00:00.004Z",
-      "nodeId": "review",
-      "attemptId": "a1",
-      "turnId": "t1",
-      "messageId": "m1",
-      "type": "assistant_event",
-      "payload": { "type": "text_delta", "contentIndex": 0, "delta": "partial" }
-    },
-    {
-      "seq": 5,
       "at": "2026-07-30T11:00:00.005Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -52,7 +42,7 @@
       "payload": { "type": "error", "reason": "aborted" }
     },
     {
-      "seq": 6,
+      "seq": 5,
       "at": "2026-07-30T11:00:00.006Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -62,7 +52,7 @@
       "payload": { "role": "assistant", "settled": false }
     },
     {
-      "seq": 7,
+      "seq": 6,
       "at": "2026-07-30T11:00:00.007Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -73,15 +63,15 @@
   ],
   "positions": [
     {
-      "throughSeq": 4,
+      "throughSeq": 3,
       "expected": {
-        "throughSeq": 4,
+        "throughSeq": 3,
         "messages": [
           {
             "messageId": "m1",
             "role": "assistant",
             "status": "streaming",
-            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "partial" }]
+            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "" }]
           }
         ],
         "tools": [],
@@ -90,15 +80,15 @@
       }
     },
     {
-      "throughSeq": 7,
+      "throughSeq": 6,
       "expected": {
-        "throughSeq": 7,
+        "throughSeq": 6,
         "messages": [
           {
             "messageId": "m1",
             "role": "assistant",
             "status": "unsettled",
-            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "partial" }]
+            "blocks": [{ "contentIndex": 0, "kind": "text", "text": "" }]
           }
         ],
         "tools": [],

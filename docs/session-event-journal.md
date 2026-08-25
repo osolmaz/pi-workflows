@@ -45,14 +45,13 @@ The current event types are:
 - `assistant_event`
 - `message_finished`
 - `tool_execution_started`
-- `tool_execution_updated`
 - `tool_execution_finished`
 
 Unknown future event types remain visible to generic readers.
 
 ## Write rules
 
-The recorder queues hot-path Pi events in memory and writes bounded batches. One transaction writes the complete batch, updates the segment count, increments the segment resource revision, and appends its audit event.
+The recorder stores lifecycle boundaries and settled content. It does not store token deltas or incremental tool progress. It queues these bounded records in memory. One transaction writes each complete batch and updates the segment count. The session-event rows are the audit journal; the store does not add one generic event for each flush.
 
 The writer checks:
 
@@ -68,7 +67,7 @@ Workflow execution does not fail because temporal capture failed. The run and th
 
 ## Settled entries
 
-A `message_finished` event can refer to the Pi entry ID that settled the message. Replay first shows temporal deltas, then switches to the verbatim entry when that settled link is available.
+A `message_finished` event can refer to the Pi entry ID that settled the message. Replay uses settled assistant content and switches to the verbatim entry when that link is available.
 
 Agent workflow steps also store their first and last Pi entry IDs. This makes the conversation slice for each step explicit without changing Pi session data.
 

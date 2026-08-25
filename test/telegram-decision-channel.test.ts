@@ -524,6 +524,19 @@ describe("TelegramDecisionChannel SQLite", () => {
     store.close();
   });
 
+  it("does not reacquire or rewrite a healthy lease on every poll", async () => {
+    const bot = fakeBot();
+    const { store, channel } = await fixture({ fetchFn: bot.fetchFn });
+    await waitUntil(() => bot.calls.filter((call) => call.method === "getUpdates").length >= 5);
+    expect(
+      store.state.connection
+        .prepare("SELECT count(*) AS count FROM events WHERE event_type = 'channel.lease_acquired'")
+        .get(),
+    ).toEqual({ count: 1 });
+    await channel.stop();
+    store.close();
+  });
+
   it("settles confirmed messages after another channel wins", async () => {
     const bot = fakeBot();
     const { request, store, channel } = await fixture({ fetchFn: bot.fetchFn });

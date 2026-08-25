@@ -28,6 +28,7 @@ const TELEGRAM_TEXT_LIMIT = 4_096;
 const PI_PRESENTATION_WINDOW_LINES = 18;
 const DEFAULT_API_BASE = "https://api.telegram.org";
 const LEASE_TTL_MS = 60_000;
+const LEASE_RENEW_WINDOW_MS = 20_000;
 const LEASE_RETRY_MS = 5_000;
 const POLL_BACKOFF_MS = 1_000;
 const MAX_SETTLEMENT_ATTEMPTS = 3;
@@ -428,6 +429,21 @@ class TelegramProjection {
   }
 
   acquire(now = Date.now()): boolean {
+    const observed = this.lease();
+    const observedToken = tokenHash(this.token);
+    const ownedByThis =
+      observed.ownerId === this.owner &&
+      observed.tokenHash !== null &&
+      observed.tokenHash.equals(observedToken) &&
+      observed.expiresAt !== null &&
+      observed.expiresAt > now;
+    if (ownedByThis) {
+      this.generation = observed.generation;
+      return true;
+    }
+    if (observed.ownerId !== null && observed.expiresAt !== null && observed.expiresAt > now) {
+      return false;
+    }
     return this.state.transaction(() => {
       const lease = this.lease();
       if (
@@ -438,7 +454,11 @@ class TelegramProjection {
       ) {
         return false;
       }
-      const generation = lease.ownerId === this.owner ? lease.generation : lease.generation + 1;
+      const sameToken =
+        lease.ownerId === this.owner &&
+        lease.tokenHash !== null &&
+        lease.tokenHash.equals(observedToken);
+      const generation = sameToken ? lease.generation : lease.generation + 1;
       const result = this.state.connection
         .prepare(
           `UPDATE leases
@@ -449,7 +469,7 @@ class TelegramProjection {
         .run(
           generation,
           this.owner,
-          tokenHash(this.token),
+          observedToken,
           now,
           now,
           now + LEASE_TTL_MS,
@@ -465,6 +485,18 @@ class TelegramProjection {
   }
 
   renew(now = Date.now()): boolean {
+    const lease = this.lease();
+    if (
+      lease.ownerId !== this.owner ||
+      lease.generation !== this.generation ||
+      lease.tokenHash === null ||
+      !lease.tokenHash.equals(tokenHash(this.token)) ||
+      lease.expiresAt === null ||
+      lease.expiresAt <= now
+    ) {
+      return false;
+    }
+    if (lease.expiresAt - now > LEASE_RENEW_WINDOW_MS) return true;
     return (
       this.state.connection
         .prepare(
@@ -1222,11 +1254,11 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
 
   private async poll(signal: AbortSignal): Promise<void> {
     while (this.running && !signal.aborted) {
-      if (!this.projection.acquire()) {
-        await wait(LEASE_RETRY_MS, signal);
-        continue;
-      }
       try {
+        if (!this.projection.acquire()) {
+          await wait(leaseRetryDelay(), signal);
+          continue;
+        }
         await this.deliverPendingRequests();
         const result = await this.call(
           "getUpdates",
@@ -1246,7 +1278,11 @@ export class TelegramDecisionChannel implements HumanDecisionChannel {
         if (!this.projection.renew()) this.projection.release();
       } catch {
         if (signal.aborted) return;
-        await wait(POLL_BACKOFF_MS, signal);
+        try {
+          await wait(POLL_BACKOFF_MS, signal);
+        } catch {
+          if (signal.aborted) return;
+        }
       }
     }
   }
@@ -1771,6 +1807,10 @@ async function writePrivateJson(filePath: string, value: unknown): Promise<void>
   await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await fsp.rename(temporary, filePath);
   await fsp.chmod(filePath, 0o600);
+}
+
+function leaseRetryDelay(): number {
+  return LEASE_RETRY_MS + Math.floor(Math.random() * 1_000);
 }
 
 async function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
