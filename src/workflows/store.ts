@@ -32,10 +32,13 @@ import {
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
+  HumanDecisionReceipt,
   WorkflowNodeDefinition,
   WorkflowNodeResult,
   WorkflowNodeSnapshot,
   WorkflowRunState,
+  WorkflowSource,
+  WorkflowMountedSource,
   WorkflowStepRecord,
   WorkflowSessionBinding,
   WorkflowSessionCapture,
@@ -103,32 +106,27 @@ type RunRow = {
   definitionHash: Buffer;
   definitionDigest: Buffer;
   workflowRef: string;
-  sourceRef: string;
-  workflowSourceHash: Buffer;
-  workflowSourcesHash: Buffer | null;
   parentRunId: string | null;
   title: string | null;
   status: string;
   paused: number;
   statusDetail: string | null;
   inputHash: Buffer;
-  humanDecisionHash: Buffer | null;
   finalOutputHash: Buffer | null;
   errorHash: Buffer | null;
-  carriedStepCount: number;
-  currentNode: string | null;
-  currentAttemptId: string | null;
-  currentNodeStartedAt: number | null;
-  currentSettingsScopeId: string | null;
-  currentSettingsChangeNumber: number | null;
-  currentSettingsHash: Buffer | null;
-  waitingOn: string | null;
   createdAt: number;
   updatedAt: number;
   finishedAt: number | null;
 };
 
-type StoredStepMetadata = Pick<WorkflowStepRecord, "action" | "assistantMessage" | "conversation">;
+type RunSourceRow = {
+  mountPath: string;
+  sourceType: "builtin" | "file";
+  sourceRef: string;
+  sourceRevision: string;
+};
+
+type StoredAttemptReceipt = Pick<WorkflowStepRecord, "action" | "assistantMessage">;
 
 type StepRow = {
   stepIndex: number;
@@ -136,10 +134,13 @@ type StepRow = {
   nodeId: string;
   nodeType: WorkflowStepRecord["nodeType"];
   status: string;
-  promptHash: Buffer | null;
   outputHash: Buffer | null;
   outputOverrideHash: Buffer | null;
-  stepMetadataHash: Buffer | null;
+  receiptHash: Buffer | null;
+  promptEntryHash: Buffer | null;
+  responseEntryHash: Buffer | null;
+  firstEntryId: string | null;
+  lastEntryId: string | null;
   errorHash: Buffer | null;
   settingsScopeId: string | null;
   settingsChangeNumber: number | null;
@@ -383,6 +384,7 @@ export class WorkflowRunStore {
           this.persistRunState(reserved, state, revision, now);
           this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
           this.syncNodeAttempts(state, snapshot, now);
+          this.syncContinuationIdentity(state);
           context.revision = revision;
           return;
         }
@@ -408,14 +410,7 @@ export class WorkflowRunStore {
         state.traceSeq = 1;
         state.updatedAt = at;
         const inputHash = this.state.putJson(state.input, now);
-        const workflowSourceHash = this.state.putJson(state.workflowSource ?? source, now);
         const launchOptionsHash = this.state.putJson({}, now);
-        const workflowSourcesHash =
-          state.workflowSources === undefined
-            ? null
-            : this.state.putJson(state.workflowSources, now);
-        const humanDecisionHash =
-          state.humanDecision === undefined ? null : this.state.putJson(state.humanDecision, now);
         const finalOutputHash =
           state.finalOutput === undefined ? null : this.state.putJson(state.finalOutput, now);
         const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
@@ -423,13 +418,10 @@ export class WorkflowRunStore {
           .prepare(
             `INSERT INTO runs(
                run_id, resource_id, project_id, parent_run_id, definition_digest,
-               workflow_ref, workflow_source_hash, launch_options_hash,
-               source_type, source_ref, source_revision, title, status, paused,
-               status_detail, input_hash, workflow_sources_hash, human_decision_hash,
-               final_output_hash, error_hash, carried_step_count, current_node,
-               current_attempt_id, current_node_started_at, waiting_on,
+               workflow_ref, launch_options_hash, title, status, paused,
+               status_detail, input_hash, final_output_hash, error_hash,
                created_at, updated_at, finished_at
-             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             state.runId,
@@ -437,31 +429,20 @@ export class WorkflowRunStore {
             state.parentRunId ?? null,
             definitionDigest,
             state.workflowName,
-            workflowSourceHash,
             launchOptionsHash,
-            source.type,
-            source.ref,
-            source.revision,
             state.runTitle ?? null,
             state.status,
             state.paused === true ? 1 : 0,
             state.statusDetail ?? null,
             inputHash,
-            workflowSourcesHash,
-            humanDecisionHash,
             finalOutputHash,
             errorHash,
-            state.carriedStepCount ?? 0,
-            state.currentNode ?? null,
-            state.currentAttemptId ?? null,
-            state.currentNodeStartedAt === undefined
-              ? null
-              : Date.parse(state.currentNodeStartedAt),
-            state.waitingOn ?? null,
             Date.parse(state.startedAt),
             now,
             state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
           );
+        this.insertRunSources(state.runId, source, state.workflowSources ?? []);
+        this.syncContinuationIdentity(state);
         insertRunEvent(this.state, resourceId, 1, at, {
           scope: "run",
           type: "run_created",
@@ -1101,6 +1082,13 @@ export class WorkflowRunStore {
     });
     const prepared = this.readRun(runId, { includeTrace: true });
     if (prepared === null) throw new Error(`Workflow run became unreadable: ${runId}`);
+    if (loaded.state.currentNode !== undefined && loaded.state.currentAttemptId !== undefined) {
+      prepared.state.currentNode = loaded.state.currentNode;
+      prepared.state.currentAttemptId = loaded.state.currentAttemptId;
+      if (loaded.state.currentNodeStartedAt !== undefined) {
+        prepared.state.currentNodeStartedAt = loaded.state.currentNodeStartedAt;
+      }
+    }
     return prepared;
   }
 
@@ -1381,7 +1369,7 @@ export class WorkflowRunStore {
         "session.entry_appended",
         "session",
         segment.sessionId,
-        entryHash,
+        null,
         now,
       );
       return sequence;
@@ -1632,10 +1620,6 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     this.bumpResource(run.resourceId, expectedRevision - 1, now);
-    const workflowSourcesHash =
-      state.workflowSources === undefined ? null : this.state.putJson(state.workflowSources, now);
-    const humanDecisionHash =
-      state.humanDecision === undefined ? null : this.state.putJson(state.humanDecision, now);
     const finalOutputHash =
       state.finalOutput === undefined ? null : this.state.putJson(state.finalOutput, now);
     const errorHash = state.error === undefined ? null : this.state.putText(state.error, now);
@@ -1643,9 +1627,7 @@ export class WorkflowRunStore {
       .prepare(
         `UPDATE runs
          SET title = ?, status = ?, paused = ?, status_detail = ?,
-             workflow_sources_hash = ?, human_decision_hash = ?, final_output_hash = ?,
-             error_hash = ?, carried_step_count = ?, current_node = ?, current_attempt_id = ?,
-             current_node_started_at = ?, waiting_on = ?, updated_at = ?, finished_at = ?
+             final_output_hash = ?, error_hash = ?, updated_at = ?, finished_at = ?
          WHERE run_id = ?`,
       )
       .run(
@@ -1653,15 +1635,8 @@ export class WorkflowRunStore {
         state.status,
         state.paused === true ? 1 : 0,
         state.statusDetail ?? null,
-        workflowSourcesHash,
-        humanDecisionHash,
         finalOutputHash,
         errorHash,
-        state.carriedStepCount ?? 0,
-        state.currentNode ?? null,
-        state.currentAttemptId ?? null,
-        state.currentNodeStartedAt === undefined ? null : Date.parse(state.currentNodeStartedAt),
-        state.waitingOn ?? null,
         now,
         state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
         state.runId,
@@ -2164,12 +2139,11 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     for (const step of state.steps.slice(state.carriedStepCount ?? 0)) {
-      const metadata = stepMetadata(step);
-      const stepMetadataHash =
-        Object.keys(metadata).length === 0 ? null : this.state.putJson(metadata, now);
+      const receipt = attemptReceipt(step);
+      const receiptHash =
+        Object.keys(receipt).length === 0 ? null : this.state.putJson(receipt, now);
       const outputHash = step.output === undefined ? null : this.state.putJson(step.output, now);
       const errorHash = step.error === undefined ? null : this.state.putText(step.error, now);
-      const promptHash = step.prompt === null ? null : this.state.putJson(step.prompt, now);
       const existing = this.state.connection
         .prepare("SELECT attempt_id AS attemptId FROM node_attempts WHERE attempt_id = ?")
         .get(step.attemptId);
@@ -2179,10 +2153,10 @@ export class WorkflowRunStore {
           .prepare(
             `INSERT INTO node_attempts(
                attempt_id, run_id, node_id, attempt_number, node_type, status,
-               prompt_hash, output_hash, step_metadata_hash, error_hash,
+               output_hash, receipt_hash, error_hash,
                settings_scope_id, settings_change_number, settings_hash,
                started_at, finished_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             step.attemptId,
@@ -2191,9 +2165,8 @@ export class WorkflowRunStore {
             attemptNumber,
             step.nodeType,
             outcomeStatus(step.outcome),
-            promptHash,
             outputHash,
-            stepMetadataHash,
+            receiptHash,
             errorHash,
             step.settingsScopeId ?? null,
             step.settingsChangeNumber ?? null,
@@ -2207,16 +2180,15 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `UPDATE node_attempts
-             SET status = ?, prompt_hash = ?, output_hash = ?, step_metadata_hash = ?,
-                 error_hash = ?, settings_scope_id = ?, settings_change_number = ?,
+             SET status = ?, output_hash = ?, receipt_hash = ?, error_hash = ?,
+                 settings_scope_id = ?, settings_change_number = ?,
                  settings_hash = ?, finished_at = ?, updated_at = ?
              WHERE attempt_id = ?`,
           )
           .run(
             outcomeStatus(step.outcome),
-            promptHash,
             outputHash,
-            stepMetadataHash,
+            receiptHash,
             errorHash,
             step.settingsScopeId ?? null,
             step.settingsChangeNumber ?? null,
@@ -2225,6 +2197,11 @@ export class WorkflowRunStore {
             now,
             step.attemptId,
           );
+      }
+      if (this.syncAttemptEntries(state.runId, step)) {
+        this.state.connection
+          .prepare("UPDATE node_attempts SET output_hash = NULL WHERE attempt_id = ?")
+          .run(step.attemptId);
       }
     }
     if (state.currentAttemptId !== undefined && state.currentNode !== undefined) {
@@ -2253,17 +2230,10 @@ export class WorkflowRunStore {
       const step = state.steps[stepIndex];
       /* istanbul ignore if -- array index follows a checked bound */
       if (step === undefined) throw new Error("Workflow run step became unavailable");
-      const attempt = this.state.connection
-        .prepare("SELECT output_hash AS outputHash FROM node_attempts WHERE attempt_id = ?")
-        .get(step.attemptId);
-      if (!isAttemptOutputRow(attempt)) {
-        throw new Error(`Workflow node attempt is missing: ${step.attemptId}`);
-      }
+      const attemptOutput = this.readAttemptOutput(step.attemptId);
       const carried = stepIndex < (state.carriedStepCount ?? 0);
       const outputOverrideHash =
-        carried &&
-        (attempt.outputHash === null ||
-          canonicalJson(this.state.readJson(attempt.outputHash)) !== canonicalJson(step.output))
+        carried && canonicalJson(attemptOutput) !== canonicalJson(step.output)
           ? this.state.putJson(step.output, now)
           : null;
       this.state.connection
@@ -2273,6 +2243,97 @@ export class WorkflowRunStore {
         )
         .run(state.runId, stepIndex, step.attemptId, outputOverrideHash);
     }
+  }
+
+  private syncAttemptEntries(runId: string, step: WorkflowStepRecord): boolean {
+    const links: Array<["prompt" | "response" | "first" | "last", string]> = [];
+    const promptEntryId = this.findAttemptPromptEntry(runId, step.attemptId);
+    if (promptEntryId !== undefined) links.push(["prompt", promptEntryId]);
+    if (step.conversation !== undefined) {
+      links.push(
+        ["first", step.conversation.firstEntryId],
+        ["last", step.conversation.lastEntryId],
+      );
+    }
+    if (step.assistantMessage?.entryId !== undefined) {
+      links.push(["response", step.assistantMessage.entryId]);
+    }
+    let responseLinked = false;
+    for (const [role, entryId] of links) {
+      const row = this.state.connection
+        .prepare(
+          `SELECT e.segment_id AS segmentId, e.entry_hash AS entryHash
+           FROM session_entries e
+           JOIN session_segments s ON s.segment_id = e.segment_id
+           WHERE s.run_id = ? AND e.entry_id = ?
+           ORDER BY e.recorded_at DESC LIMIT 1`,
+        )
+        .get(runId, entryId);
+      if (!isSegmentIdentityRow(row)) continue;
+      if (role === "response") {
+        const output = assistantOutputFromEntry(
+          this.state.readJson(row.entryHash),
+          step.assistantMessage?.maxChars,
+        );
+        if (
+          canonicalJson(output) !== canonicalJson(step.output) ||
+          createHash("sha256").update(output).digest("hex") !== step.assistantMessage?.sha256
+        ) {
+          throw new Error(`Assistant response entry conflicts with attempt ${step.attemptId}`);
+        }
+      }
+      this.state.connection
+        .prepare(
+          `INSERT INTO attempt_entries(attempt_id, role, segment_id, entry_id)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(attempt_id, role) DO UPDATE SET
+             segment_id = excluded.segment_id, entry_id = excluded.entry_id`,
+        )
+        .run(step.attemptId, role, row.segmentId, entryId);
+      if (role === "response") responseLinked = true;
+    }
+    return responseLinked;
+  }
+
+  private findAttemptPromptEntry(runId: string, attemptId: string): string | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT e.entry_id AS entryId
+         FROM session_entries e
+         JOIN session_segments s ON s.segment_id = e.segment_id
+         JOIN blobs b ON b.blob_hash = e.entry_hash
+         WHERE s.run_id = ?
+           AND json_extract(CAST(b.content AS TEXT), '$.customType') = 'pi-workflows-agent-step'
+           AND json_extract(CAST(b.content AS TEXT), '$.details.contract.attemptId') = ?
+         ORDER BY e.recorded_at DESC LIMIT 1`,
+      )
+      .get(runId, attemptId);
+    return isEntryIdentityRow(row) ? row.entryId : undefined;
+  }
+
+  private readAttemptOutput(attemptId: string): unknown {
+    const row = this.state.connection
+      .prepare(
+        `SELECT a.output_hash AS outputHash, a.receipt_hash AS receiptHash,
+                e.entry_hash AS responseEntryHash
+         FROM node_attempts a
+         LEFT JOIN attempt_entries l ON l.attempt_id = a.attempt_id AND l.role = 'response'
+         LEFT JOIN session_entries e
+           ON e.segment_id = l.segment_id AND e.entry_id = l.entry_id
+         WHERE a.attempt_id = ?`,
+      )
+      .get(attemptId);
+    if (!isAttemptValueRow(row)) {
+      throw new Error(`Workflow node attempt is missing: ${attemptId}`);
+    }
+    if (row.outputHash !== null) return this.state.readJson(row.outputHash);
+    if (row.responseEntryHash === null) return null;
+    const receipt =
+      row.receiptHash === null ? {} : this.readJsonAs<StoredAttemptReceipt>(row.receiptHash);
+    return assistantOutputFromEntry(
+      this.state.readJson(row.responseEntryHash),
+      receipt.assistantMessage?.maxChars,
+    );
   }
 
   private ensureAttempt(
@@ -2359,28 +2420,62 @@ export class WorkflowRunStore {
     return row.updateSeq;
   }
 
+  private insertRunSources(
+    runId: string,
+    root: { type: "builtin" | "file"; ref: string; revision: string },
+    mounted: WorkflowMountedSource[],
+  ): void {
+    const insert = this.state.connection.prepare(
+      `INSERT INTO run_sources(run_id, mount_path, source_type, source_ref, source_revision)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    insert.run(runId, "", root.type, root.ref, root.revision);
+    for (const item of mounted) {
+      const source = sourceParts(item.source);
+      insert.run(runId, item.mountPath.join("/"), source.type, source.ref, source.revision);
+    }
+  }
+
+  private syncContinuationIdentity(state: WorkflowRunState): void {
+    if (state.parentRunId === undefined || state.humanDecision === undefined) return;
+    const createdAt = Date.parse(state.humanDecision.acceptedAt);
+    this.state.connection
+      .prepare(
+        `INSERT INTO continuations(
+           decision_id, parent_run_id, continuation_run_id, created_at
+         ) VALUES (?, ?, ?, ?)
+         ON CONFLICT(decision_id) DO NOTHING`,
+      )
+      .run(state.humanDecision.decisionId, state.parentRunId, state.runId, createdAt);
+    const row = this.state.connection
+      .prepare(
+        `SELECT parent_run_id AS parentRunId, continuation_run_id AS continuationRunId,
+                created_at AS createdAt
+         FROM continuations WHERE decision_id = ?`,
+      )
+      .get(state.humanDecision.decisionId);
+    if (
+      !isContinuationIdentityRow(row) ||
+      row.parentRunId !== state.parentRunId ||
+      row.continuationRunId !== state.runId ||
+      row.createdAt !== createdAt
+    ) {
+      throw new Error("Immutable human decision continuation conflicts");
+    }
+  }
+
   private readRunRow(runId: string): RunRow | undefined {
     const row = this.state.connection
       .prepare(
         `SELECT r.run_id AS runId, r.resource_id AS resourceId,
                 d.definition_hash AS definitionHash, r.definition_digest AS definitionDigest,
-                d.workflow_name AS workflowRef, r.source_ref AS sourceRef,
-                r.workflow_source_hash AS workflowSourceHash,
-                r.workflow_sources_hash AS workflowSourcesHash, r.parent_run_id AS parentRunId,
+                d.workflow_name AS workflowRef, r.parent_run_id AS parentRunId,
                 r.title, r.status, r.paused, r.status_detail AS statusDetail,
-                r.input_hash AS inputHash, r.human_decision_hash AS humanDecisionHash,
-                r.final_output_hash AS finalOutputHash, r.error_hash AS errorHash,
-                r.carried_step_count AS carriedStepCount, r.current_node AS currentNode,
-                r.current_attempt_id AS currentAttemptId,
-                r.current_node_started_at AS currentNodeStartedAt,
-                current_attempt.settings_scope_id AS currentSettingsScopeId,
-                current_attempt.settings_change_number AS currentSettingsChangeNumber,
-                current_attempt.settings_hash AS currentSettingsHash, r.waiting_on AS waitingOn,
+                r.input_hash AS inputHash, r.final_output_hash AS finalOutputHash,
+                r.error_hash AS errorHash,
                 r.created_at AS createdAt, r.updated_at AS updatedAt, r.finished_at AS finishedAt
          FROM runs r
          JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
-         LEFT JOIN node_attempts current_attempt
-           ON current_attempt.attempt_id = r.current_attempt_id
          WHERE r.run_id = ?`,
       )
       .get(runId);
@@ -2395,6 +2490,10 @@ export class WorkflowRunStore {
 
   private readRunState(row: RunRow, snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
     const steps = this.readSteps(row.runId);
+    const sources = this.readRunSources(row.runId, snapshot);
+    const carriedStepCount = this.carriedStepCount(row.runId);
+    const activeAttempt = this.readActiveAttempt(row.runId);
+    const humanDecision = this.readHumanDecisionReceipt(row.runId);
     const outputs: Record<string, unknown> = {};
     const results: Record<string, WorkflowNodeResult> = {};
     for (const step of steps) {
@@ -2419,15 +2518,11 @@ export class WorkflowRunStore {
       runId: row.runId,
       workflowName: row.workflowRef,
       ...(row.parentRunId === null ? {} : { parentRunId: row.parentRunId }),
-      ...(row.carriedStepCount === 0 ? {} : { carriedStepCount: row.carriedStepCount }),
+      ...(carriedStepCount === 0 ? {} : { carriedStepCount }),
       ...(row.title === null ? {} : { runTitle: row.title }),
-      ...(row.sourceRef.startsWith("inline:")
-        ? {}
-        : { workflowSource: this.readJsonAs(row.workflowSourceHash) }),
-      ...(row.workflowSourcesHash === null
-        ? {}
-        : { workflowSources: this.readJsonAs(row.workflowSourcesHash) }),
-      ...(row.workflowSourcesHash !== null || snapshot.composition?.mounts.length
+      ...(sources.root === undefined ? {} : { workflowSource: sources.root }),
+      ...(sources.mounted.length === 0 ? {} : { workflowSources: sources.mounted }),
+      ...(sources.mounted.length !== 0 || snapshot.composition?.mounts.length
         ? { definitionDigest: `sha256:${row.definitionDigest.toString("hex")}` }
         : {}),
       startedAt: new Date(row.createdAt).toISOString(),
@@ -2439,22 +2534,22 @@ export class WorkflowRunStore {
       results,
       steps,
       ...this.readUpdates(row.runId),
-      ...(row.currentNode === null ? {} : { currentNode: row.currentNode }),
-      ...(row.currentAttemptId === null ? {} : { currentAttemptId: row.currentAttemptId }),
-      ...(row.currentNodeStartedAt === null
+      ...(activeAttempt === undefined ? {} : { currentNode: activeAttempt.nodeId }),
+      ...(activeAttempt === undefined ? {} : { currentAttemptId: activeAttempt.attemptId }),
+      ...(activeAttempt?.startedAt === null || activeAttempt === undefined
         ? {}
-        : { currentNodeStartedAt: new Date(row.currentNodeStartedAt).toISOString() }),
+        : { currentNodeStartedAt: new Date(activeAttempt.startedAt).toISOString() }),
       ...savedCurrentSettingsBinding(
-        row.currentSettingsScopeId,
-        row.currentSettingsChangeNumber,
-        row.currentSettingsHash,
+        activeAttempt?.settingsScopeId ?? null,
+        activeAttempt?.settingsChangeNumber ?? null,
+        activeAttempt?.settingsHash ?? null,
       ),
       ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
-      ...(row.humanDecisionHash === null
-        ? {}
-        : { humanDecision: this.readJsonAs(row.humanDecisionHash) }),
+      ...(humanDecision === undefined ? {} : { humanDecision }),
       ...(row.paused === 0 ? {} : { paused: true }),
-      ...(row.waitingOn === null ? {} : { waitingOn: row.waitingOn }),
+      ...(row.status === "waiting" && steps.at(-1) !== undefined
+        ? { waitingOn: steps.at(-1)?.nodeId as string }
+        : {}),
       ...(row.finalOutputHash === null
         ? {}
         : { finalOutput: this.state.readJson(row.finalOutputHash) }),
@@ -2466,15 +2561,32 @@ export class WorkflowRunStore {
     const rows = this.state.connection
       .prepare(
         `SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
-                a.node_type AS nodeType, a.status, a.prompt_hash AS promptHash,
+                a.node_type AS nodeType, a.status,
                 a.output_hash AS outputHash, s.output_override_hash AS outputOverrideHash,
-                a.step_metadata_hash AS stepMetadataHash, a.error_hash AS errorHash,
+                a.receipt_hash AS receiptHash, a.error_hash AS errorHash,
+                prompt_entry.entry_hash AS promptEntryHash,
+                response_entry.entry_hash AS responseEntryHash,
+                first_link.entry_id AS firstEntryId, last_link.entry_id AS lastEntryId,
                 a.settings_scope_id AS settingsScopeId,
                 a.settings_change_number AS settingsChangeNumber,
                 a.settings_hash AS settingsHash,
                 a.started_at AS startedAt, a.finished_at AS finishedAt
          FROM run_steps s
          JOIN node_attempts a ON a.attempt_id = s.attempt_id
+         LEFT JOIN attempt_entries prompt_link
+           ON prompt_link.attempt_id = a.attempt_id AND prompt_link.role = 'prompt'
+         LEFT JOIN session_entries prompt_entry
+           ON prompt_entry.segment_id = prompt_link.segment_id
+          AND prompt_entry.entry_id = prompt_link.entry_id
+         LEFT JOIN attempt_entries response_link
+           ON response_link.attempt_id = a.attempt_id AND response_link.role = 'response'
+         LEFT JOIN session_entries response_entry
+           ON response_entry.segment_id = response_link.segment_id
+          AND response_entry.entry_id = response_link.entry_id
+         LEFT JOIN attempt_entries first_link
+           ON first_link.attempt_id = a.attempt_id AND first_link.role = 'first'
+         LEFT JOIN attempt_entries last_link
+           ON last_link.attempt_id = a.attempt_id AND last_link.role = 'last'
          WHERE s.run_id = ? ORDER BY s.step_index`,
       )
       .all(runId)
@@ -2482,14 +2594,27 @@ export class WorkflowRunStore {
     return rows.map((row, index) => {
       if (row.stepIndex !== index)
         throw new Error(`Workflow run step sequence has a gap: ${runId}`);
-      const metadata =
-        row.stepMetadataHash === null
-          ? {}
-          : this.readJsonAs<StoredStepMetadata>(row.stepMetadataHash);
-      const prompt = row.promptHash === null ? null : this.readJsonAs<string>(row.promptHash);
+      const receipt =
+        row.receiptHash === null ? {} : this.readJsonAs<StoredAttemptReceipt>(row.receiptHash);
+      const prompt =
+        row.promptEntryHash === null
+          ? null
+          : promptFromEntry(this.state.readJson(row.promptEntryHash));
       const outputHash = row.outputOverrideHash ?? row.outputHash;
-      const output = outputHash === null ? null : this.state.readJson(outputHash);
+      const output =
+        outputHash !== null
+          ? this.state.readJson(outputHash)
+          : row.responseEntryHash === null
+            ? null
+            : assistantOutputFromEntry(
+                this.state.readJson(row.responseEntryHash),
+                receipt.assistantMessage?.maxChars,
+              );
       const error = row.errorHash === null ? undefined : this.readText(row.errorHash);
+      const conversation =
+        row.firstEntryId === null || row.lastEntryId === null
+          ? undefined
+          : { firstEntryId: row.firstEntryId, lastEntryId: row.lastEntryId };
       return {
         attemptId: row.attemptId,
         nodeId: row.nodeId,
@@ -2505,9 +2630,122 @@ export class WorkflowRunStore {
           row.settingsChangeNumber,
           row.settingsHash,
         ),
-        ...metadata,
+        ...receipt,
+        ...(conversation === undefined ? {} : { conversation }),
       };
     });
+  }
+
+  private readRunSources(
+    runId: string,
+    snapshot: WorkflowDefinitionSnapshot,
+  ): { root?: WorkflowSource; mounted: WorkflowMountedSource[] } {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT mount_path AS mountPath, source_type AS sourceType,
+                source_ref AS sourceRef, source_revision AS sourceRevision
+         FROM run_sources WHERE run_id = ? ORDER BY mount_path`,
+      )
+      .all(runId)
+      .filter(isRunSourceRow);
+    const rootRow = rows.find((row) => row.mountPath === "");
+    const root =
+      rootRow === undefined ||
+      (rootRow.sourceType === "file" && rootRow.sourceRef.startsWith("inline:"))
+        ? undefined
+        : workflowSourceFromRow(rootRow);
+    const mountNames = new Map(
+      (snapshot.composition?.mounts ?? []).map((mount) => [
+        mount.mountPath.join("/"),
+        mount.workflowName,
+      ]),
+    );
+    const mounted = rows
+      .filter((row) => row.mountPath !== "")
+      .map((row) => ({
+        mountPath: row.mountPath.split("/"),
+        workflowName: mountNames.get(row.mountPath) ?? row.mountPath,
+        source: workflowSourceFromRow(row),
+      }));
+    return { ...(root === undefined ? {} : { root }), mounted };
+  }
+
+  private carriedStepCount(runId: string): number {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count
+         FROM run_steps s JOIN node_attempts a ON a.attempt_id = s.attempt_id
+         WHERE s.run_id = ? AND a.run_id <> s.run_id`,
+      )
+      .get(runId);
+    return isCountRow(row) ? row.count : 0;
+  }
+
+  private readActiveAttempt(
+    runId: string,
+  ):
+    | {
+        attemptId: string;
+        nodeId: string;
+        startedAt: number | null;
+        settingsScopeId: string | null;
+        settingsChangeNumber: number | null;
+        settingsHash: Buffer | null;
+      }
+    | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT attempt_id AS attemptId, node_id AS nodeId, started_at AS startedAt,
+                settings_scope_id AS settingsScopeId,
+                settings_change_number AS settingsChangeNumber,
+                settings_hash AS settingsHash
+         FROM node_attempts
+         WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
+      )
+      .get(runId);
+    return isActiveAttemptRow(row) ? row : undefined;
+  }
+
+  private readHumanDecisionReceipt(runId: string): HumanDecisionReceipt | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT d.request_hash AS requestHash, r.response_hash AS responseHash
+         FROM continuations c
+         JOIN human_decisions d ON d.decision_id = c.decision_id
+         JOIN human_decision_resolutions r ON r.decision_id = c.decision_id
+         WHERE c.continuation_run_id = ? AND r.outcome = 'accepted'`,
+      )
+      .get(runId);
+    if (!isDecisionReceiptRow(row)) return undefined;
+    const request = this.readJsonAs<Record<string, unknown>>(row.requestHash);
+    const decision = this.readJsonAs<Record<string, unknown>>(row.responseHash);
+    if (
+      typeof request.decisionId !== "string" ||
+      typeof request.requestDigest !== "string" ||
+      typeof request.nodeId !== "string" ||
+      typeof decision.provenance !== "string" ||
+      typeof decision.acceptedAt !== "string" ||
+      typeof decision.answerDigest !== "string" ||
+      typeof decision.subjectDigest !== "string" ||
+      typeof decision.presentationDigest !== "string" ||
+      typeof decision.revision !== "number" ||
+      decision.response === undefined
+    ) {
+      throw new Error(`Human decision receipt is invalid for run ${runId}`);
+    }
+    return {
+      schema: "pi-workflows.human-decision-receipt.v1",
+      decisionId: request.decisionId,
+      requestDigest: request.requestDigest,
+      nodeId: request.nodeId,
+      response: decision.response as HumanDecisionReceipt["response"],
+      provenance: decision.provenance === "timeout" ? "timeout" : "human",
+      acceptedAt: decision.acceptedAt,
+      answerDigest: decision.answerDigest,
+      subjectDigest: decision.subjectDigest,
+      presentationDigest: decision.presentationDigest,
+      revision: decision.revision,
+    };
   }
 
   private readUpdates(runId: string): Pick<WorkflowRunState, "updates"> {
@@ -2816,10 +3054,22 @@ function compactTracePayload(
   eventType: string,
   payload: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (
-    (eventType === "node_finished" || eventType === "include_exited") &&
-    Object.hasOwn(payload, "output")
-  ) {
+  if (eventType === "agent_prompt_sent" && Object.hasOwn(payload, "prompt")) {
+    const { prompt: _prompt, ...rest } = payload;
+    return { ...rest, promptStored: true };
+  }
+  if (eventType === "node_finished" || eventType === "node_failed") {
+    const {
+      output: _output,
+      action: _action,
+      assistantMessage: _assistantMessage,
+      conversation: _conversation,
+      error: _error,
+      ...rest
+    } = payload;
+    return { ...rest, ...(Object.hasOwn(payload, "output") ? { outputStored: true } : {}) };
+  }
+  if (eventType === "include_exited" && Object.hasOwn(payload, "output")) {
     const { output: _output, ...rest } = payload;
     return { ...rest, outputStored: true };
   }
@@ -2878,6 +3128,22 @@ function sourceForState(
   };
 }
 
+function sourceParts(source: WorkflowSource): {
+  type: "builtin" | "file";
+  ref: string;
+  revision: string;
+} {
+  return source.kind === "builtin"
+    ? { type: "builtin", ref: source.id, revision: source.revision }
+    : { type: "file", ref: source.path, revision: source.hash };
+}
+
+function workflowSourceFromRow(row: RunSourceRow): WorkflowSource {
+  return row.sourceType === "builtin"
+    ? { kind: "builtin", id: row.sourceRef, revision: row.sourceRevision }
+    : { kind: "file", path: row.sourceRef, hash: row.sourceRevision };
+}
+
 function segmentIdFor(runId: string, attemptId?: string): string {
   return `segment-${createHash("sha256")
     .update(`${runId}\0${attemptId ?? ""}`)
@@ -2917,12 +3183,43 @@ function outcomeForStatus(status: string): WorkflowStepRecord["outcome"] {
   }
 }
 
-function stepMetadata(step: WorkflowStepRecord): StoredStepMetadata {
+function attemptReceipt(step: WorkflowStepRecord): StoredAttemptReceipt {
   return {
     ...(step.action === undefined ? {} : { action: step.action }),
     ...(step.assistantMessage === undefined ? {} : { assistantMessage: step.assistantMessage }),
-    ...(step.conversation === undefined ? {} : { conversation: step.conversation }),
   };
+}
+
+function promptFromEntry(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const content = value.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  return content
+    .filter(isRecord)
+    .map((part) => (typeof part.text === "string" ? part.text : ""))
+    .filter((text) => text.length !== 0)
+    .join("\n");
+}
+
+function assistantOutputFromEntry(value: unknown, maxChars?: number): string {
+  if (!isRecord(value) || !isRecord(value.message)) {
+    throw new Error("Assistant response entry is invalid");
+  }
+  const message = value.message;
+  if (message.role !== "assistant" || !Array.isArray(message.content)) {
+    throw new Error("Assistant response entry does not contain an assistant message");
+  }
+  const text = message.content
+    .filter(isRecord)
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n");
+  if (text.trim().length === 0) throw new Error("Assistant response entry has no visible text");
+  if (maxChars !== undefined && text.length > maxChars) {
+    throw new Error(`Assistant response exceeds its stored limit of ${maxChars} characters`);
+  }
+  return text;
 }
 
 function resultForStep(step: WorkflowStepRecord): WorkflowNodeResult {
@@ -3232,11 +3529,59 @@ function isRunStepIdentityRow(value: unknown): value is {
   return isRecord(value);
 }
 
-function isAttemptOutputRow(value: unknown): value is { outputHash: Buffer | null } {
-  return isRecord(value) && (value.outputHash === null || Buffer.isBuffer(value.outputHash));
+function isStepRow(value: unknown): value is StepRow {
+  return isRecord(value);
 }
 
-function isStepRow(value: unknown): value is StepRow {
+function isRunSourceRow(value: unknown): value is RunSourceRow {
+  return isRecord(value);
+}
+
+function isSegmentIdentityRow(value: unknown): value is { segmentId: string; entryHash: Buffer } {
+  return isRecord(value) && typeof value.segmentId === "string" && Buffer.isBuffer(value.entryHash);
+}
+
+function isEntryIdentityRow(value: unknown): value is { entryId: string } {
+  return isRecord(value) && typeof value.entryId === "string";
+}
+
+function isAttemptValueRow(value: unknown): value is {
+  outputHash: Buffer | null;
+  receiptHash: Buffer | null;
+  responseEntryHash: Buffer | null;
+} {
+  return isRecord(value);
+}
+
+function isCountRow(value: unknown): value is { count: number } {
+  return isRecord(value) && typeof value.count === "number";
+}
+
+function isActiveAttemptRow(value: unknown): value is {
+  attemptId: string;
+  nodeId: string;
+  startedAt: number | null;
+  settingsScopeId: string | null;
+  settingsChangeNumber: number | null;
+  settingsHash: Buffer | null;
+} {
+  return isRecord(value);
+}
+
+function isDecisionReceiptRow(value: unknown): value is {
+  requestHash: Buffer;
+  responseHash: Buffer;
+} {
+  return (
+    isRecord(value) && Buffer.isBuffer(value.requestHash) && Buffer.isBuffer(value.responseHash)
+  );
+}
+
+function isContinuationIdentityRow(value: unknown): value is {
+  parentRunId: string;
+  continuationRunId: string;
+  createdAt: number;
+} {
   return isRecord(value);
 }
 

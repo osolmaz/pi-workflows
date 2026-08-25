@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import workflow from "../examples/workflows/echo.workflow.js";
+import { agent, assistantMessage, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import {
   SESSION_BINDING_SCHEMA,
@@ -71,6 +73,126 @@ describe("WorkflowRunStore SQLite", () => {
         .prepare("SELECT 1 FROM pragma_table_info('runs') WHERE name = 'output_hash'")
         .get(),
     ).toBeUndefined();
+    store.close();
+  });
+
+  it("shares one structured output blob across repeated results", async () => {
+    const databasePath = await makeStateDatabasePath("run-store-repeated-output");
+    const repeated = { reply: "x".repeat(1024 * 1024) };
+    const repeatedWorkflow = defineWorkflow({
+      name: "repeated-output",
+      startAt: "one",
+      nodes: {
+        one: agent({ prompt: () => "one" }),
+        two: agent({ prompt: () => "two" }),
+      },
+      edges: [{ from: "one", to: "two" }],
+    });
+    await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("one", { output: repeated }).respond("two", {
+        output: repeated,
+      }),
+    }).run(repeatedWorkflow, {});
+
+    const store = new WorkflowRunStore(databasePath, { readOnly: true });
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT count(DISTINCT hex(output_hash)) AS hashes, count(*) AS attempts
+           FROM node_attempts WHERE output_hash IS NOT NULL`,
+        )
+        .get(),
+    ).toEqual({ hashes: 1, attempts: 2 });
+    store.close();
+  });
+
+  it("reads an interactive prompt and visible output from their Pi entries", async () => {
+    const databasePath = await makeStateDatabasePath("run-store-pi-entries");
+    const store = new WorkflowRunStore(databasePath);
+    const largePrompt = `PROMPT-${"p".repeat(1024 * 1024)}`;
+    const visibleOutput = `RESPONSE-${"r".repeat(1024 * 1024)}`;
+    let bound = false;
+    const interactiveWorkflow = defineWorkflow({
+      name: "interactive-entry-storage",
+      startAt: "present",
+      nodes: {
+        present: agent({
+          prompt: () => largePrompt,
+          expectedOutput: assistantMessage(),
+        }),
+      },
+      edges: [],
+    });
+    const result = await new WorkflowEngine({
+      store,
+      executor: {
+        assistantMessageMode: "visible",
+        runAgentStep: async (request) => {
+          if (!bound) {
+            bound = true;
+            await store.writeSessionBinding(request.contract.runId, {
+              schema: SESSION_BINDING_SCHEMA,
+              runId: request.contract.runId,
+              piSessionId: "pi-entry-session",
+              cwd: "/tmp/project",
+              boundAt: new Date().toISOString(),
+            });
+          }
+          const promptId = "prompt-entry";
+          const responseId = "response-entry";
+          await store.appendSessionEntry(request.contract.runId, {
+            id: promptId,
+            type: "custom_message",
+            customType: "pi-workflows-agent-step",
+            content: request.prompt,
+            details: { contract: { attemptId: request.contract.attemptId } },
+          });
+          await store.appendSessionEntry(request.contract.runId, {
+            id: responseId,
+            type: "message",
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: [{ type: "text", text: visibleOutput }],
+            },
+          });
+          return {
+            output: visibleOutput,
+            assistantMessage: {
+              sha256: createHash("sha256").update(visibleOutput).digest("hex"),
+              entryId: responseId,
+            },
+            conversation: { firstEntryId: promptId, lastEntryId: responseId },
+          };
+        },
+      },
+    }).run(interactiveWorkflow, {});
+
+    const loaded = store.readRun(result.runId, { includeTrace: true });
+    expect(loaded?.state.steps[0]?.prompt).toContain(largePrompt);
+    expect(loaded?.state.steps[0]?.output).toBe(visibleOutput);
+    expect(
+      store.state.connection.prepare("SELECT output_hash AS outputHash FROM node_attempts").get(),
+    ).toEqual({ outputHash: null });
+    expect(
+      store.state.connection.prepare("SELECT count(*) AS count FROM attempt_entries").get(),
+    ).toEqual({ count: 4 });
+    const eventText = JSON.stringify(loaded?.traceEvents ?? []);
+    expect(eventText).not.toContain("PROMPT-pppp");
+    expect(eventText).not.toContain("RESPONSE-rrrr");
+    for (const [table, removed] of [
+      ["node_attempts", "prompt_hash"],
+      ["node_attempts", "step_metadata_hash"],
+      ["runs", "current_node"],
+      ["runs", "waiting_on"],
+    ]) {
+      expect(
+        store.state.connection
+          .prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`)
+          .get(removed as string),
+      ).toBeUndefined();
+    }
     store.close();
   });
 

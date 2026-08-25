@@ -88,6 +88,26 @@ describe("human decision engine continuation", () => {
       response: { choice: "continue" },
     });
     expect(continued.state.humanDecision).not.toHaveProperty("source");
+    const loaded = store.readRun("human-continuation");
+    expect(loaded?.state.humanDecision).toEqual(continued.state.humanDecision);
+    expect(loaded?.state.carriedStepCount).toBe(1);
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT count(*) AS count FROM node_attempts
+           WHERE run_id = 'human-continuation' AND node_id = 'approve'`,
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT count(*) AS count FROM run_steps s
+           JOIN node_attempts a ON a.attempt_id = s.attempt_id
+           WHERE s.run_id = 'human-continuation' AND a.run_id = 'human-parent'`,
+        )
+        .get(),
+    ).toEqual({ count: 1 });
   });
 
   it("rejects a forged accepted object that is not in the durable decision store", async () => {

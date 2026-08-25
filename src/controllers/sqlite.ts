@@ -155,9 +155,8 @@ type RunRow = {
   workflowName: string;
   workflowRef: string;
   runStatus: string;
-  workflowSourceHash: Buffer;
-  workflowSourcesHash: Buffer | null;
   definitionDigest: Buffer;
+  definitionHash: Buffer;
   inputHash: Buffer;
   launchOptionsHash: Buffer;
   status: WorkflowRunLaunchStatus;
@@ -175,6 +174,12 @@ type RunRow = {
   leaseGeneration: number;
   ownerId: string | null;
   claimExpiresAt: number | null;
+};
+type RunSourceIdentityRow = {
+  mountPath: string;
+  sourceType: "builtin" | "file";
+  sourceRef: string;
+  sourceRevision: string;
 };
 
 type EffectRow = {
@@ -1049,9 +1054,6 @@ export class SqliteControllerStore implements ControllerStore {
       const resourceId = resourceIdFor("run", options.runId);
       const definitionHash = this.state.putJson(options.definitionSnapshot, now);
       const queuedSource = queuedWorkflowSource(options.workflowSource);
-      const sourceHash = this.state.putJson(queuedSource.root, now);
-      const mountedSourcesHash =
-        queuedSource.mounted.length === 0 ? null : this.state.putJson(queuedSource.mounted, now);
       const inputHash = this.state.putJson(options.input ?? null, now);
       const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
       this.state.connection
@@ -1071,15 +1073,13 @@ export class SqliteControllerStore implements ControllerStore {
       this.state.connection
         .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
         .run(resourceId);
-      const source = sourceParts(options.workflowSourceRef, options.definitionDigest);
       this.state.connection
         .prepare(
           `INSERT INTO runs(
              run_id, resource_id, project_id, parent_run_id, definition_digest,
-             workflow_ref, workflow_source_hash, launch_options_hash,
-             source_type, source_ref, source_revision, status, paused,
-             input_hash, workflow_sources_hash, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`,
+             workflow_ref, launch_options_hash, status, paused,
+             input_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
         )
         .run(
           options.runId,
@@ -1088,16 +1088,12 @@ export class SqliteControllerStore implements ControllerStore {
           options.parentRunId ?? null,
           definitionDigest,
           options.workflowSourceRef,
-          sourceHash,
           launchHash,
-          source.type,
-          source.ref,
-          source.revision,
           inputHash,
-          mountedSourcesHash,
           now,
           now,
         );
+      insertQueuedRunSources(this.state, options.runId, queuedSource);
       this.state.connection
         .prepare(
           `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
@@ -2238,11 +2234,7 @@ export class SqliteControllerStore implements ControllerStore {
       runId: row.runId,
       workflowName: row.workflowName,
       workflowSourceRef: row.workflowRef,
-      workflowSource: {
-        root: this.state.readJson(row.workflowSourceHash),
-        mounted:
-          row.workflowSourcesHash === null ? [] : this.state.readJson(row.workflowSourcesHash),
-      },
+      workflowSource: readQueuedRunSources(this.state, row),
       initialized: row.runStatus !== "queued",
       definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
       input: this.state.readJson(row.inputHash),
@@ -2469,8 +2461,6 @@ export class SqliteControllerStore implements ControllerStore {
         .prepare(
           `UPDATE runs
            SET status = ?, paused = 0, status_detail = NULL, error_hash = ?,
-               current_node = NULL, current_attempt_id = NULL,
-               current_node_started_at = NULL, waiting_on = NULL,
                updated_at = ?, finished_at = ?
            WHERE run_id = ?`,
         )
@@ -2776,9 +2766,8 @@ function workflowSelect(clause: string): string {
 function workflowRunSelect(clause: string): string {
   return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
     d.workflow_name AS workflowName, r.workflow_ref AS workflowRef, r.status AS runStatus,
-    r.workflow_source_hash AS workflowSourceHash,
-    r.workflow_sources_hash AS workflowSourcesHash,
-    r.definition_digest AS definitionDigest, r.input_hash AS inputHash,
+    r.definition_digest AS definitionDigest, d.definition_hash AS definitionHash,
+    r.input_hash AS inputHash,
     r.launch_options_hash AS launchOptionsHash,
     q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
@@ -2886,6 +2875,9 @@ function isLeaseRow(value: unknown): value is LeaseRow {
 function isRunRow(value: unknown): value is RunRow {
   return isRecord(value);
 }
+function isRunSourceIdentityRow(value: unknown): value is RunSourceIdentityRow {
+  return isRecord(value);
+}
 function isEffectRow(value: unknown): value is EffectRow {
   return isRecord(value);
 }
@@ -2958,24 +2950,126 @@ function digestBuffer(value: string): Buffer {
   if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
   return Buffer.from(hex, "hex");
 }
-function queuedWorkflowSource(value: unknown): { root: unknown; mounted: unknown[] } {
-  if (isRecord(value) && (value.kind === "builtin" || value.kind === "file")) {
+type QueuedSource = {
+  root:
+    | { kind: "builtin"; id: string; revision: string }
+    | { kind: "file"; path: string; hash: string };
+  mounted: Array<{
+    mountPath: string[];
+    workflowName: string;
+    source:
+      | { kind: "builtin"; id: string; revision: string }
+      | { kind: "file"; path: string; hash: string };
+  }>;
+};
+
+function queuedWorkflowSource(value: unknown): QueuedSource {
+  if (isWorkflowSource(value)) {
     return { root: value, mounted: [] };
   }
-  if (isRecord(value) && isRecord(value.root) && Array.isArray(value.mounted)) {
+  if (
+    isRecord(value) &&
+    isWorkflowSource(value.root) &&
+    Array.isArray(value.mounted) &&
+    value.mounted.every(isMountedWorkflowSource)
+  ) {
     return { root: value.root, mounted: value.mounted };
   }
   throw new Error("Stored workflow source identity is invalid");
 }
 
-function sourceParts(
-  ref: string,
-  revision: string,
-): { type: "builtin" | "file"; ref: string; revision: string } {
-  return ref.startsWith("builtin:")
-    ? { type: "builtin", ref: ref.slice(8), revision }
-    : { type: "file", ref, revision };
+function isWorkflowSource(value: unknown): value is QueuedSource["root"] {
+  return (
+    isRecord(value) &&
+    ((value.kind === "builtin" &&
+      typeof value.id === "string" &&
+      typeof value.revision === "string") ||
+      (value.kind === "file" && typeof value.path === "string" && typeof value.hash === "string"))
+  );
 }
+
+function isMountedWorkflowSource(value: unknown): value is QueuedSource["mounted"][number] {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.mountPath) &&
+    value.mountPath.every((part) => typeof part === "string") &&
+    typeof value.workflowName === "string" &&
+    isWorkflowSource(value.source)
+  );
+}
+
+function insertQueuedRunSources(state: StateDatabase, runId: string, value: QueuedSource): void {
+  const insert = state.connection.prepare(
+    `INSERT INTO run_sources(run_id, mount_path, source_type, source_ref, source_revision)
+     VALUES (?, ?, ?, ?, ?)`,
+  );
+  const root = queuedSourceParts(value.root);
+  insert.run(runId, "", root.type, root.ref, root.revision);
+  for (const mounted of value.mounted) {
+    const source = queuedSourceParts(mounted.source);
+    insert.run(runId, mounted.mountPath.join("/"), source.type, source.ref, source.revision);
+  }
+}
+
+function queuedSourceParts(source: QueuedSource["root"]): {
+  type: "builtin" | "file";
+  ref: string;
+  revision: string;
+} {
+  return source.kind === "builtin"
+    ? { type: "builtin", ref: source.id, revision: source.revision }
+    : { type: "file", ref: source.path, revision: source.hash };
+}
+
+function readQueuedRunSources(state: StateDatabase, run: RunRow): QueuedSource {
+  const rows = state.connection
+    .prepare(
+      `SELECT mount_path AS mountPath, source_type AS sourceType,
+              source_ref AS sourceRef, source_revision AS sourceRevision
+       FROM run_sources WHERE run_id = ? ORDER BY mount_path`,
+    )
+    .all(run.runId)
+    .filter(isRunSourceIdentityRow);
+  const rootRow = rows.find((row) => row.mountPath === "");
+  if (rootRow === undefined) throw new Error(`Workflow run source is missing: ${run.runId}`);
+  const snapshot = state.readJson(run.definitionHash);
+  const mounts =
+    isRecord(snapshot) &&
+    isRecord(snapshot.composition) &&
+    Array.isArray(snapshot.composition.mounts)
+      ? snapshot.composition.mounts
+      : [];
+  const names = new Map(
+    mounts.flatMap((mount) => {
+      if (
+        !isRecord(mount) ||
+        !Array.isArray(mount.mountPath) ||
+        !mount.mountPath.every((part) => typeof part === "string") ||
+        typeof mount.workflowName !== "string"
+      ) {
+        return [];
+      }
+      return [[mount.mountPath.join("/"), mount.workflowName] as const];
+    }),
+  );
+  return {
+    root: rowToSource(rootRow),
+    mounted: rows
+      .filter((row) => row.mountPath !== "")
+      .map((row) => ({
+        mountPath: row.mountPath.split("/"),
+        workflowName: names.get(row.mountPath) ?? row.mountPath,
+        source: rowToSource(row),
+      })),
+  };
+}
+
+function rowToSource(row: RunSourceIdentityRow): QueuedSource["root"] {
+  return row.sourceType === "builtin"
+    ? { kind: "builtin", id: row.sourceRef, revision: row.sourceRevision }
+    : { kind: "file", path: row.sourceRef, hash: row.sourceRevision };
+}
+
 function effectStatus(value: EffectRecord["state"]): string {
   return value === "indeterminate" ? "ambiguous" : value;
 }

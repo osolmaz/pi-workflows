@@ -106,7 +106,7 @@ The two message types must not share delivery code that can accidentally change 
 
 Interactive step deliveries use `sendMessage` instead of `sendUserMessage`. Existing session entries remain readable and are not rewritten.
 
-The custom prompt and visible assistant response are normal documented Pi session messages. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores the full prompt, exact assistant text, conversation range, and additive digest receipt in existing content-addressed records, so this behavior adds no durable format.
+The custom prompt and visible assistant response are normal documented Pi session messages. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores each settled Pi entry once. Small relational links connect the workflow attempt to its prompt, response, first, and last entries. The attempt keeps only the assistant digest receipt. It does not copy the prompt or visible response into another blob.
 
 If the renderer is unavailable, Pi still retains the custom message content. pi-workflows does not add a fallback path that sends a duplicate user message.
 

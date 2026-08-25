@@ -89,14 +89,15 @@ export class StateDatabase {
     });
 
     try {
-      this.configure(existed);
-      if (this.mode === "read-write") {
-        this.prepareSchema(!existed);
+      this.configureConnection();
+      if (this.mode === "read-write" && !existed) {
+        this.prepareSchema(true);
       }
       this.verifySchema();
       if (this.mode === "read-only") {
         this.connection.pragma("query_only = ON");
       } else {
+        this.configureWriter();
         fs.chmodSync(this.filePath, 0o600);
       }
     } catch (error) {
@@ -212,17 +213,16 @@ export class StateDatabase {
     }
   }
 
-  private configure(existed: boolean): void {
+  private configureConnection(): void {
     this.connection.pragma("foreign_keys = ON");
     this.connection.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
-    if (this.mode === "read-write") {
-      this.connection.pragma("journal_mode = WAL");
-      this.connection.pragma("synchronous = FULL");
-      this.connection.pragma("wal_autocheckpoint = 1000");
-      this.connection.pragma(`journal_size_limit = ${JOURNAL_SIZE_LIMIT}`);
-    } else if (existed) {
-      this.connection.pragma("synchronous = FULL");
-    }
+    this.connection.pragma("synchronous = FULL");
+  }
+
+  private configureWriter(): void {
+    this.connection.pragma("journal_mode = WAL");
+    this.connection.pragma("wal_autocheckpoint = 1000");
+    this.connection.pragma(`journal_size_limit = ${JOURNAL_SIZE_LIMIT}`);
   }
 
   private prepareSchema(allowInitialize: boolean): void {

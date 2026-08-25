@@ -37,13 +37,13 @@ export type NormalizedAssistantEvent =
   | { type: "start" }
   | { type: "text_start"; contentIndex: number }
   | { type: "text_delta"; contentIndex: number; delta: string }
-  | { type: "text_end"; contentIndex: number; content: string }
+  | { type: "text_end"; contentIndex: number }
   | { type: "thinking_start"; contentIndex: number }
   | { type: "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "thinking_end"; contentIndex: number; content: string }
+  | { type: "thinking_end"; contentIndex: number }
   | { type: "toolcall_start"; contentIndex: number }
   | { type: "toolcall_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_end"; contentIndex: number; toolCall: unknown }
+  | { type: "toolcall_end"; contentIndex: number; toolCallId?: string; toolName?: string }
   | { type: "done"; reason: "stop" | "length" | "toolUse" | "deferred" }
   | { type: "error"; reason: "aborted" | "error" };
 
@@ -64,13 +64,19 @@ export function normalizeAssistantEvent(
       return { type: event.type, contentIndex: event.contentIndex, delta: event.delta };
     case "text_end":
     case "thinking_end":
-      return { type: event.type, contentIndex: event.contentIndex, content: event.content };
-    case "toolcall_end":
+      return { type: event.type, contentIndex: event.contentIndex };
+    case "toolcall_end": {
+      const toolCall =
+        typeof event.toolCall === "object" && event.toolCall !== null
+          ? (event.toolCall as { id?: unknown; name?: unknown })
+          : {};
       return {
         type: event.type,
         contentIndex: event.contentIndex,
-        toolCall: event.toolCall,
+        ...(typeof toolCall.id === "string" ? { toolCallId: toolCall.id } : {}),
+        ...(typeof toolCall.name === "string" ? { toolName: toolCall.name } : {}),
       };
+    }
     case "done":
       return { type: event.type, reason: event.reason };
     case "error":
@@ -91,19 +97,15 @@ export function messageRole(message: unknown): string {
 }
 
 export function toolCallIdFromAssistantEvent(event: NormalizedAssistantEvent): string | null {
-  if (event.type !== "toolcall_end" || typeof event.toolCall !== "object" || !event.toolCall) {
-    return null;
-  }
-  const id = (event.toolCall as { id?: unknown }).id;
-  return typeof id === "string" && id.length > 0 ? id : null;
+  return event.type === "toolcall_end" && event.toolCallId !== undefined ? event.toolCallId : null;
 }
 
 export function toolStartedPayload(event: ToolExecutionStartEventLike): Record<string, unknown> {
-  return { toolName: event.toolName, args: event.args };
+  return { toolName: event.toolName };
 }
 
 export function toolFinishedPayload(event: ToolExecutionEndEventLike): Record<string, unknown> {
-  return { toolName: event.toolName, isError: event.isError, result: event.result };
+  return { toolName: event.toolName, isError: event.isError };
 }
 
 export function turnFinishedPayload(

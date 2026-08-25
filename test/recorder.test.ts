@@ -369,7 +369,7 @@ describe("SessionRecorder", () => {
     });
   });
 
-  it("stores large tool payloads in the content-addressed blob table", async () => {
+  it("does not copy large tool payloads into session events", async () => {
     const { store, runId } = await makeRun();
     const recorder = new SessionRecorder(store, runId);
     const ctx = makeCtx([]);
@@ -406,17 +406,13 @@ describe("SessionRecorder", () => {
         event.type === "assistant_event" &&
         (event.payload as Record<string, unknown>).type === "toolcall_end",
     );
-    expect(
-      (
-        (toolCall?.payload as { toolCall?: { arguments?: { text?: string } } })?.toolCall?.arguments
-          ?.text ?? ""
-      ).length,
-    ).toBe(900_000);
-    expect(
-      store.state.connection.prepare("SELECT count(*) AS count FROM blobs").get(),
-    ).toMatchObject({
-      count: expect.any(Number),
+    expect(toolCall?.payload).toEqual({
+      type: "toolcall_end",
+      contentIndex: 0,
+      toolCallId: "large-call",
+      toolName: "write",
     });
+    expect(JSON.stringify(events)).not.toContain("x".repeat(1_000));
     const capture = readCapture(runId) as Record<string, unknown>;
     expect(capture).toMatchObject({ status: "complete", eventCount: 4 });
   });

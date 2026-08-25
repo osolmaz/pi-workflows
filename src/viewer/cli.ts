@@ -6,6 +6,7 @@ import { SqliteControllerStore } from "../controllers/sqlite.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
 import { sanitizeText } from "../render/ansi.js";
 import { StateDatabase } from "../state/database.js";
+import { pruneState } from "../state/prune.js";
 import { WorkflowRunStore, workflowStateDatabasePath } from "../workflows/store.js";
 import {
   formatDuration,
@@ -25,6 +26,8 @@ Usage:
   pi-workflows controller <controller> <key>
   pi-workflows state status|verify
   pi-workflows state backup <destination>
+  pi-workflows state prune --before <timestamp> --dry-run
+  pi-workflows state prune --before <timestamp> --backup <absolute-path> --apply
   pi-workflows host [--project <dir>] [-- <extra pi args>]
   pi-workflows herdr sync [--json]
   pi-workflows herdr setup [--json]
@@ -38,8 +41,10 @@ export type CliArgs = {
   controllerName?: string;
   resourceKey?: string;
   herdrAction?: string;
-  stateAction?: "status" | "verify" | "backup";
+  stateAction?: "status" | "verify" | "backup" | "prune";
   backupDestination?: string;
+  pruneBefore?: string;
+  pruneApply?: boolean;
   once: boolean;
   json: boolean;
   project?: string | undefined;
@@ -52,12 +57,20 @@ export function parseCliArgs(argv: string[]): CliArgs {
   let once = false;
   let json = false;
   let project: string | undefined;
+  let pruneBefore: string | undefined;
+  let backupDestination: string | undefined;
+  let pruneApply = false;
+  let pruneDryRun = false;
   const positionals: string[] = [];
   const piArgs: string[] = [];
 
   while (args.length > 0) {
     const arg = args.shift() as string;
     if (arg === "--project") project = requiredValue(args, "--project");
+    else if (arg === "--before") pruneBefore = requiredValue(args, "--before");
+    else if (arg === "--backup") backupDestination = requiredValue(args, "--backup");
+    else if (arg === "--apply") pruneApply = true;
+    else if (arg === "--dry-run") pruneDryRun = true;
     else if (arg === "--once") once = true;
     else if (arg === "--json") json = true;
     else if (arg === "--help" || arg === "-h") return { command: "help", once, json };
@@ -80,8 +93,30 @@ export function parseCliArgs(argv: string[]): CliArgs {
   }
   if (command === "state") {
     const action = positionals[0];
-    if (action !== "status" && action !== "verify" && action !== "backup") {
-      throw new Error("state requires status, verify, or backup");
+    if (action !== "status" && action !== "verify" && action !== "backup" && action !== "prune") {
+      throw new Error("state requires status, verify, backup, or prune");
+    }
+    if (action === "prune") {
+      if (positionals.length !== 1) throw new Error("state prune accepts no positional arguments");
+      if (pruneBefore === undefined) throw new Error("state prune requires --before <timestamp>");
+      if (pruneApply === pruneDryRun) {
+        throw new Error("state prune requires exactly one of --dry-run or --apply");
+      }
+      if (pruneApply && backupDestination === undefined) {
+        throw new Error("state prune --apply requires --backup <absolute-path>");
+      }
+      if (pruneDryRun && backupDestination !== undefined) {
+        throw new Error("state prune --dry-run does not accept --backup");
+      }
+      return {
+        command,
+        stateAction: action,
+        pruneBefore,
+        pruneApply,
+        ...(backupDestination === undefined ? {} : { backupDestination }),
+        once,
+        json,
+      };
     }
     if (action === "backup") {
       if (positionals.length !== 2) throw new Error("state backup requires <destination>");
@@ -251,6 +286,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 async function runStateCommand(databasePath: string, args: CliArgs): Promise<void> {
+  if (args.stateAction === "prune") {
+    const report = await pruneState(databasePath, {
+      before: args.pruneBefore as string,
+      apply: args.pruneApply === true,
+      ...(args.backupDestination === undefined
+        ? {}
+        : { backupPath: path.resolve(args.backupDestination) }),
+    });
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return;
+  }
   if (args.stateAction === "backup") {
     const state = new StateDatabase({ filePath: databasePath });
     try {
@@ -277,9 +323,10 @@ async function runStateCommand(databasePath: string, args: CliArgs): Promise<voi
            (SELECT count(*) FROM workflow_settings) AS settingsScopes,
            (SELECT count(*) FROM workflow_follow_ups WHERE status IN ('queued', 'pending_presentation', 'ready')) AS pendingFollowUps,
            (SELECT count(*) FROM effects WHERE status IN ('pending', 'applying', 'ambiguous')) AS unsettledEffects,
-           (SELECT count(*) FROM leases WHERE owner_id IS NOT NULL) AS activeLeases`,
+           (SELECT count(*) FROM leases
+            WHERE owner_id IS NOT NULL AND expires_at > ?) AS activeLeases`,
       )
-      .get();
+      .get(Date.now());
     process.stdout.write(
       `Database: ${databasePath}\nSize: ${fs.statSync(databasePath).size} bytes\n${JSON.stringify(counts)}\n`,
     );

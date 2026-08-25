@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const STATE_APPLICATION_ID = 0x50495746;
 export const STATE_SCHEMA_NAME = "pi-workflows-state";
 export const STATE_SCHEMA_VERSION = 1;
-export const STATE_APP_VERSION = "0.12.1";
+export const STATE_APP_VERSION = "0.13.3";
 
 export const STATE_SCHEMA_SQL = String.raw`
 CREATE TABLE schema_meta (
@@ -95,11 +95,7 @@ CREATE TABLE runs (
   parent_run_id TEXT REFERENCES runs(run_id),
   definition_digest BLOB NOT NULL REFERENCES workflow_definitions(definition_digest),
   workflow_ref TEXT NOT NULL,
-  workflow_source_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   launch_options_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  source_type TEXT NOT NULL CHECK (source_type IN ('builtin', 'file')),
-  source_ref TEXT NOT NULL,
-  source_revision TEXT NOT NULL,
   title TEXT,
   status TEXT NOT NULL CHECK (status IN (
     'queued', 'running', 'waiting', 'completed', 'failed', 'timed_out', 'cancelled'
@@ -107,15 +103,8 @@ CREATE TABLE runs (
   paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
   status_detail TEXT,
   input_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  workflow_sources_hash BLOB REFERENCES blobs(blob_hash),
-  human_decision_hash BLOB REFERENCES blobs(blob_hash),
   final_output_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
-  carried_step_count INTEGER NOT NULL DEFAULT 0 CHECK (carried_step_count >= 0),
-  current_node TEXT,
-  current_attempt_id TEXT,
-  current_node_started_at INTEGER,
-  waiting_on TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
@@ -125,6 +114,15 @@ CREATE TABLE runs (
 CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
+
+CREATE TABLE run_sources (
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  mount_path TEXT NOT NULL,
+  source_type TEXT NOT NULL CHECK (source_type IN ('builtin', 'file')),
+  source_ref TEXT NOT NULL,
+  source_revision TEXT NOT NULL,
+  PRIMARY KEY (run_id, mount_path)
+) STRICT;
 
 CREATE TABLE run_bindings (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -251,11 +249,8 @@ CREATE TABLE node_attempts (
   status TEXT NOT NULL CHECK (status IN (
     'pending', 'running', 'waiting', 'completed', 'failed', 'timed_out', 'cancelled'
   )),
-  input_hash BLOB REFERENCES blobs(blob_hash),
-  contract_hash BLOB REFERENCES blobs(blob_hash),
-  prompt_hash BLOB REFERENCES blobs(blob_hash),
   output_hash BLOB REFERENCES blobs(blob_hash),
-  step_metadata_hash BLOB REFERENCES blobs(blob_hash),
+  receipt_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
   settings_scope_id TEXT REFERENCES workflow_settings(scope_id),
   settings_change_number INTEGER CHECK (settings_change_number IS NULL OR settings_change_number >= 0),
@@ -324,6 +319,18 @@ CREATE TABLE session_entries (
   PRIMARY KEY (segment_id, entry_seq),
   UNIQUE (segment_id, entry_id)
 ) STRICT;
+
+CREATE TABLE attempt_entries (
+  attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('prompt', 'response', 'first', 'last')),
+  segment_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  PRIMARY KEY (attempt_id, role),
+  FOREIGN KEY (segment_id, entry_id)
+    REFERENCES session_entries(segment_id, entry_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX attempt_entries_entry_idx ON attempt_entries(segment_id, entry_id);
 
 CREATE TABLE session_events (
   segment_id TEXT NOT NULL REFERENCES session_segments(segment_id) ON DELETE CASCADE,
@@ -396,7 +403,6 @@ CREATE TABLE continuations (
   decision_id TEXT PRIMARY KEY REFERENCES human_decisions(decision_id) ON DELETE CASCADE,
   parent_run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
   continuation_run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
-  response_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL
 ) STRICT;
 

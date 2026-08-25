@@ -3096,6 +3096,7 @@ mod tests {
             settings_scope_id: None,
             settings_change_number: None,
             settings_hash: None,
+            assistant_message: None,
         }];
         assert_eq!(completed_step_at(&steps, 1_767_225_603_000), -1);
         assert_eq!(completed_step_at(&steps, 1_767_225_605_000), 0);
