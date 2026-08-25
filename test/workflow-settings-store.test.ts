@@ -414,10 +414,20 @@ describe("durable workflow settings", () => {
         prompt: "Different task",
       }),
     ).toThrow(/reused with different content/);
-    expect(store.readFollowUpQueue(runId)?.followUps.map((item) => item.state)).toEqual([
-      "queued",
-      "queued",
-    ]);
+    expect(store.readFollowUpQueue(runId)).toMatchObject({
+      originSessionId: "session-1",
+      followUps: [{ state: "queued" }, { state: "queued" }],
+    });
+    expect(() =>
+      store.queueFollowUp({
+        runId,
+        requestId: "wrong-session",
+        targetSessionId: "session-2",
+        actor: { type: "session", id: "session-2" },
+        source: "workflow-tool",
+        prompt: "Wrong session",
+      }),
+    ).toThrow(/origin Pi session/);
 
     executor.release?.();
     await running;

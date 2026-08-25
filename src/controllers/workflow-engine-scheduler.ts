@@ -1,6 +1,5 @@
-import { isDeepStrictEqual } from "node:util";
 import { compositionMetadata } from "../workflows/composition.js";
-import { WorkflowEngine } from "../workflows/engine.js";
+import { WorkflowEngine, workflowIdentityMismatch } from "../workflows/engine.js";
 import type { WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowDefinition,
@@ -115,10 +114,7 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
     if (bundle === null) throw new Error(`Workflow run not found: ${request.runId}`);
     const resolved = await this.options.resolveWorkflow(bundle.state.workflowName);
     signal.throwIfAborted();
-    if (
-      bundle.state.workflowSource !== undefined &&
-      !isDeepStrictEqual(bundle.state.workflowSource, resolved.workflowSource)
-    ) {
+    if (workflowIdentityMismatch(bundle.state, resolved.workflow, resolved.workflowSource)) {
       throw new Error(`Workflow source changed since run ${request.runId} started`);
     }
     const scopes = this.options.store.listSettingsScopes(request.runId);

@@ -759,6 +759,21 @@ export class WorkflowRunStore {
           "follow-up.queued",
           ({ database, now }) => {
             this.requireRunAcceptsSettings(request.runId, true);
+            const currentQueue = this.requireFollowUpQueueRow(request.runId);
+            if (
+              currentQueue.originSessionId !== null &&
+              currentQueue.originSessionId !== request.targetSessionId
+            ) {
+              throw new Error("Workflow follow-ups must target the run's origin Pi session");
+            }
+            if (currentQueue.originSessionId === null) {
+              database.connection
+                .prepare(
+                  `UPDATE workflow_follow_up_queues
+                   SET origin_session_id = ?, updated_at = ? WHERE run_id = ?`,
+                )
+                .run(request.targetSessionId, now, request.runId);
+            }
             const order = this.nextFollowUpOrder(request.runId);
             const followUpId = followUpIdFor(request.runId, request.requestId);
             const resourceId = this.mutations.ensureResource("follow_up", followUpId, now);

@@ -1815,7 +1815,7 @@ function workflowSourceMismatch(
   );
 }
 
-function workflowIdentityMismatch(
+export function workflowIdentityMismatch(
   state: WorkflowRunState,
   workflow: WorkflowDefinition,
   source: WorkflowSource | undefined,

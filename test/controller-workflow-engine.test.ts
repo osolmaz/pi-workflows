@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkflowEngineScheduler } from "../src/controllers/workflow-engine-scheduler.js";
-import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
+import {
+  checkpoint,
+  compute,
+  defineWorkflow,
+  includeWorkflow,
+} from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { allowSettingsPath, workflowSettings } from "../src/workflows/settings.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
@@ -32,6 +37,34 @@ const controlledWorkflow = defineWorkflow({
   nodes: { wait: checkpoint({ summary: "wait" }) },
   edges: [],
 });
+
+function composedControlledWorkflow(permission: "controller" | "human") {
+  const child = defineWorkflow({
+    name: "composed-controlled-child",
+    settings: workflowSettings({
+      initial: { mode: "old" },
+      parse: (value) => value as { mode: string },
+      paths: [allowSettingsPath("/mode", { replace: [permission] })],
+    }),
+    startAt: "wait",
+    nodes: { wait: checkpoint({ summary: "wait" }) },
+    exits: { ready: { from: "wait" } },
+    edges: [],
+  });
+  return defineWorkflow({
+    name: "composed-controlled",
+    includes: { child: includeWorkflow(child) },
+    startAt: "start",
+    nodes: {
+      start: compute({ run: () => ({}) }),
+      finish: compute({ run: ({ outputs }) => outputs.child }),
+    },
+    edges: [
+      { from: "start", to: "child" },
+      { from: "child.ready", to: "finish" },
+    ],
+  });
+}
 
 const failingWorkflow = defineWorkflow({
   name: "failing-child",
@@ -267,6 +300,46 @@ describe("WorkflowEngineScheduler SQLite", () => {
         new AbortController().signal,
       ),
     ).toMatchObject({ state: "removed", adopted: false });
+    store.close();
+  });
+
+  it("rejects a settings change when an included definition changed", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("child-composed-source"));
+    const original = composedControlledWorkflow("controller");
+    const workflows = new Map<string, WorkflowDefinition>([
+      ["composed", original],
+      ["composed-controlled", original],
+    ]);
+    const subject = scheduler(store, workflows);
+    await subject.ensure(
+      {
+        requestId: "composed-request",
+        attempt: 1,
+        workflow: "composed",
+        input: {},
+        runId: "composed-run",
+      },
+      new AbortController().signal,
+      () => undefined,
+    );
+    await subject.waitForIdle();
+    const scope = store.listSettingsScopes("composed-run")[0];
+    if (scope === undefined) throw new Error("Composed settings scope was not created");
+    workflows.set("composed-controlled", composedControlledWorkflow("human"));
+
+    await expect(
+      subject.changeSettings(
+        {
+          requestKey: "changed-child",
+          actorRequestKey: "controller:resource-1:changed-child",
+          controllerResourceUid: "resource-1",
+          runId: "composed-run",
+          scopeId: scope.scopeId,
+          patch: [{ op: "replace", path: "/mode", value: "new" }],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/source changed/);
     store.close();
   });
 

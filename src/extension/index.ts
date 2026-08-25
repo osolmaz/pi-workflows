@@ -12,7 +12,7 @@ import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
 import { canonicalJson } from "../state/json.js";
 import { compositionMetadata } from "../workflows/composition.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
-import { WorkflowEngine } from "../workflows/engine.js";
+import { WorkflowEngine, workflowIdentityMismatch } from "../workflows/engine.js";
 import {
   BuiltinWorkflowRevisionChangedError,
   ClaimLostError,
@@ -2207,7 +2207,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (source === undefined) throw new Error(`Workflow run ${runId} has no saved source`);
     const ref = source.kind === "builtin" ? `builtin:${source.id}` : source.path;
     const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
-    if (!isDeepStrictEqual(resolved.source, source)) {
+    if (workflowIdentityMismatch(loaded.state, resolved.definition, resolved.source)) {
       throw new Error(`Workflow source changed since run ${runId} started`);
     }
     return { runId, workflow: resolved.definition, store: new WorkflowRunStore() };
