@@ -131,6 +131,12 @@ pub struct RunState {
     pub workflow_source: Option<WorkflowSource>,
     #[serde(rename = "parentRunId", skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
+    #[serde(rename = "carriedStepCount", skip_serializing_if = "Option::is_none")]
+    pub carried_step_count: Option<u64>,
+    #[serde(rename = "workflowSources", skip_serializing_if = "Option::is_none")]
+    pub workflow_sources: Option<Vec<Value>>,
+    #[serde(rename = "definitionDigest", skip_serializing_if = "Option::is_none")]
+    pub definition_digest: Option<String>,
     #[serde(rename = "startedAt")]
     pub started_at: String,
     #[serde(rename = "finishedAt", skip_serializing_if = "Option::is_none")]
@@ -142,6 +148,8 @@ pub struct RunState {
     pub outputs: BTreeMap<String, Value>,
     pub results: BTreeMap<String, NodeResult>,
     pub steps: Vec<StepRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<Vec<Value>>,
     #[serde(rename = "currentNode", skip_serializing_if = "Option::is_none")]
     pub current_node: Option<String>,
     #[serde(rename = "currentAttemptId", skip_serializing_if = "Option::is_none")]
@@ -222,6 +230,8 @@ pub struct StepRecord {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<ActionReceipt>,
+    #[serde(rename = "assistantMessage", skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<ConversationRange>,
     #[serde(rename = "settingsScopeId", skip_serializing_if = "Option::is_none")]

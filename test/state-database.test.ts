@@ -65,9 +65,15 @@ describe("StateDatabase", () => {
 
     const raw = new Database(filePath);
     raw.exec("CREATE TABLE unexpected(value TEXT) STRICT");
+    raw.pragma("journal_mode = DELETE");
     raw.close();
 
+    const before = fs.readFileSync(filePath);
+
     expect(() => open(filePath)).toThrow(/state is incompatible/i);
+    expect(fs.readFileSync(filePath)).toEqual(before);
+    expect(fs.existsSync(`${filePath}-wal`)).toBe(false);
+    expect(fs.existsSync(`${filePath}-shm`)).toBe(false);
   });
 
   it("uses query-only connections for readers", async () => {

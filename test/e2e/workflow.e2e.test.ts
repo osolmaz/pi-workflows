@@ -1550,9 +1550,13 @@ describe.sequential("pi-workflows end to end", () => {
 
     const sessionEntries = loaded.sessionEntries;
     const entryIds = new Set(sessionEntries.map((record) => record.entry.id));
-    const agentPrompts = traceEvents
-      .filter((event) => event.type === "agent_prompt_sent")
-      .map((event) => event.payload.prompt)
+    expect(
+      traceEvents
+        .filter((event) => event.type === "agent_prompt_sent")
+        .every((event) => event.payload.prompt === undefined),
+    ).toBe(true);
+    const agentPrompts = loaded.state.steps
+      .map((step) => step.prompt)
       .filter((prompt): prompt is string => typeof prompt === "string");
     const stepEntries = sessionEntries.filter(
       ({ entry }) =>

@@ -94,20 +94,20 @@ Local effects use deterministic transactions. Run queue settlement effects are c
 
 The shared records do not replace domain schemas. The following `STRICT` tables keep the state explicit:
 
-| Area                | Tables                                                                                                        |
-| ------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Schema and projects | `schema_meta`, `projects`                                                                                     |
-| Content             | `blobs`                                                                                                       |
-| Shared lifecycle    | `resources`, `leases`, `events`                                                                               |
-| Workflows           | `workflow_definitions`, `runs`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
-| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                               |
-| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                            |
-| Session capture     | `session_segments`, `session_entries`, `session_events`                                                       |
-| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                |
-| Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                   |
-| Effects             | `effects`, `effect_attempts`                                                                                  |
-| Pi delivery         | `notifications`, `turn_intents`                                                                               |
-| Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`                   |
+| Area                | Tables                                                                                                                       |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Schema and projects | `schema_meta`, `projects`                                                                                                    |
+| Content             | `blobs`                                                                                                                      |
+| Shared lifecycle    | `resources`, `leases`, `events`                                                                                              |
+| Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
+| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                              |
+| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                                           |
+| Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                   |
+| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                               |
+| Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
+| Effects             | `effects`, `effect_attempts`                                                                                                 |
+| Pi delivery         | `notifications`, `turn_intents`                                                                                              |
+| Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`                                  |
 
 Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
@@ -115,15 +115,17 @@ Foreign keys join projects, runs, attempts, decisions, controllers, effects, and
 
 `blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes.
 
-Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping large prompts, outputs, errors, session payloads, and rendered channel text deduplicated. A writable open removes blobs that no foreign-key column references.
+Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Opening the database never deletes blobs. The explicit prune command removes unreferenced blobs after it deletes safe old run trees.
 
-Runs do not store a nested `WorkflowRunState` blob. `runs` stores scalar run facts and hashes for independent values. `node_attempts` stores each prompt and output once. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer. Readers derive `steps`, `outputs`, and `results` from these rows. Compact trace events do not copy node outputs, run inputs, or final outputs.
+Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer.
+
+Readers derive `steps`, `outputs`, `results`, carried-step count, current-node fields, waiting state, source objects, and continuation decision receipts from these rows. Compact trace events do not copy prompts, node outputs, run inputs, final outputs, action receipts, or assistant receipts.
 
 ### Assistant-message attempts
 
 An agent definition records `expectedOutput` as either a submitted-output description or `{ "kind": "assistant-message", "maxChars"?: number }`. Omitted `maxChars` means that Pi Workflows adds no character limit.
 
-A completed assistant-message attempt stores the exact text through the normal output blob. Its result record also stores a receipt with the text digest, final Pi session entry ID when available, optional author-supplied limit, and whether recovery adopted an existing response. Session tables keep the prompt-to-response entry range and the normal Pi message events.
+A completed interactive assistant-message attempt uses the settled Pi response entry as its output. It does not store a second output blob. Its small receipt keeps the text digest, final Pi session entry ID, optional author-supplied limit, and whether recovery adopted an existing response. A noninteractive attempt with no captured response entry keeps one normal output blob.
 
 An interrupted assistant-message attempt keeps its attempt ID when the origin Pi session resumes it. The executor adopts a matching completed assistant child from the active Pi branch instead of displaying the response twice. Submitted and non-agent attempts keep their normal fresh-attempt resume behavior.
 
@@ -148,7 +150,7 @@ COMMIT
 
 Any failed check rolls back the complete command.
 
-Session-event batches use `session_events` as their journal. They update the contiguous segment counter in the same transaction and do not create a generic `session.events_appended` event for each flush. The recorder stores lifecycle boundaries and settled events. It discards token deltas and incremental tool progress.
+Session-event batches use `session_events` as their journal. They update the contiguous segment counter in the same transaction and do not create a generic `session.events_appended` event for each flush. The recorder stores order, IDs, roles, status, and timing boundaries. It discards token deltas, completed text, thinking text, tool arguments, tool results, and incremental tool progress. The settled Pi entries keep the replay content.
 
 A TypeScript write permit carries the expected facts between layers. It is not authority by itself. The store verifies durable ownership and revision data again inside the transaction.
 
@@ -220,10 +222,14 @@ Supported commands are:
 pi-workflows state status
 pi-workflows state verify
 pi-workflows state backup /absolute/path/to/state-backup.sqlite
+pi-workflows state prune --before 2026-08-01T00:00:00Z --dry-run
+pi-workflows state prune --before 2026-08-01T00:00:00Z --backup /absolute/path/to/before-prune.sqlite --apply
 ```
 
 `status` reports only safe counts, file size, active leases, and unsettled effects.
 It does not print actor IDs, channel references, payloads, or credentials.
+
+`prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, and refuses trees with live queues, active leases, unsettled effects, controller references, channel references, or step links from runs outside the tree. It deletes the safe aggregates, removes blobs with no remaining foreign-key reference, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. Pi Workflows never runs prune at startup.
 
 ## Alpha cutover
 

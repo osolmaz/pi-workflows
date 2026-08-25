@@ -42,10 +42,6 @@ export async function seedHumanDecisionRequest(
       const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest();
       const definitionHash = state.putJson(snapshot, now);
       const inputHash = state.putJson({}, now);
-      const sourceHash = state.putJson(
-        { kind: "file", path: `inline:${request.workflowName}`, hash: "test" },
-        now,
-      );
       const launchHash = state.putJson({}, now);
       const finalOutputHash = state.putJson(request, now);
       state.connection
@@ -69,37 +65,39 @@ export async function seedHumanDecisionRequest(
         .prepare(
           `INSERT INTO runs(
              run_id, resource_id, definition_digest, workflow_ref,
-             workflow_source_hash, launch_options_hash,
-             source_type, source_ref, source_revision, status, paused,
-             input_hash, final_output_hash, current_node, current_attempt_id,
-             waiting_on, created_at, updated_at, finished_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'file', ?, 'test', 'waiting', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             launch_options_hash, status, paused, input_hash, final_output_hash,
+             created_at, updated_at, finished_at
+           ) VALUES (?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?)`,
         )
         .run(
           request.runId,
           runResourceId,
           definitionDigest,
           request.workflowName,
-          sourceHash,
           launchHash,
-          `inline:${request.workflowName}`,
           inputHash,
           finalOutputHash,
-          request.nodeId,
-          request.attemptId,
-          request.nodeId,
           now,
           now,
           now,
         );
       state.connection
         .prepare(
+          `INSERT INTO run_sources(run_id, mount_path, source_type, source_ref, source_revision)
+           VALUES (?, '', 'file', ?, 'test')`,
+        )
+        .run(request.runId, `inline:${request.workflowName}`);
+      state.connection
+        .prepare(
           `INSERT INTO node_attempts(
              attempt_id, run_id, node_id, attempt_number, node_type, status,
-             started_at, created_at, updated_at
-           ) VALUES (?, ?, ?, 1, 'checkpoint', 'waiting', ?, ?, ?)`,
+             started_at, created_at, updated_at, finished_at
+           ) VALUES (?, ?, ?, 1, 'checkpoint', 'completed', ?, ?, ?, ?)`,
         )
-        .run(request.attemptId, request.runId, request.nodeId, now, now, now);
+        .run(request.attemptId, request.runId, request.nodeId, now, now, now, now);
+      state.connection
+        .prepare("INSERT INTO run_steps(run_id, step_index, attempt_id) VALUES (?, 0, ?)")
+        .run(request.runId, request.attemptId);
     });
   }
   await store.createRequest(request);

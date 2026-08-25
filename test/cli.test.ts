@@ -31,6 +31,25 @@ describe("pi-workflows CLI", () => {
       stateAction: "backup",
       backupDestination: "/tmp/state-backup.sqlite",
     });
+    expect(
+      parseCliArgs([
+        "state",
+        "prune",
+        "--before",
+        "2026-08-01T00:00:00Z",
+        "--backup",
+        "/tmp/state.sqlite",
+        "--apply",
+      ]),
+    ).toMatchObject({
+      stateAction: "prune",
+      pruneBefore: "2026-08-01T00:00:00Z",
+      backupDestination: "/tmp/state.sqlite",
+      pruneApply: true,
+    });
+    expect(() => parseCliArgs(["state", "prune", "--before", "2026-08-01T00:00:00Z"])).toThrow(
+      /exactly one/,
+    );
   });
 
   it("parses controller and host commands", () => {

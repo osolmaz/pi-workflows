@@ -238,7 +238,9 @@ describe("WorkflowRunStore branch behavior", () => {
     file.workflowSource = { kind: "file", path: "/tmp/demo.ts", hash: "abc" };
     await store.initializeRun(workflow, file);
     const rows = store.state.connection
-      .prepare("SELECT source_type AS sourceType FROM runs ORDER BY run_id")
+      .prepare(
+        "SELECT source_type AS sourceType FROM run_sources WHERE mount_path = '' ORDER BY run_id",
+      )
       .all();
     expect(rows).toEqual([{ sourceType: "builtin" }, { sourceType: "file" }]);
     store.close();

@@ -21,7 +21,7 @@ const cases: Array<{
   },
   {
     event: { type: "text_end", contentIndex: 0, content: "hi", partial },
-    expected: { type: "text_end", contentIndex: 0, content: "hi" },
+    expected: { type: "text_end", contentIndex: 0 },
   },
   {
     event: { type: "thinking_start", contentIndex: 1, partial },
@@ -33,7 +33,7 @@ const cases: Array<{
   },
   {
     event: { type: "thinking_end", contentIndex: 1, content: "hmm", partial },
-    expected: { type: "thinking_end", contentIndex: 1, content: "hmm" },
+    expected: { type: "thinking_end", contentIndex: 1 },
   },
   {
     event: { type: "toolcall_start", contentIndex: 2, partial },
@@ -53,7 +53,8 @@ const cases: Array<{
     expected: {
       type: "toolcall_end",
       contentIndex: 2,
-      toolCall: { id: "call-1", name: "read", arguments: {} },
+      toolCallId: "call-1",
+      toolName: "read",
     },
   },
   {
