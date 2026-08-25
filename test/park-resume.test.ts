@@ -25,6 +25,13 @@ describe("durable run handoff in SQLite", () => {
     const parked = await running;
     expect(parked.state.status).toBe("running");
 
+    const recoveryStore = new WorkflowRunStore(databasePath);
+    const firstRecovery = await recoveryStore.prepareRunResume(parked.runId);
+    const secondRecovery = await recoveryStore.prepareRunResume(parked.runId);
+    expect(secondRecovery.state.currentAttemptId).toBe(firstRecovery.state.currentAttemptId);
+    expect(secondRecovery.state.currentNode).toBe("second");
+    recoveryStore.close();
+
     const secondEngine = new WorkflowEngine({
       databasePath,
       executor: new ScriptedExecutor().respond("second", { output: { done: true } }),

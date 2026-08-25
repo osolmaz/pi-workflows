@@ -247,7 +247,8 @@ CREATE TABLE node_attempts (
   attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
   node_type TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN (
-    'pending', 'running', 'waiting', 'completed', 'failed', 'timed_out', 'cancelled'
+    'pending', 'running', 'waiting', 'interrupted',
+    'completed', 'failed', 'timed_out', 'cancelled'
   )),
   output_hash BLOB REFERENCES blobs(blob_hash),
   receipt_hash BLOB REFERENCES blobs(blob_hash),

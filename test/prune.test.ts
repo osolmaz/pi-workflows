@@ -38,6 +38,13 @@ describe("state prune", () => {
     const effectId = "effect-prune";
     const effectResourceId = resourceIdFor("effect", effectId);
     const contentHash = setup.state.putText("done", now);
+    const settingsResourceId = resourceIdFor("settings", "settings-prune");
+    const followUpId = "follow-up-prune";
+    const followUpResourceId = resourceIdFor("follow_up", followUpId);
+    const followUpQueue = setup.state.connection
+      .prepare("SELECT resource_id AS resourceId FROM workflow_follow_up_queues WHERE run_id = ?")
+      .get(result.runId) as { resourceId: string };
+    const settingsHash = setup.state.putJson({ mode: "test" }, now);
     setup.state.transaction(() => {
       setup.state.connection
         .prepare(
@@ -56,6 +63,33 @@ describe("state prune", () => {
       setup.state.connection
         .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0), (?, 0)")
         .run(effectResourceId, notificationResourceId);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'settings', 'settings-prune', 1, ?, ?), (?, 'follow_up', ?, 1, ?, ?)",
+        )
+        .run(settingsResourceId, now, now, followUpResourceId, followUpId, now, now);
+      setup.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0), (?, 0)")
+        .run(settingsResourceId, followUpResourceId);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO workflow_settings(scope_id, resource_id, origin_run_id, active_run_id, mount_path, invocation, initial_hash, current_hash, created_at, updated_at) VALUES ('settings-prune', ?, ?, ?, '', 1, ?, ?, ?, ?)",
+        )
+        .run(settingsResourceId, result.runId, result.runId, settingsHash, settingsHash, now, now);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO workflow_follow_ups(follow_up_id, resource_id, queue_resource_id, run_id, request_id, order_number, target_session_id, actor_type, source_type, prompt_hash, status, reason_hash, created_at, updated_at) VALUES (?, ?, ?, ?, 'request-prune', 1, 'session-a', 'system', 'test', ?, 'removed', ?, ?, ?)",
+        )
+        .run(
+          followUpId,
+          followUpResourceId,
+          followUpQueue.resourceId,
+          result.runId,
+          contentHash,
+          contentHash,
+          now,
+          now,
+        );
       setup.state.connection
         .prepare(
           "INSERT INTO effects(effect_id, resource_id, source_resource_id, source_revision, effect_type, idempotency_key, payload_hash, owner_scope, status, attempt_count, created_at, updated_at, settled_at) VALUES (?, ?, ?, ?, 'notification.deliver', ?, ?, 'run', 'applied', 0, ?, ?, ?)",
@@ -81,6 +115,11 @@ describe("state prune", () => {
           "INSERT INTO events(event_id, resource_id, resource_revision, event_type, actor_type, recorded_at) VALUES ('notification-prune-event', ?, 1, 'notification.queued', 'system', ?)",
         )
         .run(notificationResourceId, now);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO events(event_id, resource_id, resource_revision, event_type, actor_type, recorded_at) VALUES ('settings-prune-event', ?, 1, 'settings.created', 'system', ?), ('follow-up-prune-event', ?, 1, 'follow-up.created', 'system', ?)",
+        )
+        .run(settingsResourceId, now, followUpResourceId, now);
     });
     setup.close();
     const cutoff = new Date(Date.now() + 60_000).toISOString();
@@ -105,7 +144,7 @@ describe("state prune", () => {
     expect(
       store.state.connection
         .prepare(
-          "SELECT count(*) AS count FROM resources WHERE resource_type IN ('effect', 'notification')",
+          "SELECT count(*) AS count FROM resources WHERE resource_type IN ('effect', 'notification', 'settings', 'follow_up', 'follow_up_queue')",
         )
         .get(),
     ).toEqual({ count: 0 });

@@ -16,8 +16,8 @@ const USER_VERSION: i64 = 1;
 const SCHEMA_NAME: &str = "pi-workflows-state";
 const APP_VERSION: &str = "0.13.3";
 pub const SCHEMA_DIGEST: [u8; 32] = [
-    0x1a, 0xa6, 0x2e, 0x1b, 0xff, 0x22, 0x13, 0x6b, 0x4e, 0x6a, 0x50, 0x39, 0xf4, 0xa3, 0xfd, 0x1a,
-    0xbe, 0x2b, 0x43, 0x06, 0x93, 0xc5, 0xdd, 0xca, 0xdc, 0x93, 0xd1, 0xa9, 0xba, 0x90, 0xd1, 0x7c,
+    0x1e, 0x7e, 0xfe, 0x95, 0x98, 0xf9, 0x0f, 0xc4, 0x7c, 0x6a, 0x12, 0xe3, 0xf8, 0xba, 0x1c, 0xba,
+    0xdc, 0x19, 0xf6, 0x96, 0x44, 0xd7, 0xb0, 0x43, 0x1f, 0x1a, 0xb5, 0x17, 0xca, 0xf9, 0x97, 0x12,
 ];
 const RESET_INSTRUCTION: &str = "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
 
@@ -403,25 +403,40 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
         state["carriedStepCount"] = json!(carried);
     }
     if status == "running" {
-        if let Some((attempt_id, node_id, started_at)) = connection
-            .query_row(
-                "SELECT attempt_id, node_id, started_at FROM node_attempts
-                 WHERE run_id = ?1 AND status IN ('pending', 'running', 'waiting')",
-                [run_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?
+        if let Some((attempt_id, node_id, started_at, scope_id, change_number, settings_hash)) =
+            connection
+                .query_row(
+                    "SELECT attempt_id, node_id, started_at,
+                        settings_scope_id, settings_change_number, settings_hash
+                 FROM node_attempts
+                 WHERE run_id = ?1 AND status IN ('pending', 'running', 'waiting', 'interrupted')",
+                    [run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<u64>>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
         {
             state["currentAttemptId"] = json!(attempt_id);
             state["currentNode"] = json!(node_id);
             if let Some(value) = started_at {
                 state["currentNodeStartedAt"] = json!(timestamp(value));
+            }
+            match (scope_id, change_number, settings_hash) {
+                (Some(scope_id), Some(change_number), Some(settings_hash)) => {
+                    state["currentSettingsScopeId"] = json!(scope_id);
+                    state["currentSettingsChangeNumber"] = json!(change_number);
+                    state["currentSettingsHash"] = json!(encode_hex(&settings_hash));
+                }
+                (None, None, None) => {}
+                _ => bail!("active workflow settings binding is incomplete"),
             }
         }
     }
