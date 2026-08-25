@@ -47,7 +47,7 @@ function commonExecutor(
         controlBoundary: "current repository",
       },
     })
-    .respond("propose", {
+    .respond("solutions", {
       output: {
         ...proposal,
         ...(options.previousPlan
@@ -55,14 +55,14 @@ function commonExecutor(
           : {}),
       },
     })
-    .respond("ideal", {
+    .respond("holyGrail", {
       output: {
         ideal: "Upstream supports it directly.",
         outsideDependencies: ["upstream release"],
         additionalValue: ["less local code"],
       },
     })
-    .respond("choose", { output: selection })
+    .respond("select", { output: selection })
     .respond(options.summaryNode, (request) => {
       expect(request.contract.completion).toBe("assistant");
       expect(request.contract).not.toHaveProperty("maxOutputChars");
@@ -151,15 +151,20 @@ describe("built-in autoplan", () => {
     );
     expect(prompts.get("captureIntent")).toContain("Do not return an array or message objects.");
     expect(prompts.get("frame")).toContain("State the goal and describe what success looks like");
-    expect(prompts.get("propose")).toContain("Give two to four practical options");
-    expect(prompts.get("ideal")).toContain("Describe the best possible end state");
-    expect(prompts.get("choose")).toContain("Select one option");
+    expect(prompts.get("solutions")).toContain("Give two to four practical options");
+    expect(prompts.get("solutions")).toContain("Long term elegant and production ready");
+    expect(prompts.get("holyGrail")).toContain("Describe the Holy grail");
+    expect(prompts.get("holyGrail")).toContain("Is this the Holy grail");
+    expect(prompts.get("select")).toContain("Select one option");
+    expect(prompts.get("select")).toContain("Long term elegant and production ready");
+    expect(prompts.get("select")).toContain("Holy grail");
     expect(prompts.get("plan")).toContain("plan that another engineer can implement");
-    for (const nodeId of ["frame", "propose", "ideal", "choose", "plan"]) {
+    for (const nodeId of ["frame", "solutions", "holyGrail", "select", "plan"]) {
       expect(prompts.get(nodeId)).toContain(ORIGINAL_USER_INSTRUCTIONS);
+      expect(prompts.get(nodeId)).toContain("Continue in this Pi session");
     }
     expect([...prompts.values()].join("\n")).not.toMatch(
-      /holy grail|materially equivalent|implementation-ready/u,
+      /materially equivalent|implementation-ready/u,
     );
     expect(autoplanWorkflow.presentationPrompt).toBeUndefined();
     expect(
@@ -271,7 +276,7 @@ describe("built-in autoplan", () => {
           controlBoundary: "repo",
         },
       })
-      .respond("propose", { output: { candidates: [proposal.candidates[0]] } });
+      .respond("solutions", { output: { candidates: [proposal.candidates[0]] } });
     const proposalEngine = new WorkflowEngine({
       executor: badProposal,
       databasePath: await makeStateDatabasePath("pi-workflows-autoplan-bad-proposal"),

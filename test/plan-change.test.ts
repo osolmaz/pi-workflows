@@ -19,7 +19,7 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
         controlBoundary: "repository",
       },
     })
-    .respond("design/propose", {
+    .respond("design/solutions", {
       output: {
         candidates: [
           {
@@ -44,10 +44,10 @@ function planningExecutor(plan: unknown): ScriptedExecutor {
         previousPlan: { status: "candidate", candidateId: "selected-plan" },
       },
     })
-    .respond("design/ideal", {
+    .respond("design/holyGrail", {
       output: { ideal: "complete", outsideDependencies: [], additionalValue: [] },
     })
-    .respond("design/choose", {
+    .respond("design/select", {
       output: {
         status: "ready",
         selectedId: "selected-plan",

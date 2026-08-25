@@ -92,7 +92,7 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
         controlBoundary: "repo",
       },
     })
-    .respond("planChange/design/propose", {
+    .respond("planChange/design/solutions", {
       output: {
         candidates: [
           {
@@ -116,10 +116,10 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
         ],
       },
     })
-    .respond("planChange/design/ideal", {
+    .respond("planChange/design/holyGrail", {
       output: { ideal: "correct code", outsideDependencies: [], additionalValue: [] },
     })
-    .respond("planChange/design/choose", {
+    .respond("planChange/design/select", {
       output: {
         status: "ready",
         selectedId: "fix-code",

@@ -597,25 +597,25 @@
         "statusDetail": "framing the problem",
         "expectedOutput": "{ \"problem\": \"concise statement\", \"success\": [\"criterion\"], \"inScope\": [\"change\"], \"outOfScope\": [\"change\"], \"constraints\": [\"constraint\"], \"controlBoundary\": \"what can change\" }"
       },
-      "redesign/design/propose": {
+      "redesign/design/solutions": {
         "nodeType": "agent",
         "mountPath": ["redesign", "design"],
-        "localNodeId": "propose",
-        "statusDetail": "devising candidate solutions",
+        "localNodeId": "solutions",
+        "statusDetail": "devising long-term solutions",
         "expectedOutput": "{ \"candidates\": [{ \"id\": \"stable-id\", \"title\": \"short title\", \"gist\": \"plain gist\", \"solution\": \"full proposal\", \"rationale\": \"why\", \"parts\": [\"part\"], \"tradeoffs\": [\"trade-off\"] }], \"previousPlan\": { \"status\": \"candidate\", \"candidateId\": \"id\" } | { \"status\": \"rejected\", \"reason\": \"reason\" } }"
       },
-      "redesign/design/ideal": {
+      "redesign/design/holyGrail": {
         "nodeType": "agent",
         "mountPath": ["redesign", "design"],
-        "localNodeId": "ideal",
-        "statusDetail": "describing the ideal end state",
-        "expectedOutput": "{ \"ideal\": \"ideal end state\", \"outsideDependencies\": [\"dependency\"], \"additionalValue\": [\"benefit\"] }"
+        "localNodeId": "holyGrail",
+        "statusDetail": "describing the Holy grail",
+        "expectedOutput": "{ \"ideal\": \"Holy grail end state\", \"outsideDependencies\": [\"dependency\"], \"additionalValue\": [\"benefit\"] }"
       },
-      "redesign/design/choose": {
+      "redesign/design/select": {
         "nodeType": "agent",
         "mountPath": ["redesign", "design"],
-        "localNodeId": "choose",
-        "statusDetail": "choosing the practical solution",
+        "localNodeId": "select",
+        "statusDetail": "selecting the solution",
         "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selectedId\": \"candidate-id-or-ideal\", \"why\": \"reason\", \"relationshipToIdeal\": \"relationship\", \"rejected\": [{ \"id\": \"other-id\", \"reason\": \"why it lost\" }], \"compromises\": [\"compromise\"], \"blocker\": \"required only when blocked\" }"
       },
       "redesign/design/plan": {
@@ -1318,18 +1318,18 @@
       },
       {
         "from": "redesign/design/frame",
-        "to": "redesign/design/propose"
+        "to": "redesign/design/solutions"
       },
       {
-        "from": "redesign/design/propose",
-        "to": "redesign/design/ideal"
+        "from": "redesign/design/solutions",
+        "to": "redesign/design/holyGrail"
       },
       {
-        "from": "redesign/design/ideal",
-        "to": "redesign/design/choose"
+        "from": "redesign/design/holyGrail",
+        "to": "redesign/design/select"
       },
       {
-        "from": "redesign/design/choose",
+        "from": "redesign/design/select",
         "switch": {
           "on": "$.status",
           "cases": {
@@ -5706,7 +5706,7 @@
         },
         {
           "kind": "node",
-          "nodeId": "redesign/design/propose"
+          "nodeId": "redesign/design/solutions"
         },
         {
           "kind": "virtual",
@@ -5816,7 +5816,7 @@
         },
         {
           "kind": "node",
-          "nodeId": "redesign/design/ideal"
+          "nodeId": "redesign/design/holyGrail"
         },
         {
           "kind": "virtual",
@@ -5934,7 +5934,7 @@
         },
         {
           "kind": "node",
-          "nodeId": "redesign/design/choose"
+          "nodeId": "redesign/design/select"
         },
         {
           "kind": "virtual",
@@ -6056,7 +6056,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6178,7 +6178,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6300,7 +6300,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6422,7 +6422,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6544,7 +6544,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6666,7 +6666,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6788,7 +6788,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -6910,7 +6910,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7036,7 +7036,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7162,7 +7162,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7292,7 +7292,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7422,7 +7422,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7560,7 +7560,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7702,7 +7702,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7844,7 +7844,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -7994,7 +7994,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8144,7 +8144,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8294,7 +8294,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8444,7 +8444,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8594,7 +8594,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8744,7 +8744,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -8894,7 +8894,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9048,7 +9048,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9198,7 +9198,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9348,7 +9348,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9498,7 +9498,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9660,7 +9660,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9822,7 +9822,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -9992,7 +9992,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -10158,7 +10158,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -10324,7 +10324,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1"
+          "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1"
         },
         {
           "kind": "virtual",
@@ -12127,33 +12127,33 @@
         "isBackEdge": false
       },
       {
-        "edgeId": "redesign/design/frame->redesign/design/propose#61.0",
+        "edgeId": "redesign/design/frame->redesign/design/solutions#61.0",
         "from": "redesign/design/frame",
-        "to": "redesign/design/propose",
+        "to": "redesign/design/solutions",
         "isBackEdge": false
       },
       {
-        "edgeId": "redesign/design/propose->redesign/design/ideal#62.0",
-        "from": "redesign/design/propose",
-        "to": "redesign/design/ideal",
+        "edgeId": "redesign/design/solutions->redesign/design/holyGrail#62.0",
+        "from": "redesign/design/solutions",
+        "to": "redesign/design/holyGrail",
         "isBackEdge": false
       },
       {
-        "edgeId": "redesign/design/ideal->redesign/design/choose#63.0",
-        "from": "redesign/design/ideal",
-        "to": "redesign/design/choose",
+        "edgeId": "redesign/design/holyGrail->redesign/design/select#63.0",
+        "from": "redesign/design/holyGrail",
+        "to": "redesign/design/select",
         "isBackEdge": false
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/plan#64.0",
-        "from": "redesign/design/choose",
+        "edgeId": "redesign/design/select->redesign/design/plan#64.0",
+        "from": "redesign/design/select",
         "to": "redesign/design/plan",
         "label": "ready",
         "isBackEdge": false
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
-        "from": "redesign/design/choose",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
+        "from": "redesign/design/select",
         "to": "redesign/design/blockedSummary",
         "label": "blocked",
         "isBackEdge": false
@@ -18640,219 +18640,219 @@
         "toCell": 10
       },
       {
-        "edgeId": "redesign/design/frame->redesign/design/propose#61.0",
+        "edgeId": "redesign/design/frame->redesign/design/solutions#61.0",
         "rank": 52,
         "fromCell": 10,
         "toCell": 10
       },
       {
-        "edgeId": "redesign/design/propose->redesign/design/ideal#62.0",
+        "edgeId": "redesign/design/solutions->redesign/design/holyGrail#62.0",
         "rank": 53,
         "fromCell": 10,
         "toCell": 10
       },
       {
-        "edgeId": "redesign/design/ideal->redesign/design/choose#63.0",
+        "edgeId": "redesign/design/holyGrail->redesign/design/select#63.0",
         "rank": 54,
         "fromCell": 10,
         "toCell": 10
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/plan#64.0",
+        "edgeId": "redesign/design/select->redesign/design/plan#64.0",
         "rank": 55,
         "fromCell": 10,
         "toCell": 10,
         "label": "ready"
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 55,
         "fromCell": 10,
         "toCell": 11,
         "label": "blocked"
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 56,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 57,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 58,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 59,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 60,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 61,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 62,
         "fromCell": 11,
         "toCell": 11
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 63,
         "fromCell": 11,
         "toCell": 12
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 64,
         "fromCell": 12,
         "toCell": 12
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 65,
         "fromCell": 12,
         "toCell": 13
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 66,
         "fromCell": 13,
         "toCell": 13
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 67,
         "fromCell": 13,
         "toCell": 15
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 68,
         "fromCell": 15,
         "toCell": 16
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 69,
         "fromCell": 16,
         "toCell": 16
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 70,
         "fromCell": 16,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 71,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 72,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 73,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 74,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 75,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 76,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 77,
         "fromCell": 18,
         "toCell": 19
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 78,
         "fromCell": 19,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 79,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 80,
         "fromCell": 18,
         "toCell": 18
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 81,
         "fromCell": 18,
         "toCell": 21
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 82,
         "fromCell": 21,
         "toCell": 21
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 83,
         "fromCell": 21,
         "toCell": 23
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 84,
         "fromCell": 23,
         "toCell": 22
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 85,
         "fromCell": 22,
         "toCell": 22
       },
       {
-        "edgeId": "redesign/design/choose->redesign/design/blockedSummary#64.1",
+        "edgeId": "redesign/design/select->redesign/design/blockedSummary#64.1",
         "rank": 86,
         "fromCell": 22,
         "toCell": 22
@@ -27880,12 +27880,12 @@
       "routeFinalizeDefaultBranchResult": 94,
       "documentation/workspace/inspect": 40,
       "localVerification/runBase": 18,
-      "redesign/design/propose": 53,
+      "redesign/design/solutions": 53,
       "documentation/workspace/ready": 43,
       "documentation/workspace/propose": 41,
       "documentation/workspace/blocked": 92,
       "localVerification/classify": 19,
-      "redesign/design/ideal": 54,
+      "redesign/design/holyGrail": 54,
       "documentation/workspace/__piw_exit_ready": 44,
       "documentation/workspace/apply": 42,
       "documentation/workspace/__piw_exit_blocked": 93,
@@ -27893,7 +27893,7 @@
       "localVerification/repairGuard": 21,
       "localVerification/judge": 20,
       "localVerification/blocked": 22,
-      "redesign/design/choose": 55,
+      "redesign/design/select": 55,
       "documentation/updateDocumentation": 45,
       "localVerification/__piw_exit_ready": 22,
       "localVerification/mechanicalRepair": 95,
@@ -28395,26 +28395,26 @@
         "                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │                             │                             │      │      │      │      │      │      │      │                                   │                                  │      │      │      │      │      │                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │                             ▼                             │      │      │      │      │      │      │      │                                   ▼                                  │      │      │      │      │      │                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │      · redesign › design › frame [agent] not visited      │      │      │      │      │      │      │      │      · documentation › verification › judge [agent] not visited      │      │      │      │      │      │                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        ┌────────┘    ┌─┼──────┘    ┌─┼──────┘    ┌─┼──────┘    ┌─┼──────┘      │                     ┌───────┘                      ┌──────┘      ├──────┘      ├──────┘      └──────┼──────┼─────────┐ ┌───── repair ──────┘ └─┼──────── blocked ───────────┐     ┴┬     ┴┬     ┴┬     └──────┼┐     └───────┐                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      ┌──────┼─┘    ┌──────┼─┘    ┌──────┼─┘    ┌──────┼─┘    ┌────────┘                     │                              │      ┌──────┤      ┌──────┤                    └──────┼─────────┼─┼───────────────────────┼──────────────┐             │      │      │      │            └┼──────┐      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                              │                              │      │      │      │      │                           └─────────┼─┼───────────────────────┼──────────────┼──────┐      │      │      │      │             │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                              │                              │      │      │      │      │                                     │ │                       └──────────────┼──────┼──────┼──────┼──────┼──────┼──────┐      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                              │                              │      │      │      │      │                                     │ │                                      │      │      │      │      │      │ready │      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                              │                              │      │      │      │      │                                     │ │                                      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                              ▼                              │      │      │      │      │                                     ▼ ▼                                      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      · redesign › design › propose [agent] not visited      │      │      │      │      │      · documentation › verification › repairGuard [compute] not visited      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                        └──────┼──────┼──────┼─────┐└──────┼──────┼──────┼─────┐└──────┼───────────────────┐          └─────────────────────────┐    └──────┼──────┼──────┼───┐  └───────────────────────────────────┼─┼┐└───── blocked ─────┐      ┌───────────┼──────┼──────┘ ┌────┼──────┼──────┼──────┘      │      │      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                               └──────┼──────┼─────┼──────┐└──────┼──────┼─────┼──────┐└───────────────────┼──────┐                             │           └──────┼──────┼───┼──────┐                    ┌──────────┘ ││      ┌─────────────┼──────┼───────────┘ ┌────┼────────┼────┼──────┘ ┌────┼─────────────┼──────┘      │                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                      └──────┼─────┼──────┼──────┐└──────┼─────┼──────┼──────┐             │      │                             │                  └──────┼───┼──────┼──────┐             │      ┌─────┘│      │      ┌──────┼──────┼─────────────┼────┘ ┌──────┼────┼────────┼────┘ ┌───────────┼─────────────┘                                                                                                                                                                                                                                           │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                             └─────┼──────┼──────┼──────┐└─────┼──────┼──────┼──────┐      │      │                             │                         └───┼──────┼──────┼──────┐      │      │      │      │      │      │      │      ┌──────┼──────┼──────┼────┘ ┌──────┼──────┼───────────┘                                                                                                                                                                                                                                                         │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                   │      │      │      │      │      │      │      │      │      │                             │                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                   │      │      │      │      │      │      │      │      │      │                             │                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                   │      │      │      │      │      │      │      │      │      │                             ▼                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                   │      │      │      │      │      │      │      │      │      │      · redesign › design › ideal [agent] not visited      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                  ┬┴     ┬┴     ┬┴     ┬┴     ┬┴     ┬┴     ┬┴     ┬┴     ┬┴     ┬┴                             │                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       ┌─────────┘   ┌──┼──────┘   ┌──┼──────┘   ┌──┼──────┘   ┌──┼──────┘      │                     ┌───────┘                       ┌─────┘┌─────┘┌─────┘┌─────┘┌─────┘      └──────┼──────┼──────────┐ ┌──── repair ──────┘ └─┼───────── blocked ───────────┐    └─┐    └─┐    └─┐    └──────┼─┐    └────────┐                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      ┌──────┼──┘   ┌──────┼──┘   ┌──────┼──┘   ┌──────┼──┘   ┌─────────┘                     │                               │      │      │      │      │                   └──────┼──────────┼─┼──────────────────────┼───────────────┐             │      │      │      │           └─┼──────┐      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │                          └──────────┼─┼──────────────────────┼───────────────┼──────┐      │      │      │      │             │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │                                     │ │                      └───────────────┼──────┼──────┼──────┼──────┼──────┼──────┐      │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │                                     │ │                                      │      │      │      │      │      │ready │      │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │                                     │ │                                      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │                               ▼                               │      │      │      │      │                                     ▼ ▼                                      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       │      │      │      │      │      │      │      │      │      │      · redesign › design › solutions [agent] not visited      │      │      │      │      │      · documentation › verification › repairGuard [compute] not visited      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                       └──────┼──────┼──────┼────┐ └──────┼──────┼──────┼────┐ └──────┼──────────────────┐            └─────────────────────────┐     └──────┼──────┼──────┼────┐ └───────────────────────────────────┼─┼─┤      ┌───────────────────────────────┘  ┌───┼──────┼──────┼──────┘  ┌───┼──────┼──────┼──────┘      │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                              └──────┼──────┼────┼──────┐ └──────┼──────┼────┼──────┐ └──────────────────┼──────┐                               │            └──────┼──────┼────┼──────┐                    ┌─────────┘ │ ├──────┼─────────────┐      ┌─────────────┼───┼──────┘  ┌───┼─────────┼───┼──────┘      │             │                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                     └──────┼────┼──────┼──────┐ └──────┼────┼──────┼──────┐             │      │                               │                   └──────┼────┼──────┼──────┐             │      ┌────┘ │      │      ┌──────┼──────┼─────────────┼───┘  ┌──────┼───┼─────────┼───┘  ┌──────────┼─────────────┘                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                            └────┼──────┼──────┼──────┐ └────┼──────┼──────┼──────┐      │      │                               │                          └────┼──────┼──────┼──────┐      │      │      │      │      │      │      │      ┌──────┼──────┼──────┼───┘  ┌──────┼──────┼──────────┘                                                                                                                                                                                                                                                        │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │                               │                               │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │                               ▼                               │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                 │      │      │      │      │      │      │      │      │      │      · redesign › design › holyGrail [agent] not visited      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                 ┴┬     ┴┬     ┴┬     ┴┬     ┴┬     ┴┬     ┴┬     ┴┬     ┴┬     ┴┬                              │                             ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                  │      │      │      │      │      │      │      │      │      │                              │                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                  │      │      │      │      │      │      │      │      │      │                              ▼                             │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                  │      │      │      │      │      │      │      │      │      │      · redesign › design › choose [agent] not visited      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                  │      │      │      │      │      │      │      │      │      │      · redesign › design › select [agent] not visited      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                     │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘    ┌─┘                            │ └──────── blocked ────────┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐                                                                                                                                                                                                                                                                  │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │                              │ ready                     │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                  │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │                              │                           │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                  │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
@@ -30147,7 +30147,7 @@
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │                                     │                                    │      │      │      │      │                                   │ │                                    │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │                                     ▼                                    │      │      │      │      │                                   ▼ ▼                                    │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      ┌────────────────────────────────────────────────────────────┐      │      │      │      │      │      ┌────────────────────────────────────────────────────────────┐      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │                redesign › design › propose                 │      │      │      │      │      │      │         documentation › verification › repairGuard         │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │               redesign › design › solutions                │      │      │      │      │      │      │         documentation › verification › repairGuard         │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      ├────────────────────────────────────────────────────────────┤      │      │      │      │      │      ├────────────────────────────────────────────────────────────┤      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │ ● agent                                           · queued │      │      │      │      │      │      │ ƒ compute                                         · queued │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │ ↻ 0                                                    ◷ — │      │      │      │      │      │      │ ↻ 0                                                    ◷ — │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
@@ -30165,7 +30165,7 @@
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │ … devising candidate solutions                             │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      │ … devising long-term solutions                             │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                │      │      │      │      │      │      │      │      │      │      └────────────────────────────────────────────────────────────┘      │      │      │      │      │      └────────────────────────────────────────────────────────────┘      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                └──────┼──────┼──────┼──┐   └──────┼──────┼──────┼──┐   └──────┼────────────────┐                    └───────────────────────┐            └──────┼──────┼──────┼──┐   └─────────────────────────────────┼─┼─┤      ┌─────────────────────────────┘    ┌─┼──────┼──────┼──────┘    ┌─┼──────┼──────┼──────┘      │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                       └──────┼──────┼──┼──────┐   └──────┼──────┼──┼──────┐   └────────────────┼──────┐                                     │                   └──────┼──────┼──┼──────┐                    ┌─────────┘ │ ├──────┼─────────────┐      ┌─────────────┼─┼──────┘    ┌─┼───────────┼─┼──────┘      │             │                                                                                                                                                                                                                                                                                                   │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
@@ -30175,7 +30175,7 @@
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                                     │                                    │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                                     ▼                                    │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      ┌────────────────────────────────────────────────────────────┐      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                 redesign › design › ideal                  │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │               redesign › design › holyGrail                │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      ├────────────────────────────────────────────────────────────┤      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ ● agent                                           · queued │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ ↻ 0                                                    ◷ — │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
@@ -30193,12 +30193,12 @@
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ … describing the ideal end state                           │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ … describing the Holy grail                                │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      └────────────────────────────────────────────────────────────┘      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                                     │                                    │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │                                     ▼                                    │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      ┌────────────────────────────────────────────────────────────┐      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                 redesign › design › choose                 │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                 redesign › design › select                 │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      ├────────────────────────────────────────────────────────────┤      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ ● agent                                           · queued │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ ↻ 0                                                    ◷ — │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
@@ -30216,7 +30216,7 @@
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │                                                            │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
-        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ … choosing the practical solution                          │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
+        "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      │ … selecting the solution                                   │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                        │      │      │      │      │      │      │      │      │      │      └────────────────────────────────────────────────────────────┘      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                          │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                    ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘  ┌───┘                                 ┌─┘ └─────────── blocked ────────────┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐   └──┐                                                                                                                                                                                                                                                                                                                       │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",
         "                                                                                                                                                                                                                                                                                                                    │      │      │      │      │      │      │      │      │      │                                     │ ready                              │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │      │                                                                                                                                                                                                                                                                                                                       │ │ │ │     │        │ │ │                                                                                                                                                           │           │        │                                                                                                                                                │       │                       │    │           │                        │           │        │",

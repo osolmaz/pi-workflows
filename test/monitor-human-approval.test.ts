@@ -97,7 +97,7 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       }),
     )
     .respond(
-      "planChange/design/propose",
+      "planChange/design/solutions",
       ...repeated({
         candidates: [
           {
@@ -123,11 +123,11 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
       }),
     )
     .respond(
-      "planChange/design/ideal",
+      "planChange/design/holyGrail",
       ...repeated({ ideal: "correct", outsideDependencies: [], additionalValue: [] }),
     )
     .respond(
-      "planChange/design/choose",
+      "planChange/design/select",
       ...repeated({
         status: "ready",
         selectedId: "fix",

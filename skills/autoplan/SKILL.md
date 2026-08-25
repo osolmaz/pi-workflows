@@ -1,6 +1,6 @@
 ---
 name: autoplan
-description: Use when the user asks to devise, choose, or plan the most elegant long-term production-ready solution, compare it with the ideal end state, and produce the best practical in-scope implementation plan without asking the user to resolve the gap.
+description: Use when the user asks to devise, choose, or plan the most Long term elegant and production ready solution, compare it with the Holy grail, and produce the best practical in-scope implementation plan without asking the user to resolve the gap.
 compatibility: Requires pi-workflows and the built-in autoplan workflow.
 ---
 
@@ -37,12 +37,12 @@ When this skill is loaded inside an active workflow step, do not start another w
 Outside Pi, or when the workflow is unavailable:
 
 1. Frame the problem, observable success criteria, scope, constraints, and interfaces under our control.
-2. Record two through four distinct practical candidates. Give each one a stable id, short title, plain gist, full solution, rationale, parts, and trade-offs.
-3. Describe the holy grail separately. Name every dependency outside our authority.
+2. Record two through four distinct practical candidates. Ask whether each is a Long term elegant and production ready solution. Give each one a stable id, short title, plain gist, full solution, rationale, parts, and trade-offs.
+3. Describe the Holy grail separately. Ask whether it is the Holy grail for the problem. Name every dependency outside our authority.
 4. Choose the right option without asking the user to decide between them. Record one rejection reason for every other explicit candidate.
-   - Choose the ideal when it is proportionate, production-ready, in scope, and implementable through interfaces we control.
-   - Otherwise choose the strongest practical in-scope solution with a clear path toward the ideal.
-   - Do not block only because the ideal requires an upstream or external change.
+   - Choose the Holy grail when it is proportionate, production-ready, in scope, and implementable through interfaces we control.
+   - Otherwise choose the strongest practical in-scope solution with a clear path toward the Holy grail.
+   - Do not block only because the Holy grail requires an upstream or external change.
 5. Write a detailed implementation plan. For each step, state what changes, where it changes, and how to verify it.
 6. Present one short plain assistant message with the chosen plan, its main steps, and a one-line gist and rejection reason for every other candidate. Call it selected for approval when a later human decision still applies.
 7. Stop as blocked only when no truthful in-scope solution can meet the success criteria.

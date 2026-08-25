@@ -244,7 +244,7 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
         controlBoundary: "authorized repository and rollout",
       },
     })
-    .respond("redesign/design/propose", {
+    .respond("redesign/design/solutions", {
       output: {
         candidates: [
           {
@@ -269,10 +269,10 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
         previousPlan: { status: "rejected", reason: "new evidence invalidated it" },
       },
     })
-    .respond("redesign/design/ideal", {
+    .respond("redesign/design/holyGrail", {
       output: { ideal: "completed work", outsideDependencies: [], additionalValue: [] },
     })
-    .respond("redesign/design/choose", {
+    .respond("redesign/design/select", {
       output: {
         status: "ready",
         selectedId: "supported-path",

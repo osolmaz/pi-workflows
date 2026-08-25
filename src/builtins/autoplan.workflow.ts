@@ -96,9 +96,11 @@ function originalUserInstructions(outputs: Record<string, unknown>): string {
 }
 
 function originalInstructionsPrompt(outputs: Record<string, unknown>): string {
-  return ["Original user instructions (authoritative):", originalUserInstructions(outputs)].join(
-    "\n",
-  );
+  return [
+    "Continue in this Pi session. Do not delegate this workflow step or start another session.",
+    "Original user instructions (authoritative):",
+    originalUserInstructions(outputs),
+  ].join("\n");
 }
 
 function requireString(value: unknown, label: string): string {
@@ -286,7 +288,7 @@ function candidateSummary(
   ideal: AutoplanIdeal,
   id: string,
 ): { id: string; title: string; gist: string } {
-  if (id === "ideal") return { id, title: "Ideal end state", gist: ideal.ideal };
+  if (id === "ideal") return { id, title: "Holy grail", gist: ideal.ideal };
   const candidate = proposal.candidates.find((item) => item.id === id);
   if (candidate === undefined)
     throw new Error(`autoplan candidate ${JSON.stringify(id)} is missing`);
@@ -298,9 +300,9 @@ function summaryInput(
   blocked: boolean,
   input: AutoplanInput,
 ): PlainSummaryInput {
-  const proposal = outputs.propose as AutoplanProposal;
-  const selection = outputs.choose as AutoplanSelection;
-  const ideal = outputs.ideal as AutoplanIdeal;
+  const proposal = outputs.solutions as AutoplanProposal;
+  const selection = outputs.select as AutoplanSelection;
+  const ideal = outputs.holyGrail as AutoplanIdeal;
   const selected = candidateSummary(proposal, ideal, selection.selectedId);
   return {
     source: {
@@ -368,6 +370,7 @@ export const autoplanWorkflow = defineWorkflow({
       statusDetail: "capturing the user's instructions",
       prompt: () =>
         [
+          "Continue in this Pi session. Do not delegate this workflow step or start another session.",
           "Read the conversation that came before this workflow step.",
           "Return one text string named originalUserInstructions.",
           "Include everything that the user has instructed for the intended purpose in the given context.",
@@ -398,12 +401,13 @@ export const autoplanWorkflow = defineWorkflow({
       expectedOutput: `{ "problem": "concise statement", "success": ["criterion"], "inScope": ["change"], "outOfScope": ["change"], "constraints": ["constraint"], "controlBoundary": "what can change" }`,
       validate: (value) => requireRecord(value, "autoplan frame"),
     }),
-    propose: agent({
-      statusDetail: "devising candidate solutions",
+    solutions: agent({
+      statusDetail: "devising long-term solutions",
       prompt: ({ outputs, input }) =>
         [
           originalInstructionsPrompt(outputs),
           "Give two to four practical options that fit the allowed scope.",
+          "For each option, ask: Is this a Long term elegant and production ready solution?",
           "For each option return a stable lowercase id and a short title. Add a plain gist and full solution, explain the reason and trade-offs, and list the parts.",
           "Favor a few reusable parts with clear owners and use interfaces that already exist.",
           "Reject one-off machinery and infrastructure that the task does not need.",
@@ -416,42 +420,46 @@ export const autoplanWorkflow = defineWorkflow({
       validate: (value, { input }) =>
         parseProposal(value, (input as AutoplanInput).previousPlan !== undefined),
     }),
-    ideal: agent({
-      statusDetail: "describing the ideal end state",
+    holyGrail: agent({
+      statusDetail: "describing the Holy grail",
       prompt: ({ outputs, input }) =>
         [
           originalInstructionsPrompt(outputs),
-          "Describe the best possible end state separately from the practical options.",
-          "It may match one option or go beyond the current scope.",
+          "Describe the Holy grail separately from the practical options.",
+          "Ask: Is this the Holy grail for the problem?",
+          "The Holy grail may match one option or go beyond the current scope.",
+          "Explain what makes it more Long term elegant and production ready than the practical options.",
           "List each dependency we do not control. Do not assume that it can change.",
-          "State what this end state would improve beyond the practical options.",
+          "State what the Holy grail would improve beyond the practical options.",
           `Problem frame: ${JSON.stringify(outputs.frame)}`,
-          `Candidates: ${JSON.stringify(outputs.propose)}`,
+          `Candidates: ${JSON.stringify(outputs.solutions)}`,
           `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
-      expectedOutput: `{ "ideal": "ideal end state", "outsideDependencies": ["dependency"], "additionalValue": ["benefit"] }`,
+      expectedOutput: `{ "ideal": "Holy grail end state", "outsideDependencies": ["dependency"], "additionalValue": ["benefit"] }`,
       validate: parseIdeal,
     }),
-    choose: agent({
-      statusDetail: "choosing the practical solution",
+    select: agent({
+      statusDetail: "selecting the solution",
       prompt: ({ outputs }) =>
         [
           originalInstructionsPrompt(outputs),
           "Select one option. Do not ask the user to choose.",
-          "Select the ideal only when it fits the allowed scope and is ready for production. Its value must justify the added complexity.",
-          "Otherwise select the best option we can build now that still moves toward the ideal.",
+          "Select the most Long term elegant and production ready option that is proportionate, in scope, and implementable through interfaces we control.",
+          "Select the Holy grail when it meets those conditions and its value justifies the added complexity.",
+          "Otherwise select the strongest practical option we can build now with a clear path toward the Holy grail.",
           "Work outside our control does not by itself make the plan blocked.",
           "Do not require changes to an upstream project or an unrelated repository. Do not require a new service or resource without approval.",
           "When two options solve the problem equally well, choose the simpler one.",
-          "Give one specific rejection reason for every option you do not select, including the ideal.",
+          "Give one specific rejection reason for every option you do not select, including the Holy grail.",
           "Return blocked only if no option inside the allowed scope can meet the success criteria.",
           `Frame: ${JSON.stringify(outputs.frame)}`,
-          `Candidates: ${JSON.stringify(outputs.propose)}`,
-          `Ideal candidate id: ideal`,
-          `Ideal: ${JSON.stringify(outputs.ideal)}`,
+          `Candidates: ${JSON.stringify(outputs.solutions)}`,
+          `Holy grail candidate id: ideal`,
+          `Holy grail: ${JSON.stringify(outputs.holyGrail)}`,
         ].join("\n"),
       expectedOutput: `{ "status": "ready" | "blocked", "selectedId": "candidate-id-or-ideal", "why": "reason", "relationshipToIdeal": "relationship", "rejected": [{ "id": "other-id", "reason": "why it lost" }], "compromises": ["compromise"], "blocker": "required only when blocked" }`,
-      validate: (value, { outputs }) => parseSelection(value, outputs.propose as AutoplanProposal),
+      validate: (value, { outputs }) =>
+        parseSelection(value, outputs.solutions as AutoplanProposal),
     }),
     plan: agent({
       timeoutMs: 30 * 60_000,
@@ -466,8 +474,8 @@ export const autoplanWorkflow = defineWorkflow({
           "Correct the earlier plan when the new evidence proves it wrong.",
           "Do not change files.",
           `Frame: ${JSON.stringify(outputs.frame)}`,
-          `Selection: ${JSON.stringify(outputs.choose)}`,
-          `Candidates: ${JSON.stringify(outputs.propose)}`,
+          `Selection: ${JSON.stringify(outputs.select)}`,
+          `Candidates: ${JSON.stringify(outputs.solutions)}`,
           `Previous plan: ${JSON.stringify((input as AutoplanInput).previousPlan ?? null)}`,
           `New evidence: ${JSON.stringify((input as AutoplanInput).newEvidence ?? null)}`,
         ].join("\n"),
@@ -476,13 +484,13 @@ export const autoplanWorkflow = defineWorkflow({
     }),
     blocked: compute({
       run: ({ outputs }) => {
-        const selection = outputs.choose as AutoplanSelection;
+        const selection = outputs.select as AutoplanSelection;
         return {
           status: "blocked",
           originalUserInstructions: originalUserInstructions(outputs),
           frame: outputs.frame,
-          proposal: outputs.propose as AutoplanProposal,
-          ideal: outputs.ideal as AutoplanIdeal,
+          proposal: outputs.solutions as AutoplanProposal,
+          ideal: outputs.holyGrail as AutoplanIdeal,
           selection,
           plainSummary: plainSummaryResult(outputs.blockedSummary, "autoplan blocked summary"),
           reason: requireString(selection.blocker, "autoplan blocker"),
@@ -499,9 +507,9 @@ export const autoplanWorkflow = defineWorkflow({
           status: "ready",
           originalUserInstructions: originalUserInstructions(outputs),
           frame: outputs.frame,
-          proposal: outputs.propose as AutoplanProposal,
-          ideal: outputs.ideal as AutoplanIdeal,
-          selection: outputs.choose as AutoplanSelection,
+          proposal: outputs.solutions as AutoplanProposal,
+          ideal: outputs.holyGrail as AutoplanIdeal,
+          selection: outputs.select as AutoplanSelection,
           plan: outputs.plan,
           plainSummary: plainSummaryResult(outputs.readySummary, "autoplan ready summary"),
           planDigest,
@@ -513,11 +521,11 @@ export const autoplanWorkflow = defineWorkflow({
   },
   edges: [
     { from: "captureIntent", to: "frame" },
-    { from: "frame", to: "propose" },
-    { from: "propose", to: "ideal" },
-    { from: "ideal", to: "choose" },
+    { from: "frame", to: "solutions" },
+    { from: "solutions", to: "holyGrail" },
+    { from: "holyGrail", to: "select" },
     {
-      from: "choose",
+      from: "select",
       switch: { on: "$.status", cases: { ready: "plan", blocked: "blockedSummary" } },
     },
     { from: "plan", to: "readySummary" },

@@ -16,19 +16,19 @@
         "statusDetail": "framing the problem",
         "expectedOutput": "{ \"problem\": \"concise statement\", \"success\": [\"criterion\"], \"inScope\": [\"change\"], \"outOfScope\": [\"change\"], \"constraints\": [\"constraint\"], \"controlBoundary\": \"what can change\" }"
       },
-      "propose": {
+      "solutions": {
         "nodeType": "agent",
-        "statusDetail": "devising candidate solutions",
+        "statusDetail": "devising long-term solutions",
         "expectedOutput": "{ \"candidates\": [{ \"id\": \"stable-id\", \"title\": \"short title\", \"gist\": \"plain gist\", \"solution\": \"full proposal\", \"rationale\": \"why\", \"parts\": [\"part\"], \"tradeoffs\": [\"trade-off\"] }], \"previousPlan\": { \"status\": \"candidate\", \"candidateId\": \"id\" } | { \"status\": \"rejected\", \"reason\": \"reason\" } }"
       },
-      "ideal": {
+      "holyGrail": {
         "nodeType": "agent",
-        "statusDetail": "describing the ideal end state",
-        "expectedOutput": "{ \"ideal\": \"ideal end state\", \"outsideDependencies\": [\"dependency\"], \"additionalValue\": [\"benefit\"] }"
+        "statusDetail": "describing the Holy grail",
+        "expectedOutput": "{ \"ideal\": \"Holy grail end state\", \"outsideDependencies\": [\"dependency\"], \"additionalValue\": [\"benefit\"] }"
       },
-      "choose": {
+      "select": {
         "nodeType": "agent",
-        "statusDetail": "choosing the practical solution",
+        "statusDetail": "selecting the solution",
         "expectedOutput": "{ \"status\": \"ready\" | \"blocked\", \"selectedId\": \"candidate-id-or-ideal\", \"why\": \"reason\", \"relationshipToIdeal\": \"relationship\", \"rejected\": [{ \"id\": \"other-id\", \"reason\": \"why it lost\" }], \"compromises\": [\"compromise\"], \"blocker\": \"required only when blocked\" }"
       },
       "plan": {
@@ -131,18 +131,18 @@
       },
       {
         "from": "frame",
-        "to": "propose"
+        "to": "solutions"
       },
       {
-        "from": "propose",
-        "to": "ideal"
+        "from": "solutions",
+        "to": "holyGrail"
       },
       {
-        "from": "ideal",
-        "to": "choose"
+        "from": "holyGrail",
+        "to": "select"
       },
       {
-        "from": "choose",
+        "from": "select",
         "switch": {
           "on": "$.status",
           "cases": {
@@ -204,19 +204,19 @@
       [
         {
           "kind": "node",
-          "nodeId": "propose"
+          "nodeId": "solutions"
         }
       ],
       [
         {
           "kind": "node",
-          "nodeId": "ideal"
+          "nodeId": "holyGrail"
         }
       ],
       [
         {
           "kind": "node",
-          "nodeId": "choose"
+          "nodeId": "select"
         }
       ],
       [
@@ -226,7 +226,7 @@
         },
         {
           "kind": "virtual",
-          "edgeId": "choose->blockedSummary#10.1"
+          "edgeId": "select->blockedSummary#10.1"
         }
       ],
       [
@@ -324,33 +324,33 @@
         "isBackEdge": false
       },
       {
-        "edgeId": "frame->propose#7.0",
+        "edgeId": "frame->solutions#7.0",
         "from": "frame",
-        "to": "propose",
+        "to": "solutions",
         "isBackEdge": false
       },
       {
-        "edgeId": "propose->ideal#8.0",
-        "from": "propose",
-        "to": "ideal",
+        "edgeId": "solutions->holyGrail#8.0",
+        "from": "solutions",
+        "to": "holyGrail",
         "isBackEdge": false
       },
       {
-        "edgeId": "ideal->choose#9.0",
-        "from": "ideal",
-        "to": "choose",
+        "edgeId": "holyGrail->select#9.0",
+        "from": "holyGrail",
+        "to": "select",
         "isBackEdge": false
       },
       {
-        "edgeId": "choose->plan#10.0",
-        "from": "choose",
+        "edgeId": "select->plan#10.0",
+        "from": "select",
         "to": "plan",
         "label": "ready",
         "isBackEdge": false
       },
       {
-        "edgeId": "choose->blockedSummary#10.1",
-        "from": "choose",
+        "edgeId": "select->blockedSummary#10.1",
+        "from": "select",
         "to": "blockedSummary",
         "label": "blocked",
         "isBackEdge": false
@@ -418,39 +418,39 @@
         "toCell": 0
       },
       {
-        "edgeId": "frame->propose#7.0",
+        "edgeId": "frame->solutions#7.0",
         "rank": 1,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "propose->ideal#8.0",
+        "edgeId": "solutions->holyGrail#8.0",
         "rank": 2,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "ideal->choose#9.0",
+        "edgeId": "holyGrail->select#9.0",
         "rank": 3,
         "fromCell": 0,
         "toCell": 0
       },
       {
-        "edgeId": "choose->plan#10.0",
+        "edgeId": "select->plan#10.0",
         "rank": 4,
         "fromCell": 0,
         "toCell": 0,
         "label": "ready"
       },
       {
-        "edgeId": "choose->blockedSummary#10.1",
+        "edgeId": "select->blockedSummary#10.1",
         "rank": 4,
         "fromCell": 0,
         "toCell": 1,
         "label": "blocked"
       },
       {
-        "edgeId": "choose->blockedSummary#10.1",
+        "edgeId": "select->blockedSummary#10.1",
         "rank": 5,
         "fromCell": 1,
         "toCell": 1
@@ -477,9 +477,9 @@
     "rankOfNode": {
       "captureIntent": 0,
       "frame": 1,
-      "propose": 2,
-      "ideal": 3,
-      "choose": 4,
+      "solutions": 2,
+      "holyGrail": 3,
+      "select": 4,
       "plan": 5,
       "blockedSummary": 6,
       "readySummary": 6,
@@ -517,13 +517,13 @@
         "                                              · frame [agent] not visited",
         "                                                           │",
         "                                                           ▼",
-        "                                             · propose [agent] not visited",
+        "                                            · solutions [agent] not visited",
         "                                                           │",
         "                                                           ▼",
-        "                                              · ideal [agent] not visited",
+        "                                            · holyGrail [agent] not visited",
         "                                                           │",
         "                                                           ▼",
-        "                                             · choose [agent] not visited",
+        "                                             · select [agent] not visited",
         "                                                       ┌─┘ └── blocked ───┐",
         "                                                       │ ready            │",
         "                                                       │                  │",
@@ -576,35 +576,35 @@
         "                                        │",
         "                                        ▼",
         "                       ┌─────────────────────────────────┐",
-        "                       │             propose             │",
+        "                       │            solutions            │",
         "                       ├─────────────────────────────────┤",
         "                       │ ● agent                · queued │",
         "                       │ ↻ 0                         ◷ — │",
         "                       │                                 │",
         "                       │                                 │",
-        "                       │ … devising candidate solutions  │",
+        "                       │ … devising long-term solutions  │",
         "                       └─────────────────────────────────┘",
         "                                        │",
         "                                        ▼",
         "                       ┌─────────────────────────────────┐",
-        "                       │              ideal              │",
+        "                       │            holyGrail            │",
         "                       ├─────────────────────────────────┤",
         "                       │ ● agent                · queued │",
         "                       │ ↻ 0                         ◷ — │",
         "                       │                                 │",
         "                       │                                 │",
-        "                       │ … describing the ideal end sta… │",
+        "                       │ … describing the Holy grail     │",
         "                       └─────────────────────────────────┘",
         "                                        │",
         "                                        ▼",
         "                       ┌─────────────────────────────────┐",
-        "                       │             choose              │",
+        "                       │             select              │",
         "                       ├─────────────────────────────────┤",
         "                       │ ● agent                · queued │",
         "                       │ ↻ 0                         ◷ — │",
         "                       │ ◇ ready                         │",
         "                       │ ◇ blocked                       │",
-        "                       │ … choosing the practical solut… │",
+        "                       │ … selecting the solution        │",
         "                       └─────────────────────────────────┘",
         "                                    ┌─┘ └───── blocked ─────┐",
         "                                    │ ready                 │",

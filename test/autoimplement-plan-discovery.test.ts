@@ -288,7 +288,7 @@ describe("autoimplement existing-plan startup", () => {
           controlBoundary: "repository",
         },
       })
-      .respond("redesign/design/propose", {
+      .respond("redesign/design/solutions", {
         output: {
           candidates: [
             {
@@ -313,10 +313,10 @@ describe("autoimplement existing-plan startup", () => {
           previousPlan: { status: "rejected", reason: "API evidence invalidated it" },
         },
       })
-      .respond("redesign/design/ideal", {
+      .respond("redesign/design/holyGrail", {
         output: { ideal: "revised", outsideDependencies: [], additionalValue: [] },
       })
-      .respond("redesign/design/choose", {
+      .respond("redesign/design/select", {
         output: {
           status: "ready",
           selectedId: "revised",
