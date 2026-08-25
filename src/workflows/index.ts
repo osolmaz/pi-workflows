@@ -63,6 +63,34 @@ export {
   parseStrictJsonValue,
   type JsonParseMode,
 } from "./json.js";
+export {
+  MAX_JSON_PATCH_BYTES,
+  MAX_JSON_PATCH_OPERATIONS,
+  MAX_JSON_POINTER_BYTES,
+  MAX_WORKFLOW_SETTINGS_BYTES,
+  applyJsonPatch,
+  encodeJsonPointer,
+  jsonPointerTarget,
+  parseJsonPointer,
+  validateJsonPatch,
+  type JsonPatch,
+  type JsonPatchOperation,
+} from "./json-patch.js";
+export {
+  allowSettingsPath,
+  applyWorkflowSettingsPatch,
+  resolveInitialWorkflowSettings,
+  settingsRoute,
+  settingsRuleForPath,
+  workflowSettings,
+  type AppliedWorkflowSettings,
+  type WorkflowSettingsChangeContext,
+  type WorkflowSettingsDefinition,
+  type WorkflowSettingsOptions,
+  type WorkflowSettingsPathPermissions,
+  type WorkflowSettingsPathRule,
+  type WorkflowSettingsPermission,
+} from "./settings.js";
 export { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
 export {
   discoverWorkflows,
@@ -191,6 +219,7 @@ export type {
   WorkflowIncludeDefinition,
   WorkflowIncludedResult,
   WorkflowInputOf,
+  WorkflowSettingsOf,
   WorkflowMountedSource,
   WorkflowMountSnapshot,
   WorkflowValueParser,

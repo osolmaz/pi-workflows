@@ -34,7 +34,12 @@ function normalizeJson(value: unknown): JsonValue {
       if (item === undefined) {
         continue;
       }
-      output[key] = normalizeJson(item);
+      Object.defineProperty(output, key, {
+        value: normalizeJson(item),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return output;
   }
