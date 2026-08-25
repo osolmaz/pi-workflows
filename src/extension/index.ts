@@ -9,6 +9,7 @@ import type {
 } from "../controllers/sqlite.js";
 import type { JsonObject } from "../controllers/types.js";
 import type { WorkflowSchedulerResult } from "../controllers/workflows.js";
+import { canonicalJson } from "../state/json.js";
 import { compositionMetadata } from "../workflows/composition.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { WorkflowEngine } from "../workflows/engine.js";
@@ -219,7 +220,7 @@ type StartRunOptions = {
 };
 
 function definitionDigest(snapshot: WorkflowDefinitionSnapshot): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
+  return `sha256:${createHash("sha256").update(canonicalJson(snapshot)).digest("hex")}`;
 }
 
 function launchSourceIdentity(workflow: WorkflowDefinition, root: unknown): unknown {
