@@ -56,7 +56,7 @@ pub async fn serve_on(listener: TcpListener, database_path: PathBuf) -> Result<(
              for remote access"
         );
     }
-    let source = Arc::new(Mutex::new(RunSource::new(&database_path)));
+    let source = Arc::new(Mutex::new(RunSource::new(&database_path)?));
     let (updates_tx, _) = broadcast::channel::<Update>(256);
 
     // Refresh loop: wake on filesystem changes (plus a slow safety tick for

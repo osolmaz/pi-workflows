@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import workflow from "../examples/workflows/echo.workflow.js";
+import { resourceIdFor } from "../src/state/mutation.js";
 import { pruneState } from "../src/state/prune.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
@@ -24,6 +25,63 @@ describe("state prune", () => {
     setup.state.connection
       .prepare("UPDATE runs SET parent_run_id = ? WHERE run_id = ?")
       .run(result.runId, child.runId);
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    const runResource = setup.state.connection
+      .prepare(
+        "SELECT resource_id AS resourceId, revision FROM runs JOIN resources USING (resource_id) WHERE run_id = ?",
+      )
+      .get(result.runId) as { resourceId: string; revision: number };
+    const now = Date.now();
+    const notificationId = "notification-prune";
+    const notificationResourceId = resourceIdFor("notification", notificationId);
+    const effectId = "effect-prune";
+    const effectResourceId = resourceIdFor("effect", effectId);
+    const contentHash = setup.state.putText("done", now);
+    setup.state.transaction(() => {
+      setup.state.connection
+        .prepare(
+          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'effect', ?, 1, ?, ?), (?, 'notification', ?, 1, ?, ?)",
+        )
+        .run(
+          effectResourceId,
+          effectId,
+          now,
+          now,
+          notificationResourceId,
+          notificationId,
+          now,
+          now,
+        );
+      setup.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0), (?, 0)")
+        .run(effectResourceId, notificationResourceId);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO effects(effect_id, resource_id, source_resource_id, source_revision, effect_type, idempotency_key, payload_hash, owner_scope, status, attempt_count, created_at, updated_at, settled_at) VALUES (?, ?, ?, ?, 'notification.deliver', ?, ?, 'run', 'applied', 0, ?, ?, ?)",
+        )
+        .run(
+          effectId,
+          effectResourceId,
+          runResource.resourceId,
+          runResource.revision,
+          notificationId,
+          contentHash,
+          now,
+          now,
+          now,
+        );
+      setup.state.connection
+        .prepare(
+          "INSERT INTO notifications(notification_id, effect_id, run_id, attempt_id, notification_index, target_session_id, notification_type, content_hash, created_at) VALUES (?, ?, ?, ?, 0, 'session-a', 'final', ?, ?)",
+        )
+        .run(notificationId, effectId, result.runId, attemptId, contentHash, now);
+      setup.state.connection
+        .prepare(
+          "INSERT INTO events(event_id, resource_id, resource_revision, event_type, actor_type, recorded_at) VALUES ('notification-prune-event', ?, 1, 'notification.queued', 'system', ?)",
+        )
+        .run(notificationResourceId, now);
+    });
     setup.close();
     const cutoff = new Date(Date.now() + 60_000).toISOString();
     const preview = await pruneState(databasePath, { before: cutoff, apply: false });
@@ -44,6 +102,13 @@ describe("state prune", () => {
 
     const store = new WorkflowRunStore(databasePath, { readOnly: true });
     expect(store.readRun(result.runId)).toBeNull();
+    expect(
+      store.state.connection
+        .prepare(
+          "SELECT count(*) AS count FROM resources WHERE resource_type IN ('effect', 'notification')",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
     store.close();
   });
 
@@ -114,5 +179,19 @@ describe("state prune", () => {
         backupPath: path.join(directory, "new.sqlite"),
       }),
     ).rejects.toThrow(/already active/);
+  });
+
+  it("releases the maintenance lock when the database cannot open", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-open-failure");
+    fs.writeFileSync(databasePath, "not a SQLite database");
+    const lockPath = `${databasePath}.maintenance.lock`;
+    await expect(
+      pruneState(databasePath, {
+        before: new Date().toISOString(),
+        apply: true,
+        backupPath: path.join(path.dirname(databasePath), "backup.sqlite"),
+      }),
+    ).rejects.toThrow();
+    expect(fs.existsSync(lockPath)).toBe(false);
   });
 });

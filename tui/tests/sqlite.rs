@@ -1,5 +1,5 @@
 use piw::source::RunSource;
-use piw::state::reader::{list_runs, read_run};
+use piw::state::reader::{list_runs, read_run, SCHEMA_DIGEST};
 use rusqlite::{params, Connection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -31,7 +31,8 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
         .unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE blobs(blob_hash BLOB PRIMARY KEY, media_type TEXT, content BLOB);
+            "CREATE TABLE schema_meta(id INTEGER PRIMARY KEY, schema_name TEXT, schema_version INTEGER, schema_digest BLOB, app_version TEXT);
+             CREATE TABLE blobs(blob_hash BLOB PRIMARY KEY, media_type TEXT, content BLOB);
              CREATE TABLE resources(resource_id TEXT PRIMARY KEY, revision INTEGER);
              CREATE TABLE workflow_definitions(definition_digest BLOB PRIMARY KEY, workflow_name TEXT, definition_hash BLOB);
              CREATE TABLE runs(run_id TEXT PRIMARY KEY, resource_id TEXT, definition_digest BLOB, parent_run_id TEXT, title TEXT, status TEXT, paused INTEGER, status_detail TEXT, input_hash BLOB, final_output_hash BLOB, error_hash BLOB, created_at INTEGER, updated_at INTEGER, finished_at INTEGER);
@@ -51,6 +52,12 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
              CREATE TABLE workflow_settings(scope_id TEXT, resource_id TEXT, active_run_id TEXT, mount_path TEXT, invocation INTEGER, current_hash BLOB);
              CREATE TABLE workflow_follow_up_queues(run_id TEXT, presentation_state TEXT);
              CREATE TABLE workflow_follow_ups(run_id TEXT, follow_up_id TEXT, order_number INTEGER, status TEXT, source_type TEXT, session_entry_id TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_meta VALUES (1, 'pi-workflows-state', 1, ?1, '0.13.3')",
+            [SCHEMA_DIGEST.as_slice()],
         )
         .unwrap();
     let snapshot = json!({
@@ -124,7 +131,7 @@ fn reads_and_lists_runs_from_sqlite() {
 #[test]
 fn refreshes_a_run_after_one_committed_update() {
     let (_temp, database) = fixture();
-    let mut source = RunSource::new(&database);
+    let mut source = RunSource::new(&database).unwrap();
     let before = source.get("run-1").unwrap().revision;
     let connection = Connection::open(&database).unwrap();
     let final_output_hash = blob(&connection, &json!(true));
@@ -252,5 +259,19 @@ fn rejects_an_incompatible_database() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("wrong.sqlite");
     Connection::open(&database).unwrap();
-    assert!(read_run(Path::new(&database), "run-1").is_err());
+    let error = read_run(Path::new(&database), "run-1").unwrap_err();
+    assert!(error.to_string().contains("Move or remove"));
+}
+
+#[test]
+fn rejects_an_old_schema_with_the_same_version_numbers() {
+    let (_temp, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("UPDATE schema_meta SET schema_digest = zeroblob(32)", [])
+        .unwrap();
+    drop(connection);
+
+    let error = RunSource::new(&database).err().unwrap();
+    assert!(error.to_string().contains("Move or remove"));
 }

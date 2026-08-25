@@ -361,7 +361,7 @@ struct App {
 }
 
 pub fn run_local(database_path: &Path, cli_theme: Option<&str>) -> Result<()> {
-    let source = RunSource::new(database_path);
+    let source = RunSource::new(database_path)?;
     run_app(
         Provider::Local {
             source,

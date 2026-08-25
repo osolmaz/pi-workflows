@@ -13,6 +13,13 @@ use std::path::Path;
 
 const APPLICATION_ID: i64 = 0x5049_5746;
 const USER_VERSION: i64 = 1;
+const SCHEMA_NAME: &str = "pi-workflows-state";
+const APP_VERSION: &str = "0.13.3";
+pub const SCHEMA_DIGEST: [u8; 32] = [
+    0x79, 0xd3, 0x18, 0xfc, 0x67, 0xe1, 0x60, 0x6c, 0xea, 0x25, 0x72, 0x93, 0x28, 0xcf, 0x0a, 0x50,
+    0x56, 0x36, 0x2d, 0x1d, 0x3e, 0xf3, 0x52, 0xe1, 0x58, 0xcc, 0x1c, 0xb6, 0xbc, 0x93, 0x97, 0xe2,
+];
+const RESET_INSTRUCTION: &str = "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
 
 type LoadedSession = (
     Option<SessionBinding>,
@@ -119,6 +126,10 @@ pub fn resolve_artifacts(value: &Value, _database_path: &Path, _max_bytes: u64) 
     value.clone()
 }
 
+pub fn validate_database(database_path: &Path) -> Result<()> {
+    open(database_path).map(drop)
+}
+
 fn open(path: &Path) -> Result<Connection> {
     let connection = Connection::open_with_flags(
         path,
@@ -132,7 +143,33 @@ fn open(path: &Path) -> Result<Connection> {
     let user_version: i64 =
         connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if application_id != APPLICATION_ID || user_version != USER_VERSION {
-        bail!("incompatible Pi Workflows SQLite schema");
+        bail!(RESET_INSTRUCTION);
+    }
+    let schema = connection
+        .query_row(
+            "SELECT schema_name, schema_version, schema_digest, app_version
+             FROM schema_meta WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .unwrap_or(None);
+    if !matches!(
+        schema,
+        Some((name, version, digest, app_version))
+            if name == SCHEMA_NAME
+                && version == USER_VERSION
+                && digest.as_slice() == SCHEMA_DIGEST
+                && app_version == APP_VERSION
+    ) {
+        bail!(RESET_INSTRUCTION);
     }
     Ok(connection)
 }

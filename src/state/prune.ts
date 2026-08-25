@@ -46,11 +46,12 @@ export async function pruneState(
   }
   const lockPath = `${databasePath}.maintenance.lock`;
   const lock = options.apply ? acquireMaintenanceLock(lockPath) : undefined;
-  const state = new StateDatabase({
-    filePath: databasePath,
-    mode: options.apply ? "read-write" : "read-only",
-  });
+  let state: StateDatabase | undefined;
   try {
+    state = new StateDatabase({
+      filePath: databasePath,
+      mode: options.apply ? "read-write" : "read-only",
+    });
     const selection = selectRunTrees(state.connection, cutoff);
     const sizeBefore = databaseBytes(databasePath);
     const base = {
@@ -134,7 +135,7 @@ export async function pruneState(
       applied: true,
     };
   } finally {
-    state.close();
+    state?.close();
     if (lock !== undefined) releaseMaintenanceLock(lockPath, lock);
   }
 }
@@ -312,7 +313,20 @@ function relatedResourceIds(database: Database.Database, runIds: string[]): stri
     .all(...resources)
     .filter(isResourceRow)
     .map((row) => row.resourceId);
-  return [...new Set([...resources, ...effectResources])];
+  const notificationResources = database
+    .prepare(
+      `SELECT resource.resource_id AS resourceId
+       FROM notifications notification
+       JOIN effects effect ON effect.effect_id = notification.effect_id
+       JOIN resources resource
+         ON resource.resource_type = 'notification'
+        AND resource.aggregate_key = notification.notification_id
+       WHERE effect.source_resource_id IN (${placeholders(resources)})`,
+    )
+    .all(...resources)
+    .filter(isResourceRow)
+    .map((row) => row.resourceId);
+  return [...new Set([...resources, ...effectResources, ...notificationResources])];
 }
 
 function selectionSignature(database: Database.Database, runIds: string[]): string {
