@@ -49,6 +49,7 @@ export {
 } from "./workflow-engine-scheduler.js";
 export {
   ControllerWorkflowCoordinator,
+  type ControllerWorkflowControlRequest,
   type ControllerWorkflowScheduler,
   type WorkflowSchedulerRequest,
   type WorkflowSchedulerResult,
@@ -64,6 +65,11 @@ export type {
   ControllerConditionStatus,
   ControllerDefinition,
   ControllerEffects,
+  ControllerFollowUpResult,
+  ControllerQueueFollowUpRequest,
+  ControllerRemoveFollowUpRequest,
+  ControllerSettingsChangeRequest,
+  ControllerSettingsChangeResult,
   ControllerEvent,
   ControllerQueueClaim,
   ControllerResource,

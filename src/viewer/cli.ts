@@ -274,6 +274,8 @@ async function runStateCommand(databasePath: string, args: CliArgs): Promise<voi
            (SELECT count(*) FROM runs) AS runs,
            (SELECT count(*) FROM controller_resources) AS controllers,
            (SELECT count(*) FROM human_decisions) AS decisions,
+           (SELECT count(*) FROM workflow_settings) AS settingsScopes,
+           (SELECT count(*) FROM workflow_follow_ups WHERE status IN ('queued', 'pending_presentation', 'ready')) AS pendingFollowUps,
            (SELECT count(*) FROM effects WHERE status IN ('pending', 'applying', 'ambiguous')) AS unsettledEffects,
            (SELECT count(*) FROM leases WHERE owner_id IS NOT NULL) AS activeLeases`,
       )

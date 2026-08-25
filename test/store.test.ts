@@ -39,7 +39,7 @@ describe("WorkflowRunStore SQLite", () => {
       store.state.connection.prepare("SELECT count(*) AS count FROM node_attempts").get(),
     ).toEqual({ count: 1 });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM events").get()).toEqual({
-      count: 6,
+      count: 7,
     });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
       count: 0,

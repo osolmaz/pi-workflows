@@ -18,6 +18,7 @@ The database stores:
 - human-decision requests, submissions, resolutions, and cancellations
 - controller resources, finalizers, effects, and child workflows
 - notifications and deferred turns
+- workflow settings, accepted JSON Patch changes, and post-completion follow-up prompts
 - nonsecret channel cursors, inbox records, messages, and settlement receipts
 - canonical JSON, text, and large text values
 
@@ -57,7 +58,7 @@ Four record groups provide the common lifecycle rules.
 
 ### Resources
 
-`resources` identifies each mutable aggregate and holds its current revision. Runs, decisions, controller resources, effects, channels, notifications, deferred turns, and session segments have stable resource identities.
+`resources` identifies each mutable aggregate and holds its current revision. Runs, settings scopes, follow-up queues and items, decisions, controller resources, effects, channels, notifications, deferred turns, and session segments have stable resource identities.
 
 Every accepted domain command compares its expected revision and increments it once.
 
@@ -99,6 +100,8 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Content             | `blobs`                                                                                                       |
 | Shared lifecycle    | `resources`, `leases`, `events`                                                                               |
 | Workflows           | `workflow_definitions`, `runs`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
+| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                              |
+| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                           |
 | Session capture     | `session_segments`, `session_entries`, `session_events`                                                       |
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                |
 | Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                   |
@@ -176,7 +179,11 @@ The same rule applies to run terminal outcomes, continuation admission, queue se
 
 ## Read contract
 
-Status is a pure projection of domain rows, immutable facts, current leases, and effect receipts.
+Status is a pure projection of domain rows, immutable facts, current leases, and effect results.
+
+A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
+
+A follow-up queue records acceptance order and final-presentation state. Successful terminalization changes queued items to ready or pending presentation in the same transaction as the terminal run fact. Failure, timeout, and cancellation cancel unsent items. Delivery uses item leases and active Pi branch evidence.
 
 - A terminal run fact overrides stale queue presentation.
 - An accepted decision is accepted even if its continuation effect is still pending.

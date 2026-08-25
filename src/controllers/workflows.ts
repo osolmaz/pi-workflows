@@ -5,8 +5,13 @@ import type {
   ChildWorkflowRecord,
   ChildWorkflowRequest,
   ChildWorkflowState,
+  ControllerFollowUpResult,
   ControllerQueueClaim,
+  ControllerQueueFollowUpRequest,
+  ControllerRemoveFollowUpRequest,
   ControllerResource,
+  ControllerSettingsChangeRequest,
+  ControllerSettingsChangeResult,
   ControllerWorkflows,
 } from "./types.js";
 
@@ -24,12 +29,36 @@ export type WorkflowSchedulerResult = {
   error?: string;
 };
 
+export type ControllerWorkflowControlRequest<TRequest> = TRequest & {
+  controllerResourceUid: string;
+  actorRequestKey: string;
+};
+
 export interface ControllerWorkflowScheduler {
   ensure(
     request: WorkflowSchedulerRequest,
     signal: AbortSignal,
     onComplete: (result: WorkflowSchedulerResult) => void,
   ): Promise<WorkflowSchedulerResult>;
+  changeSettings?(
+    request: ControllerWorkflowControlRequest<ControllerSettingsChangeRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerSettingsChangeResult>;
+  queueFollowUp?(
+    request: ControllerWorkflowControlRequest<ControllerQueueFollowUpRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerFollowUpResult>;
+  removeFollowUp?(
+    request: ControllerWorkflowControlRequest<ControllerRemoveFollowUpRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerFollowUpResult>;
+}
+
+function controllerRequestKey(resource: ControllerResource, requestKey: string): string {
+  if (requestKey.trim().length === 0) {
+    throw new Error("Controller workflow requestKey must not be empty");
+  }
+  return `controller:${resource.metadata.uid}:${requestKey}`;
 }
 
 export class ControllerWorkflowCoordinator {
@@ -45,6 +74,45 @@ export class ControllerWorkflowCoordinator {
   ): ControllerWorkflows {
     return {
       ensure: async (request) => await this.ensure(resource, claim, request, signal),
+      changeSettings: async (request) => {
+        if (this.scheduler?.changeSettings === undefined) {
+          throw new Error("This controller host does not support workflow settings changes");
+        }
+        return await this.scheduler.changeSettings(
+          {
+            ...request,
+            controllerResourceUid: resource.metadata.uid,
+            actorRequestKey: controllerRequestKey(resource, request.requestKey),
+          },
+          signal,
+        );
+      },
+      queueFollowUp: async (request) => {
+        if (this.scheduler?.queueFollowUp === undefined) {
+          throw new Error("This controller host does not support workflow follow-ups");
+        }
+        return await this.scheduler.queueFollowUp(
+          {
+            ...request,
+            controllerResourceUid: resource.metadata.uid,
+            actorRequestKey: controllerRequestKey(resource, request.requestKey),
+          },
+          signal,
+        );
+      },
+      removeFollowUp: async (request) => {
+        if (this.scheduler?.removeFollowUp === undefined) {
+          throw new Error("This controller host does not support workflow follow-ups");
+        }
+        return await this.scheduler.removeFollowUp(
+          {
+            ...request,
+            controllerResourceUid: resource.metadata.uid,
+            actorRequestKey: controllerRequestKey(resource, request.requestKey),
+          },
+          signal,
+        );
+      },
     };
   }
 

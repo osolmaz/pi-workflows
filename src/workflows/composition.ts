@@ -31,6 +31,7 @@ export type WorkflowScopeMetadata = {
   path: string;
   workflowName: string;
   maxSteps?: number;
+  settings?: WorkflowDefinition["settings"];
   authoredNodes: Record<string, string>;
   childMounts: Record<string, string>;
 };
@@ -41,6 +42,7 @@ export type WorkflowEntryMetadata = {
   parentPath: string;
   workflowName: string;
   input: WorkflowIncludeDefinition["input"];
+  settings?: WorkflowIncludeDefinition["settings"];
   normalizeInput?: WorkflowDefinition["input"];
 };
 
@@ -125,6 +127,7 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
       path: scopePath,
       workflowName: current.name,
       ...(current.maxSteps !== undefined ? { maxSteps: current.maxSteps } : {}),
+      ...(current.settings !== undefined ? { settings: current.settings } : {}),
       authoredNodes,
       childMounts,
     };
@@ -155,6 +158,11 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
           `Workflow include ${qualify(scopePath, name)} is unresolved: ${include.workflow}`,
         );
       }
+      if (include.settings !== undefined && child.settings === undefined) {
+        throw new Error(
+          `Workflow include ${qualify(scopePath, name)} maps settings but child ${child.name} declares none`,
+        );
+      }
       const mountPath = qualify(scopePath, name);
       const childExits = child.exits ?? {};
       if (Object.keys(childExits).length === 0) {
@@ -167,6 +175,7 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
         parentPath: scopePath,
         workflowName: child.name,
         input: include.input,
+        ...(include.settings !== undefined ? { settings: include.settings } : {}),
         normalizeInput: child.input,
       };
       nodes[entryNode] = {
@@ -176,10 +185,14 @@ export function compileWorkflowDefinition<TWorkflow extends WorkflowDefinition<a
           const parentContext = projectWorkflowContext(context, scopePath, scopes, entries, exits);
           const mapped = include.input ? await include.input(parentContext) : parentContext.input;
           const normalized = child.input ? await child.input(mapped) : mapped;
+          const initialSettings = include.settings
+            ? await include.settings(parentContext)
+            : undefined;
           return {
             schema: "pi-workflows.include-entry.v1",
             invocation: countCompletedEntries(context.state, entryNode) + 1,
             input: normalized === undefined ? null : normalized,
+            ...(initialSettings !== undefined ? { settings: initialSettings } : {}),
           };
         },
       };
@@ -478,6 +491,7 @@ function wrapNode(
         ...common,
         nodeType: "compute",
         run: (context) => (node as ComputeNodeDefinition).run(project(context)),
+        ...(node.settingsRoute === true ? { settingsRoute: true as const } : {}),
       };
     case "notify":
       return {
@@ -637,6 +651,11 @@ export function projectWorkflowContext(
     outputs,
     results,
     state,
+    ...(context.settings !== undefined ? { settings: context.settings } : {}),
+    ...(context.settingsScopeId !== undefined ? { settingsScopeId: context.settingsScopeId } : {}),
+    ...(context.settingsChangeNumber !== undefined
+      ? { settingsChangeNumber: context.settingsChangeNumber }
+      : {}),
     signal: context.signal,
   };
 }

@@ -55,6 +55,8 @@ The request carries optional presentation data for the run title and node status
 
 One pure formatter remains responsible for the model prompt used by both executors. Interactive delivery must not shorten, summarize, or rebuild the model prompt from display fields.
 
+Before the step contract, the formatter adds the active settings scope, change number, bounded current value, allowed model paths, and exact `change-settings` action when that scope declares settings. It also shows the `queue-follow-up` and `remove-follow-up` actions. Actor identity is never part of model input. The extension derives it from the documented tool call.
+
 ## Compact display
 
 The collapsed card shows only useful workflow identity and current work. For example:
@@ -123,7 +125,7 @@ Tests verify:
 - interactive and RPC executors give the model the same complete prompt
 - one step message starts one model turn
 - collapsed rendering does not show the full prompt
-- expanded rendering shows the full prompt and exact contract ids
+- expanded rendering shows the full prompt, settings scope and change number, allowed paths, and exact contract ids
 - long and missing display fields render safely
 - reminders and resumed deliveries keep the active attempt id
 - submitted steps still reject stale attempts after timeout or cancellation

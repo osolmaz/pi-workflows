@@ -43,6 +43,26 @@ async function sessionEntries(agentDirectory: string): Promise<string[]> {
     });
 }
 
+function calledWorkflowAction(
+  messages: Array<{ tool_calls?: unknown[] }>,
+  action: string,
+): boolean {
+  return messages.some((message) =>
+    (message.tool_calls ?? []).some((call) => {
+      if (call === null || typeof call !== "object") return false;
+      const fn = (call as { function?: unknown }).function;
+      if (fn === null || typeof fn !== "object") return false;
+      const args = (fn as { arguments?: unknown }).arguments;
+      if (typeof args !== "string") return false;
+      try {
+        return (JSON.parse(args) as { action?: unknown }).action === action;
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -165,6 +185,42 @@ export default defineWorkflow({
     }),
   },
   edges: [],
+});
+`;
+
+const LIVE_SETTINGS_E2E_WORKFLOW = `import {
+  agent,
+  allowSettingsPath,
+  compute,
+  defineWorkflow,
+  settingsRoute,
+  workflowSettings,
+} from "@osolmaz/pi-workflows";
+
+const settings = workflowSettings({
+  initial: { route: "normal", instructions: [] },
+  parse: (value) => value,
+  paths: [
+    allowSettingsPath("/route", { read: ["session"], replace: ["session"] }),
+    allowSettingsPath("/instructions", { read: ["session"], add: ["session"] }),
+  ],
+});
+
+export default defineWorkflow({
+  name: "live-settings-e2e",
+  settings,
+  startAt: "configure",
+  presentationPrompt: "LIVE SETTINGS FINAL PRESENTATION",
+  nodes: {
+    configure: agent({ prompt: () => "Apply the scripted live settings and follow-up.", expectedOutput: '{ "done": true }' }),
+    choose: settingsRoute({ run: ({ settings }) => ({ route: settings.route }) }),
+    normal: compute({ run: ({ settings }) => ({ selected: "normal", settings }) }),
+    careful: compute({ run: ({ settings }) => ({ selected: "careful", settings }) }),
+  },
+  edges: [
+    { from: "configure", to: "choose" },
+    { from: "choose", switch: { on: "$.route", cases: { normal: "normal", careful: "careful" } } },
+  ],
 });
 `;
 
@@ -883,6 +939,52 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        const serializedMessages = JSON.stringify(messages);
+        const liveSettingsStep = serializedMessages.match(
+          /workflow step contract \(workflow: live-settings-e2e, step: configure, attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (liveSettingsStep && !calledWorkflowAction(messages, "submit")) {
+          if (!calledWorkflowAction(messages, "change-settings")) {
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: {
+                action: "change-settings",
+                expectedChangeNumber: 0,
+                patch: [
+                  { op: "replace", path: "/route", value: "careful" },
+                  { op: "add", path: "/instructions/-", value: "Run every check." },
+                ],
+              },
+            };
+          }
+          if (!calledWorkflowAction(messages, "queue-follow-up")) {
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: {
+                action: "queue-follow-up",
+                prompt: "LIVE SETTINGS FOLLOW-UP",
+              },
+            };
+          }
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "configure",
+              attempt: liveSettingsStep[1] ?? "",
+              output: { done: true },
+            },
+          };
+        }
+        if (lastUserText.includes("LIVE SETTINGS FINAL PRESENTATION")) {
+          return { kind: "text", text: "Live settings final response." };
+        }
+        if (lastUserText.includes("LIVE SETTINGS FOLLOW-UP")) {
+          return { kind: "text", text: "Live settings follow-up completed." };
+        }
         const assistantOutputStepMatch = lastUserText.match(
           /workflow step contract \(workflow: assistant-output-e2e, step: (prepare|present), attempt: ([a-z0-9-]+)\)/i,
         );
@@ -1034,6 +1136,11 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "live-settings-e2e.workflow.ts"),
+      LIVE_SETTINGS_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "controller-child.workflow.ts"),
       E2E_CONTROLLER_CHILD,
       "utf8",
@@ -1164,6 +1271,55 @@ describe.sequential("pi-workflows end to end", () => {
       "command-batch-e2e",
     );
   }, 30_000);
+
+  it("applies live settings and sends ordered work after terminal presentation", async () => {
+    pi.send({
+      id: "live-settings-e2e",
+      type: "prompt",
+      message: "/workflow live-settings-e2e",
+    });
+    const completed = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "live-settings-e2e" && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      20_000,
+    );
+    await waitForCondition(
+      () => {
+        const run = readWorkflowRun(completed.runId, { databasePath: runsDir, includeTrace: true });
+        return (
+          run?.followUpQueue?.presentationState === "settled" &&
+          run.followUpQueue.followUps[0]?.state === "sent"
+        );
+      },
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      30_000,
+    );
+    await waitForPiIdle(pi);
+    const run = readWorkflowRun(completed.runId, { databasePath: runsDir, includeTrace: true });
+    expect(run?.state.finalOutput).toEqual({
+      selected: "careful",
+      settings: { route: "careful", instructions: ["Run every check."] },
+    });
+    expect(run?.settingsScopes?.[0]).toMatchObject({ changeNumber: 1 });
+    expect(run?.followUpQueue).toMatchObject({
+      presentationState: "settled",
+      followUps: [
+        {
+          order: 1,
+          state: "sent",
+          sessionEntryId: expect.any(String),
+        },
+      ],
+    });
+    expect(run?.traceEvents?.map((event) => event.type)).toContain("run_completed");
+    expect(
+      listWorkflowRuns({ databasePath: runsDir }).filter(
+        (candidate) => candidate.state.workflowName === "live-settings-e2e",
+      ),
+    ).toHaveLength(1);
+  }, 60_000);
 
   it("starts one later turn after a post-start runtime crash", async () => {
     const requestsBefore = mock.requests.length;
@@ -1511,6 +1667,16 @@ describe.sequential("pi-workflows end to end", () => {
       () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`,
     );
 
+    await waitForCondition(
+      () => {
+        const run = readWorkflowRun(runId, { databasePath: runsDir });
+        return (
+          run?.followUpQueue?.presentationState === "settled" ||
+          run?.followUpQueue?.presentationState === "unavailable"
+        );
+      },
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
     const terminalProjection = JSON.stringify(
       listWorkflowRuns({ databasePath: runsDir, includeTrace: true }).find(
         (run) => run.runId === runId,
@@ -1903,7 +2069,7 @@ describe.sequential("pi-workflows end to end", () => {
     expect(state.workflowSource).toEqual({
       kind: "builtin",
       id: "autoimplement",
-      revision: "10",
+      revision: "11",
     });
     expect(state.steps.map((step) => step.nodeId)).toEqual(
       expect.arrayContaining([

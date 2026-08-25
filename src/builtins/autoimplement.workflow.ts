@@ -13,6 +13,7 @@ import {
   includedResult,
 } from "../workflows/definition.js";
 import { digest } from "../workflows/human-decision.js";
+import { allowSettingsPath, workflowSettings } from "../workflows/settings.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
 import autodocWorkflow, { type AutodocInput } from "./autodoc.workflow.js";
 import {
@@ -39,6 +40,11 @@ import workspacePreparationWorkflow, {
   type WorkspaceMode,
   type WorkspacePreparationInput,
 } from "./workspace-preparation.workflow.js";
+
+export type AutoimplementSettings = {
+  merge: boolean;
+  addedInstructions: string[];
+};
 
 export type AutoimplementInput = {
   task: string;
@@ -577,6 +583,27 @@ function parseInput(value: unknown): AutoimplementInput {
   };
 }
 
+function parseAutoimplementSettings(value: unknown): AutoimplementSettings {
+  const settings = requireRecord(value, "autoimplement settings");
+  if (typeof settings.merge !== "boolean") {
+    throw new Error("autoimplement settings merge must be a boolean");
+  }
+  if (
+    !Array.isArray(settings.addedInstructions) ||
+    settings.addedInstructions.some((item) => typeof item !== "string")
+  ) {
+    throw new Error("autoimplement settings addedInstructions must be an array of strings");
+  }
+  return {
+    merge: settings.merge,
+    addedInstructions: [...settings.addedInstructions] as string[],
+  };
+}
+
+function autoimplementSettings(context: WorkflowNodeContext): AutoimplementSettings {
+  return parseAutoimplementSettings(context.settings);
+}
+
 function parseExistingPlan(value: unknown): ExistingPlanDiscovery {
   const result = requireRecord(value, "existing plan discovery");
   if (result.route !== "found" && result.route !== "blocked") {
@@ -919,8 +946,8 @@ function parseDeliveryResult(
   if (result.status !== "completed" && result.status !== "blocked") {
     throw new Error("delivery status must be completed or blocked");
   }
-  const request = context.input as AutoimplementInput;
-  if (request.merge !== true && result.merged === true) {
+  const settings = autoimplementSettings(context);
+  if (settings.merge !== true && result.merged === true) {
     throw new Error("delivery cannot merge without explicit merge: true");
   }
   if (result.status === "blocked") return result;
@@ -960,7 +987,7 @@ function parseDeliveryResult(
     }
     actual.set(repository.repository, repository);
   }
-  const mergeExpected = request.merge === true;
+  const mergeExpected = settings.merge === true;
   for (const expected of published) {
     const repository = actual.get(path.resolve(expected.repository));
     if (repository === undefined || repository.pr !== expected.pr) {
@@ -1298,6 +1325,28 @@ export const autoimplementWorkflow = defineWorkflow({
   contractId: "pi-workflows.autoimplement.v1",
   name: "autoimplement",
   input: parseInput,
+  settings: workflowSettings<AutoimplementSettings, AutoimplementInput>({
+    initial: (input) => ({ merge: input.merge === true, addedInstructions: [] }),
+    parse: parseAutoimplementSettings,
+    description: "Future merge behavior and instructions added during this run.",
+    paths: [
+      allowSettingsPath("/merge", {
+        read: ["session", "human"],
+        replace: ["session", "human"],
+      }),
+      allowSettingsPath("/addedInstructions", {
+        read: ["session", "human"],
+        add: ["session", "human"],
+        remove: ["session", "human"],
+        replace: ["session", "human"],
+      }),
+    ],
+    validateChange: ({ before, after, actor }) => {
+      if (actor.type === "session" && before.merge === false && after.merge === true) {
+        throw new Error("A model workflow step cannot grant merge authority");
+      }
+    },
+  }),
   title: ({ input }) => `autoimplement: ${input.task.slice(0, 60)}`,
   presentationPrompt:
     "Summarize what was implemented, the review rounds by severity, the CI result, the PR or merge result, and any remaining limitation. Include exact validation commands.",
@@ -1616,7 +1665,7 @@ export const autoimplementWorkflow = defineWorkflow({
           `Current result and claimed blocker: ${JSON.stringify(latestBlockerClaim(context))}`,
           `Authorized scope: ${request.scope ?? request.repository ?? "the current repository and task"}`,
           `Constraints and authority: ${JSON.stringify(request.constraints ?? [])}`,
-          `Merge authorized: ${request.merge === true}`,
+          `Merge currently allowed: ${autoimplementSettings(context).merge === true}`,
           `Previous blocker challenges: ${JSON.stringify(blockerChallenges(context))}`,
           `Recent workflow attempts: ${JSON.stringify(recentWorkflowAttempts(context))}`,
         ].join("\n");
@@ -1925,10 +1974,9 @@ export const autoimplementWorkflow = defineWorkflow({
       timeoutMs: 30 * 60_000,
       statusDetail: "finalizing PRs",
       prompt: (context) => {
-        const request = context.input as AutoimplementInput;
         return [
-          request.merge === false
-            ? "Leave every verified PR ready without merging because input disabled merge."
+          autoimplementSettings(context).merge === false
+            ? "Leave every verified PR ready without merging because current workflow settings disable merge."
             : "Handle verified PRs one at a time and merge each unless repository policy or explicit user instructions prohibit it.",
           "Before each mutation, inspect the current PR head, merge state, and existing final report. Do not merge an already merged expected head or post a duplicate report.",
           "Use each repository's required merge method.",

@@ -102,8 +102,10 @@ function stepLine(
     step.error !== undefined
       ? ansi.red(previewValue(step.error, 60))
       : ansi.dim(previewValue(step.output, 60));
+  const settings =
+    step.settingsChangeNumber === undefined ? "" : `, settings ${step.settingsChangeNumber}`;
   return fitWidth(
-    ` ${marker}${glyph} ${step.nodeId} ${ansi.dim(`(${step.nodeType}, ${formatDuration(durationMs)})`)} ${preview}`,
+    ` ${marker}${glyph} ${step.nodeId} ${ansi.dim(`(${step.nodeType}, ${formatDuration(durationMs)}${settings})`)} ${preview}`,
     width,
   );
 }
@@ -180,6 +182,16 @@ function inspectorLines(step: WorkflowStepRecord, width: number): string[] {
     typeof body === "string" && step.error !== undefined ? body : JSON.stringify(body, null, 2);
   for (const raw of (rendered ?? "null").split("\n")) {
     lines.push(fitWidth(`  ${sanitizeText(raw)}`, width));
+  }
+  if (step.settingsScopeId !== undefined) {
+    lines.push(
+      fitWidth(
+        ansi.dim(
+          `  settings ${step.settingsChangeNumber ?? 0} · ${sanitizeText(step.settingsScopeId)} · ${step.settingsHash?.slice(0, 12) ?? "unknown hash"}`,
+        ),
+        width,
+      ),
+    );
   }
   if (step.action) {
     const receipt = [
@@ -267,6 +279,36 @@ export function renderRunDetailLines(
           ansi.dim(
             `${indentation}  ${track.estimate.sampleCount} samples · ${track.estimate.confidence ?? "no"} confidence · updated ${latest?.at ?? "unknown"}`,
           ),
+          size.width,
+        ),
+      );
+    }
+  }
+
+  if ((bundle.settingsScopes?.length ?? 0) > 0) {
+    lines.push("");
+    lines.push(ansi.bold("workflow settings"));
+    for (const scope of bundle.settingsScopes ?? []) {
+      lines.push(
+        fitWidth(
+          `  ${sanitizeText(scope.mountPath || "root")} #${scope.invocation} · change ${scope.changeNumber} · ${scope.settingsHash.slice(0, 12)}`,
+          size.width,
+        ),
+      );
+    }
+  }
+
+  if ((bundle.followUpQueue?.followUps.length ?? 0) > 0) {
+    lines.push("");
+    lines.push(
+      ansi.bold(
+        `follow-ups · presentation ${bundle.followUpQueue?.presentationState ?? "unknown"}`,
+      ),
+    );
+    for (const followUp of bundle.followUpQueue?.followUps ?? []) {
+      lines.push(
+        fitWidth(
+          `  ${followUp.order}. ${followUp.state} · ${followUp.followUpId} · ${sanitizeText(followUp.source)}`,
           size.width,
         ),
       );

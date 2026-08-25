@@ -368,6 +368,7 @@ export function assertValidWorkflowDefinitionShape(
         fail(`include ${mountName} requires a workflow definition or reference`);
       }
       assertOptionalFunction(include.input, `include ${mountName} input`);
+      assertOptionalFunction(include.settings, `include ${mountName} settings`);
       if (
         include.contract !== undefined &&
         (include.contract === null || typeof include.contract !== "object")

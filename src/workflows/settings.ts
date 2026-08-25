@@ -53,6 +53,123 @@ export type AppliedWorkflowSettings<TSettings> = {
   json: JsonValue;
 };
 
+export type InitialWorkflowSettingsScope = {
+  mountPath: string;
+  invocation: number;
+  settings: JsonValue;
+};
+
+export type WorkflowSettingsScopeRecord = {
+  scopeId: string;
+  originRunId: string;
+  activeRunId: string;
+  mountPath: string;
+  invocation: number;
+  changeNumber: number;
+  settings: JsonValue;
+  settingsHash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowSettingsChangeRequest = {
+  runId: string;
+  scopeId: string;
+  requestId: string;
+  expectedChangeNumber?: number;
+  actor: MutationActor;
+  source: string;
+  patch: unknown;
+};
+
+export type WorkflowSettingsChangeRecord = {
+  changeId: string;
+  scopeId: string;
+  requestId: string;
+  changeNumber: number;
+  actor: MutationActor;
+  source: string;
+  patch: JsonPatch;
+  beforeHash: string;
+  afterHash: string;
+  acceptedAt: string;
+};
+
+export type WorkflowSettingsChangeResult = {
+  scope: WorkflowSettingsScopeRecord;
+  change: WorkflowSettingsChangeRecord;
+  adopted: boolean;
+};
+
+export type WorkflowFollowUpState =
+  | "queued"
+  | "pending_presentation"
+  | "ready"
+  | "sent"
+  | "removed"
+  | "cancelled";
+
+export type WorkflowPresentationState =
+  | "none"
+  | "not-needed"
+  | "pending"
+  | "settled"
+  | "unavailable";
+
+export type WorkflowFollowUpRecord = {
+  followUpId: string;
+  runId: string;
+  requestId: string;
+  order: number;
+  targetSessionId: string;
+  actor: MutationActor;
+  source: string;
+  prompt: string;
+  state: WorkflowFollowUpState;
+  sessionEntryId?: string;
+  reason?: string;
+  createdAt: string;
+  updatedAt: string;
+  sentAt?: string;
+};
+
+export type WorkflowFollowUpQueueRecord = {
+  runId: string;
+  originSessionId?: string;
+  presentationState: WorkflowPresentationState;
+  presentationEntryId?: string;
+  presentationAssistantEntryId?: string;
+  presentationReason?: string;
+  followUps: WorkflowFollowUpRecord[];
+};
+
+export type WorkflowQueueFollowUpRequest = {
+  runId: string;
+  requestId: string;
+  targetSessionId: string;
+  actor: MutationActor;
+  source: string;
+  prompt: string;
+};
+
+export type WorkflowRemoveFollowUpRequest = {
+  runId: string;
+  followUpId: string;
+  actor: MutationActor;
+  source: string;
+};
+
+export function workflowSettingsScopeId(
+  originRunId: string,
+  mountPath: string,
+  invocation: number,
+): string {
+  if (!Number.isInteger(invocation) || invocation <= 0) {
+    throw new Error("Workflow settings invocation must be a positive integer");
+  }
+  return `${originRunId}:${mountPath || "$root"}:${invocation}`;
+}
+
 export function workflowSettings<TSettings, TInput = unknown>(
   options: WorkflowSettingsOptions<TSettings, TInput>,
 ): WorkflowSettingsDefinition<TSettings, TInput> {
@@ -80,20 +197,7 @@ export function allowSettingsPath(
   permissions: WorkflowSettingsPathPermissions,
 ): WorkflowSettingsPathRule {
   parseJsonPointer(path);
-  if (Object.keys(permissions).length === 0) {
-    throw new Error(`Workflow settings path ${JSON.stringify(path)} grants no permissions`);
-  }
-  for (const [permission, actors] of Object.entries(permissions)) {
-    if (!isSettingsPermission(permission)) {
-      throw new Error(`Unknown workflow settings permission: ${permission}`);
-    }
-    if (!Array.isArray(actors) || actors.length === 0) {
-      throw new Error(
-        `Workflow settings permission ${permission} at ${JSON.stringify(path)} requires actors`,
-      );
-    }
-    for (const actor of actors) assertActorType(actor);
-  }
+  validatePathPermissions(path, permissions);
   return { path, permissions };
 }
 
@@ -114,14 +218,21 @@ export async function resolveInitialWorkflowSettings<TSettings, TInput>(
     typeof definition.initial === "function"
       ? await (definition.initial as (value: TInput) => MaybePromise<TSettings>)(input)
       : definition.initial;
+  return await parseWorkflowSettingsValue(definition, raw);
+}
+
+export async function parseWorkflowSettingsValue<TSettings, TInput = unknown>(
+  definition: WorkflowSettingsDefinition<TSettings, TInput>,
+  raw: unknown,
+): Promise<AppliedWorkflowSettings<TSettings>> {
   const parsed = await definition.parse(raw);
   const json = cloneJson(parsed as JsonValue);
   assertSettingsSize(json);
   return { patch: [], settings: parsed, json };
 }
 
-export async function applyWorkflowSettingsPatch<TSettings>(
-  definition: WorkflowSettingsDefinition<TSettings>,
+export async function applyWorkflowSettingsPatch<TSettings, TInput = unknown>(
+  definition: WorkflowSettingsDefinition<TSettings, TInput>,
   before: JsonValue,
   patchValue: unknown,
   actor: MutationActor,
@@ -247,6 +358,7 @@ function validatePathRules(rules: readonly WorkflowSettingsPathRule[]): void {
       throw new Error("Invalid workflow settings: each path rule must be an object");
     }
     parseJsonPointer(rule.path);
+    validatePathPermissions(rule.path, rule.permissions);
     const normalized = freezeRule(rule);
     const prior = byPath.get(rule.path);
     if (
@@ -256,6 +368,26 @@ function validatePathRules(rules: readonly WorkflowSettingsPathRule[]): void {
       throw new Error(`Conflicting workflow settings rules for ${JSON.stringify(rule.path)}`);
     }
     byPath.set(rule.path, normalized);
+  }
+}
+
+function validatePathPermissions(path: string, permissions: WorkflowSettingsPathPermissions): void {
+  if (permissions === null || typeof permissions !== "object" || Array.isArray(permissions)) {
+    throw new Error(`Workflow settings path ${JSON.stringify(path)} permissions must be an object`);
+  }
+  if (Object.keys(permissions).length === 0) {
+    throw new Error(`Workflow settings path ${JSON.stringify(path)} grants no permissions`);
+  }
+  for (const [permission, actors] of Object.entries(permissions)) {
+    if (!isSettingsPermission(permission)) {
+      throw new Error(`Unknown workflow settings permission: ${permission}`);
+    }
+    if (!Array.isArray(actors) || actors.length === 0) {
+      throw new Error(
+        `Workflow settings permission ${permission} at ${JSON.stringify(path)} requires actors`,
+      );
+    }
+    for (const actor of actors) assertActorType(actor);
   }
 }
 

@@ -296,6 +296,37 @@ export default defineWorkflow({
   );
 }
 
+async function writeSettingsWorkflow(cwd: string): Promise<void> {
+  const dir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "settings.workflow.ts"),
+    `import { agent, allowSettingsPath, compute, defineWorkflow, workflowSettings } from "@osolmaz/pi-workflows";
+
+const settings = workflowSettings({
+  initial: { mode: "old", instructions: [] },
+  parse: (value) => value,
+  paths: [
+    allowSettingsPath("/mode", { read: ["session"], replace: ["session"] }),
+    allowSettingsPath("/instructions", { read: ["session"], add: ["session"] }),
+  ],
+});
+
+export default defineWorkflow({
+  name: "settings",
+  settings,
+  startAt: "change",
+  nodes: {
+    change: agent({ prompt: ({ settings }) => "Change future settings: " + JSON.stringify(settings), expectedOutput: '{ "done": true }' }),
+    done: compute({ run: ({ settings, settingsChangeNumber }) => ({ settings, settingsChangeNumber }) }),
+  },
+  edges: [{ from: "change", to: "done" }],
+});
+`,
+    "utf8",
+  );
+}
+
 async function writeAssistantWorkflow(cwd: string): Promise<void> {
   const dir = path.join(cwd, ".pi", "workflows");
   await fs.mkdir(dir, { recursive: true });
@@ -505,6 +536,66 @@ describe("pi-workflows extension", () => {
       } finally {
         queue.close();
       }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("changes future settings and queues a normal post-completion prompt", async () => {
+    const cwd = await makeTempDir("pi-workflows-live-settings");
+    try {
+      await writeSettingsWorkflow(cwd);
+      let stepPrompt = "";
+      const harness = makeHarness({
+        cwd,
+        respond: (prompt, tool) => {
+          const contract = stepFromPrompt(prompt);
+          if (!contract) return;
+          stepPrompt = prompt;
+          void Promise.all([
+            tool.execute("change-call", {
+              action: "change-settings",
+              expectedChangeNumber: 0,
+              patch: [
+                { op: "replace", path: "/mode", value: "new" },
+                { op: "add", path: "/instructions/-", value: "Run all checks." },
+              ],
+            }),
+            tool.execute("follow-call", {
+              action: "queue-follow-up",
+              prompt: "Do the next task after this workflow.",
+            }),
+            tool.execute("submit-call", {
+              action: "submit",
+              ...contract,
+              output: { done: true },
+            }),
+          ]);
+        },
+      });
+
+      await harness.command.handler("settings", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+      expect(stepPrompt).toContain("Active settings scope:");
+      expect(stepPrompt).toContain("Current settings change number: 0");
+      expect(stepPrompt).toContain("action change-settings");
+
+      const run = listWorkflowRuns()[0];
+      expect(run?.state.finalOutput).toEqual({
+        settings: { mode: "new", instructions: ["Run all checks."] },
+        settingsChangeNumber: 1,
+      });
+      expect(run?.settingsScopes?.[0]).toMatchObject({ changeNumber: 1 });
+      expect(run?.followUpQueue?.followUps[0]).toMatchObject({
+        order: 1,
+        state: "ready",
+      });
+
+      harness.setIdle(true);
+      await harness.emitAsync("agent_settled");
+      await waitFor(() => harness.sentUserMessages.length === 1);
+      expect(harness.sentUserMessages[0]).toContain("Do the next task after this workflow.");
+      expect(harness.sentUserMessages[0]).toContain("pi-workflows-follow-up:");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1113,7 +1204,7 @@ describe("pi-workflows extension", () => {
     expect(starts.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(starts.find((result) => result.status === "rejected")).toMatchObject({
       reason: expect.objectContaining({
-        message: expect.stringMatching(/launch is already waiting/),
+        message: expect.stringMatching(/already (?:queued|waiting)/),
       }),
     });
 

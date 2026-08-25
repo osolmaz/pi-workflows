@@ -61,6 +61,25 @@ function childWorkflow() {
 }
 
 describe("workflow composition", () => {
+  it("rejects a child settings mapping when the child declares no settings", () => {
+    const child = childWorkflow();
+    const parent = defineWorkflow({
+      name: "bad-settings-parent",
+      startAt: "start",
+      includes: {
+        child: includeWorkflow(child, {
+          input: () => ({ task: "demo" }),
+          settings: () => ({ value: true }),
+        }),
+      },
+      nodes: { start: compute({ run: () => ({}) }) },
+      edges: [{ from: "start", to: "child" }],
+    });
+    expect(() => compileWorkflowDefinition(parent)).toThrow(
+      /maps settings but child .* declares none/,
+    );
+  });
+
   it("builds typed registries and validates included result exits", () => {
     const child = childWorkflow();
     expect(defineWorkflowRegistry({ child }).child).toBe(child);

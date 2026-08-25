@@ -507,6 +507,8 @@ export type WorkflowIncludeDefinition<
   workflow: TWorkflow | string;
   /** Pure parent-to-child input mapping, evaluated on every mount entry. */
   input?: (context: WorkflowNodeContext) => MaybePromise<WorkflowInputOf<TWorkflow>>;
+  /** Optional explicit initial settings mapping for this child invocation. */
+  settings?: (context: WorkflowNodeContext) => MaybePromise<WorkflowSettingsOf<TWorkflow>>;
   /** Optional direct definition that supplies the contract for a dynamic reference. */
   contract?: TWorkflow;
 };
@@ -539,7 +541,7 @@ export type WorkflowDefinition<
   TInput = any,
   TExits extends WorkflowExitMap = WorkflowExitMap,
   TIncludes extends WorkflowIncludeMap = WorkflowIncludeMap,
-  TSettings = unknown,
+  TSettings = any,
 > = {
   name: string;
   /** Optional workflow-owned JSON settings that can change during a run. */
@@ -694,6 +696,9 @@ export type WorkflowRunState = {
   currentNode?: string;
   currentAttemptId?: string;
   currentNodeStartedAt?: string;
+  currentSettingsScopeId?: string;
+  currentSettingsChangeNumber?: number;
+  currentSettingsHash?: string;
   statusDetail?: string;
   /** Redacted verified-human receipt carried by a continuation run. */
   humanDecision?: HumanDecisionReceipt;
@@ -732,13 +737,19 @@ export type WorkflowDefinitionSnapshot = {
   nodes: Record<string, WorkflowNodeSnapshot>;
   edges: WorkflowEdge[];
   composition?: WorkflowCompositionSnapshot;
-  settings?: {
-    description?: string;
-    paths: Array<{
-      path: string;
-      permissions: Partial<Record<"read" | "add" | "remove" | "replace", string[]>>;
-    }>;
-  };
+  settings?: WorkflowSettingsSnapshot;
+  settingsScopes?: Array<{
+    mountPath: string[];
+    settings: WorkflowSettingsSnapshot;
+  }>;
+};
+
+export type WorkflowSettingsSnapshot = {
+  description?: string;
+  paths: Array<{
+    path: string;
+    permissions: Partial<Record<"read" | "add" | "remove" | "replace", string[]>>;
+  }>;
 };
 
 export type WorkflowTraceEvent = {

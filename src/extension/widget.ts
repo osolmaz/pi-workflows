@@ -311,6 +311,14 @@ function nodeRuntimeSegments(
   if (attempts > 1) {
     segments.push(`↻${attempts}`);
   }
+  if (state.currentNode === nodeId && state.currentSettingsChangeNumber !== undefined) {
+    segments.push(`settings ${state.currentSettingsChangeNumber}`);
+  } else {
+    const latest = state.steps.findLast((step) => step.nodeId === nodeId);
+    if (latest?.settingsChangeNumber !== undefined) {
+      segments.push(`settings ${latest.settingsChangeNumber}`);
+    }
+  }
 
   const result = state.results[nodeId];
   if (state.currentNode === nodeId) {

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkflowEngineScheduler } from "../src/controllers/workflow-engine-scheduler.js";
 import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import { WorkflowRunStore } from "../src/workflows/store.js";
+import { allowSettingsPath, workflowSettings } from "../src/workflows/settings.js";
+import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowDefinition } from "../src/workflows/types.js";
 import { ScriptedExecutor, makeStateDatabasePath } from "./helpers.js";
 
@@ -17,6 +18,18 @@ const waitingWorkflow = defineWorkflow({
   name: "waiting-child",
   startAt: "approval",
   nodes: { approval: checkpoint({ summary: "approve" }) },
+  edges: [],
+});
+
+const controlledWorkflow = defineWorkflow({
+  name: "controlled-child",
+  settings: workflowSettings({
+    initial: { mode: "old" },
+    parse: (value) => value as { mode: string },
+    paths: [allowSettingsPath("/mode", { replace: ["controller"] })],
+  }),
+  startAt: "wait",
+  nodes: { wait: checkpoint({ summary: "wait" }) },
   edges: [],
 });
 
@@ -94,6 +107,166 @@ describe("WorkflowEngineScheduler SQLite", () => {
         { state: "failed", runId: "failed-run", error: "child failed" },
       ]),
     );
+    store.close();
+  });
+
+  it("changes settings and manages follow-ups for a controller child", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("child-control"));
+    const subject = scheduler(
+      store,
+      new Map([
+        ["controlled", controlledWorkflow],
+        ["controlled-child", controlledWorkflow],
+      ]),
+    );
+    await subject.ensure(
+      {
+        requestId: "controlled-request",
+        attempt: 1,
+        workflow: "controlled",
+        input: {},
+        runId: "controlled-run",
+      },
+      new AbortController().signal,
+      () => undefined,
+    );
+    await subject.waitForIdle();
+    const changed = await subject.changeSettings(
+      {
+        requestKey: "settings",
+        actorRequestKey: "controller:resource-1:settings",
+        controllerResourceUid: "resource-1",
+        runId: "controlled-run",
+        patch: [{ op: "replace", path: "/mode", value: "new" }],
+      },
+      new AbortController().signal,
+    );
+    expect(changed).toMatchObject({ changeNumber: 1, adopted: false });
+    await expect(
+      subject.changeSettings(
+        {
+          requestKey: "missing",
+          actorRequestKey: "controller:resource-1:missing",
+          controllerResourceUid: "resource-1",
+          runId: "missing-run",
+          patch: [],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/run not found/);
+    await expect(
+      subject.changeSettings(
+        {
+          requestKey: "unknown-scope",
+          actorRequestKey: "controller:resource-1:unknown-scope",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          scopeId: "missing-scope",
+          patch: [],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/scope not found/);
+    await expect(
+      subject.queueFollowUp(
+        {
+          requestKey: "no-session",
+          actorRequestKey: "controller:resource-1:no-session",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          prompt: "later",
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/origin Pi session/);
+    expect(
+      await subject.changeSettings(
+        {
+          requestKey: "settings-2",
+          actorRequestKey: "controller:resource-1:settings-2",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          scopeId: changed.scopeId,
+          expectedChangeNumber: 1,
+          patch: [{ op: "replace", path: "/mode", value: "newer" }],
+        },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ changeNumber: 2 });
+    const wrongDefinition = scheduler(
+      store,
+      new Map([
+        ["controlled-child", waitingWorkflow],
+        ["waiting-child", waitingWorkflow],
+      ]),
+    );
+    await expect(
+      wrongDefinition.changeSettings(
+        {
+          requestKey: "no-definition",
+          actorRequestKey: "controller:resource-1:no-definition",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          scopeId: changed.scopeId,
+          patch: [],
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/does not declare editable settings/);
+    await store.writeSessionBinding("controlled-run", {
+      schema: SESSION_BINDING_SCHEMA,
+      runId: "controlled-run",
+      piSessionId: "session-1",
+      cwd: "/tmp/project",
+      boundAt: new Date().toISOString(),
+    });
+    const queued = await subject.queueFollowUp(
+      {
+        requestKey: "follow",
+        actorRequestKey: "controller:resource-1:follow",
+        controllerResourceUid: "resource-1",
+        runId: "controlled-run",
+        prompt: "Continue later",
+      },
+      new AbortController().signal,
+    );
+    expect(queued).toMatchObject({ order: 1, state: "queued" });
+    expect(
+      await subject.queueFollowUp(
+        {
+          requestKey: "follow",
+          actorRequestKey: "controller:resource-1:follow",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          prompt: "Continue later",
+        },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ adopted: true, order: 1 });
+    await expect(
+      subject.removeFollowUp(
+        {
+          requestKey: "remove",
+          actorRequestKey: "controller:resource-1:remove",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          followUpId: queued.followUpId,
+        },
+        AbortSignal.abort(new Error("stop")),
+      ),
+    ).rejects.toThrow(/stop/);
+    expect(
+      await subject.removeFollowUp(
+        {
+          requestKey: "remove",
+          actorRequestKey: "controller:resource-1:remove",
+          controllerResourceUid: "resource-1",
+          runId: "controlled-run",
+          followUpId: queued.followUpId,
+        },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ state: "removed", adopted: false });
     store.close();
   });
 

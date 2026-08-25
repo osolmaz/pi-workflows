@@ -27,6 +27,7 @@ import type {
   WorkflowInputOf,
   WorkflowNodeContext,
   WorkflowNodeDefinition,
+  WorkflowSettingsOf,
   WorkflowTypedEdge,
   WorkflowValueParser,
 } from "./types.js";
@@ -91,6 +92,9 @@ export function includeWorkflow<TWorkflow extends WorkflowDefinition<any, any, a
     input?: (
       context: WorkflowNodeContext,
     ) => Promise<WorkflowInputOf<TWorkflow>> | WorkflowInputOf<TWorkflow>;
+    settings?: (
+      context: WorkflowNodeContext,
+    ) => Promise<WorkflowSettingsOf<TWorkflow>> | WorkflowSettingsOf<TWorkflow>;
   },
 ): WorkflowIncludeDefinition<TWorkflow>;
 export function includeWorkflow<TWorkflow extends WorkflowDefinition<any, any, any>>(
@@ -102,6 +106,9 @@ export function includeWorkflow<TWorkflow extends WorkflowDefinition<any, any, a
     input?: (
       context: WorkflowNodeContext,
     ) => Promise<WorkflowInputOf<TWorkflow>> | WorkflowInputOf<TWorkflow>;
+    settings?: (
+      context: WorkflowNodeContext,
+    ) => Promise<WorkflowSettingsOf<TWorkflow>> | WorkflowSettingsOf<TWorkflow>;
   } = {},
 ): WorkflowIncludeDefinition<TWorkflow> {
   const definition = isWorkflowDefinition(workflowOrDefinition)
@@ -112,6 +119,9 @@ export function includeWorkflow<TWorkflow extends WorkflowDefinition<any, any, a
   }
   if (definition.input !== undefined && typeof definition.input !== "function") {
     throw new Error("Included workflow input must be a function");
+  }
+  if (definition.settings !== undefined && typeof definition.settings !== "function") {
+    throw new Error("Included workflow settings must be a function");
   }
   if (definition.contract !== undefined && !isWorkflowDefinition(definition.contract)) {
     throw new Error("Included workflow contract must be defined with defineWorkflow");

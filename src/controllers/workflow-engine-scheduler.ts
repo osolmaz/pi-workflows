@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { compositionMetadata } from "../workflows/composition.js";
 import { WorkflowEngine } from "../workflows/engine.js";
 import type { WorkflowRunStore } from "../workflows/store.js";
 import type {
@@ -7,6 +9,14 @@ import type {
   WorkflowSource,
 } from "../workflows/types.js";
 import type {
+  ControllerFollowUpResult,
+  ControllerQueueFollowUpRequest,
+  ControllerRemoveFollowUpRequest,
+  ControllerSettingsChangeRequest,
+  ControllerSettingsChangeResult,
+} from "./types.js";
+import type {
+  ControllerWorkflowControlRequest,
   ControllerWorkflowScheduler,
   WorkflowSchedulerRequest,
   WorkflowSchedulerResult,
@@ -94,6 +104,102 @@ export class WorkflowEngineScheduler implements ControllerWorkflowScheduler {
       });
     this.active.set(activeKey, { runId, promise });
     return { state: "running", runId };
+  }
+
+  async changeSettings(
+    request: ControllerWorkflowControlRequest<ControllerSettingsChangeRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerSettingsChangeResult> {
+    signal.throwIfAborted();
+    const bundle = this.options.store.readRun(request.runId);
+    if (bundle === null) throw new Error(`Workflow run not found: ${request.runId}`);
+    const resolved = await this.options.resolveWorkflow(bundle.state.workflowName);
+    signal.throwIfAborted();
+    if (
+      bundle.state.workflowSource !== undefined &&
+      !isDeepStrictEqual(bundle.state.workflowSource, resolved.workflowSource)
+    ) {
+      throw new Error(`Workflow source changed since run ${request.runId} started`);
+    }
+    const scopes = this.options.store.listSettingsScopes(request.runId);
+    const scopeId = request.scopeId ?? (scopes.length === 1 ? scopes[0]?.scopeId : undefined);
+    if (scopeId === undefined) {
+      throw new Error("Controller settings changes require scopeId when several scopes exist");
+    }
+    const scope = this.options.store.getSettingsScope(scopeId);
+    if (scope === undefined || scope.activeRunId !== request.runId) {
+      throw new Error(`Workflow settings scope not found: ${scopeId}`);
+    }
+    const definition =
+      scope.mountPath === ""
+        ? resolved.workflow.settings
+        : compositionMetadata(resolved.workflow)?.scopes[scope.mountPath]?.settings;
+    if (definition === undefined) {
+      throw new Error(`Workflow scope ${scopeId} does not declare editable settings`);
+    }
+    const result = await this.options.store.changeSettings(definition, {
+      runId: request.runId,
+      scopeId,
+      requestId: request.actorRequestKey,
+      ...(request.expectedChangeNumber !== undefined
+        ? { expectedChangeNumber: request.expectedChangeNumber }
+        : {}),
+      actor: { type: "controller", id: request.controllerResourceUid },
+      source: "controller-request",
+      patch: request.patch,
+    });
+    return {
+      runId: request.runId,
+      scopeId,
+      changeNumber: result.scope.changeNumber,
+      adopted: result.adopted,
+    };
+  }
+
+  async queueFollowUp(
+    request: ControllerWorkflowControlRequest<ControllerQueueFollowUpRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerFollowUpResult> {
+    signal.throwIfAborted();
+    const targetSessionId = this.options.store.originSessionId(request.runId);
+    if (targetSessionId === undefined) {
+      throw new Error("Controller follow-up requires a workflow run with an origin Pi session");
+    }
+    const result = this.options.store.queueFollowUp({
+      runId: request.runId,
+      requestId: request.actorRequestKey,
+      targetSessionId,
+      actor: { type: "controller", id: request.controllerResourceUid },
+      source: "controller-request",
+      prompt: request.prompt,
+    });
+    return {
+      runId: request.runId,
+      followUpId: result.followUp.followUpId,
+      order: result.followUp.order,
+      state: result.followUp.state,
+      adopted: result.adopted,
+    };
+  }
+
+  async removeFollowUp(
+    request: ControllerWorkflowControlRequest<ControllerRemoveFollowUpRequest>,
+    signal: AbortSignal,
+  ): Promise<ControllerFollowUpResult> {
+    signal.throwIfAborted();
+    const result = this.options.store.removeFollowUp({
+      runId: request.runId,
+      followUpId: request.followUpId,
+      actor: { type: "controller", id: request.controllerResourceUid },
+      source: "controller-request",
+    });
+    return {
+      runId: request.runId,
+      followUpId: result.followUpId,
+      order: result.order,
+      state: result.state,
+      adopted: false,
+    };
   }
 
   async waitForIdle(): Promise<void> {

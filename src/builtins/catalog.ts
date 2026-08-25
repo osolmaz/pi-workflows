@@ -11,7 +11,7 @@ export const builtinWorkflowCatalog = new BuiltinWorkflowCatalog([
   { id: "plain-summary", revision: "3", definition: plainSummaryWorkflow },
   { id: "autoplan", revision: "5", definition: autoplanWorkflow },
   { id: "autodoc", revision: "2", definition: autodocWorkflow },
-  { id: "autoimplement", revision: "10", definition: autoimplementWorkflow },
+  { id: "autoimplement", revision: "11", definition: autoimplementWorkflow },
   { id: "plan-approval", revision: "4", definition: planApprovalWorkflow },
   { id: "sanity-check", revision: "6", definition: sanityCheckWorkflow },
   {

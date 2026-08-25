@@ -32,6 +32,8 @@ Runs should survive interruption and remain safe to resume. Save the run input a
 
 Immutable SQLite events are the record of what happened. Domain rows are current projections written in the same transaction. Viewers derive their answers from those facts instead of creating another source of truth.
 
+Live workflow settings follow the same rule. The workflow owns one typed JSON value and path policy. The engine owns ordered JSON Patch application and fixed node bindings. Lifecycle actions, such as queued post-completion prompts, stay outside the settings value.
+
 Reading shared state never gives mutation authority. Every durable write checks its actor, expected resource revision, and current lease generation when ownership is required. Follow-up work uses deterministic effects and idempotent receipts so partial failure can converge safely.
 
 ## Boundaries

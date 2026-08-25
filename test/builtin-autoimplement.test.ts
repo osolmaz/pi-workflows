@@ -9,6 +9,10 @@ import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
+import {
+  applyWorkflowSettingsPatch,
+  resolveInitialWorkflowSettings,
+} from "../src/workflows/settings.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
@@ -322,6 +326,36 @@ afterEach(() => {
 });
 
 describe("built-in autoimplement", () => {
+  it("allows a model to disable merge but not grant merge authority", async () => {
+    const definition = autoimplementWorkflow.settings;
+    if (definition === undefined) throw new Error("autoimplement settings are missing");
+    await expect(
+      resolveInitialWorkflowSettings(definition, {
+        task: "demo",
+        repository: "/tmp/demo",
+        merge: true,
+      }),
+    ).resolves.toMatchObject({ settings: { merge: true, addedInstructions: [] } });
+    await expect(
+      applyWorkflowSettingsPatch(
+        definition,
+        { merge: true, addedInstructions: [] },
+        [{ op: "replace", path: "/merge", value: false }],
+        { type: "session" },
+        "workflow-tool",
+      ),
+    ).resolves.toMatchObject({ settings: { merge: false } });
+    await expect(
+      applyWorkflowSettingsPatch(
+        definition,
+        { merge: false, addedInstructions: [] },
+        [{ op: "replace", path: "/merge", value: true }],
+        { type: "session" },
+        "workflow-tool",
+      ),
+    ).rejects.toThrow(/cannot grant merge authority/);
+  });
+
   it("validates input, reviewer severities, repair commands, and CI tracking", async () => {
     const parseInput = autoimplementWorkflow.input;
     if (parseInput === undefined) throw new Error("autoimplement input parser is missing");
@@ -983,6 +1017,7 @@ describe("built-in autoimplement", () => {
         },
         outputs: {},
         results: {},
+        settings: { merge: false, addedInstructions: [] },
         state: { steps: [] },
         signal: new AbortController().signal,
         ...overrides,
@@ -1178,7 +1213,11 @@ describe("built-in autoimplement", () => {
     ).toContain("without merging");
     expect(
       await delivery.prompt(
-        makeContext({ input: { task: "demo", merge: true }, outputs: { publish: published() } }),
+        makeContext({
+          input: { task: "demo", merge: true },
+          settings: { merge: true, addedInstructions: [] },
+          outputs: { publish: published() },
+        }),
       ),
     ).toContain("merge each");
     expect(() => delivery.validate?.({ status: "invalid" }, makeContext())).toThrow(

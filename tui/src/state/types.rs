@@ -151,6 +151,21 @@ pub struct RunState {
         skip_serializing_if = "Option::is_none"
     )]
     pub current_node_started_at: Option<String>,
+    #[serde(
+        rename = "currentSettingsScopeId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_settings_scope_id: Option<String>,
+    #[serde(
+        rename = "currentSettingsChangeNumber",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_settings_change_number: Option<u64>,
+    #[serde(
+        rename = "currentSettingsHash",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_settings_hash: Option<String>,
     #[serde(rename = "statusDetail", skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
     #[serde(rename = "humanDecision", skip_serializing_if = "Option::is_none")]
@@ -209,6 +224,15 @@ pub struct StepRecord {
     pub action: Option<ActionReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<ConversationRange>,
+    #[serde(rename = "settingsScopeId", skip_serializing_if = "Option::is_none")]
+    pub settings_scope_id: Option<String>,
+    #[serde(
+        rename = "settingsChangeNumber",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub settings_change_number: Option<u64>,
+    #[serde(rename = "settingsHash", skip_serializing_if = "Option::is_none")]
+    pub settings_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -27,6 +27,8 @@ pub struct RemoteView {
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
+    pub settings_scopes: Vec<Value>,
+    pub follow_up_queue: Option<Value>,
     pub live: bool,
     pub possibly_interrupted: bool,
 }
@@ -62,6 +64,15 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let session_capture = raw.pointer("/session/capture").cloned();
+    let settings_scopes = raw
+        .get("settingsScopes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let follow_up_queue = raw
+        .get("followUpQueue")
+        .cloned()
+        .filter(|value| !value.is_null());
     Some(RemoteView {
         revision,
         generation,
@@ -75,6 +86,8 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         session_events_malformed,
         session_events_torn_tail,
         session_capture,
+        settings_scopes,
+        follow_up_queue,
         live: raw.get("live").and_then(Value::as_bool).unwrap_or(false),
         possibly_interrupted: raw
             .get("possiblyInterrupted")
