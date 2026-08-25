@@ -125,7 +125,10 @@ describe("workflow composition", () => {
     expect(bundle?.snapshot.composition?.mounts).toHaveLength(1);
     const trace = bundle?.traceEvents ?? [];
     expect(trace.filter((event) => event.type === "include_entered")).toHaveLength(1);
-    expect(trace.filter((event) => event.type === "include_exited")).toHaveLength(1);
+    const includeExit = trace.filter((event) => event.type === "include_exited");
+    expect(includeExit).toHaveLength(1);
+    expect(includeExit[0]?.payload).toMatchObject({ outputStored: true });
+    expect(includeExit[0]?.payload).not.toHaveProperty("output");
   });
 
   it("starts every re-entry with empty child-local state", async () => {

@@ -1613,7 +1613,10 @@ function compactTracePayload(
   eventType: string,
   payload: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (eventType === "node_finished" && Object.hasOwn(payload, "output")) {
+  if (
+    (eventType === "node_finished" || eventType === "include_exited") &&
+    Object.hasOwn(payload, "output")
+  ) {
     const { output: _output, ...rest } = payload;
     return { ...rest, outputStored: true };
   }
