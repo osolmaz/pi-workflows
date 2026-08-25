@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agent,
+  assistantMessage,
   checkpoint,
   compute,
   defineWorkflow,
@@ -190,6 +191,94 @@ describe("durable workflow settings", () => {
         runId,
       ),
     ).rejects.toThrow(/projection does not match saved changes/);
+    store.close();
+  });
+
+  it("recaptures current settings when a parked submitted node resumes", async () => {
+    const databasePath = await makeStateDatabasePath("workflow-settings-parked-resume");
+    const executor = new HeldExecutor();
+    const engine = new WorkflowEngine({ databasePath, executor });
+    const running = engine.run(liveWorkflow, {});
+    await waitUntil(() => executor.started);
+    const store = new WorkflowRunStore(databasePath);
+    const runId = store.listRuns()[0]?.runId as string;
+    const scope = store.listSettingsScopes(runId)[0];
+    await store.changeSettings(settings, {
+      runId,
+      scopeId: scope?.scopeId as string,
+      requestId: "resume-change",
+      actor: { type: "human" },
+      source: "interactive-command",
+      patch: [{ op: "replace", path: "/mode", value: "b" }],
+    });
+    engine.park();
+    await running;
+
+    const resumedExecutor = new ScriptedExecutor().respond("hold", { output: { ok: true } });
+    const resumed = await new WorkflowEngine({ databasePath, executor: resumedExecutor }).resumeRun(
+      liveWorkflow,
+      runId,
+    );
+    expect(resumed.state.steps[0]).toMatchObject({
+      nodeId: "hold",
+      settingsChangeNumber: 1,
+    });
+    expect(resumed.state.finalOutput).toEqual({
+      settings: { mode: "b", notes: [] },
+      settingsChangeNumber: 1,
+    });
+    store.close();
+  });
+
+  it("keeps the saved settings change when an assistant response resumes", async () => {
+    const databasePath = await makeStateDatabasePath("workflow-settings-assistant-resume");
+    const workflow = defineWorkflow({
+      name: "settings-assistant-resume",
+      settings,
+      startAt: "present",
+      nodes: {
+        present: agent({
+          prompt: ({ settings }) => `Present ${JSON.stringify(settings)}`,
+          expectedOutput: assistantMessage(),
+        }),
+      },
+      edges: [],
+    });
+    const parkedExecutor = {
+      assistantMessageMode: "park" as const,
+      runAgentStep: async () => {
+        throw new Error("parked executor must not receive a prompt");
+      },
+    };
+    const parked = await new WorkflowEngine({
+      databasePath,
+      executor: parkedExecutor,
+    }).run(workflow, {});
+    const store = new WorkflowRunStore(databasePath);
+    const scope = store.listSettingsScopes(parked.runId)[0];
+    await store.changeSettings(settings, {
+      runId: parked.runId,
+      scopeId: scope?.scopeId as string,
+      requestId: "assistant-resume-change",
+      actor: { type: "human" },
+      source: "interactive-command",
+      patch: [{ op: "replace", path: "/mode", value: "b" }],
+    });
+
+    const visibleExecutor = new ScriptedExecutor().respond("present", (request) => {
+      expect(request.prompt).toContain('"mode":"a"');
+      expect(request.prompt).not.toContain('"mode":"b"');
+      return { output: "visible", assistantMessage: { sha256: "c".repeat(64) } };
+    });
+    const resumed = await new WorkflowEngine({
+      databasePath,
+      executor: visibleExecutor,
+    }).resumeRun(workflow, parked.runId);
+    expect(resumed.state.steps[0]).toMatchObject({ settingsChangeNumber: 0 });
+    expect(store.getSettingsScope(scope?.scopeId as string)).toMatchObject({
+      changeNumber: 1,
+      settings: { mode: "b", notes: [] },
+    });
     store.close();
   });
 

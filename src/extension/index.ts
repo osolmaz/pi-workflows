@@ -680,7 +680,12 @@ export default function piWorkflows(pi: ExtensionAPI) {
     runId: string,
     unavailableReason?: string,
   ): boolean => {
-    if (followUpStore === null) return false;
+    if (
+      followUpStore === null ||
+      followUpStore.readFollowUpQueue(runId)?.presentationState !== "pending"
+    ) {
+      return false;
+    }
     const settled = findSettledPresentationEntries(ctx.sessionManager.getBranch(), runId);
     if (settled !== undefined) {
       followUpStore.settleFollowUpPresentation({

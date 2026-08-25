@@ -2174,6 +2174,7 @@ export default defineWorkflow({
 
 export default defineWorkflow({
   name: "parked",
+  presentationPrompt: "Explain that the workflow is waiting for review.",
   startAt: "review",
   nodes: {
     review: checkpoint({ summary: "human review", run: () => ({ ok: true }) }),
@@ -2190,6 +2191,12 @@ export default defineWorkflow({
       expect(harness.notifications.at(-1)).toContain(
         "parked at checkpoint review — answer with /workflow answer <json>",
       );
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-presentation",
+        ),
+      );
+      await harness.emitAsync("agent_settled");
 
       // The final widget update must still be present, not cleared, and show
       // the waiting state so the human sees the parked checkpoint.

@@ -343,20 +343,22 @@ export class WorkflowEngine {
     const point = this.resumePointFor(workflow, state, "wait");
     const interruptedNode =
       state.currentNode !== undefined ? workflow.nodes[state.currentNode] : undefined;
-    const resumedSettings = this.persistedSettingsBinding(state);
-    const resumedAttempt: ResumedNodeAttempt | undefined =
+    let resumedAttempt: ResumedNodeAttempt | undefined;
+    if (
       state.currentNode !== undefined &&
       state.currentAttemptId !== undefined &&
       state.currentNodeStartedAt !== undefined &&
       interruptedNode?.nodeType === "agent" &&
       assistantMessageConfig(interruptedNode) !== undefined
-        ? {
-            nodeId: state.currentNode,
-            attemptId: state.currentAttemptId,
-            startedAt: state.currentNodeStartedAt,
-            ...(resumedSettings !== undefined ? { settings: resumedSettings } : {}),
-          }
-        : undefined;
+    ) {
+      const resumedSettings = this.persistedSettingsBinding(state);
+      resumedAttempt = {
+        nodeId: state.currentNode,
+        attemptId: state.currentAttemptId,
+        startedAt: state.currentNodeStartedAt,
+        ...(resumedSettings !== undefined ? { settings: resumedSettings } : {}),
+      };
+    }
     // A resumed run starts unpaused. Submitted and non-agent nodes discard
     // stale in-flight markers and start a new attempt. Assistant-message
     // nodes keep their attempt id so the origin session can adopt an already
@@ -1341,15 +1343,21 @@ export class WorkflowEngine {
     state: WorkflowRunState,
   ): WorkflowSettingsScopeRecord | undefined {
     if (state.currentSettingsScopeId === undefined) return undefined;
-    const scope = this.store.getSettingsScope(state.currentSettingsScopeId);
+    if (
+      state.currentSettingsChangeNumber === undefined ||
+      state.currentSettingsHash === undefined
+    ) {
+      throw new Error("Saved workflow settings binding is incomplete");
+    }
+    const scope = this.store.getSettingsScopeAtChange(
+      state.currentSettingsScopeId,
+      state.currentSettingsChangeNumber,
+    );
     if (scope === undefined) {
       throw new Error(`Saved workflow settings scope is missing: ${state.currentSettingsScopeId}`);
     }
-    if (
-      scope.changeNumber !== state.currentSettingsChangeNumber ||
-      scope.settingsHash !== state.currentSettingsHash
-    ) {
-      throw new Error("Saved workflow settings binding does not match its settings scope");
+    if (scope.settingsHash !== state.currentSettingsHash) {
+      throw new Error("Saved workflow settings binding does not match its saved change");
     }
     return scope;
   }
