@@ -100,8 +100,8 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Content             | `blobs`                                                                                                       |
 | Shared lifecycle    | `resources`, `leases`, `events`                                                                               |
 | Workflows           | `workflow_definitions`, `runs`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
-| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                              |
-| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                           |
+| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                               |
+| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                            |
 | Session capture     | `session_segments`, `session_entries`, `session_events`                                                       |
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                |
 | Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                   |
