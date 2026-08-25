@@ -10,7 +10,10 @@ export type ResourceType =
   | "effect"
   | "channel"
   | "notification"
-  | "turn_intent";
+  | "turn_intent"
+  | "settings"
+  | "follow_up_queue"
+  | "follow_up";
 
 export type ActorType =
   | "session"

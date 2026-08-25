@@ -31,14 +31,30 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
         .unwrap();
     connection
         .execute_batch(
-            "CREATE TABLE blobs(blob_hash BLOB PRIMARY KEY, media_type TEXT, content BLOB);
+            "CREATE TABLE schema_meta(id INTEGER PRIMARY KEY, schema_digest BLOB);
+             CREATE TABLE blobs(blob_hash BLOB PRIMARY KEY, media_type TEXT, content BLOB);
+             CREATE TABLE resources(resource_id TEXT PRIMARY KEY, revision INTEGER);
              CREATE TABLE workflow_definitions(definition_digest BLOB PRIMARY KEY, definition_hash BLOB);
              CREATE TABLE runs(run_id TEXT PRIMARY KEY, resource_id TEXT, definition_digest BLOB, output_hash BLOB, created_at INTEGER);
              CREATE TABLE leases(resource_id TEXT PRIMARY KEY, owner_id TEXT, expires_at INTEGER);
              CREATE TABLE events(resource_id TEXT, resource_revision INTEGER, event_type TEXT, payload_hash BLOB, recorded_at INTEGER);
              CREATE TABLE session_segments(segment_id TEXT, run_id TEXT, capture_key TEXT, binding_hash BLOB, status TEXT, entry_count INTEGER, event_count INTEGER, failure_hash BLOB, created_at INTEGER);
              CREATE TABLE session_entries(segment_id TEXT, entry_seq INTEGER, entry_hash BLOB, recorded_at INTEGER);
-             CREATE TABLE session_events(segment_id TEXT, event_seq INTEGER, event_type TEXT, node_id TEXT, attempt_id TEXT, turn_id TEXT, message_id TEXT, tool_call_id TEXT, payload_hash BLOB, recorded_at INTEGER);",
+             CREATE TABLE session_events(segment_id TEXT, event_seq INTEGER, event_type TEXT, node_id TEXT, attempt_id TEXT, turn_id TEXT, message_id TEXT, tool_call_id TEXT, payload_hash BLOB, recorded_at INTEGER);
+             CREATE TABLE workflow_settings(scope_id TEXT, resource_id TEXT, active_run_id TEXT, mount_path TEXT, invocation INTEGER, current_hash BLOB);
+             CREATE TABLE workflow_follow_up_queues(run_id TEXT, presentation_state TEXT);
+             CREATE TABLE workflow_follow_ups(run_id TEXT, follow_up_id TEXT, order_number INTEGER, status TEXT, source_type TEXT, session_entry_id TEXT);",
+        )
+        .unwrap();
+    let schema_digest = vec![
+        0xb6, 0xca, 0x3b, 0xc5, 0xf5, 0x8b, 0xe4, 0xdb, 0x4b, 0x61, 0xd4, 0x16, 0x38, 0x4e, 0x0b,
+        0x62, 0x7c, 0xc6, 0x24, 0x5a, 0xdc, 0x1d, 0x30, 0x0c, 0x1b, 0xf6, 0x5a, 0xc1, 0x7d, 0xe0,
+        0x45, 0x5d,
+    ];
+    connection
+        .execute(
+            "INSERT INTO schema_meta(id, schema_digest) VALUES (1, ?1)",
+            [schema_digest],
         )
         .unwrap();
     let state = json!({
@@ -64,6 +80,12 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
         .execute(
             "INSERT INTO workflow_definitions(definition_digest, definition_hash) VALUES (?1, ?2)",
             params![digest, definition_hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO resources(resource_id, revision) VALUES ('resource-1', 1)",
+            [],
         )
         .unwrap();
     connection
@@ -202,6 +224,33 @@ fn remote_mode_does_not_require_local_state() {
         .unwrap();
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("database"));
+}
+
+#[test]
+fn rejects_the_previous_schema_digest() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("old.sqlite");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .pragma_update(None, "application_id", 0x5049_5746_i64)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", 1_i64)
+        .unwrap();
+    connection
+        .execute_batch("CREATE TABLE schema_meta(id INTEGER PRIMARY KEY, schema_digest BLOB);")
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO schema_meta(id, schema_digest) VALUES (1, ?1)",
+            [vec![0_u8; 32]],
+        )
+        .unwrap();
+    drop(connection);
+    let error = read_run(Path::new(&database), "run-1").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("incompatible Pi Workflows SQLite schema"));
 }
 
 #[test]

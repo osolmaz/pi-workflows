@@ -260,6 +260,12 @@ The `launch_failure` notification kind is removed. Queued launch failure creates
 
 Pending `launch_failure` rows from the earlier alpha contract are incompatible. Pi Workflows must stop with a clear controller-store reset instruction. It must not reinterpret, migrate, or silently delete those rows.
 
+## Post-completion follow-ups
+
+Deferred turns repair one stranded workflow turn after interruption. Ordered post-completion prompts are different. They represent user-requested normal work after successful completion, use `workflow_follow_up_queues` and `workflow_follow_ups`, and are delivered by the separate follow-up coordinator. Neither feature reads or changes the other's rows.
+
+See [Continue normal work after a workflow finishes](2026-08-25-workflow-follow-ups.md).
+
 ## Availability limits
 
 Pi Workflows can guarantee only the facts under its control:

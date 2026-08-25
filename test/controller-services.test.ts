@@ -236,6 +236,94 @@ describe("ControllerEffectService", () => {
 });
 
 describe("ControllerWorkflowCoordinator", () => {
+  it("rejects control methods that the host does not provide", async () => {
+    const { store, resource, claim } = await fixture();
+    const workflows = new ControllerWorkflowCoordinator(store, {
+      ensure: async (request) => ({ state: "running", runId: request.runId }),
+    }).forResource(resource, claim, new AbortController().signal);
+    await expect(
+      workflows.changeSettings({
+        requestKey: "settings",
+        runId: "run-1",
+        patch: [],
+      }),
+    ).rejects.toThrow(/does not support workflow settings/);
+    await expect(
+      workflows.queueFollowUp({ requestKey: "queue", runId: "run-1", prompt: "later" }),
+    ).rejects.toThrow(/does not support workflow follow-ups/);
+    await expect(
+      workflows.removeFollowUp({
+        requestKey: "remove",
+        runId: "run-1",
+        followUpId: "follow-up-1",
+      }),
+    ).rejects.toThrow(/does not support workflow follow-ups/);
+  });
+
+  it("adds controller identity to settings and follow-up requests", async () => {
+    const { store, resource, claim } = await fixture();
+    const changeSettings = vi.fn(async (request) => ({
+      runId: request.runId,
+      scopeId: request.scopeId ?? "scope-1",
+      changeNumber: 2,
+      adopted: false,
+    }));
+    const queueFollowUp = vi.fn(async (request) => ({
+      runId: request.runId,
+      followUpId: "follow-up-1",
+      order: 1,
+      state: "queued",
+      adopted: false,
+    }));
+    const removeFollowUp = vi.fn(async (request) => ({
+      runId: request.runId,
+      followUpId: request.followUpId,
+      order: 1,
+      state: "removed",
+      adopted: false,
+    }));
+    const coordinator = new ControllerWorkflowCoordinator(store, {
+      ensure: async (request) => ({ state: "running", runId: request.runId }),
+      changeSettings,
+      queueFollowUp,
+      removeFollowUp,
+    });
+    const workflows = coordinator.forResource(resource, claim, new AbortController().signal);
+    await expect(
+      workflows.changeSettings({ requestKey: " ", runId: "run-1", patch: [] }),
+    ).rejects.toThrow(/requestKey must not be empty/);
+    await workflows.changeSettings({
+      requestKey: "settings-1",
+      runId: "run-1",
+      patch: [{ op: "replace", path: "/mode", value: "safe" }],
+    });
+    const queued = await workflows.queueFollowUp({
+      requestKey: "follow-1",
+      runId: "run-1",
+      prompt: "Continue later",
+    });
+    await workflows.removeFollowUp({
+      requestKey: "remove-1",
+      runId: "run-1",
+      followUpId: queued.followUpId,
+    });
+    expect(changeSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controllerResourceUid: resource.metadata.uid,
+        actorRequestKey: `controller:${resource.metadata.uid}:settings-1`,
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(queueFollowUp).toHaveBeenCalledWith(
+      expect.objectContaining({ actorRequestKey: `controller:${resource.metadata.uid}:follow-1` }),
+      expect.any(AbortSignal),
+    );
+    expect(removeFollowUp).toHaveBeenCalledWith(
+      expect.objectContaining({ actorRequestKey: `controller:${resource.metadata.uid}:remove-1` }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("keeps a stable child request and reports completion to the parent", async () => {
     const { store, resource, claim } = await fixture();
     const scheduler: ControllerWorkflowScheduler = {

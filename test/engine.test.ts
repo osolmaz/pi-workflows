@@ -8,7 +8,7 @@ import {
   defineWorkflow,
   shell,
 } from "../src/workflows/definition.js";
-import { WorkflowEngine, appendStepContract } from "../src/workflows/engine.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore, readWorkflowRun } from "../src/workflows/store.js";
 import type { WorkflowTraceEvent } from "../src/workflows/types.js";
 import { makeStateDatabasePath, ScriptedExecutor, waitUntil } from "./helpers.js";
@@ -201,9 +201,8 @@ describe("WorkflowEngine", () => {
       runTitle: "Contract run",
       statusDetail: "Checking the contract",
     });
-    expect(prompt).toBe(
-      appendStepContract("Base prompt", "contract", "ask", attemptId, `{ "x": 1 }`),
-    );
+    expect(prompt).toContain("This workflow scope has no editable settings.");
+    expect(prompt).toContain("queue-follow-up");
   });
 
   it("uses exact visible text for assistant-message agent output", async () => {

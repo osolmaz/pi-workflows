@@ -4,6 +4,7 @@ import {
   MAX_JSON_PATCH_OPERATIONS,
   MAX_JSON_POINTER_BYTES,
   applyJsonPatch,
+  cloneJson,
   encodeJsonPointer,
   jsonPointerTarget,
   parseJsonPointer,
@@ -24,6 +25,7 @@ describe("RFC 6901 JSON Pointer", () => {
   });
 
   it("rejects malformed and oversized pointers", () => {
+    expect(() => parseJsonPointer(5 as never)).toThrow(/must be a string/);
     expect(() => parseJsonPointer("missing-slash")).toThrow(/Invalid JSON Pointer/);
     expect(() => parseJsonPointer("/bad~2escape")).toThrow(/Invalid JSON Pointer escape/);
     expect(() => parseJsonPointer(`/${"x".repeat(MAX_JSON_POINTER_BYTES + 1)}`)).toThrow(
@@ -31,7 +33,14 @@ describe("RFC 6901 JSON Pointer", () => {
     );
   });
 
-  it("reads only own properties", () => {
+  it("reads roots, arrays, primitives, and only own properties", () => {
+    expect(encodeJsonPointer([])).toBe("");
+    expect(jsonPointerTarget({ value: 1 }, "")).toEqual({
+      exists: true,
+      value: { value: 1 },
+    });
+    expect(jsonPointerTarget(["a"], "/1")).toEqual({ exists: false });
+    expect(jsonPointerTarget({ value: 1 }, "/value/child")).toEqual({ exists: false });
     expect(jsonPointerTarget({ constructor: "safe" }, "/constructor")).toEqual({
       exists: true,
       value: "safe",
@@ -65,19 +74,31 @@ describe("RFC 6902 JSON Patch", () => {
     });
   });
 
-  it("supports root replacement and array append", () => {
+  it("supports root operations and array append", () => {
+    expect(applyJsonPatch(source, [{ op: "add", path: "", value: [0] }])).toEqual([0]);
     expect(applyJsonPatch(source, [{ op: "replace", path: "", value: [1] }])).toEqual([1]);
+    expect(applyJsonPatch({ a: 1 }, [{ op: "test", path: "", value: { a: 1 } }])).toEqual({
+      a: 1,
+    });
+    expect(applyJsonPatch({ a: 1 }, [{ op: "copy", from: "", path: "/copy" }])).toEqual({
+      a: 1,
+      copy: { a: 1 },
+    });
     expect(applyJsonPatch({ items: [] }, [{ op: "add", path: "/items/-", value: "x" }])).toEqual({
       items: ["x"],
     });
   });
 
-  it("uses post-removal indexes for moves in one array", () => {
+  it("uses post-removal indexes and handles same-path and root moves", () => {
     expect(applyJsonPatch(["a", "b", "c"], [{ op: "move", from: "/0", path: "/2" }])).toEqual([
       "b",
       "c",
       "a",
     ]);
+    expect(applyJsonPatch({ a: 1 }, [{ op: "move", from: "/a", path: "/a" }])).toEqual({ a: 1 });
+    expect(() => applyJsonPatch({ a: 1 }, [{ op: "move", from: "", path: "/a" }])).toThrow(
+      /document root/,
+    );
   });
 
   it("deep-copies copied values", () => {
@@ -124,6 +145,21 @@ describe("RFC 6902 JSON Patch", () => {
       applyJsonPatch(source, [{ op: "move", from: "/nested", path: "/nested/new" }]),
     ).toThrow(/inside its source/);
     expect(() => applyJsonPatch(source, [{ op: "remove", path: "" }])).toThrow(/document root/);
+    expect(() => applyJsonPatch(source, [{ op: "replace", path: "/items/2", value: "x" }])).toThrow(
+      /does not exist/,
+    );
+    expect(() => applyJsonPatch(source, [{ op: "replace", path: "/missing", value: "x" }])).toThrow(
+      /does not exist/,
+    );
+    expect(() => applyJsonPatch({ value: 1 }, [{ op: "add", path: "/value/x", value: 2 }])).toThrow(
+      /does not exist/,
+    );
+    expect(() => applyJsonPatch({ items: [] }, [{ op: "remove", path: "/items/0" }])).toThrow(
+      /does not exist/,
+    );
+    expect(() =>
+      applyJsonPatch({ items: [1] }, [{ op: "copy", from: "/items/1", path: "/x" }]),
+    ).toThrow(/does not exist/);
   });
 
   it("rejects unknown fields, missing values, non-JSON values, and unknown operations", () => {
@@ -135,6 +171,22 @@ describe("RFC 6902 JSON Patch", () => {
       /not valid JSON/,
     );
     expect(() => validateJsonPatch([{ op: "increment", path: "/name" }])).toThrow(/Unknown/);
+    expect(() => validateJsonPatch([null])).toThrow(/must contain string op and path/);
+    expect(() => validateJsonPatch([{ op: "copy", path: "/x", from: 1 }])).toThrow(
+      /requires string from/,
+    );
+    expect(() => validateJsonPatch([{ op: "copy", path: "/x", from: "/bad~2" }])).toThrow(
+      /Invalid JSON Pointer escape/,
+    );
+  });
+
+  it("clones JSON values safely and rejects unsupported values", () => {
+    expect(cloneJson(null)).toBeNull();
+    expect(cloneJson("x")).toBe("x");
+    expect(cloneJson(true)).toBe(true);
+    expect(Object.is(cloneJson(-0), -0)).toBe(false);
+    expect(() => cloneJson(Number.POSITIVE_INFINITY)).toThrow(/finite/);
+    expect(() => cloneJson(new Date() as never)).toThrow(/only JSON values/);
   });
 
   it("enforces operation, patch-byte, and result-byte limits at exact boundaries", () => {
@@ -150,5 +202,10 @@ describe("RFC 6902 JSON Patch", () => {
     expect(() => validateJsonPatch([{ op: "add", path: "/x", value: oversized }])).toThrow(
       /cannot exceed/,
     );
+    expect(() =>
+      applyJsonPatch({ large: "x".repeat(140 * 1024) }, [
+        { op: "copy", from: "/large", path: "/copy" },
+      ]),
+    ).toThrow(/result cannot exceed/);
   });
 });

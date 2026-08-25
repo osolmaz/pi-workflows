@@ -2224,6 +2224,27 @@
           "maxSteps": 5
         }
       ]
+    },
+    "settings": {
+      "description": "Future merge behavior and instructions added during this run.",
+      "paths": [
+        {
+          "path": "/merge",
+          "permissions": {
+            "read": ["session", "human"],
+            "replace": ["session", "human"]
+          }
+        },
+        {
+          "path": "/addedInstructions",
+          "permissions": {
+            "read": ["session", "human"],
+            "add": ["session", "human"],
+            "remove": ["session", "human"],
+            "replace": ["session", "human"]
+          }
+        }
+      ]
     }
   },
   "layout": {

@@ -78,6 +78,7 @@ import {
   type DeferredTurnDescriptor,
 } from "./deferred-turn.js";
 import { ConversationStepExecutor } from "./executor.js";
+import { FollowUpCoordinator, findSettledPresentationEntries } from "./follow-up-coordinator.js";
 import {
   HerdrWorkflowViewer,
   parseViewerPlacement,
@@ -292,6 +293,9 @@ export type ParsedWorkflowArgs =
   | { kind: "resume" }
   | { kind: "status"; runId?: string }
   | { kind: "answer"; input: unknown; runId?: string | undefined }
+  | { kind: "change-settings"; patch: unknown }
+  | { kind: "queue-follow-up"; prompt: string }
+  | { kind: "remove-follow-up"; followUpId: string }
   | { kind: "run"; ref: string; input: unknown };
 
 /** Parse `/workflow` arguments. Exported for tests. */
@@ -305,6 +309,28 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   }
   if (trimmed === "status") {
     return { kind: "status" };
+  }
+  if (trimmed.startsWith("change-settings ")) {
+    const text = trimmed.slice("change-settings".length).trim();
+    try {
+      return { kind: "change-settings", patch: JSON.parse(text) as unknown };
+    } catch (error) {
+      throw new Error(
+        `change-settings requires a JSON Patch array: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (trimmed.startsWith("queue-follow-up ")) {
+    const prompt = trimmed.slice("queue-follow-up".length).trim();
+    if (prompt.length === 0) throw new Error("queue-follow-up requires a prompt");
+    return { kind: "queue-follow-up", prompt };
+  }
+  if (trimmed.startsWith("remove-follow-up ")) {
+    const followUpId = trimmed.slice("remove-follow-up".length).trim();
+    if (!/^follow-up-[a-f0-9]{40}$/u.test(followUpId)) {
+      throw new Error("remove-follow-up requires one valid follow-up id");
+    }
+    return { kind: "remove-follow-up", followUpId };
   }
   if (trimmed.startsWith("status ")) {
     const runId = trimmed.slice("status".length).trim();
@@ -365,7 +391,13 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   return { kind: "run", ref, input: rest.length > 0 ? { task: rest } : {} };
 }
 
-function workflowStateSummary(state: WorkflowRunState): JsonObject {
+function workflowStateSummary(
+  state: WorkflowRunState,
+  controls?: Pick<
+    NonNullable<ReturnType<typeof readWorkflowRun>>,
+    "settingsScopes" | "followUpQueue"
+  >,
+): JsonObject {
   const error =
     state.error === undefined
       ? undefined
@@ -386,6 +418,33 @@ function workflowStateSummary(state: WorkflowRunState): JsonObject {
     ...(state.waitingOn !== undefined ? { waitingOn: state.waitingOn } : {}),
     ...(state.startedAt !== undefined ? { startedAt: state.startedAt } : {}),
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
+    ...(controls !== undefined
+      ? {
+          settingsScopes: (controls.settingsScopes ?? []).map((scope) => ({
+            scopeId: scope.scopeId,
+            mountPath: scope.mountPath,
+            invocation: scope.invocation,
+            changeNumber: scope.changeNumber,
+            settingsHash: scope.settingsHash,
+            activeRunId: scope.activeRunId,
+          })),
+          followUps:
+            controls.followUpQueue === null || controls.followUpQueue === undefined
+              ? null
+              : {
+                  presentationState: controls.followUpQueue.presentationState,
+                  items: controls.followUpQueue.followUps.map((followUp) => ({
+                    followUpId: followUp.followUpId,
+                    order: followUp.order,
+                    state: followUp.state,
+                    source: followUp.source,
+                    ...(followUp.sessionEntryId !== undefined
+                      ? { sessionEntryId: followUp.sessionEntryId }
+                      : {}),
+                  })),
+                },
+        }
+      : {}),
     ...(error !== undefined ? { error } : {}),
   };
 }
@@ -545,6 +604,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         },
         idle,
       );
+      void followUpCoordinator?.synchronize(ctx, activeRun !== null).catch(() => undefined);
     } catch {
       // Delivery retries on the next poll. It never affects workflow execution.
     }
@@ -576,7 +636,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let sessionClosed = false;
   let runGeneration = 0;
   let presentationAbort: AbortController | null = null;
-  let presentationPending: number | null = null;
+  let presentationPending: { generation: number; runId: string } | null = null;
+  let followUpStore: WorkflowRunStore | null = null;
+  let followUpCoordinator: FollowUpCoordinator | null = null;
   let controllerHost: PiControllerHost | undefined;
   let controllerContext: ExtensionContext | null = null;
 
@@ -603,6 +665,42 @@ export default function piWorkflows(pi: ExtensionAPI) {
     branchResolution: branchIntentResolution,
     leaseMs: TURN_INTENT_DELIVERY_LEASE_MS,
   });
+
+  const ensureFollowUpDelivery = (): void => {
+    if (followUpStore !== null && followUpCoordinator !== null) return;
+    followUpStore?.close();
+    followUpStore = new WorkflowRunStore();
+    followUpCoordinator = new FollowUpCoordinator(followUpStore, `follow-up-${runnerId}`, (text) =>
+      pi.sendUserMessage(text),
+    );
+  };
+
+  const settlePresentationFromBranch = (
+    ctx: ExtensionContext,
+    runId: string,
+    unavailableReason?: string,
+  ): boolean => {
+    if (followUpStore === null) return false;
+    const settled = findSettledPresentationEntries(ctx.sessionManager.getBranch(), runId);
+    if (settled !== undefined) {
+      followUpStore.settleFollowUpPresentation({
+        runId,
+        state: "settled",
+        presentationEntryId: settled.presentationEntryId,
+        assistantEntryId: settled.assistantEntryId,
+      });
+      return true;
+    }
+    if (unavailableReason !== undefined) {
+      followUpStore.settleFollowUpPresentation({
+        runId,
+        state: "unavailable",
+        reason: unavailableReason,
+      });
+      return true;
+    }
+    return false;
+  };
 
   // UI updates are best-effort: a captured ctx becomes stale after session
   // replacement or shutdown, and pi throws on any access (even `ctx.hasUI`).
@@ -987,6 +1085,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return;
       }
       if (instructions === undefined || instructions.trim().length === 0) {
+        settlePresentationFromBranch(ctx, run.runId, "No result presentation was available");
         if (run.abortProvenance !== undefined) {
           makeRunTurnIntentEligible(ctx, run, state.status, "No result presentation was available");
         }
@@ -998,7 +1097,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           targetSessionId: originSessionId(ctx, run.runId),
           resolution: "presentation",
           send: (turnIntentId) => {
-            presentationPending = run.generation;
+            presentationPending = { generation: run.generation, runId: run.runId };
             pi.sendMessage(
               {
                 customType: PRESENTATION_MESSAGE_TYPE,
@@ -1006,6 +1105,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
                 display: false,
                 details: {
                   schema: PRESENTATION_MESSAGE_SCHEMA,
+                  runId: run.runId,
                   ...(turnIntentId === undefined ? {} : { turnIntentId }),
                 },
               },
@@ -1019,7 +1119,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
         ctx.isIdle() && systemTurnAbort === null,
       );
     } catch (error) {
-      if (presentationPending === run.generation) {
+      if (presentationPending?.generation === run.generation) {
         presentationPending = null;
       }
       if (
@@ -1034,6 +1134,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
           ? `timed out after ${PRESENTATION_TIMEOUT_MS}ms`
           : errorMessage(error);
       notify(ctx, `Could not present workflow result: ${message}`, "warning");
+      settlePresentationFromBranch(ctx, run.runId, message);
       if (run.abortProvenance !== undefined) {
         makeRunTurnIntentEligible(ctx, run, state.status, message);
       }
@@ -1203,6 +1304,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (options.signal?.aborted) {
       throw options.signal.reason ?? new Error("Workflow startup aborted");
     }
+    ensureFollowUpDelivery();
     if (activeRun) {
       if (!options.quiet) {
         notify(
@@ -1686,7 +1788,65 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (controllerHost !== undefined) {
       return controllerHost;
     }
-    controllerHost = await PiControllerHost.create({ cwd: ctx.cwd, startChild });
+    controllerHost = await PiControllerHost.create({
+      cwd: ctx.cwd,
+      startChild,
+      workflowControls: {
+        changeSettings: async (request) => {
+          const result = await changeWorkflowSettings(ctx, {
+            runId: request.runId,
+            ...(request.scopeId !== undefined ? { scopeId: request.scopeId } : {}),
+            ...(request.expectedChangeNumber !== undefined
+              ? { expectedChangeNumber: request.expectedChangeNumber }
+              : {}),
+            patch: request.patch,
+            requestId: request.actorRequestKey,
+            actor: "controller",
+            actorId: request.controllerResourceUid,
+            source: "controller-request",
+          });
+          return {
+            runId: request.runId,
+            scopeId: String(result.details.scopeId),
+            changeNumber: Number(result.details.changeNumber),
+            adopted: result.details.adopted === true,
+          };
+        },
+        queueFollowUp: async (request) => {
+          const result = await queueWorkflowFollowUp(ctx, {
+            runId: request.runId,
+            prompt: request.prompt,
+            requestId: request.actorRequestKey,
+            actor: "controller",
+            actorId: request.controllerResourceUid,
+            source: "controller-request",
+          });
+          return {
+            runId: request.runId,
+            followUpId: String(result.details.followUpId),
+            order: Number(result.details.order),
+            state: "queued",
+            adopted: result.details.adopted === true,
+          };
+        },
+        removeFollowUp: async (request) => {
+          const result = await removeWorkflowFollowUp(ctx, {
+            runId: request.runId,
+            followUpId: request.followUpId,
+            actor: "controller",
+            actorId: request.controllerResourceUid,
+            source: "controller-request",
+          });
+          return {
+            runId: request.runId,
+            followUpId: String(result.details.followUpId),
+            order: Number(result.details.order),
+            state: String(result.details.state),
+            adopted: false,
+          };
+        },
+      },
+    });
     controllerHost?.start();
     updateControllerStatus(ctx);
     return controllerHost;
@@ -1998,7 +2158,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const { state } = bundle;
       return {
         message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
-        details: workflowStateSummary(state),
+        details: workflowStateSummary(state, bundle),
       };
     }
     const state = activeRun?.lastState ?? widgetSource?.state;
@@ -2017,8 +2177,174 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     return {
       message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
-      details: workflowStateSummary(state),
+      details: workflowStateSummary(state, readWorkflowRun(state.runId) ?? undefined),
     };
+  };
+
+  const resolveMutableWorkflow = async (
+    ctx: ExtensionContext,
+    requestedRunId?: string,
+  ): Promise<{
+    runId: string;
+    workflow: WorkflowDefinition;
+    store: WorkflowRunStore;
+  }> => {
+    const runId = requestedRunId ?? activeRun?.runId ?? lastWaitingRunId ?? undefined;
+    if (runId === undefined) {
+      throw new Error("No running, parked, or waiting workflow is available for changes.");
+    }
+    const loaded = readWorkflowRun(runId);
+    if (loaded === null) throw new Error(`Workflow run not found: ${runId}`);
+    if (originSessionId(ctx, runId) !== ctx.sessionManager.getSessionId()) {
+      throw new Error("Workflow changes must come from the Pi session that owns the run.");
+    }
+    const source = loaded.state.workflowSource;
+    if (source === undefined) throw new Error(`Workflow run ${runId} has no saved source`);
+    const ref = source.kind === "builtin" ? `builtin:${source.id}` : source.path;
+    const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
+    if (!isDeepStrictEqual(resolved.source, source)) {
+      throw new Error(`Workflow source changed since run ${runId} started`);
+    }
+    return { runId, workflow: resolved.definition, store: new WorkflowRunStore() };
+  };
+
+  const changeWorkflowSettings = async (
+    ctx: ExtensionContext,
+    options: {
+      runId?: string;
+      scopeId?: string;
+      expectedChangeNumber?: number;
+      patch: unknown;
+      requestId: string;
+      actor: "session" | "human" | "controller";
+      actorId?: string;
+      source: string;
+    },
+  ): Promise<WorkflowControlResult> => {
+    const target = await resolveMutableWorkflow(ctx, options.runId);
+    try {
+      const scopes = target.store.listSettingsScopes(target.runId);
+      const scopeId =
+        options.scopeId ??
+        (activeRun?.runId === target.runId ? activeRun.engine.activeSettingsScopeId : undefined) ??
+        (scopes.length === 1 ? scopes[0]?.scopeId : undefined);
+      if (scopeId === undefined) {
+        throw new Error("Specify scopeId because this workflow has more than one settings scope.");
+      }
+      const scope = target.store.getSettingsScope(scopeId);
+      if (scope === undefined || scope.activeRunId !== target.runId) {
+        throw new Error(`Workflow settings scope not found for run ${target.runId}: ${scopeId}`);
+      }
+      const definition =
+        scope.mountPath === ""
+          ? target.workflow.settings
+          : compositionMetadata(target.workflow)?.scopes[scope.mountPath]?.settings;
+      if (definition === undefined) {
+        throw new Error(`Workflow scope ${scopeId} does not declare editable settings.`);
+      }
+      const result = await target.store.changeSettings(definition, {
+        runId: target.runId,
+        scopeId,
+        requestId: options.requestId,
+        ...(options.expectedChangeNumber !== undefined
+          ? { expectedChangeNumber: options.expectedChangeNumber }
+          : {}),
+        actor: {
+          type: options.actor,
+          id: options.actorId ?? ctx.sessionManager.getSessionId(),
+        },
+        source: options.source,
+        patch: options.patch,
+      });
+      renderWidget(ctx);
+      return {
+        message: `Workflow settings changed to number ${result.scope.changeNumber}.`,
+        details: {
+          action: "change-settings",
+          runId: target.runId,
+          scopeId,
+          changeNumber: result.scope.changeNumber,
+          adopted: result.adopted,
+        },
+      };
+    } finally {
+      target.store.close();
+    }
+  };
+
+  const queueWorkflowFollowUp = async (
+    ctx: ExtensionContext,
+    options: {
+      runId?: string;
+      prompt: string;
+      requestId: string;
+      actor: "session" | "human" | "controller";
+      actorId?: string;
+      source: string;
+    },
+  ): Promise<WorkflowControlResult> => {
+    const target = await resolveMutableWorkflow(ctx, options.runId);
+    try {
+      const result = target.store.queueFollowUp({
+        runId: target.runId,
+        requestId: options.requestId,
+        targetSessionId: ctx.sessionManager.getSessionId(),
+        actor: {
+          type: options.actor,
+          id: options.actorId ?? ctx.sessionManager.getSessionId(),
+        },
+        source: options.source,
+        prompt: options.prompt,
+      });
+      return {
+        message: `Queued workflow follow-up ${result.followUp.order}.`,
+        details: {
+          action: "queue-follow-up",
+          runId: target.runId,
+          followUpId: result.followUp.followUpId,
+          order: result.followUp.order,
+          adopted: result.adopted,
+        },
+      };
+    } finally {
+      target.store.close();
+    }
+  };
+
+  const removeWorkflowFollowUp = async (
+    ctx: ExtensionContext,
+    options: {
+      runId?: string;
+      followUpId: string;
+      actor: "session" | "human" | "controller";
+      actorId?: string;
+      source: string;
+    },
+  ): Promise<WorkflowControlResult> => {
+    const target = await resolveMutableWorkflow(ctx, options.runId);
+    try {
+      const followUp = target.store.removeFollowUp({
+        runId: target.runId,
+        followUpId: options.followUpId,
+        actor: {
+          type: options.actor,
+          id: options.actorId ?? ctx.sessionManager.getSessionId(),
+        },
+        source: options.source,
+      });
+      return {
+        message: `Removed workflow follow-up ${followUp.order}.`,
+        details: {
+          action: "remove-follow-up",
+          runId: target.runId,
+          followUpId: followUp.followUpId,
+          order: followUp.order,
+          state: followUp.state,
+        },
+      };
+    } finally {
+      target.store.close();
+    }
   };
 
   const resolveWaitingWorkflow = async (
@@ -2623,7 +2949,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.registerCommand("workflow", {
     description:
-      "Run or manage a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, answer",
+      "Run or manage a workflow: /workflow <name-or-path> [task | --input-json {…}]; also: status, pause, resume, cancel, answer, change-settings, queue-follow-up, remove-follow-up",
     getArgumentCompletions: async (prefix: string) => {
       const discovered = await discoverWorkflows({ cwd: process.cwd() }, builtinWorkflowCatalog);
       const items = [
@@ -2633,6 +2959,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
         { value: "resume", label: "resume" },
         { value: "cancel", label: "cancel" },
         { value: "answer", label: "answer" },
+        { value: "change-settings", label: "change-settings" },
+        { value: "queue-follow-up", label: "queue-follow-up" },
+        { value: "remove-follow-up", label: "remove-follow-up" },
       ].filter((item) => item.value.startsWith(prefix));
       return items.length > 0 ? items : null;
     },
@@ -2666,6 +2995,47 @@ export default function piWorkflows(pi: ExtensionAPI) {
       if (parsed.kind === "status") {
         try {
           const result = await statusWorkflowControl(ctx, parsed.runId);
+          notify(ctx, result.message, result.level);
+        } catch (error) {
+          notify(ctx, errorMessage(error), "error");
+        }
+        return;
+      }
+      if (parsed.kind === "change-settings") {
+        try {
+          const result = await changeWorkflowSettings(ctx, {
+            patch: parsed.patch,
+            requestId: `interactive-${randomUUID()}`,
+            actor: "human",
+            source: "interactive-command",
+          });
+          notify(ctx, result.message, result.level);
+        } catch (error) {
+          notify(ctx, errorMessage(error), "error");
+        }
+        return;
+      }
+      if (parsed.kind === "queue-follow-up") {
+        try {
+          const result = await queueWorkflowFollowUp(ctx, {
+            prompt: parsed.prompt,
+            requestId: `interactive-${randomUUID()}`,
+            actor: "human",
+            source: "interactive-command",
+          });
+          notify(ctx, result.message, result.level);
+        } catch (error) {
+          notify(ctx, errorMessage(error), "error");
+        }
+        return;
+      }
+      if (parsed.kind === "remove-follow-up") {
+        try {
+          const result = await removeWorkflowFollowUp(ctx, {
+            followUpId: parsed.followUpId,
+            actor: "human",
+            source: "interactive-command",
+          });
           notify(ctx, result.message, result.level);
         } catch (error) {
           notify(ctx, errorMessage(error), "error");
@@ -2830,11 +3200,26 @@ export default function piWorkflows(pi: ExtensionAPI) {
     },
   });
 
+  let workflowToolTail = Promise.resolve();
+  const withWorkflowToolOrder = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const prior = workflowToolTail;
+    let release: (() => void) | undefined;
+    workflowToolTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+    }
+  };
+
   pi.registerTool({
     name: "workflow",
     label: "Workflow",
     description: [
-      "List, start, inspect, pause, resume, cancel, answer, update, or complete pi-workflows runs.",
+      "List, start, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer, update, or complete pi-workflows runs.",
       "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, stopWhen, everyMinutes, and optional maxChecks.",
       "Put the exact goal, authority, limits, and recovery rules in task; Monitor observes first, performs only safe authorized actions, verifies them immediately, and waits only while target work is moving or an external event is pending.",
       "Use update or submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
@@ -2842,89 +3227,121 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ].join(" "),
     parameters: WorkflowToolParameters,
     async execute(toolCallId, rawParams, _signal, _onUpdate, ctx) {
-      const params = parseWorkflowToolInput(rawParams);
-      let control: WorkflowControlResult;
-      switch (params.action) {
-        case "list":
-          control = await listWorkflowControl(ctx, params.offset);
-          break;
-        case "start":
-          control = await queueToolLaunch(ctx, params.workflow, params.input ?? {});
-          break;
-        case "status":
-          control = await statusWorkflowControl(ctx, params.runId);
-          break;
-        case "pause":
-          control = pauseWorkflowControl(ctx);
-          break;
-        case "resume":
-          control = resumeWorkflowControl(ctx);
-          break;
-        case "cancel":
-          control = await cancelWorkflowControl(ctx, "agent", params.runId);
-          break;
-        case "answer": {
-          const waiting = await resolveWaitingWorkflow(ctx, params.runId);
-          const parent = readWorkflowRun(waiting.parentRunId);
-          if (parent !== null && humanDecisionRequest(parent.state.finalOutput) !== null) {
-            throw new Error(
-              "This checkpoint requires a verified human answer from Pi UI or a configured decision channel.",
-            );
-          }
-          control = await queueToolLaunch(ctx, waiting.workflowRef, params.input, {
-            parentRunId: waiting.parentRunId,
-          });
-          break;
-        }
-        case "update": {
-          if (!activeRun) throw new Error("No workflow step is active.");
-          const receipt = await activeRun.engine.publishUpdate(
-            params.step,
-            params.attempt,
-            params.update,
-            toolCallId,
-          );
-          return {
-            content: [
-              { type: "text", text: "Workflow update published; the step remains active." },
-            ],
-            details: { action: "update", ...receipt },
-          };
-        }
-        case "submit": {
-          if (!activeRun) {
-            if (
-              lastExpiredAttempt?.contract.attemptId === params.attempt &&
-              lastExpiredAttempt.contract.nodeId === params.step
-            ) {
+      return await withWorkflowToolOrder(async () => {
+        const params = parseWorkflowToolInput(rawParams);
+        let control: WorkflowControlResult;
+        switch (params.action) {
+          case "list":
+            control = await listWorkflowControl(ctx, params.offset);
+            break;
+          case "start":
+            control = await queueToolLaunch(ctx, params.workflow, params.input ?? {});
+            break;
+          case "status":
+            control = await statusWorkflowControl(ctx, params.runId);
+            break;
+          case "pause":
+            control = pauseWorkflowControl(ctx);
+            break;
+          case "resume":
+            control = resumeWorkflowControl(ctx);
+            break;
+          case "cancel":
+            control = await cancelWorkflowControl(ctx, "agent", params.runId);
+            break;
+          case "answer": {
+            const waiting = await resolveWaitingWorkflow(ctx, params.runId);
+            const parent = readWorkflowRun(waiting.parentRunId);
+            if (parent !== null && humanDecisionRequest(parent.state.finalOutput) !== null) {
               throw new Error(
-                `Workflow step ${JSON.stringify(params.step)} attempt ${JSON.stringify(params.attempt)} ${lastExpiredAttempt.reason}; its output is no longer accepted.`,
+                "This checkpoint requires a verified human answer from Pi UI or a configured decision channel.",
               );
             }
-            throw new Error("No workflow step is waiting for output.");
+            control = await queueToolLaunch(ctx, waiting.workflowRef, params.input, {
+              parentRunId: waiting.parentRunId,
+            });
+            break;
           }
-          // Flush the conversation into SQLite before accepting, so the
-          // attempt range includes the assistant message carrying this call.
-          await activeRun.recorder?.record(ctx).catch(() => undefined);
-          await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
-          const result = await activeRun.executor.submit(
-            params.step,
-            params.attempt,
-            params.output,
-          );
-          if (!result.accepted) {
-            throw new Error(result.message);
+          case "change-settings":
+            control = await changeWorkflowSettings(ctx, {
+              ...(params.runId !== undefined ? { runId: params.runId } : {}),
+              ...(params.scopeId !== undefined ? { scopeId: params.scopeId } : {}),
+              ...(params.expectedChangeNumber !== undefined
+                ? { expectedChangeNumber: params.expectedChangeNumber }
+                : {}),
+              patch: params.patch,
+              requestId: `tool-${toolCallId}`,
+              actor: "session",
+              source: "workflow-tool",
+            });
+            break;
+          case "queue-follow-up":
+            control = await queueWorkflowFollowUp(ctx, {
+              ...(params.runId !== undefined ? { runId: params.runId } : {}),
+              prompt: params.prompt,
+              requestId: `tool-${toolCallId}`,
+              actor: "session",
+              source: "workflow-tool",
+            });
+            break;
+          case "remove-follow-up":
+            control = await removeWorkflowFollowUp(ctx, {
+              ...(params.runId !== undefined ? { runId: params.runId } : {}),
+              followUpId: params.followUpId,
+              actor: "session",
+              source: "workflow-tool",
+            });
+            break;
+          case "update": {
+            if (!activeRun) throw new Error("No workflow step is active.");
+            const receipt = await activeRun.engine.publishUpdate(
+              params.step,
+              params.attempt,
+              params.update,
+              toolCallId,
+            );
+            return {
+              content: [
+                { type: "text", text: "Workflow update published; the step remains active." },
+              ],
+              details: { action: "update", ...receipt },
+            };
           }
-          return {
-            content: [{ type: "text", text: result.message }],
-            details: { action: "submit", step: params.step, accepted: true },
-          };
+          case "submit": {
+            if (!activeRun) {
+              if (
+                lastExpiredAttempt?.contract.attemptId === params.attempt &&
+                lastExpiredAttempt.contract.nodeId === params.step
+              ) {
+                throw new Error(
+                  `Workflow step ${JSON.stringify(params.step)} attempt ${JSON.stringify(params.attempt)} ${lastExpiredAttempt.reason}; its output is no longer accepted.`,
+                );
+              }
+              throw new Error("No workflow step is waiting for output.");
+            }
+            // Flush the conversation into SQLite before accepting, so the
+            // attempt range includes the assistant message carrying this call.
+            await activeRun.recorder?.record(ctx).catch(() => undefined);
+            await activeRun.recorder?.synchronize(ctx).catch(() => undefined);
+            const result = await activeRun.executor.submit(
+              params.step,
+              params.attempt,
+              params.output,
+            );
+            if (!result.accepted) {
+              throw new Error(result.message);
+            }
+            return {
+              content: [{ type: "text", text: result.message }],
+              details: { action: "submit", step: params.step, accepted: true },
+            };
+          }
         }
-      }
-      return {
-        content: [{ type: "text", text: control.message }],
-        details: control.details,
-      };
+        return {
+          content: [{ type: "text", text: control.message }],
+          details: control.details,
+        };
+      });
     },
   });
 
@@ -2950,6 +3367,22 @@ export default function piWorkflows(pi: ExtensionAPI) {
     controllerContext = ctx;
     if (herdrEnabled) void refreshHerdrCapability(ctx);
     ensureRunQueueStore(ctx.cwd);
+    ensureFollowUpDelivery();
+    const sessionFollowUpStore = followUpStore;
+    const sessionFollowUpCoordinator = followUpCoordinator;
+    if (sessionFollowUpStore === null || sessionFollowUpCoordinator === null) {
+      throw new Error("Workflow follow-up delivery did not initialize");
+    }
+    for (const runId of sessionFollowUpStore.listPendingPresentations(
+      ctx.sessionManager.getSessionId(),
+    )) {
+      settlePresentationFromBranch(
+        ctx,
+        runId,
+        "The final workflow response did not settle before the extension restarted",
+      );
+    }
+    await sessionFollowUpCoordinator.synchronize(ctx, false).catch(() => undefined);
     try {
       await reloadDecisionChannels(ctx);
     } catch {
@@ -3070,6 +3503,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     systemTurnAbort = null;
+    if (presentationPending !== null) {
+      settlePresentationFromBranch(
+        ctx,
+        presentationPending.runId,
+        "The final workflow response settled without durable session evidence",
+      );
+      presentationPending = null;
+    }
     if (activeRun === null) {
       try {
         const prepared = ensureRunQueueStore(ctx.cwd).findSessionReservation(
@@ -3091,7 +3532,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const run = activeRun;
     if (!run) {
       turnCoordinator.flushNatural(ctx.isIdle() && !sessionClosed && !runHeld());
-      presentationPending = null;
+      await followUpCoordinator?.synchronize(ctx, false).catch(() => undefined);
       runSyncPass(ctx);
       return;
     }
@@ -3146,6 +3587,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
     controllerContext = null;
     runQueueStore?.close();
     runQueueStore = null;
+    followUpCoordinator?.clear();
+    followUpCoordinator = null;
+    followUpStore?.close();
+    followUpStore = null;
     presentationPending = null;
     clearWidgetTimer();
     stopWidgetTicker();

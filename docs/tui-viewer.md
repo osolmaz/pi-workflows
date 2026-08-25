@@ -73,12 +73,13 @@ the browser.
 - **Inspector:** Steps, Trace, Conversation, and Info tabs. Each tab is a
   bracketed symbol button with a full-label mouse target; the selected tab uses
   the accent surface. Steps can expand to full prompt, output, timestamps,
-  error, and action receipt fields. Trace can
-  show the selected attempt, the replay-visible prefix, or the full run, with
-  expandable JSON payloads. Conversation shows live text, thinking, tool-call
-  construction, and tool execution, then switches settled messages to the
-  verbatim Pi entry. Raw records remain expandable. Info shows run metadata,
-  final output, capture status, counts, and integrity diagnostics.
+  error, action data, and the settings scope and change number used by that
+  attempt. Trace can show the selected attempt, the replay-visible prefix, or
+  the full run, with expandable JSON payloads. Conversation shows live text,
+  thinking, tool-call construction, and tool execution, then switches settled
+  messages to the verbatim Pi entry. Raw records remain expandable. Info shows
+  run metadata, final output, settings scopes and change numbers, queued
+  follow-up states, capture status, counts, and integrity diagnostics.
 - **Timeline:** run status, elapsed time, replay track, playhead, position,
   playback controls, and speed. Every playback action uses the same bracketed
   symbol-button style as the inspector and theme actions. The controls accept

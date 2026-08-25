@@ -18,9 +18,11 @@ philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the engine and
 its public parts. Running steps can publish durable [workflow
 updates](docs/WORKFLOW_UPDATES.md), including progress counts and ETA data.
 Agent instructions use compact [workflow step
-messages](docs/WORKFLOW_STEP_MESSAGES.md), and the built-in
-[monitor](docs/MONITOR.md) reports every check without starting an extra
-assistant turn.
+messages](docs/WORKFLOW_STEP_MESSAGES.md). Workflows can expose [settings that
+change during a run](docs/2026-08-25-workflow-settings.md) and queue [normal
+follow-up work after completion](docs/2026-08-25-workflow-follow-ups.md). The
+built-in [monitor](docs/MONITOR.md) reports every check without starting an
+extra assistant turn.
 
 ## Install
 

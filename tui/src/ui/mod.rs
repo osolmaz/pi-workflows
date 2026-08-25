@@ -66,6 +66,8 @@ pub struct RunData<'a> {
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<&'a Value>,
+    pub settings_scopes: &'a [Value],
+    pub follow_up_queue: Option<&'a Value>,
     pub live: bool,
     pub possibly_interrupted: bool,
     /// Bundle directory when reading the filesystem directly; lets previews
@@ -167,6 +169,8 @@ impl Provider {
                     session_events_malformed: entry.session_events_malformed,
                     session_events_torn_tail: entry.session_events_torn_tail,
                     session_capture: entry.session_capture.as_ref(),
+                    settings_scopes: &entry.settings_scopes,
+                    follow_up_queue: entry.follow_up_queue.as_ref(),
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
                     run_dir: Some(&entry.dir),
@@ -186,6 +190,8 @@ impl Provider {
                     session_events_malformed: view.session_events_malformed,
                     session_events_torn_tail: view.session_events_torn_tail,
                     session_capture: view.session_capture.as_ref(),
+                    settings_scopes: &view.settings_scopes,
+                    follow_up_queue: view.follow_up_queue.as_ref(),
                     live: view.live,
                     possibly_interrupted: view.possibly_interrupted,
                     run_dir: None,
@@ -2343,6 +2349,19 @@ fn steps_lines(
                     );
                 }
             }
+            if let Some(scope_id) = &step.settings_scope_id {
+                push_detail_line(&mut lines, "settings scope", scope_id, width, palette);
+                push_detail_line(
+                    &mut lines,
+                    "settings change",
+                    &step.settings_change_number.unwrap_or(0).to_string(),
+                    width,
+                    palette,
+                );
+                if let Some(hash) = &step.settings_hash {
+                    push_detail_line(&mut lines, "settings hash", hash, width, palette);
+                }
+            }
             if let Some(error) = &step.error {
                 push_detail_line(&mut lines, "error", error, width, palette);
             }
@@ -2375,6 +2394,12 @@ fn steps_lines(
                         "{} {}",
                         action.action_type, command
                     ))),
+                ]));
+            }
+            if let Some(change) = step.settings_change_number {
+                lines.push(Line::from(vec![
+                    Span::styled("settings: ", Style::default().fg(palette.accent)),
+                    Span::raw(change.to_string()),
                 ]));
             }
             if let Some(error) = &step.error {
@@ -2581,6 +2606,63 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         )),
     ]));
     lines.extend(progress_info_lines(data.events, palette));
+    if !data.settings_scopes.is_empty() {
+        lines.push(Line::from(vec![
+            label("settings"),
+            Span::raw(format!("{} scope(s)", data.settings_scopes.len())),
+        ]));
+        for scope in data.settings_scopes {
+            let mount = scope
+                .get("mountPath")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("root");
+            let invocation = scope.get("invocation").and_then(Value::as_u64).unwrap_or(0);
+            let change = scope
+                .get("changeNumber")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            lines.push(Line::from(vec![
+                label("settings scope"),
+                Span::raw(format!(
+                    "{} #{} · change {}",
+                    sanitize_text(mount),
+                    invocation,
+                    change
+                )),
+            ]));
+        }
+    }
+    if let Some(queue) = data.follow_up_queue {
+        let presentation = queue
+            .get("presentationState")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let items = queue
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            label("follow-ups"),
+            Span::raw(format!(
+                "{} item(s) · presentation {}",
+                items.len(),
+                sanitize_text(presentation)
+            )),
+        ]));
+        for item in items {
+            let order = item.get("order").and_then(Value::as_u64).unwrap_or(0);
+            let state = item
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            lines.push(Line::from(vec![
+                label("follow-up"),
+                Span::raw(format!("{} · {}", order, sanitize_text(state))),
+            ]));
+        }
+    }
     let capture = capture_integrity(data);
     lines.push(Line::from(vec![
         label("session"),
@@ -3011,6 +3093,9 @@ mod tests {
             error: None,
             conversation: None,
             action: None,
+            settings_scope_id: None,
+            settings_change_number: None,
+            settings_hash: None,
         }];
         assert_eq!(completed_step_at(&steps, 1_767_225_603_000), -1);
         assert_eq!(completed_step_at(&steps, 1_767_225_605_000), 0);

@@ -85,6 +85,9 @@ type WorkflowNodeContext = {
   outputs: Record<string, unknown>; // accepted output per finished node id
   results: Record<string, WorkflowNodeResult>; // full result records, including failures
   state: WorkflowRunState; // the live run state (read-only by convention)
+  settings?: unknown; // fixed typed settings for this attempt, when declared
+  settingsScopeId?: string;
+  settingsChangeNumber?: number;
   signal: AbortSignal; // aborted on node timeout or run cancellation
 };
 ```
@@ -97,6 +100,12 @@ Long-running compute, action, and checkpoint callbacks should observe
 `context.signal` (pass it to `fetch`/`spawn`, or check `signal.aborted` between
 steps). When the node times out or the run is cancelled, the engine stops
 waiting immediately, but only cooperative callbacks stop doing work.
+
+A workflow can declare typed JSON settings with `workflowSettings()`. Each node
+attempt receives one fixed copy. Authorized changes use RFC 6902 JSON Patch and
+affect only later attempts. Use `settingsRoute()` for a pure route choice that
+must retry when a newer settings change wins before route settlement. See
+[Change workflow settings during a run](2026-08-25-workflow-settings.md).
 
 Function actions receive `WorkflowActionContext`, which adds
 `publishUpdate(update)`. Other callbacks keep the read-only node context.
@@ -424,6 +433,9 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `status` for the active run or a supplied run ID.
 - `pause`, `resume`, and `cancel` for the active run.
 - `answer` with ordinary checkpoint input and an optional run ID. Protected `humanDecision()` gates reject this model-facing action.
+- `change-settings` with an RFC 6902 patch, optional scope ID, and optional expected change number.
+- `queue-follow-up` to save one ordered normal user prompt for after successful completion.
+- `remove-follow-up` to remove an unsent prompt created by the same model source.
 - `update` for a non-completing update from the current agent attempt.
 - `submit` for the current workflow step contract.
 
@@ -432,7 +444,16 @@ workflow prompt then starts a new turn. This keeps the requesting turn outside
 the workflow's first attempt and prevents an early missing-submission reminder.
 The normal extension offers all actions. The headless RPC bridge offers only
 `update` and `submit`, so a workflow child cannot recursively control other
-runs.
+runs. Direct `/workflow change-settings`, `queue-follow-up`, and
+`remove-follow-up` commands use verified interactive provenance. Controller
+code can use the matching `ctx.workflows` methods. All surfaces call the same
+SQLite operations.
+
+Follow-up prompts stay separate from workflow settings. Successful terminal
+state is saved before delivery. A final presentation settles first. The Pi
+extension then sends prompts in order as normal user messages without
+reactivating the completed run. See [Continue normal work after a workflow
+finishes](2026-08-25-workflow-follow-ups.md).
 
 ### Built-in plain summary
 

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalJson } from "../state/json.js";
+import { StaleResourceError } from "../state/mutation.js";
 import {
   compileWorkflowDefinition,
   compositionMetadata,
@@ -23,6 +24,11 @@ import {
   validateHumanDecisionResponse,
 } from "./human-decision.js";
 import { extractJsonValue } from "./json.js";
+import {
+  parseWorkflowSettingsValue,
+  resolveInitialWorkflowSettings,
+  type WorkflowSettingsScopeRecord,
+} from "./settings.js";
 import { runShellAction, shellResultFromError } from "./shell.js";
 import {
   RUN_STATE_SCHEMA,
@@ -68,6 +74,7 @@ const TITLE_TIMEOUT_MS = 30_000;
 const TIMEOUT_RESOLUTION_TIMEOUT_MS = 30_000;
 // Covers the shell SIGTERM → SIGKILL escalation (1s) plus stdio close.
 const ABORT_CLEANUP_GRACE_MS = 2_000;
+const MAX_SETTINGS_ROUTE_RETRIES = 16;
 
 type NodeExecution = {
   output: unknown;
@@ -89,6 +96,7 @@ type NodeExecutionMeta = {
 type NodeAttempt = {
   result: WorkflowNodeResult;
   execution: NodeExecution | null;
+  settings?: WorkflowSettingsScopeRecord;
   error?: unknown;
 };
 
@@ -96,6 +104,7 @@ type ResumedNodeAttempt = {
   nodeId: string;
   attemptId: string;
   startedAt: string;
+  settings?: WorkflowSettingsScopeRecord;
 };
 
 /**
@@ -120,6 +129,7 @@ export class WorkflowEngine {
         state: WorkflowRunState;
         nodeId: string;
         attemptId: string;
+        settingsScopeId?: string;
         signal: AbortSignal;
       }
     | undefined;
@@ -128,6 +138,7 @@ export class WorkflowEngine {
   private cancelled = false;
   private parked = false;
   private paused = false;
+  private presentationRequired = false;
   private wakePause: (() => void) | null = null;
 
   constructor(options: WorkflowEngineOptions) {
@@ -237,6 +248,10 @@ export class WorkflowEngine {
     return this.paused;
   }
 
+  get activeSettingsScopeId(): string | undefined {
+    return this.activeAttempt?.settingsScopeId;
+  }
+
   async run(
     workflow: WorkflowDefinition,
     input: unknown,
@@ -244,6 +259,7 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
+    this.presentationRequired = workflow.presentationPrompt !== undefined;
     // Fail before any run row exists so bad input cannot leave partial state.
     const suppliedInput = input === undefined ? null : input;
     const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
@@ -261,7 +277,18 @@ export class WorkflowEngine {
       options.workflowSource,
       options.runId,
     );
-    const runId = await this.store.initializeRun(workflow, state);
+    const initialSettings =
+      workflow.settings === undefined
+        ? []
+        : [
+            {
+              mountPath: "",
+              invocation: 1,
+              settings: (await resolveInitialWorkflowSettings(workflow.settings, normalizedInput))
+                .json,
+            },
+          ];
+    const runId = await this.store.initializeRun(workflow, state, { initialSettings });
     await this.persist(runId, state, {
       scope: "run",
       type: "run_started",
@@ -300,6 +327,7 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
+    this.presentationRequired = workflow.presentationPrompt !== undefined;
     // Reset before any await: a park or cancel landing during preparation
     // must survive, or a host drain would hang while the run executes.
     this.cancelled = false;
@@ -315,6 +343,7 @@ export class WorkflowEngine {
     const point = this.resumePointFor(workflow, state, "wait");
     const interruptedNode =
       state.currentNode !== undefined ? workflow.nodes[state.currentNode] : undefined;
+    const resumedSettings = this.persistedSettingsBinding(state);
     const resumedAttempt: ResumedNodeAttempt | undefined =
       state.currentNode !== undefined &&
       state.currentAttemptId !== undefined &&
@@ -325,6 +354,7 @@ export class WorkflowEngine {
             nodeId: state.currentNode,
             attemptId: state.currentAttemptId,
             startedAt: state.currentNodeStartedAt,
+            ...(resumedSettings !== undefined ? { settings: resumedSettings } : {}),
           }
         : undefined;
     // A resumed run starts unpaused. Submitted and non-agent nodes discard
@@ -336,6 +366,9 @@ export class WorkflowEngine {
       delete state.currentNode;
       delete state.currentAttemptId;
       delete state.currentNodeStartedAt;
+      delete state.currentSettingsScopeId;
+      delete state.currentSettingsChangeNumber;
+      delete state.currentSettingsHash;
       delete state.statusDetail;
     }
     await this.persist(runId, state, {
@@ -408,6 +441,7 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
+    this.presentationRequired = workflow.presentationPrompt !== undefined;
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
@@ -687,6 +721,7 @@ export class WorkflowEngine {
     let currentNodeId: string | null = startNodeId;
     let executedSteps = executedStepsBase;
     let lastOutput: unknown = initialLastOutput;
+    const settingsRouteRetries = new Map<string, number>();
 
     while (currentNodeId !== null) {
       await this.holdWhilePaused(state, runId);
@@ -723,28 +758,84 @@ export class WorkflowEngine {
         // as in-flight, and resume reruns it with a fresh attempt.
         throw new RunParkedError();
       }
+      const beforeRecord = structuredClone(state);
       this.recordAttempt(workflow, state, attempt);
-      // The durable step row owns the output. The trace keeps the terminal fact
-      // and compact execution metadata without copying the output value.
-      await this.persist(runId, state, {
-        scope: "node",
-        type: attempt.result.outcome === "ok" ? "node_finished" : "node_failed",
-        nodeId: attempt.result.nodeId,
-        attemptId: attempt.result.attemptId,
-        payload: {
-          outcome: attempt.result.outcome,
-          durationMs: attempt.result.durationMs,
-          ...(attempt.result.outcome === "ok" ? { output: attempt.result.output ?? null } : {}),
-          ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
-          ...(attempt.execution?.action !== undefined ? { action: attempt.execution.action } : {}),
-          ...(attempt.execution?.assistantMessage !== undefined
-            ? { assistantMessage: attempt.execution.assistantMessage }
-            : {}),
-          ...(attempt.execution?.conversation !== undefined
-            ? { conversation: attempt.execution.conversation }
-            : {}),
-        },
-      });
+      // The durable step row owns the output. The trace keeps the terminal fact,
+      // settings binding, and compact execution metadata.
+      try {
+        await this.persist(runId, state, {
+          scope: "node",
+          type: attempt.result.outcome === "ok" ? "node_finished" : "node_failed",
+          nodeId: attempt.result.nodeId,
+          attemptId: attempt.result.attemptId,
+          payload: {
+            outcome: attempt.result.outcome,
+            durationMs: attempt.result.durationMs,
+            ...(attempt.result.outcome === "ok" ? { output: attempt.result.output ?? null } : {}),
+            ...(attempt.result.error !== undefined ? { error: attempt.result.error } : {}),
+            ...(attempt.execution?.action !== undefined
+              ? { action: attempt.execution.action }
+              : {}),
+            ...(attempt.execution?.assistantMessage !== undefined
+              ? { assistantMessage: attempt.execution.assistantMessage }
+              : {}),
+            ...(attempt.execution?.conversation !== undefined
+              ? { conversation: attempt.execution.conversation }
+              : {}),
+            ...(attempt.settings !== undefined
+              ? {
+                  settingsScopeId: attempt.settings.scopeId,
+                  settingsChangeNumber: attempt.settings.changeNumber,
+                  settingsHash: attempt.settings.settingsHash,
+                }
+              : {}),
+          },
+        });
+      } catch (error) {
+        if (
+          !(error instanceof StaleResourceError) ||
+          node.nodeType !== "compute" ||
+          node.settingsRoute !== true ||
+          attempt.settings === undefined
+        ) {
+          throw error;
+        }
+        restoreRunState(state, beforeRecord);
+        const retryCount = (settingsRouteRetries.get(currentNodeId) ?? 0) + 1;
+        if (retryCount > MAX_SETTINGS_ROUTE_RETRIES) {
+          throw new Error(
+            `Settings route ${currentNodeId} changed more than ${MAX_SETTINGS_ROUTE_RETRIES} times before settlement`,
+          );
+        }
+        settingsRouteRetries.set(currentNodeId, retryCount);
+        const latest = await this.captureSettingsBinding(workflow, state, currentNodeId);
+        if (latest === undefined) {
+          throw new Error(`Settings route ${currentNodeId} lost its settings scope`);
+        }
+        state.currentSettingsScopeId = latest.scopeId;
+        state.currentSettingsChangeNumber = latest.changeNumber;
+        state.currentSettingsHash = latest.settingsHash;
+        await this.persist(runId, state, {
+          scope: "run",
+          type: "settings_route_retried",
+          nodeId: currentNodeId,
+          attemptId: attempt.result.attemptId,
+          payload: {
+            scopeId: latest.scopeId,
+            previousChangeNumber: attempt.settings.changeNumber,
+            changeNumber: latest.changeNumber,
+          },
+        });
+        resumedAttempt = {
+          nodeId: currentNodeId,
+          attemptId: attempt.result.attemptId,
+          startedAt: attempt.result.startedAt,
+          settings: latest,
+        };
+        executedSteps -= 1;
+        continue;
+      }
+      settingsRouteRetries.delete(currentNodeId);
 
       if (attempt.result.outcome !== "ok") {
         currentNodeId = this.routeAfterFailure(workflow, state, attempt);
@@ -887,11 +978,21 @@ export class WorkflowEngine {
       ...(attempt.execution?.conversation !== undefined
         ? { conversation: attempt.execution.conversation }
         : {}),
+      ...(attempt.settings !== undefined
+        ? {
+            settingsScopeId: attempt.settings.scopeId,
+            settingsChangeNumber: attempt.settings.changeNumber,
+            settingsHash: attempt.settings.settingsHash,
+          }
+        : {}),
     };
     state.steps.push(step);
     delete state.currentNode;
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
+    delete state.currentSettingsScopeId;
+    delete state.currentSettingsChangeNumber;
+    delete state.currentSettingsHash;
     delete state.statusDetail;
   }
 
@@ -905,9 +1006,20 @@ export class WorkflowEngine {
   ): Promise<NodeAttempt> {
     const attemptId = resumedAttempt?.attemptId ?? randomUUID();
     const startedAt = resumedAttempt?.startedAt ?? new Date().toISOString();
+    const settings =
+      resumedAttempt?.settings ?? (await this.captureSettingsBinding(workflow, state, nodeId));
     state.currentNode = nodeId;
     state.currentAttemptId = attemptId;
     state.currentNodeStartedAt = startedAt;
+    if (settings !== undefined) {
+      state.currentSettingsScopeId = settings.scopeId;
+      state.currentSettingsChangeNumber = settings.changeNumber;
+      state.currentSettingsHash = settings.settingsHash;
+    } else {
+      delete state.currentSettingsScopeId;
+      delete state.currentSettingsChangeNumber;
+      delete state.currentSettingsHash;
+    }
     if (node.statusDetail !== undefined) {
       state.statusDetail = node.statusDetail;
     }
@@ -917,7 +1029,16 @@ export class WorkflowEngine {
         type: "node_started",
         nodeId,
         attemptId,
-        payload: { nodeType: node.nodeType },
+        payload: {
+          nodeType: node.nodeType,
+          ...(settings !== undefined
+            ? {
+                settingsScopeId: settings.scopeId,
+                settingsChangeNumber: settings.changeNumber,
+                settingsHash: settings.settingsHash,
+              }
+            : {}),
+        },
       });
     }
 
@@ -931,10 +1052,12 @@ export class WorkflowEngine {
         attemptId,
         node,
         meta,
+        settings,
       );
       return {
         result: this.createNodeResult(nodeId, node, attemptId, startedAt, "ok", execution.output),
         execution,
+        ...(settings !== undefined ? { settings } : {}),
       };
     } catch (error) {
       const outcome = this.outcomeForError(error);
@@ -950,6 +1073,7 @@ export class WorkflowEngine {
           promptText: meta.promptText,
           ...(meta.action !== undefined ? { action: meta.action } : {}),
         },
+        ...(settings !== undefined ? { settings } : {}),
         error,
       };
     }
@@ -994,9 +1118,10 @@ export class WorkflowEngine {
     attemptId: string,
     node: WorkflowNodeDefinition,
     meta: NodeExecutionMeta,
+    settings?: WorkflowSettingsScopeRecord,
   ): Promise<NodeExecution> {
     const abort = new AbortController();
-    const context = this.createNodeContext(state, abort.signal);
+    const context = this.createNodeContext(state, abort.signal, settings);
     let timer: NodeJS.Timeout | undefined;
     let dispatchSettled: Promise<void> | undefined;
     this.activeAbort = abort;
@@ -1019,7 +1144,14 @@ export class WorkflowEngine {
           abort.abort(new TimeoutError(timeoutMs));
         }, timeoutMs);
       }
-      this.activeAttempt = { runId, state, nodeId, attemptId, signal: abort.signal };
+      this.activeAttempt = {
+        runId,
+        state,
+        nodeId,
+        attemptId,
+        ...(settings !== undefined ? { settingsScopeId: settings.scopeId } : {}),
+        signal: abort.signal,
+      };
       const dispatched = this.dispatchNode(
         workflow,
         state,
@@ -1162,12 +1294,83 @@ export class WorkflowEngine {
     }
   }
 
-  private createNodeContext(state: WorkflowRunState, signal: AbortSignal): WorkflowNodeContext {
+  private async captureSettingsBinding(
+    workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+    nodeId: string,
+  ): Promise<WorkflowSettingsScopeRecord | undefined> {
+    const metadata = compositionMetadata(workflow);
+    let mountPath = "";
+    let definition = workflow.settings;
+    if (metadata !== undefined) {
+      const entry = metadata.entries[nodeId];
+      const exit = metadata.exits[nodeId];
+      const scope =
+        entry !== undefined
+          ? metadata.scopes[entry.parentPath]
+          : exit !== undefined
+            ? metadata.scopes[exit.mountPath]
+            : Object.values(metadata.scopes).find((candidate) =>
+                Object.values(candidate.authoredNodes).includes(nodeId),
+              );
+      if (scope === undefined) {
+        throw new Error(`Workflow settings scope is missing for node ${nodeId}`);
+      }
+      mountPath = scope.path;
+      definition = scope.settings;
+    }
+    if (definition === undefined) return undefined;
+    const invocation = mountPath === "" ? 1 : currentMountInvocation(state, mountPath);
+    const existing = this.store.findSettingsScope(state.runId, mountPath, invocation);
+    if (existing !== undefined) return existing;
+    const input = mountPath === "" ? state.input : currentMountInput(state, mountPath);
+    const mappedSettings =
+      mountPath === "" ? { present: false as const } : currentMountSettings(state, mountPath);
+    const initial = mappedSettings.present
+      ? await parseWorkflowSettingsValue(definition, mappedSettings.value)
+      : await resolveInitialWorkflowSettings(definition, input);
+    return this.store.ensureSettingsScope({
+      runId: state.runId,
+      mountPath,
+      invocation,
+      settings: initial.json,
+    });
+  }
+
+  private persistedSettingsBinding(
+    state: WorkflowRunState,
+  ): WorkflowSettingsScopeRecord | undefined {
+    if (state.currentSettingsScopeId === undefined) return undefined;
+    const scope = this.store.getSettingsScope(state.currentSettingsScopeId);
+    if (scope === undefined) {
+      throw new Error(`Saved workflow settings scope is missing: ${state.currentSettingsScopeId}`);
+    }
+    if (
+      scope.changeNumber !== state.currentSettingsChangeNumber ||
+      scope.settingsHash !== state.currentSettingsHash
+    ) {
+      throw new Error("Saved workflow settings binding does not match its settings scope");
+    }
+    return scope;
+  }
+
+  private createNodeContext(
+    state: WorkflowRunState,
+    signal: AbortSignal,
+    settings?: WorkflowSettingsScopeRecord,
+  ): WorkflowNodeContext {
     return {
       input: state.input,
       outputs: state.outputs,
       results: state.results,
       state,
+      ...(settings !== undefined
+        ? {
+            settings: deepFreezeJson(structuredClone(settings.settings)),
+            settingsScopeId: settings.scopeId,
+            settingsChangeNumber: settings.changeNumber,
+          }
+        : {}),
       signal,
     };
   }
@@ -1202,7 +1405,8 @@ export class WorkflowEngine {
       }
     }
 
-    const basePrompt = await node.prompt(context);
+    const authoredPrompt = await node.prompt(context);
+    const basePrompt = appendLiveControlInstructions(authoredPrompt, workflow, nodeId, context);
     if (signal.aborted) {
       // The node timed out or the run was cancelled while the async prompt
       // builder ran; a late continuation must not write into a run that
@@ -1352,6 +1556,9 @@ export class WorkflowEngine {
     delete state.currentNode;
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
+    delete state.currentSettingsScopeId;
+    delete state.currentSettingsChangeNumber;
+    delete state.currentSettingsHash;
     await this.persist(runId, state, {
       scope: "run",
       type: `run_${status}`,
@@ -1360,6 +1567,7 @@ export class WorkflowEngine {
         ...(fields.error !== undefined ? { error: fields.error } : {}),
         ...(fields.waitingOn !== undefined ? { waitingOn: fields.waitingOn } : {}),
         ...(fields.finalOutput !== undefined ? { finalOutput: fields.finalOutput } : {}),
+        presentationRequired: status === "completed" && this.presentationRequired,
       },
     });
   }
@@ -1476,6 +1684,58 @@ function abortRejection(signal: AbortSignal): Promise<never> {
     }
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function restoreRunState(target: WorkflowRunState, saved: WorkflowRunState): void {
+  for (const key of Object.keys(target) as Array<keyof WorkflowRunState>) {
+    delete target[key];
+  }
+  Object.assign(target, saved);
+}
+
+function currentMountInvocation(state: WorkflowRunState, mountPath: string): number {
+  for (let index = state.steps.length - 1; index >= 0; index -= 1) {
+    const step = state.steps[index];
+    if (step?.nodeId !== mountPath || step.outcome !== "ok") continue;
+    const output = step.output as { invocation?: unknown };
+    if (typeof output.invocation === "number" && Number.isInteger(output.invocation)) {
+      return output.invocation;
+    }
+  }
+  throw new Error(`Workflow include entry is missing for settings scope ${mountPath}`);
+}
+
+function currentMountInput(state: WorkflowRunState, mountPath: string): unknown {
+  for (let index = state.steps.length - 1; index >= 0; index -= 1) {
+    const step = state.steps[index];
+    if (step?.nodeId !== mountPath || step.outcome !== "ok") continue;
+    const output = step.output as { input?: unknown };
+    return output.input ?? null;
+  }
+  throw new Error(`Workflow include input is missing for settings scope ${mountPath}`);
+}
+
+function currentMountSettings(
+  state: WorkflowRunState,
+  mountPath: string,
+): { present: true; value: unknown } | { present: false } {
+  for (let index = state.steps.length - 1; index >= 0; index -= 1) {
+    const step = state.steps[index];
+    if (step?.nodeId !== mountPath || step.outcome !== "ok") continue;
+    const output = step.output as { settings?: unknown };
+    return Object.hasOwn(output, "settings")
+      ? { present: true, value: output.settings }
+      : { present: false };
+  }
+  throw new Error(`Workflow include entry is missing for settings scope ${mountPath}`);
+}
+
+function deepFreezeJson<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreezeJson(item);
+  }
+  return value;
 }
 
 function countExecutableSteps(workflow: WorkflowDefinition, steps: WorkflowStepRecord[]): number {
@@ -1606,6 +1866,66 @@ function assistantMessageOutput(
 
 function assistantMessageConfig(node: AgentNodeDefinition): AssistantMessageOutput | undefined {
   return assistantMessageOutput(node.expectedOutput);
+}
+
+function appendLiveControlInstructions(
+  prompt: string,
+  workflow: WorkflowDefinition,
+  nodeId: string,
+  context: WorkflowNodeContext,
+): string {
+  const lines = [prompt.trimEnd(), "", "Workflow changes during this run:"];
+  if (
+    context.settingsScopeId !== undefined &&
+    context.settingsChangeNumber !== undefined &&
+    context.settings !== undefined
+  ) {
+    const definition = settingsDefinitionForNode(workflow, nodeId);
+    const value = canonicalJson(context.settings);
+    const summary =
+      value.length <= 8_192 ? value : `${value.slice(0, 8_192)}… [settings truncated]`;
+    const allowed = (definition?.paths ?? [])
+      .flatMap((rule) =>
+        Object.entries(rule.permissions)
+          .filter(([, actors]) => actors?.includes("session") === true)
+          .map(([permission]) => `${permission} ${rule.path || "/"}`),
+      )
+      .join(", ");
+    lines.push(
+      `- Active settings scope: ${context.settingsScopeId}`,
+      `- Current settings change number: ${context.settingsChangeNumber}`,
+      ...(definition?.description !== undefined
+        ? [`- Settings purpose: ${definition.description}`]
+        : []),
+      `- Current settings: ${summary}`,
+      `- Changes allowed from this model step: ${allowed || "none"}`,
+      "- Treat the current settings as authoritative for future behavior in this workflow scope.",
+      "- To change future workflow settings, use the workflow tool with action change-settings, this scopeId, an RFC 6902 patch, and optionally expectedChangeNumber.",
+    );
+  } else {
+    lines.push("- This workflow scope has no editable settings.");
+  }
+  lines.push(
+    "- To save normal user work for after successful completion, use workflow action queue-follow-up once for each prompt.",
+    "- To remove an unsent prompt that this model queued, use workflow action remove-follow-up with its followUpId.",
+    "- Setting changes affect only future node attempts and future settings routes. They do not change this running attempt or completed work.",
+  );
+  return lines.join("\n");
+}
+
+function settingsDefinitionForNode(
+  workflow: WorkflowDefinition,
+  nodeId: string,
+): WorkflowDefinition["settings"] {
+  const metadata = compositionMetadata(workflow);
+  if (metadata === undefined) return workflow.settings;
+  const entry = metadata.entries[nodeId];
+  if (entry !== undefined) return metadata.scopes[entry.parentPath]?.settings;
+  const exit = metadata.exits[nodeId];
+  if (exit !== undefined) return metadata.scopes[exit.mountPath]?.settings;
+  return Object.values(metadata.scopes).find((scope) =>
+    Object.values(scope.authoredNodes).includes(nodeId),
+  )?.settings;
 }
 
 /**

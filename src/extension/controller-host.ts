@@ -4,6 +4,7 @@ import {
   loadDiscoveredControllers,
   type AnyControllerDefinition,
   type ControllerResource,
+  type ControllerWorkflowScheduler,
   type WorkflowSchedulerRequest,
   type WorkflowSchedulerResult,
 } from "../controllers/index.js";
@@ -80,6 +81,10 @@ export class PiControllerHost {
   static async create(options: {
     cwd: string;
     startChild: PiChildWorkflowStarter;
+    workflowControls?: Pick<
+      ControllerWorkflowScheduler,
+      "changeSettings" | "queueFollowUp" | "removeFollowUp"
+    >;
   }): Promise<PiControllerHost | undefined> {
     const definitions = await loadDiscoveredControllers({ cwd: options.cwd });
     if (definitions.length === 0) {
@@ -89,7 +94,7 @@ export class PiControllerHost {
     const manager = new ControllerManager({
       store,
       controllers: definitions,
-      workflowScheduler: { ensure: options.startChild },
+      workflowScheduler: { ensure: options.startChild, ...options.workflowControls },
     });
     return new PiControllerHost(definitions, store, manager);
   }

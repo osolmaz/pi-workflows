@@ -38,6 +38,25 @@ describe("parseWorkflowArgs answer", () => {
     expect(() => parseWorkflowArgs("status bad id")).toThrow(/valid run id/);
   });
 
+  it("parses settings and follow-up commands", () => {
+    expect(
+      parseWorkflowArgs('change-settings [{"op":"replace","path":"/mode","value":"safe"}]'),
+    ).toEqual({
+      kind: "change-settings",
+      patch: [{ op: "replace", path: "/mode", value: "safe" }],
+    });
+    expect(parseWorkflowArgs("queue-follow-up Run the release checks.")).toEqual({
+      kind: "queue-follow-up",
+      prompt: "Run the release checks.",
+    });
+    const followUpId = `follow-up-${"a".repeat(40)}`;
+    expect(parseWorkflowArgs(`remove-follow-up ${followUpId}`)).toEqual({
+      kind: "remove-follow-up",
+      followUpId,
+    });
+    expect(() => parseWorkflowArgs("change-settings broken")).toThrow(/JSON Patch/);
+  });
+
   it("parses --input-json for runs", () => {
     expect(parseWorkflowArgs('mini --input-json {"task":"hi"}')).toEqual({
       kind: "run",

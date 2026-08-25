@@ -13,6 +13,10 @@ use std::path::Path;
 
 const APPLICATION_ID: i64 = 0x5049_5746;
 const USER_VERSION: i64 = 1;
+const SCHEMA_DIGEST: [u8; 32] = [
+    0xb6, 0xca, 0x3b, 0xc5, 0xf5, 0x8b, 0xe4, 0xdb, 0x4b, 0x61, 0xd4, 0x16, 0x38, 0x4e, 0x0b, 0x62,
+    0x7c, 0xc6, 0x24, 0x5a, 0xdc, 0x1d, 0x30, 0x0c, 0x1b, 0xf6, 0x5a, 0xc1, 0x7d, 0xe0, 0x45, 0x5d,
+];
 
 type LoadedSession = (
     Option<SessionBinding>,
@@ -31,6 +35,8 @@ pub struct LoadedRun {
     pub session_entries: Vec<SessionEntryRecord>,
     pub session_events: Vec<SessionEventRecord>,
     pub session_capture: Option<SessionCapture>,
+    pub settings_scopes: Vec<Value>,
+    pub follow_up_queue: Option<Value>,
     pub possibly_interrupted: bool,
 }
 
@@ -73,6 +79,8 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     let trace = read_trace(&connection, run_id)?;
     let (session_binding, session_entries, session_events, session_capture) =
         read_session(&connection, run_id)?;
+    let settings_scopes = read_settings(&connection, run_id)?;
+    let follow_up_queue = read_follow_ups(&connection, run_id)?;
     let manifest = manifest_from_state(&state);
     let possibly_interrupted = state.status.label() == "running"
         && (owner_id.is_none()
@@ -87,6 +95,8 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
         session_entries,
         session_events,
         session_capture,
+        settings_scopes,
+        follow_up_queue,
         possibly_interrupted,
     })
 }
@@ -133,6 +143,16 @@ fn open(path: &Path) -> Result<Connection> {
     if application_id != APPLICATION_ID || user_version != USER_VERSION {
         bail!("incompatible Pi Workflows SQLite schema");
     }
+    let schema_digest: Vec<u8> = connection
+        .query_row(
+            "SELECT schema_digest FROM schema_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .context("incompatible Pi Workflows SQLite schema metadata")?;
+    if schema_digest.as_slice() != SCHEMA_DIGEST {
+        bail!("incompatible Pi Workflows SQLite schema; back up or reset the old alpha state");
+    }
     Ok(connection)
 }
 
@@ -143,6 +163,72 @@ fn read_json_blob(connection: &Connection, hash: &[u8]) -> Result<Value> {
         |row| row.get(0),
     )?;
     Ok(serde_json::from_slice(&content)?)
+}
+
+fn read_settings(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
+    let mut statement = connection.prepare(
+        "SELECT s.scope_id, s.mount_path, s.invocation, s.current_hash, r.revision
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.active_run_id = ?1
+         ORDER BY s.mount_path, s.invocation",
+    )?;
+    let rows = statement.query_map([run_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u64>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+            row.get::<_, u64>(4)?,
+        ))
+    })?;
+    let mut scopes = Vec::new();
+    for row in rows {
+        let (scope_id, mount_path, invocation, settings_hash, change_number) = row?;
+        scopes.push(json!({
+            "scopeId": scope_id,
+            "mountPath": mount_path,
+            "invocation": invocation,
+            "changeNumber": change_number,
+            "settingsHash": hex_bytes(&settings_hash),
+        }));
+    }
+    Ok(scopes)
+}
+
+fn read_follow_ups(connection: &Connection, run_id: &str) -> Result<Option<Value>> {
+    let queue = connection
+        .query_row(
+            "SELECT presentation_state FROM workflow_follow_up_queues WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(presentation_state) = queue else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT follow_up_id, order_number, status, source_type, session_entry_id
+         FROM workflow_follow_ups WHERE run_id = ?1 ORDER BY order_number",
+    )?;
+    let rows = statement.query_map([run_id], |row| {
+        Ok(json!({
+            "followUpId": row.get::<_, String>(0)?,
+            "order": row.get::<_, u64>(1)?,
+            "state": row.get::<_, String>(2)?,
+            "source": row.get::<_, String>(3)?,
+            "sessionEntryId": row.get::<_, Option<String>>(4)?,
+        }))
+    })?;
+    let items = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(json!({
+        "presentationState": presentation_state,
+        "items": items,
+    })))
+}
+
+fn hex_bytes(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn read_trace(connection: &Connection, run_id: &str) -> Result<Vec<TraceEvent>> {

@@ -198,6 +198,21 @@ A child cannot read parent state except through mapped input. A parent sees only
 
 Each mount entry starts with empty local outputs and results. Earlier invocation data stays in the trace but cannot satisfy callbacks in a later invocation. The latest named exit replaces the parent-visible mount output.
 
+### Workflow settings
+
+A root workflow and each included-workflow invocation can declare separate settings. Included settings are isolated by default and use the mount path plus saved invocation number as their scope. Re-entry creates fresh settings. A child initializer receives the mapped child input.
+
+A parent can override one invocation's initial child settings explicitly:
+
+```ts
+includeWorkflow(child, {
+  input: ({ outputs }) => ({ task: outputs.plan }),
+  settings: ({ settings }) => ({ ...settings, route: "careful" }),
+});
+```
+
+A checkpoint continuation keeps the same active settings scopes, change numbers, and saved changes. The continuation transaction transfers those scopes and queued follow-ups to the new run before execution resumes.
+
 ### Limits and progress
 
 The root `maxSteps` limits all real node attempts in the run. Each child `maxSteps` limits one invocation. Include entry and exit transitions are recorded but do not count as user-authored node attempts.

@@ -305,7 +305,7 @@ A delivery lease is temporary coordination state. It is not another follow-up st
 | Completed                                 | Reject          | Reject         | Wait for presentation, then send |
 | Failed, timed out, or cancelled           | Reject          | Reject         | Cancel unsent items              |
 
-The checkpoint continuation is a new stored run, but it is the same logical workflow chain. The transaction that creates the continuation copies the latest settings scope values and change numbers to matching scopes in the new run, then moves queued follow-ups to the new run. A crash cannot leave the new run without its settings or split its follow-up list.
+The checkpoint continuation is a new stored run, but it is the same logical workflow chain. The transaction that creates the continuation transfers the active settings scopes and queued follow-ups to the new run. Scope IDs, change numbers, saved changes, and current values stay unchanged. A crash cannot leave the new run without its settings or split its follow-up list.
 
 - Pause and park keep queued prompts.
 - Resume keeps their order.
@@ -463,7 +463,7 @@ Update:
 - `docs/DESIGN_PHILOSOPHY.md`
 - `README.md`
 
-Add evergreen documents for workflow settings and follow-up prompts when implementation begins. Keep this file as the dated implementation plan.
+Add `docs/2026-08-25-workflow-settings.md` and `docs/2026-08-25-workflow-follow-ups.md`. Keep this file as the dated implementation plan.
 
 ## Tests
 

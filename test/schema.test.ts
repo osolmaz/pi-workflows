@@ -16,6 +16,7 @@ import {
   errorMessage,
   isAbortLikeError,
 } from "../src/workflows/errors.js";
+import { allowSettingsPath, settingsRoute, workflowSettings } from "../src/workflows/settings.js";
 import { createDefinitionSnapshot, workflowStateDatabasePath } from "../src/workflows/store.js";
 import type { WorkflowDefinition, WorkflowEdge } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
@@ -40,7 +41,17 @@ describe("defineWorkflow validation", () => {
   });
 
   it("rejects reserved workflow names claimed by /workflow subcommands", () => {
-    for (const name of ["answer", "cancel", "list", "pause", "resume", "status"]) {
+    for (const name of [
+      "answer",
+      "cancel",
+      "change-settings",
+      "list",
+      "pause",
+      "queue-follow-up",
+      "remove-follow-up",
+      "resume",
+      "status",
+    ]) {
       expect(() => define({ name })).toThrow(/reserved for \/workflow subcommands/);
     }
   });
@@ -246,6 +257,28 @@ describe("definition snapshots", () => {
     expect(snapshot.nodes.fn).toEqual({ nodeType: "action", actionExecution: "function" });
     expect(snapshot.nodes.report).toEqual({ nodeType: "notify", summary: "final" });
     expect(snapshot.nodes.stop).toEqual({ nodeType: "checkpoint", summary: "pause here" });
+  });
+
+  it("captures settings paths and pure settings routes", () => {
+    const workflow = defineWorkflow({
+      name: "settings-snapshot",
+      settings: workflowSettings({
+        initial: { route: "a" },
+        parse: (value) => value as { route: string },
+        description: "Future route.",
+        paths: [allowSettingsPath("/route", { replace: ["session"] })],
+      }),
+      startAt: "start",
+      nodes: { start: settingsRoute({ run: ({ settings }) => settings }) },
+      edges: [],
+    });
+    expect(createDefinitionSnapshot(workflow)).toMatchObject({
+      settings: {
+        description: "Future route.",
+        paths: [{ path: "/route", permissions: { replace: ["session"] } }],
+      },
+      nodes: { start: { nodeType: "compute", settingsRoute: true } },
+    });
   });
 });
 

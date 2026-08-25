@@ -1,3 +1,5 @@
+import type { JsonPatch } from "../workflows/json-patch.js";
+
 export type MaybePromise<T> = T | Promise<T>;
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -131,8 +133,46 @@ export type ChildWorkflowRecord = ChildWorkflowReference & {
   error?: string;
 };
 
+export type ControllerSettingsChangeRequest = {
+  requestKey: string;
+  runId: string;
+  scopeId?: string;
+  expectedChangeNumber?: number;
+  patch: JsonPatch;
+};
+
+export type ControllerSettingsChangeResult = {
+  runId: string;
+  scopeId: string;
+  changeNumber: number;
+  adopted: boolean;
+};
+
+export type ControllerQueueFollowUpRequest = {
+  requestKey: string;
+  runId: string;
+  prompt: string;
+};
+
+export type ControllerFollowUpResult = {
+  runId: string;
+  followUpId: string;
+  order: number;
+  state: string;
+  adopted: boolean;
+};
+
+export type ControllerRemoveFollowUpRequest = {
+  requestKey: string;
+  runId: string;
+  followUpId: string;
+};
+
 export interface ControllerWorkflows {
   ensure(request: ChildWorkflowRequest): Promise<ChildWorkflowRecord>;
+  changeSettings(request: ControllerSettingsChangeRequest): Promise<ControllerSettingsChangeResult>;
+  queueFollowUp(request: ControllerQueueFollowUpRequest): Promise<ControllerFollowUpResult>;
+  removeFollowUp(request: ControllerRemoveFollowUpRequest): Promise<ControllerFollowUpResult>;
 }
 
 export type ReconcileContext<TStatus> = {

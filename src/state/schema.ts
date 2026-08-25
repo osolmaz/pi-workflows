@@ -34,7 +34,8 @@ CREATE TABLE blobs (
 CREATE TABLE resources (
   resource_id TEXT PRIMARY KEY,
   resource_type TEXT NOT NULL CHECK (resource_type IN (
-    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'notification', 'turn_intent'
+    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'notification', 'turn_intent',
+    'settings', 'follow_up_queue', 'follow_up'
   )),
   aggregate_key TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
@@ -134,6 +135,92 @@ CREATE TABLE run_bindings (
 
 CREATE INDEX run_bindings_session_idx ON run_bindings(origin_session_id, created_at DESC);
 
+CREATE TABLE workflow_settings (
+  scope_id TEXT PRIMARY KEY,
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
+  origin_run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  active_run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  mount_path TEXT NOT NULL,
+  invocation INTEGER NOT NULL CHECK (invocation > 0),
+  initial_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  current_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (origin_run_id, mount_path, invocation)
+) STRICT;
+
+CREATE INDEX workflow_settings_active_run_idx ON workflow_settings(active_run_id, mount_path, invocation);
+
+CREATE TABLE workflow_setting_changes (
+  change_id TEXT PRIMARY KEY,
+  scope_id TEXT NOT NULL REFERENCES workflow_settings(scope_id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  change_number INTEGER NOT NULL CHECK (change_number > 0),
+  actor_type TEXT NOT NULL CHECK (actor_type IN (
+    'session', 'host', 'controller', 'channel', 'human', 'policy', 'control', 'system'
+  )),
+  actor_id TEXT,
+  source_type TEXT NOT NULL,
+  patch_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  before_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  after_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  accepted_at INTEGER NOT NULL,
+  UNIQUE (scope_id, request_id),
+  UNIQUE (scope_id, change_number)
+) STRICT;
+
+CREATE TABLE workflow_follow_up_queues (
+  run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
+  origin_session_id TEXT,
+  presentation_state TEXT NOT NULL DEFAULT 'none' CHECK (presentation_state IN (
+    'none', 'not-needed', 'pending', 'settled', 'unavailable'
+  )),
+  presentation_entry_id TEXT,
+  presentation_assistant_entry_id TEXT,
+  presentation_reason_hash BLOB REFERENCES blobs(blob_hash),
+  presentation_updated_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (presentation_state IN ('none', 'not-needed', 'pending') AND presentation_assistant_entry_id IS NULL AND presentation_reason_hash IS NULL)
+    OR
+    (presentation_state = 'unavailable' AND presentation_assistant_entry_id IS NULL AND presentation_reason_hash IS NOT NULL)
+    OR
+    (presentation_state = 'settled' AND presentation_entry_id IS NOT NULL AND presentation_assistant_entry_id IS NOT NULL AND presentation_reason_hash IS NULL)
+  )
+) STRICT;
+
+CREATE TABLE workflow_follow_ups (
+  follow_up_id TEXT PRIMARY KEY,
+  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
+  queue_resource_id TEXT NOT NULL REFERENCES resources(resource_id),
+  run_id TEXT NOT NULL REFERENCES workflow_follow_up_queues(run_id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  order_number INTEGER NOT NULL CHECK (order_number > 0),
+  target_session_id TEXT NOT NULL,
+  actor_type TEXT NOT NULL CHECK (actor_type IN (
+    'session', 'host', 'controller', 'channel', 'human', 'policy', 'control', 'system'
+  )),
+  actor_id TEXT,
+  source_type TEXT NOT NULL,
+  prompt_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  status TEXT NOT NULL CHECK (status IN (
+    'queued', 'pending_presentation', 'ready', 'sent', 'removed', 'cancelled'
+  )),
+  session_entry_id TEXT,
+  reason_hash BLOB REFERENCES blobs(blob_hash),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  sent_at INTEGER,
+  UNIQUE (run_id, request_id),
+  UNIQUE (run_id, order_number),
+  CHECK ((status = 'sent') = (session_entry_id IS NOT NULL AND sent_at IS NOT NULL)),
+  CHECK ((status IN ('removed', 'cancelled')) = (reason_hash IS NOT NULL))
+) STRICT;
+
+CREATE INDEX workflow_follow_ups_delivery_idx ON workflow_follow_ups(target_session_id, status, order_number);
+
 CREATE TABLE run_queue (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK (status IN (
@@ -170,6 +257,9 @@ CREATE TABLE node_attempts (
   output_hash BLOB REFERENCES blobs(blob_hash),
   step_metadata_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
+  settings_scope_id TEXT REFERENCES workflow_settings(scope_id),
+  settings_change_number INTEGER CHECK (settings_change_number IS NULL OR settings_change_number >= 0),
+  settings_hash BLOB REFERENCES blobs(blob_hash),
   started_at INTEGER,
   deadline_at INTEGER,
   finished_at INTEGER,

@@ -1,8 +1,34 @@
 import { createHash, randomUUID } from "node:crypto";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
-import { canonicalJson } from "../state/json.js";
-import { resourceIdFor, tokenHash, type MutationActor, type OwnerType } from "../state/mutation.js";
+import { canonicalJson, type JsonValue } from "../state/json.js";
+import {
+  StateMutationStore,
+  StaleResourceError,
+  resourceIdFor,
+  tokenHash,
+  type ActorType,
+  type LeaseClaim,
+  type MutationActor,
+  type OwnerType,
+} from "../state/mutation.js";
 import { compositionMetadata } from "./composition.js";
+import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
+import {
+  applyWorkflowSettingsPatch,
+  workflowSettingsScopeId,
+  type InitialWorkflowSettingsScope,
+  type WorkflowFollowUpQueueRecord,
+  type WorkflowFollowUpRecord,
+  type WorkflowFollowUpState,
+  type WorkflowPresentationState,
+  type WorkflowQueueFollowUpRequest,
+  type WorkflowRemoveFollowUpRequest,
+  type WorkflowSettingsChangeRecord,
+  type WorkflowSettingsChangeRequest,
+  type WorkflowSettingsChangeResult,
+  type WorkflowSettingsDefinition,
+  type WorkflowSettingsScopeRecord,
+} from "./settings.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -15,6 +41,7 @@ import type {
   WorkflowSessionCapture,
   WorkflowSessionEntryRecord,
   WorkflowSessionEventRecord,
+  WorkflowSettingsSnapshot,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
   WorkflowUpdateInput,
@@ -28,6 +55,19 @@ export const SESSION_BINDING_SCHEMA = "pi-workflows.session-binding.v1" as const
 export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
 export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
 export const SESSION_EVENT_MAX_BYTES = 1024 * 1024;
+
+const FOLLOW_UP_ROW_SELECT = `
+  SELECT f.follow_up_id AS followUpId, f.resource_id AS resourceId,
+         f.queue_resource_id AS queueResourceId, f.run_id AS runId,
+         f.request_id AS requestId, f.order_number AS orderNumber,
+         f.target_session_id AS targetSessionId, f.actor_type AS actorType,
+         f.actor_id AS actorId, f.source_type AS sourceType,
+         f.prompt_hash AS promptHash, f.status,
+         f.session_entry_id AS sessionEntryId, f.reason_hash AS reasonHash,
+         f.created_at AS createdAt, f.updated_at AS updatedAt, f.sent_at AS sentAt,
+         r.revision
+  FROM workflow_follow_ups f
+  JOIN resources r ON r.resource_id = f.resource_id`;
 
 export function workflowStateDatabasePath(homeDir?: string): string {
   return workflowStatePath(homeDir);
@@ -120,6 +160,79 @@ type EventRow = {
   recordedAt: number;
 };
 
+type SettingsScopeRow = {
+  scopeId: string;
+  resourceId: string;
+  originRunId: string;
+  activeRunId: string;
+  mountPath: string;
+  invocation: number;
+  currentHash: Buffer;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type SettingsProjectionRow = {
+  scopeId: string;
+  initialHash: Buffer;
+  currentHash: Buffer;
+  revision: number;
+};
+
+type SettingsProjectionChangeRow = {
+  changeNumber: number;
+  patchHash: Buffer;
+  beforeHash: Buffer;
+  afterHash: Buffer;
+};
+
+type SettingsChangeRow = {
+  changeId: string;
+  scopeId: string;
+  requestId: string;
+  changeNumber: number;
+  actorType: string;
+  actorId: string | null;
+  sourceType: string;
+  patchHash: Buffer;
+  beforeHash: Buffer;
+  afterHash: Buffer;
+  acceptedAt: number;
+};
+
+type FollowUpQueueRow = {
+  runId: string;
+  resourceId: string;
+  originSessionId: string | null;
+  presentationState: string;
+  presentationEntryId: string | null;
+  presentationAssistantEntryId: string | null;
+  presentationReasonHash: Buffer | null;
+  revision: number;
+};
+
+type FollowUpRow = {
+  followUpId: string;
+  resourceId: string;
+  queueResourceId: string;
+  runId: string;
+  requestId: string;
+  orderNumber: number;
+  targetSessionId: string;
+  actorType: string;
+  actorId: string | null;
+  sourceType: string;
+  promptHash: Buffer;
+  status: string;
+  sessionEntryId: string | null;
+  reasonHash: Buffer | null;
+  createdAt: number;
+  updatedAt: number;
+  sentAt: number | null;
+  revision: number;
+};
+
 type SegmentRow = {
   segmentId: string;
   runId: string;
@@ -178,10 +291,16 @@ export type LoadedWorkflowRun = {
   sessionCapture: WorkflowSessionCapture | null;
   sessionIntegrity: SessionCaptureIntegrity;
   sessionSegments: SessionCaptureSegment[];
+  settingsScopes?: WorkflowSettingsScopeRecord[];
+  followUpQueue?: WorkflowFollowUpQueueRecord | null;
 };
 
 export type ReadWorkflowRunOptions = {
   includeTrace?: boolean;
+};
+
+export type InitializeWorkflowRunOptions = {
+  initialSettings?: InitialWorkflowSettingsScope[];
 };
 
 export class WorkflowRunStore {
@@ -192,6 +311,7 @@ export class WorkflowRunStore {
     | undefined;
   private readonly contexts = new Map<string, RunContext>();
   private readonly ownsState: boolean;
+  private readonly mutations: StateMutationStore;
 
   constructor(databasePath: string = workflowStatePath(), options: WorkflowRunStoreOptions = {}) {
     this.authorityProvider = options.authorityProvider;
@@ -204,13 +324,18 @@ export class WorkflowRunStore {
         checkLegacyState: databasePath === workflowStatePath(),
       });
     this.databasePath = this.state.filePath;
+    this.mutations = new StateMutationStore(this.state);
   }
 
   close(): void {
     if (this.ownsState) this.state.close();
   }
 
-  async initializeRun(workflow: WorkflowDefinition, state: WorkflowRunState): Promise<string> {
+  async initializeRun(
+    workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+    options: InitializeWorkflowRunOptions = {},
+  ): Promise<string> {
     assertValidRunId(state.runId);
     if (!this.contexts.has(state.runId)) {
       const reserved = this.readRunRow(state.runId);
@@ -250,6 +375,7 @@ export class WorkflowRunStore {
             payload: { workflowName: workflow.name },
           });
           this.persistRunState(reserved, state, revision, now);
+          this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
           this.syncNodeAttempts(state, snapshot, now);
           context.revision = revision;
           return;
@@ -335,11 +461,555 @@ export class WorkflowRunStore {
           type: "run_created",
           payload: { workflowName: workflow.name },
         });
+        this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
         this.syncNodeAttempts(state, snapshot, now);
       });
       this.contexts.set(state.runId, { revision: acceptedRevision, lock: Promise.resolve() });
       return state.runId;
     });
+  }
+
+  ensureSettingsScope(options: {
+    runId: string;
+    mountPath: string;
+    invocation: number;
+    settings: JsonValue;
+  }): WorkflowSettingsScopeRecord {
+    const now = Date.now();
+    return this.state.transaction(() => {
+      this.requireRunAcceptsSettings(options.runId, false);
+      const originRunId = this.logicalOriginRunId(options.runId);
+      const scopeId = workflowSettingsScopeId(originRunId, options.mountPath, options.invocation);
+      const existing = this.settingsScopeRow(scopeId);
+      if (existing !== undefined) {
+        if (existing.activeRunId !== options.runId) {
+          throw new Error(`Workflow settings scope belongs to another active run: ${scopeId}`);
+        }
+        return this.settingsScopeRecord(existing);
+      }
+      const resourceId = this.mutations.ensureResource("settings", scopeId, now);
+      const settingsHash = this.state.putJson(options.settings, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO workflow_settings(
+             scope_id, resource_id, origin_run_id, active_run_id, mount_path, invocation,
+             initial_hash, current_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          scopeId,
+          resourceId,
+          originRunId,
+          options.runId,
+          options.mountPath,
+          options.invocation,
+          settingsHash,
+          settingsHash,
+          now,
+          now,
+        );
+      return this.settingsScopeRecord(this.requireSettingsScopeRow(scopeId));
+    });
+  }
+
+  getSettingsScope(scopeId: string): WorkflowSettingsScopeRecord | undefined {
+    const row = this.settingsScopeRow(scopeId);
+    return row === undefined ? undefined : this.settingsScopeRecord(row);
+  }
+
+  listSettingsScopes(runId: string): WorkflowSettingsScopeRecord[] {
+    return this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.active_run_id = ?
+         ORDER BY s.mount_path, s.invocation`,
+      )
+      .all(runId)
+      .filter(isSettingsScopeRow)
+      .map((row) => this.settingsScopeRecord(row));
+  }
+
+  private settingsScopesForRunView(runId: string): WorkflowSettingsScopeRecord[] {
+    const originRunId = this.logicalOriginRunId(runId);
+    return this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.origin_run_id = ? OR s.active_run_id = ?
+         ORDER BY s.mount_path, s.invocation`,
+      )
+      .all(originRunId, runId)
+      .filter(isSettingsScopeRow)
+      .map((row) => this.settingsScopeRecord(row));
+  }
+
+  findSettingsScope(
+    runId: string,
+    mountPath: string,
+    invocation: number,
+  ): WorkflowSettingsScopeRecord | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.active_run_id = ? AND s.mount_path = ? AND s.invocation = ?`,
+      )
+      .get(runId, mountPath, invocation);
+    return isSettingsScopeRow(row) ? this.settingsScopeRecord(row) : undefined;
+  }
+
+  async changeSettings<TSettings, TInput = unknown>(
+    definition: WorkflowSettingsDefinition<TSettings, TInput>,
+    request: WorkflowSettingsChangeRequest,
+  ): Promise<WorkflowSettingsChangeResult> {
+    assertRequestId(request.requestId);
+    assertSourceType(request.source);
+    const patch = validateJsonPatch(request.patch);
+    const patchJson = canonicalJson(patch);
+    const patchDigest = createHash("sha256").update(patchJson).digest();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const prior = this.settingsChangeRow(request.scopeId, request.requestId);
+      if (prior !== undefined) {
+        this.assertSameSettingsChange(prior, request, patchDigest);
+        return {
+          scope: this.settingsScopeRecord(this.requireSettingsScopeRow(request.scopeId)),
+          change: this.settingsChangeRecord(prior),
+          adopted: true,
+        };
+      }
+      const scope = this.requireSettingsScopeRow(request.scopeId);
+      if (scope.activeRunId !== request.runId) {
+        throw new Error(`Workflow settings scope is not active for run ${request.runId}`);
+      }
+      this.requireRunAcceptsSettings(request.runId, true);
+      if (
+        request.expectedChangeNumber !== undefined &&
+        request.expectedChangeNumber !== scope.revision
+      ) {
+        throw new StaleResourceError(
+          `Workflow settings changed: expected ${request.expectedChangeNumber}, current ${scope.revision}`,
+        );
+      }
+      const before = this.state.readJson(scope.currentHash);
+      const applied = await applyWorkflowSettingsPatch(
+        definition,
+        before,
+        patch,
+        request.actor,
+        request.source,
+      );
+      const beforeHash = scope.currentHash;
+      const afterHash = createHash("sha256").update(canonicalJson(applied.json)).digest();
+      try {
+        const mutation = this.mutations.mutate(
+          {
+            resourceId: scope.resourceId,
+            operation: "settings.change",
+            actor: request.actor,
+            expectedRevision: scope.revision,
+          },
+          "settings.changed",
+          ({ database, nextRevision, now }) => {
+            this.requireRunAcceptsSettings(request.runId, true);
+            const current = this.requireSettingsScopeRow(request.scopeId);
+            if (current.activeRunId !== request.runId || !current.currentHash.equals(beforeHash)) {
+              throw new StaleResourceError("Workflow settings changed before the patch committed");
+            }
+            const patchHash = database.putJson(applied.patch, now);
+            const savedAfterHash = database.putJson(applied.json, now);
+            const changeId = `setting-change-${randomUUID()}`;
+            database.connection
+              .prepare(
+                `INSERT INTO workflow_setting_changes(
+                   change_id, scope_id, request_id, change_number,
+                   actor_type, actor_id, source_type, patch_hash,
+                   before_hash, after_hash, accepted_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                changeId,
+                request.scopeId,
+                request.requestId,
+                nextRevision,
+                request.actor.type,
+                request.actor.id ?? null,
+                request.source,
+                patchHash,
+                beforeHash,
+                savedAfterHash,
+                now,
+              );
+            database.connection
+              .prepare(
+                `UPDATE workflow_settings SET current_hash = ?, updated_at = ? WHERE scope_id = ?`,
+              )
+              .run(savedAfterHash, now, request.scopeId);
+            return changeId;
+          },
+          {
+            payload: {
+              scopeId: request.scopeId,
+              requestId: request.requestId,
+              source: request.source,
+              beforeHash: beforeHash.toString("hex"),
+              afterHash: afterHash.toString("hex"),
+            },
+          },
+        );
+        const row = this.settingsChangeRow(request.scopeId, request.requestId);
+        if (row === undefined || row.changeId !== mutation.value) {
+          throw new Error("Accepted workflow settings change is missing");
+        }
+        return {
+          scope: this.settingsScopeRecord(this.requireSettingsScopeRow(request.scopeId)),
+          change: this.settingsChangeRecord(row),
+          adopted: false,
+        };
+      } catch (error) {
+        if (!(error instanceof StaleResourceError) || request.expectedChangeNumber !== undefined) {
+          throw error;
+        }
+      }
+    }
+    throw new StaleResourceError("Workflow settings kept changing; retry with an expected number");
+  }
+
+  queueFollowUp(request: WorkflowQueueFollowUpRequest): {
+    followUp: WorkflowFollowUpRecord;
+    adopted: boolean;
+  } {
+    assertRequestId(request.requestId);
+    assertSourceType(request.source);
+    if (typeof request.prompt !== "string" || request.prompt.trim().length === 0) {
+      throw new Error("Workflow follow-up prompt must be a non-empty string");
+    }
+    if (Buffer.byteLength(request.prompt, "utf8") > 64 * 1024) {
+      throw new Error("Workflow follow-up prompt cannot exceed 65536 bytes");
+    }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const prior = this.followUpRowByRequest(request.runId, request.requestId);
+      if (prior !== undefined) {
+        this.assertSameFollowUp(prior, request);
+        return { followUp: this.followUpRecord(prior), adopted: true };
+      }
+      this.requireRunAcceptsSettings(request.runId, true);
+      const queue = this.requireFollowUpQueueRow(request.runId);
+      try {
+        const result = this.mutations.mutate(
+          {
+            resourceId: queue.resourceId,
+            operation: "follow-up.queue",
+            actor: request.actor,
+            expectedRevision: queue.revision,
+          },
+          "follow-up.queued",
+          ({ database, now }) => {
+            this.requireRunAcceptsSettings(request.runId, true);
+            const order = this.nextFollowUpOrder(request.runId);
+            const followUpId = followUpIdFor(request.runId, request.requestId);
+            const resourceId = this.mutations.ensureResource("follow_up", followUpId, now);
+            const promptHash = database.putText(request.prompt, now);
+            database.connection
+              .prepare(
+                `INSERT INTO workflow_follow_ups(
+                   follow_up_id, resource_id, queue_resource_id, run_id,
+                   request_id, order_number, target_session_id,
+                   actor_type, actor_id, source_type, prompt_hash, status,
+                   created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+              )
+              .run(
+                followUpId,
+                resourceId,
+                queue.resourceId,
+                request.runId,
+                request.requestId,
+                order,
+                request.targetSessionId,
+                request.actor.type,
+                request.actor.id ?? null,
+                request.source,
+                promptHash,
+                now,
+                now,
+              );
+            return followUpId;
+          },
+          { payload: { runId: request.runId, requestId: request.requestId } },
+        );
+        return {
+          followUp: this.followUpRecord(this.requireFollowUpRow(result.value)),
+          adopted: false,
+        };
+      } catch (error) {
+        if (!(error instanceof StaleResourceError)) throw error;
+      }
+    }
+    throw new StaleResourceError("Workflow follow-up queue kept changing; retry the request");
+  }
+
+  removeFollowUp(request: WorkflowRemoveFollowUpRequest): WorkflowFollowUpRecord {
+    assertSourceType(request.source);
+    const row = this.requireFollowUpRow(request.followUpId);
+    if (row.runId !== request.runId) {
+      throw new Error(`Workflow follow-up is not part of run ${request.runId}`);
+    }
+    if (row.status === "removed") return this.followUpRecord(row);
+    if (row.status === "sent" || row.status === "cancelled") {
+      throw new Error(`Workflow follow-up cannot be removed after it is ${row.status}`);
+    }
+    this.assertFollowUpRemovalAuthority(row, request.actor, request.source);
+    if (this.hasLiveLease(row.resourceId)) {
+      throw new Error("Workflow follow-up is being delivered and cannot be removed");
+    }
+    const reason = "Removed before delivery";
+    this.mutations.mutate(
+      {
+        resourceId: row.resourceId,
+        operation: "follow-up.remove",
+        actor: request.actor,
+        expectedRevision: row.revision,
+      },
+      "follow-up.removed",
+      ({ database, now }) => {
+        const reasonHash = database.putText(reason, now);
+        const update = database.connection
+          .prepare(
+            `UPDATE workflow_follow_ups
+             SET status = 'removed', reason_hash = ?, updated_at = ?
+             WHERE follow_up_id = ? AND status IN ('queued', 'pending_presentation', 'ready')`,
+          )
+          .run(reasonHash, now, request.followUpId);
+        if (update.changes !== 1) {
+          throw new StaleResourceError("Workflow follow-up changed before removal");
+        }
+      },
+      { payload: { followUpId: request.followUpId, source: request.source } },
+    );
+    return this.followUpRecord(this.requireFollowUpRow(request.followUpId));
+  }
+
+  originSessionId(runId: string): string | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT COALESCE(q.origin_session_id, b.origin_session_id) AS originSessionId
+         FROM runs r
+         LEFT JOIN workflow_follow_up_queues q ON q.run_id = r.run_id
+         LEFT JOIN run_bindings b ON b.run_id = r.run_id
+         WHERE r.run_id = ?`,
+      )
+      .get(runId);
+    return isRecord(row) && typeof row.originSessionId === "string"
+      ? row.originSessionId
+      : undefined;
+  }
+
+  readFollowUpQueue(runId: string): WorkflowFollowUpQueueRecord | undefined {
+    const queue = this.followUpQueueRow(runId);
+    if (queue === undefined) return undefined;
+    const followUps = this.state.connection
+      .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number`)
+      .all(runId)
+      .filter(isFollowUpRow)
+      .map((row) => this.followUpRecord(row));
+    return {
+      runId,
+      ...(queue.originSessionId !== null ? { originSessionId: queue.originSessionId } : {}),
+      presentationState: assertPresentationState(queue.presentationState),
+      ...(queue.presentationEntryId !== null
+        ? { presentationEntryId: queue.presentationEntryId }
+        : {}),
+      ...(queue.presentationAssistantEntryId !== null
+        ? { presentationAssistantEntryId: queue.presentationAssistantEntryId }
+        : {}),
+      ...(queue.presentationReasonHash !== null
+        ? { presentationReason: this.readText(queue.presentationReasonHash) }
+        : {}),
+      followUps,
+    };
+  }
+
+  listPendingPresentations(targetSessionId: string): string[] {
+    return this.state.connection
+      .prepare(
+        `SELECT run_id AS runId FROM workflow_follow_up_queues
+         WHERE origin_session_id = ? AND presentation_state = 'pending'
+         ORDER BY created_at`,
+      )
+      .all(targetSessionId)
+      .flatMap((row) => (isRecord(row) && typeof row.runId === "string" ? [row.runId] : []));
+  }
+
+  settleFollowUpPresentation(options: {
+    runId: string;
+    state: "settled" | "unavailable";
+    presentationEntryId?: string;
+    assistantEntryId?: string;
+    reason?: string;
+  }): WorkflowFollowUpQueueRecord {
+    const queue = this.requireFollowUpQueueRow(options.runId);
+    if (queue.presentationState === options.state) {
+      return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
+    }
+    if (queue.presentationState !== "pending") {
+      throw new Error(
+        `Workflow presentation is ${queue.presentationState}, not pending for ${options.runId}`,
+      );
+    }
+    if (
+      options.state === "settled" &&
+      (options.presentationEntryId === undefined || options.assistantEntryId === undefined)
+    ) {
+      throw new Error("Settled workflow presentation requires both session entry IDs");
+    }
+    if (options.state === "unavailable" && !options.reason?.trim()) {
+      throw new Error("Unavailable workflow presentation requires a reason");
+    }
+    try {
+      this.mutations.mutate(
+        {
+          resourceId: queue.resourceId,
+          operation: "follow-up.presentation",
+          actor: {
+            type: "session",
+            ...(queue.originSessionId !== null ? { id: queue.originSessionId } : {}),
+          },
+          expectedRevision: queue.revision,
+        },
+        `follow-up.presentation-${options.state}`,
+        ({ database, now }) => {
+          const reasonHash =
+            options.state === "unavailable"
+              ? database.putText(options.reason as string, now)
+              : null;
+          database.connection
+            .prepare(
+              `UPDATE workflow_follow_up_queues
+             SET presentation_state = ?, presentation_entry_id = ?,
+                 presentation_assistant_entry_id = ?, presentation_reason_hash = ?,
+                 presentation_updated_at = ?, updated_at = ?
+             WHERE run_id = ? AND presentation_state = 'pending'`,
+            )
+            .run(
+              options.state,
+              options.presentationEntryId ?? null,
+              options.assistantEntryId ?? null,
+              reasonHash,
+              now,
+              now,
+              options.runId,
+            );
+          database.connection
+            .prepare(
+              `UPDATE workflow_follow_ups SET status = 'ready', updated_at = ?
+             WHERE run_id = ? AND status = 'pending_presentation'`,
+            )
+            .run(now, options.runId);
+        },
+        { payload: { runId: options.runId, state: options.state } },
+      );
+    } catch (error) {
+      if (error instanceof StaleResourceError) {
+        const current = this.requireFollowUpQueueRow(options.runId);
+        if (current.presentationState === options.state) {
+          return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
+        }
+      }
+      throw error;
+    }
+    return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
+  }
+
+  claimNextFollowUp(
+    targetSessionId: string,
+    ownerId: string,
+    leaseMs = 30_000,
+  ): { followUp: WorkflowFollowUpRecord; claim: LeaseClaim } | undefined {
+    const rows = this.state.connection
+      .prepare(
+        `${FOLLOW_UP_ROW_SELECT}
+         WHERE f.target_session_id = ? AND f.status = 'ready'
+         ORDER BY f.created_at, f.order_number LIMIT 16`,
+      )
+      .all(targetSessionId)
+      .filter(isFollowUpRow);
+    for (const row of rows) {
+      let claim: LeaseClaim | undefined;
+      try {
+        claim = this.mutations.claim({
+          resourceId: row.resourceId,
+          ownerType: "session",
+          ownerId,
+          expectedRevision: row.revision,
+          leaseMs,
+        });
+      } catch (error) {
+        if (error instanceof StaleResourceError) continue;
+        throw error;
+      }
+      if (claim === undefined) continue;
+      const current = this.requireFollowUpRow(row.followUpId);
+      if (current.status !== "ready") {
+        this.mutations.release(claim, claim.resourceRevision);
+        continue;
+      }
+      return { followUp: this.followUpRecord(current), claim };
+    }
+    return undefined;
+  }
+
+  markFollowUpSent(
+    followUpId: string,
+    claim: LeaseClaim,
+    sessionEntryId: string,
+  ): WorkflowFollowUpRecord {
+    const row = this.requireFollowUpRow(followUpId);
+    if (row.status === "sent") return this.followUpRecord(row);
+    this.mutations.mutate(
+      {
+        resourceId: row.resourceId,
+        operation: "follow-up.sent",
+        actor: { type: "session", id: claim.ownerId },
+        expectedRevision: claim.resourceRevision,
+        lease: claim,
+      },
+      "follow-up.sent",
+      ({ database, now }) => {
+        const update = database.connection
+          .prepare(
+            `UPDATE workflow_follow_ups
+             SET status = 'sent', session_entry_id = ?, sent_at = ?, updated_at = ?
+             WHERE follow_up_id = ? AND status = 'ready'`,
+          )
+          .run(sessionEntryId, now, now, followUpId);
+        if (update.changes !== 1) {
+          throw new StaleResourceError("Workflow follow-up changed before delivery completed");
+        }
+      },
+      { payload: { followUpId, sessionEntryId } },
+    );
+    return this.followUpRecord(this.requireFollowUpRow(followUpId));
+  }
+
+  releaseFollowUpClaim(claim: LeaseClaim): void {
+    const revision = this.requireResourceRevision(claim.resourceId);
+    this.mutations.release(claim, revision);
   }
 
   async prepareRunResume(runId: string): Promise<LoadedWorkflowRun> {
@@ -348,6 +1018,7 @@ export class WorkflowRunStore {
     if (loaded.state.status !== "running") {
       throw new Error(`Cannot resume workflow run ${runId} with status ${loaded.state.status}`);
     }
+    this.verifySettingsProjections(runId);
     const revision = this.resourceRevision(runId);
     this.contexts.set(runId, { revision, lock: Promise.resolve() });
     this.finalizeRecordingCaptures(runId, "Workflow host stopped before the run finished");
@@ -393,6 +1064,9 @@ export class WorkflowRunStore {
     delete loaded.state.currentNode;
     delete loaded.state.currentAttemptId;
     delete loaded.state.currentNodeStartedAt;
+    delete loaded.state.currentSettingsScopeId;
+    delete loaded.state.currentSettingsChangeNumber;
+    delete loaded.state.currentSettingsHash;
     delete loaded.state.statusDetail;
     delete loaded.state.paused;
     await this.writeSnapshot(runId, loaded.state, {
@@ -502,12 +1176,14 @@ export class WorkflowRunStore {
         const revision = context.revision + 1;
         const now = Date.now();
         const at = new Date(now).toISOString();
+        const snapshot = this.readDefinition(run.definitionHash);
+        this.assertSettingsRouteCurrent(event, snapshot);
         const traceEvent: WorkflowTraceEvent = { seq: revision, at, runId, ...event };
         state.traceSeq = revision;
         state.updatedAt = at;
         insertRunEvent(this.state, run.resourceId, revision, at, traceEvent);
         this.persistRunState(run, state, revision, now);
-        const snapshot = this.readDefinition(run.definitionHash);
+        this.transitionFollowUpsForRunState(state, event, now);
         this.syncNodeAttempts(state, snapshot, now);
         context.revision = revision;
         accepted = traceEvent;
@@ -593,6 +1269,13 @@ export class WorkflowRunStore {
              ON CONFLICT(run_id) DO NOTHING`,
           )
           .run(runId, binding.piSessionId, now);
+        this.state.connection
+          .prepare(
+            `UPDATE workflow_follow_up_queues
+             SET origin_session_id = COALESCE(origin_session_id, ?), updated_at = ?
+             WHERE run_id = ?`,
+          )
+          .run(binding.piSessionId, now, runId);
         const revision = context.revision + 1;
         const at = new Date(now).toISOString();
         insertRunEvent(this.state, run.resourceId, revision, at, {
@@ -776,6 +1459,8 @@ export class WorkflowRunStore {
       sessionCapture: flat.capture,
       sessionIntegrity: flat.integrity,
       sessionSegments: segments.filter((segment) => segment.attemptId !== ""),
+      settingsScopes: this.settingsScopesForRunView(runId),
+      followUpQueue: this.readFollowUpQueue(runId) ?? null,
     };
   }
 
@@ -1001,6 +1686,421 @@ export class WorkflowRunStore {
     );
   }
 
+  private initializeRunSettingsAndFollowUps(
+    state: WorkflowRunState,
+    initialSettings: InitialWorkflowSettingsScope[],
+    now: number,
+  ): void {
+    const childQueueResourceId = this.ensureFollowUpQueue(state.runId, now);
+    if (state.parentRunId !== undefined) {
+      const parentQueue = this.followUpQueueRow(state.parentRunId);
+      if (parentQueue !== undefined) {
+        this.state.connection
+          .prepare(
+            `UPDATE workflow_follow_up_queues
+             SET origin_session_id = COALESCE(origin_session_id, ?), updated_at = ?
+             WHERE run_id = ?`,
+          )
+          .run(parentQueue.originSessionId, now, state.runId);
+        this.state.connection
+          .prepare(
+            `UPDATE workflow_follow_ups
+             SET run_id = ?, queue_resource_id = ?, updated_at = ?
+             WHERE run_id = ? AND status = 'queued'`,
+          )
+          .run(state.runId, childQueueResourceId, now, state.parentRunId);
+      }
+      this.state.connection
+        .prepare(
+          `UPDATE workflow_settings SET active_run_id = ?, updated_at = ? WHERE active_run_id = ?`,
+        )
+        .run(state.runId, now, state.parentRunId);
+    }
+    const existing = this.state.connection
+      .prepare("SELECT COUNT(*) AS count FROM workflow_settings WHERE active_run_id = ?")
+      .get(state.runId);
+    const hasSettings = isCountRow(existing) && existing.count > 0;
+    if (hasSettings) return;
+    for (const scope of initialSettings) {
+      const originRunId = this.logicalOriginRunId(state.runId);
+      const scopeId = workflowSettingsScopeId(originRunId, scope.mountPath, scope.invocation);
+      const resourceId = this.mutations.ensureResource("settings", scopeId, now);
+      const settingsHash = this.state.putJson(scope.settings, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO workflow_settings(
+             scope_id, resource_id, origin_run_id, active_run_id, mount_path, invocation,
+             initial_hash, current_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(scope_id) DO NOTHING`,
+        )
+        .run(
+          scopeId,
+          resourceId,
+          originRunId,
+          state.runId,
+          scope.mountPath,
+          scope.invocation,
+          settingsHash,
+          settingsHash,
+          now,
+          now,
+        );
+    }
+  }
+
+  private ensureFollowUpQueue(runId: string, now: number): string {
+    const resourceId = this.mutations.ensureResource("follow_up_queue", runId, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO workflow_follow_up_queues(
+           run_id, resource_id, created_at, updated_at
+         ) VALUES (?, ?, ?, ?)
+         ON CONFLICT(run_id) DO NOTHING`,
+      )
+      .run(runId, resourceId, now, now);
+    return resourceId;
+  }
+
+  private logicalOriginRunId(runId: string): string {
+    let current = runId;
+    for (let depth = 0; depth < 100; depth += 1) {
+      const row = this.state.connection
+        .prepare("SELECT parent_run_id AS parentRunId FROM runs WHERE run_id = ?")
+        .get(current);
+      if (!isParentRunRow(row)) return current;
+      if (row.parentRunId === null) return current;
+      current = row.parentRunId;
+    }
+    throw new Error(`Workflow continuation chain is too deep for run ${runId}`);
+  }
+
+  private requireRunAcceptsSettings(runId: string, allowWaiting: boolean): void {
+    const row = this.state.connection
+      .prepare("SELECT status FROM runs WHERE run_id = ?")
+      .get(runId);
+    if (!isStatusRow(row)) throw new Error(`Workflow run is missing: ${runId}`);
+    if (row.status !== "running" && !(allowWaiting && row.status === "waiting")) {
+      throw new Error(`Workflow run ${runId} does not accept changes with status ${row.status}`);
+    }
+  }
+
+  private verifySettingsProjections(runId: string): void {
+    const scopes = this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.initial_hash AS initialHash,
+                s.current_hash AS currentHash, r.revision
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.active_run_id = ?`,
+      )
+      .all(runId);
+    for (const value of scopes) {
+      if (!isSettingsProjectionRow(value)) {
+        throw new Error("Workflow settings projection row is invalid");
+      }
+      let current = this.state.readJson(value.initialHash);
+      let currentHash = value.initialHash;
+      const changes = this.state.connection
+        .prepare(
+          `SELECT change_number AS changeNumber, patch_hash AS patchHash,
+                  before_hash AS beforeHash, after_hash AS afterHash
+           FROM workflow_setting_changes WHERE scope_id = ? ORDER BY change_number`,
+        )
+        .all(value.scopeId);
+      let expected = 1;
+      for (const change of changes) {
+        if (!isSettingsProjectionChangeRow(change) || change.changeNumber !== expected) {
+          throw new Error(`Workflow settings changes are not contiguous for ${value.scopeId}`);
+        }
+        if (!change.beforeHash.equals(currentHash)) {
+          throw new Error(`Workflow settings change has a wrong old value for ${value.scopeId}`);
+        }
+        current = applyJsonPatch(current, this.state.readJson(change.patchHash));
+        currentHash = createHash("sha256").update(canonicalJson(current)).digest();
+        if (!currentHash.equals(change.afterHash)) {
+          throw new Error(`Workflow settings change has a wrong new value for ${value.scopeId}`);
+        }
+        expected += 1;
+      }
+      if (value.revision !== expected - 1 || !value.currentHash.equals(currentHash)) {
+        throw new Error(
+          `Workflow settings projection does not match saved changes for ${value.scopeId}`,
+        );
+      }
+    }
+  }
+
+  private settingsScopeRow(scopeId: string): SettingsScopeRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.scope_id = ?`,
+      )
+      .get(scopeId);
+    return isSettingsScopeRow(row) ? row : undefined;
+  }
+
+  private requireSettingsScopeRow(scopeId: string): SettingsScopeRow {
+    const row = this.settingsScopeRow(scopeId);
+    if (row === undefined) throw new Error(`Workflow settings scope not found: ${scopeId}`);
+    return row;
+  }
+
+  private settingsScopeRecord(row: SettingsScopeRow): WorkflowSettingsScopeRecord {
+    return {
+      scopeId: row.scopeId,
+      originRunId: row.originRunId,
+      activeRunId: row.activeRunId,
+      mountPath: row.mountPath,
+      invocation: row.invocation,
+      changeNumber: row.revision,
+      settings: this.state.readJson(row.currentHash),
+      settingsHash: row.currentHash.toString("hex"),
+      createdAt: new Date(row.createdAt).toISOString(),
+      updatedAt: new Date(row.updatedAt).toISOString(),
+    };
+  }
+
+  private settingsChangeRow(scopeId: string, requestId: string): SettingsChangeRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT change_id AS changeId, scope_id AS scopeId, request_id AS requestId,
+                change_number AS changeNumber, actor_type AS actorType, actor_id AS actorId,
+                source_type AS sourceType, patch_hash AS patchHash,
+                before_hash AS beforeHash, after_hash AS afterHash,
+                accepted_at AS acceptedAt
+         FROM workflow_setting_changes WHERE scope_id = ? AND request_id = ?`,
+      )
+      .get(scopeId, requestId);
+    return isSettingsChangeRow(row) ? row : undefined;
+  }
+
+  private settingsChangeRecord(row: SettingsChangeRow): WorkflowSettingsChangeRecord {
+    return {
+      changeId: row.changeId,
+      scopeId: row.scopeId,
+      requestId: row.requestId,
+      changeNumber: row.changeNumber,
+      actor: {
+        type: assertActorType(row.actorType),
+        ...(row.actorId !== null ? { id: row.actorId } : {}),
+      },
+      source: row.sourceType,
+      patch: validateJsonPatch(this.state.readJson(row.patchHash)),
+      beforeHash: row.beforeHash.toString("hex"),
+      afterHash: row.afterHash.toString("hex"),
+      acceptedAt: new Date(row.acceptedAt).toISOString(),
+    };
+  }
+
+  private assertSameSettingsChange(
+    row: SettingsChangeRow,
+    request: WorkflowSettingsChangeRequest,
+    patchDigest: Buffer,
+  ): void {
+    if (
+      !row.patchHash.equals(patchDigest) ||
+      row.actorType !== request.actor.type ||
+      row.actorId !== (request.actor.id ?? null) ||
+      row.sourceType !== request.source
+    ) {
+      throw new Error(`Workflow settings request ID was reused with different content`);
+    }
+  }
+
+  private followUpQueueRow(runId: string): FollowUpQueueRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT q.run_id AS runId, q.resource_id AS resourceId,
+                q.origin_session_id AS originSessionId,
+                q.presentation_state AS presentationState,
+                q.presentation_entry_id AS presentationEntryId,
+                q.presentation_assistant_entry_id AS presentationAssistantEntryId,
+                q.presentation_reason_hash AS presentationReasonHash,
+                r.revision
+         FROM workflow_follow_up_queues q
+         JOIN resources r ON r.resource_id = q.resource_id
+         WHERE q.run_id = ?`,
+      )
+      .get(runId);
+    return isFollowUpQueueRow(row) ? row : undefined;
+  }
+
+  private requireFollowUpQueueRow(runId: string): FollowUpQueueRow {
+    const row = this.followUpQueueRow(runId);
+    if (row === undefined) throw new Error(`Workflow follow-up queue not found: ${runId}`);
+    return row;
+  }
+
+  private followUpRowByRequest(runId: string, requestId: string): FollowUpRow | undefined {
+    const row = this.state.connection
+      .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? AND f.request_id = ?`)
+      .get(runId, requestId);
+    return isFollowUpRow(row) ? row : undefined;
+  }
+
+  private followUpRow(followUpId: string): FollowUpRow | undefined {
+    const row = this.state.connection
+      .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.follow_up_id = ?`)
+      .get(followUpId);
+    return isFollowUpRow(row) ? row : undefined;
+  }
+
+  private requireFollowUpRow(followUpId: string): FollowUpRow {
+    const row = this.followUpRow(followUpId);
+    if (row === undefined) throw new Error(`Workflow follow-up not found: ${followUpId}`);
+    return row;
+  }
+
+  private followUpRecord(row: FollowUpRow): WorkflowFollowUpRecord {
+    return {
+      followUpId: row.followUpId,
+      runId: row.runId,
+      requestId: row.requestId,
+      order: row.orderNumber,
+      targetSessionId: row.targetSessionId,
+      actor: {
+        type: assertActorType(row.actorType),
+        ...(row.actorId !== null ? { id: row.actorId } : {}),
+      },
+      source: row.sourceType,
+      prompt: this.readText(row.promptHash),
+      state: assertFollowUpState(row.status),
+      ...(row.sessionEntryId !== null ? { sessionEntryId: row.sessionEntryId } : {}),
+      ...(row.reasonHash !== null ? { reason: this.readText(row.reasonHash) } : {}),
+      createdAt: new Date(row.createdAt).toISOString(),
+      updatedAt: new Date(row.updatedAt).toISOString(),
+      ...(row.sentAt !== null ? { sentAt: new Date(row.sentAt).toISOString() } : {}),
+    };
+  }
+
+  private assertSameFollowUp(row: FollowUpRow, request: WorkflowQueueFollowUpRequest): void {
+    const promptHash = createHash("sha256").update(request.prompt).digest();
+    if (
+      !row.promptHash.equals(promptHash) ||
+      row.targetSessionId !== request.targetSessionId ||
+      row.actorType !== request.actor.type ||
+      row.actorId !== (request.actor.id ?? null) ||
+      row.sourceType !== request.source
+    ) {
+      throw new Error("Workflow follow-up request ID was reused with different content");
+    }
+  }
+
+  private assertFollowUpRemovalAuthority(
+    row: FollowUpRow,
+    actor: MutationActor,
+    source: string,
+  ): void {
+    if (actor.type === "human") return;
+    if (
+      (actor.type === "session" || actor.type === "controller") &&
+      row.actorType === actor.type &&
+      row.actorId === (actor.id ?? null) &&
+      row.sourceType === source
+    ) {
+      return;
+    }
+    throw new Error("Workflow follow-up can be removed only by its source or a verified human");
+  }
+
+  private hasLiveLease(resourceId: string): boolean {
+    const row = this.state.connection
+      .prepare("SELECT expires_at AS expiresAt FROM leases WHERE resource_id = ?")
+      .get(resourceId);
+    return isLeaseExpiryRow(row) && row.expiresAt !== null && row.expiresAt > Date.now();
+  }
+
+  private nextFollowUpOrder(runId: string): number {
+    const row = this.state.connection
+      .prepare(
+        `SELECT COALESCE(MAX(order_number), 0) + 1 AS nextOrder
+         FROM workflow_follow_ups WHERE run_id = ?`,
+      )
+      .get(runId);
+    if (!isNextOrderRow(row)) throw new Error("Could not allocate workflow follow-up order");
+    return row.nextOrder;
+  }
+
+  private assertSettingsRouteCurrent(
+    event: WorkflowTraceEventDraft,
+    snapshot: WorkflowDefinitionSnapshot,
+  ): void {
+    if (event.type !== "node_finished" || event.nodeId === undefined) return;
+    if (snapshot.nodes[event.nodeId]?.settingsRoute !== true) return;
+    const scopeId = event.payload.settingsScopeId;
+    const changeNumber = event.payload.settingsChangeNumber;
+    if (typeof scopeId !== "string" || typeof changeNumber !== "number") {
+      throw new Error(`Settings route ${event.nodeId} has no saved settings binding`);
+    }
+    const scope = this.requireSettingsScopeRow(scopeId);
+    if (scope.revision !== changeNumber) {
+      throw new StaleResourceError(
+        `Settings route ${event.nodeId} used change ${changeNumber}, current change is ${scope.revision}`,
+      );
+    }
+  }
+
+  private transitionFollowUpsForRunState(
+    state: WorkflowRunState,
+    event: WorkflowTraceEventDraft,
+    now: number,
+  ): void {
+    if (state.status === "running" || state.status === "waiting") return;
+    const queue = this.followUpQueueRow(state.runId);
+    if (queue === undefined || queue.presentationState !== "none") return;
+    let presentationState: WorkflowPresentationState = "not-needed";
+    let followUpState: WorkflowFollowUpState = "cancelled";
+    let reasonHash: Buffer | null = null;
+    if (state.status === "completed") {
+      const required = event.payload.presentationRequired === true;
+      presentationState = required ? "pending" : "not-needed";
+      followUpState = required ? "pending_presentation" : "ready";
+    } else {
+      reasonHash = this.state.putText(
+        state.error ?? `Workflow ended with status ${state.status}`,
+        now,
+      );
+    }
+    this.state.connection
+      .prepare(
+        `UPDATE workflow_follow_up_queues
+         SET presentation_state = ?, presentation_updated_at = ?, updated_at = ?
+         WHERE run_id = ? AND presentation_state = 'none'`,
+      )
+      .run(presentationState, now, now, state.runId);
+    this.state.connection
+      .prepare(
+        `UPDATE workflow_follow_ups
+         SET status = ?, reason_hash = ?, updated_at = ?
+         WHERE run_id = ? AND status IN ('queued', 'pending_presentation', 'ready')`,
+      )
+      .run(followUpState, reasonHash, now, state.runId);
+    const revision = this.requireResourceRevision(queue.resourceId);
+    this.bumpResource(queue.resourceId, revision, now);
+    const payloadHash = this.state.putJson(
+      { runId: state.runId, state: presentationState, followUps: followUpState },
+      now,
+    );
+    insertGenericEvent(
+      this.state,
+      queue.resourceId,
+      revision + 1,
+      "follow-up.run-finished",
+      "system",
+      null,
+      payloadHash,
+      now,
+    );
+  }
+
   private syncNodeAttempts(
     state: WorkflowRunState,
     snapshot: WorkflowDefinitionSnapshot,
@@ -1023,8 +2123,9 @@ export class WorkflowRunStore {
             `INSERT INTO node_attempts(
                attempt_id, run_id, node_id, attempt_number, node_type, status,
                prompt_hash, output_hash, step_metadata_hash, error_hash,
+               settings_scope_id, settings_change_number, settings_hash,
                started_at, finished_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             step.attemptId,
@@ -1037,6 +2138,9 @@ export class WorkflowRunStore {
             outputHash,
             stepMetadataHash,
             errorHash,
+            step.settingsScopeId ?? null,
+            step.settingsChangeNumber ?? null,
+            step.settingsHash === undefined ? null : Buffer.from(step.settingsHash, "hex"),
             Date.parse(step.startedAt),
             Date.parse(step.finishedAt),
             Date.parse(step.startedAt),
@@ -1047,7 +2151,8 @@ export class WorkflowRunStore {
           .prepare(
             `UPDATE node_attempts
              SET status = ?, prompt_hash = ?, output_hash = ?, step_metadata_hash = ?,
-                 error_hash = ?, finished_at = ?, updated_at = ?
+                 error_hash = ?, settings_scope_id = ?, settings_change_number = ?,
+                 settings_hash = ?, finished_at = ?, updated_at = ?
              WHERE attempt_id = ?`,
           )
           .run(
@@ -1056,6 +2161,9 @@ export class WorkflowRunStore {
             outputHash,
             stepMetadataHash,
             errorHash,
+            step.settingsScopeId ?? null,
+            step.settingsChangeNumber ?? null,
+            step.settingsHash === undefined ? null : Buffer.from(step.settingsHash, "hex"),
             Date.parse(step.finishedAt),
             now,
             step.attemptId,
@@ -1123,8 +2231,22 @@ export class WorkflowRunStore {
     const status = state.status === "waiting" ? "waiting" : "running";
     if (existing !== undefined) {
       this.state.connection
-        .prepare("UPDATE node_attempts SET status = ?, updated_at = ? WHERE attempt_id = ?")
-        .run(status, now, attemptId);
+        .prepare(
+          `UPDATE node_attempts
+           SET status = ?, settings_scope_id = ?, settings_change_number = ?,
+               settings_hash = ?, updated_at = ?
+           WHERE attempt_id = ?`,
+        )
+        .run(
+          status,
+          state.currentSettingsScopeId ?? null,
+          state.currentSettingsChangeNumber ?? null,
+          state.currentSettingsHash === undefined
+            ? null
+            : Buffer.from(state.currentSettingsHash, "hex"),
+          now,
+          attemptId,
+        );
       return;
     }
     const definition =
@@ -1134,8 +2256,9 @@ export class WorkflowRunStore {
       .prepare(
         `INSERT INTO node_attempts(
            attempt_id, run_id, node_id, attempt_number, node_type, status,
+           settings_scope_id, settings_change_number, settings_hash,
            started_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         attemptId,
@@ -1144,6 +2267,11 @@ export class WorkflowRunStore {
         this.nextAttemptNumber(state.runId, nodeId),
         nodeType,
         status,
+        state.currentSettingsScopeId ?? null,
+        state.currentSettingsChangeNumber ?? null,
+        state.currentSettingsHash === undefined
+          ? null
+          : Buffer.from(state.currentSettingsHash, "hex"),
         state.currentNodeStartedAt === undefined ? now : Date.parse(state.currentNodeStartedAt),
         now,
         now,
@@ -1797,6 +2925,178 @@ function validateSessionCapture(capture: WorkflowSessionCapture): void {
   }
 }
 
+function followUpIdFor(runId: string, requestId: string): string {
+  const digest = createHash("sha256").update(`${runId}\0${requestId}`).digest("hex").slice(0, 40);
+  return `follow-up-${digest}`;
+}
+
+function assertRequestId(requestId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u.test(requestId)) {
+    throw new Error("Workflow request ID must be a stable identifier of at most 512 characters");
+  }
+}
+
+function assertSourceType(source: string): void {
+  if (typeof source !== "string" || source.trim().length === 0 || source.length > 128) {
+    throw new Error("Workflow change source must be a non-empty string of at most 128 characters");
+  }
+}
+
+function assertActorType(value: string): ActorType {
+  if (
+    value !== "session" &&
+    value !== "host" &&
+    value !== "controller" &&
+    value !== "channel" &&
+    value !== "human" &&
+    value !== "policy" &&
+    value !== "control" &&
+    value !== "system"
+  ) {
+    throw new Error(`Unknown saved actor type: ${value}`);
+  }
+  return value;
+}
+
+function assertFollowUpState(value: string): WorkflowFollowUpState {
+  if (
+    value !== "queued" &&
+    value !== "pending_presentation" &&
+    value !== "ready" &&
+    value !== "sent" &&
+    value !== "removed" &&
+    value !== "cancelled"
+  ) {
+    throw new Error(`Unknown workflow follow-up state: ${value}`);
+  }
+  return value;
+}
+
+function assertPresentationState(value: string): WorkflowPresentationState {
+  if (
+    value !== "none" &&
+    value !== "not-needed" &&
+    value !== "pending" &&
+    value !== "settled" &&
+    value !== "unavailable"
+  ) {
+    throw new Error(`Unknown workflow presentation state: ${value}`);
+  }
+  return value;
+}
+
+function isSettingsScopeRow(value: unknown): value is SettingsScopeRow {
+  return (
+    isRecord(value) &&
+    typeof value.scopeId === "string" &&
+    typeof value.resourceId === "string" &&
+    typeof value.originRunId === "string" &&
+    typeof value.activeRunId === "string" &&
+    typeof value.mountPath === "string" &&
+    typeof value.invocation === "number" &&
+    Buffer.isBuffer(value.currentHash) &&
+    typeof value.revision === "number" &&
+    typeof value.createdAt === "number" &&
+    typeof value.updatedAt === "number"
+  );
+}
+
+function isSettingsProjectionRow(value: unknown): value is SettingsProjectionRow {
+  return (
+    isRecord(value) &&
+    typeof value.scopeId === "string" &&
+    Buffer.isBuffer(value.initialHash) &&
+    Buffer.isBuffer(value.currentHash) &&
+    typeof value.revision === "number"
+  );
+}
+
+function isSettingsProjectionChangeRow(value: unknown): value is SettingsProjectionChangeRow {
+  return (
+    isRecord(value) &&
+    typeof value.changeNumber === "number" &&
+    Buffer.isBuffer(value.patchHash) &&
+    Buffer.isBuffer(value.beforeHash) &&
+    Buffer.isBuffer(value.afterHash)
+  );
+}
+
+function isSettingsChangeRow(value: unknown): value is SettingsChangeRow {
+  return (
+    isRecord(value) &&
+    typeof value.changeId === "string" &&
+    typeof value.scopeId === "string" &&
+    typeof value.requestId === "string" &&
+    typeof value.changeNumber === "number" &&
+    typeof value.actorType === "string" &&
+    (typeof value.actorId === "string" || value.actorId === null) &&
+    typeof value.sourceType === "string" &&
+    Buffer.isBuffer(value.patchHash) &&
+    Buffer.isBuffer(value.beforeHash) &&
+    Buffer.isBuffer(value.afterHash) &&
+    typeof value.acceptedAt === "number"
+  );
+}
+
+function isFollowUpQueueRow(value: unknown): value is FollowUpQueueRow {
+  return (
+    isRecord(value) &&
+    typeof value.runId === "string" &&
+    typeof value.resourceId === "string" &&
+    (typeof value.originSessionId === "string" || value.originSessionId === null) &&
+    typeof value.presentationState === "string" &&
+    (typeof value.presentationEntryId === "string" || value.presentationEntryId === null) &&
+    (typeof value.presentationAssistantEntryId === "string" ||
+      value.presentationAssistantEntryId === null) &&
+    (Buffer.isBuffer(value.presentationReasonHash) || value.presentationReasonHash === null) &&
+    typeof value.revision === "number"
+  );
+}
+
+function isFollowUpRow(value: unknown): value is FollowUpRow {
+  return (
+    isRecord(value) &&
+    typeof value.followUpId === "string" &&
+    typeof value.resourceId === "string" &&
+    typeof value.queueResourceId === "string" &&
+    typeof value.runId === "string" &&
+    typeof value.requestId === "string" &&
+    typeof value.orderNumber === "number" &&
+    typeof value.targetSessionId === "string" &&
+    typeof value.actorType === "string" &&
+    (typeof value.actorId === "string" || value.actorId === null) &&
+    typeof value.sourceType === "string" &&
+    Buffer.isBuffer(value.promptHash) &&
+    typeof value.status === "string" &&
+    (typeof value.sessionEntryId === "string" || value.sessionEntryId === null) &&
+    (Buffer.isBuffer(value.reasonHash) || value.reasonHash === null) &&
+    typeof value.createdAt === "number" &&
+    typeof value.updatedAt === "number" &&
+    (typeof value.sentAt === "number" || value.sentAt === null) &&
+    typeof value.revision === "number"
+  );
+}
+
+function isParentRunRow(value: unknown): value is { parentRunId: string | null } {
+  return isRecord(value) && (typeof value.parentRunId === "string" || value.parentRunId === null);
+}
+
+function isStatusRow(value: unknown): value is { status: string } {
+  return isRecord(value) && typeof value.status === "string";
+}
+
+function isCountRow(value: unknown): value is { count: number } {
+  return isRecord(value) && typeof value.count === "number";
+}
+
+function isLeaseExpiryRow(value: unknown): value is { expiresAt: number | null } {
+  return isRecord(value) && (typeof value.expiresAt === "number" || value.expiresAt === null);
+}
+
+function isNextOrderRow(value: unknown): value is { nextOrder: number } {
+  return isRecord(value) && typeof value.nextOrder === "number";
+}
+
 function assertValidRunId(runId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(runId)) {
     throw new Error(`Invalid workflow run id: ${JSON.stringify(runId)}`);
@@ -1873,7 +3173,15 @@ function isLeaseAuthorityRow(value: unknown): value is {
 }
 
 export function createDefinitionSnapshot(workflow: WorkflowDefinition): WorkflowDefinitionSnapshot {
-  const composition = compositionMetadata(workflow)?.snapshot;
+  const metadata = compositionMetadata(workflow);
+  const composition = metadata?.snapshot;
+  const settingsScopes = Object.values(metadata?.scopes ?? {})
+    .filter((scope) => scope.path !== "" && scope.settings !== undefined)
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((scope) => ({
+      mountPath: scope.path.split("/"),
+      settings: snapshotSettings(scope.settings!),
+    }));
   return {
     schema: DEFINITION_SNAPSHOT_SCHEMA,
     name: workflow.name,
@@ -1887,6 +3195,8 @@ export function createDefinitionSnapshot(workflow: WorkflowDefinition): Workflow
     ),
     edges: structuredClone(workflow.edges),
     ...(composition !== undefined ? { composition: structuredClone(composition) } : {}),
+    ...(workflow.settings !== undefined ? { settings: snapshotSettings(workflow.settings) } : {}),
+    ...(settingsScopes.length > 0 ? { settingsScopes } : {}),
   };
 }
 
@@ -1927,6 +3237,9 @@ function snapshotNode(
   if (node.nodeType === "agent" && node.expectedOutput !== undefined) {
     common.expectedOutput = node.expectedOutput;
   }
+  if (node.nodeType === "compute" && node.settingsRoute === true) {
+    common.settingsRoute = true;
+  }
   if (node.nodeType === "notify") common.summary = node.kind ?? "progress";
   if (node.nodeType === "checkpoint" && node.summary !== undefined) common.summary = node.summary;
   if (node.nodeType === "checkpoint" && node.humanDecision !== undefined) {
@@ -1944,4 +3257,21 @@ function snapshotNode(
   }
   if (node.nodeType === "action") common.actionExecution = "exec" in node ? "shell" : "function";
   return common;
+}
+
+function snapshotSettings(
+  settings: NonNullable<WorkflowDefinition["settings"]>,
+): WorkflowSettingsSnapshot {
+  return {
+    ...(settings.description !== undefined ? { description: settings.description } : {}),
+    paths: settings.paths.map((rule) => ({
+      path: rule.path,
+      permissions: Object.fromEntries(
+        Object.entries(rule.permissions).map(([permission, actors]) => [
+          permission,
+          actors === undefined ? [] : [...actors],
+        ]),
+      ),
+    })),
+  };
 }
