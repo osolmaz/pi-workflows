@@ -3,6 +3,9 @@ import autoplanWorkflow from "../src/builtins/autoplan.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
+const ORIGINAL_USER_INSTRUCTIONS =
+  "  Solve the complete demo request.\n\nKeep the queued requirement exactly.  ";
+
 const proposal = {
   candidates: [
     {
@@ -31,6 +34,9 @@ function commonExecutor(
   options: { previousPlan?: boolean; summaryNode: string; summary: string },
 ) {
   return new ScriptedExecutor()
+    .respond("captureIntent", {
+      output: { originalUserInstructions: ORIGINAL_USER_INSTRUCTIONS },
+    })
     .respond("frame", {
       output: {
         problem: "demo",
@@ -66,6 +72,7 @@ function commonExecutor(
       expect(request.prompt).toContain("Use the supported extension point.");
       expect(request.prompt).toContain("Wrap the current command locally.");
       expect(request.prompt).toContain("Upstream supports it directly.");
+      expect(request.prompt).toContain(JSON.stringify(ORIGINAL_USER_INSTRUCTIONS));
       if (options.previousPlan) {
         expect(request.prompt).toContain("old plan");
         expect(request.prompt).toContain("new evidence invalidated it");
@@ -121,6 +128,7 @@ describe("built-in autoplan", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({
       status: "ready",
+      originalUserInstructions: ORIGINAL_USER_INSTRUCTIONS,
       changed: true,
       proposal: { candidates: [{ id: "public-extension" }, { id: "local-wrapper" }] },
       selection: {
@@ -134,11 +142,22 @@ describe("built-in autoplan", () => {
     const prompts = new Map(
       executor.requests.map((request) => [request.contract.nodeId, request.prompt]),
     );
+    expect(executor.requests[0]?.contract.nodeId).toBe("captureIntent");
+    expect(prompts.get("captureIntent")).toContain(
+      "Include everything that the user has instructed for the intended purpose in the given context.",
+    );
+    expect(prompts.get("captureIntent")).toContain(
+      "Do not summarize, rewrite, explain, label, omit, or add instructions.",
+    );
+    expect(prompts.get("captureIntent")).toContain("Do not return an array or message objects.");
     expect(prompts.get("frame")).toContain("State the goal and describe what success looks like");
     expect(prompts.get("propose")).toContain("Give two to four practical options");
     expect(prompts.get("ideal")).toContain("Describe the best possible end state");
     expect(prompts.get("choose")).toContain("Select one option");
     expect(prompts.get("plan")).toContain("plan that another engineer can implement");
+    for (const nodeId of ["frame", "propose", "ideal", "choose", "plan"]) {
+      expect(prompts.get(nodeId)).toContain(ORIGINAL_USER_INSTRUCTIONS);
+    }
     expect([...prompts.values()].join("\n")).not.toMatch(
       /holy grail|materially equivalent|implementation-ready/u,
     );
@@ -205,6 +224,7 @@ describe("built-in autoplan", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toMatchObject({
       status: "blocked",
+      originalUserInstructions: ORIGINAL_USER_INSTRUCTIONS,
       reason: "No public interface can meet the success criteria.",
       plainSummary: { text: expect.stringContaining("Planning is blocked") },
     });
@@ -214,8 +234,33 @@ describe("built-in autoplan", () => {
     ).toHaveLength(1);
   });
 
-  it("rejects incomplete candidate and selection records", async () => {
+  it("rejects invalid intent, candidate, and selection records", async () => {
+    const badIntent = new ScriptedExecutor().respond("captureIntent", {
+      output: { originalUserInstructions: ["demo"] },
+    });
+    const intentEngine = new WorkflowEngine({
+      executor: badIntent,
+      databasePath: await makeStateDatabasePath("pi-workflows-autoplan-bad-intent"),
+    });
+    expect((await intentEngine.run(autoplanWorkflow, { problem: "demo" })).state.error).toMatch(
+      /originalUserInstructions must be a non-empty string/,
+    );
+
+    const emptyIntent = new ScriptedExecutor().respond("captureIntent", {
+      output: { originalUserInstructions: " \n\t " },
+    });
+    const emptyIntentEngine = new WorkflowEngine({
+      executor: emptyIntent,
+      databasePath: await makeStateDatabasePath("pi-workflows-autoplan-empty-intent"),
+    });
+    expect(
+      (await emptyIntentEngine.run(autoplanWorkflow, { problem: "demo" })).state.error,
+    ).toMatch(/originalUserInstructions must be a non-empty string/);
+
     const badProposal = new ScriptedExecutor()
+      .respond("captureIntent", {
+        output: { originalUserInstructions: ORIGINAL_USER_INSTRUCTIONS },
+      })
       .respond("frame", {
         output: {
           problem: "demo",

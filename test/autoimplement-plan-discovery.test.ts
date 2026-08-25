@@ -275,6 +275,9 @@ describe("autoimplement existing-plan startup", () => {
         },
         { output: { route: "blocked", summary: "done", evidence: "done" } },
       )
+      .respond("redesign/design/captureIntent", {
+        output: { originalUserInstructions: "implement and redesign" },
+      })
       .respond("redesign/design/frame", {
         output: {
           problem: "API mismatch",

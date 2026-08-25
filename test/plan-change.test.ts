@@ -6,6 +6,9 @@ import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function planningExecutor(plan: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
+    .respond("design/captureIntent", {
+      output: { originalUserInstructions: "change the implementation" },
+    })
     .respond("design/frame", {
       output: {
         problem: "change the implementation",

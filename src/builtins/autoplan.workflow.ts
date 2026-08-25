@@ -46,8 +46,13 @@ export type AutoplanSelection = {
   blocker?: string;
 };
 
+export type AutoplanIntent = {
+  originalUserInstructions: string;
+};
+
 export type AutoplanReady = {
   status: "ready";
+  originalUserInstructions: string;
   frame: unknown;
   proposal: AutoplanProposal;
   ideal: AutoplanIdeal;
@@ -61,6 +66,7 @@ export type AutoplanReady = {
 
 export type AutoplanBlocked = {
   status: "blocked";
+  originalUserInstructions: string;
   frame: unknown;
   proposal: AutoplanProposal;
   ideal: AutoplanIdeal;
@@ -74,6 +80,25 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     throw new Error(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function parseIntent(value: unknown): AutoplanIntent {
+  const intent = requireRecord(value, "autoplan user intent");
+  const instructions = intent.originalUserInstructions;
+  if (typeof instructions !== "string" || instructions.trim().length === 0) {
+    throw new Error("autoplan originalUserInstructions must be a non-empty string");
+  }
+  return { originalUserInstructions: instructions };
+}
+
+function originalUserInstructions(outputs: Record<string, unknown>): string {
+  return parseIntent(outputs.captureIntent).originalUserInstructions;
+}
+
+function originalInstructionsPrompt(outputs: Record<string, unknown>): string {
+  return ["Original user instructions (authoritative):", originalUserInstructions(outputs)].join(
+    "\n",
+  );
 }
 
 function requireString(value: unknown, label: string): string {
@@ -279,6 +304,7 @@ function summaryInput(
   const selected = candidateSummary(proposal, ideal, selection.selectedId);
   return {
     source: {
+      originalUserInstructions: originalUserInstructions(outputs),
       status: selection.status,
       selected,
       why: selection.why,
@@ -317,7 +343,7 @@ export const autoplanWorkflow = defineWorkflow({
   name: "autoplan",
   input: parseInput,
   title: ({ input }) => `autoplan: ${input.problem.slice(0, 60)}`,
-  startAt: "frame",
+  startAt: "captureIntent",
   maxSteps: 16,
   includes: {
     readySummary: includeWorkflow(plainSummaryWorkflow, {
@@ -338,12 +364,28 @@ export const autoplanWorkflow = defineWorkflow({
     },
   },
   nodes: {
+    captureIntent: agent({
+      statusDetail: "capturing the user's instructions",
+      prompt: () =>
+        [
+          "Read the conversation that came before this workflow step.",
+          "Return one text string named originalUserInstructions.",
+          "Include everything that the user has instructed for the intended purpose in the given context.",
+          "Include relevant earlier or queued user messages that are present in the context.",
+          "When several messages contribute, preserve their wording and chronological order in the one text value.",
+          "Do not summarize, rewrite, explain, label, omit, or add instructions.",
+          "Do not return an array or message objects.",
+        ].join("\n"),
+      expectedOutput: `{ "originalUserInstructions": "all relevant user instructions in one text string" }`,
+      validate: parseIntent,
+    }),
     frame: agent({
       statusDetail: "framing the problem",
-      prompt: ({ input }) => {
+      prompt: ({ outputs, input }) => {
         const request = input as AutoplanInput;
         return [
-          `Planning problem: ${request.problem}`,
+          originalInstructionsPrompt(outputs),
+          `Caller-provided problem description (supplemental): ${request.problem}`,
           `Allowed scope: ${request.scope ?? "infer it conservatively from the request and current project"}.`,
           `Constraints: ${JSON.stringify(request.constraints ?? [])}.`,
           `Previous plan: ${JSON.stringify(request.previousPlan ?? null)}.`,
@@ -360,6 +402,7 @@ export const autoplanWorkflow = defineWorkflow({
       statusDetail: "devising candidate solutions",
       prompt: ({ outputs, input }) =>
         [
+          originalInstructionsPrompt(outputs),
           "Give two to four practical options that fit the allowed scope.",
           "For each option return a stable lowercase id and a short title. Add a plain gist and full solution, explain the reason and trade-offs, and list the parts.",
           "Favor a few reusable parts with clear owners and use interfaces that already exist.",
@@ -377,6 +420,7 @@ export const autoplanWorkflow = defineWorkflow({
       statusDetail: "describing the ideal end state",
       prompt: ({ outputs, input }) =>
         [
+          originalInstructionsPrompt(outputs),
           "Describe the best possible end state separately from the practical options.",
           "It may match one option or go beyond the current scope.",
           "List each dependency we do not control. Do not assume that it can change.",
@@ -392,6 +436,7 @@ export const autoplanWorkflow = defineWorkflow({
       statusDetail: "choosing the practical solution",
       prompt: ({ outputs }) =>
         [
+          originalInstructionsPrompt(outputs),
           "Select one option. Do not ask the user to choose.",
           "Select the ideal only when it fits the allowed scope and is ready for production. Its value must justify the added complexity.",
           "Otherwise select the best option we can build now that still moves toward the ideal.",
@@ -413,6 +458,7 @@ export const autoplanWorkflow = defineWorkflow({
       statusDetail: "writing the implementation plan",
       prompt: ({ outputs, input }) =>
         [
+          originalInstructionsPrompt(outputs),
           "Turn the selected option into a plan that another engineer can implement.",
           "Keep every step inside the allowed scope and authority.",
           "For each step name the location and exact change before stating the check that proves it works.",
@@ -433,6 +479,7 @@ export const autoplanWorkflow = defineWorkflow({
         const selection = outputs.choose as AutoplanSelection;
         return {
           status: "blocked",
+          originalUserInstructions: originalUserInstructions(outputs),
           frame: outputs.frame,
           proposal: outputs.propose as AutoplanProposal,
           ideal: outputs.ideal as AutoplanIdeal,
@@ -450,6 +497,7 @@ export const autoplanWorkflow = defineWorkflow({
           request.previousPlan === undefined ? undefined : digest(request.previousPlan);
         return {
           status: "ready",
+          originalUserInstructions: originalUserInstructions(outputs),
           frame: outputs.frame,
           proposal: outputs.propose as AutoplanProposal,
           ideal: outputs.ideal as AutoplanIdeal,
@@ -464,6 +512,7 @@ export const autoplanWorkflow = defineWorkflow({
     }),
   },
   edges: [
+    { from: "captureIntent", to: "frame" },
     { from: "frame", to: "propose" },
     { from: "propose", to: "ideal" },
     { from: "ideal", to: "choose" },
