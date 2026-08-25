@@ -179,14 +179,15 @@ pub struct RefreshOutcome {
 }
 
 impl RunSource {
-    pub fn new(database_path: &Path) -> Self {
+    pub fn new(database_path: &Path) -> Result<Self> {
+        crate::state::reader::validate_database(database_path)?;
         let mut source = Self {
             database_path: database_path.to_path_buf(),
             runs: BTreeMap::new(),
             single_run_id: None,
         };
         source.scan();
-        source
+        Ok(source)
     }
 
     pub fn single(database_path: &Path, run_id: &str) -> Result<Self> {
