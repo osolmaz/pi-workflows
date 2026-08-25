@@ -1338,6 +1338,82 @@ export default defineWorkflow({
     expect(status.details).toMatchObject({ status: "failed", errorCode: "source_changed" });
   });
 
+  it("rejects a settings change when an included workflow source changed", async () => {
+    const cwd = await makeTempDir("pi-workflows-settings-include-source");
+    const runsDir = await makeTempDir("pi-workflows-settings-include-source-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      const workflowDir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(workflowDir, { recursive: true });
+      const childPath = path.join(workflowDir, "settings-child.workflow.ts");
+      await fs.writeFile(
+        childPath,
+        `import { allowSettingsPath, checkpoint, defineWorkflow, workflowSettings } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "settings-child",
+  settings: workflowSettings({
+    initial: { mode: "old" },
+    parse: (value) => value,
+    paths: [allowSettingsPath("/mode", { replace: ["human"] })],
+  }),
+  startAt: "wait",
+  exits: { ready: { from: "wait" } },
+  nodes: { wait: checkpoint({ summary: "wait" }) },
+  edges: [],
+});
+`,
+      );
+      await fs.writeFile(
+        path.join(workflowDir, "settings-parent.workflow.ts"),
+        `import { compute, defineWorkflow, includeWorkflow } from "@osolmaz/pi-workflows";
+import child from "./settings-child.workflow.ts";
+export default defineWorkflow({
+  source: import.meta.url,
+  name: "settings-parent",
+  includes: { child: includeWorkflow(child) },
+  startAt: "start",
+  nodes: {
+    start: compute({ run: () => ({}) }),
+    finish: compute({ run: ({ outputs }) => outputs.child }),
+  },
+  edges: [
+    { from: "start", to: "child" },
+    { from: "child.ready", to: "finish" },
+  ],
+});
+`,
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      const queued = await harness.tool.execute("start-settings-parent", {
+        action: "start",
+        workflow: "settings-parent",
+      });
+      await harness.emitAsync("agent_settled");
+      const runId = queued.details.runId as string;
+      const databasePath = workflowStateDatabasePath(runsDir);
+      await waitFor(() => readWorkflowRun(runId, { databasePath })?.state.status === "waiting");
+      const bundle = readWorkflowRun(runId, { databasePath });
+      const scopeId = bundle?.settingsScopes?.[0]?.scopeId;
+      if (scopeId === undefined) throw new Error("Included settings scope was not created");
+      await fs.writeFile(
+        childPath,
+        (await fs.readFile(childPath, "utf8")).replace('["human"]', '["session"]'),
+      );
+
+      await expect(
+        harness.tool.execute("change-settings-child", {
+          action: "change-settings",
+          runId,
+          scopeId,
+          patch: [{ op: "replace", path: "/mode", value: "new" }],
+        }),
+      ).rejects.toThrow(/source changed/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reports a deferred launch failure and lets the model start a corrected run", async () => {
     const cwd = await makeTempDir("pi-workflows-tool-launch-recovery");
     const runsDir = await makeTempDir("pi-workflows-tool-launch-recovery-runs");

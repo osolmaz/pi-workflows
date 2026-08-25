@@ -107,7 +107,10 @@ export function findSettledPresentationEntries(
       const message = child.message;
       if (!isRecord(message)) continue;
       if (message.role === "user") break;
-      if (message.role === "assistant" && message.stopReason !== "pending") {
+      if (
+        message.role === "assistant" &&
+        (message.stopReason === "stop" || message.stopReason === "length")
+      ) {
         return { presentationEntryId: entry.id, assistantEntryId: child.id };
       }
     }

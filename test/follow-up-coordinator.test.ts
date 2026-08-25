@@ -200,6 +200,26 @@ describe("follow-up delivery", () => {
         "run-1",
       ),
     ).toBeUndefined();
+    for (const stopReason of ["pending", "aborted", "error", "toolUse"]) {
+      expect(
+        findSettledPresentationEntries(
+          [
+            {
+              type: "custom_message",
+              id: `presentation-${stopReason}`,
+              customType: "pi-workflows-presentation",
+              details: { runId: "run-1" },
+            },
+            {
+              type: "message",
+              id: `assistant-${stopReason}`,
+              message: { role: "assistant", stopReason },
+            },
+          ],
+          "run-1",
+        ),
+      ).toBeUndefined();
+    }
     expect(
       findSettledPresentationEntries(
         [
@@ -234,7 +254,7 @@ describe("follow-up delivery", () => {
           {
             type: "message",
             id: "assistant-1",
-            message: { role: "assistant", stopReason: "stop", content: [] },
+            message: { role: "assistant", stopReason: "length", content: [] },
           },
         ],
         "run-1",
