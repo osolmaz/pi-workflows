@@ -5,11 +5,17 @@ export type MaybePromise<T> = T | Promise<T>;
  * validators). `outputs` maps node ids to their accepted outputs; `results`
  * maps node ids to the full result record of their latest attempt.
  */
-export type WorkflowNodeContext<TInput = unknown> = {
+export type WorkflowNodeContext<TInput = unknown, TSettings = unknown> = {
   input: TInput;
   outputs: Record<string, unknown>;
   results: Record<string, WorkflowNodeResult>;
   state: WorkflowRunState;
+  /** Fixed settings value captured when this node attempt started, when declared. */
+  settings?: TSettings;
+  /** Stable root or included-workflow settings scope for this attempt. */
+  settingsScopeId?: string;
+  /** Accepted settings change number captured by this attempt. */
+  settingsChangeNumber?: number;
   /**
    * Aborted when the node times out or the run is cancelled. Long-running
    * callbacks should observe it (pass it to fetch/spawn or check
@@ -130,6 +136,8 @@ export type AgentNodeDefinition = SubmittedAgentNodeDefinition | AssistantAgentN
 export type ComputeNodeDefinition = WorkflowNodeCommon & {
   nodeType: "compute";
   run: (context: WorkflowNodeContext) => MaybePromise<unknown>;
+  /** Marks a pure route selector that may rerun before route settlement. */
+  settingsRoute?: true;
 };
 
 /** A durable user-facing message addressed by the runtime to the run's origin session. */
@@ -471,10 +479,13 @@ export type WorkflowExitDefinition<TOutput = unknown> = {
 export type WorkflowExitMap = Record<string, WorkflowExitDefinition>;
 
 export type WorkflowInputOf<TWorkflow> =
-  TWorkflow extends WorkflowDefinition<infer TInput, any, any> ? TInput : unknown;
+  TWorkflow extends WorkflowDefinition<infer TInput, any, any, any> ? TInput : unknown;
+
+export type WorkflowSettingsOf<TWorkflow> =
+  TWorkflow extends WorkflowDefinition<any, any, any, infer TSettings> ? TSettings : unknown;
 
 export type WorkflowExitOutputs<TWorkflow> =
-  TWorkflow extends WorkflowDefinition<any, infer TExits, any>
+  TWorkflow extends WorkflowDefinition<any, infer TExits, any, any>
     ? {
         [K in keyof TExits]: TExits[K] extends WorkflowExitDefinition<infer TOutput>
           ? TOutput
@@ -490,7 +501,7 @@ export type WorkflowIncludedResult<TWorkflow> = {
 }[keyof WorkflowExitOutputs<TWorkflow>];
 
 export type WorkflowIncludeDefinition<
-  TWorkflow extends WorkflowDefinition<any, any, any> = WorkflowDefinition<any, any, any>,
+  TWorkflow extends WorkflowDefinition<any, any, any, any> = WorkflowDefinition<any, any, any, any>,
 > = {
   /** Imported child definition or dynamic discovered name/path. */
   workflow: TWorkflow | string;
@@ -528,8 +539,11 @@ export type WorkflowDefinition<
   TInput = any,
   TExits extends WorkflowExitMap = WorkflowExitMap,
   TIncludes extends WorkflowIncludeMap = WorkflowIncludeMap,
+  TSettings = unknown,
 > = {
   name: string;
+  /** Optional workflow-owned JSON settings that can change during a run. */
+  settings?: import("./settings.js").WorkflowSettingsDefinition<TSettings, TInput>;
   /** Module URL used to attest directly imported child workflow files. */
   source?: string;
   /** Stable public input-and-exit contract identity for compatible overrides. */
@@ -605,6 +619,12 @@ export type WorkflowStepRecord = {
   assistantMessage?: AssistantMessageReceipt;
   /** For agent steps recorded inside a Pi conversation. */
   conversation?: ConversationRange;
+  /** Fixed settings scope used by this attempt. */
+  settingsScopeId?: string;
+  /** Fixed accepted-through settings number used by this attempt. */
+  settingsChangeNumber?: number;
+  /** SHA-256 hash of the fixed settings JSON used by this attempt. */
+  settingsHash?: string;
 };
 
 export type WorkflowRunStatus =
@@ -690,6 +710,7 @@ export type WorkflowNodeSnapshot = {
   statusDetail?: string;
   summary?: string;
   expectedOutput?: AgentExpectedOutput;
+  settingsRoute?: true;
   actionExecution?: "function" | "shell";
   mountPath?: string[];
   localNodeId?: string;
@@ -711,6 +732,13 @@ export type WorkflowDefinitionSnapshot = {
   nodes: Record<string, WorkflowNodeSnapshot>;
   edges: WorkflowEdge[];
   composition?: WorkflowCompositionSnapshot;
+  settings?: {
+    description?: string;
+    paths: Array<{
+      path: string;
+      permissions: Partial<Record<"read" | "add" | "remove" | "replace", string[]>>;
+    }>;
+  };
 };
 
 export type WorkflowTraceEvent = {

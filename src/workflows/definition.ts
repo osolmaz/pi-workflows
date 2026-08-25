@@ -7,6 +7,7 @@ import {
   assertValidShellActionNode,
   assertValidWorkflowDefinitionShape,
 } from "./schema.js";
+import type { WorkflowSettingsDefinition } from "./settings.js";
 import type {
   AgentNodeDefinition,
   AssistantAgentNodeDefinition,
@@ -37,11 +38,13 @@ type WorkflowDefinitionInput<
   TNodes extends Record<string, WorkflowNodeDefinition>,
   TIncludes extends WorkflowIncludeMap,
   TExits extends WorkflowExitMap,
+  TSettings,
 > = Omit<
-  WorkflowDefinition<TInput, TExits, TIncludes>,
-  "input" | "nodes" | "includes" | "exits" | "edges"
+  WorkflowDefinition<TInput, TExits, TIncludes, TSettings>,
+  "input" | "settings" | "nodes" | "includes" | "exits" | "edges"
 > & {
   input?: WorkflowValueParser<TInput>;
+  settings?: WorkflowSettingsDefinition<TSettings, TInput>;
   nodes: TNodes;
   includes?: TIncludes;
   exits?: TExits;
@@ -56,15 +59,16 @@ export function defineWorkflow<
   >,
   const TIncludes extends WorkflowIncludeMap = Record<never, never>,
   const TExits extends WorkflowExitMap = Record<never, never>,
+  TSettings = unknown,
 >(
-  definition: WorkflowDefinitionInput<TInput, TNodes, TIncludes, TExits>,
-): WorkflowDefinition<TInput, TExits, TIncludes> & {
+  definition: WorkflowDefinitionInput<TInput, TNodes, TIncludes, TExits, TSettings>,
+): WorkflowDefinition<TInput, TExits, TIncludes, TSettings> & {
   nodes: TNodes;
   includes?: TIncludes;
   exits?: TExits;
 } {
   assertValidWorkflowDefinitionShape(definition as WorkflowDefinition);
-  const typed = definition as WorkflowDefinition<TInput, TExits, TIncludes> & {
+  const typed = definition as WorkflowDefinition<TInput, TExits, TIncludes, TSettings> & {
     nodes: TNodes;
     includes?: TIncludes;
     exits?: TExits;

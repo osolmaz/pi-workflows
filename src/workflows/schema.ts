@@ -79,6 +79,9 @@ export function assertValidComputeNode(node: ComputeNodeDefinition, nodeId = "co
   if (typeof node.run !== "function") {
     fail(`node ${nodeId} requires a run function`);
   }
+  if (node.settingsRoute !== undefined && node.settingsRoute !== true) {
+    fail(`node ${nodeId} settingsRoute must be true when provided`);
+  }
   assertCommonNodeFields(node, nodeId);
 }
 
@@ -250,7 +253,17 @@ function assertValidEdgeShape(edge: WorkflowEdge, index: number): void {
  * Names claimed by `/workflow` subcommands; a workflow with one of these
  * names could never be started because the keyword wins the argument slot.
  */
-const RESERVED_WORKFLOW_NAMES = new Set(["answer", "cancel", "list", "pause", "resume", "status"]);
+const RESERVED_WORKFLOW_NAMES = new Set([
+  "answer",
+  "cancel",
+  "change-settings",
+  "list",
+  "pause",
+  "queue-follow-up",
+  "remove-follow-up",
+  "resume",
+  "status",
+]);
 
 export function assertValidWorkflowDefinitionShape(
   definition: WorkflowDefinition,
@@ -274,6 +287,22 @@ export function assertValidWorkflowDefinitionShape(
     fail("workflow contractId must be a stable identifier");
   }
   assertOptionalFunction(definition.input, "workflow input");
+  if (definition.settings !== undefined) {
+    assertRecord(definition.settings, "workflow settings");
+    if (
+      typeof definition.settings.initial !== "function" &&
+      definition.settings.initial === undefined
+    ) {
+      fail("workflow settings requires initial");
+    }
+    if (typeof definition.settings.parse !== "function") {
+      fail("workflow settings requires a parse function");
+    }
+    if (!Array.isArray(definition.settings.paths)) {
+      fail("workflow settings paths must be an array");
+    }
+    assertOptionalFunction(definition.settings.validateChange, "workflow settings validateChange");
+  }
   if (
     definition.title !== undefined &&
     typeof definition.title !== "string" &&
