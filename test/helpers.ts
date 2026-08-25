@@ -47,23 +47,7 @@ export async function seedHumanDecisionRequest(
         now,
       );
       const launchHash = state.putJson({}, now);
-      const runState = {
-        schema: "pi-workflows.run-state.v1",
-        traceSeq: 1,
-        runId: request.runId,
-        workflowName: request.workflowName,
-        startedAt: request.createdAt,
-        updatedAt: request.createdAt,
-        finishedAt: request.createdAt,
-        status: "waiting",
-        input: {},
-        outputs: {},
-        results: {},
-        steps: [],
-        waitingOn: request.nodeId,
-        finalOutput: request,
-      };
-      const stateHash = state.putJson(runState, now);
+      const finalOutputHash = state.putJson(request, now);
       state.connection
         .prepare(
           `INSERT INTO workflow_definitions(
@@ -87,8 +71,9 @@ export async function seedHumanDecisionRequest(
              run_id, resource_id, definition_digest, workflow_ref,
              workflow_source_hash, launch_options_hash,
              source_type, source_ref, source_revision, status, paused,
-             input_hash, output_hash, created_at, updated_at, finished_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'file', ?, 'test', 'waiting', 0, ?, ?, ?, ?, ?)`,
+             input_hash, final_output_hash, current_node, current_attempt_id,
+             waiting_on, created_at, updated_at, finished_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'file', ?, 'test', 'waiting', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           request.runId,
@@ -99,7 +84,10 @@ export async function seedHumanDecisionRequest(
           launchHash,
           `inline:${request.workflowName}`,
           inputHash,
-          stateHash,
+          finalOutputHash,
+          request.nodeId,
+          request.attemptId,
+          request.nodeId,
           now,
           now,
           now,

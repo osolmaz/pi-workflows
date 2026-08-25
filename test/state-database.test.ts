@@ -39,7 +39,7 @@ describe("StateDatabase", () => {
       state.connection
         .prepare("SELECT count(*) AS count FROM sqlite_schema WHERE sql LIKE '% STRICT'")
         .get(),
-    ).toEqual({ count: 32 });
+    ).toEqual({ count: 33 });
     state.integrityCheck();
   });
 
@@ -55,6 +55,18 @@ describe("StateDatabase", () => {
     expect(state.connection.prepare("SELECT count(*) AS count FROM blobs").get()).toEqual({
       count: 2,
     });
+  });
+
+  it("removes unreferenced blobs when a writable database opens", async () => {
+    const filePath = path.join(await makeTempDir("state-blob-prune"), "state.sqlite");
+    const first = open(filePath);
+    const orphan = first.putJson({ large: "x".repeat(100_000) });
+    expect(first.readBlob(orphan)?.byteLength).toBeGreaterThan(100_000);
+    first.close();
+    opened.splice(opened.indexOf(first), 1);
+
+    const second = open(filePath);
+    expect(second.readBlob(orphan)).toBeUndefined();
   });
 
   it("rejects incompatible or changed schemas", async () => {

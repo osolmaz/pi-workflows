@@ -20,7 +20,6 @@ export type TemporalTool = {
   messageId: string;
   toolName: string;
   status: "running" | "finished" | "failed";
-  updates: number;
   args?: unknown;
   result?: unknown;
 };
@@ -157,22 +156,6 @@ function foldSessionEvents(
           );
         } else if (
           contentIndex !== undefined &&
-          (assistantType === "text_delta" ||
-            assistantType === "thinking_delta" ||
-            assistantType === "toolcall_delta")
-        ) {
-          const block = ensureBlock(
-            message,
-            contentIndex,
-            assistantType === "text_delta"
-              ? "text"
-              : assistantType === "thinking_delta"
-                ? "thinking"
-                : "toolCall",
-          );
-          block.text += payloadString(event.payload, "delta") ?? "";
-        } else if (
-          contentIndex !== undefined &&
           (assistantType === "text_end" || assistantType === "thinking_end")
         ) {
           const block = ensureBlock(
@@ -181,10 +164,10 @@ function foldSessionEvents(
             assistantType === "text_end" ? "text" : "thinking",
           );
           const content = payloadString(event.payload, "content") ?? "";
-          if (block.text !== content) {
+          if (block.text.length > 0 && block.text !== content) {
             diagnostics.push(`${assistantType} mismatch for ${event.messageId}:${contentIndex}`);
-            block.text = content;
           }
+          block.text = content;
         } else if (contentIndex !== undefined && assistantType === "toolcall_end") {
           const block = ensureBlock(message, contentIndex, "toolCall");
           block.value = event.payload.toolCall;
@@ -229,20 +212,10 @@ function foldSessionEvents(
           messageId: event.messageId,
           toolName: payloadString(event.payload, "toolName") ?? "tool",
           status: "running",
-          updates: 0,
           ...(event.payload.args === undefined ? {} : { args: event.payload.args }),
         };
         tools.set(event.toolCallId, tool);
         toolOrder.push(event.toolCallId);
-        break;
-      }
-      case "tool_execution_updated": {
-        const tool = event.toolCallId ? tools.get(event.toolCallId) : undefined;
-        if (tool) {
-          tool.updates += 1;
-        } else {
-          diagnostics.push(`tool_execution_updated ${event.seq} precedes start`);
-        }
         break;
       }
       case "tool_execution_finished": {

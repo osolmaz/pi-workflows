@@ -49,6 +49,8 @@ Read-only tools open the same file with SQLite read-only mode and `PRAGMA query_
 
 Opening code verifies the application ID, user version, schema metadata, compiled DDL digest, and exact SQLite schema shape. An incompatible database fails with an instruction to clear the incompatible alpha state. Pi Workflows does not import, reinterpret, or delete that state.
 
+The normalized run layout is an in-place alpha cutover. It keeps SQLite user version `1` and the current `v1` public record identifiers. A database with the former nested run-snapshot layout is incompatible and must be moved or removed. There is no migration, compatibility reader, dual write, alias, or second schema generation.
+
 ## Shared records
 
 Four record groups provide the common lifecycle rules.
@@ -91,18 +93,18 @@ Local effects use deterministic transactions. Run queue settlement effects are c
 
 The shared records do not replace domain schemas. The following `STRICT` tables keep the state explicit:
 
-| Area                | Tables                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------ |
-| Schema and projects | `schema_meta`, `projects`                                                                        |
-| Content             | `blobs`                                                                                          |
-| Shared lifecycle    | `resources`, `leases`, `events`                                                                  |
-| Workflows           | `workflow_definitions`, `runs`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
-| Session capture     | `session_segments`, `session_entries`, `session_events`                                          |
-| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`   |
-| Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`      |
-| Effects             | `effects`, `effect_attempts`                                                                     |
-| Pi delivery         | `notifications`, `turn_intents`                                                                  |
-| Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`      |
+| Area                | Tables                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Schema and projects | `schema_meta`, `projects`                                                                                     |
+| Content             | `blobs`                                                                                                       |
+| Shared lifecycle    | `resources`, `leases`, `events`                                                                               |
+| Workflows           | `workflow_definitions`, `runs`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
+| Session capture     | `session_segments`, `session_entries`, `session_events`                                                       |
+| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                |
+| Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                   |
+| Effects             | `effects`, `effect_attempts`                                                                                  |
+| Pi delivery         | `notifications`, `turn_intents`                                                                               |
+| Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`                   |
 
 Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
@@ -110,7 +112,9 @@ Foreign keys join projects, runs, attempts, decisions, controllers, effects, and
 
 `blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes.
 
-Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping large prompts, outputs, errors, session payloads, and rendered channel text deduplicated.
+Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping large prompts, outputs, errors, session payloads, and rendered channel text deduplicated. A writable open removes blobs that no foreign-key column references.
+
+Runs do not store a nested `WorkflowRunState` blob. `runs` stores scalar run facts and hashes for independent values. `node_attempts` stores each prompt and output once. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer. Readers derive `steps`, `outputs`, and `results` from these rows. Compact trace events do not copy node outputs, run inputs, or final outputs.
 
 ### Assistant-message attempts
 
@@ -122,7 +126,7 @@ An interrupted assistant-message attempt keeps its attempt ID when the origin Pi
 
 ## Write contract
 
-A write command uses this order:
+A resource command uses this order:
 
 ```text
 BEGIN IMMEDIATE
@@ -140,6 +144,8 @@ COMMIT
 ```
 
 Any failed check rolls back the complete command.
+
+Session-event batches use `session_events` as their journal. They update the contiguous segment counter in the same transaction and do not create a generic `session.events_appended` event for each flush. The recorder stores lifecycle boundaries and settled events. It discards token deltas and incremental tool progress.
 
 A TypeScript write permit carries the expected facts between layers. It is not authority by itself. The store verifies durable ownership and revision data again inside the transaction.
 

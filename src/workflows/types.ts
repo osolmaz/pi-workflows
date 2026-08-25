@@ -760,7 +760,6 @@ export type WorkflowSessionEventType =
   | "assistant_event"
   | "message_finished"
   | "tool_execution_started"
-  | "tool_execution_updated"
   | "tool_execution_finished";
 
 /** One normalized temporal Pi event in `session/events.ndjson`. */

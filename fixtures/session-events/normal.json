@@ -57,16 +57,6 @@
     },
     {
       "seq": 4,
-      "at": "2026-07-30T10:00:00.004Z",
-      "nodeId": "review",
-      "attemptId": "a1",
-      "turnId": "t1",
-      "messageId": "m1",
-      "type": "assistant_event",
-      "payload": { "type": "thinking_delta", "contentIndex": 0, "delta": "plan" }
-    },
-    {
-      "seq": 5,
       "at": "2026-07-30T10:00:00.005Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -76,7 +66,7 @@
       "payload": { "type": "thinking_end", "contentIndex": 0, "content": "plan" }
     },
     {
-      "seq": 6,
+      "seq": 5,
       "at": "2026-07-30T10:00:00.006Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -86,17 +76,7 @@
       "payload": { "type": "text_start", "contentIndex": 1 }
     },
     {
-      "seq": 7,
-      "at": "2026-07-30T10:00:00.007Z",
-      "nodeId": "review",
-      "attemptId": "a1",
-      "turnId": "t1",
-      "messageId": "m1",
-      "type": "assistant_event",
-      "payload": { "type": "text_delta", "contentIndex": 1, "delta": "hello" }
-    },
-    {
-      "seq": 8,
+      "seq": 6,
       "at": "2026-07-30T10:00:00.008Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -106,7 +86,7 @@
       "payload": { "type": "text_end", "contentIndex": 1, "content": "hello" }
     },
     {
-      "seq": 9,
+      "seq": 7,
       "at": "2026-07-30T10:00:00.009Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -116,21 +96,7 @@
       "payload": { "type": "toolcall_start", "contentIndex": 2 }
     },
     {
-      "seq": 10,
-      "at": "2026-07-30T10:00:00.010Z",
-      "nodeId": "review",
-      "attemptId": "a1",
-      "turnId": "t1",
-      "messageId": "m1",
-      "type": "assistant_event",
-      "payload": {
-        "type": "toolcall_delta",
-        "contentIndex": 2,
-        "delta": "{\"path\":\"README.md\"}"
-      }
-    },
-    {
-      "seq": 11,
+      "seq": 8,
       "at": "2026-07-30T10:00:00.011Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -144,7 +110,7 @@
       }
     },
     {
-      "seq": 12,
+      "seq": 9,
       "at": "2026-07-30T10:00:00.012Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -155,18 +121,7 @@
       "payload": { "toolName": "read", "args": { "path": "README.md" } }
     },
     {
-      "seq": 13,
-      "at": "2026-07-30T10:00:00.013Z",
-      "nodeId": "review",
-      "attemptId": "a1",
-      "turnId": "t1",
-      "messageId": "m1",
-      "toolCallId": "call-1",
-      "type": "tool_execution_updated",
-      "payload": {}
-    },
-    {
-      "seq": 14,
+      "seq": 10,
       "at": "2026-07-30T10:00:00.014Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -177,7 +132,7 @@
       "payload": { "toolName": "read", "isError": false, "result": { "content": "ok" } }
     },
     {
-      "seq": 15,
+      "seq": 11,
       "at": "2026-07-30T10:00:00.015Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -187,7 +142,7 @@
       "payload": { "type": "done", "reason": "toolUse" }
     },
     {
-      "seq": 16,
+      "seq": 12,
       "at": "2026-07-30T10:00:01.001Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -197,7 +152,7 @@
       "payload": { "role": "assistant", "settled": true, "entryId": "entry-1" }
     },
     {
-      "seq": 17,
+      "seq": 13,
       "at": "2026-07-30T10:00:01.002Z",
       "nodeId": "review",
       "attemptId": "a1",
@@ -208,9 +163,9 @@
   ],
   "positions": [
     {
-      "throughSeq": 7,
+      "throughSeq": 6,
       "expected": {
-        "throughSeq": 7,
+        "throughSeq": 6,
         "messages": [
           {
             "messageId": "m1",
@@ -228,9 +183,9 @@
       }
     },
     {
-      "throughSeq": 17,
+      "throughSeq": 13,
       "expected": {
-        "throughSeq": 17,
+        "throughSeq": 13,
         "messages": [
           {
             "messageId": "m1",
@@ -243,7 +198,7 @@
               {
                 "contentIndex": 2,
                 "kind": "toolCall",
-                "text": "{\"path\":\"README.md\"}",
+                "text": "",
                 "value": { "id": "call-1", "name": "read", "arguments": { "path": "README.md" } }
               }
             ]
@@ -255,7 +210,6 @@
             "messageId": "m1",
             "toolName": "read",
             "status": "finished",
-            "updates": 1,
             "args": { "path": "README.md" },
             "result": { "content": "ok" }
           }
