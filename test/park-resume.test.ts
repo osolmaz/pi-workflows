@@ -45,6 +45,9 @@ describe("durable run handoff in SQLite", () => {
     const parked = await running;
     const interrupted = await store.markRunInterrupted(parked.runId, "owner disappeared");
     expect(interrupted?.state).toMatchObject({ status: "failed", error: "owner disappeared" });
+    expect(interrupted?.state.currentAttemptId).toBeUndefined();
+    expect(interrupted?.state.currentNode).toBeUndefined();
+    expect(store.readRun(parked.runId)?.state.currentAttemptId).toBeUndefined();
     expect(interrupted?.traceEvents?.at(-1)?.type).toBe("run_interrupted");
     store.close();
   });

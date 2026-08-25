@@ -2492,7 +2492,7 @@ export class WorkflowRunStore {
     const steps = this.readSteps(row.runId);
     const sources = this.readRunSources(row.runId, snapshot);
     const carriedStepCount = this.carriedStepCount(row.runId);
-    const activeAttempt = this.readActiveAttempt(row.runId);
+    const activeAttempt = row.status === "running" ? this.readActiveAttempt(row.runId) : undefined;
     const humanDecision = this.readHumanDecisionReceipt(row.runId);
     const outputs: Record<string, unknown> = {};
     const results: Record<string, WorkflowNodeResult> = {};

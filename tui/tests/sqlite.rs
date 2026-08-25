@@ -63,7 +63,8 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
     let snapshot = json!({
         "schema": "pi-workflows.definition-snapshot.v1",
         "name": "demo", "startAt": "work",
-        "nodes": {"work": {"nodeType": "compute"}}, "edges": []
+        "nodes": {"work": {"nodeType": "compute"}}, "edges": [],
+        "composition": {"mounts": [{"mountPath": ["child"], "workflowName": "child"}]}
     });
     let definition_hash = blob(&connection, &snapshot);
     let input_hash = blob(&connection, &json!({}));
@@ -114,6 +115,10 @@ fn reads_and_lists_runs_from_sqlite() {
     let (_temp, database) = fixture();
     let run = read_run(&database, "run-1").unwrap();
     assert_eq!(run.state.run_id, "run-1");
+    assert_eq!(
+        run.state.definition_digest.as_deref(),
+        Some("sha256:0101010101010101010101010101010101010101010101010101010101010101")
+    );
     assert_eq!(run.trace.len(), 1);
     assert!(run.possibly_interrupted);
     assert_eq!(list_runs(&database).len(), 1);

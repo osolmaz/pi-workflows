@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { main, parseCliArgs } from "../src/viewer/cli.js";
 
 describe("pi-workflows CLI", () => {
@@ -65,6 +65,26 @@ describe("pi-workflows CLI", () => {
       project: "/tmp/project",
       piArgs: ["--model", "test"],
     });
+  });
+
+  it("rejects a relative prune backup path", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(
+        await main([
+          "state",
+          "prune",
+          "--before",
+          "2026-08-01T00:00:00Z",
+          "--backup",
+          "relative.sqlite",
+          "--apply",
+        ]),
+      ).toBe(1);
+      expect(stderr).toHaveBeenCalledWith(expect.stringMatching(/absolute/));
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("prints help", async () => {

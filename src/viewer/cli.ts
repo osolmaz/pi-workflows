@@ -290,9 +290,7 @@ async function runStateCommand(databasePath: string, args: CliArgs): Promise<voi
     const report = await pruneState(databasePath, {
       before: args.pruneBefore as string,
       apply: args.pruneApply === true,
-      ...(args.backupDestination === undefined
-        ? {}
-        : { backupPath: path.resolve(args.backupDestination) }),
+      ...(args.backupDestination === undefined ? {} : { backupPath: args.backupDestination }),
     });
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return;

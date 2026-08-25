@@ -402,25 +402,27 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
     if carried != 0 {
         state["carriedStepCount"] = json!(carried);
     }
-    if let Some((attempt_id, node_id, started_at)) = connection
-        .query_row(
-            "SELECT attempt_id, node_id, started_at FROM node_attempts
-             WHERE run_id = ?1 AND status IN ('pending', 'running', 'waiting')",
-            [run_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                ))
-            },
-        )
-        .optional()?
-    {
-        state["currentAttemptId"] = json!(attempt_id);
-        state["currentNode"] = json!(node_id);
-        if let Some(value) = started_at {
-            state["currentNodeStartedAt"] = json!(timestamp(value));
+    if status == "running" {
+        if let Some((attempt_id, node_id, started_at)) = connection
+            .query_row(
+                "SELECT attempt_id, node_id, started_at FROM node_attempts
+                 WHERE run_id = ?1 AND status IN ('pending', 'running', 'waiting')",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            state["currentAttemptId"] = json!(attempt_id);
+            state["currentNode"] = json!(node_id);
+            if let Some(value) = started_at {
+                state["currentNodeStartedAt"] = json!(timestamp(value));
+            }
         }
     }
     if status == "waiting" {
@@ -438,6 +440,12 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
     }
     if !mounted_sources.is_empty() {
         state["workflowSources"] = json!(mounted_sources);
+    }
+    let has_composed_mounts = definition
+        .pointer("/composition/mounts")
+        .and_then(Value::as_array)
+        .is_some_and(|mounts| !mounts.is_empty());
+    if !state["workflowSources"].is_null() || has_composed_mounts {
         state["definitionDigest"] = json!(format!("sha256:{}", encode_hex(&definition_digest)));
     }
     let updates = read_updates(connection, run_id)?;
