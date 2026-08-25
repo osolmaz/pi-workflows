@@ -79,6 +79,9 @@ function stopObservation() {
 function repairExecutor(secondObservation: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
     .respond("observe", { output: repairObservation() }, { output: secondObservation })
+    .respond("planChange/design/captureIntent", {
+      output: { originalUserInstructions: "repair the test failure" },
+    })
     .respond("planChange/design/frame", {
       output: {
         problem: "test failure",

@@ -82,6 +82,10 @@ function designResponses(executor: ScriptedExecutor, rounds: number): ScriptedEx
     Array.from({ length: rounds }, () => ({ output: structuredClone(value) }));
   return executor
     .respond(
+      "planChange/design/captureIntent",
+      ...repeated({ originalUserInstructions: "repair the test failure" }),
+    )
+    .respond(
       "planChange/design/frame",
       ...repeated({
         problem: "test failure",

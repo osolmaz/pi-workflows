@@ -224,6 +224,12 @@ function confirmedChallenge(reason: string) {
 
 function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): ScriptedExecutor {
   return executor
+    .respond(
+      "redesign/design/captureIntent",
+      ...plans.map(() => ({
+        output: { originalUserInstructions: "finish the task" },
+      })),
+    )
     .respond("redesign/design/frame", {
       output: {
         problem: "finish the task",
