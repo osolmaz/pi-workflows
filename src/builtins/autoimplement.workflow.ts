@@ -817,7 +817,7 @@ function createBlockerClaim(context: WorkflowNodeContext): BlockerClaim {
     unrelatedFailures: Array.isArray(result.unrelatedFailures) ? result.unrelatedFailures : [],
     recoveryAttempts: Array.isArray(result.repairAttempts) ? result.repairAttempts : [],
     alternativesChecked: [],
-    authorityFact: `scope=${(context.input as AutoimplementInput).scope ?? "unspecified"}; merge=${(context.input as AutoimplementInput).merge === true}`,
+    authorityFact: `scope=${(context.input as AutoimplementInput).scope ?? "unspecified"}; merge=${autoimplementSettings(context).merge}`,
   };
 }
 
