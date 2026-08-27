@@ -3175,6 +3175,60 @@ export default defineWorkflow({
     }
   });
 
+  it("does not persist terminal turn intents for timed-out controller children", async () => {
+    const cwd = await makeTempDir("pi-workflows-ext-child-timeout");
+    const runsDir = await makeTempDir("pi-workflows-ext-child-timeout-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      await writeControllerWithChild(cwd);
+      await fs.writeFile(
+        path.join(cwd, ".pi", "workflows", "child.workflow.ts"),
+        `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "child",
+  startAt: "work",
+  nodes: { work: agent({ prompt: () => "Wait.", timeoutMs: 30 }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const command = harness.commands.get("controller");
+
+      await command?.handler('apply demo item-9 {"value":"x"}', harness.ctx);
+      await command?.handler("start", harness.ctx);
+      await waitFor(() =>
+        listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) }).some(
+          (run) => run.state.workflowName === "child" && run.state.status === "timed_out",
+        ),
+      );
+      await command?.handler("stop", harness.ctx);
+      await harness.emitAsync("agent_end", { messages: [{ stopReason: "aborted" }] });
+      await harness.emitAsync("agent_settled");
+
+      const childRuns = listWorkflowRuns({
+        databasePath: workflowStateDatabasePath(runsDir),
+      }).filter((run) => run.state.workflowName === "child");
+      expect(childRuns.length).toBeGreaterThan(0);
+      const store = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        readOnly: true,
+        projectPath: cwd,
+      });
+      try {
+        for (const child of childRuns) {
+          expect(store.listWorkflowTurnIntents({ runId: child.runId })).toHaveLength(0);
+        }
+      } finally {
+        store.close();
+      }
+      await harness.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("handles command edge cases", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-edges");
     // No global workflows or controllers in this test's home.
