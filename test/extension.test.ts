@@ -9,6 +9,7 @@ import {
 } from "../src/extension/deferred-turn.js";
 import piWorkflows from "../src/extension/index.js";
 import type { WorkflowToolInput } from "../src/extension/workflow-tool.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
 import { createHumanDecisionRequest, HumanDecisionStore } from "../src/workflows/human-decision.js";
 import {
   listWorkflowRuns,
@@ -462,12 +463,30 @@ export default defineWorkflow({
   );
 }
 
-async function writeHumanDecisionWorkflow(cwd: string, timeoutMs?: number): Promise<void> {
+async function writeHumanDecisionWorkflow(
+  cwd: string,
+  timeoutMs?: number,
+  loadBarrier?: { enteredPath: string; releasePath: string },
+): Promise<void> {
   const dir = path.join(cwd, ".pi", "workflows");
   await fs.mkdir(dir, { recursive: true });
+  const barrierSource =
+    loadBarrier === undefined
+      ? ""
+      : `import fs from "node:fs/promises";
+let previousLoads = "";
+try { previousLoads = await fs.readFile(${JSON.stringify(loadBarrier.enteredPath)}, "utf8"); } catch {}
+await fs.appendFile(${JSON.stringify(loadBarrier.enteredPath)}, "load\\n");
+if (previousLoads.length > 0) {
+  for (;;) {
+    try { await fs.access(${JSON.stringify(loadBarrier.releasePath)}); break; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  }
+}`;
   await fs.writeFile(
     path.join(dir, "human.workflow.ts"),
     `import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge, textInput } from "@osolmaz/pi-workflows";
+${barrierSource}
 const choices = defineHumanChoices({
   continue: choice({ label: "Continue" }),
   replan: choice({ label: "Replan", input: textInput({ name: "instructions", prompt: "What should change?" }) }),
@@ -749,6 +768,93 @@ describe("pi-workflows extension", () => {
       answer: { choice: "replan", input: { instructions: exact } },
     });
     expect(JSON.stringify(completed?.state.finalOutput)).not.toContain("actorId");
+  });
+
+  it("adopts one continuation when a direct answer races recovery", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-race");
+    const runsDir = await makeTempDir("pi-workflows-human-race-runs");
+    vi.stubEnv("HOME", runsDir);
+    const enteredPath = path.join(cwd, ".pi", "human-decision-race-loads");
+    const releasePath = path.join(cwd, ".pi", "human-decision-race-release");
+    await writeHumanDecisionWorkflow(cwd, undefined, { enteredPath, releasePath });
+    const continueRun = vi.spyOn(WorkflowEngine.prototype, "continueRun");
+    const harness = makeHarness({
+      cwd,
+      respond: () => {},
+      select: async () => "Continue",
+    });
+
+    try {
+      await harness.emitAsync("session_start", {});
+      await harness.command.handler(
+        'human --input-json {"task":"approve","original":true}',
+        harness.ctx,
+      );
+      await waitFor(async () => {
+        const loads = await fs.readFile(enteredPath, "utf8").catch(() => "");
+        return loads.trim().split("\n").length >= 3;
+      }, 20_000);
+      await fs.writeFile(releasePath, "release\n", "utf8");
+      await waitFor(
+        async () =>
+          (await listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) })).some(
+            (bundle) =>
+              bundle.state.parentRunId !== undefined && bundle.state.status === "completed",
+          ),
+        20_000,
+      );
+
+      const bundles = await listWorkflowRuns({
+        databasePath: workflowStateDatabasePath(runsDir),
+      });
+      const parent = bundles.find((bundle) => bundle.state.status === "waiting");
+      const continuations = bundles.filter(
+        (bundle) => bundle.state.parentRunId === parent?.state.runId,
+      );
+      expect(continuations).toHaveLength(1);
+      expect(continuations[0]?.state.steps.map((step) => step.nodeId)).toEqual([
+        "approve",
+        "continued",
+      ]);
+      expect(continueRun).toHaveBeenCalledTimes(1);
+      const request = parent?.state.finalOutput as HumanDecisionRequest | undefined;
+      if (request === undefined) throw new Error("missing race decision request");
+      const decisions = new HumanDecisionStore(workflowStateDatabasePath(runsDir));
+      await waitFor(async () => (await decisions.readContinuation(request.decisionId)) !== null);
+      const loadsAtCompletion = await fs.readFile(enteredPath, "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(await fs.readFile(enteredPath, "utf8")).toBe(loadsAtCompletion);
+
+      const queue = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        projectPath: cwd,
+      });
+      const continuationId = continuations[0]?.state.runId ?? "";
+      expect(queue.getWorkflowRun(continuationId)?.status).toBe("done");
+      expect(
+        queue.state.connection
+          .prepare(
+            `SELECT l.generation AS generation FROM leases l
+             JOIN runs r ON r.resource_id = l.resource_id WHERE r.run_id = ?`,
+          )
+          .get(continuationId),
+      ).toEqual({ generation: 1 });
+      expect(
+        queue.state.connection
+          .prepare(
+            `SELECT count(*) AS count FROM events e
+             JOIN runs r ON r.resource_id = e.resource_id
+             WHERE r.run_id = ? AND e.event_type = 'failed'`,
+          )
+          .get(continuationId),
+      ).toEqual({ count: 0 });
+      queue.close();
+      expect(harness.notifications.join("\n")).not.toMatch(
+        /already exists|revision conflict|crashed/iu,
+      );
+    } finally {
+      continueRun.mockRestore();
+      await harness.emitAsync("session_shutdown", {});
+    }
   });
 
   it("cancels a pending human decision and rejects later acceptance", async () => {

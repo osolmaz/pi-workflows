@@ -320,6 +320,41 @@ export default defineWorkflow({
 });
 `;
 
+const HUMAN_DECISION_RACE_E2E_WORKFLOW = `import fs from "node:fs/promises";
+import path from "node:path";
+import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge } from "@osolmaz/pi-workflows";
+
+const barrierDir = process.env.PI_WORKFLOWS_E2E_RACE_DIR;
+if (barrierDir === undefined) throw new Error("PI_WORKFLOWS_E2E_RACE_DIR is required");
+const enteredPath = path.join(barrierDir, "human-decision-race-loads");
+const releasePath = path.join(barrierDir, "human-decision-race-release");
+let previousLoads = "";
+try { previousLoads = await fs.readFile(enteredPath, "utf8"); } catch {}
+await fs.appendFile(enteredPath, "load\\n");
+if (previousLoads.length > 0) {
+  for (;;) {
+    try { await fs.access(releasePath); break; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  }
+}
+
+const choices = defineHumanChoices({ continue: choice({ label: "Continue" }) });
+
+export default defineWorkflow({
+  name: "human-decision-race-e2e",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({
+      audience: "operator",
+      choices,
+      request: ({ input }) => ({ title: "Approve", subject: input, presentation: { schema: "pi-workflows.decision-presentation.v1", summary: "Review this decision.", blocks: [] } }),
+    }),
+    continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+  },
+  edges: [humanDecisionEdge({ from: "approve", choices, cases: { continue: "continued" } })],
+});
+`;
+
 const HUMAN_TIMEOUT_E2E_WORKFLOW = `import { choice, compute, defineHumanChoices, defineWorkflow, humanDecision, humanDecisionEdge } from "@osolmaz/pi-workflows";
 
 const choices = defineHumanChoices({ continue: choice({ label: "Continue" }) });
@@ -1249,6 +1284,11 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "human-decision-race-e2e.workflow.ts"),
+      HUMAN_DECISION_RACE_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "composed-child.workflow.ts"),
       COMPOSED_CHILD_WORKFLOW,
       "utf8",
@@ -1376,6 +1416,7 @@ describe.sequential("pi-workflows end to end", () => {
         PI_CODING_AGENT_DIR: agentDir,
         PI_AGENT_FIXTURE_BASE_URL: mock.baseUrl,
         PI_AGENT_FIXTURE_API_KEY: "e2e-provider-key",
+        PI_WORKFLOWS_E2E_RACE_DIR: agentDir,
         PATH: `${commandDir}:${process.env.PATH ?? ""}`,
       },
     });
@@ -2141,6 +2182,86 @@ describe.sequential("pi-workflows end to end", () => {
     );
     await waitForPiIdle(pi);
   });
+
+  it("starts one continuation when a direct answer races recovery", async () => {
+    const outputOffset = pi.stdoutLines.length;
+    pi.send({
+      id: "human-decision-race-1",
+      type: "prompt",
+      message: '/workflow human-decision-race-e2e --input-json {"original":true}',
+    });
+    const waiting = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "human-decision-race-e2e" && candidate.status === "waiting",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      20_000,
+    );
+    pi.send({
+      id: "human-decision-race-2",
+      type: "prompt",
+      message: `/workflow answer ${waiting.state.runId} {"choice":"continue"}`,
+    });
+    const enteredPath = path.join(agentDir, "human-decision-race-loads");
+    await waitForCondition(
+      async () => {
+        const loads = await fs.readFile(enteredPath, "utf8").catch(() => "");
+        return loads.trim().split("\n").length >= 3;
+      },
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      20_000,
+    );
+    await fs.writeFile(path.join(agentDir, "human-decision-race-release"), "release\n", "utf8");
+    const continued = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "human-decision-race-e2e" &&
+        candidate.parentRunId === waiting.state.runId &&
+        candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      20_000,
+    );
+    await waitForPiIdle(pi);
+
+    const continuations = listWorkflowRuns({ databasePath: runsDir }).filter(
+      (bundle) => bundle.state.parentRunId === waiting.state.runId,
+    );
+    expect(continuations).toHaveLength(1);
+    expect(continued.state.steps.map((step) => step.nodeId)).toEqual(["approve", "continued"]);
+
+    const queue = new SqliteControllerStore(runsDir, { projectPath: projectDir });
+    expect(queue.getWorkflowRun(continued.state.runId)?.status).toBe("done");
+    expect(
+      queue.state.connection
+        .prepare(
+          `SELECT l.generation AS generation FROM leases l
+           JOIN runs r ON r.resource_id = l.resource_id WHERE r.run_id = ?`,
+        )
+        .get(continued.state.runId),
+    ).toEqual({ generation: 1 });
+    expect(
+      queue.state.connection
+        .prepare(
+          `SELECT count(*) AS starts FROM events e
+           JOIN runs r ON r.resource_id = e.resource_id
+           WHERE r.run_id = ? AND e.event_type = 'run_started'`,
+        )
+        .get(continued.state.runId),
+    ).toEqual({ starts: 1 });
+    expect(
+      queue.state.connection
+        .prepare(
+          `SELECT count(*) AS failures FROM events e
+           JOIN runs r ON r.resource_id = e.resource_id
+           WHERE r.run_id = ? AND e.event_type = 'failed'`,
+        )
+        .get(continued.state.runId),
+    ).toEqual({ failures: 0 });
+    queue.close();
+    expect(pi.stdoutLines.slice(outputOffset).join("\n")).not.toMatch(
+      /already exists|revision conflict|crashed/iu,
+    );
+  }, 30_000);
 
   it("continues a timed human decision through the real Pi recovery loop", async () => {
     pi.send({
