@@ -1,6 +1,6 @@
 ---
 name: autodoc
-description: Use when an existing selected solution or clear implementation plan must be recorded or updated in canonical documentation before implementation, including choosing the right repository and applying SimpleDoc conventions.
+description: Records or updates an existing selected plan in canonical documentation without implementing it. Use only when the user explicitly asks to run autodoc.
 compatibility: Requires pi-workflows and the built-in autodoc workflow.
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: autoimplement
-description: Use when the user asks to implement a plan end-to-end, test it, run pi-reviewer against the base branch in a loop until no P0/P1 issues remain, and make sure CI/CD is green before finishing.
+description: Implements an existing plan end to end, tests it, runs pi-reviewer until no P0/P1 issues remain, and verifies CI/CD. Use only when the user explicitly asks to run autoimplement.
 compatibility: Requires Pi Workflows and the built-in autoimplement workflow.
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: autoplan
-description: Use when the user asks to devise, choose, or plan the most Long term elegant and production ready solution, compare it with the Holy grail, and produce the best practical in-scope implementation plan without asking the user to resolve the gap.
+description: Compares practical solutions with the ideal end state, selects the best in-scope option, and produces an implementation plan. Use only when the user explicitly asks to run autoplan.
 compatibility: Requires pi-workflows and the built-in autoplan workflow.
 ---
 
