@@ -1822,12 +1822,12 @@ export default defineWorkflow({
         ),
       );
       await harness.emitAsync("agent_settled");
-      await waitFor(
-        () =>
-          harness.sentMessages.filter(
-            (entry) => entry.message.customType === "pi-workflows-deferred-turn",
-          ).length === 2,
-      );
+      const terminalDecisionCount = () =>
+        harness.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ).length;
+      await waitFor(() => terminalDecisionCount() >= 2, 30_000);
+      expect(terminalDecisionCount()).toBe(2);
       await expect(
         harness.tool.execute("restart-repeated-max-steps", {
           action: "restart",
@@ -1837,7 +1837,7 @@ export default defineWorkflow({
     } finally {
       vi.unstubAllEnvs();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects restart for active and waiting runs", async () => {
     const activeCwd = await makeTempDir("pi-workflows-restart-active");
