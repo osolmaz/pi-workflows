@@ -181,6 +181,43 @@ describe("state prune", () => {
     expect(preview).toMatchObject({ candidateTrees: 1, blockedTrees: 1, selectedRuns: 0 });
   });
 
+  it("blocks a restart ancestor while its successor is live", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-restart-lineage");
+    const parent = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "parent" } }),
+    }).run(workflow, {});
+    const successor = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "successor" } }),
+    }).run(workflow, {});
+    const store = new WorkflowRunStore(databasePath);
+    const launchOptionsHash = store.state.putJson({
+      restartLineage: {
+        schema: "pi-workflows.restart-lineage.v1",
+        rootRunId: parent.runId,
+        parentRunId: parent.runId,
+        restartNumber: 1,
+        parentTerminalFingerprint: `sha256:${"a".repeat(64)}`,
+      },
+    });
+    store.state.connection
+      .prepare(
+        `UPDATE runs
+         SET launch_options_hash = ?, status = 'queued', finished_at = NULL,
+             final_output_hash = NULL, error_hash = NULL
+         WHERE run_id = ?`,
+      )
+      .run(launchOptionsHash, successor.runId);
+    store.close();
+
+    const preview = await pruneState(databasePath, {
+      before: new Date(Date.now() + 120_000).toISOString(),
+      apply: false,
+    });
+    expect(preview).toMatchObject({ candidateTrees: 1, blockedTrees: 1, selectedRuns: 0 });
+  });
+
   it("blocks a run with pending follow-up presentation", async () => {
     const databasePath = await makeStateDatabasePath("state-prune-follow-up");
     const result = await new WorkflowEngine({

@@ -10,6 +10,7 @@ const UNSETTLED_EFFECT_STATUSES = ["pending", "applying", "ambiguous"];
 type RunAgeRow = {
   runId: string;
   parentRunId: string | null;
+  launchOptionsHash: Buffer;
   status: string;
   finishedAt: number | null;
 };
@@ -52,7 +53,7 @@ export async function pruneState(
       filePath: databasePath,
       mode: options.apply ? "read-write" : "read-only",
     });
-    const selection = selectRunTrees(state.connection, cutoff);
+    const selection = selectRunTrees(state, cutoff);
     const sizeBefore = databaseBytes(databasePath);
     const base = {
       cutoff: new Date(cutoff).toISOString(),
@@ -83,7 +84,7 @@ export async function pruneState(
     let deletedBlobBytes = 0;
     state.connection.exec("BEGIN EXCLUSIVE");
     try {
-      const checked = selectRunTrees(state.connection, cutoff);
+      const checked = selectRunTrees(state, cutoff);
       if (
         checked.runIds.join("\0") !== selection.runIds.join("\0") ||
         checked.signature !== selection.signature
@@ -141,12 +142,14 @@ export async function pruneState(
 }
 
 function selectRunTrees(
-  database: Database.Database,
+  state: StateDatabase,
   cutoff: number,
 ): { candidateTrees: number; blockedTrees: number; runIds: string[]; signature: string } {
+  const { connection: database } = state;
   const rows = database
     .prepare(
-      `SELECT run_id AS runId, parent_run_id AS parentRunId, status, finished_at AS finishedAt
+      `SELECT run_id AS runId, parent_run_id AS parentRunId,
+              launch_options_hash AS launchOptionsHash, status, finished_at AS finishedAt
        FROM runs ORDER BY created_at, run_id`,
     )
     .all()
@@ -162,15 +165,25 @@ function selectRunTrees(
       .map((row) => row.runId),
   );
   const children = new Map<string, string[]>();
+  const parents = new Map<string, string[]>();
   for (const row of rows) {
-    if (row.parentRunId === null) continue;
-    const values = children.get(row.parentRunId) ?? [];
-    values.push(row.runId);
-    children.set(row.parentRunId, values);
+    const runParents = new Set<string>();
+    if (row.parentRunId !== null) runParents.add(row.parentRunId);
+    const restartParentRunId = restartParentFromLaunchOptions(
+      state.readJson(row.launchOptionsHash),
+    );
+    if (restartParentRunId !== null) runParents.add(restartParentRunId);
+    parents.set(row.runId, [...runParents]);
+    for (const parentRunId of runParents) {
+      const values = children.get(parentRunId) ?? [];
+      values.push(row.runId);
+      children.set(parentRunId, values);
+    }
   }
   const roots = rows.filter(
     (row) =>
-      eligible.has(row.runId) && (row.parentRunId === null || !eligible.has(row.parentRunId)),
+      eligible.has(row.runId) &&
+      (parents.get(row.runId) ?? []).every((parentRunId) => !eligible.has(parentRunId)),
   );
   const selected = new Set<string>();
   let blockedTrees = 0;
@@ -407,13 +420,26 @@ function blobReferencePredicate(database: Database.Database): string {
 
 function descendants(root: string, children: Map<string, string[]>): string[] {
   const result: string[] = [];
+  const seen = new Set<string>();
   const pending = [root];
   while (pending.length !== 0) {
     const runId = pending.pop() as string;
+    if (seen.has(runId)) continue;
+    seen.add(runId);
     result.push(runId);
     pending.push(...(children.get(runId) ?? []));
   }
   return result;
+}
+
+function restartParentFromLaunchOptions(value: unknown): string | null {
+  if (!isRecord(value)) throw new Error("Stored workflow launch options are invalid");
+  const lineage = value.restartLineage;
+  if (lineage === undefined) return null;
+  if (!isRecord(lineage) || typeof lineage.parentRunId !== "string") {
+    throw new Error("Stored workflow restart lineage is invalid");
+  }
+  return lineage.parentRunId;
 }
 
 function parseCutoff(value: string): number {
