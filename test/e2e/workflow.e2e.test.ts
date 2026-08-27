@@ -619,6 +619,33 @@ async function waitForQueueRecord(
   );
 }
 
+async function waitForResolvedTurnIntent(
+  databasePath: string,
+  projectPath: string,
+  runId: string,
+  onTimeout: () => string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  await waitForCondition(
+    () => {
+      try {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, projectPath });
+        try {
+          return store
+            .listWorkflowTurnIntents({ runId })
+            .some((intent) => intent.resolvedAt !== null);
+        } finally {
+          store.close();
+        }
+      } catch {
+        return false;
+      }
+    },
+    onTimeout,
+    timeoutMs,
+  );
+}
+
 async function waitForRunState(
   databasePath: string,
   predicate: (state: WorkflowRunState) => boolean,
@@ -2106,6 +2133,13 @@ describe.sequential("pi-workflows end to end", () => {
       response: { choice: "continue" },
     });
     expect(continued.state.humanDecision).not.toHaveProperty("source");
+    await waitForResolvedTurnIntent(
+      controllerFile,
+      projectDir,
+      continued.runId,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForPiIdle(pi);
   });
 
   it("continues a timed human decision through the real Pi recovery loop", async () => {
@@ -2140,6 +2174,13 @@ describe.sequential("pi-workflows end to end", () => {
       afterMs: 50,
       response: { choice: "continue" },
     });
+    await waitForResolvedTurnIntent(
+      controllerFile,
+      projectDir,
+      continued.runId,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForPiIdle(pi);
   });
 
   it("starts the built-in monitor from the model-facing workflow tool", async () => {
