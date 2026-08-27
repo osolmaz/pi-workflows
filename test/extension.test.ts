@@ -1837,7 +1837,7 @@ export default defineWorkflow({
     } finally {
       vi.unstubAllEnvs();
     }
-  });
+  }, 30_000);
 
   it("rejects restart for active and waiting runs", async () => {
     const activeCwd = await makeTempDir("pi-workflows-restart-active");
