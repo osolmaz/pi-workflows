@@ -1844,8 +1844,13 @@ export default defineWorkflow({
         readOnly: true,
       });
       try {
-        expect(intents.listWorkflowTurnIntents({ runId: sourceRunId })).toHaveLength(1);
-        expect(intents.listWorkflowTurnIntents({ runId: restartedRunId })).toHaveLength(1);
+        const sourceIntents = intents.listWorkflowTurnIntents({ runId: sourceRunId });
+        const restartedIntents = intents.listWorkflowTurnIntents({ runId: restartedRunId });
+        if (sourceIntents.length !== 1 || restartedIntents.length !== 1) {
+          throw new Error(
+            `Expected one terminal intent per run:\n${JSON.stringify({ sourceIntents, restartedIntents }, null, 2)}`,
+          );
+        }
       } finally {
         intents.close();
       }
