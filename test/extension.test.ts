@@ -2276,7 +2276,7 @@ export default defineWorkflow({
     }
   });
 
-  it("discards a delayed presentation when another workflow starts", async () => {
+  it("uses one factual fallback when another workflow supersedes a delayed presentation", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("HOME", runsDir);
@@ -2325,14 +2325,21 @@ export default defineWorkflow({
       );
       await new Promise((resolve) => setTimeout(resolve, 150));
 
-      expect(harness.sentMessages).toHaveLength(0);
+      expect(harness.sentMessages).toHaveLength(1);
+      expect(harness.sentMessages[0]).toMatchObject({
+        message: {
+          customType: "pi-workflows-deferred-turn",
+          content: expect.stringContaining('"workflowName": "delayed"'),
+        },
+      });
+      expect(harness.sentMessages[0]?.message.content).not.toContain("Present the old result.");
       expect(harness.notifications.some((note) => note.includes("Could not present"))).toBe(false);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("discards a delayed presentation when a normal user turn starts", async () => {
+  it("delivers one factual fallback after a user turn supersedes a delayed presentation", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("HOME", runsDir);
@@ -2362,10 +2369,50 @@ export default defineWorkflow({
       await waitFor(() =>
         harness.notifications.some((note) => note.includes("Workflow delayed-turn completed")),
       );
+      const run = listWorkflowRuns({
+        databasePath: workflowStateDatabasePath(runsDir),
+      }).find((candidate) => candidate.state.workflowName === "delayed-turn");
+      if (run === undefined) throw new Error("Delayed workflow run was not recorded");
+
+      harness.setIdle(false);
+      harness.appendUserMessage("Continue with a newer user request.");
       harness.emit("agent_start");
       await new Promise((resolve) => setTimeout(resolve, 150));
 
+      const pendingStore = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        readOnly: true,
+        projectPath: cwd,
+      });
+      try {
+        expect(pendingStore.listWorkflowTurnIntents({ runId: run.state.runId })).toMatchObject([
+          { eligibleAt: expect.any(String), resolvedAt: null },
+        ]);
+      } finally {
+        pendingStore.close();
+      }
       expect(harness.sentMessages).toHaveLength(0);
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) =>
+            entry.message.customType === "pi-workflows-deferred-turn" &&
+            entry.message.content.includes('"workflowName": "delayed-turn"'),
+        ),
+      );
+
+      expect(harness.sentMessages).toHaveLength(1);
+      const settledStore = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        readOnly: true,
+        projectPath: cwd,
+      });
+      try {
+        expect(settledStore.listWorkflowTurnIntents({ runId: run.state.runId })).toMatchObject([
+          { resolution: "fallback", resolvedAt: expect.any(String) },
+        ]);
+      } finally {
+        settledStore.close();
+      }
       expect(harness.notifications.some((note) => note.includes("Could not present"))).toBe(false);
     } finally {
       vi.unstubAllEnvs();

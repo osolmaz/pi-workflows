@@ -1416,13 +1416,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
       if (presentationPending?.generation === run.generation) {
         presentationPending = null;
       }
-      if (
-        error instanceof PresentationSupersededError ||
-        sessionClosed ||
-        run.generation !== runGeneration
-      ) {
+      const superseded =
+        error instanceof PresentationSupersededError || run.generation !== runGeneration;
+      if (superseded) {
+        if (!sessionClosed) {
+          const message = "Result presentation was superseded by a newer turn";
+          settlePresentationFromBranch(ctx, run.runId, message);
+          makeRunTurnIntentEligible(ctx, run, state.status, message);
+          runSyncPass(ctx);
+        }
         return;
       }
+      if (sessionClosed) return;
       const message =
         error instanceof PresentationTimeoutError
           ? `timed out after ${PRESENTATION_TIMEOUT_MS}ms`
