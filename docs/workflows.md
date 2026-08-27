@@ -439,6 +439,12 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `update` for a non-completing update from the current agent attempt.
 - `submit` for the current workflow step contract.
 
+The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
+adds a generic `restart` action. It will accept a terminal run ID, reuse that
+run's exact workflow reference and input, and create a new immutable run. The
+model will select this action only after it receives the terminal result and
+decides from the current conversation that the user's task is still unfinished.
+
 A model-started run is queued until the model's current turn settles. The first
 workflow prompt then starts a new turn. This keeps the requesting turn outside
 the workflow's first attempt and prevents an early missing-submission reminder.
@@ -691,6 +697,15 @@ delivery fails, the extension reports a warning and leaves the finished run
 unchanged. Opting in adds one hidden custom message and one assistant response
 to the normal Pi session; it adds no other persistent data and uses no Pi
 internals.
+
+The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
+will extend this host-level behavior to every terminal top-level interactive
+run. Presentation and fallback will settle one turn intent. The resulting model
+turn will include the workflow result and terminal reason, then let the model
+use the conversation it already has to stop, restart, start Monitor, ask for a
+needed decision, or take another safe action. Workflow definitions will not add
+continuation nodes or prompts, and Pi Workflows will not copy or track an
+original user message.
 
 ## Runtime behavior
 
