@@ -1,74 +1,120 @@
 ---
-title: Let the model decide what follows a terminal workflow result
+title: Workflow terminal decision and restart plan
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-27
 ---
 
-# Let the model decide what follows a terminal workflow result
+# Full plan
 
-A workflow run can end while the user's larger task is still unfinished. A technical failure, a timeout, or the `maxSteps` limit can end the run without resolving the task. Pi Workflows must give the model one normal turn to inspect the result and decide what to do next.
+## Goal
 
-The model already receives the conversation from Pi. This feature does not find, copy, hash, or store an original user message. It adds the workflow result and terminal reason to the next model turn and lets the model use the conversation it already has.
+After every top-level workflow run ends, give the model one normal successor turn.
 
-Related documents:
+That turn contains the workflow result and terminal reason. The model uses the conversation it already has to decide whether to:
 
-- [Workflow authoring reference](../workflows.md)
-- [Deferred workflow turns](../DEFERRED_TURNS.md)
-- [SQLite state](../SQLITE_STATE.md)
-- [Continue normal work after a workflow finishes](../2026-08-25-workflow-follow-ups.md)
+- stop because the user’s task is complete
+- restart the same workflow as a new run
+- start Monitor for an authorized external wait
+- ask the user for a required decision or authority
+- take another safe authorized action
 
-## Goals
+The system does not save or identify the original user message. It does not restart automatically. It gives the model one clear decision opportunity and makes safe retry the default for unfinished work after technical failures.
 
-- Give every terminal top-level interactive run at most one normal successor model turn.
-- Tell the model the workflow name, run ID, exact input, result, terminal state, terminal reason, and restart history.
-- Let the model stop, restart the same workflow, start Monitor, ask for a required decision or authority, or take another safe action.
-- Prefer a safe restart when an unexpected technical or temporary failure leaves the user's task unfinished.
-- Stop after completed work, explicit human cancellation, missing authority, a required user decision, or a repeated identical failure.
-- Keep terminal runs immutable. A restart always creates a new run.
-- Preserve one terminal turn and one selected launch across delivery races, reloads, crashes, and compaction.
-- Keep retries bounded.
+## Shared terminal behavior
 
-## Boundaries
+The shared terminal message must include:
 
-- Keep the behavior in the shared Pi extension host. Workflow definitions do not add terminal nodes, prompts, flags, or restart logic.
-- Use documented Pi extension APIs. Do not change Pi core or private APIs.
-- Pi owns conversation history. Pi Workflows does not add original-message persistence or provenance.
-- Use the existing deferred-turn coordinator, turn intents, run queue, effects, run input and result records, launch options, and activation recovery.
-- Do not add a database table, store, service, controller, daemon, or external resource.
-- Do not bypass human checkpoints, required review, CI, scope, authority, cancellation, or safety rules.
-- Follow the alpha hard-cut policy. Do not add compatibility readers, dual paths, migrations, aliases, feature flags, or replacement schema versions.
+- workflow name and revision
+- terminal run ID
+- exact workflow input
+- workflow result
+- terminal state
+- terminal reason
+- restart count
+- earlier terminal outcomes in the same restart chain
 
-## Terminal decision turn
+The message must tell the model:
 
-Each terminal top-level interactive run creates one turn intent. Result presentation and factual fallback compete to settle that same intent. The first successful delivery wins. Reload and crash recovery can continue an unsettled intent, but they cannot send a second turn after settlement.
+> A workflow run ended, but that does not prove the user’s task is complete. Use the current conversation and this result to decide what to do next. If the task is unfinished because of an unexpected technical or temporary failure, prefer a safe restart. Stop if the work is complete, the user cancelled it, new authority is required, the user must make a decision, or the same failure has repeated. Use Monitor only for an authorized external wait.
 
-Waiting checkpoints are not terminal. Controller child runs and internal runs that already report to an owner do not create an independent terminal decision turn.
+Use the term **result**, not “durable result.”
 
-The turn contains these facts:
+## Implementation steps
 
-- workflow name and revision;
-- terminal run ID;
-- exact workflow input;
-- formatted workflow result or error;
-- terminal state;
-- terminal reason;
-- restart count and earlier terminal outcomes in the same restart chain.
+### 1. Build one shared terminal-decision message
 
-Large results keep the current presentation limits and clear truncation markers. The run ID, state, reason, and restart history are always present. The workflow output is called the result.
+**Where**
 
-The shared instruction tells the model that a terminal workflow result does not prove that the user's larger task is complete. The model reads the current conversation and chooses the next action:
+- `src/extension/deferred-turn.ts`
+- Add `src/extension/terminal-decision.ts` if a separate pure module keeps the code smaller.
 
-- stop and report the result when the task is complete;
-- restart when the task is unfinished after an unexpected technical or temporary failure and retry is safe and authorized;
-- start Monitor when an authorized external wait remains;
-- ask the user when a decision or new authority is required;
-- take another safe authorized action when a workflow is not the right next step.
+**Change**
 
-A workflow state of `completed` can still carry a blocked result. The model decides from the result and conversation. Explicit human cancellation always defaults to stopping.
+Add a pure builder that reads the existing run record and produces the shared terminal facts and prompt.
 
-## Restart action
+It must not read, copy, hash, or store an original user message.
 
-Add this workflow tool action:
+Use the existing stored workflow input and result. Apply the existing output-size rules to large results, but always include the run ID, state, reason, and restart history.
+
+**Verification**
+
+Unit tests must cover completed, failed, timed-out, maxSteps, cancelled, and blocked results.
+
+### 2. Create one terminal turn for every top-level run
+
+**Where**
+
+- `finishRun` in `src/extension/index.ts`
+- `src/extension/deferred-turn-coordinator.ts`
+- Existing turn-intent state in `src/controllers/sqlite.ts`
+
+**Change**
+
+Create one terminal turn intent when a top-level interactive run reaches a terminal state.
+
+Normal presentation and fallback delivery must compete for the same intent. The first successful delivery settles it. Every later delivery attempt becomes a no-op.
+
+Do not create this turn for:
+
+- waiting checkpoints
+- controller child runs
+- internal helper runs that already report to an owner
+
+**Verification**
+
+Race tests must prove that presentation, fallback, reload recovery, and crash recovery produce one model turn, not two.
+
+### 3. Replace the current terminal presentation instruction
+
+**Where**
+
+- `buildPresentationMessage`
+- `buildDeferredTurnContent`
+- Related presentation helpers in `src/extension/index.ts`
+
+**Change**
+
+Remove the current instruction that says the model must not call the workflow tool.
+
+Replace it with the shared decision instructions. The terminal turn must permit one workflow launch selected by the model.
+
+Completed runs still get a result turn. A workflow state of `completed` does not always mean the larger user task is complete. For example, the result can say that work is blocked.
+
+Explicit human cancellation must default to stopping.
+
+**Verification**
+
+Tests must prove that the model can select restart or Monitor during the terminal turn and that ordinary completed work does not cause an automatic restart.
+
+### 4. Add a generic restart action
+
+**Where**
+
+- `src/workflows/tool-input.ts`
+- Workflow tool registration, schema, help text, and control switch under `src/workflows/`
+- Restart handling in `src/extension/index.ts`
+
+**Contract**
 
 ```json
 {
@@ -77,136 +123,235 @@ Add this workflow tool action:
 }
 ```
 
-The action reads the terminal run and creates a new immutable run with the same workflow reference, exact input, and safe launch settings. It leaves the old run unchanged.
+**Change**
 
-The action rejects these cases:
+The action must:
 
-- the run is active or waiting;
-- the run does not exist;
-- the run belongs to another session;
-- the run was explicitly cancelled;
-- the stored workflow source or revision is no longer available;
-- the same terminal outcome already repeated in the restart chain;
-- the restart chain reached its limit.
+1. Read the terminal run.
+2. Confirm that it belongs to the current session.
+3. Confirm that it is terminal.
+4. Reuse the exact workflow reference, input, and safe launch settings.
+5. Create a new immutable run.
+6. Record the restart relationship.
+7. Leave the old run unchanged.
 
-A later explicit user request can still use normal `start` after cancellation or a source change.
+Reject restart when:
 
-The model can select one workflow launch during the terminal decision turn. The host reserves that launch once and starts it only after the model turn settles. The selected launch can be `restart`, Monitor, or another normal workflow start. A second workflow launch from the same terminal turn is rejected.
+- the run is active or waiting
+- the run is unknown
+- the run belongs to another session
+- the run was explicitly cancelled
+- the workflow source or revision is no longer available
+- the restart limit was reached
+- the same terminal failure already repeated
 
-## Restart limits
+A later explicit user request can still use normal `start`.
 
-A restarted run stores these facts in the existing launch-options value:
+**Verification**
 
-- root run ID;
-- parent run ID;
-- restart number;
-- parent terminal fingerprint.
+Tool-schema and extension tests must prove exact input reuse, immutable old runs, session checks, source checks, and correct rejection behavior.
 
-The terminal fingerprint is a stable hash of the workflow identity and revision, exact input, terminal state, canonical result or error, and canonical terminal reason. It excludes timestamps, run IDs, and other values that change between equivalent attempts.
+### 5. Permit one selected launch during the terminal turn
 
-One root run permits at most three restart actions, for at most four runs in the chain. If a terminal fingerprint appears again in the same chain, another restart is rejected immediately. A changed result can remain eligible until the total limit is reached. Starting Monitor does not consume a restart.
+**Where**
 
-## Delivery and recovery
+- `queueToolLaunch`
+- presentation tracking in `src/extension/index.ts`
+- `agent_settled`
+- existing queued-launch recovery
 
-The existing turn-intent claim and settlement records provide one terminal decision turn. Presentation and fallback use the same intent instead of creating separate obligations.
+**Change**
 
-A launch selected during that turn uses the existing session reservation, run queue, and effect receipt. The reservation records the source terminal intent and tool call. Replaying the same request returns the existing reservation or run. It does not create another run.
+The current presentation guard rejects workflow launches. Add one narrow exception for the active terminal-decision turn.
 
-The launch waits for `agent_settled`. Existing activation recovery starts a reserved launch after reload or a process crash. Recovery must preserve both limits: one terminal turn and one successor run.
+The model can reserve one of these:
 
-## Implementation plan
+- restart
+- Monitor
+- another workflow start
 
-### Build the terminal decision content
+The reservation must not activate until the model turn settles. A second workflow launch from the same terminal turn must fail.
 
-Add a pure helper in `src/extension/deferred-turn.ts` or a focused `src/extension/terminal-decision.ts`. Build the shared facts and instruction from existing run records. Remove the presentation instruction that forbids workflow tool calls.
+Other tool calls remain subject to their normal rules.
 
-Verify completed, blocked completed, failed, timed-out, `maxSteps`, and cancelled results.
+**Verification**
 
-### Settle one terminal turn intent
+Tests must prove that:
 
-Update `finishRun` in `src/extension/index.ts`, `src/extension/deferred-turn-coordinator.ts`, and the existing turn-intent state. Create one intent for every terminal top-level interactive run. Make presentation and fallback settle that same intent.
+- one launch can be reserved during presentation
+- it starts only after `agent_settled`
+- a second launch is rejected
+- reload after reservation does not lose it
+- crash recovery does not start it twice
 
-Verify presentation, fallback, reload, and crash races. Waiting checkpoints and controller child runs must not create competing turns.
+### 6. Add bounded restart lineage
 
-### Add generic restart
+**Where**
 
-Update `src/workflows/tool-input.ts`, the workflow tool schema and help text, and control handling in `src/extension/index.ts`. Resolve the named terminal run and create a new run from its exact workflow reference, input, and safe launch settings.
+- Add `src/extension/restart-policy.ts`
+- Existing run launch-options JSON and accessors
+- No new database table
 
-Verify exact input reuse, immutable prior runs, session checks, cancellation checks, source checks, and invalid run states.
+**Change**
 
-### Reserve one selected launch
+Store this information for restarted runs:
 
-Update `queueToolLaunch`, presentation tracking, `agent_settled`, and queued activation recovery. Permit one launch reservation from the active terminal decision turn. Delay activation until settlement and reject another reservation.
+- root run ID
+- parent run ID
+- restart number
+- parent terminal fingerprint
 
-Verify settlement ordering, reload after reservation, crash recovery, and duplicate calls.
+A terminal fingerprint is a stable hash of:
 
-### Enforce restart policy
+- workflow identity and revision
+- exact input
+- terminal state
+- canonical result or error
+- canonical terminal reason
 
-Add a focused restart-policy helper and store lineage in the existing launch-options value. Compute canonical fingerprints, traverse the bounded parent chain, reject a repeated outcome, and enforce three restarts.
+Do not include timestamps or new run IDs in the fingerprint.
 
-Verify a first technical retry, progress followed by a different failure, repeated `maxSteps`, the total limit, and Monitor selection.
+Allow at most three restart actions after the original run. This permits at most four runs in one chain.
 
-### Update public documentation
+If a terminal fingerprint occurs again in the same chain, reject another restart immediately. If the result changes because the workflow made progress, another restart can remain eligible until the total limit is reached.
 
-Update `docs/workflows.md`, `docs/SQLITE_STATE.md`, and workflow tool examples when implementation lands. Keep the result-presentation, restart, retry, and storage descriptions aligned with the code.
+Starting Monitor does not consume a restart.
 
-Verify every documented tool example against the real input schema.
+**Verification**
 
-## Tests
+Tests must cover:
 
-Add regression tests for:
+- first technical retry
+- progress followed by a different failure
+- repeated identical maxSteps failure
+- three-restart limit
+- Monitor selection
+- restart history after database reopen
 
-- completed work;
-- a completed workflow with a blocked result;
-- failure, timeout, and `maxSteps`;
-- explicit cancellation;
-- one turn across presentation and fallback races;
-- one turn after reload and crash recovery;
-- waiting and child-run exclusions;
-- exact workflow input reuse;
-- an immutable terminal run;
-- delayed activation after `agent_settled`;
-- idempotent reservation and run creation;
-- a repeated terminal fingerprint;
-- the three-restart limit;
-- Monitor without restart consumption;
-- the absence of original-message capture, hashing, or storage.
+### 7. Make restart reservation idempotent
 
-The end-to-end regression must reproduce the original failure mode. Start a workflow from a normal conversation, force `maxSteps`, receive one terminal decision turn, restart from the exact input, and verify that reload does not create a duplicate turn or run.
+**Where**
 
-## Risks
+- Existing effect records
+- Existing run queue and reservation code
+- Terminal turn-intent settlement code
 
-A model can restart work that is already complete. The shared instruction makes stop the default for successful completed work, and the restart policy limits mistakes.
+**Change**
 
-A retry can repeat an external side effect. The terminal turn includes the prior result and restart history. The new run must re-observe current state before it repeats consequential work.
+Key the selected launch to the source terminal turn intent and tool call.
 
-Presentation and fallback can race. They settle one turn intent.
+If the host repeats the same tool call after a crash or reload, return the existing reservation or new run instead of creating another one.
 
-A selected launch can race with result presentation. The host reserves it and waits for `agent_settled`.
+The terminal turn intent, launch reservation, and resulting run must have one inspectable chain.
 
-A temporary outage can cause repeated attempts. The model selects Monitor for an external wait, identical outcomes stop, and the chain permits only three restarts.
+**Verification**
 
-A workflow can report `completed` with a blocked result. The model decides from the result. Explicit cancellation remains the only terminal outcome that the restart shortcut always rejects.
+Inject failures after:
 
-## Verification
+- turn-intent claim
+- launch reservation
+- run creation
+- terminal response settlement
 
-Run these checks after implementation:
+After recovery, there must still be one terminal message and one successor run.
+
+### 8. Document the contract
+
+**Where**
+
+- `docs/workflows.md`
+- `docs/SQLITE_STATE.md`
+- Workflow tool reference and examples
+- Relevant README text
+
+**Change**
+
+Document:
+
+- the shared terminal decision turn
+- the `restart` action
+- the difference between a workflow ending and the user’s task finishing
+- retry defaults and limits
+- Monitor selection
+- explicit cancellation behavior
+- top-level versus child-run behavior
+- recovery and duplicate prevention
+- that conversation context remains owned by Pi
+- that Pi Workflows does not capture or persist an original user message
+
+No workflow definition needs an opt-in or terminal restart step.
+
+## Contract changes
+
+- The workflow tool gains `restart`.
+- Every top-level terminal run owns one terminal turn intent.
+- Restart always creates a new run.
+- Restart reuses the exact prior workflow input.
+- The model makes the continuation decision from the current conversation.
+- Restart is preferred, not forced, for unfinished work after technical or temporary failures.
+- Explicit cancellation, missing authority, required user decisions, repeated failures, and completed work stop.
+- Restart lineage uses existing run launch data.
+- No new store, service, controller, or Pi API is added.
+- No original-message provenance contract is added.
+
+## Test plan
+
+Add regression coverage for:
+
+1. Successful completion produces one result turn and no automatic restart.
+2. A blocked result from a completed workflow lets the model select restart.
+3. Failed, timed-out, and maxSteps runs offer restart.
+4. Explicit cancellation is not restartable through the shortcut.
+5. Waiting checkpoints do not produce a terminal turn.
+6. Controller child runs do not produce competing turns.
+7. Presentation and fallback races produce one turn.
+8. Restart uses the exact workflow reference and input.
+9. Restart leaves the prior run unchanged.
+10. Monitor starts through the normal start path.
+11. A selected launch waits for `agent_settled`.
+12. Reload and crash recovery do not duplicate turns or runs.
+13. The same terminal failure cannot repeat indefinitely.
+14. A chain cannot exceed three restarts.
+15. No new code captures, hashes, or stores an original user message.
+16. The maxSteps failure that caused this incident produces a terminal decision turn instead of silently ending the task.
+
+Run the full repository checks:
 
 ```bash
 npm run check
 npm run test:e2e
 npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
-git diff --check
-npx -y @simpledoc/simpledoc check
 ```
 
-Keep coverage at or above 85 percent. Inspect the final diff for duplicate turn sources, duplicate launch reservations, missing restart bounds, original-message handling, hidden retries, and dependency-boundary violations.
+## Main risks
 
-## Rollout
+- **The model restarts completed work.**
+  Make stopping the default for successful results and enforce restart limits.
 
-This is an in-place alpha change. Keep the current schema identifiers. Restart lineage uses the existing launch-options value, so the plan adds no database table or migration.
+- **A retry repeats external effects.**
+  Include the prior result and restart history so the model can inspect the current state before it retries.
 
-If the implementation makes existing alpha state incompatible, fail with the repository's standard clear reset instruction. Do not reinterpret, migrate, or delete old state.
+- **Presentation and fallback both fire.**
+  Make both settle the same turn intent.
 
-Do not publish a package or create a release without separate authorization.
+- **A launch starts while the terminal response is still active.**
+  Reserve it first and activate it after `agent_settled`.
+
+- **A temporary outage causes a loop.**
+  Use Monitor for external waits, stop repeated fingerprints, and allow only three restarts.
+
+## Boundaries
+
+Do not:
+
+- modify Pi core or private APIs
+- store or identify an original user message
+- add restart nodes to individual workflows
+- modify Autoimplement, Monitor, or other workflow definitions
+- create a new controller, database, service, or daemon
+- bypass cancellation, checkpoints, reviews, CI, authority, or safety rules
+- add compatibility shims or parallel state contracts
+- release or deploy anything as part of this plan
+
+This is the selected plan.
