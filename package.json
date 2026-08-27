@@ -1,6 +1,6 @@
 {
   "name": "@osolmaz/pi-workflows",
-  "version": "0.13.4",
+  "version": "0.14.0",
   "description": "Workflow and controller runtime with a live terminal viewer for the pi coding agent",
   "keywords": [
     "pi-package"
