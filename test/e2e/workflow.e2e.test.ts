@@ -43,24 +43,33 @@ async function sessionEntries(agentDirectory: string): Promise<string[]> {
     });
 }
 
+function workflowActionCallIds(
+  messages: Array<{ tool_calls?: unknown[] }>,
+  action: string,
+): string[] {
+  return messages.flatMap((message) =>
+    (message.tool_calls ?? []).flatMap((call) => {
+      if (call === null || typeof call !== "object") return [];
+      const fn = (call as { function?: unknown }).function;
+      if (fn === null || typeof fn !== "object") return [];
+      const args = (fn as { arguments?: unknown }).arguments;
+      if (typeof args !== "string") return [];
+      try {
+        if ((JSON.parse(args) as { action?: unknown }).action !== action) return [];
+        const id = (call as { id?: unknown }).id;
+        return [typeof id === "string" ? id : JSON.stringify(call)];
+      } catch {
+        return [];
+      }
+    }),
+  );
+}
+
 function calledWorkflowAction(
   messages: Array<{ tool_calls?: unknown[] }>,
   action: string,
 ): boolean {
-  return messages.some((message) =>
-    (message.tool_calls ?? []).some((call) => {
-      if (call === null || typeof call !== "object") return false;
-      const fn = (call as { function?: unknown }).function;
-      if (fn === null || typeof fn !== "object") return false;
-      const args = (fn as { arguments?: unknown }).arguments;
-      if (typeof args !== "string") return false;
-      try {
-        return (JSON.parse(args) as { action?: unknown }).action === action;
-      } catch {
-        return false;
-      }
-    }),
-  );
+  return workflowActionCallIds(messages, action).length > 0;
 }
 
 function contentText(content: unknown): string {
@@ -185,6 +194,34 @@ export default defineWorkflow({
     }),
   },
   edges: [],
+});
+`;
+
+const RESUME_CONTROL_E2E_WORKFLOW = `import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "resume-control-e2e",
+  startAt: "prepare",
+  nodes: {
+    prepare: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ prepared: true }), 1000);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+    work: agent({
+      prompt: () => "Advance the resumed workflow once.",
+      expectedOutput: '{ "advanced": true }',
+    }),
+    finish: compute({ run: ({ outputs }) => ({ prepare: outputs.prepare, work: outputs.work }) }),
+  },
+  edges: [
+    { from: "prepare", to: "work" },
+    { from: "work", to: "finish" },
+  ],
 });
 `;
 
@@ -722,6 +759,9 @@ describe.sequential("pi-workflows end to end", () => {
             },
           };
         }
+        if (lastRole === "user" && lastUserText === "continue it") {
+          return { kind: "tool", toolName: "workflow", args: { action: "resume" } };
+        }
         if (
           lastRole === "tool" &&
           contentText(messages.at(-1)?.content).includes("Workflow update published") &&
@@ -868,6 +908,21 @@ describe.sequential("pi-workflows end to end", () => {
               reason: "Ready without merge.",
             });
           }
+        }
+        const resumeControlStepMatch = lastUserText.match(
+          /workflow step contract \(workflow: resume-control-e2e, step: work, attempt: ([a-z0-9-]+)\)/i,
+        );
+        if (resumeControlStepMatch && lastRole !== "tool") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: "work",
+              attempt: resumeControlStepMatch[1] ?? "",
+              output: { advanced: true },
+            },
+          };
         }
         if (lastRole === "tool") {
           return {
@@ -1133,6 +1188,11 @@ describe.sequential("pi-workflows end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "no-timeout-e2e.workflow.ts"),
       NO_TIMEOUT_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "resume-control-e2e.workflow.ts"),
+      RESUME_CONTROL_E2E_WORKFLOW,
       "utf8",
     );
     await fs.writeFile(
@@ -1773,6 +1833,52 @@ describe.sequential("pi-workflows end to end", () => {
 
     expect(state.finalOutput).toEqual({ completed: true });
     expect(snapshot?.nodes.work?.timeoutMs).toBeNull();
+  }, 90_000);
+
+  it("resumes a paused workflow from explicit normal user text without duplicate execution", async () => {
+    await waitForPiIdle(pi);
+    const requestOffset = mock.requests.length;
+    pi.send({
+      id: "resume-control-start",
+      type: "prompt",
+      message: "/workflow resume-control-e2e",
+    });
+
+    const started = await waitForRunState(
+      runsDir,
+      (candidate) =>
+        candidate.workflowName === "resume-control-e2e" && candidate.currentNode === "prepare",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+    await waitForPiIdle(pi);
+    pi.send({ id: "resume-control-pause", type: "prompt", message: "/workflow pause" });
+    await waitForRunState(
+      runsDir,
+      (candidate) => candidate.runId === started.runId && candidate.paused === true,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+    );
+
+    await waitForPiIdle(pi);
+    pi.send({ id: "resume-control-continue", type: "prompt", message: "continue it" });
+    const { state } = await waitForRunState(
+      runsDir,
+      (candidate) => candidate.runId === started.runId && candidate.status === "completed",
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-20).join("\n")}`,
+      20_000,
+    );
+    await waitForPiIdle(pi);
+
+    expect(state.finalOutput).toEqual({
+      prepare: { prepared: true },
+      work: { advanced: true },
+    });
+    expect(state.steps.map((step) => step.nodeId)).toEqual(["prepare", "work", "finish"]);
+    const resumeCallIds = new Set(
+      mock.requests
+        .slice(requestOffset)
+        .flatMap((request) => workflowActionCallIds(request.messages, "resume")),
+    );
+    expect(resumeCallIds.size).toBe(1);
   }, 90_000);
 
   it("continues a protected human decision through a real Pi command without Telegram", async () => {

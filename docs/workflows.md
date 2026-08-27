@@ -439,6 +439,28 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `update` for a non-completing update from the current agent attempt.
 - `submit` for the current workflow step contract.
 
+A direct user request to continue or resume the active workflow maps to the
+`resume` action immediately. The model does not call `status` instead of
+`resume`, and it does not use `status` as a prerequisite.
+
+`resume` is idempotent while a run is active. A held, pausing, or paused run is
+released and reports `resumed: true`. An active run that is already executing
+returns normal success with `resumed: false` and `alreadyRunning: true`. It does
+not change the run state. With no active run, `resume` still returns a warning.
+
+Model-facing `status` keeps `status` as the durable workflow lifecycle state.
+It also reports the host action fields `paused`, `workState`, and `resumable`.
+For the current active run, `paused` is true when the host has requested or
+applied a hold, or when the durable run state has `paused: true`. `workState`
+is `running`, `pausing`, or `paused` for that active host run and `inactive`
+when no current host run can act on the durable state. `resumable` is true only
+when `resume` can release the current active run. Queue-only status uses its
+launch state, such as `queued` or `starting`, as `workState`; queue-only and
+no-run results report `paused: false` and `resumable: false`. Thus, a durable
+`status: "running"` can correctly appear with `workState: "pausing"` or
+`workState: "paused"`, and the status message names that actionable state
+instead of saying only that the workflow is running.
+
 The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
 adds a generic `restart` action. It will accept a terminal run ID, reuse that
 run's exact workflow reference and input, and create a new immutable run. The
@@ -727,6 +749,9 @@ possible. Defaults worth knowing:
   held without nudges and the engine pauses at the next boundary. Node
   timeouts keep ticking while held, so a long-abandoned step still times out.
   `/workflow resume` re-delivers the pending step prompt.
+- Resuming an active run that is already running succeeds without changing the
+  engine, executor, widget, or durable workflow state. This makes duplicate
+  `resume` calls safe.
 - A model-started workflow is persisted as `queued` with its final run ID before the start tool
   returns. Activation waits for the initiating agent turn to settle, then moves through `starting`
   and `running`. `workflow status` and `workflow cancel` accept the run ID before a SQLite run state

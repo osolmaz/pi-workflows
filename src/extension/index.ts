@@ -391,8 +391,15 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   return { kind: "run", ref, input: rest.length > 0 ? { task: rest } : {} };
 }
 
+type WorkflowActionableStatus = {
+  paused: boolean;
+  workState: "running" | "pausing" | "paused" | "inactive";
+  resumable: boolean;
+};
+
 function workflowStateSummary(
   state: WorkflowRunState,
+  actionable: WorkflowActionableStatus,
   controls?: Pick<
     NonNullable<ReturnType<typeof readWorkflowRun>>,
     "settingsScopes" | "followUpQueue"
@@ -409,6 +416,9 @@ function workflowStateSummary(
     runId: state.runId,
     workflowName: state.workflowName,
     status: state.status,
+    paused: actionable.paused,
+    workState: actionable.workState,
+    resumable: actionable.resumable,
     steps: state.steps.length,
     updates: (state.updates ?? []).map(({ data, ...record }) => ({
       ...record,
@@ -747,6 +757,24 @@ export default function piWorkflows(pi: ExtensionAPI) {
   /** True when the run is held for the user (escape or /workflow pause). */
   const runHeld = (): boolean =>
     activeRun !== null && (activeRun.engine.pauseRequested || activeRun.executor.held);
+
+  const actionableStatus = (state: WorkflowRunState): WorkflowActionableStatus => {
+    if (activeRun === null || activeRun.runId !== state.runId || state.status !== "running") {
+      return {
+        paused: state.paused === true,
+        workState: "inactive",
+        resumable: false,
+      };
+    }
+    const paused = state.paused === true || runHeld();
+    const workState =
+      state.paused === true || activeRun.executor.held
+        ? "paused"
+        : activeRun.engine.pauseRequested
+          ? "pausing"
+          : "running";
+    return { paused, workState, resumable: paused };
+  };
 
   const originSessionId = (ctx: ExtensionContext, runId: string): string =>
     ensureRunQueueStore(ctx.cwd).getWorkflowRun(runId)?.originSessionId ??
@@ -2103,14 +2131,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
     if (!runHeld()) {
       return {
-        message: `Workflow ${activeRun.workflowName} is not paused.`,
+        message: `Workflow ${activeRun.workflowName} is already running.`,
         details: {
           action: "resume",
           workflowName: activeRun.workflowName,
           runId: activeRun.runId,
           paused: false,
+          resumed: false,
+          alreadyRunning: true,
         },
-        level: "warning",
       };
     }
     activeRun.suppressTurnIntent = false;
@@ -2124,6 +2153,8 @@ export default function piWorkflows(pi: ExtensionAPI) {
         workflowName: activeRun.workflowName,
         runId: activeRun.runId,
         paused: false,
+        resumed: true,
+        alreadyRunning: false,
       },
     };
   };
@@ -2137,6 +2168,11 @@ export default function piWorkflows(pi: ExtensionAPI) {
       workflowName: record.workflowName,
       runId: record.runId,
       status: record.status,
+      paused: false,
+      workState: ["queued", "starting", "running"].includes(record.status)
+        ? record.status
+        : "inactive",
+      resumable: false,
       ...(record.errorCode === null ? {} : { errorCode: record.errorCode }),
       ...(record.errorMessage === null ? {} : { error: record.errorMessage }),
     },
@@ -2161,9 +2197,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
         return workflowLaunchStatus(launch);
       }
       const { state } = bundle;
+      const actionable = actionableStatus(state);
+      const displayStatus = actionable.resumable ? actionable.workState : state.status;
       return {
-        message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
-        details: workflowStateSummary(state, bundle),
+        message:
+          displayStatus === state.status
+            ? `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`
+            : `Workflow ${state.workflowName} is ${displayStatus} (durable status ${state.status}; run ${state.runId}).`,
+        details: workflowStateSummary(state, actionable, bundle),
       };
     }
     const state = activeRun?.lastState ?? widgetSource?.state;
@@ -2176,13 +2217,18 @@ export default function piWorkflows(pi: ExtensionAPI) {
     if (state === undefined || state === null) {
       return {
         message: "No workflow run is active or displayed.",
-        details: { active: false },
+        details: { active: false, paused: false, workState: "inactive", resumable: false },
         level: "warning",
       };
     }
+    const actionable = actionableStatus(state);
+    const displayStatus = actionable.resumable ? actionable.workState : state.status;
     return {
-      message: `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`,
-      details: workflowStateSummary(state, readWorkflowRun(state.runId) ?? undefined),
+      message:
+        displayStatus === state.status
+          ? `Workflow ${state.workflowName} is ${state.status} (run ${state.runId}).`
+          : `Workflow ${state.workflowName} is ${displayStatus} (durable status ${state.status}; run ${state.runId}).`,
+      details: workflowStateSummary(state, actionable, readWorkflowRun(state.runId) ?? undefined),
     };
   };
 
@@ -3225,6 +3271,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     label: "Workflow",
     description: [
       "List, start, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer, update, or complete pi-workflows runs.",
+      "When the user asks to continue or resume the active workflow, call workflow resume immediately; do not use workflow status as a substitute or prerequisite.",
       "When the user asks to monitor, watch, poll, or check something repeatedly, start the built-in monitor workflow with input keys task, stopWhen, everyMinutes, and optional maxChecks.",
       "Put the exact goal, authority, limits, and recovery rules in task; Monitor observes first, performs only safe authorized actions, verifies them immediately, and waits only while target work is moving or an external event is pending.",
       "Use update or submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",

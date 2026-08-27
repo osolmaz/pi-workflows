@@ -22,6 +22,8 @@ Use the smallest applicable action:
 - `update` publishes a non-completing durable update for the active step attempt.
 - `submit` completes an active submitted agent step with its required output. An assistant-message step completes through its normal visible reply instead.
 
+When the user asks to continue or resume the active workflow, call `workflow` with `action: "resume"` immediately. Do not use `workflow status` as a substitute or prerequisite.
+
 Use `start` only once for one requested run. Before starting, load the matching workflow skill when one exists and build its complete input. Include scope, authority, constraints, identifiers, and finish criteria required by that skill. Do not start with placeholders that still need user or model repair.
 
 For a workflow without a specialized skill, inspect its input contract and make one complete call. For example:

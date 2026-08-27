@@ -26,11 +26,13 @@ type ToolResult = {
 
 type RegisteredTool = {
   name: string;
+  description: string;
   execute: (toolCallId: string, params: WorkflowToolInput) => Promise<ToolResult>;
 };
 
 type RegisteredToolSpec = {
   name: string;
+  description: string;
   execute: (
     toolCallId: string,
     params: WorkflowToolInput,
@@ -121,6 +123,7 @@ function makeHarness(options: {
   ) => Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>;
 }) {
   const notifications: string[] = [];
+  const notificationLevels: (string | undefined)[] = [];
   const widgets: (string[] | WidgetFactory | undefined)[] = [];
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
@@ -152,7 +155,10 @@ function makeHarness(options: {
       getBranch: () => [],
     },
     ui: {
-      notify: (message) => notifications.push(message),
+      notify: (message, type) => {
+        notifications.push(message);
+        notificationLevels.push(type);
+      },
       setWidget: (_key, content) => widgets.push(content),
       setStatus: (_key, text) => statuses.push(text),
       select: async (title, choices) => await options.select?.(title, choices),
@@ -195,6 +201,7 @@ function makeHarness(options: {
     registerTool: (spec: RegisteredToolSpec) => {
       tool = {
         name: spec.name,
+        description: spec.description,
         execute: async (toolCallId, params) =>
           await spec.execute(
             toolCallId,
@@ -246,6 +253,7 @@ function makeHarness(options: {
   return {
     ctx,
     notifications,
+    notificationLevels,
     widgets,
     statuses,
     sentMessages,
@@ -1050,6 +1058,16 @@ describe("pi-workflows extension", () => {
       expect(harness.notifications.some((note) => note.includes("Workflow mini started"))).toBe(
         false,
       );
+      const queuedStatus = await harness.tool.execute("status-queued", {
+        action: "status",
+        runId: String(queued.details.runId),
+      });
+      expect(queuedStatus.details).toMatchObject({
+        status: "queued",
+        paused: false,
+        workState: "queued",
+        resumable: false,
+      });
 
       await harness.emitAsync("agent_settled");
       await waitFor(() =>
@@ -1078,7 +1096,13 @@ describe("pi-workflows extension", () => {
       await harness.emitAsync("agent_settled");
 
       const status = await harness.tool.execute("status-1", { action: "status" });
-      expect(status.details).toMatchObject({ workflowName: "mini", status: "completed" });
+      expect(status.details).toMatchObject({
+        workflowName: "mini",
+        status: "completed",
+        paused: false,
+        workState: "inactive",
+        resumable: false,
+      });
       await expect(
         harness.tool.execute("status-missing", { action: "status", runId: "missing-run" }),
       ).rejects.toThrow(/Workflow run not found/);
@@ -2298,7 +2322,7 @@ export default defineWorkflow({
     }
   });
 
-  it("shares pause, resume, and cancel behavior between commands and the tool", async () => {
+  it("reports actionable pause state and keeps resume idempotent", async () => {
     const cwd = await makeTempDir("pi-workflows-ext");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("HOME", runsDir);
@@ -2307,21 +2331,50 @@ export default defineWorkflow({
       // Never respond, so the agent step stays pending and the run stays live.
       const harness = makeHarness({ cwd, respond: () => {} });
 
-      await harness.command.handler("pause", harness.ctx);
+      const noRun = await harness.tool.execute("resume-no-run", { action: "resume" });
+      expect(noRun.content[0]?.text).toContain("No workflow is running");
+      expect(noRun.details).toMatchObject({ action: "resume", active: false });
+      await harness.command.handler("resume", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("No workflow is running");
+      expect(harness.notificationLevels.at(-1)).toBe("warning");
 
       await harness.command.handler("mini", harness.ctx);
-      await waitFor(() => harness.notifications.some((note) => note.includes("started")));
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-agent-step",
+        ),
+      );
 
       const paused = await harness.tool.execute("pause-1", { action: "pause" });
       expect(paused.content[0]?.text).toContain("Pausing workflow mini");
+      const status = await harness.tool.execute("status-pausing", { action: "status" });
+      expect(status.content[0]?.text).toContain("is pausing");
+      expect(status.details).toMatchObject({
+        status: "running",
+        paused: true,
+        workState: "pausing",
+        resumable: true,
+      });
       const pausedAgain = await harness.tool.execute("pause-2", { action: "pause" });
       expect(pausedAgain.content[0]?.text).toContain("already pausing or paused");
 
       const resumed = await harness.tool.execute("resume-1", { action: "resume" });
       expect(resumed.content[0]?.text).toContain("Workflow mini resumed");
+      expect(resumed.details).toMatchObject({ resumed: true, alreadyRunning: false });
+      const beforeIdempotentResume = readWorkflowRun(String(resumed.details.runId), {
+        databasePath: workflowStateDatabasePath(runsDir),
+      })?.state;
       const resumedAgain = await harness.tool.execute("resume-2", { action: "resume" });
-      expect(resumedAgain.content[0]?.text).toContain("is not paused");
+      expect(resumedAgain.content[0]?.text).toContain("already running");
+      expect(resumedAgain.details).toMatchObject({ resumed: false, alreadyRunning: true });
+      expect(
+        readWorkflowRun(String(resumed.details.runId), {
+          databasePath: workflowStateDatabasePath(runsDir),
+        })?.state,
+      ).toEqual(beforeIdempotentResume);
+      await harness.command.handler("resume", harness.ctx);
+      expect(harness.notifications.at(-1)).toContain("already running");
+      expect(harness.notificationLevels.at(-1)).toBeUndefined();
 
       const cancelled = await harness.tool.execute("cancel-1", { action: "cancel" });
       expect(cancelled.content[0]?.text).toContain("Cancelling workflow mini");
@@ -2329,6 +2382,22 @@ export default defineWorkflow({
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("instructs the model to map continue directly to workflow resume", async () => {
+    const cwd = await makeTempDir("pi-workflows-resume-instruction");
+    const harness = makeHarness({ cwd, respond: () => {} });
+    const skill = await fs.readFile(
+      path.join(process.cwd(), "skills", "pi-workflows", "SKILL.md"),
+      "utf8",
+    );
+
+    expect(harness.tool.description).toContain(
+      "call workflow resume immediately; do not use workflow status as a substitute or prerequisite",
+    );
+    expect(skill).toContain(
+      'call `workflow` with `action: "resume"` immediately. Do not use `workflow status` as a substitute or prerequisite.',
+    );
   });
 
   it("auto-pauses when the user interrupts the turn and resumes with a reprompt", async () => {
@@ -2973,7 +3042,7 @@ export default defineWorkflow({
     },
   );
 
-  it("pauses, resumes, and cancels an active run", { timeout: 20_000 }, async () => {
+  it("reports a durable paused boundary and resumes it", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-controls");
     const runsDir = await makeTempDir("pi-workflows-ext-runs");
     vi.stubEnv("HOME", runsDir);
@@ -2988,6 +3057,15 @@ export default defineWorkflow({
   nodes: {
     work: compute({
       run: ({ signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve("prepared"), 100);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+    finish: compute({
+      run: ({ signal }) => new Promise((resolve, reject) => {
         const timer = setTimeout(() => resolve("done"), 600);
         signal.addEventListener("abort", () => {
           clearTimeout(timer);
@@ -2996,7 +3074,7 @@ export default defineWorkflow({
       }),
     }),
   },
-  edges: [],
+  edges: [{ from: "work", to: "finish" }],
 });
 `,
         "utf8",
@@ -3012,12 +3090,30 @@ export default defineWorkflow({
 
       await workflow?.handler("pause", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("Pausing workflow slow");
-      await workflow?.handler("pause", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("already pausing or paused");
-      await workflow?.handler("resume", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("resumed");
-      await workflow?.handler("resume", harness.ctx);
-      expect(harness.notifications.at(-1)).toContain("is not paused");
+      await waitFor(() => {
+        const bundle = listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) })[0];
+        return bundle?.state.paused === true;
+      });
+      const pausedStatus = await harness.tool.execute("status-paused", { action: "status" });
+      expect(pausedStatus.content[0]?.text).toContain("is paused");
+      expect(pausedStatus.details).toMatchObject({
+        status: "running",
+        paused: true,
+        workState: "paused",
+        resumable: true,
+      });
+
+      const resumed = await harness.tool.execute("resume-paused", { action: "resume" });
+      expect(resumed.content[0]?.text).toContain("resumed");
+      expect(resumed.details).toMatchObject({ resumed: true, alreadyRunning: false });
+      await waitFor(() => {
+        const bundle = listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) })[0];
+        return bundle?.state.currentNode === "finish" && bundle.state.paused !== true;
+      });
+      const alreadyRunning = await harness.tool.execute("resume-running", { action: "resume" });
+      expect(alreadyRunning.content[0]?.text).toContain("already running");
+      expect(alreadyRunning.details).toMatchObject({ resumed: false, alreadyRunning: true });
+
       await workflow?.handler("cancel", harness.ctx);
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
       await harness.emitAsync("agent_settled");
