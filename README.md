@@ -4,25 +4,17 @@
   <img src="assets/cover.svg" alt="pi-workflows: a representative multi-step workflow graph with plan, implement, verify, review, a fix loop, and a clean finish" width="880">
 </p>
 
-pi-workflows is a workflow extension for the [pi coding agent](https://pi.dev).
+pi-workflows is a workflow extension for the [Pi coding agent](https://pi.dev).
 It lets you define multi-step agent workflows as TypeScript graphs, trigger
-them at any point in a pi conversation with `/workflow`, and watch them run
+them at any point in a Pi conversation with `/workflow`, and watch them run
 live in a standalone terminal viewer.
 
-The workflow model is a port of [openclaw/acpx](https://github.com/openclaw/acpx)
-flows into pi itself. Agent steps run inside your current pi conversation, so
-the model keeps everything it already knows from the discussion. A submitted
-agent calls the JSON `workflow` tool with structured output. An assistant agent
-writes a normal visible response that becomes the node output. See the [design
-philosophy](docs/DESIGN_PHILOSOPHY.md) for the principles behind the engine and
-its public parts. Running steps can publish durable [workflow
-updates](docs/WORKFLOW_UPDATES.md), including progress counts and ETA data.
-Agent instructions use compact [workflow step
-messages](docs/WORKFLOW_STEP_MESSAGES.md). Workflows can expose [settings that
-change during a run](docs/2026-08-25-workflow-settings.md) and queue [normal
-follow-up work after completion](docs/2026-08-25-workflow-follow-ups.md). The
-built-in [monitor](docs/MONITOR.md) reports every check without starting an
-extra assistant turn.
+Agent steps run inside your current Pi conversation, so the model keeps
+everything it already knows from the discussion. A submitted agent step
+returns structured output through the JSON `workflow` tool, while an
+assistant step writes a normal visible response that becomes the node
+output. The [design philosophy](docs/DESIGN_PHILOSOPHY.md) explains the
+principles behind the engine and its public parts.
 
 ## Install
 
@@ -70,7 +62,7 @@ Set `"skills": []` to disable all bundled skills while keeping the extension.
 Set `"extensions": []` to keep the skills without loading the extension.
 
 Install the interactive terminal viewer separately from crates.io. The crate
-is named `pi-workflows`; its command is `piw`:
+is named `pi-workflows` and installs the `piw` command:
 
 ```bash
 cargo install pi-workflows
@@ -88,35 +80,10 @@ All live workflow and controller state uses one local database:
 ```
 
 Runs, decisions, queues, claims, controllers, session capture, notifications,
-channel transport state, effects, and large text values share that database.
-Reads are read-only. Every write checks its actor, expected revision, and owner
-lease when required. See [SQLite state](docs/SQLITE_STATE.md).
-
-## Herdr integration
-
-pi-workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
-`piw` and pi-workflows, synchronize the bundled plugin:
-
-```bash
-pi-workflows herdr sync
-```
-
-Run the same command after a pi-workflows update. It finds the package that
-provides the running CLI and repairs a Herdr link when npm moved that package.
-`pi-workflows herdr setup` remains an alias for existing installations. Use
-`--json` for versioned machine-readable output. The [Herdr plugin sync
-plan](docs/plans/2026-08-20-herdr-plugin-sync-plan.md) defines update and
-recovery behavior.
-
-When Pi runs inside Herdr, a workflow widget shows `Ctrl+Shift+R piw`. When the widget has hidden rows, this call to action shares the existing scroll-controls line instead of taking another line.
-The shortcut opens the exact SQLite run state and lets you choose a split, tab, or new
-workspace. `/piw` opens the same menu, and `/piw right`, `/piw below`, `/piw
-left`, `/piw above`, `/piw tab`, or `/piw workspace` selects a placement
-directly. If a viewer for that run already exists, pi-workflows focuses it
-instead of opening a duplicate.
-
-The plugin uses Herdr's public pane APIs and runs no service or polling loop. It
-is also available through the [Herdr plugin marketplace](https://herdr.dev/plugins/).
+channel transport state, effects, and large text values all live there.
+Viewers open the database read-only, and every write checks its actor,
+expected revision, and owner lease when required. See
+[SQLite state](docs/SQLITE_STATE.md).
 
 ## Quick start
 
@@ -141,28 +108,28 @@ export default defineWorkflow({
 });
 ```
 
-Then, from any pi conversation:
+Then, from any Pi conversation:
 
 ```
 /workflow echo summarize this repository
 ```
 
-A model-started workflow is saved before the tool reports it as queued. The returned run ID works
-with `workflow status` and `workflow cancel` before execution starts. pi-workflows waits for the
-current agent turn to settle before activation. If activation fails, it saves the failure and sends
-one follow-up turn so the model can correct the cause and start a new run.
-
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
-lets the current step finish and then holds the run before the next node. This
-is useful when you want to interject in the conversation mid-workflow.
-`/workflow resume` continues it. Pressing escape to interrupt a turn
-pauses the workflow automatically, so the run never nudges the model while
-you have taken the conversation back; `/workflow resume` re-delivers the
-pending step prompt. `/workflow cancel` stops the active run; if the last run
-already ended (for example parked at a checkpoint), it clears the leftover
-widget instead. Trailing text becomes `{ task: "..." }`; pass arbitrary input
-with `--input-json {"key": "value"}`. The names `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are
-reserved and rejected as workflow names.
+lets the current step finish and then holds the run before the next node,
+which is useful when you want to interject in the conversation mid-workflow.
+`/workflow resume` continues it. Pressing escape to interrupt a turn pauses
+the workflow automatically, so the run never nudges the model while you have
+taken the conversation back. `/workflow resume` then re-delivers the pending
+step prompt. `/workflow cancel` stops the active run. If the last run already
+ended (for example parked at a checkpoint), it clears the leftover widget
+instead. Trailing text becomes `{ task: "..." }`, and `--input-json
+{"key": "value"}` passes arbitrary input. The names `answer`, `cancel`,
+`list`, `pause`, `resume`, and `status` are reserved and rejected as workflow
+names.
+
+A workflow can also expose [settings that change during a
+run](docs/2026-08-25-workflow-settings.md) and queue [normal follow-up work
+after completion](docs/2026-08-25-workflow-follow-ups.md).
 
 While a run is on screen, the footer status bar shows a compact
 `wf <name> [status] <node>` indicator alongside the widget.
@@ -179,7 +146,7 @@ visible text becomes the node output after the turn settles. The helper has no
 default character limit; a workflow can set one explicitly with
 `assistantMessage({ maxChars: 2_000 })`.
 
-## Compose workflows
+## Workflow composition
 
 A workflow can import another workflow and connect its named exits without copying its nodes:
 
@@ -208,25 +175,41 @@ export default defineWorkflow({
 });
 ```
 
-Direct imports check child input and exit names in TypeScript. Names and paths remain available for dynamic discovery. Nested children share one run, trace, pause state, and cancellation state. See [Workflow composition](docs/WORKFLOW_COMPOSITION.md) for the complete contract.
+Direct imports check child input and exit names in TypeScript, while names and
+paths remain available for dynamic discovery. Nested children share one run,
+trace, pause state, and cancellation state. See
+[Workflow composition](docs/WORKFLOW_COMPOSITION.md) for the complete contract.
 
 ## Agent-managed workflows
 
 The model can use the same `workflow` tool to list, start, inspect, pause,
 resume, cancel, and answer workflows. Submitted-step contracts use the tool's
-`submit` action. Assistant-step contracts require a normal assistant response
-instead. Slash commands and model actions share one lifecycle implementation.
+`submit` action, while assistant-step contracts require a normal assistant
+response instead. Slash commands and model actions share one lifecycle
+implementation.
 
-pi-workflows includes a `monitor` workflow for plain-language requests such as:
+A model-started workflow is saved before the tool reports it as queued, so the
+returned run ID works with `workflow status` and `workflow cancel` before
+execution starts. pi-workflows waits for the current agent turn to settle
+before activation. If activation fails, it saves the failure and sends one
+follow-up turn so the model can correct the cause and start a new run.
+
+pi-workflows includes a [monitor](docs/MONITOR.md) workflow for plain-language
+requests such as:
 
 > Monitor PR 123 every 30 minutes. Report failed checks. Stop when it is merged or closed.
 
 The monitor checks immediately, reports only the states requested by the user,
 waits with a normal shell action, and loops until its stop condition or check
-limit. Its input supports `task`, `everyMinutes`, `stopWhen`, `maxChecks`, and
-an optional `checkTimeoutMinutes`.
+limit. Every check is reported without starting an extra assistant turn. Its
+input supports `task`, `everyMinutes`, `stopWhen`, `maxChecks`, and an
+optional `checkTimeoutMinutes`.
 
-Monitor is observation-only by default. An explicit `repair` policy authorizes its composed `autoplan` and `autoimplement` path. The monitor checks the target again after repair and stops when the same issue and target evidence return without progress. Project and global workflows can replace the built-in `monitor` by using the same file name.
+Monitor is observation-only by default. An explicit `repair` policy authorizes
+its composed `autoplan` and `autoimplement` path. The monitor checks the
+target again after repair and stops when the same issue and target evidence
+return without progress. Project and global workflows can replace the built-in
+`monitor` by using the same file name.
 
 A monitor occupies the session's one active workflow slot. If its Pi runner
 stops during the shell wait, the run parks and repeats that wait node when a
@@ -241,9 +224,9 @@ resolve the gap. The ideal can win when it is feasible, but work outside the
 current authority cannot block a valid practical solution. The workflow keeps
 the detailed implementation plan and shows one short assistant response with
 the selected plan and a gist of every rejected option. `autoplan` replaces the
-earlier `autodevise` name; the old command and export are not retained.
+earlier `autodevise` name, and the old command and export are not retained.
 
-## Watching a run
+## Viewers
 
 Runs persist in `~/.pi/agent/workflows/state.sqlite` as they execute. The
 viewer reads that database and re-renders on every state change:
@@ -255,27 +238,17 @@ pi-workflows runs          # plain list of recent runs
 pi-workflows view --once   # print a snapshot and exit (good for scripts)
 ```
 
-The run detail view draws the workflow as a boxed graph, like the acpx replay
-viewer. Included nodes use hierarchical labels such as `implementation › redesign › plan`. Every card has a centered step-name header and a divider above its
-structured metadata. Border characters keep the graph background, the body
-surface begins inside the border, and the header interior uses a separate
-surface. Node type, status, attempts, and timing use compact symbol rows; start
-and terminal markers sit outside the card. Node types have distinct
-semantic colors, active cards use a heavy border, branches carry their case
-labels, the taken path is highlighted, and loops route through a gutter on the
-right back into their target from above. `←/→` scrubs
-backwards and forwards through the recorded steps and re-derives every node's
-status as of that step, with the selected step's full output shown below;
-scrubbing to the end snaps back to following the run live.
-
-The Rust `piw` viewer under `tui/` adds a Catppuccin interface, selectable
-themes, centered active-node following, draggable browser and inspector sizes,
-detailed trace and conversation inspection, temporal replay, and reconnecting
-remote viewing. Full cards have one fixed graph-wide size, so streaming,
-selection, timer ticks, and replay never move nodes or edges. Live conversation
-capture shows text, thinking, tool calls, and tool execution as they happen,
-then reconciles settled messages to verbatim Pi entries. See
-[the piw guide](docs/tui-viewer.md).
+The run detail view draws the workflow as a boxed graph, like the replay
+viewer in [openclaw/acpx](https://github.com/openclaw/acpx), whose flows the
+pi-workflows workflow model was originally ported from. Included nodes use
+hierarchical labels such as `implementation › redesign › plan`, and each card
+shows its step name plus node type, status, attempts, and timing in compact
+symbol rows. Node types have distinct semantic colors, active cards use a
+heavy border, branches carry their case labels, the taken path is highlighted,
+and loops route through a gutter on the right back into their target from
+above. `←/→` scrubs backwards and forwards through the recorded steps and
+re-derives every node's status as of that step, with the selected step's full
+output shown below. Scrubbing to the end snaps back to following the run live.
 
 ```
   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -289,23 +262,56 @@ then reconciles settled messages to verbatim Pi entries. See
   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
 
-Inside pi, a compact widget above the editor shows one line per workflow node.
+The Rust `piw` viewer under `tui/` adds a Catppuccin interface, selectable
+themes, centered active-node following, draggable browser and inspector sizes,
+detailed trace and conversation inspection, temporal replay, and reconnecting
+remote viewing. Cards have one fixed graph-wide size, so streaming, selection,
+timer ticks, and replay never move nodes or edges. Live conversation capture
+shows text, thinking, tool calls, and tool execution as they happen, then
+reconciles settled messages to verbatim Pi entries. See
+[the piw guide](docs/tui-viewer.md).
+
+Inside Pi, a compact widget above the editor shows one line per workflow node.
 The first glyph is the node status. The second glyph is the node type: `●`
 agent, `ƒ` compute, `!` notification, `$` shell action, `*` function action, or
 `◆` checkpoint. Repeated visits, runtime details, and timing appear on the same
 line when they apply. Pi's current theme highlights the full active-node line,
 while status glyphs keep every state readable without color. Long workflows are
-windowed around the active node.
-Scroll the list with `shift+↑` / `shift+↓`; it snaps back to following the
-active node whenever the workflow advances a step. Use `piw` when you need the
-full boxed graph and its edges.
+windowed around the active node. Scroll the list with `shift+↑` / `shift+↓`.
+It snaps back to following the active node whenever the workflow advances a
+step. Use `piw` when you need the full boxed graph and its edges.
+
+## Herdr integration
+
+pi-workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
+`piw` and pi-workflows, synchronize the bundled plugin:
+
+```bash
+pi-workflows herdr sync
+```
+
+Run the same command after a pi-workflows update. It finds the package that
+provides the running CLI and repairs a Herdr link when npm moved that package.
+`pi-workflows herdr setup` remains an alias for existing installations. Use
+`--json` for versioned machine-readable output.
+
+When Pi runs inside Herdr, the workflow widget shows a `Ctrl+Shift+R piw`
+shortcut. The shortcut opens the exact SQLite run state and lets you choose a
+split, tab, or new workspace. `/piw` opens the same menu, and `/piw right`,
+`/piw below`, `/piw left`, `/piw above`, `/piw tab`, or `/piw workspace`
+selects a placement directly. If a viewer for that run already exists,
+pi-workflows focuses it instead of opening a duplicate.
+
+The plugin uses Herdr's public pane APIs and runs no service or polling loop. It
+is also available through the [Herdr plugin marketplace](https://herdr.dev/plugins/).
 
 ## Node types
 
 A workflow is a graph of named nodes with exactly one entry point. Each node
 finishes with an output, and edges decide what runs next.
 
-An `agent` node sends a prompt into the pi conversation. By default, it waits
+An `agent` node sends a prompt into the Pi conversation as a compact
+[workflow step message](docs/WORKFLOW_STEP_MESSAGES.md). By default, it waits
 for structured output through the `workflow` tool. With
 `expectedOutput: assistantMessage()`, it waits for a normal visible assistant
 response and uses the exact text as its output. A `compute` node runs a pure
@@ -316,6 +322,9 @@ TypeScript function (`action({ run })`) or a runtime-owned shell command
 state so a human can pick it up. On top of `agent`, the `decision` helper asks
 the model to pick from a fixed set of choices and validates the answer, and
 `decisionEdge` routes on the result with compile-time case checking.
+
+Running steps can publish durable [workflow updates](docs/WORKFLOW_UPDATES.md),
+including progress counts and ETA data.
 
 See [docs/workflows.md](docs/workflows.md) for the full authoring reference
 and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk run format.
@@ -352,7 +361,7 @@ The standalone CLI provides read-only views with `pi-workflows controllers` and 
 
 ## Always-on workflows
 
-Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it. Another interactive session cannot claim it. Reopening the exact session that started the run resumes it. A standalone host can also resume it without changing where reports go. A checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
+Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it. Another interactive session cannot claim it. Reopening the exact session that started the run resumes it, and a standalone host can also resume it without changing where reports go. A checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
 
 Workflow reports use a durable session-addressed outbox. A report waits while its starting session is closed and is delivered only to that session when it opens again. Runs in the same database do not broadcast messages to each other's conversations.
 
@@ -362,7 +371,7 @@ For runs that must continue while Pi is closed, keep the standalone host running
 pi-workflows host --project /path/to/project
 ```
 
-The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. It is a foreground process — stop it with Ctrl-C; a crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk rules.
+The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. The host runs in the foreground, so stop it with Ctrl-C. A crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk rules.
 
 ## Examples
 
@@ -373,8 +382,7 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
 - `branch` classifies a task with a `decision` and routes to either a
   continue lane or a clarification checkpoint.
 - `shell` runs a runtime-owned shell command and parses its output, with no
-  agent step at all. Shell and function actions can publish durable progress
-  while they run.
+  agent step at all.
 - `two-turn` chains three agent steps that build on each other's outputs in
   the same conversation.
 - `plain-summary` turns structured source data into one visible assistant
@@ -387,9 +395,9 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
   worktree before mutation, documents it when needed, and verifies the current
   change against eligible base-branch failures. It writes and runs the exact
   pi-reviewer command, tracks P0 through P2, handles PR comments and CI, and
-  finalizes the PR. P0 and P1 fixes require another review. P2-only work is
-  verified without another reviewer round. A five-minute CI wait routes to
-  additional useful local testing. New evidence can route through autoplan
+  finalizes the PR. P0 and P1 fixes require another review, while P2-only work
+  is verified without another reviewer round. A five-minute CI wait routes to
+  additional useful local testing, and new evidence can route through autoplan
   and autodoc before implementation resumes.
 - `human-decision` shows a reusable verified-human gate with a structured
   machine subject, a separate readable operator presentation, plain choices,
@@ -397,11 +405,11 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
 - `approved-plan` includes the shared plan-change workflow, which composes
   autoplan, autodoc, the configurable plan decision, and bounded replanning.
 - `autoresearch` runs an iterative feature-search loop in the style of
-  [karpathy/autoresearch](https://github.com/karpathy/autoresearch): setup
+  [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Setup
   creates a frozen evaluation harness, one editable feature file, and a
-  journal; each loop iteration runs one generation of experiments and
-  journals every result; an assess decision keeps looping until a kept
-  result plateaus or a diverse generation all fails, then conclusions are
+  journal. Each loop iteration then runs one generation of experiments and
+  journals every result, and an assess decision keeps looping until a kept
+  result plateaus or a diverse generation all fails. Conclusions are
   written before the winner is promoted out of the loop directory.
 
 The controller example at `examples/controllers/pull-request.controller.ts`
