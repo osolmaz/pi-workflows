@@ -735,17 +735,32 @@ export default function piWorkflows(pi: ExtensionAPI) {
 
   const branchIntentResolution = (intentId: string): BranchIntentResolution | null => {
     if (controllerContext === null) return null;
+    const intentRunId = runQueueStore?.getWorkflowTurnIntent(intentId)?.runId;
     for (const entry of controllerContext.sessionManager.getBranch()) {
       if (entry.type !== "custom_message") continue;
       const details = entry.details;
       if (details === null || typeof details !== "object" || Array.isArray(details)) continue;
-      if ((details as { turnIntentId?: unknown }).turnIntentId !== intentId) continue;
+      const recordedIntentId = (details as { turnIntentId?: unknown }).turnIntentId;
+      const terminalMarker = parseTerminalDecisionMarker(
+        (details as { terminalDecision?: unknown }).terminalDecision,
+      );
+      // A terminal run owns one decision turn. If recovery finds a second
+      // intent for the same immutable run, adopt the branch message instead
+      // of sending another model turn.
+      const matchesTerminalRun = intentRunId !== undefined && terminalMarker?.runId === intentRunId;
+      if (recordedIntentId !== intentId && !matchesTerminalRun) continue;
       let resolution: WorkflowTurnIntentResolution | null = null;
       if (entry.customType === WORKFLOW_AGENT_STEP_MESSAGE_TYPE) resolution = "workflowPrompt";
       if (entry.customType === PRESENTATION_MESSAGE_TYPE) resolution = "presentation";
       if (entry.customType === DEFERRED_TURN_MESSAGE_TYPE) resolution = "fallback";
       if (resolution !== null) {
-        return { resolution, messageId: deferredTurnMessageId(intentId, resolution) };
+        const messageIntentId = matchesTerminalRun
+          ? terminalMarker.turnIntentId
+          : (recordedIntentId as string);
+        return {
+          resolution,
+          messageId: deferredTurnMessageId(messageIntentId, resolution),
+        };
       }
     }
     return null;
@@ -1006,6 +1021,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
     ensureRunQueueStore(ctx.cwd).ensureWorkflowTurnIntent({ ...descriptor, eligible });
   };
 
+  const terminalTurnSourceEventId = (runId: string): string =>
+    deferredTurnSourceEventId({
+      runId,
+      cause: "terminal",
+      nodeId: "$terminal",
+      source: "terminal-decision",
+    });
+
   const ensureQueuedTerminalTurnIntent = (
     ctx: ExtensionContext,
     record: WorkflowRunQueueRecord,
@@ -1023,14 +1046,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
       workflowName: record.workflowName,
       targetSessionId,
       cause,
-      sourceEventId:
-        pending?.sourceEventId ??
-        deferredTurnSourceEventId({
-          runId: record.runId,
-          cause,
-          nodeId: "$terminal",
-          source: "queued-terminal",
-        }),
+      sourceEventId: pending?.sourceEventId ?? terminalTurnSourceEventId(record.runId),
       observedState,
       nodeId: pending?.nodeId ?? "$terminal",
       attemptId: pending?.attemptId ?? null,
@@ -1113,14 +1129,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
             : "failed");
     const previous = run.abortProvenance?.descriptor;
     const sourceEventId =
-      pending?.sourceEventId ??
-      previous?.sourceEventId ??
-      deferredTurnSourceEventId({
-        runId: run.runId,
-        cause,
-        nodeId: "$terminal",
-        source: "terminal",
-      });
+      pending?.sourceEventId ?? previous?.sourceEventId ?? terminalTurnSourceEventId(run.runId);
     const descriptor = createDeferredTurnDescriptor({
       runId: run.runId,
       workflowName: pending?.workflowRef ?? run.workflowName,

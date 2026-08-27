@@ -1822,12 +1822,33 @@ export default defineWorkflow({
         ),
       );
       await harness.emitAsync("agent_settled");
-      const terminalDecisionCount = () =>
-        harness.sentMessages.filter(
-          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
-        ).length;
-      await waitFor(() => terminalDecisionCount() >= 2, 30_000);
-      expect(terminalDecisionCount()).toBe(2);
+      const terminalDecisions = () =>
+        harness.sentMessages
+          .filter((entry) => entry.message.customType === "pi-workflows-deferred-turn")
+          .map(
+            (entry) =>
+              (
+                entry.message.details as {
+                  terminalDecision?: { runId?: string; turnIntentId?: string };
+                }
+              ).terminalDecision,
+          );
+      await waitFor(() => terminalDecisions().length >= 2, 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
+      expect(terminalDecisions()).toMatchObject([
+        { runId: sourceRunId, turnIntentId: expect.any(String) },
+        { runId: restartedRunId, turnIntentId: expect.any(String) },
+      ]);
+      const intents = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        projectPath: cwd,
+        readOnly: true,
+      });
+      try {
+        expect(intents.listWorkflowTurnIntents({ runId: sourceRunId })).toHaveLength(1);
+        expect(intents.listWorkflowTurnIntents({ runId: restartedRunId })).toHaveLength(1);
+      } finally {
+        intents.close();
+      }
       await expect(
         harness.tool.execute("restart-repeated-max-steps", {
           action: "restart",
