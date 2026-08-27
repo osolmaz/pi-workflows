@@ -1069,7 +1069,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
     cause: WorkflowTurnIntentCause,
     contract: AgentStepContract,
     reason: unknown,
-  ): DeferredTurnDescriptor => {
+  ): DeferredTurnDescriptor | undefined => {
+    if (run.childKey !== undefined) {
+      return undefined;
+    }
     if (run.abortProvenance?.descriptor !== undefined) {
       return run.abortProvenance.descriptor;
     }
