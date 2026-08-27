@@ -24,7 +24,10 @@ export {
   SqliteControllerStore,
   type RunEventRecord,
   type WorkflowNotificationRecord,
+  type WorkflowRunClaimOptions,
+  type WorkflowRunPreparationResult,
   type WorkflowRunQueueRecord,
+  type WorkflowRunReservationOptions,
 } from "./sqlite.js";
 export {
   type ControllerStore,

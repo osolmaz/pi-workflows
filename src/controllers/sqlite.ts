@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
+import { canonicalJson } from "../state/json.js";
 import { resourceIdFor, tokenHash } from "../state/mutation.js";
 import {
   EffectRequestConflictError,
@@ -39,6 +40,26 @@ export type WorkflowRunLaunchStatus =
   | "failed"
   | "cancelled";
 
+export type WorkflowRunReservationOptions = {
+  runId: string;
+  workflowName: string;
+  workflowSourceRef: string;
+  workflowSource: unknown;
+  definitionDigest: string;
+  definitionSnapshot: unknown;
+  input: unknown;
+  launchOptions?: unknown;
+  runnerId: string;
+  originSessionId: string;
+  parentRunId?: string;
+  now?: string;
+};
+
+export type WorkflowRunClaimOptions = WorkflowRunReservationOptions & {
+  claimToken: string;
+  leaseMs: number;
+};
+
 export type WorkflowRunQueueRecord = {
   runId: string;
   workflowName: string;
@@ -63,6 +84,16 @@ export type WorkflowRunQueueRecord = {
   startedAt: string | null;
   finishedAt: string | null;
 };
+
+export type WorkflowRunPreparationResult =
+  | {
+      state: "claimed";
+      run: WorkflowRunQueueRecord & { claimToken: string };
+    }
+  | {
+      state: "adopted";
+      run: WorkflowRunQueueRecord;
+    };
 
 export type WorkflowNotificationRecord = {
   notificationId: string;
@@ -998,139 +1029,147 @@ export class SqliteControllerStore implements ControllerStore {
     }));
   }
 
-  reserveWorkflowRun(options: {
-    runId: string;
-    workflowName: string;
-    workflowSourceRef: string;
-    workflowSource: unknown;
-    definitionDigest: string;
-    definitionSnapshot: unknown;
-    input: unknown;
-    launchOptions?: unknown;
-    runnerId: string;
-    originSessionId: string;
-    parentRunId?: string;
-    now?: string;
-  }): WorkflowRunQueueRecord {
+  reserveWorkflowRun(options: WorkflowRunReservationOptions): WorkflowRunQueueRecord {
     validateRunId(options.runId);
     const now = epoch(validTimestamp(options.now));
     const definitionDigest = digestBuffer(options.definitionDigest);
-    return this.state.transaction(() => {
-      if (this.getWorkflowRun(options.runId) !== undefined) {
-        throw new Error(`Workflow run already reserved: ${options.runId}`);
+    return this.state.transaction(() =>
+      this.reserveWorkflowRunInTransaction(options, now, definitionDigest),
+    );
+  }
+
+  private reserveWorkflowRunInTransaction(
+    options: WorkflowRunReservationOptions,
+    now: number,
+    definitionDigest: Buffer,
+  ): WorkflowRunQueueRecord {
+    if (this.getWorkflowRun(options.runId) !== undefined) {
+      throw new Error(`Workflow run already reserved: ${options.runId}`);
+    }
+    if (options.parentRunId !== undefined) {
+      const parent = this.requireWorkflowRunRow(options.parentRunId);
+      if (parent.originSessionId !== options.originSessionId) {
+        throw new Error("Continuation parent belongs to another Pi session");
       }
-      if (options.parentRunId !== undefined) {
-        const parent = this.requireWorkflowRunRow(options.parentRunId);
-        if (parent.originSessionId !== options.originSessionId) {
-          throw new Error("Continuation parent belongs to another Pi session");
+      if (parent.status === "parked") {
+        const parentLease = this.requireLease(parent.resourceId);
+        if (parentLease.ownerId !== null) {
+          throw new Error("Continuation parent still has an active owner");
         }
-        if (parent.status === "parked") {
-          const parentLease = this.requireLease(parent.resourceId);
-          if (parentLease.ownerId !== null) {
-            throw new Error("Continuation parent still has an active owner");
-          }
-          this.state.connection
-            .prepare(
-              `UPDATE run_queue
+        this.state.connection
+          .prepare(
+            `UPDATE run_queue
                SET status = 'done', updated_at = ?, finished_at = ?
                WHERE run_id = ? AND status = 'parked'`,
-            )
-            .run(now, now, parent.runId);
-          const parentRevision = this.resourceRevision(parent.resourceId);
-          this.bumpResource(parent.resourceId, parentRevision, now);
-          this.insertEvent(
-            parent.resourceId,
-            parentRevision + 1,
-            "run.queue_done_for_continuation",
-            "session",
-            options.originSessionId,
-            { continuationRunId: options.runId },
-            now,
-          );
-        } else if (parent.status === "done") {
-          throw new Error("Continuation parent already has a reserved continuation");
-        } else {
-          throw new Error(`Continuation parent queue is ${parent.status}`);
-        }
+          )
+          .run(now, now, parent.runId);
+        const parentRevision = this.resourceRevision(parent.resourceId);
+        this.bumpResource(parent.resourceId, parentRevision, now);
+        this.insertEvent(
+          parent.resourceId,
+          parentRevision + 1,
+          "run.queue_done_for_continuation",
+          "session",
+          options.originSessionId,
+          { continuationRunId: options.runId },
+          now,
+        );
+      } else if (parent.status === "done") {
+        throw new Error("Continuation parent already has a reserved continuation");
+      } else {
+        throw new Error(`Continuation parent queue is ${parent.status}`);
       }
-      const resourceId = resourceIdFor("run", options.runId);
-      const definitionHash = this.state.putJson(options.definitionSnapshot, now);
-      const queuedSource = queuedWorkflowSource(options.workflowSource);
-      const inputHash = this.state.putJson(options.input ?? null, now);
-      const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
-      this.state.connection
-        .prepare(
-          `INSERT INTO workflow_definitions(
+    }
+    const resourceId = resourceIdFor("run", options.runId);
+    const definitionHash = this.state.putJson(options.definitionSnapshot, now);
+    const queuedSource = queuedWorkflowSource(options.workflowSource);
+    const inputHash = this.state.putJson(options.input ?? null, now);
+    const launchHash = this.state.putJson(options.launchOptions ?? {}, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO workflow_definitions(
              definition_digest, workflow_name, definition_hash, created_at
            ) VALUES (?, ?, ?, ?)
            ON CONFLICT(definition_digest) DO NOTHING`,
-        )
-        .run(definitionDigest, options.workflowName, definitionHash, now);
-      this.state.connection
-        .prepare(
-          `INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at)
+      )
+      .run(definitionDigest, options.workflowName, definitionHash, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at)
            VALUES (?, 'run', ?, 1, ?, ?)`,
-        )
-        .run(resourceId, options.runId, now, now);
-      this.state.connection
-        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
-        .run(resourceId);
-      this.state.connection
-        .prepare(
-          `INSERT INTO runs(
+      )
+      .run(resourceId, options.runId, now, now);
+    this.state.connection
+      .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+      .run(resourceId);
+    this.state.connection
+      .prepare(
+        `INSERT INTO runs(
              run_id, resource_id, project_id, parent_run_id, definition_digest,
              workflow_ref, launch_options_hash, status, paused,
              input_hash, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
-        )
-        .run(
-          options.runId,
-          resourceId,
-          this.requireProjectId(),
-          options.parentRunId ?? null,
-          definitionDigest,
-          options.workflowSourceRef,
-          launchHash,
-          inputHash,
-          now,
-          now,
-        );
-      insertQueuedRunSources(this.state, options.runId, queuedSource);
-      this.state.connection
-        .prepare(
-          `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
+      )
+      .run(
+        options.runId,
+        resourceId,
+        this.requireProjectId(),
+        options.parentRunId ?? null,
+        definitionDigest,
+        options.workflowSourceRef,
+        launchHash,
+        inputHash,
+        now,
+        now,
+      );
+    insertQueuedRunSources(this.state, options.runId, queuedSource);
+    this.state.connection
+      .prepare(
+        `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
            VALUES (?, ?, 'interactive', ?)`,
-        )
-        .run(options.runId, options.originSessionId, now);
-      this.state.connection
-        .prepare(
-          `INSERT INTO run_queue(
+      )
+      .run(options.runId, options.originSessionId, now);
+    this.state.connection
+      .prepare(
+        `INSERT INTO run_queue(
              run_id, status, available_at, affinity_runner_id, origin_session_id,
              consecutive_errors, created_at, updated_at
            ) VALUES (?, 'queued', ?, ?, ?, 0, ?, ?)`,
-        )
-        .run(options.runId, now, options.runnerId, options.originSessionId, now, now);
-      this.insertEvent(resourceId, 1, "run.queued", "session", options.originSessionId, {}, now);
-      return this.requireWorkflowRun(options.runId);
+      )
+      .run(options.runId, now, options.runnerId, options.originSessionId, now, now);
+    this.insertEvent(resourceId, 1, "run.queued", "session", options.originSessionId, {}, now);
+    return this.requireWorkflowRun(options.runId);
+  }
+
+  prepareOrAdoptWorkflowRun(options: WorkflowRunClaimOptions): WorkflowRunPreparationResult {
+    validateRunId(options.runId);
+    const now = epoch(validTimestamp(options.now));
+    const definitionDigest = digestBuffer(options.definitionDigest);
+    return this.state.transaction(() => {
+      const existing = this.workflowRunRow(options.runId);
+      if (existing !== undefined) {
+        this.assertWorkflowRunPreparationCompatible(existing, options, definitionDigest);
+        return { state: "adopted", run: this.mapWorkflowRun(existing) };
+      }
+      this.reserveWorkflowRunInTransaction(options, now, definitionDigest);
+      const claimed = this.claimRunInTransaction(
+        options.runId,
+        options.runnerId,
+        options.claimToken,
+        options.leaseMs,
+        now,
+      );
+      if (claimed === undefined) {
+        throw new Error(`Workflow run could not be claimed: ${options.runId}`);
+      }
+      return {
+        state: "claimed",
+        run: claimed as WorkflowRunQueueRecord & { claimToken: string },
+      };
     });
   }
 
-  enqueueWorkflowRun(options: {
-    runId: string;
-    workflowName: string;
-    workflowSourceRef: string;
-    workflowSource: unknown;
-    definitionDigest: string;
-    definitionSnapshot: unknown;
-    input: unknown;
-    launchOptions?: unknown;
-    runnerId: string;
-    claimToken: string;
-    leaseMs: number;
-    originSessionId: string;
-    parentRunId?: string;
-    now?: string;
-  }): WorkflowRunQueueRecord {
+  enqueueWorkflowRun(options: WorkflowRunClaimOptions): WorkflowRunQueueRecord {
     if (this.getWorkflowRun(options.runId) === undefined) {
       this.reserveWorkflowRun({
         runId: options.runId,
@@ -2230,6 +2269,27 @@ export class SqliteControllerStore implements ControllerStore {
     return this.mapWorkflowRun(this.requireWorkflowRunRow(runId));
   }
 
+  private assertWorkflowRunPreparationCompatible(
+    row: RunRow,
+    options: WorkflowRunReservationOptions,
+    definitionDigest: Buffer,
+  ): void {
+    const compatible =
+      row.workflowName === options.workflowName &&
+      row.workflowRef === options.workflowSourceRef &&
+      row.definitionDigest.equals(definitionDigest) &&
+      canonicalJson(readQueuedRunSources(this.state, row)) ===
+        canonicalJson(queuedWorkflowSource(options.workflowSource)) &&
+      canonicalJson(this.state.readJson(row.inputHash)) === canonicalJson(options.input ?? null) &&
+      canonicalJson(this.state.readJson(row.launchOptionsHash)) ===
+        canonicalJson(options.launchOptions ?? {}) &&
+      row.originSessionId === options.originSessionId &&
+      row.parentRunId === (options.parentRunId ?? null);
+    if (!compatible) {
+      throw new Error(`Workflow run preparation conflicts: ${options.runId}`);
+    }
+  }
+
   /* istanbul ignore next -- pure projection covered by integration tests */
   private mapWorkflowRun(row: RunRow): WorkflowRunQueueRecord {
     return {
@@ -2269,56 +2329,65 @@ export class SqliteControllerStore implements ControllerStore {
     leaseMs: number,
     now: number,
   ): WorkflowRunQueueRecord | undefined {
-    return this.state.transaction(() => {
-      const row = this.workflowRunRow(runId);
-      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status))
-        return undefined;
-      const lease = this.requireLease(row.resourceId);
-      if (
-        lease.ownerId !== null &&
-        lease.expiresAt !== null &&
-        lease.expiresAt > now &&
-        lease.ownerId !== runnerId
-      )
-        return undefined;
-      const generation = lease.generation + 1;
-      const expiresAt = now + leaseMs;
-      const result = this.state.connection
-        .prepare(
-          `UPDATE leases SET generation = ?, owner_type = ?, owner_id = ?, token_hash = ?,
+    return this.state.transaction(() =>
+      this.claimRunInTransaction(runId, runnerId, claimToken, leaseMs, now),
+    );
+  }
+
+  private claimRunInTransaction(
+    runId: string,
+    runnerId: string,
+    claimToken: string,
+    leaseMs: number,
+    now: number,
+  ): WorkflowRunQueueRecord | undefined {
+    const row = this.workflowRunRow(runId);
+    if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) return undefined;
+    const lease = this.requireLease(row.resourceId);
+    if (
+      lease.ownerId !== null &&
+      lease.expiresAt !== null &&
+      lease.expiresAt > now &&
+      lease.ownerId !== runnerId
+    )
+      return undefined;
+    const generation = lease.generation + 1;
+    const expiresAt = now + leaseMs;
+    const result = this.state.connection
+      .prepare(
+        `UPDATE leases SET generation = ?, owner_type = ?, owner_id = ?, token_hash = ?,
                   acquired_at = ?, heartbeat_at = ?, expires_at = ?
            WHERE resource_id = ? AND generation = ?`,
-        )
-        .run(
-          generation,
-          runnerId.startsWith("host-") ? "host" : "session",
-          runnerId,
-          tokenHash(claimToken),
-          now,
-          now,
-          expiresAt,
-          row.resourceId,
-          lease.generation,
-        );
-      /* istanbul ignore if -- impossible after exact schema and transaction checks */
-      if (result.changes !== 1) return undefined;
-      this.state.connection
-        .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
-        .run(now, runId);
-      const revision = this.resourceRevision(row.resourceId);
-      this.bumpResource(row.resourceId, revision, now);
-      this.insertEvent(
-        row.resourceId,
-        revision + 1,
-        "lease.claimed",
+      )
+      .run(
+        generation,
         runnerId.startsWith("host-") ? "host" : "session",
         runnerId,
-        { expiresAt },
+        tokenHash(claimToken),
         now,
-        generation,
+        now,
+        expiresAt,
+        row.resourceId,
+        lease.generation,
       );
-      return { ...this.requireWorkflowRun(runId), claimToken };
-    });
+    /* istanbul ignore if -- impossible after exact schema and transaction checks */
+    if (result.changes !== 1) return undefined;
+    this.state.connection
+      .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
+      .run(now, runId);
+    const revision = this.resourceRevision(row.resourceId);
+    this.bumpResource(row.resourceId, revision, now);
+    this.insertEvent(
+      row.resourceId,
+      revision + 1,
+      "lease.claimed",
+      runnerId.startsWith("host-") ? "host" : "session",
+      runnerId,
+      { expiresAt },
+      now,
+      generation,
+    );
+    return { ...this.requireWorkflowRun(runId), claimToken };
   }
 
   private updateClaimedRunStatus(

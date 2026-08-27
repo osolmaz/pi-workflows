@@ -52,6 +52,11 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Accept the first valid response with a no-replace write.
 - Adopt identical retries and reject conflicting responses.
 - Derive one continuation identity from the accepted decision.
+- Prepare that continuation through one atomic queue operation.
+- Let the first caller create and claim the queue row.
+- Let compatible concurrent or repeated callers adopt the row without changing its lease, claim generation, queue state, timestamps, or events.
+- Reject incompatible workflow source, definition, input, launch options, parent, or owning session without changing the existing row.
+- Give only the winning caller a claim token and permission to start the engine.
 - Reject stale responses by decision ID and canonical request digest.
 - Rebuild the pending-decision index from immutable records.
 
@@ -83,6 +88,10 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Promise exactly-once Telegram message creation after an ambiguous Bot API response.
 - Add arbitrary forms in the first release. Choice buttons and one text input cover the required flows.
 - Change existing checkpoints or historical run bundles.
+- Add a database field, table, migration, schema version, compatibility reader, or dual-write path for continuation startup.
+- Coordinate continuation startup with a process-local promise map, timing guard, retry loop, or swallowed error.
+- Change general queue claim behavior for unrelated launch paths.
+- Repair an already stranded live continuation as part of this change.
 - Enable human approval by default in existing built-in workflows.
 
 ## Design decisions
@@ -107,7 +116,13 @@ The Telegram adapter accepts replan text only as a reply to the exact `ForceRepl
 
 ### Make answer acceptance exact
 
-Channel delivery can be retried or fail independently. Decision acceptance is one atomic no-replace operation. The accepted response and deterministic continuation identity prevent two channels from starting two continuations.
+Channel delivery can be retried or fail independently. Decision acceptance is one atomic no-replace operation. The accepted response and deterministic continuation identity prevent two channels from selecting different continuations.
+
+### Prepare or adopt one continuation
+
+Direct answer handling and periodic recovery can both see the accepted decision. They use one continuation coordinator and one durable queue operation. The operation creates and claims a missing queue row or returns a compatible existing row as adopted. Only a newly claimed preparation can call `WorkflowEngine.continueRun()`.
+
+An adopted result is normal success. It does not start another engine or change the winning lease, claim generation, queue state, timestamps, or events. The adopter receives no claim token, so it cannot renew, release, park, complete, or replace the winning claim. Incompatible reuse fails without mutation. Existing cleanup handles failure before run initialization, and existing lease expiry and activation recovery handle a winning process that stops after preparation.
 
 ### Handle Telegram delivery limits honestly
 
@@ -171,10 +186,17 @@ A private SQLite index may track pending decisions, channel leases, Telegram upd
 - Validate the accepted response through the node contract.
 - Preserve the parent's original workflow input.
 - Expose the response as the checkpoint output.
-- derive and adopt the continuation identity; and
-- leave the legacy checkpoint path unchanged.
+- Derive the deterministic continuation identity.
+- Add a typed atomic prepare-or-adopt operation to the existing SQLite queue store.
+- Compare the stored workflow source, definition digest, input, launch options, parent, and owning session before adoption.
+- Build one prepared continuation value in the Pi extension.
+- Route direct verified answers and recovery through one continuation coordinator.
+- Start `WorkflowEngine.continueRun()` only with the new claim token.
+- Return normal started or already-continuing success to the answer path.
+- Keep enqueue and lease behavior unchanged for other launch paths.
+- Leave legacy checkpoint continuation unchanged.
 
-Test crashes before acceptance, after acceptance, during continuation creation, and after continuation completion.
+Test crashes before acceptance, after acceptance, during continuation creation, and after continuation completion. Add a focused race test for direct answer handling and recovery. It must prove one claim generation, one engine start, one continuation, one execution of each continuation node, coherent queue and run state, and no duplicate-start or revision-conflict failure. Add a real-Pi version of the same regression with a durable barrier instead of sleep-only timing.
 
 ### Channel management
 
@@ -248,7 +270,9 @@ The setup command uses an existing mode-`0600` token file instead of collecting 
 - The workflow tool cannot answer a protected human decision.
 - Pi and Telegram can receive the same decision through one audience profile.
 - The first concurrent valid answer wins and creates one continuation.
-- An identical retry is adopted; a conflicting or stale answer is rejected.
+- Direct answer handling and recovery can race without starting it twice or replacing its lease.
+- The first queue preparation starts the engine, and a compatible repeat adopts it without mutation.
+- An incompatible continuation identity, conflicting answer, or stale answer is rejected without mutation.
 - The original workflow input survives a human-decision continuation.
 - Old checkpoints and old bundles pass their existing tests unchanged.
 - The Telegram adapter accepts text only from the bound reply and approved numeric actor.
@@ -267,6 +291,8 @@ npx vitest run test/human-decision-api.test.ts test/human-decision-store.test.ts
 npx vitest run test/human-decision-engine.test.ts test/run-resume.test.ts
 npx vitest run test/pi-decision-channel.test.ts test/telegram-decision-channel.test.ts
 npx vitest run test/plan-approval.test.ts test/composition.test.ts
+npx vitest run test/run-queue.test.ts test/extension.test.ts
+npx vitest run --config vitest.e2e.config.ts test/e2e/workflow.e2e.test.ts
 ```
 
 Run all repository gates before review:
@@ -290,7 +316,7 @@ This work adds compatible public APIs and additive persisted records. Release it
 ## Contract impact
 
 - **Session state:** normal workflow messages and interactive decision results.
-- **Other persistent data:** additive decision records, a rebuildable private channel index, and private channel configuration.
+- **Other persistent data:** additive decision records, a rebuildable private channel index, private channel configuration, and existing run queue and lease records. The continuation startup fix adds no persistent field, table, migration, or schema version.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle plus command and UI methods only.
-- **Public pi-workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, and the `plan-approval` workflow.
+- **Public pi-workflows API:** typed human choices, `humanDecision()`, `humanDecisionEdge()`, the channel interface, the `plan-approval` workflow, and an additive queue prepare-or-adopt operation.

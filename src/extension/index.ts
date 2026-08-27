@@ -248,6 +248,16 @@ type StartRunOptions = {
   claimToken?: string;
 };
 
+type PreparedRunLaunch = {
+  ref: string;
+  input: unknown;
+  options: StartRunOptions;
+  workflow: WorkflowDefinition;
+  snapshot: WorkflowDefinitionSnapshot;
+  workflowSource: WorkflowSource;
+  runId: string;
+};
+
 function definitionDigest(snapshot: WorkflowDefinitionSnapshot): string {
   return `sha256:${createHash("sha256").update(canonicalJson(snapshot)).digest("hex")}`;
 }
@@ -1611,37 +1621,15 @@ export default function piWorkflows(pi: ExtensionAPI) {
     }
   };
 
-  const startRun = async (
+  const prepareRunLaunch = async (
     ctx: ExtensionContext,
     ref: string,
     input: unknown,
     options: StartRunOptions = {},
-  ): Promise<string | undefined> => {
+  ): Promise<PreparedRunLaunch> => {
     if (options.signal?.aborted) {
       throw options.signal.reason ?? new Error("Workflow startup aborted");
     }
-    ensureFollowUpDelivery();
-    if (activeRun) {
-      if (!options.quiet) {
-        notify(
-          ctx,
-          `A workflow is already running: ${activeRun.workflowName}. Use /workflow cancel first.`,
-          "error",
-        );
-      }
-      return undefined;
-    }
-    if (presentationPending !== null) {
-      if (!options.quiet) {
-        notify(
-          ctx,
-          "The previous workflow result is still being presented. Wait for it to finish.",
-        );
-      }
-      return undefined;
-    }
-    supersedePresentation();
-    const generation = runGeneration;
     const resolved = await resolveWorkflowRef(ref, { cwd: ctx.cwd }, builtinWorkflowCatalog);
     const workflow = resolved.definition;
     if (options.signal?.aborted) {
@@ -1669,6 +1657,46 @@ export default function piWorkflows(pi: ExtensionAPI) {
           workflowSource,
         );
       }
+    }
+    return { ref, input, options, workflow, snapshot, workflowSource, runId };
+  };
+
+  const beginRunStart = (ctx: ExtensionContext, options: StartRunOptions): number | undefined => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new Error("Workflow startup aborted");
+    }
+    ensureFollowUpDelivery();
+    if (activeRun) {
+      if (!options.quiet) {
+        notify(
+          ctx,
+          `A workflow is already running: ${activeRun.workflowName}. Use /workflow cancel first.`,
+          "error",
+        );
+      }
+      return undefined;
+    }
+    if (presentationPending !== null) {
+      if (!options.quiet) {
+        notify(
+          ctx,
+          "The previous workflow result is still being presented. Wait for it to finish.",
+        );
+      }
+      return undefined;
+    }
+    supersedePresentation();
+    return runGeneration;
+  };
+
+  const startPreparedRun = async (
+    ctx: ExtensionContext,
+    launch: PreparedRunLaunch,
+    generation: number,
+  ): Promise<string | undefined> => {
+    const { ref, input, options, workflow, snapshot, workflowSource, runId } = launch;
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new Error("Workflow startup aborted");
     }
 
     // Interactive runs are queued and claimed atomically, so this session
@@ -1998,6 +2026,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
         notify(ctx, `Workflow ${workflow.name} crashed: ${message}`, "error");
       });
     return runId;
+  };
+
+  const startRun = async (
+    ctx: ExtensionContext,
+    ref: string,
+    input: unknown,
+    options: StartRunOptions = {},
+  ): Promise<string | undefined> => {
+    const generation = beginRunStart(ctx, options);
+    if (generation === undefined) return undefined;
+    return await startPreparedRun(
+      ctx,
+      await prepareRunLaunch(ctx, ref, input, options),
+      generation,
+    );
   };
 
   // Reclaim and resume a parked run when this session opens without an
@@ -2743,6 +2786,100 @@ export default function piWorkflows(pi: ExtensionAPI) {
     };
   };
 
+  type HumanDecisionContinuationOutcome = {
+    runId: string;
+    started: boolean;
+    queueStatus: WorkflowRunQueueRecord["status"];
+  };
+
+  const continueAcceptedHumanDecision = async (
+    ctx: ExtensionContext,
+    options: {
+      parentRunId: string;
+      workflowRef: string;
+      input: unknown;
+      request: HumanDecisionRequest;
+      resolved: ResolvedHumanDecision;
+      quiet: boolean;
+    },
+  ): Promise<HumanDecisionContinuationOutcome> => {
+    const runId = `continuation-${options.request.decisionId.slice("decision-".length)}`;
+    const launch = await prepareRunLaunch(ctx, options.workflowRef, options.input, {
+      parentRunId: options.parentRunId,
+      humanDecision: options.resolved,
+      runId,
+      quiet: options.quiet,
+    });
+    const queue = ensureRunQueueStore(ctx.cwd);
+    const claimToken = randomUUID();
+    const preparation = queue.prepareOrAdoptWorkflowRun({
+      runId,
+      workflowName: launch.workflow.name,
+      workflowSourceRef:
+        launch.workflowSource.kind === "builtin"
+          ? `builtin:${launch.workflowSource.id}`
+          : launch.workflowSource.path,
+      workflowSource: launchSourceIdentity(launch.workflow, launch.workflowSource),
+      definitionDigest: definitionDigest(launch.snapshot),
+      definitionSnapshot: launch.snapshot,
+      input: launch.input,
+      launchOptions: preparedLaunchOptions(launch.options),
+      runnerId,
+      claimToken,
+      leaseMs: RUN_CLAIM_LEASE_MS,
+      originSessionId: ctx.sessionManager.getSessionId(),
+      parentRunId: options.parentRunId,
+    });
+
+    let started = false;
+    if (preparation.state === "claimed") {
+      recordRunEvent({
+        runId,
+        workflowRef: options.workflowRef,
+        type: "queued",
+        payload: { parentRunId: options.parentRunId },
+      });
+      const claimedLaunch = {
+        ...launch,
+        options: { ...launch.options, claimToken: preparation.run.claimToken },
+      };
+      const generation = beginRunStart(ctx, claimedLaunch.options);
+      const startedRunId =
+        generation === undefined
+          ? undefined
+          : await startPreparedRun(ctx, claimedLaunch, generation);
+      if (startedRunId === undefined) {
+        queue.parkWorkflowRun({ runId, claimToken: preparation.run.claimToken });
+      } else {
+        started = true;
+      }
+    } else {
+      const bundle = readWorkflowRun(runId);
+      if (
+        ["done", "failed", "cancelled"].includes(preparation.run.status) &&
+        (bundle === null || bundle.state.status === "running")
+      ) {
+        throw new Error(`Workflow continuation ${runId} has inconsistent durable state`);
+      }
+    }
+
+    const continuation = {
+      schema: "pi-workflows.human-decision-continuation.v1" as const,
+      decisionId: options.request.decisionId,
+      requestDigest: options.request.requestDigest,
+      provenance: options.resolved.provenance,
+      parentRunId: options.parentRunId,
+      runId,
+      createdAt: options.resolved.acceptedAt,
+    };
+    const decisionStore = humanDecisionStore(ctx.cwd);
+    await decisionStore.recordContinuation(options.request.decisionId, continuation);
+    decisionStore.markEffectApplied(options.request.decisionId, "decision.continue");
+    await settleHumanDecisionChannels(options.resolved);
+    decisionStore.markEffectApplied(options.request.decisionId, "decision.settle_presentations");
+    return { runId, started, queueStatus: preparation.run.status };
+  };
+
   const answerWorkflowControl = async (
     ctx: ExtensionContext,
     input: unknown,
@@ -2755,7 +2892,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
     const request = humanDecisionRequest(parent.state.finalOutput);
     let accepted: AcceptedHumanDecision | undefined;
     let continuationInput = input;
-    let continuationRunId: string | undefined;
     if (request !== null) {
       if (
         verified !== undefined &&
@@ -2783,7 +2919,6 @@ export default function piWorkflows(pi: ExtensionAPI) {
       }
       accepted = acceptance.decision;
       continuationInput = parent.state.input;
-      continuationRunId = `continuation-${request.decisionId.slice("decision-".length)}`;
     }
     if (request !== null && accepted !== undefined && verified !== undefined) {
       const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(waiting.parentRunId);
@@ -2804,44 +2939,41 @@ export default function piWorkflows(pi: ExtensionAPI) {
         };
       }
     }
-    const decisionStore = humanDecisionStore(ctx.cwd);
-    if (continuationRunId !== undefined) {
-      const existingContinuation = readWorkflowRun(continuationRunId);
-      if (existingContinuation !== null) {
-        if (accepted !== undefined) await settleHumanDecisionChannels(accepted);
-        lastWaitingRunId = null;
-        return {
-          message: `Human decision already continued as ${continuationRunId}.`,
-          details: {
-            action: "answer",
-            parentRunId: waiting.parentRunId,
-            runId: continuationRunId,
-            adopted: true,
-          },
-        };
-      }
+    if (request !== null && accepted !== undefined) {
+      const outcome = await continueAcceptedHumanDecision(ctx, {
+        parentRunId: waiting.parentRunId,
+        workflowRef: waiting.workflowRef,
+        input: continuationInput,
+        request,
+        resolved: accepted,
+        quiet: false,
+      });
+      lastWaitingRunId = null;
+      return outcome.started
+        ? {
+            message: `Answered checkpoint ${waiting.parentRunId}; continuation ${outcome.runId} started.`,
+            details: {
+              action: "answer",
+              parentRunId: waiting.parentRunId,
+              runId: outcome.runId,
+            },
+          }
+        : {
+            message: `Human decision already continuing as ${outcome.runId}.`,
+            details: {
+              action: "answer",
+              parentRunId: waiting.parentRunId,
+              runId: outcome.runId,
+              adopted: true,
+              status: outcome.queueStatus,
+            },
+          };
     }
     const continued = await startRun(ctx, waiting.workflowRef, continuationInput, {
       parentRunId: waiting.parentRunId,
-      ...(accepted !== undefined ? { humanDecision: accepted } : {}),
-      ...(continuationRunId !== undefined ? { runId: continuationRunId } : {}),
     });
     if (continued === undefined) {
       throw new Error("Could not start the checkpoint continuation.");
-    }
-    if (request !== null && accepted !== undefined) {
-      await decisionStore.recordContinuation(request.decisionId, {
-        schema: "pi-workflows.human-decision-continuation.v1",
-        decisionId: request.decisionId,
-        requestDigest: request.requestDigest,
-        provenance: accepted.provenance,
-        parentRunId: waiting.parentRunId,
-        runId: continued,
-        createdAt: accepted.acceptedAt,
-      });
-      decisionStore.markEffectApplied(request.decisionId, "decision.continue");
-      await settleHumanDecisionChannels(accepted);
-      decisionStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
     }
     lastWaitingRunId = null;
     return {
@@ -2929,14 +3061,40 @@ export default function piWorkflows(pi: ExtensionAPI) {
       ) {
         continue;
       }
-      const queueRecord = ensureRunQueueStore(ctx.cwd).getWorkflowRun(request.runId);
+      const recoveryQueue = ensureRunQueueStore(ctx.cwd);
+      const queueRecord = recoveryQueue.getWorkflowRun(request.runId);
       const ownedBySession =
         queueRecord !== undefined &&
         (queueRecord.originSessionId === null ||
           queueRecord.originSessionId === ctx.sessionManager.getSessionId());
       if (!ownedBySession) continue;
+      if (
+        queueRecord.status === "done" &&
+        (await store.readContinuation(request.decisionId)) !== null
+      ) {
+        continue;
+      }
+
+      let resolved = await store.readResolved(request.decisionId);
+      if (resolved !== null) {
+        if (parent.state.workflowSource === undefined) continue;
+        const workflowRef =
+          parent.state.workflowSource.kind === "builtin"
+            ? `builtin:${parent.state.workflowSource.id}`
+            : parent.state.workflowSource.path;
+        await continueAcceptedHumanDecision(ctx, {
+          parentRunId: request.runId,
+          workflowRef,
+          input: parent.state.input,
+          request,
+          resolved,
+          quiet: true,
+        });
+        if (activeRun !== null) break;
+        continue;
+      }
+
       const recoveryToken = randomUUID();
-      const recoveryQueue = ensureRunQueueStore(ctx.cwd);
       const claimed = recoveryQueue.claimWorkflowRun({
         runId: request.runId,
         runnerId: ctx.sessionManager.getSessionId(),
@@ -2947,97 +3105,73 @@ export default function piWorkflows(pi: ExtensionAPI) {
       const ownerStore = humanDecisionStore(ctx.cwd, () =>
         recoveryQueue.workflowRunAuthority(request.runId, recoveryToken),
       );
-      let resolved = await store.readResolved(request.decisionId);
+      resolved = await store.readResolved(request.decisionId);
+      let cancellation = await store.readCancellation(request.decisionId);
+      const expired =
+        request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now();
+      if (resolved === null && cancellation === null && expired) {
+        if (request.defaultResponse === undefined) {
+          await ownerStore.cancel(request, "expired");
+          cancellation = await ownerStore.readCancellation(request.decisionId);
+        } else {
+          try {
+            resolved = (await ownerStore.resolveTimeout(request)).decision;
+          } catch {
+            cancellation = await store.readCancellation(request.decisionId);
+            resolved = await store.readResolved(request.decisionId);
+          }
+        }
+      }
+      if (cancellation !== null) {
+        recoveryQueue.completeWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
+        ownerStore.markEffectApplied(request.decisionId, "decision.cancel_parent");
+        await settleHumanDecisionChannels(cancellation);
+        ownerStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
+        ownerStore.close();
+        continue;
+      }
       if (resolved === null) {
-        let cancellation = await store.readCancellation(request.decisionId);
-        const expired =
-          request.expiresAt !== undefined && Date.parse(request.expiresAt) <= Date.now();
-        if (cancellation === null && expired) {
-          if (request.defaultResponse === undefined) {
-            await ownerStore.cancel(request, "expired");
-            cancellation = await ownerStore.readCancellation(request.decisionId);
-          } else {
-            try {
-              resolved = (await ownerStore.resolveTimeout(request)).decision;
-            } catch {
-              cancellation = await store.readCancellation(request.decisionId);
-              resolved = await store.readResolved(request.decisionId);
-            }
-          }
-        }
-        if (cancellation !== null) {
-          recoveryQueue.completeWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
-          ownerStore.markEffectApplied(request.decisionId, "decision.cancel_parent");
-          await settleHumanDecisionChannels(cancellation);
-          ownerStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
-          ownerStore.close();
-          continue;
-        }
-        if (resolved === null) {
-          if (!deliverPending) {
-            recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
-            ownerStore.close();
-            continue;
-          }
-          const channels = audienceChannels(decisionChannelConfig, request.audience);
-          for (const channelId of channels) {
-            const channel = telegramDecisionChannels.get(channelId);
-            if (channel !== undefined) await channel.deliver(humanDecisionChannelRequest(request));
-          }
-          if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
-            lastWaitingRunId = request.runId;
-            queueMicrotask(() => void promptHumanDecision(ctx, request));
-          }
+        if (!deliverPending) {
           recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
           ownerStore.close();
           continue;
         }
-      }
-
-      const currentParent = runStore.readRun(request.runId);
-      if (currentParent === null || currentParent.state.status !== "waiting") {
+        const channels = audienceChannels(decisionChannelConfig, request.audience);
+        for (const channelId of channels) {
+          const channel = telegramDecisionChannels.get(channelId);
+          if (channel !== undefined) await channel.deliver(humanDecisionChannelRequest(request));
+        }
+        if (ctx.mode === "tui" && channels.includes("pi") && lastWaitingRunId === null) {
+          lastWaitingRunId = request.runId;
+          queueMicrotask(() => void promptHumanDecision(ctx, request));
+        }
         recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
         ownerStore.close();
         continue;
       }
-      const runId = `continuation-${request.decisionId.slice("decision-".length)}`;
-      const continuation = (await store.readContinuation(request.decisionId)) ?? {
-        schema: "pi-workflows.human-decision-continuation.v1" as const,
-        decisionId: request.decisionId,
-        requestDigest: request.requestDigest,
-        provenance: resolved.provenance,
-        parentRunId: request.runId,
-        runId,
-        createdAt: resolved.acceptedAt,
-      };
-      recoveryQueue.parkWorkflowRun({
-        runId: request.runId,
-        claimToken: recoveryToken,
-      });
-      const existing = runStore.readRun(continuation.runId);
-      if (existing === null && activeRun === null) {
-        if (currentParent.state.workflowSource === undefined) {
-          ownerStore.close();
-          continue;
-        }
-        const workflowRef =
-          currentParent.state.workflowSource.kind === "builtin"
-            ? `builtin:${currentParent.state.workflowSource.id}`
-            : currentParent.state.workflowSource.path;
-        await startRun(ctx, workflowRef, currentParent.state.input, {
-          parentRunId: request.runId,
-          humanDecision: resolved,
-          runId: continuation.runId,
-          quiet: true,
-        });
-      }
-      if (runStore.readRun(continuation.runId) !== null) {
-        await ownerStore.recordContinuation(request.decisionId, continuation);
-        ownerStore.markEffectApplied(request.decisionId, "decision.continue");
-      }
-      await settleHumanDecisionChannels(resolved);
-      ownerStore.markEffectApplied(request.decisionId, "decision.settle_presentations");
+
+      const currentParent = runStore.readRun(request.runId);
+      recoveryQueue.parkWorkflowRun({ runId: request.runId, claimToken: recoveryToken });
       ownerStore.close();
+      if (
+        currentParent === null ||
+        currentParent.state.status !== "waiting" ||
+        currentParent.state.workflowSource === undefined
+      ) {
+        continue;
+      }
+      const workflowRef =
+        currentParent.state.workflowSource.kind === "builtin"
+          ? `builtin:${currentParent.state.workflowSource.id}`
+          : currentParent.state.workflowSource.path;
+      await continueAcceptedHumanDecision(ctx, {
+        parentRunId: request.runId,
+        workflowRef,
+        input: currentParent.state.input,
+        request,
+        resolved,
+        quiet: true,
+      });
       if (activeRun !== null) break;
     }
   };
