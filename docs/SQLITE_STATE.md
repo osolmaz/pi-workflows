@@ -111,22 +111,29 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 
 Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
-### Planned terminal restart state
+### Terminal restart state
 
-The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
-uses the existing tables. It adds no state store or table. A restarted run will
-keep its root run ID, parent run ID, restart number, and parent terminal
-fingerprint in the existing launch-options value. The fingerprint will use the
-workflow identity and revision, exact input, terminal state, canonical result
-or error, and canonical reason. It will exclude run IDs, timestamps, and other
-values that change between equivalent attempts.
+The [terminal workflow restart contract](plans/2026-08-27-workflow-terminal-restart-plan.md)
+uses the existing tables. It adds no state store or table. A restarted run keeps
+its root run ID, parent run ID, restart number, and parent terminal fingerprint
+in the existing launch-options value. The fingerprint uses the workflow
+identity and revision, exact input, terminal state, canonical result or error,
+and canonical reason. It excludes run IDs, timestamps, and other values that
+change between equivalent attempts.
 
-One terminal turn intent will cover result presentation and factual fallback.
-A selected restart or Monitor launch will use the existing session reservation,
-run queue, and effect receipt. The reservation will record the source terminal
-intent and tool call so recovery can adopt the same launch instead of creating
-another one. Conversation history remains in Pi. This state does not identify,
-hash, copy, or store an original user message.
+One terminal turn intent covers result presentation and factual fallback. A
+selected restart, Monitor run, or other workflow start uses the existing
+session reservation, run queue, and effect receipt. The successor run's launch
+options record the source terminal run, intent, model tool call, and canonical
+request fingerprint. A repeated call adopts that reservation or run. Activation
+waits for `agent_settled`, and normal queue recovery activates a surviving
+reservation once.
+
+Restart creates a new run. The terminal run remains unchanged. Restart lineage
+allows three restarts after the original run and rejects a repeated terminal
+fingerprint in the same chain. A Monitor selection records terminal selection
+but no restart lineage. Conversation history remains in Pi. This state does not
+identify, hash, copy, or store an original user message.
 
 ## Content-addressed values
 

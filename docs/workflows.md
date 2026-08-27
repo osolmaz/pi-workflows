@@ -430,6 +430,7 @@ The model sees one `workflow` tool. Its `action` field supports:
 
 - `list` for discovered workflow names and sources.
 - `start` with a workflow name or path and structured input.
+- `restart` with a terminal run ID. It creates a new run from the exact stored workflow reference and input.
 - `status` for the active run or a supplied run ID.
 - `pause`, `resume`, and `cancel` for the active run.
 - `answer` with ordinary checkpoint input and an optional run ID. Protected `humanDecision()` gates reject this model-facing action.
@@ -461,14 +462,25 @@ no-run results report `paused: false` and `resumable: false`. Thus, a durable
 `workState: "paused"`, and the status message names that actionable state
 instead of saying only that the workflow is running.
 
-The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
-adds a generic `restart` action. It will accept a terminal run ID, reuse that
-run's exact workflow reference and input, and create a new immutable run. The
-model will select this action only after it receives the terminal result and
-decides from the current conversation that the user's task is still unfinished.
+Restart uses this contract:
 
-A model-started run is queued until the model's current turn settles. The first
-workflow prompt then starts a new turn. This keeps the requesting turn outside
+```json
+{
+  "action": "restart",
+  "runId": "terminal-run-id"
+}
+```
+
+The terminal run must belong to the current Pi session and must not be active,
+waiting, or explicitly cancelled. Its source and revision must still resolve
+exactly. Restart creates a new immutable run and leaves the terminal run
+unchanged. It copies the stored input and safe launch settings; it does not
+reconstruct input from conversation history.
+
+A model-started run is queued until the model's current turn settles. A terminal
+decision turn can reserve one restart, Monitor run, or other workflow start.
+A second workflow launch from that turn fails. The first workflow prompt then
+starts a new turn. This keeps the requesting turn outside
 the workflow's first attempt and prevents an early missing-submission reminder.
 The normal extension offers all actions. The headless RPC bridge offers only
 `update` and `submit`, so a workflow child cannot recursively control other
@@ -693,19 +705,30 @@ export default defineWorkflow({
 });
 ```
 
-After the final run state has been persisted, the Pi extension sends the
-presentation instructions and bounded final result to the model as a hidden
-follow-up message. The next visible message is a normal assistant response.
-Returning `undefined`, returning an empty string, or omitting
-`presentationPrompt` produces no presentation. Failed, timed-out, and cancelled
-runs are never presented. When one of those outcomes would otherwise strand an
-agent after a workflow-caused turn abort or asynchronous crash, the extension
-uses the deferred-turn contract to send one factual fallback after settlement.
-Async prompt builders have 30 seconds to finish and receive an
-`AbortSignal` that fires on timeout, session shutdown, or when a new workflow
-or normal user turn starts; stale presentations are discarded. Once a presentation message has
-been queued, another workflow cannot start until that assistant response
-settles, so results cannot interleave.
+After a top-level interactive run becomes terminal, the Pi extension gives the
+model one normal terminal decision turn. The message contains the workflow name
+and revision, terminal run ID, exact stored input, bounded result, terminal
+state and reason, restart count, and earlier terminal outcomes in the restart
+chain. A completed state does not prove that the user's larger task is complete.
+The model uses the current Pi conversation to stop, restart safely, start
+Monitor for an authorized external wait, ask for a decision or authority, or
+take another safe authorized action.
+
+`presentationPrompt` adds workflow-specific presentation instructions to this
+shared terminal decision message for completed runs. Returning `undefined`,
+returning an empty string, omitting `presentationPrompt`, or ending in failure,
+timeout, or cancellation uses the factual terminal fallback instead. Normal
+presentation and fallback claim the same terminal turn intent, so races,
+reload, crash recovery, and compaction cannot create a second decision turn.
+Async prompt builders have 30 seconds to finish and receive an `AbortSignal`
+that fires on timeout, session shutdown, or when a new workflow or normal user
+turn starts; stale presentations are discarded.
+
+Waiting checkpoints are not terminal and do not create a terminal decision
+turn. Controller child runs and internally owned runs report to their owner and
+do not create competing turns. Explicit cancellation produces terminal facts,
+but its decision instruction defaults to stopping and the `restart` shortcut
+rejects it.
 
 An agent with `expectedOutput: assistantMessage()` is different. Its visible
 assistant response is the node output, can appear before later nodes, and also
@@ -713,21 +736,11 @@ works inside an included workflow. A root `presentationPrompt` would add a
 second response, so workflows that end with assistant-message output normally
 omit it.
 
-Presentation is outside the workflow graph: it cannot route to another node,
-change the run status, or alter the SQLite run state. If prompt generation or message
-delivery fails, the extension reports a warning and leaves the finished run
-unchanged. Opting in adds one hidden custom message and one assistant response
-to the normal Pi session; it adds no other persistent data and uses no Pi
-internals.
-
-The selected [terminal workflow restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md)
-will extend this host-level behavior to every terminal top-level interactive
-run. Presentation and fallback will settle one turn intent. The resulting model
-turn will include the workflow result and terminal reason, then let the model
-use the conversation it already has to stop, restart, start Monitor, ask for a
-needed decision, or take another safe action. Workflow definitions will not add
-continuation nodes or prompts, and Pi Workflows will not copy or track an
-original user message.
+Presentation and terminal decisions are outside the workflow graph: they cannot
+route to another node, change the terminal run, or alter its result. A selected
+restart always creates a new run. Workflow definitions need no opt-in,
+continuation node, or restart prompt. Pi owns conversation history. Pi Workflows
+does not identify, hash, copy, or store an original user message.
 
 ## Runtime behavior
 
@@ -757,15 +770,18 @@ possible. Defaults worth knowing:
   and `running`. `workflow status` and `workflow cancel` accept the run ID before a SQLite run state
   exists.
 - If deferred activation fails, the queue stores a bounded safe error, releases the session
-  reservation, and creates one deferred-turn intent for the initiating session. A workflow that
+  reservation, and creates one terminal turn intent for the initiating session. A workflow that
   reports `started` and then crashes before its first prompt follows the same path. The model gets
-  one factual follow-up after settlement and can make a new explicit start call. Pi Workflows does
-  not retry blindly.
-- An agent-issued `workflow cancel` aborts the current node and the current Pi turn, then creates
-  one deferred-turn intent. The next natural workflow message resolves it when possible; otherwise
-  one factual fallback starts after settlement. Direct `/workflow cancel` remains quiet because it
-  is explicit user control. When no run is live but the widget still shows a parked or finished run,
-  the command clears the widget.
+  one factual decision turn after settlement. Pi Workflows does not retry automatically.
+- Agent-issued and direct `workflow cancel` actions that cancel an active or queued run create or
+  settle one terminal turn intent. The resulting decision defaults to stopping, and `restart`
+  rejects the cancelled run. When no run is live but the widget still shows a parked or finished
+  run, the command clears the widget.
+- A restart chain allows at most three restart actions after the original run. The terminal
+  fingerprint excludes timestamps and run IDs. If the same workflow revision, exact input, state,
+  result or error, and reason occur again in that chain, another restart fails immediately. A
+  changed outcome can remain restartable until the chain limit. Starting Monitor does not consume
+  a restart.
 - One workflow runs per session at a time.
 - After the workflow tool accepts an agent-step submission, any assistant text that follows remains visible. The next workflow message continues the graph. A deferred intent makes a workflow prompt, presentation, and factual fallback compete to provide one successor turn, so an abort cannot produce two continuation turns.
 - Agent nudges: if the model ends its turn without submitting the pending

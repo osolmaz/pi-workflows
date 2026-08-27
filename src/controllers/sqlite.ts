@@ -84,7 +84,9 @@ export type WorkflowTurnIntentCause =
   | "failed"
   | "launchFailed"
   | "controllerInterrupted"
-  | "claimLost";
+  | "claimLost"
+  | "terminal"
+  | "cancelled";
 
 export type WorkflowTurnIntentResolution = "workflowPrompt" | "presentation" | "fallback";
 

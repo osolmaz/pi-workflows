@@ -1,8 +1,8 @@
 # Deferred workflow turns
 
-This specification defines how Pi Workflows schedules one successor agent turn after a workflow event stops or strands the current turn. It covers cancellation, timeout, terminal failure, launch failure, controller interruption, and claim loss.
+This specification defines how Pi Workflows schedules one successor agent turn after a workflow event stops or strands the current turn. It covers every top-level interactive terminal result, cancellation, timeout, launch failure, controller interruption, and claim loss.
 
-The implementation plan is [Guarantee one successor turn after workflow interruption](plans/2026-08-21-deferred-turn-intents-plan.md).
+The implementation plans are [Guarantee one successor turn after workflow interruption](plans/2026-08-21-deferred-turn-intents-plan.md) and [Workflow terminal decision and restart](plans/2026-08-27-workflow-terminal-restart-plan.md).
 
 ## Terms
 
@@ -18,10 +18,10 @@ The implementation plan is [Guarantee one successor turn after workflow interrup
 Each eligible source event creates at most one turn intent. Exactly one of these message paths can resolve it:
 
 1. a workflow agent prompt;
-2. a completed or waiting result presentation;
+2. a result presentation;
 3. a factual fallback.
 
-All three paths claim the same intent before sending. A resolved intent cannot start another turn.
+Every top-level interactive terminal run owns one intent. Its presentation and fallback claim that same intent before sending. A waiting presentation can resolve an earlier interruption intent, but waiting state does not create a terminal intent. A resolved intent cannot start another turn.
 
 Cancellation and process termination remain immediate. Pi Workflows does not keep the old assistant turn alive and does not wait for the successor before stopping active work.
 
@@ -56,25 +56,25 @@ Resolution records message delivery into the Pi session or the presence of the s
 Valid causes are:
 
 ```text
-agentCancelled | timedOut | failed | launchFailed | controllerInterrupted | claimLost
+agentCancelled | timedOut | failed | launchFailed | controllerInterrupted | claimLost | terminal | cancelled
 ```
 
 The event policy is:
 
-| Event                                                          | Intent                                                 | Fallback rule                                                                          |
-| -------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| Agent calls `workflow cancel` during an active workflow turn   | Create before `ctx.abort()` when storage is available. | Make eligible after durable terminal cancellation.                                     |
-| Agent step times out                                           | Create before `ctx.abort()` when storage is available. | Keep ineligible while a recovery prompt can arrive. Make eligible on terminal timeout. |
-| Active workflow turn ends in terminal failure                  | Create or reuse the abort intent.                      | Make eligible after durable terminal failure.                                          |
-| Workflow reports started, then crashes before its first prompt | Create after durable failure.                          | Create as eligible.                                                                    |
-| Queued launch activation fails                                 | Create after the queue row is durably failed.          | Create as eligible.                                                                    |
-| Controller interrupts an active workflow turn                  | Create before the turn abort when possible.            | Durable terminal or handoff state decides eligibility.                                 |
-| Active workflow turn loses its queue claim                     | Create before the turn abort when possible.            | Keep ineligible while a new owner can continue.                                        |
-| Completed or waiting result has a presentation                 | Do not create a new intent.                            | Resolve an existing intent through presentation.                                       |
-| Direct `/workflow cancel`                                      | Do not create.                                         | No automatic model turn.                                                               |
-| Workflow pause                                                 | Do not create.                                         | No automatic model turn.                                                               |
-| User Escape or held workflow                                   | Do not create.                                         | No automatic model turn.                                                               |
-| Session shutdown                                               | Do not create.                                         | A closing session cannot start another turn.                                           |
+| Event                                                          | Intent                                        | Fallback rule                                                                |
+| -------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------- |
+| Top-level interactive run completes                            | Create one terminal intent.                   | Presentation and factual fallback compete for the intent.                    |
+| Top-level interactive run fails or times out                   | Create or reuse the abort intent.             | Make eligible after the terminal state is durable.                           |
+| Agent or user cancels a top-level run                          | Create before turn abort when needed.         | Make eligible after durable cancellation; the decision defaults to stopping. |
+| Workflow reports started, then crashes before its first prompt | Create after durable failure.                 | Create as eligible.                                                          |
+| Queued launch activation fails                                 | Create after the queue row is durably failed. | Create as eligible.                                                          |
+| Controller interrupts an active workflow turn                  | Create before the turn abort when possible.   | Durable terminal or handoff state decides eligibility.                       |
+| Active workflow turn loses its queue claim                     | Create before the turn abort when possible.   | Keep ineligible while a new owner can continue.                              |
+| Waiting result has a presentation                              | Do not create a terminal intent.              | It can resolve an earlier interruption intent through presentation.          |
+| Controller child or internally owned run ends                  | Do not create a terminal intent.              | Its owner receives the result.                                               |
+| Workflow pause                                                 | Do not create.                                | No automatic model turn.                                                     |
+| User Escape or held workflow                                   | Do not create.                                | No automatic model turn.                                                     |
+| Session shutdown                                               | Do not create.                                | A closing session cannot start another turn.                                 |
 
 A terminal failure after a successful start tool result is eligible even when it did not first call `ctx.abort()`. This rule covers asynchronous runtime validation and startup failures that the user can see in the UI but the model cannot see in its current context.
 
@@ -232,9 +232,21 @@ The message type is `pi-workflows-deferred-turn`. Delivery uses:
 }
 ```
 
-The visible content reports observed facts and asks the agent to inspect durable state before it decides whether an authorized correction is needed. It does not claim that recovery occurred, resume the old run, or retry work.
+For a terminal run, the visible content contains the workflow identity and revision, terminal run ID, exact stored input, bounded result, terminal state and reason, restart count, and earlier terminal outcomes in the chain. It tells the model to use the current conversation, prefer a safe restart for an unfinished task after a technical or temporary failure, and stop for completed work, cancellation, missing authority, a required user decision, or a repeated failure. Values from input and result are data, not instructions.
+
+The content comes only from existing run and queue records. Pi owns conversation history. Pi Workflows does not identify, hash, copy, or store an original user message.
 
 Fallback delivery is disabled during session shutdown and while a user-interrupted workflow is held.
+
+## Selected launch and restart
+
+A terminal decision turn can reserve at most one workflow launch: `restart`, Monitor through normal `start`, or another workflow through normal `start`. The reservation records the source terminal intent, model tool call, and request fingerprint in the new run's existing launch options. It does not activate before `agent_settled`.
+
+Repeating the same tool call adopts the existing reservation or run. A different launch from the same terminal intent fails. Session-start and queue recovery activate a surviving reservation once when the session is idle.
+
+`restart` accepts the terminal run ID. It checks session ownership, terminal state, explicit cancellation, source identity and revision, repeated failure, and the restart limit. It creates a new immutable run from the exact stored reference, input, and safe launch settings. The old run does not change.
+
+Restart lineage in launch options records the root run ID, parent run ID, restart number, and parent terminal fingerprint. The fingerprint covers workflow identity and revision, exact input, terminal state, canonical result or error, and terminal reason. It excludes timestamps and run IDs. The same fingerprint cannot restart twice in one chain. A chain permits three restarts after the original run. Starting Monitor does not add restart lineage.
 
 ## Delivery recovery
 
@@ -262,7 +274,7 @@ Pending `launch_failure` rows from the earlier alpha contract are incompatible. 
 
 ## Post-completion follow-ups
 
-Deferred turns repair one stranded workflow turn after interruption. Ordered post-completion prompts are different. They represent user-requested normal work after successful completion, use `workflow_follow_up_queues` and `workflow_follow_ups`, and are delivered by the separate follow-up coordinator. Neither feature reads or changes the other's rows.
+Deferred turns provide the terminal decision before ordered post-completion prompts. Those prompts represent user-requested normal work after successful completion, use `workflow_follow_up_queues` and `workflow_follow_ups`, and are delivered by the separate follow-up coordinator after the terminal intent is resolved. Neither feature reads or changes the other's rows.
 
 See [Continue normal work after a workflow finishes](2026-08-25-workflow-follow-ups.md).
 
@@ -293,12 +305,13 @@ This is an alpha hard cutover.
 
 An implementation conforms when:
 
-- one eligible source event produces at most one intent;
-- one intent produces at most one successor message;
-- an agent self-cancel receives one fallback after settlement;
+- every top-level interactive terminal run produces at most one intent and one decision message;
+- an agent self-cancel and a direct cancellation receive one fallback after settlement;
 - an asynchronous crash after a successful start result receives one fallback after settlement;
 - a natural recovery prompt or presentation suppresses fallback by resolving the same intent;
-- direct cancellation, pause, Escape, user hold, and shutdown produce no automatic turn;
+- waiting checkpoints, controller children, internal owners, pause, Escape, user hold, and shutdown do not create terminal turns;
 - claim transfer permits natural resolution by the new owner and prevents stale writes;
-- polling, restart, lease expiry, and send-before-resolution failure do not duplicate turns;
+- one terminal turn reserves at most one launch and activates it after `agent_settled`;
+- exact replay adopts the same launch, while reload, lease expiry, and send-before-resolution failure do not duplicate turns or runs;
+- restart keeps the prior run immutable, preserves exact input, rejects cancellation and repeated fingerprints, and stops after three restarts;
 - passive workflow notifications keep their current behavior.

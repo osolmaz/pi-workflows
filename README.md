@@ -134,11 +134,12 @@ after completion](docs/2026-08-25-workflow-follow-ups.md).
 While a run is on screen, the footer status bar shows a compact
 `wf <name> [status] <node>` indicator alongside the widget.
 
-`presentationPrompt` is optional. When present, pi-workflows uses it after the
-structured run ends to request one normal, human-readable assistant response.
-Without it, pi-workflows does not request a separate final response. If the
-model writes text after submitting its last agent step, that text stays visible.
-Shell-only and machine-consumed workflows remain model-free.
+`presentationPrompt` is optional. After each top-level interactive run ends,
+pi-workflows gives the model one normal terminal decision turn with the exact
+stored input, result, terminal reason, and restart history. A presentation
+prompt adds instructions for the human-readable response. Presentation and
+factual fallback share one durable turn intent, so only one decision turn is
+sent. Waiting checkpoints and controller child runs do not create this turn.
 
 Use `expectedOutput: assistantMessage()` when a normal assistant response must
 be a node inside the graph rather than a presentation after the run. Its exact
@@ -182,8 +183,10 @@ trace, pause state, and cancellation state. See
 
 ## Agent-managed workflows
 
-The model can use the same `workflow` tool to list, start, inspect, pause,
-resume, cancel, and answer workflows. Submitted-step contracts use the tool's
+The model can use the same `workflow` tool to list, start, restart, inspect,
+pause, resume, cancel, and answer workflows. `restart` takes a terminal run ID,
+reuses its exact workflow reference and input, and creates a new immutable run.
+Submitted-step contracts use the tool's
 `submit` action, while assistant-step contracts require a normal assistant
 response instead. Slash commands and model actions share one lifecycle
 implementation.
@@ -191,8 +194,15 @@ implementation.
 A model-started workflow is saved before the tool reports it as queued, so the
 returned run ID works with `workflow status` and `workflow cancel` before
 execution starts. pi-workflows waits for the current agent turn to settle
-before activation. If activation fails, it saves the failure and sends one
-follow-up turn so the model can correct the cause and start a new run.
+before activation. A terminal decision turn can reserve at most one restart,
+Monitor run, or other workflow start. Activation waits for that turn to settle.
+If activation fails, pi-workflows saves the failure and sends one decision turn
+so the model can correct the cause safely.
+
+Restart is never automatic. Explicit cancellation is not restartable through
+the shortcut. A chain permits at most three restarts and rejects a repeated
+terminal fingerprint. Pi Workflows uses Pi's current conversation for the
+continuation decision and does not capture or persist an original user message.
 
 pi-workflows includes a [monitor](docs/MONITOR.md) workflow for plain-language
 requests such as:
