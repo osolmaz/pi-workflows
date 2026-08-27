@@ -2848,9 +2848,10 @@ export default function piWorkflows(pi: ExtensionAPI) {
         generation === undefined
           ? undefined
           : await startPreparedRun(ctx, claimedLaunch, generation);
-      if (startedRunId === undefined) {
-        queue.parkWorkflowRun({ runId, claimToken: preparation.run.claimToken });
-      } else {
+      // A temporary active-run or presentation guard must not park this
+      // continuation. Keep it prepared so normal activation recovery starts it
+      // as soon as the session is idle.
+      if (startedRunId !== undefined) {
         started = true;
       }
     } else {

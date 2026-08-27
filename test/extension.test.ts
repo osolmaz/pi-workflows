@@ -467,6 +467,7 @@ async function writeHumanDecisionWorkflow(
   cwd: string,
   timeoutMs?: number,
   loadBarrier?: { enteredPath: string; releasePath: string },
+  presentationPrompt?: string,
 ): Promise<void> {
   const dir = path.join(cwd, ".pi", "workflows");
   await fs.mkdir(dir, { recursive: true });
@@ -493,6 +494,7 @@ const choices = defineHumanChoices({
 });
 export default defineWorkflow({
   name: "human",
+  ${presentationPrompt === undefined ? "" : `presentationPrompt: () => ${JSON.stringify(presentationPrompt)},`}
   startAt: "approve",
   nodes: {
     approve: humanDecision({ audience: "operator", choices, request: ({ input }) => ({ title: "Approve", subject: input, presentation: { schema: "pi-workflows.decision-presentation.v1", summary: "Review this decision.", blocks: [] } }), ${timeoutMs === undefined ? "" : `onTimeout: { afterMs: ${timeoutMs}, response: { choice: "continue" } },`} }),
@@ -851,6 +853,57 @@ describe("pi-workflows extension", () => {
       expect(harness.notifications.join("\n")).not.toMatch(
         /already exists|revision conflict|crashed/iu,
       );
+    } finally {
+      continueRun.mockRestore();
+      await harness.emitAsync("session_shutdown", {});
+    }
+  });
+
+  it("activates a claimed continuation after a pending presentation settles", async () => {
+    const cwd = await makeTempDir("pi-workflows-human-presentation");
+    const runsDir = await makeTempDir("pi-workflows-human-presentation-runs");
+    vi.stubEnv("HOME", runsDir);
+    await writeHumanDecisionWorkflow(cwd, undefined, undefined, "Present the decision.");
+    const continueRun = vi.spyOn(WorkflowEngine.prototype, "continueRun");
+    const harness = makeHarness({
+      cwd,
+      respond: () => {},
+      select: async () => "Continue",
+    });
+
+    try {
+      await harness.emitAsync("session_start", {});
+      await harness.command.handler("human", harness.ctx);
+      await waitFor(async () => {
+        const bundles = await listWorkflowRuns({
+          databasePath: workflowStateDatabasePath(runsDir),
+        });
+        const parent = bundles.find((bundle) => bundle.state.status === "waiting");
+        if (parent === undefined) return false;
+        const continuation = bundles.find(
+          (bundle) => bundle.state.parentRunId === parent.state.runId,
+        );
+        if (continuation === undefined) return false;
+        const queue = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+          projectPath: cwd,
+        });
+        try {
+          return queue.getWorkflowRun(continuation.state.runId)?.status === "starting";
+        } finally {
+          queue.close();
+        }
+      });
+
+      await harness.emitAsync("agent_settled", {});
+      await waitFor(async () => {
+        const bundles = await listWorkflowRuns({
+          databasePath: workflowStateDatabasePath(runsDir),
+        });
+        return bundles.some(
+          (bundle) => bundle.state.parentRunId !== undefined && bundle.state.status === "completed",
+        );
+      });
+      expect(continueRun).toHaveBeenCalledTimes(1);
     } finally {
       continueRun.mockRestore();
       await harness.emitAsync("session_shutdown", {});
