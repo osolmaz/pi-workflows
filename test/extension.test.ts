@@ -86,7 +86,7 @@ type FakeContext = {
     getSessionId: () => string;
     getLeafId: () => string | null;
     getSessionFile: () => string | undefined;
-    getBranch: () => never[];
+    getBranch: () => Record<string, unknown>[];
   };
   ui: {
     notify: (message: string, type?: string) => void;
@@ -128,6 +128,7 @@ function makeHarness(options: {
   const statuses: (string | undefined)[] = [];
   const sentMessages: SentMessage[] = [];
   const sentUserMessages: string[] = [];
+  const branchEntries: Record<string, unknown>[] = [];
   const messageRenderers = new Map<string, unknown>();
   const listeners = new Map<
     string,
@@ -152,7 +153,7 @@ function makeHarness(options: {
       getSessionId: () => options.sessionId ?? "test-session",
       getLeafId: () => null,
       getSessionFile: () => undefined,
-      getBranch: () => [],
+      getBranch: () => branchEntries,
     },
     ui: {
       notify: (message, type) => {
@@ -230,10 +231,15 @@ function makeHarness(options: {
     },
     sendUserMessage: (prompt: string) => {
       sentUserMessages.push(prompt);
+      branchEntries.push({
+        type: "message",
+        message: { role: "user", content: prompt },
+      });
       idle = false;
       queueMicrotask(() => options.respond(prompt, tool as RegisteredTool));
     },
     sendMessage: (message: SentMessage["message"], messageOptions?: SentMessage["options"]) => {
+      branchEntries.push({ type: "custom_message", ...message });
       sentMessages.push({
         message,
         ...(messageOptions === undefined ? {} : { options: messageOptions }),
@@ -258,6 +264,10 @@ function makeHarness(options: {
     statuses,
     sentMessages,
     sentUserMessages,
+    branchEntries,
+    appendUserMessage: (content: string) => {
+      branchEntries.push({ type: "message", message: { role: "user", content } });
+    },
     messageRenderers,
     get abortCalls() {
       return abortCalls;
@@ -270,14 +280,17 @@ function makeHarness(options: {
     tool: tool as RegisteredTool,
     shortcuts,
     emit: (event: string, payload?: unknown) => {
+      if (event === "agent_settled") idle = true;
       for (const listener of listeners.get(event) ?? []) {
         void listener(payload, ctx);
       }
     },
-    emitAsync: async (event: string, payload?: unknown) =>
-      await Promise.all(
+    emitAsync: async (event: string, payload?: unknown) => {
+      if (event === "agent_settled") idle = true;
+      return await Promise.all(
         (listeners.get(event) ?? []).map(async (listener) => await listener(payload, ctx)),
-      ),
+      );
+    },
   };
 }
 
@@ -369,6 +382,25 @@ export default defineWorkflow({
   startAt: "wait",
   nodes: { wait: agent({ prompt: () => "Wait.", timeoutMs: 30 }) },
   edges: [],
+});
+`,
+    "utf8",
+  );
+}
+
+async function writeMaxStepsWorkflow(cwd: string): Promise<void> {
+  const dir = path.join(cwd, ".pi", "workflows");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "max-steps.workflow.ts"),
+    `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "max-steps",
+  maxSteps: 1,
+  startAt: "loop",
+  nodes: { loop: compute({ run: ({ input }) => input }) },
+  edges: [{ from: "loop", to: "loop" }],
 });
 `,
     "utf8",
@@ -600,6 +632,13 @@ describe("pi-workflows extension", () => {
       });
 
       harness.setIdle(true);
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+      expect(harness.sentUserMessages).toHaveLength(0);
       await harness.emitAsync("agent_settled");
       await waitFor(() => harness.sentUserMessages.length === 1);
       expect(harness.sentUserMessages[0]).toContain("Do the next task after this workflow.");
@@ -1095,6 +1134,13 @@ describe("pi-workflows extension", () => {
       await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
       await harness.emitAsync("agent_settled");
 
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) =>
+            entry.message.customType === "pi-workflows-deferred-turn" &&
+            entry.message.content.includes('"terminalState": "completed"'),
+        ),
+      );
       const status = await harness.tool.execute("status-1", { action: "status" });
       expect(status.details).toMatchObject({
         workflowName: "mini",
@@ -1103,6 +1149,11 @@ describe("pi-workflows extension", () => {
         workState: "inactive",
         resumable: false,
       });
+      expect(
+        listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) }).filter(
+          (run) => run.state.workflowName === "mini",
+        ),
+      ).toHaveLength(1);
       await expect(
         harness.tool.execute("status-missing", { action: "status", runId: "missing-run" }),
       ).rejects.toThrow(/Workflow run not found/);
@@ -1119,10 +1170,11 @@ describe("pi-workflows extension", () => {
       await writeEchoWorkflow(cwd);
       const harness = makeHarness({ cwd, respond: () => {} });
       await harness.emitAsync("session_start");
-      await harness.tool.execute("start-self-cancel", {
+      const started = await harness.tool.execute("start-self-cancel", {
         action: "start",
         workflow: "mini",
       });
+      const runId = started.details.runId as string;
       await harness.emitAsync("agent_settled");
       await waitFor(() =>
         harness.sentMessages.some(
@@ -1155,8 +1207,13 @@ describe("pi-workflows extension", () => {
       expect(fallback).toMatchObject({
         options: { triggerTurn: true, deliverAs: "followUp" },
         message: {
-          content: expect.stringContaining("state cancelled"),
-          details: expect.objectContaining({ cause: "agentCancelled" }),
+          content: expect.stringContaining('"terminalState": "cancelled"'),
+          details: expect.objectContaining({
+            cause: "agentCancelled",
+            terminalDecision: expect.objectContaining({
+              schema: "pi-workflows.terminal-decision.v1",
+            }),
+          }),
         },
       });
       await harness.emitAsync("agent_settled");
@@ -1165,6 +1222,9 @@ describe("pi-workflows extension", () => {
           (entry) => entry.message.customType === "pi-workflows-deferred-turn",
         ),
       ).toHaveLength(1);
+      await expect(
+        harness.tool.execute("restart-cancelled", { action: "restart", runId }),
+      ).rejects.toThrow(/explicitly cancelled workflow cannot be restarted/u);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1470,10 +1530,16 @@ export default defineWorkflow({
       expect(failureMessages[0]).toMatchObject({
         options: { triggerTurn: true, deliverAs: "followUp" },
         message: {
-          content: expect.stringContaining("failed to start"),
-          details: expect.objectContaining({ cause: "launchFailed" }),
+          content: expect.stringContaining('"terminalState": "failed"'),
+          details: expect.objectContaining({
+            cause: "launchFailed",
+            terminalDecision: expect.objectContaining({
+              schema: "pi-workflows.terminal-decision.v1",
+            }),
+          }),
         },
       });
+      expect(failureMessages[0]?.message.content).toContain('"kind": "launchFailed"');
 
       const failed = await harness.tool.execute("status-failed-launch", {
         action: "status",
@@ -1585,6 +1651,377 @@ export default defineWorkflow({
     }
   });
 
+  it("lets a blocked completed result select one restart without changing the old run", async () => {
+    const cwd = await makeTempDir("pi-workflows-terminal-blocked");
+    const runsDir = await makeTempDir("pi-workflows-terminal-blocked-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      const workflowDir = path.join(cwd, ".pi", "workflows");
+      await fs.mkdir(workflowDir, { recursive: true });
+      await fs.writeFile(
+        path.join(workflowDir, "blocked.workflow.ts"),
+        `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "blocked",
+  startAt: "finish",
+  nodes: { finish: compute({ run: ({ input }) => ({ status: "blocked", input }) }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const exactInput = { task: "try after the blocker clears" };
+      const queued = await harness.tool.execute("start-blocked", {
+        action: "start",
+        workflow: "blocked",
+        input: exactInput,
+      });
+      const sourceRunId = queued.details.runId as string;
+      await harness.emitAsync("agent_settled");
+      await waitFor(
+        () =>
+          readWorkflowRun(sourceRunId, {
+            databasePath: workflowStateDatabasePath(runsDir),
+          })?.state.status === "completed",
+      );
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) =>
+            entry.message.customType === "pi-workflows-deferred-turn" &&
+            entry.message.content.includes('"status": "blocked"'),
+        ),
+      );
+      const sourceBefore = readWorkflowRun(sourceRunId, {
+        databasePath: workflowStateDatabasePath(runsDir),
+      });
+
+      const restarted = await harness.tool.execute("restart-blocked", {
+        action: "restart",
+        runId: sourceRunId,
+      });
+      expect(restarted.details).toMatchObject({ action: "restart", queued: true });
+      const queue = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        readOnly: true,
+        projectPath: cwd,
+      });
+      try {
+        expect(queue.getWorkflowRun(restarted.details.runId as string)).toMatchObject({
+          input: exactInput,
+          status: "queued",
+          launchOptions: {
+            restartLineage: { parentRunId: sourceRunId, restartNumber: 1 },
+          },
+        });
+      } finally {
+        queue.close();
+      }
+      expect(
+        readWorkflowRun(sourceRunId, { databasePath: workflowStateDatabasePath(runsDir) }),
+      ).toEqual(sourceBefore);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("restarts maxSteps once from exact input and rejects duplicate outcomes and launches", async () => {
+    const cwd = await makeTempDir("pi-workflows-terminal-restart");
+    const runsDir = await makeTempDir("pi-workflows-terminal-restart-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      await writeMaxStepsWorkflow(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const exactInput = { task: "keep exact", nested: { value: [1, 2, 3] } };
+      const queued = await harness.tool.execute("start-max-steps", {
+        action: "start",
+        workflow: "max-steps",
+        input: exactInput,
+      });
+      const sourceRunId = queued.details.runId as string;
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.notifications.some(
+          (note) => note.includes(sourceRunId) && note.includes("maxSteps=1"),
+        ),
+      );
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) =>
+            entry.message.customType === "pi-workflows-deferred-turn" &&
+            entry.message.content.includes(sourceRunId),
+        ),
+      );
+      const sourceBefore = readWorkflowRun(sourceRunId, {
+        databasePath: workflowStateDatabasePath(runsDir),
+      });
+      const restart = await harness.tool.execute("restart-max-steps", {
+        action: "restart",
+        runId: sourceRunId,
+      });
+      expect(restart.details).toMatchObject({ action: "restart", queued: true });
+      const restartedRunId = restart.details.runId as string;
+
+      const replay = await harness.tool.execute("restart-max-steps", {
+        action: "restart",
+        runId: sourceRunId,
+      });
+      expect(replay.details).toMatchObject({
+        action: "restart",
+        runId: restartedRunId,
+        adopted: true,
+      });
+      await expect(
+        harness.tool.execute("second-terminal-launch", {
+          action: "start",
+          workflow: "monitor",
+          input: {
+            task: "wait",
+            stopWhen: "done",
+            everyMinutes: 1,
+            maxChecks: 1,
+          },
+        }),
+      ).rejects.toThrow(/already selected another workflow launch/u);
+
+      const queue = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        projectPath: cwd,
+        readOnly: true,
+      });
+      try {
+        const restarted = queue.getWorkflowRun(restartedRunId);
+        expect(restarted).toMatchObject({ input: exactInput, status: "queued" });
+        expect(restarted?.launchOptions).toMatchObject({
+          restartLineage: {
+            schema: "pi-workflows.restart-lineage.v1",
+            rootRunId: sourceRunId,
+            parentRunId: sourceRunId,
+            restartNumber: 1,
+          },
+          terminalSelection: {
+            schema: "pi-workflows.terminal-selection.v1",
+            sourceRunId,
+            toolCallId: "restart-max-steps",
+          },
+        });
+      } finally {
+        queue.close();
+      }
+      expect(
+        readWorkflowRun(sourceRunId, { databasePath: workflowStateDatabasePath(runsDir) }),
+      ).toEqual(sourceBefore);
+
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.notifications.some(
+          (note) => note.includes(restartedRunId) && note.includes("maxSteps=1"),
+        ),
+      );
+      await harness.emitAsync("agent_settled");
+      await waitFor(
+        () =>
+          harness.sentMessages.filter(
+            (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+          ).length === 2,
+      );
+      await expect(
+        harness.tool.execute("restart-repeated-max-steps", {
+          action: "restart",
+          runId: restartedRunId,
+        }),
+      ).rejects.toThrow(/same terminal outcome/u);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects restart for active and waiting runs", async () => {
+    const activeCwd = await makeTempDir("pi-workflows-restart-active");
+    const activeHome = await makeTempDir("pi-workflows-restart-active-runs");
+    vi.stubEnv("HOME", activeHome);
+    try {
+      await writeEchoWorkflow(activeCwd);
+      const active = makeHarness({ cwd: activeCwd, respond: () => {} });
+      await active.emitAsync("session_start");
+      const queued = await active.tool.execute("start-active", {
+        action: "start",
+        workflow: "mini",
+      });
+      const runId = queued.details.runId as string;
+      await active.emitAsync("agent_settled");
+      await waitFor(() =>
+        active.sentMessages.some((entry) => entry.message.customType === "pi-workflows-agent-step"),
+      );
+      await expect(
+        active.tool.execute("restart-active", { action: "restart", runId }),
+      ).rejects.toThrow(/is active and cannot be restarted/u);
+      await active.tool.execute("cancel-active", { action: "cancel", runId });
+      await waitFor(() => active.notifications.some((note) => note.includes("cancelled")));
+      await active.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    const waitingCwd = await makeTempDir("pi-workflows-restart-waiting");
+    const waitingHome = await makeTempDir("pi-workflows-restart-waiting-runs");
+    vi.stubEnv("HOME", waitingHome);
+    try {
+      const workflowDir = path.join(waitingCwd, ".pi", "workflows");
+      await fs.mkdir(workflowDir, { recursive: true });
+      await fs.writeFile(
+        path.join(workflowDir, "waiting.workflow.ts"),
+        `import { checkpoint, defineWorkflow } from "@osolmaz/pi-workflows";
+export default defineWorkflow({
+  name: "waiting",
+  startAt: "hold",
+  nodes: { hold: checkpoint({ summary: "Wait for input" }) },
+  edges: [],
+});
+`,
+        "utf8",
+      );
+      const waiting = makeHarness({ cwd: waitingCwd, respond: () => {} });
+      await waiting.emitAsync("session_start");
+      const queued = await waiting.tool.execute("start-waiting", {
+        action: "start",
+        workflow: "waiting",
+      });
+      const runId = queued.details.runId as string;
+      await waiting.emitAsync("agent_settled");
+      await waitFor(
+        () =>
+          readWorkflowRun(runId, {
+            databasePath: workflowStateDatabasePath(waitingHome),
+          })?.state.status === "waiting",
+      );
+      await expect(
+        waiting.tool.execute("restart-waiting", { action: "restart", runId }),
+      ).rejects.toThrow(/is waiting and cannot be restarted/u);
+      expect(
+        waiting.sentMessages.filter(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      ).toHaveLength(0);
+      await waiting.emitAsync("session_shutdown");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects unknown, cross-session, and changed-source restart requests", async () => {
+    const cwd = await makeTempDir("pi-workflows-terminal-restart-guards");
+    const runsDir = await makeTempDir("pi-workflows-terminal-restart-guards-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      await writeMaxStepsWorkflow(cwd);
+      const owner = makeHarness({ cwd, sessionId: "owner-session", respond: () => {} });
+      await owner.emitAsync("session_start");
+      await expect(
+        owner.tool.execute("restart-missing", { action: "restart", runId: "missing-run" }),
+      ).rejects.toThrow(/Workflow run not found/u);
+
+      const queued = await owner.tool.execute("start-owned", {
+        action: "start",
+        workflow: "max-steps",
+        input: { task: "keep ownership" },
+      });
+      const runId = queued.details.runId as string;
+      await owner.emitAsync("agent_settled");
+      await waitFor(() => owner.notifications.some((note) => note.includes("maxSteps=1")));
+      await owner.emitAsync("agent_settled");
+      await waitFor(() =>
+        owner.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+
+      const outsider = makeHarness({ cwd, sessionId: "other-session", respond: () => {} });
+      await outsider.emitAsync("session_start");
+      await expect(
+        outsider.tool.execute("restart-other-session", { action: "restart", runId }),
+      ).rejects.toThrow(/belongs to another Pi session/u);
+
+      const laterTurn = makeHarness({ cwd, sessionId: "owner-session", respond: () => {} });
+      await laterTurn.emitAsync("session_start");
+      await expect(
+        laterTurn.tool.execute("restart-outside-decision", { action: "restart", runId }),
+      ).rejects.toThrow(/not the active terminal decision/u);
+
+      const workflowPath = path.join(cwd, ".pi", "workflows", "max-steps.workflow.ts");
+      await fs.writeFile(
+        workflowPath,
+        (await fs.readFile(workflowPath, "utf8")).replace(
+          "nodes: { loop: compute({ run: ({ input }) => input }) },",
+          "nodes: { loop: compute({ run: ({ input }) => ({ input, changed: true }) }) },",
+        ),
+        "utf8",
+      );
+      await expect(
+        owner.tool.execute("restart-changed-source", { action: "restart", runId }),
+      ).rejects.toThrow(/stored workflow source or revision is no longer available/u);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("lets a terminal turn select Monitor without consuming a restart", async () => {
+    const cwd = await makeTempDir("pi-workflows-terminal-monitor");
+    const runsDir = await makeTempDir("pi-workflows-terminal-monitor-runs");
+    vi.stubEnv("HOME", runsDir);
+    try {
+      await writeMaxStepsWorkflow(cwd);
+      const harness = makeHarness({ cwd, respond: () => {} });
+      await harness.emitAsync("session_start");
+      const queued = await harness.tool.execute("start-before-monitor", {
+        action: "start",
+        workflow: "max-steps",
+        input: { task: "wait outside" },
+      });
+      const sourceRunId = queued.details.runId as string;
+      await harness.emitAsync("agent_settled");
+      await waitFor(() => harness.notifications.some((note) => note.includes("maxSteps=1")));
+      await harness.emitAsync("agent_settled");
+      await waitFor(() =>
+        harness.sentMessages.some(
+          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+        ),
+      );
+
+      const monitor = await harness.tool.execute("start-monitor-after-terminal", {
+        action: "start",
+        workflow: "monitor",
+        input: {
+          task: "Wait for the authorized external event.",
+          stopWhen: "The event is complete.",
+          everyMinutes: 1,
+          maxChecks: 1,
+        },
+      });
+      const queue = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        projectPath: cwd,
+        readOnly: true,
+      });
+      try {
+        const selected = queue.getWorkflowRun(monitor.details.runId as string);
+        expect(selected?.launchOptions).toMatchObject({
+          terminalSelection: {
+            schema: "pi-workflows.terminal-selection.v1",
+            sourceRunId,
+          },
+        });
+        expect(selected?.launchOptions).not.toHaveProperty("restartLineage");
+      } finally {
+        queue.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reuses a pending claim-loss intent when the new runner fails terminally", async () => {
     const cwd = await makeTempDir("pi-workflows-claim-loss-terminal");
     const runsDir = await makeTempDir("pi-workflows-claim-loss-terminal-runs");
@@ -1649,10 +2086,13 @@ export default defineWorkflow({
       expect(fallback).toMatchObject({
         options: { triggerTurn: true, deliverAs: "followUp" },
         message: {
-          content: expect.stringContaining("ended with state failed"),
+          content: expect.stringContaining('"terminalState": "failed"'),
           details: expect.objectContaining({
             cause: "claimLost",
             turnIntentId: descriptor.intentId,
+            terminalDecision: expect.objectContaining({
+              schema: "pi-workflows.terminal-decision.v1",
+            }),
           }),
         },
       });
@@ -1750,6 +2190,8 @@ export default defineWorkflow({
       });
 
       await harness.command.handler("present", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+      await harness.emitAsync("agent_settled");
       await waitFor(() =>
         harness.sentMessages.some(
           (entry) => entry.message.customType === "pi-workflows-presentation",
@@ -1763,8 +2205,11 @@ export default defineWorkflow({
       expect(sent?.message.display).toBe(false);
       expect(sent?.message.content).toContain("Explain the answer plainly.");
       expect(sent?.message.content).toContain('"answer": "forty-two"');
-      expect(sent?.message.content).toContain("Do not call the `workflow` tool");
-      expect(sent?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sent?.message.content).not.toContain("Do not call the `workflow` tool");
+      expect(sent?.message.details).toMatchObject({
+        terminalDecision: { schema: "pi-workflows.terminal-decision.v1" },
+      });
+      expect(sent?.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
 
       await fs.writeFile(
         path.join(dir, "next.workflow.ts"),
@@ -2582,6 +3027,8 @@ export default defineWorkflow({
       });
       await harness.emitAsync("session_start");
       await harness.command.handler("mini-present", harness.ctx);
+      await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
+      await harness.emitAsync("agent_settled");
       await waitFor(() =>
         harness.sentMessages.some(
           (entry) => entry.message.customType === "pi-workflows-presentation",
@@ -2607,6 +3054,8 @@ export default defineWorkflow({
 
   it("drives the controller command through its lifecycle", { timeout: 20_000 }, async () => {
     const cwd = await makeTempDir("pi-workflows-ext-ctlcmd");
+    const runsDir = await makeTempDir("pi-workflows-ext-ctlcmd-runs");
+    vi.stubEnv("HOME", runsDir);
     try {
       await writeControllerWithChild(cwd);
       const harness = makeHarness({ cwd, respond: () => {} });
@@ -2625,6 +3074,24 @@ export default defineWorkflow({
       expect(harness.notifications.at(-1)).toContain("Requested deletion");
       await command?.handler("start", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("workers started");
+      await waitFor(() =>
+        listWorkflowRuns({ databasePath: workflowStateDatabasePath(runsDir) }).some(
+          (run) => run.state.workflowName === "child" && run.state.status === "completed",
+        ),
+      );
+      const child = listWorkflowRuns({
+        databasePath: workflowStateDatabasePath(runsDir),
+      }).find((run) => run.state.workflowName === "child" && run.state.status === "completed");
+      if (child === undefined) throw new Error("Controller child did not complete");
+      const store = new SqliteControllerStore(workflowStateDatabasePath(runsDir), {
+        readOnly: true,
+        projectPath: cwd,
+      });
+      try {
+        expect(store.listWorkflowTurnIntents({ runId: child.runId })).toHaveLength(0);
+      } finally {
+        store.close();
+      }
       await command?.handler("stop", harness.ctx);
       expect(harness.notifications.at(-1)).toContain("workers stopped");
       await command?.handler("bogus", harness.ctx);
@@ -3117,11 +3584,14 @@ export default defineWorkflow({
       await workflow?.handler("cancel", harness.ctx);
       await waitFor(() => harness.notifications.some((note) => note.includes("cancelled")));
       await harness.emitAsync("agent_settled");
-      expect(
-        harness.sentMessages.filter(
-          (entry) => entry.message.customType === "pi-workflows-deferred-turn",
-        ),
-      ).toHaveLength(0);
+      const cancellationTurns = harness.sentMessages.filter(
+        (entry) => entry.message.customType === "pi-workflows-deferred-turn",
+      );
+      expect(cancellationTurns).toHaveLength(1);
+      expect(cancellationTurns[0]?.message.details).toMatchObject({
+        cause: "cancelled",
+        terminalDecision: { schema: "pi-workflows.terminal-decision.v1" },
+      });
       await harness.emitAsync("session_shutdown");
     } finally {
       vi.unstubAllEnvs();

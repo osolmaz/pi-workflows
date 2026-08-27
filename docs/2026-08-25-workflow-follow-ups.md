@@ -6,7 +6,7 @@ date: 2026-08-25
 
 # Continue normal work after a workflow finishes
 
-A workflow can save several normal user prompts while it runs. Pi Workflows sends them in order only after the workflow is officially terminal and its final response has settled. The completed workflow stays terminal and does not enter its start node again.
+A workflow can save several normal user prompts while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its one terminal decision intent is resolved, and its final-response barrier has settled. The completed workflow stays terminal and does not enter its start node again.
 
 Follow-up prompts are separate from workflow settings. JSON Patch changes future workflow behavior. Follow-up actions create later normal user turns.
 
@@ -66,7 +66,7 @@ Prompts keep database acceptance order. Several user messages can therefore add 
 - Running, paused, parked, and waiting workflows accept new prompts.
 - Pause and park keep prompts queued.
 - A checkpoint continuation takes the queued prompts with it in the same transaction that creates the new run.
-- Successful completion records the terminal run before prompts can become ready.
+- Successful completion records the terminal run and terminal decision intent before prompts can be delivered.
 - Failed, timed-out, and cancelled workflows cancel every unsent prompt.
 - A terminal workflow rejects new prompts. Repeating an earlier request ID can still return its first result.
 
@@ -81,15 +81,15 @@ Each run saves one final-response state:
 - `settled`: the active session branch contains the presentation message and its completed assistant response;
 - `unavailable`: the extension recorded a definite timeout, failure, or restart gap.
 
-Successful completion changes queued prompts to `pending_presentation` when a final response is required. It changes them directly to `ready` when no final response is required. A settled or unavailable presentation changes pending prompts to ready.
+Successful completion changes queued prompts to `pending_presentation` when a presentation prompt is present. It changes them directly to `ready` when no presentation prompt is present. A settled or unavailable presentation changes pending prompts to ready. Ready prompts still wait while the run's terminal decision intent is unresolved.
 
-The extension includes the run ID in documented presentation-message details. On restart, it scans the active durable branch for the presentation message and completed assistant response. It saves the observed entry IDs. It does not treat an in-memory event alone as proof.
+The extension includes the run ID in documented presentation-message details. On restart, it scans the active durable branch for the presentation message and completed assistant response. It also recovers the terminal intent before follow-up delivery. It saves observed entry IDs and does not treat an in-memory event alone as proof.
 
 ## Delivery
 
 The follow-up coordinator handles one prompt at a time:
 
-1. Wait for terminal workflow state and a completed final-response barrier.
+1. Wait for terminal workflow state, a resolved terminal decision intent, and a completed final-response barrier.
 2. Wait for the target session to be idle and have no active workflow.
 3. Claim the first ready prompt with a lease.
 4. Scan the active session branch for its stable follow-up ID.
@@ -100,7 +100,9 @@ The follow-up coordinator handles one prompt at a time:
 
 `pi.sendUserMessage` returns no message ID. Branch evidence is required after a new send and after restart.
 
-The follow-up message is a normal user message. It can start normal work or a different workflow. It cannot resume or reactivate the completed workflow.
+The follow-up message is a normal user message. It can start normal work or a different workflow. It cannot resume or reactivate the completed workflow. A `restart` selected from the terminal decision is a separate immutable workflow run, not a follow-up prompt.
+
+Follow-up storage contains only prompts explicitly queued through this feature. Terminal restart does not find, copy, hash, or store an original user message. Conversation history remains owned by Pi.
 
 ## Failure handling
 

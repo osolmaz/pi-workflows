@@ -11,7 +11,7 @@ const inputSchema = Type.Unknown({
   description: "Checkpoint answer for answer; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
-  description: "Run id; optional for status, cancel, and answer",
+  description: "Run id; required for restart and optional for status, cancel, and answer",
 });
 const stepSchema = Type.String({
   description: "Workflow step id; required when action is update or submit",
@@ -67,6 +67,13 @@ export const WorkflowActionSchemas = {
       action: Type.Literal("start"),
       workflow: workflowSchema,
       input: Type.Optional(inputSchema),
+    },
+    noExtraProperties,
+  ),
+  restart: Type.Object(
+    {
+      action: Type.Literal("restart"),
+      runId: runIdSchema,
     },
     noExtraProperties,
   ),
@@ -154,6 +161,7 @@ type ToolInputParser<Output> = (value: unknown) => Output;
 const workflowInputParsers = {
   list: (value) => parseToolInput(WorkflowActionSchemas.list, value, "workflow"),
   start: (value) => parseToolInput(WorkflowActionSchemas.start, value, "workflow"),
+  restart: (value) => parseToolInput(WorkflowActionSchemas.restart, value, "workflow"),
   status: (value) => parseToolInput(WorkflowActionSchemas.status, value, "workflow"),
   pause: (value) => parseToolInput(WorkflowActionSchemas.pause, value, "workflow"),
   resume: (value) => parseToolInput(WorkflowActionSchemas.resume, value, "workflow"),

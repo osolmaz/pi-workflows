@@ -380,6 +380,22 @@ export default defineWorkflow({
 });
 `;
 
+const TERMINAL_RESTART_INPUT = {
+  task: "Preserve this exact terminal restart input.",
+  nested: { enabled: true, values: [1, 2, 3] },
+};
+
+const TERMINAL_RESTART_E2E_WORKFLOW = `import { compute, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "terminal-restart-e2e",
+  maxSteps: 1,
+  startAt: "loop",
+  nodes: { loop: compute({ run: ({ input }) => input }) },
+  edges: [{ from: "loop", to: "loop" }],
+});
+`;
+
 const COMMAND_BATCH_E2E_WORKFLOW = `import { action, compute, defineWorkflow, runCommandBatch } from "@osolmaz/pi-workflows";
 
 export default defineWorkflow({
@@ -705,13 +721,37 @@ describe.sequential("pi-workflows end to end", () => {
         ) {
           return { kind: "text", text: SANITY_PLAIN_RESPONSE };
         }
-        if (lastUserText.includes("Presentation instructions:")) {
+        if (
+          lastUserText.includes("Presentation instructions:") ||
+          lastUserText.includes("Workflow presentation instructions:")
+        ) {
           return { kind: "text", text: "Implemented the boring, proven design." };
         }
-        if (lastUserText.includes("Workflow post-start-crash-e2e ended with state failed")) {
+        if (
+          lastRole !== "tool" &&
+          lastUserText.includes('"workflowName": "terminal-restart-e2e"')
+        ) {
+          const runId = lastUserText.match(/"runId": "([^"]+)"/u)?.[1] ?? "";
+          const restartCount = Number(lastUserText.match(/"count": (\d+)/u)?.[1] ?? "-1");
+          if (restartCount === 0) {
+            return {
+              kind: "tool",
+              toolName: "workflow",
+              args: { action: "restart", runId },
+            };
+          }
+          return { kind: "text", text: "Repeated terminal outcome observed; stopping." };
+        }
+        if (
+          lastUserText.includes('"workflowName": "post-start-crash-e2e"') &&
+          lastUserText.includes('"terminalState": "failed"')
+        ) {
           return { kind: "text", text: "Post-start crash observed." };
         }
-        if (lastUserText.includes("Workflow self-cancel-e2e ended with state cancelled")) {
+        if (
+          lastUserText.includes('"workflowName": "self-cancel-e2e"') &&
+          lastUserText.includes('"terminalState": "cancelled"')
+        ) {
           return { kind: "text", text: "Self-cancellation observed." };
         }
         if (
@@ -741,6 +781,17 @@ describe.sequential("pi-workflows end to end", () => {
             kind: "tool",
             toolName: "workflow",
             args: { action: "start", workflow: "self-cancel-e2e", input: {} },
+          };
+        }
+        if (lastRole === "user" && lastUserText === "Start the terminal restart fixture now.") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "start",
+              workflow: "terminal-restart-e2e",
+              input: TERMINAL_RESTART_INPUT,
+            },
           };
         }
         if (lastRole === "user" && lastUserText === "Start the built-in monitor now.") {
@@ -1151,6 +1202,11 @@ describe.sequential("pi-workflows end to end", () => {
       "utf8",
     );
     await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "terminal-restart-e2e.workflow.ts"),
+      TERMINAL_RESTART_E2E_WORKFLOW,
+      "utf8",
+    );
+    await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "command-batch-e2e.workflow.ts"),
       COMMAND_BATCH_E2E_WORKFLOW,
       "utf8",
@@ -1509,6 +1565,132 @@ describe.sequential("pi-workflows end to end", () => {
     }
   }, 60_000);
 
+  it("restarts exact maxSteps input once and reloads without duplicate turns or runs", async () => {
+    await waitForPiIdle(pi);
+    const requestOffset = mock.requests.length;
+    pi.send({
+      id: "terminal-restart",
+      type: "prompt",
+      message: "Start the terminal restart fixture now.",
+    });
+
+    await waitForCondition(
+      () =>
+        listWorkflowRuns({ databasePath: runsDir }).filter(
+          (candidate) =>
+            candidate.state.workflowName === "terminal-restart-e2e" &&
+            candidate.state.status === "failed",
+        ).length === 2,
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-30).join("\n")}`,
+      30_000,
+    );
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes("Repeated terminal outcome observed")),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-30).join("\n")}`,
+      30_000,
+    );
+    await waitForPiIdle(pi);
+
+    const terminalDecisionRequests = () =>
+      mock.requests.slice(requestOffset).filter((request) => {
+        const last = request.messages.at(-1);
+        return (
+          last?.role === "user" &&
+          contentText(last.content).includes('"workflowName": "terminal-restart-e2e"')
+        );
+      });
+    expect(terminalDecisionRequests()).toHaveLength(2);
+
+    const restartCallIds = new Set<string>();
+    for (const request of mock.requests.slice(requestOffset)) {
+      for (const message of request.messages) {
+        for (const call of message.tool_calls ?? []) {
+          if (call === null || typeof call !== "object") continue;
+          const candidate = call as { id?: unknown; function?: unknown };
+          if (typeof candidate.id !== "string") continue;
+          const fn = candidate.function;
+          if (fn === null || typeof fn !== "object") continue;
+          const args = (fn as { arguments?: unknown }).arguments;
+          if (typeof args !== "string") continue;
+          try {
+            if ((JSON.parse(args) as { action?: unknown }).action === "restart") {
+              restartCallIds.add(candidate.id);
+            }
+          } catch {
+            // Ignore partial or unrelated model tool arguments.
+          }
+        }
+      }
+    }
+    expect(restartCallIds.size).toBe(1);
+
+    const store = new SqliteControllerStore(controllerFile, {
+      readOnly: true,
+      projectPath: projectDir,
+    });
+    try {
+      const records = store
+        .listWorkflowRuns()
+        .filter((record) => record.workflowName === "terminal-restart-e2e");
+      expect(records).toHaveLength(2);
+      const original = records.find(
+        (record) =>
+          !(
+            record.launchOptions !== null &&
+            typeof record.launchOptions === "object" &&
+            "restartLineage" in record.launchOptions
+          ),
+      );
+      const restarted = records.find(
+        (record) =>
+          record.launchOptions !== null &&
+          typeof record.launchOptions === "object" &&
+          "restartLineage" in record.launchOptions,
+      );
+      expect(original).toMatchObject({ input: TERMINAL_RESTART_INPUT, status: "done" });
+      expect(restarted).toMatchObject({
+        input: TERMINAL_RESTART_INPUT,
+        status: "done",
+        launchOptions: {
+          restartLineage: {
+            schema: "pi-workflows.restart-lineage.v1",
+            rootRunId: original?.runId,
+            parentRunId: original?.runId,
+            restartNumber: 1,
+          },
+          terminalSelection: {
+            schema: "pi-workflows.terminal-selection.v1",
+            sourceRunId: original?.runId,
+          },
+        },
+      });
+      for (const record of records) {
+        expect(store.listWorkflowTurnIntents({ runId: record.runId })).toMatchObject([
+          { resolution: "fallback", resolvedAt: expect.any(String) },
+        ]);
+      }
+    } finally {
+      store.close();
+    }
+
+    const terminalTurnsBeforeReload = terminalDecisionRequests().length;
+    pi.send({ id: "terminal-restart-reload", type: "prompt", message: "/reload" });
+    await waitForCondition(
+      () => pi.stdoutLines.some((line) => line.includes('"id":"terminal-restart-reload"')),
+      () => `${pi.stderr()}\n${pi.stdoutLines.slice(-30).join("\n")}`,
+      30_000,
+    );
+    await waitForPiIdle(pi);
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+
+    expect(terminalDecisionRequests()).toHaveLength(terminalTurnsBeforeReload);
+    expect(
+      listWorkflowRuns({ databasePath: runsDir }).filter(
+        (candidate) => candidate.state.workflowName === "terminal-restart-e2e",
+      ),
+    ).toHaveLength(2);
+  }, 90_000);
+
   it("runs a directly imported child in one real Pi workflow run", async () => {
     pi.send({
       id: "wf-composed",
@@ -1725,7 +1907,8 @@ describe.sequential("pi-workflows end to end", () => {
         mock.requests.some((request) =>
           request.messages.some(
             (message) =>
-              JSON.stringify(message.content)?.includes("Presentation instructions:") === true,
+              JSON.stringify(message.content)?.includes("Workflow presentation instructions:") ===
+              true,
           ),
         ) && pi.stdoutLines.some((line) => line.includes("Implemented the boring, proven design.")),
       () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`,

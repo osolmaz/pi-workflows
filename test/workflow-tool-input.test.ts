@@ -18,6 +18,7 @@ describe("workflow tool input", () => {
     { action: "list", offset: 10 },
     { action: "start", workflow: "monitor" },
     { action: "start", workflow: "monitor", input: { task: "check" } },
+    { action: "restart", runId: "run-1" },
     { action: "status" },
     { action: "status", runId: "run-1" },
     { action: "pause" },
@@ -43,6 +44,7 @@ describe("workflow tool input", () => {
   it.each([
     { action: "unknown" },
     { action: "start" },
+    { action: "restart" },
     { action: "answer" },
     { action: "change-settings", patch: { op: "replace" } },
     { action: "queue-follow-up", prompt: "" },
@@ -87,6 +89,7 @@ describe("workflow tool input", () => {
           enum: [
             "list",
             "start",
+            "restart",
             "status",
             "pause",
             "resume",
