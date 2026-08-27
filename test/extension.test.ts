@@ -1815,7 +1815,7 @@ export default defineWorkflow({
         readWorkflowRun(sourceRunId, { databasePath: workflowStateDatabasePath(runsDir) }),
       ).toEqual(sourceBefore);
 
-      await harness.emitAsync("agent_settled");
+      await Promise.all([harness.emitAsync("agent_settled"), harness.emitAsync("agent_settled")]);
       await waitFor(() =>
         harness.notifications.some(
           (note) => note.includes(restartedRunId) && note.includes("maxSteps=1"),

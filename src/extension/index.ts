@@ -590,6 +590,9 @@ export default function piWorkflows(pi: ExtensionAPI) {
   let syncArmed = false;
   let runSyncTimer: ReturnType<typeof setInterval> | null = null;
   let activationRecovery: ((ctx: ExtensionContext) => void) | undefined;
+  // Agent settlement and polling can observe the same prepared row. Share
+  // one activation so this runner cannot replace its own live queue claim.
+  const activationInFlight = new Map<string, Promise<boolean>>();
   let decisionRecoveryTimer: ReturnType<typeof setInterval> | null = null;
   let decisionRecoveryActive = false;
   let turnCoordinator: DeferredTurnCoordinator;
@@ -3305,7 +3308,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
     );
   };
 
-  const activatePreparedLaunch = async (
+  const activatePreparedLaunchOnce = async (
     ctx: ExtensionContext,
     prepared: WorkflowRunQueueRecord,
   ): Promise<boolean> => {
@@ -3344,6 +3347,14 @@ export default function piWorkflows(pi: ExtensionAPI) {
       if (launchOptions.parentRunId !== undefined) lastWaitingRunId = null;
       return true;
     } catch (error) {
+      if (isClaimLostError(error)) {
+        recordRunEvent({
+          runId: claimed.runId,
+          workflowRef: claimed.workflowName,
+          type: "claim_lost",
+        });
+        return false;
+      }
       const safe = safeLaunchError(error);
       queue.failWorkflowRun({
         runId: claimed.runId,
@@ -3388,6 +3399,21 @@ export default function piWorkflows(pi: ExtensionAPI) {
       runSyncPass(ctx);
       return false;
     }
+  };
+
+  const activatePreparedLaunch = (
+    ctx: ExtensionContext,
+    prepared: WorkflowRunQueueRecord,
+  ): Promise<boolean> => {
+    const pending = activationInFlight.get(prepared.runId);
+    if (pending !== undefined) return pending;
+    const activation = activatePreparedLaunchOnce(ctx, prepared).finally(() => {
+      if (activationInFlight.get(prepared.runId) === activation) {
+        activationInFlight.delete(prepared.runId);
+      }
+    });
+    activationInFlight.set(prepared.runId, activation);
+    return activation;
   };
 
   activationRecovery = (ctx) => {
