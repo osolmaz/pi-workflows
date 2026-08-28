@@ -78,6 +78,8 @@ pub enum ServerMessage {
         graph_steps: Option<Vec<Value>>,
         #[serde(rename = "takenTransitions", skip_serializing_if = "Option::is_none")]
         taken_transitions: Option<Vec<String>>,
+        #[serde(rename = "replayCheckpoint", skip_serializing_if = "Option::is_none")]
+        replay_checkpoint: Option<Value>,
     },
     Artifact {
         #[serde(rename = "runId")]
@@ -97,6 +99,7 @@ pub enum ServerMessage {
 pub enum PageKind {
     Steps,
     Trace,
+    TraceAtStep,
     SessionEntries,
     SessionEvents,
     Settings,

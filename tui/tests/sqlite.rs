@@ -469,6 +469,7 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
     let (_temp, database) = fixture();
     let mut connection = Connection::open(&database).unwrap();
     let transaction = connection.transaction().unwrap();
+    let event_payload = blob(&transaction, &json!({"scope": "node", "payload": {}}));
     for index in 0..300_u64 {
         let attempt_id = format!("attempt-{index}");
         transaction
@@ -481,6 +482,12 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
             .execute(
                 "INSERT INTO run_steps(run_id, step_index, attempt_id) VALUES ('run-1', ?1, ?2)",
                 params![index, attempt_id],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO events(resource_id, resource_revision, event_type, payload_hash, recorded_at) VALUES ('resource-1', ?1, 'node_finished', ?2, ?3)",
+                params![index + 2, event_payload, index as i64 + 1],
             )
             .unwrap();
     }
@@ -513,6 +520,12 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
         "attempt-299"
     );
     assert_eq!(last.items[255]["attemptId"], json!("attempt-299"));
+
+    let (_, trace) = reader
+        .read_page("run-1", PageKind::TraceAtStep, 299)
+        .unwrap();
+    assert_eq!(trace.total, 301);
+    assert!(trace.items.iter().any(|event| event["seq"] == json!(301)));
 }
 
 #[test]
@@ -521,17 +534,24 @@ fn reads_bounded_session_pages_by_run_sequence() {
     let mut connection = Connection::open(&database).unwrap();
     connection
         .execute(
-            "INSERT INTO session_segments(segment_id, run_id, capture_key, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', NULL, 'complete', 300, 0, 1)",
+            "INSERT INTO session_segments(segment_id, run_id, capture_key, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', NULL, 'complete', 300, 300, 1)",
             [],
         )
         .unwrap();
     let transaction = connection.transaction().unwrap();
+    let event_payload = blob(&transaction, &json!({}));
     for sequence in 1..=300_u64 {
         let hash = blob(&transaction, &json!({"sequence": sequence}));
         transaction
             .execute(
                 "INSERT INTO session_entries(segment_id, run_id, entry_seq, run_seq, entry_id, entry_hash, recorded_at) VALUES ('s1', 'run-1', ?1, ?1, ?2, ?3, ?1)",
                 params![sequence, format!("entry-{sequence}"), hash],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO session_events(segment_id, run_id, event_seq, run_seq, event_type, node_id, attempt_id, turn_id, payload_hash, recorded_at) VALUES ('s1', 'run-1', ?1, ?1, 'turn_started', 'work', 'attempt', ?2, ?3, ?1)",
+                params![sequence, format!("turn-{sequence}"), event_payload],
             )
             .unwrap();
     }
@@ -552,6 +572,19 @@ fn reads_bounded_session_pages_by_run_sequence() {
     assert_eq!(last.start, 44);
     assert_eq!(last.items.len(), 256);
     assert_eq!(last.items[255]["seq"], json!(300));
+
+    let (_, events) = reader
+        .read_page("run-1", PageKind::SessionEvents, 299)
+        .unwrap();
+    assert_eq!(events.start, 44);
+    assert_eq!(events.items.len(), 256);
+    assert_eq!(
+        events
+            .replay_checkpoint
+            .as_ref()
+            .and_then(|value| value.get("throughSeq")),
+        Some(&json!(44))
+    );
 }
 
 #[test]

@@ -115,7 +115,7 @@ A client asks for a page with `fetch_page`:
 }
 ```
 
-`kind` is one of `steps`, `trace`, `session_entries`, `session_events`, `settings`, `follow_ups`, or `updates`. The server answers with `run_page`:
+`kind` is one of `steps`, `trace`, `trace_at_step`, `session_entries`, `session_events`, `settings`, `follow_ups`, or `updates`. `trace_at_step` uses a step index as its cursor and returns the trace page around that step's timestamp. The server answers with `run_page`:
 
 ```json
 {
@@ -130,7 +130,7 @@ A client asks for a page with `fetch_page`:
 }
 ```
 
-Page reads use bounded ranges. The response echoes the requested `cursor` and carries the presentation revision read in the same SQLite snapshot as its rows. A client ignores an older response when a newer cursor is pending. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
+Page reads use bounded ranges. The response echoes the requested `cursor` and carries the presentation revision read in the same SQLite snapshot as its rows. A client ignores an older response when a newer cursor is pending. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. A historical session-event page can return `replayCheckpoint`. The checkpoint contains only active message and tool state at the page boundary. It lets the client continue the temporal reducer without loading predecessor event pages. The client also requests the related entry page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
 
 ## Messages
 

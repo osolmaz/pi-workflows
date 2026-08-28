@@ -43,6 +43,7 @@ pub struct RemoteView {
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
+    pub session_replay_checkpoint: Option<Value>,
     pub settings_scopes: Vec<Value>,
     pub settings_start: u64,
     pub settings_total: u64,
@@ -135,6 +136,10 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let session_capture = raw.pointer("/session/capture").cloned();
+    let session_replay_checkpoint = raw
+        .pointer("/session/replayCheckpoint")
+        .cloned()
+        .filter(|value| !value.is_null());
     let settings_scopes = raw
         .get("settingsScopes")
         .and_then(Value::as_array)
@@ -202,6 +207,7 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         session_events_malformed,
         session_events_torn_tail,
         session_capture,
+        session_replay_checkpoint,
         settings_scopes,
         settings_start,
         settings_total,
@@ -670,6 +676,7 @@ async fn run_socket(
                         graph_cursor,
                         graph_steps,
                         taken_transitions,
+                        replay_checkpoint,
                     } => {
                         let page_key = (run_id.clone(), kind);
                         let mut state = shared.lock().unwrap();
@@ -688,7 +695,7 @@ async fn run_socket(
                             } else {
                                 let pointer = match kind {
                                     PageKind::Steps => "/state/steps",
-                                    PageKind::Trace => "/tracePage",
+                                    PageKind::Trace | PageKind::TraceAtStep => "/tracePage",
                                     PageKind::SessionEntries => "/session/entryPage",
                                     PageKind::SessionEvents => "/session/eventPage",
                                     PageKind::Settings => "/settingsScopes",
@@ -728,6 +735,7 @@ async fn run_socket(
                                             view["updateTotal"] = serde_json::json!(total);
                                         }
                                         PageKind::Trace
+                                        | PageKind::TraceAtStep
                                         | PageKind::SessionEntries
                                         | PageKind::SessionEvents => {
                                             *page = serde_json::json!({
@@ -736,6 +744,17 @@ async fn run_socket(
                                                 "total": total,
                                                 "items": items,
                                             });
+                                        }
+                                    }
+                                    if kind == PageKind::SessionEvents {
+                                        if let Some(session) = view
+                                            .get_mut("session")
+                                            .and_then(Value::as_object_mut)
+                                        {
+                                            session.insert(
+                                                "replayCheckpoint".to_string(),
+                                                replay_checkpoint.unwrap_or(Value::Null),
+                                            );
                                         }
                                     }
                                     *generation = (*generation).wrapping_add(1);

@@ -1,6 +1,7 @@
 //! Read-only access to the canonical Pi Workflows SQLite database.
 
 use crate::protocol::{PageKind, PatchOp};
+use crate::session::SessionReplayIndex;
 use crate::state::types::{
     DefinitionSnapshot, Manifest, ManifestPaths, RunState, SessionBinding, SessionCapture,
     SessionEntryRecord, SessionEventRecord, TraceEvent, DEFINITION_SNAPSHOT_SCHEMA,
@@ -36,6 +37,7 @@ type LoadedSession = (
 pub struct ProjectionCursors {
     pub step: Option<u64>,
     pub trace: Option<u64>,
+    pub trace_step: Option<u64>,
     pub session_entry: Option<u64>,
     pub session_event: Option<u64>,
     pub settings: Option<u64>,
@@ -52,6 +54,7 @@ type LoadedSessionWindow = (
     u64,
     u64,
     Option<SessionCapture>,
+    Option<Value>,
 );
 
 #[derive(Debug, Clone)]
@@ -75,6 +78,7 @@ pub struct LoadedRun {
     pub session_event_start: u64,
     pub session_event_total: u64,
     pub session_capture: Option<SessionCapture>,
+    pub session_replay_checkpoint: Option<Value>,
     pub settings_scopes: Vec<Value>,
     pub settings_start: u64,
     pub settings_total: u64,
@@ -119,6 +123,7 @@ pub struct ProjectionPage {
     pub graph_cursor: Option<u64>,
     pub graph_steps: Option<Vec<crate::state::types::StepRecord>>,
     pub taken_transitions: Option<Vec<String>>,
+    pub replay_checkpoint: Option<Value>,
 }
 
 pub enum ViewerDeltaRead {
@@ -174,8 +179,13 @@ impl ProjectionReader {
         )?;
         let page = match kind {
             PageKind::Steps => read_step_page(&transaction, run_id, Some(cursor))?,
-            PageKind::Trace => {
-                let (items, start, total) = read_trace_window(&transaction, run_id, Some(cursor))?;
+            PageKind::Trace | PageKind::TraceAtStep => {
+                let trace_cursor = if kind == PageKind::TraceAtStep {
+                    trace_cursor_for_step(&transaction, run_id, cursor)?
+                } else {
+                    Some(cursor)
+                };
+                let (items, start, total) = read_trace_window(&transaction, run_id, trace_cursor)?;
                 ProjectionPage {
                     start,
                     total,
@@ -186,6 +196,7 @@ impl ProjectionReader {
                     graph_cursor: None,
                     graph_steps: None,
                     taken_transitions: None,
+                    replay_checkpoint: None,
                 }
             }
             PageKind::SessionEntries => {
@@ -351,7 +362,13 @@ fn read_run_from_connection(
         ),
     };
     let (trace, trace_start, trace_total) = match cursors {
-        Some(cursors) => read_trace_window(connection, run_id, cursors.trace)?,
+        Some(cursors) => {
+            let trace_cursor = match cursors.trace_step {
+                Some(step) => trace_cursor_for_step(connection, run_id, step)?,
+                None => cursors.trace,
+            };
+            read_trace_window(connection, run_id, trace_cursor)?
+        }
         None => {
             let trace = read_trace(connection, run_id)?;
             let total = trace.len() as u64;
@@ -367,6 +384,7 @@ fn read_run_from_connection(
         session_event_start,
         session_event_total,
         session_capture,
+        session_replay_checkpoint,
     ) = match cursors {
         Some(cursors) => read_session_window(
             connection,
@@ -387,6 +405,7 @@ fn read_run_from_connection(
                 0,
                 event_total,
                 capture,
+                None,
             )
         }
     };
@@ -444,6 +463,7 @@ fn read_run_from_connection(
         session_event_start,
         session_event_total,
         session_capture,
+        session_replay_checkpoint,
         settings_scopes: settings_page.items,
         settings_start: settings_page.start,
         settings_total: settings_page.total,
@@ -1527,6 +1547,35 @@ fn read_trace_window(
     Ok((events, start, total))
 }
 
+fn trace_cursor_for_step(
+    connection: &Connection,
+    run_id: &str,
+    step_index: u64,
+) -> Result<Option<u64>> {
+    let timestamp = connection
+        .query_row(
+            "SELECT COALESCE(a.finished_at, a.started_at)
+             FROM run_steps s
+             JOIN node_attempts a ON a.attempt_id = s.attempt_id
+             WHERE s.run_id = ?1 AND s.step_index = ?2",
+            rusqlite::params![run_id, step_index],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(timestamp) = timestamp else {
+        return Ok(None);
+    };
+    let count: u64 = connection.query_row(
+        "SELECT count(*)
+         FROM events e JOIN runs r ON r.resource_id = e.resource_id
+         WHERE r.run_id = ?1 AND e.recorded_at <= ?2",
+        rusqlite::params![run_id, timestamp],
+        |row| row.get(0),
+    )?;
+    Ok(count.checked_sub(1))
+}
+
 fn read_session(connection: &Connection, run_id: &str) -> Result<LoadedSession> {
     let mut segments_statement = connection.prepare(
         "SELECT segment_id, binding_hash, status, entry_count, event_count,
@@ -1676,6 +1725,7 @@ fn read_step_page(
         graph_cursor: Some(graph_cursor),
         graph_steps: Some(read_graph_steps(connection, run_id, graph_cursor)?),
         taken_transitions: Some(read_taken_transitions(connection, run_id, graph_cursor)?),
+        replay_checkpoint: None,
     })
 }
 
@@ -1715,6 +1765,7 @@ fn read_session_entry_page(
         graph_cursor: None,
         graph_steps: None,
         taken_transitions: None,
+        replay_checkpoint: None,
     })
 }
 
@@ -1793,7 +1844,101 @@ fn read_session_event_page(
         graph_cursor: None,
         graph_steps: None,
         taken_transitions: None,
+        replay_checkpoint: session_replay_checkpoint(connection, run_id, start)?,
     })
+}
+
+fn read_session_events_range(
+    connection: &Connection,
+    run_id: &str,
+    start: u64,
+    limit: i64,
+) -> Result<Vec<SessionEventRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT e.event_type, e.node_id, e.attempt_id, e.turn_id,
+                e.message_id, e.tool_call_id, e.payload_hash, e.recorded_at,
+                s.step_index
+         FROM session_events e
+         LEFT JOIN run_steps s ON s.run_id = e.run_id AND s.attempt_id = e.attempt_id
+         WHERE e.run_id = ?1 AND e.run_seq > ?2
+         ORDER BY e.run_seq LIMIT ?3",
+    )?;
+    let rows = statement.query_map(rusqlite::params![run_id, start, limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<u64>>(8)?,
+        ))
+    })?;
+    let mut events = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let (
+            event_type,
+            node_id,
+            attempt_id,
+            turn_id,
+            message_id,
+            tool_call_id,
+            hash,
+            at,
+            step_index,
+        ) = row?;
+        let mut value = json!({
+            "seq": start + index as u64 + 1,
+            "at": timestamp(at),
+            "nodeId": node_id,
+            "attemptId": attempt_id,
+            "type": event_type,
+            "payload": read_json_blob(connection, &hash)?,
+        });
+        if let Some(step_index) = step_index {
+            value["stepIndex"] = json!(step_index);
+        }
+        if let Some(turn_id) = turn_id {
+            value["turnId"] = json!(turn_id);
+        }
+        if let Some(message_id) = message_id {
+            value["messageId"] = json!(message_id);
+        }
+        if let Some(tool_call_id) = tool_call_id {
+            value["toolCallId"] = json!(tool_call_id);
+        }
+        events.push(serde_json::from_value(value)?);
+    }
+    Ok(events)
+}
+
+fn session_replay_checkpoint(
+    connection: &Connection,
+    run_id: &str,
+    start: u64,
+) -> Result<Option<Value>> {
+    if start == 0 {
+        return Ok(None);
+    }
+    let prior = read_session_events_range(connection, run_id, 0, start as i64)?;
+    let mut state =
+        SessionReplayIndex::new(&[], &prior, VIEWER_PAGE_SIZE as usize).state_at_seq(start);
+    state
+        .messages
+        .retain(|message| message.status == "streaming");
+    let active_messages = state
+        .messages
+        .iter()
+        .map(|message| message.message_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    state.tools.retain(|tool| {
+        tool.status == "running" && active_messages.contains(tool.message_id.as_str())
+    });
+    state.settled_entry_ids.clear();
+    state.diagnostics = vec!["earlier session messages are outside this page".to_string()];
+    Ok(Some(serde_json::to_value(state)?))
 }
 
 fn read_session_window(
@@ -1820,7 +1965,7 @@ fn read_session_window(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     if segment_rows.is_empty() {
-        return Ok((None, Vec::new(), 0, 0, Vec::new(), 0, 0, None));
+        return Ok((None, Vec::new(), 0, 0, Vec::new(), 0, 0, None, None));
     }
 
     let mut binding = None;
@@ -1953,6 +2098,11 @@ fn read_session_window(
         event_start,
         event_total,
         Some(serde_json::from_value(capture)?),
+        if event_cursor.is_some() {
+            session_replay_checkpoint(connection, run_id, event_start)?
+        } else {
+            None
+        },
     ))
 }
 
@@ -1964,6 +2114,7 @@ fn projection_page(start: u64, total: u64, items: Vec<Value>) -> ProjectionPage 
         graph_cursor: None,
         graph_steps: None,
         taken_transitions: None,
+        replay_checkpoint: None,
     }
 }
 

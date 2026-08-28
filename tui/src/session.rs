@@ -592,6 +592,15 @@ pub fn reduce_session_events(
 }
 
 /// Viewer-only checkpoint and timestamp index for efficient temporal seeks.
+pub fn reduce_session_events_from_checkpoint(
+    entries: &[SessionEntryRecord],
+    events: &[SessionEventRecord],
+    through_seq: u64,
+    checkpoint: &TemporalSessionState,
+) -> TemporalSessionState {
+    fold_session_events(entries, events, through_seq, Some(checkpoint))
+}
+
 pub struct SessionReplayIndex<'a> {
     entries: &'a [SessionEntryRecord],
     events: &'a [SessionEventRecord],
