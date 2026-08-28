@@ -1,6 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../src/render/ansi.js";
+import { CharCanvas } from "../src/render/canvas.js";
 import { graphCardSize, renderGraphLines } from "../src/render/graph-render.js";
 import { expandEdges, layoutGraph } from "../src/render/graph.js";
 import type { LoadedWorkflowRun } from "../src/workflows/store.js";
@@ -167,6 +168,15 @@ describe("layoutGraph", () => {
     const layout = layoutGraph(BRANCH_SNAPSHOT);
     const labelled = layout.segments.filter((segment) => segment.label !== undefined);
     expect(labelled.map((segment) => segment.label).toSorted()).toEqual(["left", "right"]);
+  });
+});
+
+describe("CharCanvas", () => {
+  it("retains combining marks without consuming another cell", () => {
+    const canvas = new CharCanvas();
+    canvas.text(0, 0, "e\u0301");
+    expect(canvas.render((text) => text)).toEqual(["e\u0301"]);
+    expect(visibleWidth(canvas.render((text) => text)[0] ?? "")).toBe(1);
   });
 });
 

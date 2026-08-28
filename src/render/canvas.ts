@@ -128,7 +128,13 @@ export class CharCanvas {
     let cursor = x;
     for (const char of value) {
       const width = visibleWidth(char);
-      if (width === 0) continue;
+      if (width === 0) {
+        let anchor = cursor - 1;
+        while (row.get(anchor)?.char === "") anchor -= 1;
+        const cell = row.get(anchor);
+        if (cell !== undefined && cell.char !== " ") cell.char += char;
+        continue;
+      }
       if (char === " ") {
         if (preserveSpaces) row.set(cursor, { char, style });
       } else {
