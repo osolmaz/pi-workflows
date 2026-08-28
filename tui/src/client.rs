@@ -259,6 +259,25 @@ fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<(),
     Ok(())
 }
 
+fn accept_page_response(
+    desired: &mut HashMap<(String, PageKind), u64>,
+    submitted: &mut HashMap<(String, PageKind), u64>,
+    key: &(String, PageKind),
+    cursor: u64,
+) -> bool {
+    if submitted.get(key) == Some(&cursor) {
+        submitted.remove(key);
+    }
+    match desired.get(key) {
+        Some(desired_cursor) if *desired_cursor == cursor => {
+            desired.remove(key);
+            true
+        }
+        Some(_) => false,
+        None => true,
+    }
+}
+
 fn is_tail_page(page: &Value) -> bool {
     let Some(start) = page.get("start").and_then(Value::as_u64) else {
         return false;
@@ -546,7 +565,7 @@ async fn run_socket(
     let mut hello_received = false;
     let mut subscribed = HashSet::new();
     let mut submitted_artifacts = HashSet::new();
-    let mut submitted_pages = HashSet::new();
+    let mut submitted_pages = HashMap::new();
 
     loop {
         tokio::select! {
@@ -628,6 +647,7 @@ async fn run_socket(
                         run_id,
                         revision,
                         kind,
+                        cursor,
                         start,
                         total,
                         items,
@@ -636,10 +656,17 @@ async fn run_socket(
                         taken_transitions,
                     } => {
                         let page_key = (run_id.clone(), kind);
-                        submitted_pages.remove(&page_key);
                         let mut state = shared.lock().unwrap();
-                        state.page_requests.remove(&page_key);
-                        if let Some((current, generation, view)) = state.raw_views.get_mut(&run_id) {
+                        let accepted = accept_page_response(
+                            &mut state.page_requests,
+                            &mut submitted_pages,
+                            &page_key,
+                            cursor,
+                        );
+                        if accepted {
+                            if let Some((current, generation, view)) =
+                                state.raw_views.get_mut(&run_id)
+                            {
                             if revision != *current {
                                 resubscribe = Some(run_id);
                             } else {
@@ -702,6 +729,7 @@ async fn run_socket(
                             }
                         }
                     }
+                    }
                     ServerMessage::Artifact { run_id, path, content } => {
                         let key = (run_id, path);
                         submitted_artifacts.remove(&key);
@@ -762,7 +790,7 @@ async fn reconcile_desired(
     shared: &Arc<Mutex<Shared>>,
     subscribed: &mut HashSet<String>,
     submitted_artifacts: &mut HashSet<(String, String)>,
-    submitted_pages: &mut HashSet<(String, PageKind)>,
+    submitted_pages: &mut HashMap<(String, PageKind), u64>,
 ) -> Result<()> {
     let (desired, artifacts, pages) = {
         let state = shared.lock().unwrap();
@@ -792,7 +820,7 @@ async fn reconcile_desired(
         )
         .await?;
         subscribed.remove(&run_id);
-        submitted_pages.retain(|(candidate, _)| candidate != &run_id);
+        submitted_pages.retain(|(candidate, _), _| candidate != &run_id);
         submitted_artifacts.retain(|(candidate, _)| candidate != &run_id);
     }
     for run_id in additions {
@@ -829,7 +857,8 @@ async fn reconcile_desired(
     }
     for ((run_id, kind), cursor) in pages {
         let key = (run_id.clone(), kind);
-        if submitted_pages.insert(key) {
+        if submitted_pages.get(&key) != Some(&cursor) {
+            submitted_pages.insert(key, cursor);
             send_message(
                 sink,
                 &ClientMessage::FetchPage {
@@ -926,6 +955,31 @@ mod tests {
         let before = middle.clone();
         apply_target_patches(&mut middle, &[entry_tail_target()]).unwrap();
         assert_eq!(middle, before);
+    }
+
+    #[test]
+    fn an_older_response_cannot_discard_a_newer_page_request() {
+        let key = ("run-1".to_string(), PageKind::SessionEvents);
+        let mut desired = HashMap::from([(key.clone(), 900)]);
+        let mut submitted = HashMap::from([(key.clone(), 900)]);
+
+        assert!(!accept_page_response(
+            &mut desired,
+            &mut submitted,
+            &key,
+            800,
+        ));
+        assert_eq!(desired.get(&key), Some(&900));
+        assert_eq!(submitted.get(&key), Some(&900));
+
+        assert!(accept_page_response(
+            &mut desired,
+            &mut submitted,
+            &key,
+            900,
+        ));
+        assert!(!desired.contains_key(&key));
+        assert!(!submitted.contains_key(&key));
     }
 
     #[test]

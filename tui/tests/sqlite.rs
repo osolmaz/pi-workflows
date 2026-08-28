@@ -169,6 +169,38 @@ fn idle_refresh_reads_only_data_version_and_never_loads_payloads() {
 }
 
 #[test]
+fn page_revision_comes_from_the_same_sqlite_snapshot_as_its_rows() {
+    let (_temp, database) = fixture();
+    let mut source = RunSource::new(&database).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let entry_hash = blob(&connection, &json!({"id": "entry-1", "type": "message"}));
+    connection
+        .execute(
+            "INSERT INTO session_segments(segment_id, run_id, capture_key, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', NULL, 'recording', 1, 0, 1)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_entries(segment_id, run_id, entry_seq, run_seq, entry_id, entry_hash, recorded_at) VALUES ('s1', 'run-1', 1, 1, 'entry-1', ?1, 1)",
+            [entry_hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE viewer_runs SET presentation_revision = 2, updated_at = 2 WHERE run_id = 'run-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (revision, page) = source.page("run-1", PageKind::SessionEntries, 0).unwrap();
+    assert_eq!(revision, 2);
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+}
+
+#[test]
 fn applies_a_direct_tail_delta_without_reloading_the_selected_run() {
     let (_temp, database) = fixture();
     let mut source = RunSource::new(&database).unwrap();
@@ -423,7 +455,7 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
     assert_eq!(first.graph_steps.len(), 1);
     assert_eq!(first.graph_steps[0].attempt_id, "attempt-0");
 
-    let last = reader.read_page("run-1", PageKind::Steps, 299).unwrap();
+    let (_, last) = reader.read_page("run-1", PageKind::Steps, 299).unwrap();
     assert_eq!(last.start, 44);
     assert_eq!(last.total, 300);
     assert_eq!(last.items.len(), 256);
@@ -458,7 +490,7 @@ fn reads_bounded_session_pages_by_run_sequence() {
     transaction.commit().unwrap();
 
     let reader = ProjectionReader::open(&database).unwrap();
-    let first = reader
+    let (_, first) = reader
         .read_page("run-1", PageKind::SessionEntries, 0)
         .unwrap();
     assert_eq!(first.start, 0);
@@ -466,7 +498,7 @@ fn reads_bounded_session_pages_by_run_sequence() {
     assert_eq!(first.items.len(), 256);
     assert_eq!(first.items[0]["seq"], json!(1));
 
-    let last = reader
+    let (_, last) = reader
         .read_page("run-1", PageKind::SessionEntries, 299)
         .unwrap();
     assert_eq!(last.start, 44);

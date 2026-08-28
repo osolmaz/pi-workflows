@@ -68,6 +68,7 @@ pub enum ServerMessage {
         run_id: String,
         revision: u64,
         kind: PageKind,
+        cursor: u64,
         start: u64,
         total: u64,
         items: Vec<Value>,

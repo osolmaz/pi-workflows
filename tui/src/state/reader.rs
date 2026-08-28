@@ -157,13 +157,23 @@ impl ProjectionReader {
         read_run_from_connection(&self.connection, run_id, Some(cursors))
     }
 
-    pub fn read_page(&self, run_id: &str, kind: PageKind, cursor: u64) -> Result<ProjectionPage> {
-        match kind {
-            PageKind::Steps => read_step_page(&self.connection, run_id, Some(cursor)),
+    pub fn read_page(
+        &self,
+        run_id: &str,
+        kind: PageKind,
+        cursor: u64,
+    ) -> Result<(u64, ProjectionPage)> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let revision = transaction.query_row(
+            "SELECT presentation_revision FROM viewer_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let page = match kind {
+            PageKind::Steps => read_step_page(&transaction, run_id, Some(cursor))?,
             PageKind::Trace => {
-                let (items, start, total) =
-                    read_trace_window(&self.connection, run_id, Some(cursor))?;
-                Ok(ProjectionPage {
+                let (items, start, total) = read_trace_window(&transaction, run_id, Some(cursor))?;
+                ProjectionPage {
                     start,
                     total,
                     items: items
@@ -173,18 +183,18 @@ impl ProjectionReader {
                     graph_cursor: None,
                     graph_steps: None,
                     taken_transitions: None,
-                })
+                }
             }
             PageKind::SessionEntries => {
-                read_session_entry_page(&self.connection, run_id, Some(cursor))
+                read_session_entry_page(&transaction, run_id, Some(cursor))?
             }
-            PageKind::SessionEvents => {
-                read_session_event_page(&self.connection, run_id, Some(cursor))
-            }
-            PageKind::Settings => read_settings_page(&self.connection, run_id, Some(cursor)),
-            PageKind::FollowUps => read_follow_up_page(&self.connection, run_id, Some(cursor)),
-            PageKind::Updates => read_update_page(&self.connection, run_id, Some(cursor)),
-        }
+            PageKind::SessionEvents => read_session_event_page(&transaction, run_id, Some(cursor))?,
+            PageKind::Settings => read_settings_page(&transaction, run_id, Some(cursor))?,
+            PageKind::FollowUps => read_follow_up_page(&transaction, run_id, Some(cursor))?,
+            PageKind::Updates => read_update_page(&transaction, run_id, Some(cursor))?,
+        };
+        transaction.commit()?;
+        Ok((revision, page))
     }
 
     pub fn read_deltas(&self, run_id: &str, after_revision: u64) -> Result<ViewerDeltaRead> {
