@@ -5,7 +5,7 @@ import {
   reduceSessionEvents,
   SessionReplayIndex,
   type TemporalSessionState,
-} from "../src/viewer/session-reducer.js";
+} from "../src/workflows/session-reducer.js";
 import type {
   WorkflowSessionEntryRecord,
   WorkflowSessionEventRecord,

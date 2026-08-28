@@ -5,8 +5,8 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { repositoryId } from "../../src/builtins/autoimplement-command-batches.js";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
-import { reduceSessionEvents } from "../../src/viewer/session-reducer.js";
 import { digest } from "../../src/workflows/human-decision.js";
+import { reduceSessionEvents } from "../../src/workflows/session-reducer.js";
 import {
   listWorkflowRuns,
   readWorkflowRun,
