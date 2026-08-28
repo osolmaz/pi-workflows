@@ -448,6 +448,13 @@ struct GraphCache {
     rendered: Option<RenderedGraph>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalDelay {
+    Ready(Duration),
+    Pending(u64),
+    Invalid,
+}
+
 struct App {
     provider: Provider,
     /// Whether the sidebar is shown (single-run mode hides it).
@@ -694,30 +701,26 @@ impl App {
             .unwrap_or((0, 0, false))
     }
 
-    fn temporal_delay(&mut self, current: i64, speed: u32) -> Option<Duration> {
-        let run_id = self.selected_run.clone()?;
-        let data = self.provider.data(&run_id)?;
-        let next = u64::try_from(current + 1).ok()?;
-        let next = next.checked_sub(data.session_event_start)? as usize;
-        let next_at = data
-            .session_events
-            .get(next)?
-            .get("at")
-            .and_then(Value::as_str)
-            .and_then(parse_timestamp_ms)?;
-        if current < 0 {
-            return Some(Duration::ZERO);
+    fn temporal_delay(&mut self, current: i64, speed: u32) -> TemporalDelay {
+        let Some(run_id) = self.selected_run.clone() else {
+            return TemporalDelay::Invalid;
+        };
+        let delay = self
+            .provider
+            .data(&run_id)
+            .map_or(TemporalDelay::Invalid, |data| {
+                temporal_delay_from_page(
+                    data.session_events,
+                    data.session_event_start,
+                    current,
+                    speed,
+                )
+            });
+        if let TemporalDelay::Pending(cursor) = delay {
+            self.provider
+                .request_window(&run_id, None, None, None, Some(cursor));
         }
-        let current = u64::try_from(current).ok()?;
-        let current = current.checked_sub(data.session_event_start)? as usize;
-        let current_at = data
-            .session_events
-            .get(current)?
-            .get("at")
-            .and_then(Value::as_str)
-            .and_then(parse_timestamp_ms)?;
-        let scaled = (next_at - current_at).max(0) as u64 / u64::from(speed.max(1));
-        Some(Duration::from_millis(scaled.max(1)))
+        delay
     }
 
     fn sync_step_to_temporal(&mut self) {
@@ -782,9 +785,13 @@ impl App {
                     }
                     return;
                 }
-                let Some(interval) = self.temporal_delay(current, speed) else {
-                    self.playing = false;
-                    return;
+                let interval = match self.temporal_delay(current, speed) {
+                    TemporalDelay::Ready(interval) => interval,
+                    TemporalDelay::Pending(_) => return,
+                    TemporalDelay::Invalid => {
+                        self.playing = false;
+                        return;
+                    }
                 };
                 if self.last_play_step.elapsed() < interval {
                     return;
@@ -2077,6 +2084,55 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     if let Some(picker) = &app.theme_picker {
         theme_picker::render(frame, area, picker, &palette);
     }
+}
+
+fn temporal_delay_from_page(
+    events: &[Value],
+    page_start: u64,
+    current: i64,
+    speed: u32,
+) -> TemporalDelay {
+    let Ok(next_cursor) = u64::try_from(current + 1) else {
+        return TemporalDelay::Invalid;
+    };
+    let Some(next_index) = next_cursor.checked_sub(page_start) else {
+        return TemporalDelay::Pending(next_cursor);
+    };
+    let Some(next_at) = events
+        .get(next_index as usize)
+        .and_then(|event| event.get("at"))
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp_ms)
+    else {
+        return if next_index as usize >= events.len() {
+            TemporalDelay::Pending(next_cursor)
+        } else {
+            TemporalDelay::Invalid
+        };
+    };
+    if current < 0 {
+        return TemporalDelay::Ready(Duration::ZERO);
+    }
+    let Ok(current_cursor) = u64::try_from(current) else {
+        return TemporalDelay::Invalid;
+    };
+    let Some(current_index) = current_cursor.checked_sub(page_start) else {
+        return TemporalDelay::Pending(current_cursor);
+    };
+    let Some(current_at) = events
+        .get(current_index as usize)
+        .and_then(|event| event.get("at"))
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp_ms)
+    else {
+        return if current_index as usize >= events.len() {
+            TemporalDelay::Pending(current_cursor)
+        } else {
+            TemporalDelay::Invalid
+        };
+    };
+    let scaled = (next_at - current_at).max(0) as u64 / u64::from(speed.max(1));
+    TemporalDelay::Ready(Duration::from_millis(scaled.max(1)))
 }
 
 fn next_page_cursor(start: u64, total: u64, length: usize, direction: i64) -> Option<u64> {
@@ -3401,12 +3457,14 @@ mod tests {
         current_progress_epoch, graph_position_label, inspector_height_for_drag,
         inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, progress_rates,
         push_human_decision_presentation, resolve_remote_artifacts, resolved_inspector_height,
-        sidebar_width_for_drag, step_projection_contains, temporal_through_seq,
-        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
-        Palette, Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
+        sidebar_width_for_drag, step_projection_contains, temporal_delay_from_page,
+        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
+        InspectorTab, NodeBounds, Palette, Rect, StepRecord, TemporalDelay, TraceScope,
+        DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
+    use std::time::Duration;
 
     #[test]
     fn progress_estimation_resets_on_phase_change() {
@@ -3478,6 +3536,29 @@ mod tests {
         assert!(!valid_session_binding(Some(&json!({ "schema": "future" }))));
         assert!(!valid_session_binding(Some(&json!("binding"))));
         assert!(!valid_session_binding(None));
+    }
+
+    #[test]
+    fn temporal_playback_waits_for_missing_pages() {
+        let tail = vec![serde_json::json!({"at": "2026-01-01T00:12:24.000Z"})];
+        assert_eq!(
+            temporal_delay_from_page(&tail, 744, -1, 1),
+            TemporalDelay::Pending(0)
+        );
+        let first = vec![serde_json::json!({"at": "2026-01-01T00:00:00.000Z"})];
+        assert_eq!(
+            temporal_delay_from_page(&first, 0, -1, 1),
+            TemporalDelay::Ready(Duration::ZERO)
+        );
+        let page = (0..256)
+            .map(|second| {
+                serde_json::json!({"at": format!("2026-01-01T00:{:02}:{:02}.000Z", second / 60, second % 60)})
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            temporal_delay_from_page(&page, 0, 255, 1),
+            TemporalDelay::Pending(256)
+        );
     }
 
     #[test]
