@@ -236,6 +236,37 @@ impl RunEntry {
         self.step_total = step_total;
         self.update_start = update_start;
         self.update_total = update_total;
+        self.settings_scopes = document
+            .get("settingsScopes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.settings_start = document
+            .get("settingsStart")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.settings_total = document
+            .get("settingsTotal")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.settings_scopes.len() as u64);
+        self.follow_up_queue = document
+            .get("followUpQueue")
+            .cloned()
+            .filter(|value| !value.is_null());
+        self.follow_up_start = document
+            .get("followUpStart")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.follow_up_total = document
+            .get("followUpTotal")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| {
+                self.follow_up_queue
+                    .as_ref()
+                    .and_then(|queue| queue.get("items"))
+                    .and_then(Value::as_array)
+                    .map_or(0, |items| items.len() as u64)
+            });
         self.live = live;
         if let Some(possibly_interrupted) =
             document.get("possiblyInterrupted").and_then(Value::as_bool)
@@ -306,7 +337,9 @@ impl RunEntry {
         }
         for target in &delta.targets {
             let applied = match (target.target_type.as_str(), target.target_key.as_str()) {
-                ("graph", "") => self.apply_root_patch(&target.patch),
+                ("summary" | "graph" | "replay" | "inspector", _) => {
+                    self.apply_root_patch(&target.patch)
+                }
                 ("conversation", key) if key.starts_with("entries:") => apply_page_patch(
                     &mut self.session_entry_start,
                     &mut self.session_entry_total,

@@ -27,7 +27,10 @@ pub enum RunStatus {
 
 impl RunStatus {
     pub fn is_terminal(self) -> bool {
-        !matches!(self, RunStatus::Running)
+        matches!(
+            self,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::TimedOut | RunStatus::Cancelled
+        )
     }
 
     pub fn label(self) -> &'static str {

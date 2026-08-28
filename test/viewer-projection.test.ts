@@ -81,6 +81,12 @@ describe("revisioned viewer projection", () => {
         path: "/state/status",
         value: "completed",
       });
+      expect(graph?.patch).toContainEqual(
+        expect.objectContaining({ op: "replace", path: "/state/steps" }),
+      );
+      expect(graph?.patch).toContainEqual(
+        expect.objectContaining({ op: "add", path: "/state/updates" }),
+      );
       expect(timeline?.patch).toContainEqual(
         expect.objectContaining({ op: "append", path: "/items" }),
       );

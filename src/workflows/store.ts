@@ -395,9 +395,14 @@ export class WorkflowRunStore {
           insertRunEvent(this.state, reserved.resourceId, revision, at, traceEvent);
           this.persistRunState(reserved, state, revision, now);
           initializeViewerRun(this.state, state.runId, now);
-          recordViewerDeltas(this.state, state.runId, runViewerTargets(state, traceEvent), now);
           this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
           this.syncNodeAttempts(state, snapshot, now);
+          recordViewerDeltas(
+            this.state,
+            state.runId,
+            [...runViewerTargets(state, traceEvent), ...this.viewerInspectorTargets(state.runId)],
+            now,
+          );
           this.syncContinuationIdentity(state);
           context.revision = revision;
           return;
@@ -513,7 +518,7 @@ export class WorkflowRunStore {
       recordViewerDeltas(
         this.state,
         options.runId,
-        [{ targetType: "inspector", targetKey: "settings" }],
+        this.viewerInspectorTargets(options.runId),
         now,
       );
       return this.settingsScopeRecord(this.requireSettingsScopeRow(scopeId));
@@ -703,7 +708,7 @@ export class WorkflowRunStore {
             recordViewerDeltas(
               this.state,
               request.runId,
-              [{ targetType: "inspector", targetKey: "settings" }],
+              this.viewerInspectorTargets(request.runId),
               now,
             );
             return changeId;
@@ -813,7 +818,7 @@ export class WorkflowRunStore {
             recordViewerDeltas(
               this.state,
               request.runId,
-              [{ targetType: "inspector", targetKey: "follow-ups" }],
+              this.viewerInspectorTargets(request.runId),
               now,
             );
             return followUpId;
@@ -869,7 +874,7 @@ export class WorkflowRunStore {
         recordViewerDeltas(
           this.state,
           request.runId,
-          [{ targetType: "inspector", targetKey: "follow-ups" }],
+          this.viewerInspectorTargets(request.runId),
           now,
         );
       },
@@ -997,7 +1002,7 @@ export class WorkflowRunStore {
           recordViewerDeltas(
             this.state,
             options.runId,
-            [{ targetType: "inspector", targetKey: "follow-ups" }],
+            this.viewerInspectorTargets(options.runId),
             now,
           );
         },
@@ -1080,12 +1085,7 @@ export class WorkflowRunStore {
         if (update.changes !== 1) {
           throw new StaleResourceError("Workflow follow-up changed before delivery completed");
         }
-        recordViewerDeltas(
-          this.state,
-          row.runId,
-          [{ targetType: "inspector", targetKey: "follow-ups" }],
-          now,
-        );
+        recordViewerDeltas(this.state, row.runId, this.viewerInspectorTargets(row.runId), now);
       },
       { payload: { followUpId, sessionEntryId } },
     );
@@ -1641,9 +1641,17 @@ export class WorkflowRunStore {
         this.state,
         runId,
         [
-          { targetType: "conversation", targetKey: "capture" },
-          { targetType: "replay", targetKey: "session" },
-          { targetType: "inspector", targetKey: "session" },
+          {
+            targetType: "conversation",
+            targetKey: "capture",
+            patch: [
+              {
+                op: "add",
+                path: "/capture",
+                value: parseJson(canonicalJson(capture)),
+              },
+            ],
+          },
         ],
         now,
       );
@@ -1892,6 +1900,77 @@ export class WorkflowRunStore {
       payloadHash,
       now,
     );
+  }
+
+  private viewerInspectorTargets(runId: string): ViewerDeltaDraft[] {
+    const settings = this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.active_run_id = ?
+         ORDER BY s.mount_path, s.invocation`,
+      )
+      .all(runId)
+      .filter(isSettingsScopeRow)
+      .map((row) => ({
+        scopeId: row.scopeId,
+        mountPath: row.mountPath,
+        invocation: row.invocation,
+        changeNumber: row.revision,
+        settingsHash: row.currentHash.toString("hex"),
+      }));
+    const settingsStart = Math.max(0, settings.length - VIEWER_PAGE_SIZE);
+    const followUps = this.state.connection
+      .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number`)
+      .all(runId)
+      .filter(isFollowUpRow)
+      .map((row) => ({
+        followUpId: row.followUpId,
+        order: row.orderNumber,
+        state: row.status,
+        source: row.sourceType,
+        sessionEntryId: row.sessionEntryId,
+      }));
+    const followUpStart = Math.max(0, followUps.length - VIEWER_PAGE_SIZE);
+    const queue = this.requireFollowUpQueueRow(runId);
+    return [
+      {
+        targetType: "inspector",
+        targetKey: "settings",
+        patch: [
+          {
+            op: "replace",
+            path: "/settingsScopes",
+            value: parseJson(canonicalJson(settings.slice(settingsStart))),
+          },
+          { op: "replace", path: "/settingsStart", value: settingsStart },
+          { op: "replace", path: "/settingsTotal", value: settings.length },
+        ],
+      },
+      {
+        targetType: "inspector",
+        targetKey: "follow-ups",
+        patch: [
+          {
+            op: "replace",
+            path: "/followUpQueue",
+            value: parseJson(
+              canonicalJson({
+                presentationState: queue.presentationState,
+                items: followUps.slice(followUpStart),
+              }),
+            ),
+          },
+          { op: "replace", path: "/followUpStart", value: followUpStart },
+          { op: "replace", path: "/followUpTotal", value: followUps.length },
+        ],
+      },
+    ];
   }
 
   private initializeRunSettingsAndFollowUps(
@@ -3177,9 +3256,17 @@ export class WorkflowRunStore {
           this.state,
           runId,
           [
-            { targetType: "conversation", targetKey: "capture" },
-            { targetType: "replay", targetKey: "session" },
-            { targetType: "inspector", targetKey: "session" },
+            {
+              targetType: "conversation",
+              targetKey: "capture",
+              patch: [
+                {
+                  op: "add",
+                  path: "/capture",
+                  value: parseJson(canonicalJson(capture)),
+                },
+              ],
+            },
           ],
           now,
         );
@@ -3196,25 +3283,27 @@ function runViewerTargets(
   const stepStart = Math.max(0, stepTotal - VIEWER_PAGE_SIZE);
   const updateTotal = state.updates?.length ?? 0;
   const updateStart = Math.max(0, updateTotal - VIEWER_PAGE_SIZE);
+  const compactStep = (step: WorkflowStepRecord) => ({
+    attemptId: step.attemptId,
+    nodeId: step.nodeId,
+    nodeType: step.nodeType,
+    outcome: step.outcome,
+    startedAt: step.startedAt,
+    finishedAt: step.finishedAt,
+    prompt: null,
+    output: null,
+    ...(step.settingsScopeId === undefined ? {} : { settingsScopeId: step.settingsScopeId }),
+    ...(step.settingsChangeNumber === undefined
+      ? {}
+      : { settingsChangeNumber: step.settingsChangeNumber }),
+    ...(step.settingsHash === undefined ? {} : { settingsHash: step.settingsHash }),
+  });
+  const boundedSteps = state.steps.slice(stepStart).map(compactStep);
   const latestStepByNode = new Map<string, WorkflowStepRecord>();
   for (const step of state.steps) latestStepByNode.set(step.nodeId, step);
   const graphSteps = state.steps
     .filter((step) => latestStepByNode.get(step.nodeId) === step)
-    .map((step) => ({
-      attemptId: step.attemptId,
-      nodeId: step.nodeId,
-      nodeType: step.nodeType,
-      outcome: step.outcome,
-      startedAt: step.startedAt,
-      finishedAt: step.finishedAt,
-      prompt: null,
-      output: null,
-      ...(step.settingsScopeId === undefined ? {} : { settingsScopeId: step.settingsScopeId }),
-      ...(step.settingsChangeNumber === undefined
-        ? {}
-        : { settingsChangeNumber: step.settingsChangeNumber }),
-      ...(step.settingsHash === undefined ? {} : { settingsHash: step.settingsHash }),
-    }));
+    .map(compactStep);
   const transitions = new Set<string>();
   for (let index = 1; index < state.steps.length; index += 1) {
     const previous = state.steps[index - 1];
@@ -3227,6 +3316,16 @@ function runViewerTargets(
     { op: "replace", path: "/state/traceSeq", value: state.traceSeq },
     { op: "replace", path: "/state/updatedAt", value: state.updatedAt },
     { op: "replace", path: "/state/status", value: state.status },
+    {
+      op: "replace",
+      path: "/state/steps",
+      value: parseJson(canonicalJson(boundedSteps)),
+    },
+    {
+      op: "add",
+      path: "/state/updates",
+      value: parseJson(canonicalJson(state.updates?.slice(updateStart) ?? [])),
+    },
     { op: "add", path: "/state/finishedAt", value: state.finishedAt ?? null },
     { op: "add", path: "/state/currentNode", value: state.currentNode ?? null },
     { op: "add", path: "/state/currentAttemptId", value: state.currentAttemptId ?? null },

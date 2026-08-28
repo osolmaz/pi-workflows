@@ -169,6 +169,28 @@ fn idle_refresh_reads_only_data_version_and_never_loads_payloads() {
 }
 
 #[test]
+fn waiting_runs_remain_live() {
+    let (_temp, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET status = 'waiting' WHERE run_id = 'run-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reader = ProjectionReader::open(&database).unwrap();
+    let run = reader
+        .list_run_index()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.manifest.run_id == "run-1")
+        .unwrap();
+    assert!(run.live);
+}
+
+#[test]
 fn page_revision_comes_from_the_same_sqlite_snapshot_as_its_rows() {
     let (_temp, database) = fixture();
     let mut source = RunSource::new(&database).unwrap();

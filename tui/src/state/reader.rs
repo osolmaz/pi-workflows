@@ -547,7 +547,7 @@ fn list_run_index(connection: &Connection) -> Result<Vec<RunIndexRow>> {
                     artifacts: None,
                 },
             },
-            live: status.label() == "running",
+            live: !status.is_terminal(),
             possibly_interrupted: status.label() == "running"
                 && (owner_id.is_none() || expires_at.is_none_or(|value| value <= now)),
             presentation_revision,
