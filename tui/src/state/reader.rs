@@ -2039,11 +2039,7 @@ fn read_session_window(
         event_start,
         event_total,
         Some(serde_json::from_value(capture)?),
-        if event_cursor.is_some() {
-            session_replay_checkpoint(connection, run_id, event_start)?
-        } else {
-            None
-        },
+        session_replay_checkpoint(connection, run_id, event_start)?,
     ))
 }
 

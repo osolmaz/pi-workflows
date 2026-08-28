@@ -644,6 +644,17 @@ fn reads_bounded_session_pages_by_run_sequence() {
             .and_then(|value| value.get("throughSeq")),
         Some(&json!(256))
     );
+    let window = reader
+        .read_window("run-1", piw::state::reader::ProjectionCursors::default())
+        .unwrap();
+    assert_eq!(window.session_event_start, 256);
+    assert_eq!(
+        window
+            .session_replay_checkpoint
+            .as_ref()
+            .and_then(|value| value.get("throughSeq")),
+        Some(&json!(256))
+    );
 }
 
 #[test]
