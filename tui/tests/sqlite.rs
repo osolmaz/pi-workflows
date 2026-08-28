@@ -424,6 +424,42 @@ fn revision_only_controller_delta_reloads_the_bounded_projection() {
 }
 
 #[test]
+fn newest_session_binding_matches_incremental_updates() {
+    let (_temp, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    let first = blob(
+        &connection,
+        &json!({
+            "schema": "pi-workflows.session-binding.v1",
+            "runId": "run-1",
+            "piSessionId": "session-a",
+            "cwd": "/tmp",
+            "boundAt": "2026-01-01T00:00:00Z"
+        }),
+    );
+    let second = blob(
+        &connection,
+        &json!({
+            "schema": "pi-workflows.session-binding.v1",
+            "runId": "run-1",
+            "piSessionId": "session-b",
+            "cwd": "/tmp",
+            "boundAt": "2026-01-01T00:00:01Z"
+        }),
+    );
+    connection
+        .execute(
+            "INSERT INTO session_segments(segment_id, run_id, binding_hash, status, entry_count, event_count, created_at) VALUES ('s1', 'run-1', ?1, 'complete', 0, 0, 1), ('s2', 'run-1', ?2, 'recording', 0, 0, 2)",
+            params![first, second],
+        )
+        .unwrap();
+    drop(connection);
+
+    let run = read_run(&database, "run-1").unwrap();
+    assert_eq!(run.session_binding.unwrap().pi_session_id, "session-b");
+}
+
+#[test]
 fn combines_capture_segments_in_order() {
     let (_temp, database) = fixture();
     let connection = Connection::open(&database).unwrap();

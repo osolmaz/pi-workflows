@@ -1608,10 +1608,8 @@ fn read_session(connection: &Connection, run_id: &str) -> Result<LoadedSession> 
     for (segment_id, binding_hash, segment_status, _entry_count, _event_count, failure_hash) in
         segment_rows
     {
-        if binding.is_none() {
-            if let Some(hash) = binding_hash {
-                binding = Some(serde_json::from_value(read_json_blob(connection, &hash)?)?);
-            }
+        if let Some(hash) = binding_hash {
+            binding = Some(serde_json::from_value(read_json_blob(connection, &hash)?)?);
         }
         if segment_status == "failed" {
             status = "failed".to_string();
@@ -1917,10 +1915,8 @@ fn read_session_window(
     for (binding_hash, segment_status, entry_count, event_count, failure_hash) in &segment_rows {
         entry_total += entry_count;
         event_total += event_count;
-        if binding.is_none() {
-            if let Some(hash) = binding_hash {
-                binding = Some(serde_json::from_value(read_json_blob(connection, hash)?)?);
-            }
+        if let Some(hash) = binding_hash {
+            binding = Some(serde_json::from_value(read_json_blob(connection, hash)?)?);
         }
         if segment_status == "failed" {
             status = "failed".to_string();
