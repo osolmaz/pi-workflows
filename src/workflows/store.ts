@@ -1732,6 +1732,48 @@ export class WorkflowRunStore {
       });
   }
 
+  private viewerSessionCapture(runId: string): WorkflowSessionCapture {
+    const segments = this.segmentRows(runId);
+    let status: WorkflowSessionCapture["status"] = "complete";
+    let failure: WorkflowSessionCapture["failure"];
+    let entryCount = 0;
+    let eventCount = 0;
+    for (const segment of segments) {
+      entryCount += segment.entryCount;
+      eventCount += segment.eventCount;
+      if (segment.status === "failed") {
+        status = "failed";
+        if (failure === undefined && segment.failureHash !== null) {
+          const value = this.state.readJson(segment.failureHash);
+          if (
+            !isRecord(value) ||
+            typeof value.failedAt !== "string" ||
+            typeof value.code !== "string" ||
+            typeof value.message !== "string"
+          ) {
+            throw new Error(`Session capture failure is invalid for ${runId}`);
+          }
+          failure = {
+            failedAt: value.failedAt,
+            code: value.code,
+            message: value.message,
+          };
+        }
+      } else if (segment.status === "recording" && status !== "failed") {
+        status = "recording";
+      }
+    }
+    return {
+      schema: SESSION_CAPTURE_SCHEMA,
+      eventSchema: SESSION_EVENT_SCHEMA,
+      status,
+      eventCount,
+      entryCount,
+      lastEventSeq: eventCount,
+      ...(failure === undefined ? {} : { failure }),
+    };
+  }
+
   async writeSessionCapture(
     runId: string,
     capture: WorkflowSessionCapture,
@@ -1775,6 +1817,7 @@ export class WorkflowRunStore {
         payloadHash,
         now,
       );
+      const viewerCapture = this.viewerSessionCapture(runId);
       recordViewerDeltas(
         this.state,
         runId,
@@ -1786,7 +1829,7 @@ export class WorkflowRunStore {
               {
                 op: "add",
                 path: "/capture",
-                value: parseJson(canonicalJson(capture)),
+                value: parseJson(canonicalJson(viewerCapture)),
               },
             ],
           },
@@ -3390,6 +3433,7 @@ export class WorkflowRunStore {
           payloadHash,
           now,
         );
+        const viewerCapture = this.viewerSessionCapture(runId);
         recordViewerDeltas(
           this.state,
           runId,
@@ -3401,7 +3445,7 @@ export class WorkflowRunStore {
                 {
                   op: "add",
                   path: "/capture",
-                  value: parseJson(canonicalJson(capture)),
+                  value: parseJson(canonicalJson(viewerCapture)),
                 },
               ],
             },

@@ -166,6 +166,48 @@ describe("WorkflowRunStore branch behavior", () => {
       );
     }
     observer.close();
+
+    await store.appendSessionEntry("run-3", { id: "entry-a", type: "message" });
+    await store.appendSessionEntry("run-3", { id: "entry-b", type: "message" }, "capture-b");
+    await store.writeSessionCapture(
+      "run-3",
+      {
+        schema: SESSION_CAPTURE_SCHEMA,
+        eventSchema: SESSION_EVENT_SCHEMA,
+        status: "complete",
+        eventCount: 0,
+        entryCount: 1,
+        lastEventSeq: 0,
+      },
+      "capture-b",
+    );
+    const captureObserver = new StateDatabase({ filePath: databasePath });
+    const captureRevision = captureObserver.connection
+      .prepare("SELECT presentation_revision AS revision FROM viewer_runs WHERE run_id = ?")
+      .get("run-3");
+    if (
+      typeof captureRevision !== "object" ||
+      captureRevision === null ||
+      !("revision" in captureRevision) ||
+      typeof captureRevision.revision !== "number"
+    ) {
+      throw new Error("Viewer revision row is invalid");
+    }
+    const captureDeltas = readViewerDeltas(captureObserver, "run-3", captureRevision.revision - 1);
+    expect(captureDeltas.kind).toBe("deltas");
+    if (captureDeltas.kind === "deltas") {
+      const captureTarget = captureDeltas.deltas.find(
+        (delta) => delta.targetType === "conversation" && delta.targetKey === "capture",
+      );
+      expect(captureTarget?.patch).toContainEqual(
+        expect.objectContaining({
+          op: "add",
+          path: "/capture",
+          value: expect.objectContaining({ entryCount: 2 }),
+        }),
+      );
+    }
+    captureObserver.close();
     store.close();
   });
 

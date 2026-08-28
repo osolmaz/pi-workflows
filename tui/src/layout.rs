@@ -57,6 +57,7 @@ pub struct GraphLayout {
     pub ranks: Vec<Vec<GraphCell>>,
     pub edges: Vec<GraphEdge>,
     pub segments: Vec<GraphSegment>,
+    #[serde(rename = "rankOfNode")]
     pub rank_of_node: HashMap<String, usize>,
 }
 
@@ -438,6 +439,19 @@ fn order_ranks_by_barycenter(ranks: &mut [Vec<GraphCell>], segments: &mut [Graph
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_scene_uses_the_shared_camel_case_contract() {
+        let layout = GraphLayout {
+            ranks: Vec::new(),
+            edges: Vec::new(),
+            segments: Vec::new(),
+            rank_of_node: HashMap::new(),
+        };
+        let value = serde_json::to_value(layout).unwrap();
+        assert!(value.get("rankOfNode").is_some());
+        assert!(value.get("rank_of_node").is_none());
+    }
 
     #[test]
     fn switch_case_labels_are_scrubbed_of_escapes() {
