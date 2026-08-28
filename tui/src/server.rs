@@ -118,7 +118,8 @@ fn targets_are_direct(targets: &[TargetPatch]) -> bool {
             target.patch.iter().any(|operation| {
                 !matches!(
                     operation,
-                    PatchOp::Replace { path, .. } if path == "/presentationRevision"
+                    PatchOp::Replace { path, .. }
+                        if path == "/presentationRevision" || path == "/graphRevision"
                 )
             })
         })

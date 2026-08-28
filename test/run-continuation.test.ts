@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { StateDatabase } from "../src/state/database.js";
 import { checkpoint, compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowSourceChangedError } from "../src/workflows/errors.js";
@@ -35,6 +36,22 @@ describe("WorkflowEngine.continueRun", () => {
     const parentAttemptId = parent.state.steps[0]?.attemptId;
     if (parentAttemptId === undefined) throw new Error("parent attempt missing");
     const parentStep = parent.state.steps[0];
+    const observer = new StateDatabase({ filePath: databasePath });
+    const revisionOf = (runId: string): number => {
+      const row = observer.connection
+        .prepare("SELECT presentation_revision AS revision FROM viewer_runs WHERE run_id = ?")
+        .get(runId);
+      if (
+        typeof row !== "object" ||
+        row === null ||
+        !("revision" in row) ||
+        typeof row.revision !== "number"
+      ) {
+        throw new Error("Viewer revision row is invalid");
+      }
+      return row.revision;
+    };
+    const parentViewerRevision = revisionOf("parent-1");
 
     const second = makeEngine(store);
     const continued = await second.continueRun(waitWorkflow, "parent-1", { approved: true });
@@ -46,6 +63,8 @@ describe("WorkflowEngine.continueRun", () => {
     expect(continued.state.finalOutput).toMatchObject({ approved: true });
     expect(continued.state.steps.length).toBeGreaterThanOrEqual(2);
     expect(continued.state.steps[0]?.nodeId).toBe("approval");
+    expect(revisionOf("parent-1")).toBeGreaterThan(parentViewerRevision);
+    observer.close();
 
     const bundle = readWorkflowRun(continued.runId, { databasePath });
     const lastOutputs = bundle?.state.outputs ?? {};
