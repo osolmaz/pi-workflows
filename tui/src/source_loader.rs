@@ -94,13 +94,7 @@ fn worker_loop(
             continue;
         };
         let loaded = reader
-            .read_window(
-                &request.run_id,
-                request.cursor.step,
-                request.cursor.trace,
-                request.cursor.session_entry,
-                request.cursor.session_event,
-            )
+            .read_window(&request.run_id, request.cursor)
             .map_err(|error| error.to_string());
         if results
             .send(LoadResult {

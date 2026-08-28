@@ -408,11 +408,18 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
 
     let reader = ProjectionReader::open(&database).unwrap();
     let first = reader
-        .read_window("run-1", Some(0), None, None, None)
+        .read_window(
+            "run-1",
+            piw::state::reader::ProjectionCursors {
+                step: Some(0),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_eq!(first.step_start, 0);
     assert_eq!(first.step_total, 300);
     assert_eq!(first.state.steps.len(), 256);
+    assert_eq!(first.graph_cursor, 0);
     assert_eq!(first.graph_steps.len(), 1);
     assert_eq!(first.graph_steps[0].attempt_id, "attempt-0");
 
@@ -420,6 +427,11 @@ fn reads_bounded_step_pages_with_compact_graph_state() {
     assert_eq!(last.start, 44);
     assert_eq!(last.total, 300);
     assert_eq!(last.items.len(), 256);
+    assert_eq!(last.graph_cursor, Some(299));
+    assert_eq!(
+        last.graph_steps.as_ref().unwrap()[0].attempt_id,
+        "attempt-299"
+    );
     assert_eq!(last.items[255]["attemptId"], json!("attempt-299"));
 }
 
@@ -460,6 +472,56 @@ fn reads_bounded_session_pages_by_run_sequence() {
     assert_eq!(last.start, 44);
     assert_eq!(last.items.len(), 256);
     assert_eq!(last.items[255]["seq"], json!(300));
+}
+
+#[test]
+fn pages_settings_follow_ups_and_current_updates_without_truncation() {
+    let (_temp, database) = fixture();
+    let mut connection = Connection::open(&database).unwrap();
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "INSERT INTO node_attempts(attempt_id, run_id, node_id, node_type, status, started_at, finished_at) VALUES ('updates', 'run-1', 'work', 'compute', 'completed', 1, 1)",
+            [],
+        )
+        .unwrap();
+    for index in 0..300_u64 {
+        let resource_id = format!("settings-{index}");
+        transaction
+            .execute(
+                "INSERT INTO resources(resource_id, revision) VALUES (?1, 1)",
+                [&resource_id],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO workflow_settings(scope_id, resource_id, active_run_id, mount_path, invocation, current_hash) VALUES (?1, ?2, 'run-1', '', ?3, ?4)",
+                params![format!("scope-{index}"), resource_id, index, vec![index as u8; 32]],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO workflow_follow_ups(run_id, follow_up_id, order_number, status, source_type, session_entry_id) VALUES ('run-1', ?1, ?2, 'queued', 'human', NULL)",
+                params![format!("follow-{index}"), index],
+            )
+            .unwrap();
+        let data_hash = blob(&transaction, &json!({"index": index}));
+        transaction
+            .execute(
+                "INSERT INTO workflow_updates(update_id, run_revision, attempt_id, update_type, update_key, data_hash, recorded_at) VALUES (?1, ?2, 'updates', 'progress', ?3, ?4, ?2)",
+                params![format!("update-{index}"), index + 1, format!("key-{index}"), data_hash],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+
+    let mut source = RunSource::new(&database).unwrap();
+    for kind in [PageKind::Settings, PageKind::FollowUps, PageKind::Updates] {
+        let (_, page) = source.page("run-1", kind, 299).unwrap();
+        assert_eq!(page.start, 44);
+        assert_eq!(page.total, 300);
+        assert_eq!(page.items.len(), 256);
+    }
 }
 
 #[test]

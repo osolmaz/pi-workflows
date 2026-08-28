@@ -366,6 +366,15 @@ async fn send_projection_page(
     let page = run_blocking(source, move |source| source.page(&request_id, kind, cursor)).await?;
     match page {
         Ok((revision, page)) => {
+            let graph_steps = page
+                .graph_steps
+                .map(|steps| {
+                    steps
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
             send(
                 sink,
                 &ServerMessage::RunPage {
@@ -375,6 +384,9 @@ async fn send_projection_page(
                     start: page.start,
                     total: page.total,
                     items: page.items,
+                    graph_cursor: page.graph_cursor,
+                    graph_steps,
+                    taken_transitions: page.taken_transitions,
                 },
             )
             .await?;

@@ -115,7 +115,7 @@ A client asks for a page with `fetch_page`:
 }
 ```
 
-`kind` is one of `steps`, `trace`, `session_entries`, or `session_events`. The server answers with `run_page`:
+`kind` is one of `steps`, `trace`, `session_entries`, `session_events`, `settings`, `follow_ups`, or `updates`. The server answers with `run_page`:
 
 ```json
 {
@@ -129,7 +129,7 @@ A client asks for a page with `fetch_page`:
 }
 ```
 
-Page reads use indexed run-wide sequence ranges. A page request does not change the shared watched-run projection or another client's cursor.
+Page reads use bounded ranges. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
 
 ## Messages
 

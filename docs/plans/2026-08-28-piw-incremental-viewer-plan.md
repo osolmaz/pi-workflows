@@ -262,7 +262,7 @@ A read-only check against a real growing database may report aggregate counts, t
 
 The current alpha schema now stores `viewer_runs` and `viewer_deltas`. A run starts at presentation revision 1. Each viewer-visible write advances that revision in the same SQLite transaction and stores ordered target patches. The store retains 256 revisions. An older or invalid cursor requires a bounded snapshot.
 
-Timeline, step, session-entry, and session-event pages contain at most 256 rows. Session rows have run-wide sequence numbers and indexed `(run_id, run_seq)` reads. Step pages keep full detail for the active replay window. A separate graph projection keeps only the latest attempt per node and the distinct taken transitions up to the replay cursor. Run-list reads use metadata and do not open payload blobs.
+Timeline, step, session-entry, session-event, settings, follow-up, and current-update pages contain at most 256 rows. Session rows have run-wide sequence numbers and indexed `(run_id, run_seq)` reads. Step pages keep full detail for the active replay window and return compact graph state for that exact cursor. A separate graph projection keeps only the latest attempt per node and the distinct taken transitions up to the replay cursor. Run-list reads use metadata and do not open payload blobs.
 
 The local viewer checks `PRAGMA data_version`. An unchanged check does not scan the run list or load payloads. Local page reads use one overwrite-only worker request, so a newer selection replaces pending work. The source keeps the last good view after a read failure and marks it stale. Direct tail patches update a loaded page without another run read.
 

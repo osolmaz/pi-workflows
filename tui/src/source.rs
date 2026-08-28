@@ -4,7 +4,8 @@ use crate::layout::{layout_graph, GraphLayout};
 use crate::protocol::{apply_patch, PageKind, PatchOp};
 use crate::source_loader::{LoadRequest, SourceLoader};
 use crate::state::reader::{
-    LoadedRun, ProjectionPage, ProjectionReader, RunIndexRow, ViewerDeltaRead, ViewerRevisionDelta,
+    LoadedRun, ProjectionCursors, ProjectionPage, ProjectionReader, RunIndexRow, ViewerDeltaRead,
+    ViewerRevisionDelta,
 };
 use crate::state::types::{
     DefinitionSnapshot, Manifest, RunState, SessionBinding, SessionCapture, SessionEntryRecord,
@@ -16,13 +17,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WindowCursor {
-    pub step: Option<u64>,
-    pub trace: Option<u64>,
-    pub session_entry: Option<u64>,
-    pub session_event: Option<u64>,
-}
+pub type WindowCursor = ProjectionCursors;
 
 pub struct RunEntry {
     pub dir: PathBuf,
@@ -33,6 +28,7 @@ pub struct RunEntry {
     pub state_raw: Value,
     pub graph_steps: Vec<crate::state::types::StepRecord>,
     pub taken_transitions: Vec<String>,
+    pub graph_cursor: u64,
     pub step_start: u64,
     pub step_total: u64,
     pub events: Vec<Value>,
@@ -49,7 +45,13 @@ pub struct RunEntry {
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
     pub settings_scopes: Vec<Value>,
+    pub settings_start: u64,
+    pub settings_total: u64,
     pub follow_up_queue: Option<Value>,
+    pub follow_up_start: u64,
+    pub follow_up_total: u64,
+    pub update_start: u64,
+    pub update_total: u64,
     pub state: RunState,
     pub snapshot: Option<DefinitionSnapshot>,
     pub live: bool,
@@ -104,6 +106,7 @@ impl RunEntry {
             state_raw,
             graph_steps: loaded.graph_steps,
             taken_transitions: loaded.taken_transitions,
+            graph_cursor: loaded.graph_cursor,
             step_start: loaded.step_start,
             step_total: loaded.step_total,
             events,
@@ -120,7 +123,13 @@ impl RunEntry {
             session_events_torn_tail: false,
             session_capture,
             settings_scopes: loaded.settings_scopes,
+            settings_start: loaded.settings_start,
+            settings_total: loaded.settings_total,
             follow_up_queue: loaded.follow_up_queue,
+            follow_up_start: loaded.follow_up_start,
+            follow_up_total: loaded.follow_up_total,
+            update_start: loaded.update_start,
+            update_total: loaded.update_total,
             state: loaded.state,
             snapshot: loaded.snapshot,
             live,
@@ -215,6 +224,7 @@ impl RunEntry {
             "state": self.state_raw,
             "graphSteps": self.graph_steps,
             "takenTransitions": self.taken_transitions,
+            "graphCursor": self.graph_cursor,
             "stepStart": self.step_start,
             "stepTotal": self.step_total,
             "tracePage": {
@@ -225,7 +235,13 @@ impl RunEntry {
             },
             "session": self.session_value(),
             "settingsScopes": self.settings_scopes,
+            "settingsStart": self.settings_start,
+            "settingsTotal": self.settings_total,
             "followUpQueue": self.follow_up_queue,
+            "followUpStart": self.follow_up_start,
+            "followUpTotal": self.follow_up_total,
+            "updateStart": self.update_start,
+            "updateTotal": self.update_total,
             "live": self.live,
             "possiblyInterrupted": self.possibly_interrupted,
         })
@@ -624,13 +640,7 @@ impl RunSource {
 
     fn load(&mut self, run_id: &str) -> Result<()> {
         let cursor = self.cursors.get(run_id).copied().unwrap_or_default();
-        let loaded = match self.reader.read_window(
-            run_id,
-            cursor.step,
-            cursor.trace,
-            cursor.session_entry,
-            cursor.session_event,
-        ) {
+        let loaded = match self.reader.read_window(run_id, cursor) {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.load_errors
@@ -689,6 +699,7 @@ fn loaded_payload_rows(loaded: &LoadedRun) -> u64 {
         + loaded.session_entries.len()
         + loaded.session_events.len()
         + loaded.settings_scopes.len()
+        + loaded.state.updates.as_ref().map_or(0, Vec::len)
         + usize::from(loaded.follow_up_queue.is_some())) as u64
 }
 
