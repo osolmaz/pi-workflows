@@ -396,6 +396,14 @@ export class WorkflowRunStore {
           this.persistRunState(reserved, state, revision, now);
           initializeViewerRun(this.state, state.runId, now);
           this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
+          if (state.parentRunId !== undefined) {
+            recordViewerDeltas(
+              this.state,
+              state.parentRunId,
+              this.viewerInspectorTargets(state.parentRunId),
+              now,
+            );
+          }
           this.syncNodeAttempts(state, snapshot, now);
           recordViewerDeltas(
             this.state,
@@ -469,6 +477,14 @@ export class WorkflowRunStore {
           payload: { workflowName: workflow.name },
         });
         this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
+        if (state.parentRunId !== undefined) {
+          recordViewerDeltas(
+            this.state,
+            state.parentRunId,
+            this.viewerInspectorTargets(state.parentRunId),
+            now,
+          );
+        }
         this.syncNodeAttempts(state, snapshot, now);
       });
       this.contexts.set(state.runId, { revision: acceptedRevision, lock: Promise.resolve() });

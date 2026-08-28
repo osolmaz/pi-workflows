@@ -381,6 +381,48 @@ fn refreshes_a_run_after_one_committed_update() {
 }
 
 #[test]
+fn revision_only_controller_delta_reloads_the_bounded_projection() {
+    let (_temp, database) = fixture();
+    let mut source = RunSource::new(&database).unwrap();
+    source.watch("run-1").unwrap();
+    let window_reads = source.stats().window_reads;
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET status = 'completed', updated_at = 2, finished_at = 2 WHERE run_id = 'run-1'",
+            [],
+        )
+        .unwrap();
+    let patch_hash = blob(
+        &connection,
+        &json!([
+            {"op": "replace", "path": "/presentationRevision", "value": 2},
+            {"op": "replace", "path": "/graphRevision", "value": 2}
+        ]),
+    );
+    connection
+        .execute(
+            "UPDATE viewer_runs SET presentation_revision = 2, updated_at = 2 WHERE run_id = 'run-1'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO viewer_deltas(run_id, presentation_revision, delta_index, target_type, target_key, patch_hash, recorded_at) VALUES ('run-1', 2, 0, 'graph', '', ?1, 2)",
+            [patch_hash],
+        )
+        .unwrap();
+    drop(connection);
+
+    source.refresh_all();
+    assert_eq!(source.stats().window_reads, window_reads + 1);
+    assert_eq!(
+        source.get("run-1").unwrap().state.status.label(),
+        "completed"
+    );
+}
+
+#[test]
 fn combines_capture_segments_in_order() {
     let (_temp, database) = fixture();
     let connection = Connection::open(&database).unwrap();

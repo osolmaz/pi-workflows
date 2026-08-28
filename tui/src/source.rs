@@ -340,7 +340,17 @@ impl RunEntry {
     }
 
     fn apply_delta(&mut self, delta: &ViewerRevisionDelta) -> bool {
-        if delta.revision != self.revision + 1 {
+        if delta.revision != self.revision + 1
+            || delta.targets.iter().any(|target| {
+                !target.patch.iter().any(|operation| {
+                    !matches!(
+                        operation,
+                        PatchOp::Replace { path, .. }
+                            if path == "/presentationRevision" || path == "/graphRevision"
+                    )
+                })
+            })
+        {
             return false;
         }
         for target in &delta.targets {
