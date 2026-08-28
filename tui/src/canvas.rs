@@ -2,6 +2,7 @@
 //! characters merge by connectivity (│ crossing ─ becomes ┼).
 
 use std::collections::HashMap;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanvasStyle {
@@ -132,7 +133,7 @@ fn mask_to_char(mask: u8) -> Option<char> {
 
 #[derive(Debug, Clone, Copy)]
 struct CanvasChar {
-    char: char,
+    char: Option<char>,
     style: CanvasStyle,
 }
 
@@ -169,17 +170,26 @@ impl CharCanvas {
             return;
         }
         if let Some(existing) = row.get(&x).copied() {
-            if existing.char == ' ' {
-                row.insert(x, CanvasChar { char, style });
+            if existing.char.is_none() {
                 return;
             }
-            let existing_mask = char_to_mask(existing.char);
+            if existing.char == Some(' ') {
+                row.insert(
+                    x,
+                    CanvasChar {
+                        char: Some(char),
+                        style,
+                    },
+                );
+                return;
+            }
+            let existing_mask = existing.char.and_then(char_to_mask);
             let incoming_mask = char_to_mask(char);
             if let (Some(existing_mask), Some(incoming_mask)) = (existing_mask, incoming_mask) {
                 row.insert(
                     x,
                     CanvasChar {
-                        char: mask_to_char(existing_mask | incoming_mask).unwrap_or(char),
+                        char: Some(mask_to_char(existing_mask | incoming_mask).unwrap_or(char)),
                         style: merge_styles(existing.style, style),
                     },
                 );
@@ -191,14 +201,54 @@ impl CharCanvas {
                 return;
             }
         }
-        row.insert(x, CanvasChar { char, style });
+        row.insert(
+            x,
+            CanvasChar {
+                char: Some(char),
+                style,
+            },
+        );
     }
 
-    /// Write a text run left to right (labels, node lines).
-    pub fn text(&mut self, x: i64, y: i64, value: &str, style: CanvasStyle) {
-        for (index, char) in value.chars().enumerate() {
-            self.put(x + index as i64, y, char, style);
+    fn write_text(
+        &mut self,
+        x: i64,
+        y: i64,
+        value: &str,
+        style: CanvasStyle,
+        preserve_spaces: bool,
+    ) {
+        let mut cursor = x;
+        for char in value.chars() {
+            let width = UnicodeWidthChar::width(char).unwrap_or(0) as i64;
+            if width == 0 {
+                continue;
+            }
+            if char == ' ' {
+                if preserve_spaces {
+                    self.row(y).insert(
+                        cursor,
+                        CanvasChar {
+                            char: Some(char),
+                            style,
+                        },
+                    );
+                }
+            } else {
+                self.put(cursor, y, char, style);
+            }
+            for offset in 1..width {
+                self.row(y)
+                    .insert(cursor + offset, CanvasChar { char: None, style });
+            }
+            cursor += width;
         }
+        self.max_x = self.max_x.max(cursor - 1);
+    }
+
+    /// Write a text run left to right in terminal display cells.
+    pub fn text(&mut self, x: i64, y: i64, value: &str, style: CanvasStyle) {
+        self.write_text(x, y, value, style, false);
     }
 
     /// Write text only when every target cell is empty. Returns whether the
@@ -207,7 +257,7 @@ impl CharCanvas {
         if x < 0 || y < 0 {
             return false;
         }
-        let width = value.chars().count() as i64;
+        let width = UnicodeWidthStr::width(value) as i64;
         if let Some(row) = self.cells.get(&y) {
             for index in 0..width {
                 if row.contains_key(&(x + index)) {
@@ -226,21 +276,20 @@ impl CharCanvas {
         if x < 1 || y < 0 {
             return false;
         }
-        let chars: Vec<char> = value.chars().collect();
+        let width = UnicodeWidthStr::width(value) as i64;
         let row = self.cells.get(&y);
-        for index in -1..=(chars.len() as i64) {
+        for index in -1..=width {
             let is_dash = row
                 .and_then(|row| row.get(&(x + index)))
-                .is_some_and(|cell| cell.char == '─');
+                .is_some_and(|cell| cell.char == Some('─'));
             if !is_dash {
                 return false;
             }
         }
-        let row = self.row(y);
-        for (index, &char) in chars.iter().enumerate() {
-            row.insert(x + index as i64, CanvasChar { char, style });
+        for index in 0..width {
+            self.row(y).remove(&(x + index));
         }
-        self.max_x = self.max_x.max(x + chars.len() as i64 - 1);
+        self.write_text(x, y, value, style, true);
         true
     }
 
@@ -255,7 +304,13 @@ impl CharCanvas {
         for row_y in y..y + height {
             let row = self.cells.entry(row_y).or_default();
             for column_x in x..x + width {
-                row.insert(column_x, CanvasChar { char: ' ', style });
+                row.insert(
+                    column_x,
+                    CanvasChar {
+                        char: Some(' '),
+                        style,
+                    },
+                );
             }
         }
     }
@@ -301,10 +356,26 @@ impl CharCanvas {
             for viewport_x in 0..width {
                 let x = origin_x + viewport_x as i64;
                 let (char, style) = if x < 0 {
-                    (' ', CanvasStyle::Plain)
+                    (Some(' '), CanvasStyle::Plain)
                 } else {
-                    row.and_then(|row| row.get(&x))
-                        .map_or((' ', CanvasStyle::Plain), |cell| (cell.char, cell.style))
+                    row.and_then(|row| row.get(&x)).map_or(
+                        (Some(' '), CanvasStyle::Plain),
+                        |cell| {
+                            let char = match cell.char {
+                                Some(char)
+                                    if UnicodeWidthChar::width(char).unwrap_or(0) > 1
+                                        && viewport_x
+                                            + UnicodeWidthChar::width(char).unwrap_or(0)
+                                            > width =>
+                                {
+                                    Some(' ')
+                                }
+                                None if viewport_x == 0 => Some(' '),
+                                value => value,
+                            };
+                            (char, cell.style)
+                        },
+                    )
                 };
                 if style != run_style {
                     if !run_text.is_empty() {
@@ -312,7 +383,9 @@ impl CharCanvas {
                     }
                     run_style = style;
                 }
-                run_text.push(char);
+                if let Some(char) = char {
+                    run_text.push(char);
+                }
             }
             if !run_text.is_empty() {
                 runs.push((run_text, run_style));
@@ -339,7 +412,7 @@ impl CharCanvas {
             for x in 0..=last_x.min(self.max_x) {
                 let (char, style) = match row.get(&x) {
                     Some(cell) => (cell.char, cell.style),
-                    None => (' ', CanvasStyle::Plain),
+                    None => (Some(' '), CanvasStyle::Plain),
                 };
                 if style != run_style {
                     if !run_text.is_empty() {
@@ -347,7 +420,9 @@ impl CharCanvas {
                     }
                     run_style = style;
                 }
-                run_text.push(char);
+                if let Some(char) = char {
+                    run_text.push(char);
+                }
             }
             if !run_text.is_empty() {
                 runs.push((run_text, run_style));
@@ -385,7 +460,7 @@ mod tests {
         assert!(window
             .iter()
             .flat_map(|row| row.iter())
-            .all(|(text, _)| text.chars().count() <= 8));
+            .all(|(text, _)| UnicodeWidthStr::width(text.as_str()) <= 8));
         assert_eq!(
             window[1]
                 .iter()
@@ -393,5 +468,19 @@ mod tests {
                 .collect::<String>(),
             " near   "
         );
+    }
+
+    #[test]
+    fn wide_text_uses_terminal_display_cells() {
+        let mut canvas = CharCanvas::new();
+        canvas.text(0, 0, "界a", CanvasStyle::Plain);
+        assert_eq!(canvas.size(), (3, 1));
+        assert_eq!(canvas.render_plain(), vec!["界a"]);
+        let window = canvas.render_runs_window(0, 0, 3, 1);
+        let rendered = window[0]
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<String>();
+        assert_eq!(UnicodeWidthStr::width(rendered.as_str()), 3);
     }
 }

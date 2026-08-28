@@ -281,6 +281,7 @@ fn refreshes_a_run_after_one_committed_update() {
     let mut source = RunSource::new(&database).unwrap();
     source.watch("run-1").unwrap();
     let before = source.get("run-1").unwrap().revision;
+    let window_reads = source.stats().window_reads;
     let connection = Connection::open(&database).unwrap();
     let final_output_hash = blob(&connection, &json!(true));
     let event_hash = blob(
@@ -307,7 +308,15 @@ fn refreshes_a_run_after_one_committed_update() {
         .unwrap();
     let patch_hash = blob(
         &connection,
-        &json!([{"op": "replace", "path": "/presentationRevision", "value": 2}]),
+        &json!([
+            {"op": "replace", "path": "/presentationRevision", "value": 2},
+            {"op": "replace", "path": "/graphRevision", "value": 2},
+            {"op": "replace", "path": "/state/status", "value": "completed"},
+            {"op": "add", "path": "/state/finalOutput", "value": true},
+            {"op": "replace", "path": "/manifest/status", "value": "completed"},
+            {"op": "add", "path": "/manifest/finishedAt", "value": "1970-01-01T00:00:00.002Z"},
+            {"op": "replace", "path": "/live", "value": false}
+        ]),
     );
     connection
         .execute(
@@ -326,6 +335,7 @@ fn refreshes_a_run_after_one_committed_update() {
     let outcome = source.refresh_all();
     assert_eq!(outcome.updates.len(), 1);
     assert_eq!(source.get("run-1").unwrap().revision, before + 1);
+    assert_eq!(source.stats().window_reads, window_reads);
     assert_eq!(
         source.get("run-1").unwrap().state.status.label(),
         "completed"

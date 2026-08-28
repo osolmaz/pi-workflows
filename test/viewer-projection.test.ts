@@ -46,8 +46,45 @@ describe("revisioned viewer projection", () => {
       expect(resultFromCursor.deltas.map((delta) => delta.deltaIndex)).toEqual([0, 1]);
       expect(resultFromCursor.deltas[0]?.patch).toEqual([
         { op: "replace", path: "/presentationRevision", value: revision },
+        { op: "replace", path: "/graphRevision", value: revision },
         { op: "replace", path: "/state/status", value: "completed" },
       ]);
+    }
+    state.close();
+  });
+
+  it("emits direct bounded patches for ordinary workflow changes", async () => {
+    const databasePath = await makeStateDatabasePath("viewer-direct-run-update");
+    const result = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
+    }).run(workflow, { task: "reply" });
+    const state = new StateDatabase({ filePath: databasePath });
+    const row = state.connection
+      .prepare("SELECT presentation_revision AS revision FROM viewer_runs WHERE run_id = ?")
+      .get(result.runId);
+    if (
+      typeof row !== "object" ||
+      row === null ||
+      !("revision" in row) ||
+      typeof row.revision !== "number"
+    ) {
+      throw new Error("Viewer revision row is invalid");
+    }
+    const latest = readViewerDeltas(state, result.runId, row.revision - 1);
+    expect(latest.kind).toBe("deltas");
+    if (latest.kind === "deltas") {
+      const graph = latest.deltas.find((delta) => delta.targetType === "graph");
+      const timeline = latest.deltas.find((delta) => delta.targetType === "timeline");
+      expect(graph?.patch).toContainEqual({
+        op: "replace",
+        path: "/state/status",
+        value: "completed",
+      });
+      expect(timeline?.patch).toContainEqual(
+        expect.objectContaining({ op: "append", path: "/items" }),
+      );
+      expect(latest.deltas.every((delta) => delta.patch.length > 1)).toBe(true);
     }
     state.close();
   });

@@ -12,6 +12,7 @@ use crate::state::types::{
 };
 use serde_json::Value;
 use std::collections::HashSet;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Everything the graph needs from a loaded run.
 pub struct GraphView<'a> {
@@ -132,19 +133,30 @@ fn node_type_badge(node_type: &str, action_execution: Option<&str>) -> String {
 }
 
 fn fit_text(text: &str, width: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= width {
+    if UnicodeWidthStr::width(text) <= width {
         return text.to_string();
     }
-    if width <= 1 {
-        return chars.into_iter().take(width).collect();
+    if width == 0 {
+        return String::new();
     }
-    format!("{}…", chars.into_iter().take(width - 1).collect::<String>())
+    let available = width.saturating_sub(UnicodeWidthChar::width('…').unwrap_or(1));
+    let mut fitted = String::new();
+    let mut used = 0;
+    for char in text.chars() {
+        let char_width = UnicodeWidthChar::width(char).unwrap_or(0);
+        if used + char_width > available {
+            break;
+        }
+        fitted.push(char);
+        used += char_width;
+    }
+    fitted.push('…');
+    fitted
 }
 
 fn centered_text(text: &str, width: usize) -> String {
     let fitted = fit_text(text, width);
-    let left = width.saturating_sub(fitted.chars().count()) / 2;
+    let left = width.saturating_sub(UnicodeWidthStr::width(fitted.as_str())) / 2;
     format!("{}{fitted}", " ".repeat(left))
 }
 
@@ -172,9 +184,8 @@ fn cell_height(node_style: GraphNodeStyle, cell: &RenderedCell) -> i64 {
     }
 }
 
-/// JS `String.prototype.length` (UTF-16 code units), used for width math.
-fn js_len(text: &str) -> i64 {
-    text.encode_utf16().count() as i64
+fn display_width(text: &str) -> i64 {
+    UnicodeWidthStr::width(text) as i64
 }
 
 fn latest_visible_attempt<'a>(steps: &'a [StepRecord], node_id: &str) -> Option<&'a StepRecord> {
@@ -294,7 +305,7 @@ fn card_shape(view: &GraphView, node_id: &str) -> CardShape {
     candidates.extend(bounded_branch_lines(&labels));
     let content_width = candidates
         .iter()
-        .map(|value| js_len(value))
+        .map(|value| display_width(value))
         .max()
         .unwrap_or(CARD_MIN_CONTENT_WIDTH)
         .clamp(CARD_MIN_CONTENT_WIDTH, CARD_MAX_CONTENT_WIDTH);
@@ -306,7 +317,7 @@ fn card_shape(view: &GraphView, node_id: &str) -> CardShape {
 
 fn bounded_node_label(node_id: &str, node: Option<&Value>, content_width: i64) -> String {
     let full = hierarchical_node_label(node_id, node);
-    if js_len(&full) <= content_width {
+    if display_width(&full) <= content_width {
         return full;
     }
     let local = node
@@ -323,7 +334,7 @@ fn bounded_node_label(node_id: &str, node: Option<&Value>, content_width: i64) -
         _ => local,
     };
     let candidate = format!("… › {suffix}");
-    if js_len(&candidate) <= content_width {
+    if display_width(&candidate) <= content_width {
         candidate
     } else {
         fit_text(&suffix, content_width as usize)
@@ -522,7 +533,7 @@ fn render_cell_text(
         is_end,
         width: match node_style {
             GraphNodeStyle::Box => shape.width,
-            GraphNodeStyle::Line => js_len(&text) + 2,
+            GraphNodeStyle::Line => display_width(&text) + 2,
         },
         height: match node_style {
             GraphNodeStyle::Box => shape.height,
@@ -1231,7 +1242,7 @@ fn draw_node_box(
     canvas.text(right_x, y + 3, &chars.v.to_string(), border_style);
     canvas.text(start_x + 2, y + 3, &type_badge, type_style);
     canvas.text(
-        right_x - 1 - status_badge.chars().count() as i64,
+        right_x - 1 - display_width(&status_badge),
         y + 3,
         &status_badge,
         status_style,
@@ -1243,7 +1254,7 @@ fn draw_node_box(
     canvas.text(right_x, y + 4, &chars.v.to_string(), border_style);
     canvas.text(start_x + 2, y + 4, &attempts, content_style);
     canvas.text(
-        right_x - 1 - elapsed.chars().count() as i64,
+        right_x - 1 - display_width(&elapsed),
         y + 4,
         &elapsed,
         content_style,
@@ -1401,8 +1412,8 @@ fn draw_segments(
 /// the graph center first), then beside the source corner.
 fn draw_segment_label(canvas: &mut CharCanvas, label: &PendingLabel) {
     let padded = format!(" {} ", label.text);
-    let padded_len = js_len(&padded);
-    let text_len = js_len(&label.text);
+    let padded_len = display_width(&padded);
+    let text_len = display_width(&label.text);
     if label.from_x != label.to_x {
         let run_start = label.from_x.min(label.to_x) + 1;
         let run_end = label.from_x.max(label.to_x) - 1;
@@ -1491,7 +1502,10 @@ fn draw_back_edges(
             canvas.text(gutter_x + 2, entry_lane_y, label, style);
         }
         // Reserve horizontal room for this gutter and its label before the next.
-        gutter_x += 2 + edge.label.as_deref().map_or(0, |label| js_len(label) + 1);
+        gutter_x += 2 + edge
+            .label
+            .as_deref()
+            .map_or(0, |label| display_width(label) + 1);
     }
 }
 

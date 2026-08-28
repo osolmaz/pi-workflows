@@ -1,3 +1,5 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 /**
  * A sparse character grid for drawing the workflow graph. Box-drawing
  * characters merge by connectivity (│ crossing ─ becomes ┼) so overlapping
@@ -94,6 +96,9 @@ export class CharCanvas {
       return;
     }
     if (existing) {
+      if (existing.char === "") {
+        return;
+      }
       const existingMask = CHAR_TO_MASK[existing.char];
       const incomingMask = CHAR_TO_MASK[char];
       if (existingMask !== undefined && incomingMask !== undefined) {
@@ -112,11 +117,34 @@ export class CharCanvas {
     row.set(x, { char, style });
   }
 
-  /** Write a text run left to right (labels, node lines). */
-  text(x: number, y: number, value: string, style: CanvasStyle = "plain"): void {
-    for (const [index, char] of [...value].entries()) {
-      this.put(x + index, y, char, style);
+  private writeText(
+    x: number,
+    y: number,
+    value: string,
+    style: CanvasStyle,
+    preserveSpaces: boolean,
+  ): void {
+    const row = this.row(y);
+    let cursor = x;
+    for (const char of value) {
+      const width = visibleWidth(char);
+      if (width === 0) continue;
+      if (char === " ") {
+        if (preserveSpaces) row.set(cursor, { char, style });
+      } else {
+        this.put(cursor, y, char, style);
+      }
+      for (let offset = 1; offset < width; offset += 1) {
+        row.set(cursor + offset, { char: "", style });
+      }
+      cursor += width;
     }
+    this.maxX = Math.max(this.maxX, cursor - 1);
+  }
+
+  /** Write a text run left to right in terminal display cells. */
+  text(x: number, y: number, value: string, style: CanvasStyle = "plain"): void {
+    this.writeText(x, y, value, style, false);
   }
 
   /**
@@ -129,7 +157,7 @@ export class CharCanvas {
       return false;
     }
     const row = this.cells.get(y);
-    const width = [...value].length;
+    const width = visibleWidth(value);
     for (let index = 0; index < width; index += 1) {
       if (row?.has(x + index)) {
         return false;
@@ -150,17 +178,17 @@ export class CharCanvas {
     if (x < 1 || y < 0) {
       return false;
     }
-    const chars = [...value];
+    const width = visibleWidth(value);
     const row = this.cells.get(y);
-    for (let index = -1; index <= chars.length; index += 1) {
+    for (let index = -1; index <= width; index += 1) {
       if (row?.get(x + index)?.char !== "─") {
         return false;
       }
     }
-    for (const [index, char] of chars.entries()) {
-      this.row(y).set(x + index, { char, style });
+    for (let index = 0; index < width; index += 1) {
+      this.row(y).delete(x + index);
     }
-    this.maxX = Math.max(this.maxX, x + chars.length - 1);
+    this.writeText(x, y, value, style, true);
     return true;
   }
 

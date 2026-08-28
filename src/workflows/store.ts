@@ -15,6 +15,7 @@ import {
   initializeViewerRun,
   recordViewerDeltas,
   viewerTailPatch,
+  VIEWER_PAGE_SIZE,
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
 import { compositionMetadata } from "./composition.js";
@@ -383,14 +384,18 @@ export class WorkflowRunStore {
           acceptedRevision = revision;
           state.traceSeq = revision;
           state.updatedAt = at;
-          insertRunEvent(this.state, reserved.resourceId, revision, at, {
+          const traceEvent: WorkflowTraceEvent = {
+            seq: revision,
+            at,
+            runId: state.runId,
             scope: "run",
             type: "run_initialized",
             payload: { workflowName: workflow.name },
-          });
+          };
+          insertRunEvent(this.state, reserved.resourceId, revision, at, traceEvent);
           this.persistRunState(reserved, state, revision, now);
           initializeViewerRun(this.state, state.runId, now);
-          recordViewerDeltas(this.state, state.runId, runViewerTargets(), now);
+          recordViewerDeltas(this.state, state.runId, runViewerTargets(state, traceEvent), now);
           this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
           this.syncNodeAttempts(state, snapshot, now);
           this.syncContinuationIdentity(state);
@@ -1116,15 +1121,19 @@ export class WorkflowRunStore {
            WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
         )
         .run(now, runId);
-      insertRunEvent(this.state, row.resourceId, nextRevision, at, {
+      const traceEvent: WorkflowTraceEvent = {
+        seq: nextRevision,
+        at,
+        runId,
         scope: "run",
         type: "run_resume_prepared",
         payload: {},
-      });
+      };
+      insertRunEvent(this.state, row.resourceId, nextRevision, at, traceEvent);
       loaded.state.traceSeq = nextRevision;
       loaded.state.updatedAt = at;
       this.persistRunState(row, loaded.state, nextRevision, now);
-      recordViewerDeltas(this.state, runId, runViewerTargets(), now);
+      recordViewerDeltas(this.state, runId, runViewerTargets(loaded.state, traceEvent), now);
       context.revision = nextRevision;
     });
     const prepared = this.readRun(runId, { includeTrace: true });
@@ -1233,7 +1242,7 @@ export class WorkflowRunStore {
         insertRunEvent(this.state, run.resourceId, revision, at, event);
         const committedAt = Date.now();
         this.persistRunState(run, state, revision, committedAt);
-        recordViewerDeltas(this.state, runId, runViewerTargets(), committedAt);
+        recordViewerDeltas(this.state, runId, runViewerTargets(state, event), committedAt);
         context.revision = revision;
         acceptedEvent = event;
         acceptedRecord = record;
@@ -1268,7 +1277,7 @@ export class WorkflowRunStore {
         this.persistRunState(run, state, revision, now);
         this.transitionFollowUpsForRunState(state, event, now);
         this.syncNodeAttempts(state, snapshot, now);
-        recordViewerDeltas(this.state, runId, runViewerTargets(), now);
+        recordViewerDeltas(this.state, runId, runViewerTargets(state, traceEvent), now);
         context.revision = revision;
         accepted = traceEvent;
       });
@@ -1362,7 +1371,7 @@ export class WorkflowRunStore {
           .run(binding.piSessionId, now, runId);
         const revision = context.revision + 1;
         const at = new Date(now).toISOString();
-        insertRunEvent(this.state, run.resourceId, revision, at, {
+        const traceEvent: WorkflowTraceEvent = {
           seq: revision,
           at,
           runId,
@@ -1372,21 +1381,29 @@ export class WorkflowRunStore {
             piSessionId: binding.piSessionId,
             ...(attemptId !== undefined ? { captureAttemptId: attemptId } : {}),
           },
-        });
+        };
+        insertRunEvent(this.state, run.resourceId, revision, at, traceEvent);
         const current = this.readRunState(run, this.readDefinition(run.definitionHash));
         current.traceSeq = revision;
         current.updatedAt = at;
         this.persistRunState(run, current, revision, now);
-        recordViewerDeltas(
-          this.state,
-          runId,
-          [
-            ...runViewerTargets(),
-            { targetType: "conversation", targetKey: "binding" },
-            { targetType: "inspector", targetKey: "session" },
-          ],
-          now,
-        );
+        const targets = runViewerTargets(current, traceEvent);
+        targets[0]?.patch?.push({
+          op: "add",
+          path: "/session",
+          value: parseJson(
+            canonicalJson({
+              binding,
+              presentationRevision: 0,
+              entryPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
+              eventPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
+              eventsMalformed: false,
+              eventsTornTail: false,
+              capture: null,
+            }),
+          ),
+        });
+        recordViewerDeltas(this.state, runId, targets, now);
         context.revision = revision;
       });
     });
@@ -3171,14 +3188,113 @@ export class WorkflowRunStore {
   }
 }
 
-function runViewerTargets(): ViewerDeltaDraft[] {
+function runViewerTargets(
+  state: WorkflowRunState,
+  traceEvent: WorkflowTraceEvent,
+): ViewerDeltaDraft[] {
+  const stepTotal = state.steps.length;
+  const stepStart = Math.max(0, stepTotal - VIEWER_PAGE_SIZE);
+  const updateTotal = state.updates?.length ?? 0;
+  const updateStart = Math.max(0, updateTotal - VIEWER_PAGE_SIZE);
+  const latestStepByNode = new Map<string, WorkflowStepRecord>();
+  for (const step of state.steps) latestStepByNode.set(step.nodeId, step);
+  const graphSteps = state.steps
+    .filter((step) => latestStepByNode.get(step.nodeId) === step)
+    .map((step) => ({
+      attemptId: step.attemptId,
+      nodeId: step.nodeId,
+      nodeType: step.nodeType,
+      outcome: step.outcome,
+      startedAt: step.startedAt,
+      finishedAt: step.finishedAt,
+      prompt: null,
+      output: null,
+      ...(step.settingsScopeId === undefined ? {} : { settingsScopeId: step.settingsScopeId }),
+      ...(step.settingsChangeNumber === undefined
+        ? {}
+        : { settingsChangeNumber: step.settingsChangeNumber }),
+      ...(step.settingsHash === undefined ? {} : { settingsHash: step.settingsHash }),
+    }));
+  const transitions = new Set<string>();
+  for (let index = 1; index < state.steps.length; index += 1) {
+    const previous = state.steps[index - 1];
+    const current = state.steps[index];
+    if (previous !== undefined && current !== undefined) {
+      transitions.add(`${previous.nodeId}->${current.nodeId}`);
+    }
+  }
+  const graphPatch: NonNullable<ViewerDeltaDraft["patch"]> = [
+    { op: "replace", path: "/state/traceSeq", value: state.traceSeq },
+    { op: "replace", path: "/state/updatedAt", value: state.updatedAt },
+    { op: "replace", path: "/state/status", value: state.status },
+    { op: "add", path: "/state/finishedAt", value: state.finishedAt ?? null },
+    { op: "add", path: "/state/currentNode", value: state.currentNode ?? null },
+    { op: "add", path: "/state/currentAttemptId", value: state.currentAttemptId ?? null },
+    {
+      op: "add",
+      path: "/state/currentNodeStartedAt",
+      value: state.currentNodeStartedAt ?? null,
+    },
+    {
+      op: "add",
+      path: "/state/currentSettingsScopeId",
+      value: state.currentSettingsScopeId ?? null,
+    },
+    {
+      op: "add",
+      path: "/state/currentSettingsChangeNumber",
+      value: state.currentSettingsChangeNumber ?? null,
+    },
+    {
+      op: "add",
+      path: "/state/currentSettingsHash",
+      value: state.currentSettingsHash ?? null,
+    },
+    { op: "add", path: "/state/statusDetail", value: state.statusDetail ?? null },
+    { op: "add", path: "/state/paused", value: state.paused ?? false },
+    { op: "add", path: "/state/waitingOn", value: state.waitingOn ?? null },
+    {
+      op: "add",
+      path: "/state/humanDecision",
+      value: parseJson(canonicalJson(state.humanDecision ?? null)),
+    },
+    {
+      op: "replace",
+      path: "/graphSteps",
+      value: parseJson(canonicalJson(graphSteps)),
+    },
+    {
+      op: "replace",
+      path: "/takenTransitions",
+      value: [...transitions].sort(),
+    },
+    { op: "replace", path: "/graphCursor", value: Math.max(0, stepTotal - 1) },
+    { op: "replace", path: "/stepStart", value: stepStart },
+    { op: "replace", path: "/stepTotal", value: stepTotal },
+    { op: "replace", path: "/updateStart", value: updateStart },
+    { op: "replace", path: "/updateTotal", value: updateTotal },
+    { op: "replace", path: "/manifest/status", value: state.status },
+    { op: "add", path: "/manifest/finishedAt", value: state.finishedAt ?? null },
+    {
+      op: "replace",
+      path: "/live",
+      value: state.status === "running" || state.status === "waiting",
+    },
+  ];
   return [
-    { targetType: "summary" },
-    { targetType: "graph" },
-    { targetType: "replay" },
-    { targetType: "timeline", targetKey: "trace:tail" },
-    { targetType: "inspector", targetKey: "run" },
-    { targetType: "inspector", targetKey: "follow-ups" },
+    { targetType: "graph", patch: graphPatch },
+    {
+      targetType: "timeline",
+      targetKey: "trace:tail",
+      patch: viewerTailPatch(traceEvent.seq - 1, [
+        parseJson(
+          canonicalJson({
+            ...traceEvent,
+            payload: compactTracePayload(traceEvent.type, traceEvent.payload),
+          }),
+        ),
+      ]),
+    },
   ];
 }
 
