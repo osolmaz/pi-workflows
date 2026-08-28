@@ -594,6 +594,36 @@ async function readRpcState(pi: RpcHandle): Promise<RpcState> {
   return data as RpcState;
 }
 
+async function readRpcEntries(pi: RpcHandle): Promise<
+  Array<{
+    type?: unknown;
+    customType?: unknown;
+    content?: unknown;
+    details?: unknown;
+  }>
+> {
+  const id = `e2e-entries-${++rpcStateRequest}`;
+  const start = pi.stdoutLines.length;
+  pi.send({ id, type: "get_entries" });
+  await waitForCondition(
+    () => pi.stdoutLines.slice(start).some((line) => line.includes(`"id":"${id}"`)),
+    () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+  );
+  const response = pi.stdoutLines
+    .slice(start)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((value) => value.id === id);
+  const data = response?.data;
+  if (data === null || typeof data !== "object") {
+    throw new Error(`Pi RPC get_entries ${id} returned no data`);
+  }
+  const entries = (data as { entries?: unknown }).entries;
+  if (!Array.isArray(entries)) {
+    throw new Error(`Pi RPC get_entries ${id} returned no entries`);
+  }
+  return entries;
+}
+
 async function waitForPiIdle(pi: RpcHandle, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -1668,6 +1698,35 @@ describe.sequential("pi-workflows end to end", () => {
         );
       });
     expect(terminalDecisionRequests()).toHaveLength(2);
+
+    const terminalRuns = listWorkflowRuns({ databasePath: runsDir }).filter(
+      (candidate) => candidate.state.workflowName === "terminal-restart-e2e",
+    );
+    const terminalRunIds = new Set(terminalRuns.map((candidate) => candidate.runId));
+    const recordedTerminalMessages = (await readRpcEntries(pi)).filter((entry) => {
+      if (entry.type !== "custom_message" || entry.customType !== "pi-workflows-deferred-turn") {
+        return false;
+      }
+      const details = entry.details;
+      if (details === null || typeof details !== "object" || Array.isArray(details)) return false;
+      const runId = (details as { runId?: unknown }).runId;
+      return typeof runId === "string" && terminalRunIds.has(runId);
+    });
+    expect(recordedTerminalMessages).toHaveLength(2);
+    for (const message of recordedTerminalMessages) {
+      expect(message.details).toMatchObject({
+        schema: "pi-workflows.deferred-turn-message.v1",
+        presentation: {
+          workflowName: "terminal-restart-e2e",
+          state: "failed",
+          reasonKind: "maxSteps",
+          restart: { limit: 3 },
+        },
+        terminalDecision: { schema: "pi-workflows.terminal-decision.v1" },
+      });
+      expect(contentText(message.content)).toContain("Exact workflow input:");
+      expect(contentText(message.content)).toContain('"workflowName": "terminal-restart-e2e"');
+    }
 
     const restartCallIds = new Set<string>();
     for (const request of mock.requests.slice(requestOffset)) {

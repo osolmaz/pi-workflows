@@ -714,6 +714,14 @@ The model uses the current Pi conversation to stop, restart safely, start
 Monitor for an authorized external wait, ask for a decision or authority, or
 take another safe authorized action.
 
+Interactive Pi shows a compact card for a factual terminal fallback. The
+collapsed card shows the workflow, state or cause, run identity, and restart
+count when available. It hides the full terminal facts, input, result,
+fingerprint, and model instructions. Expanding the card shows the complete
+model-facing content. The renderer uses structured display fields rather than
+parsing the prompt, so collapsing the card does not change session history,
+model context, replay, or recovery. Headless and RPC behavior stays unchanged.
+
 `presentationPrompt` adds workflow-specific presentation instructions to this
 shared terminal decision message for completed runs. Returning `undefined`,
 returning an empty string, omitting `presentationPrompt`, or ending in failure,

@@ -75,6 +75,7 @@ import {
   deferredTurnMessageDetails,
   deferredTurnMessageId,
   deferredTurnSourceEventId,
+  registerDeferredTurnMessageRenderer,
   type DeferredTurnDescriptor,
 } from "./deferred-turn.js";
 import { ConversationStepExecutor } from "./executor.js";
@@ -546,6 +547,7 @@ type WorkflowWidgetContent = string[] | WorkflowWidgetFactory;
 
 export default function piWorkflows(pi: ExtensionAPI) {
   registerWorkflowAgentStepMessageRenderer(pi);
+  registerDeferredTurnMessageRenderer(pi);
 
   const herdrEnabled = process.env.HERDR_ENV === "1";
   const herdrViewer = new HerdrWorkflowViewer((command, args, options) =>
@@ -692,7 +694,7 @@ export default function piWorkflows(pi: ExtensionAPI) {
                     : buildTerminalDecisionContent(decision),
                 display: true,
                 details: {
-                  ...deferredTurnMessageDetails(intent),
+                  ...deferredTurnMessageDetails(intent, decision),
                   ...(decision === null
                     ? {}
                     : {

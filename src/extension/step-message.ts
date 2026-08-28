@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { Box, Text, TruncatedText } from "@earendil-works/pi-tui";
-import { sanitizeText } from "../workflows/text.js";
 import type {
   AgentStepContract,
   AgentStepPresentation,
   AgentStepSubmission,
 } from "../workflows/types.js";
 import { visibleAssistantText, type PromptDeliveryKind } from "./executor.js";
+import {
+  cleanOptionalSingleLine,
+  cleanSingleLine,
+  customMessageContentText,
+  paintMessageCard,
+  renderMessageCard,
+  type MessageCardView,
+} from "./message-card.js";
 
 export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = "pi-workflows-agent-step";
 export const WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA = "pi-workflows.agent-step-message.v1";
@@ -25,27 +31,13 @@ type WorkflowAgentStepMessage = {
   details?: unknown;
 };
 
-type WorkflowAgentStepView = {
-  title: string;
-  status?: string;
-  expandedText?: string;
-};
+type WorkflowAgentStepView = MessageCardView;
 
 export function registerWorkflowAgentStepMessageRenderer(pi: ExtensionAPI): void {
   pi.registerMessageRenderer<WorkflowAgentStepMessageDetails>(
     WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
-    (message, { expanded }, theme) => {
-      const view = buildWorkflowAgentStepView(message, expanded, theme);
-      const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-      box.addChild(new TruncatedText(view.title));
-      if (view.status !== undefined) {
-        box.addChild(new TruncatedText(view.status));
-      }
-      if (view.expandedText !== undefined) {
-        box.addChild(new Text(`\n${view.expandedText}`));
-      }
-      return box;
-    },
+    (message, { expanded }, theme) =>
+      renderMessageCard(buildWorkflowAgentStepView(message, expanded, theme), theme),
   );
 }
 
@@ -65,12 +57,14 @@ export function buildWorkflowAgentStepView(
   const label = runTitle ?? workflowName;
   const suffix = kind === "step" ? "" : ` · ${kind}`;
   const glyph = kind === "step" ? "▶" : "↻";
-  const title = paint(theme, "accent", `${glyph} ${label} › ${nodeId}${suffix}`);
+  const title = paintMessageCard(theme, "accent", `${glyph} ${label} › ${nodeId}${suffix}`);
 
   if (!expanded) {
     return {
       title,
-      ...(statusDetail !== undefined ? { status: paint(theme, "dim", statusDetail) } : {}),
+      ...(statusDetail !== undefined
+        ? { status: paintMessageCard(theme, "dim", statusDetail) }
+        : {}),
     };
   }
 
@@ -88,11 +82,11 @@ export function buildWorkflowAgentStepView(
     `Completion: ${assistant ? "assistant response" : "workflow submission"}`,
     `Expected output: ${cleanSingleLine(expectedOutput)}`,
   ];
-  const prompt = contentText(message.content);
+  const prompt = customMessageContentText(message.content);
   return {
     title,
-    ...(statusDetail !== undefined ? { status: paint(theme, "dim", statusDetail) } : {}),
-    expandedText: `${metadata.map((line) => paint(theme, "dim", line)).join("\n")}\n\n${prompt}`,
+    ...(statusDetail !== undefined ? { status: paintMessageCard(theme, "dim", statusDetail) } : {}),
+    expandedText: `${metadata.map((line) => paintMessageCard(theme, "dim", line)).join("\n")}\n\n${prompt}`,
   };
 }
 
@@ -207,42 +201,4 @@ function parseDetails(value: unknown): WorkflowAgentStepMessageDetails | undefin
     return undefined;
   }
   return candidate as WorkflowAgentStepMessageDetails;
-}
-
-function contentText(content: unknown): string {
-  if (typeof content === "string") return cleanMultiline(content);
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (part === null || typeof part !== "object" || !("text" in part)) return "";
-      const text = (part as { text?: unknown }).text;
-      return typeof text === "string" ? cleanMultiline(text) : "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function cleanOptionalSingleLine(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? cleanSingleLine(value) : undefined;
-}
-
-function cleanSingleLine(value: string): string {
-  return sanitizeText(value);
-}
-
-function cleanMultiline(value: string): string {
-  return value
-    .replaceAll("\r\n", "\n")
-    .replaceAll("\r", "\n")
-    .split("\n")
-    .map((line) => sanitizeText(line))
-    .join("\n");
-}
-
-function paint(
-  theme: Pick<Theme, "fg"> | undefined,
-  color: "accent" | "dim",
-  text: string,
-): string {
-  return theme?.fg(color, text) ?? text;
 }
