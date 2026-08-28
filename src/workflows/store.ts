@@ -18,6 +18,11 @@ import {
   VIEWER_PAGE_SIZE,
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
+import {
+  reduceSessionEvents,
+  reduceSessionEventsFromCheckpoint,
+  type TemporalSessionState,
+} from "../viewer/session-reducer.js";
 import { compositionMetadata } from "./composition.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
@@ -51,6 +56,7 @@ import type {
   WorkflowSessionCapture,
   WorkflowSessionEntryRecord,
   WorkflowSessionEventRecord,
+  WorkflowSessionEventType,
   WorkflowSettingsSnapshot,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
@@ -172,6 +178,23 @@ type EventRow = {
   resourceRevision: number;
   eventType: string;
   payloadHash: Buffer | null;
+  recordedAt: number;
+};
+
+type ViewerSessionCheckpointRow = {
+  eventSeq: number;
+  stateHash: Buffer;
+};
+
+type ViewerSessionEventRow = {
+  runSeq: number;
+  eventType: string;
+  nodeId: string;
+  attemptId: string;
+  turnId: string | null;
+  messageId: string | null;
+  toolCallId: string | null;
+  payloadHash: Buffer;
   recordedAt: number;
 };
 
@@ -1527,7 +1550,7 @@ export class WorkflowRunStore {
       }
       let runSequence = runSequenceRow.count;
       const firstRunSequence = runSequence;
-      const projectedRecords: JsonValue[] = [];
+      const projectedRecords: Array<WorkflowSessionEventRecord & { stepIndex?: number }> = [];
       for (const record of records) {
         validateSessionEventRecord(record);
         if (record.seq !== expected) {
@@ -1564,21 +1587,20 @@ export class WorkflowRunStore {
              FROM run_steps WHERE run_id = ? AND attempt_id = ?`,
           )
           .get(runId, record.attemptId);
-        projectedRecords.push(
-          parseJson(
-            canonicalJson({
-              ...record,
-              seq: runSequence,
-              ...(isStepIndexRow(stepIndex) ? { stepIndex: stepIndex.stepIndex } : {}),
-            }),
-          ),
-        );
+        projectedRecords.push({
+          ...record,
+          seq: runSequence,
+          ...(isStepIndexRow(stepIndex) ? { stepIndex: stepIndex.stepIndex } : {}),
+        });
         expected += 1;
         runSequence += 1;
       }
       this.state.connection
         .prepare("UPDATE session_segments SET event_count = ? WHERE segment_id = ?")
         .run(expected - 1, current.segmentId);
+      const recordedAt = Date.now();
+      this.recordSessionReplayCheckpoints(runId, firstRunSequence, projectedRecords, recordedAt);
+      const projectedValues = projectedRecords.map((record) => parseJson(canonicalJson(record)));
       recordViewerDeltas(
         this.state,
         runId,
@@ -1586,7 +1608,7 @@ export class WorkflowRunStore {
           {
             targetType: "timeline",
             targetKey: "session:tail",
-            patch: viewerTailPatch(firstRunSequence - 1, projectedRecords),
+            patch: viewerTailPatch(firstRunSequence - 1, projectedValues),
           },
           {
             targetType: "conversation",
@@ -1595,19 +1617,100 @@ export class WorkflowRunStore {
               {
                 op: "replace",
                 path: "/capture/eventCount",
-                value: firstRunSequence - 1 + projectedRecords.length,
+                value: firstRunSequence - 1 + projectedValues.length,
               },
               {
                 op: "replace",
                 path: "/capture/lastEventSeq",
-                value: firstRunSequence - 1 + projectedRecords.length,
+                value: firstRunSequence - 1 + projectedValues.length,
               },
             ],
           },
         ],
-        Date.now(),
+        recordedAt,
       );
     });
+  }
+
+  private recordSessionReplayCheckpoints(
+    runId: string,
+    firstRunSequence: number,
+    newRecords: WorkflowSessionEventRecord[],
+    now: number,
+  ): void {
+    const row = this.state.connection
+      .prepare(
+        `SELECT event_seq AS eventSeq, state_hash AS stateHash
+         FROM viewer_session_checkpoints
+         WHERE run_id = ? ORDER BY event_seq DESC LIMIT 1`,
+      )
+      .get(runId);
+    let checkpoint = reduceSessionEvents([], [], 0);
+    if (isViewerSessionCheckpointRow(row)) {
+      const saved = this.state.readJson(row.stateHash);
+      if (!isTemporalSessionState(saved) || saved.throughSeq !== row.eventSeq) {
+        throw new Error(`Viewer session checkpoint is invalid for ${runId}`);
+      }
+      checkpoint = saved;
+    }
+    let pending = [
+      ...this.sessionEventRecords(runId, checkpoint.throughSeq, firstRunSequence),
+      ...newRecords,
+    ];
+    const lastSequence = pending.at(-1)?.seq ?? checkpoint.throughSeq;
+    let boundary = (Math.floor(checkpoint.throughSeq / VIEWER_PAGE_SIZE) + 1) * VIEWER_PAGE_SIZE;
+    while (boundary <= lastSequence) {
+      const page = pending.filter((event) => event.seq <= boundary);
+      checkpoint = reduceSessionEventsFromCheckpoint([], page, boundary, checkpoint);
+      checkpoint = boundedTemporalCheckpoint(checkpoint);
+      const stateHash = this.state.putJson(checkpoint, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO viewer_session_checkpoints(run_id, event_seq, state_hash, recorded_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(runId, boundary, stateHash, now);
+      pending = pending.filter((event) => event.seq > boundary);
+      boundary += VIEWER_PAGE_SIZE;
+    }
+  }
+
+  private sessionEventRecords(
+    runId: string,
+    afterSequence: number,
+    beforeSequence: number,
+  ): WorkflowSessionEventRecord[] {
+    return this.state.connection
+      .prepare(
+        `SELECT run_seq AS runSeq, event_type AS eventType, node_id AS nodeId,
+                attempt_id AS attemptId, turn_id AS turnId, message_id AS messageId,
+                tool_call_id AS toolCallId, payload_hash AS payloadHash,
+                recorded_at AS recordedAt
+         FROM session_events
+         WHERE run_id = ? AND run_seq > ? AND run_seq < ?
+         ORDER BY run_seq`,
+      )
+      .all(runId, afterSequence, beforeSequence)
+      .map((value) => {
+        if (!isViewerSessionEventRow(value)) {
+          throw new Error(`Viewer session event row is invalid for ${runId}`);
+        }
+        const payload = this.state.readJson(value.payloadHash);
+        if (!isRecord(payload)) {
+          throw new Error(`Viewer session event payload is invalid for ${runId}`);
+        }
+        return {
+          seq: value.runSeq,
+          at: new Date(value.recordedAt).toISOString(),
+          nodeId: value.nodeId,
+          attemptId: value.attemptId,
+          type: assertSessionEventType(value.eventType),
+          payload,
+          ...(value.turnId === null ? {} : { turnId: value.turnId }),
+          ...(value.messageId === null ? {} : { messageId: value.messageId }),
+          ...(value.toolCallId === null ? {} : { toolCallId: value.toolCallId }),
+        };
+      });
   }
 
   async writeSessionCapture(
@@ -3688,6 +3791,21 @@ function emptySegment(): SessionCaptureSegment {
   };
 }
 
+function assertSessionEventType(value: string): WorkflowSessionEventType {
+  switch (value) {
+    case "turn_started":
+    case "turn_finished":
+    case "message_started":
+    case "assistant_event":
+    case "message_finished":
+    case "tool_execution_started":
+    case "tool_execution_finished":
+      return value;
+    default:
+      throw new Error(`Unknown session event type: ${value}`);
+  }
+}
+
 function validateSessionEventRecord(record: WorkflowSessionEventRecord): void {
   if (!Number.isSafeInteger(record.seq) || record.seq < 1) {
     throw new Error("Session event seq must be a positive safe integer");
@@ -3906,6 +4024,52 @@ function isLeaseExpiryRow(value: unknown): value is { expiresAt: number | null }
 
 function isNextOrderRow(value: unknown): value is { nextOrder: number } {
   return isRecord(value) && typeof value.nextOrder === "number";
+}
+
+function isViewerSessionCheckpointRow(value: unknown): value is ViewerSessionCheckpointRow {
+  return isRecord(value) && typeof value.eventSeq === "number" && Buffer.isBuffer(value.stateHash);
+}
+
+function isViewerSessionEventRow(value: unknown): value is ViewerSessionEventRow {
+  return (
+    isRecord(value) &&
+    typeof value.runSeq === "number" &&
+    typeof value.eventType === "string" &&
+    typeof value.nodeId === "string" &&
+    typeof value.attemptId === "string" &&
+    (typeof value.turnId === "string" || value.turnId === null) &&
+    (typeof value.messageId === "string" || value.messageId === null) &&
+    (typeof value.toolCallId === "string" || value.toolCallId === null) &&
+    Buffer.isBuffer(value.payloadHash) &&
+    typeof value.recordedAt === "number"
+  );
+}
+
+function isTemporalSessionState(value: unknown): value is TemporalSessionState {
+  return (
+    isRecord(value) &&
+    typeof value.throughSeq === "number" &&
+    Array.isArray(value.messages) &&
+    Array.isArray(value.tools) &&
+    Array.isArray(value.settledEntryIds) &&
+    value.settledEntryIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.diagnostics) &&
+    value.diagnostics.every((item) => typeof item === "string")
+  );
+}
+
+function boundedTemporalCheckpoint(state: TemporalSessionState): TemporalSessionState {
+  const messages = state.messages.filter((message) => message.status === "streaming");
+  const activeMessages = new Set(messages.map((message) => message.messageId));
+  return {
+    ...state,
+    messages,
+    tools: state.tools.filter(
+      (tool) => tool.status === "running" && activeMessages.has(tool.messageId),
+    ),
+    settledEntryIds: [],
+    diagnostics: ["earlier session messages are outside this page"],
+  };
 }
 
 function assertValidRunId(runId: string): void {

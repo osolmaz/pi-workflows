@@ -140,6 +140,14 @@ CREATE TABLE viewer_deltas (
 CREATE INDEX viewer_deltas_resume_idx
   ON viewer_deltas(run_id, presentation_revision, delta_index);
 
+CREATE TABLE viewer_session_checkpoints (
+  run_id TEXT NOT NULL REFERENCES viewer_runs(run_id) ON DELETE CASCADE,
+  event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+  state_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  recorded_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, event_seq)
+) STRICT;
+
 CREATE TABLE run_sources (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   mount_path TEXT NOT NULL,

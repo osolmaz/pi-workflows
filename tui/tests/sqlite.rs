@@ -39,6 +39,7 @@ fn fixture() -> (TempDir, std::path::PathBuf) {
              CREATE TABLE runs(run_id TEXT PRIMARY KEY, resource_id TEXT, definition_digest BLOB, parent_run_id TEXT, title TEXT, status TEXT, paused INTEGER, status_detail TEXT, input_hash BLOB, final_output_hash BLOB, error_hash BLOB, created_at INTEGER, updated_at INTEGER, finished_at INTEGER);
              CREATE TABLE viewer_runs(run_id TEXT PRIMARY KEY, presentation_revision INTEGER, retained_from_revision INTEGER, updated_at INTEGER);
              CREATE TABLE viewer_deltas(run_id TEXT, presentation_revision INTEGER, delta_index INTEGER, target_type TEXT, target_key TEXT, patch_hash BLOB, recorded_at INTEGER);
+             CREATE TABLE viewer_session_checkpoints(run_id TEXT, event_seq INTEGER, state_hash BLOB, recorded_at INTEGER);
              CREATE TABLE run_sources(run_id TEXT, mount_path TEXT, source_type TEXT, source_ref TEXT, source_revision TEXT);
              CREATE TABLE leases(resource_id TEXT PRIMARY KEY, owner_id TEXT, expires_at INTEGER);
              CREATE TABLE events(resource_id TEXT, resource_revision INTEGER, event_type TEXT, payload_hash BLOB, recorded_at INTEGER);
@@ -597,6 +598,22 @@ fn reads_bounded_session_pages_by_run_sequence() {
             )
             .unwrap();
     }
+    let checkpoint_hash = blob(
+        &transaction,
+        &json!({
+            "throughSeq": 256,
+            "messages": [],
+            "tools": [],
+            "settledEntryIds": [],
+            "diagnostics": ["earlier session messages are outside this page"]
+        }),
+    );
+    transaction
+        .execute(
+            "INSERT INTO viewer_session_checkpoints(run_id, event_seq, state_hash, recorded_at) VALUES ('run-1', 256, ?1, 256)",
+            [checkpoint_hash],
+        )
+        .unwrap();
     transaction.commit().unwrap();
 
     let reader = ProjectionReader::open(&database).unwrap();
@@ -618,14 +635,14 @@ fn reads_bounded_session_pages_by_run_sequence() {
     let (_, events) = reader
         .read_page("run-1", PageKind::SessionEvents, 299)
         .unwrap();
-    assert_eq!(events.start, 44);
-    assert_eq!(events.items.len(), 256);
+    assert_eq!(events.start, 256);
+    assert_eq!(events.items.len(), 44);
     assert_eq!(
         events
             .replay_checkpoint
             .as_ref()
             .and_then(|value| value.get("throughSeq")),
-        Some(&json!(44))
+        Some(&json!(256))
     );
 }
 
