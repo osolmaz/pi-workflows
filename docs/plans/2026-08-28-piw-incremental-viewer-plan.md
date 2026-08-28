@@ -272,11 +272,25 @@ Boxed cards use a content width from 20 through 28 cells, which gives an outer w
 
 The generated scale fixture is 98,242,560 bytes and contains 44 runs, 17,820 run events, 9,284 session entries, and 48,620 session events. Five release-mode runs of 1,000 idle checks each loaded one selected window with 723 payload rows. They performed one run-index read, no later payload loads, and used 9,388 KiB peak RSS, or 9.61 MB. Total time was 1,291 through 2,331 microseconds per 1,000 checks. Median checks took 1 through 2 microseconds, p99 checks took 1 through 2 microseconds, and the maximum was 9 through 27 microseconds. Compared with the measured 370 MB baseline, peak memory fell by about 360.39 MB, or 97.4%. This is much larger than the registered 50% memory reduction gate. A separate run of 1,000,000 unchanged checks used 0.63 CPU seconds in user code and 0.65 CPU seconds in system calls. Its p99 check took 2 microseconds. The deterministic structural gate also passed: idle checks performed zero payload reads after the first bounded selected window.
 
+## Preserving pre-viewer runs
+
+The implementation changed the exact SQLite shape. It added the viewer projection tables and added run-wide sequence fields to session entries and events. Onur explicitly requires the runs stored by the immediately previous schema to remain available for testing and adoption.
+
+One explicit maintenance command upgrades only that exact prior schema. It requires a new absolute backup path and `--apply`, refuses active leases, checkpoints the WAL, takes an exclusive lock, and writes a byte-identical verified backup before it changes the source. In one transaction it rebuilds the two session tables with stable chronological run sequence numbers, adds the viewer tables, gives each old run presentation revision 1, and backfills bounded replay checkpoints. It compares existing session content before and after, validates the exact current schema, and runs integrity and foreign-key checks before commit. A failure rolls back the source and keeps a completed backup.
+
+This bounded exception does not add a runtime compatibility reader, dual reads, dual writes, a new schema version, automatic startup migration, or support for an unknown alpha schema. The normal runtime still accepts only the current exact schema.
+
 ## Rollout
 
-The implementation is one hard replacement. State writers, projection readers, local viewer, replay server, replay client, and protocol must agree before release.
+State writers, projection readers, local viewer, replay server, replay client, and protocol must agree before release.
 
-If the new presentation revision or delta records make the existing alpha database incompatible, startup must stop with the standard clear reset instruction. It must not modify or delete the old database.
+Before adoption on a pre-viewer database, stop all Pi Workflows runs and hosts and run:
+
+```bash
+pi-workflows state upgrade --backup /absolute/path/to/state-before-viewer.sqlite --apply
+```
+
+Test the command and a source-built `piw` against a copied database first. Do not modify the live database for that test.
 
 Release publication and installation of the matching npm and crates.io packages are separate work. Existing installed viewers keep their current behavior until they are replaced.
 

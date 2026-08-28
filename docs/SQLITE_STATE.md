@@ -18,7 +18,11 @@ The store retains 256 presentation revisions. A reader with an older cursor must
 
 `session_entries` and `session_events` have run-wide sequence numbers and indexed `(run_id, run_seq)` ranges. Step, trace, entry, and event reads contain at most 256 rows. Run-list queries read metadata, status, lease facts, and the presentation revision. They do not read payload bodies.
 
-This is an in-place alpha schema change. The schema name and version remain `pi-workflows-state` version 1. The DDL digest and exact shape changed. An older alpha database fails with the standard reset instruction and remains untouched. There is no compatibility reader, migration shim, dual path, feature flag, alias, or `v2` schema.
+This is an in-place alpha schema change. The schema name and version remain `pi-workflows-state` version 1. The DDL digest and exact shape changed.
+
+The exact schema used by Pi Workflows 0.14.0 can take one explicit preservation upgrade. The upgrade first requires all workflow runs and hosts to stop. It checkpoints the WAL, holds an exclusive lock, writes a byte-identical backup, verifies that backup, and then changes the source database in one transaction. It rebuilds `session_entries` and `session_events` with run-wide sequence numbers, adds the viewer tables, gives every existing run presentation revision 1, and writes a bounded replay checkpoint at each complete 256-event boundary. It verifies existing session row content, the final schema shape, integrity, and foreign keys before commit. An error rolls back the source database and keeps a completed backup.
+
+This is one exact upgrade, not a general compatibility layer. Normal readers and writers support only the current schema. Unknown alpha schemas still fail with the standard reset instruction and remain untouched. There is no dual path, feature flag, alias, or `v2` schema.
 
 ## Storage boundary
 
@@ -258,6 +262,7 @@ Supported commands are:
 pi-workflows state status
 pi-workflows state verify
 pi-workflows state backup /absolute/path/to/state-backup.sqlite
+pi-workflows state upgrade --backup /absolute/path/to/state-before-viewer.sqlite --apply
 pi-workflows state prune --before 2026-08-01T00:00:00Z --dry-run
 pi-workflows state prune --before 2026-08-01T00:00:00Z --backup /absolute/path/to/before-prune.sqlite --apply
 ```
@@ -265,10 +270,14 @@ pi-workflows state prune --before 2026-08-01T00:00:00Z --backup /absolute/path/t
 `status` reports only safe counts, file size, active leases, and unsettled effects.
 It does not print actor IDs, channel references, payloads, or credentials.
 
+`upgrade` is the only supported way to preserve a database from the exact pre-viewer schema. Stop every Pi Workflows run and host first. The command refuses active leases, an existing backup destination, a relative backup path, the current schema, and every unknown schema. Pi Workflows never runs this upgrade at startup.
+
 `prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, and refuses trees with live queues, active leases, unsettled effects, controller references, channel references, or step links from runs outside the tree. It deletes the safe aggregates, removes blobs with no remaining foreign-key reference, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. Pi Workflows never runs prune at startup.
 
 ## Alpha cutover
 
-This is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import.
+Normal runtime access remains a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import.
 
-Older state remains untouched. If it is present when a new database would be created, Pi Workflows fails with a clear instruction instead of guessing or deleting data.
+The explicit pre-viewer upgrade is a bounded exception requested to preserve existing runs. It accepts only the known prior digest and exact changed table shapes. It does not make old state readable at runtime.
+
+Other older state remains untouched. If it is present when a new database would be created, Pi Workflows fails with a clear instruction instead of guessing or deleting data.
