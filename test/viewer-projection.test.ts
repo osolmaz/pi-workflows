@@ -133,8 +133,9 @@ describe("revisioned viewer projection", () => {
       executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
     }).run(workflow, { task: "reply" });
     const state = new StateDatabase({ filePath: databasePath });
+    let evictedPatchHash: Buffer | undefined;
     for (let index = 0; index < VIEWER_DELTA_RETENTION + 2; index += 1) {
-      state.transaction(() =>
+      const revision = state.transaction(() =>
         recordViewerDeltas(state, run.runId, [
           {
             targetType: "summary",
@@ -142,9 +143,28 @@ describe("revisioned viewer projection", () => {
           },
         ]),
       );
+      if (index === 0) {
+        const row = state.connection
+          .prepare(
+            "SELECT patch_hash AS patchHash FROM viewer_deltas WHERE run_id = ? AND presentation_revision = ?",
+          )
+          .get(run.runId, revision);
+        if (
+          typeof row !== "object" ||
+          row === null ||
+          !("patchHash" in row) ||
+          !Buffer.isBuffer(row.patchHash)
+        ) {
+          throw new Error("Viewer patch hash row is invalid");
+        }
+        evictedPatchHash = row.patchHash;
+      }
     }
     const stale = readViewerDeltas(state, run.runId, 1);
     expect(stale.kind).toBe("snapshot_required");
+    expect(
+      state.connection.prepare("SELECT 1 FROM blobs WHERE blob_hash = ?").get(evictedPatchHash),
+    ).toBeUndefined();
     state.close();
   });
 

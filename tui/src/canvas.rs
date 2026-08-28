@@ -143,6 +143,7 @@ pub type StyledRun = (String, CanvasStyle);
 #[derive(Clone, Default)]
 pub struct CharCanvas {
     cells: HashMap<i64, HashMap<i64, CanvasChar>>,
+    combining: HashMap<(i64, i64), String>,
     max_x: i64,
     max_y: i64,
 }
@@ -164,6 +165,7 @@ impl CharCanvas {
         }
         self.max_y = self.max_y.max(y);
         self.max_x = self.max_x.max(x);
+        self.combining.remove(&(x, y));
         let row = self.cells.entry(y).or_default();
         // Spaces never occupy cells; text_over_run handles deliberate padding.
         if char == ' ' {
@@ -222,6 +224,23 @@ impl CharCanvas {
         for char in value.chars() {
             let width = UnicodeWidthChar::width(char).unwrap_or(0) as i64;
             if width == 0 {
+                let mut anchor = cursor - 1;
+                while self
+                    .cells
+                    .get(&y)
+                    .and_then(|row| row.get(&anchor))
+                    .is_some_and(|cell| cell.char.is_none())
+                {
+                    anchor -= 1;
+                }
+                let attach = self
+                    .cells
+                    .get(&y)
+                    .and_then(|row| row.get(&anchor))
+                    .is_some_and(|cell| cell.char.is_some_and(|value| value != ' '));
+                if attach {
+                    self.combining.entry((anchor, y)).or_default().push(char);
+                }
                 continue;
             }
             if char == ' ' {
@@ -288,6 +307,7 @@ impl CharCanvas {
         }
         for index in 0..width {
             self.row(y).remove(&(x + index));
+            self.combining.remove(&(x + index, y));
         }
         self.write_text(x, y, value, style, true);
         true
@@ -304,6 +324,7 @@ impl CharCanvas {
         for row_y in y..y + height {
             let row = self.cells.entry(row_y).or_default();
             for column_x in x..x + width {
+                self.combining.remove(&(column_x, row_y));
                 row.insert(
                     column_x,
                     CanvasChar {
@@ -385,6 +406,9 @@ impl CharCanvas {
                 }
                 if let Some(char) = char {
                     run_text.push(char);
+                    if let Some(combining) = self.combining.get(&(x, y)) {
+                        run_text.push_str(combining);
+                    }
                 }
             }
             if !run_text.is_empty() {
@@ -422,6 +446,9 @@ impl CharCanvas {
                 }
                 if let Some(char) = char {
                     run_text.push(char);
+                    if let Some(combining) = self.combining.get(&(x, y)) {
+                        run_text.push_str(combining);
+                    }
                 }
             }
             if !run_text.is_empty() {
@@ -482,5 +509,10 @@ mod tests {
             .map(|(text, _)| text.as_str())
             .collect::<String>();
         assert_eq!(UnicodeWidthStr::width(rendered.as_str()), 3);
+
+        let mut combining = CharCanvas::new();
+        combining.text(0, 0, "e\u{301}", CanvasStyle::Plain);
+        assert_eq!(combining.size(), (1, 1));
+        assert_eq!(combining.render_plain(), vec!["e\u{301}"]);
     }
 }

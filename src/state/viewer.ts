@@ -147,12 +147,38 @@ export function recordViewerDeltas(
   if (update.changes !== 1) {
     throw new Error(`Viewer projection revision conflict for workflow run: ${runId}`);
   }
+  const stalePatchHashes = state.connection
+    .prepare(
+      `SELECT DISTINCT patch_hash AS patchHash FROM viewer_deltas
+       WHERE run_id = ? AND presentation_revision < ?`,
+    )
+    .all(runId, retainedFromRevision)
+    .filter(isPatchHashRow)
+    .map((value) => value.patchHash);
   state.connection
     .prepare(
       `DELETE FROM viewer_deltas
        WHERE run_id = ? AND presentation_revision < ?`,
     )
     .run(runId, retainedFromRevision);
+  const deleteBlob = state.connection.prepare(
+    `DELETE FROM blobs WHERE blob_hash = ?
+     AND NOT EXISTS (SELECT 1 FROM viewer_deltas WHERE patch_hash = blobs.blob_hash)`,
+  );
+  for (const hash of stalePatchHashes) {
+    try {
+      deleteBlob.run(hash);
+    } catch (error) {
+      if (
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        error.code !== "SQLITE_CONSTRAINT_FOREIGNKEY"
+      ) {
+        throw error;
+      }
+    }
+  }
   return revision;
 }
 
@@ -294,6 +320,10 @@ function parsePatch(value: JsonValue): ViewerPatchOperation[] {
     throw new Error("Viewer delta patch operation is unsupported");
   }
   return operations;
+}
+
+function isPatchHashRow(value: unknown): value is { patchHash: Buffer } {
+  return isRecord(value) && Buffer.isBuffer(value.patchHash);
 }
 
 function isViewerRunRow(value: unknown): value is ViewerRunRow {

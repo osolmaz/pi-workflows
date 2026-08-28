@@ -1351,6 +1351,7 @@ export class WorkflowRunStore {
     await this.withRunLock(runId, async () => {
       const segmentId = segmentIdFor(runId, attemptId);
       if (this.segmentRow(segmentId) !== undefined) return;
+      const hasExistingSession = this.segmentRows(runId).length > 0;
       this.state.transaction(() => {
         const run = this.requireRunRow(runId);
         const context = this.contextFor(runId);
@@ -1427,21 +1428,30 @@ export class WorkflowRunStore {
         current.updatedAt = at;
         this.persistRunState(run, current, revision, now);
         const targets = runViewerTargets(current, traceEvent);
-        targets[0]?.patch?.push({
-          op: "add",
-          path: "/session",
-          value: parseJson(
-            canonicalJson({
-              binding,
-              presentationRevision: 0,
-              entryPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
-              eventPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
-              eventsMalformed: false,
-              eventsTornTail: false,
-              capture: null,
-            }),
-          ),
-        });
+        targets[0]?.patch?.push(
+          hasExistingSession
+            ? {
+                op: "add",
+                path: "/session/binding",
+                value: parseJson(canonicalJson(binding)),
+              }
+            : {
+                op: "add",
+                path: "/session",
+                value: parseJson(
+                  canonicalJson({
+                    binding,
+                    presentationRevision: 0,
+                    entryPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
+                    eventPage: { presentationRevision: 0, start: 0, total: 0, items: [] },
+                    eventsMalformed: false,
+                    eventsTornTail: false,
+                    capture: null,
+                    replayCheckpoint: null,
+                  }),
+                ),
+              },
+        );
         recordViewerDeltas(this.state, runId, targets, now);
         context.revision = revision;
       });

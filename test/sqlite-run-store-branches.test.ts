@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { StateDatabase } from "../src/state/database.js";
+import { readViewerDeltas } from "../src/state/viewer.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import {
   RUN_STATE_SCHEMA,
@@ -120,7 +121,8 @@ describe("WorkflowRunStore branch behavior", () => {
   });
 
   it("adopts one binding and creates later capture segments", async () => {
-    const store = new WorkflowRunStore(await makeStateDatabasePath("run-segments"));
+    const databasePath = await makeStateDatabasePath("run-segments");
+    const store = new WorkflowRunStore(databasePath);
     const current = state("run-3");
     await store.initializeRun(workflow, current);
     const binding = {
@@ -140,6 +142,30 @@ describe("WorkflowRunStore branch behavior", () => {
     expect(await store.hasSessionBinding("run-3")).toBe(true);
     expect(await store.listSessionSegments("run-3")).toEqual(["capture-b"]);
     expect(store.readRun("run-3")?.sessionSegments).toHaveLength(1);
+    const observer = new StateDatabase({ filePath: databasePath });
+    const revisionRow = observer.connection
+      .prepare("SELECT presentation_revision AS revision FROM viewer_runs WHERE run_id = ?")
+      .get("run-3");
+    if (
+      typeof revisionRow !== "object" ||
+      revisionRow === null ||
+      !("revision" in revisionRow) ||
+      typeof revisionRow.revision !== "number"
+    ) {
+      throw new Error("Viewer revision row is invalid");
+    }
+    const deltas = readViewerDeltas(observer, "run-3", revisionRow.revision - 1);
+    expect(deltas.kind).toBe("deltas");
+    if (deltas.kind === "deltas") {
+      const graph = deltas.deltas.find((delta) => delta.targetType === "graph");
+      expect(graph?.patch).toContainEqual(
+        expect.objectContaining({ op: "add", path: "/session/binding" }),
+      );
+      expect(graph?.patch).not.toContainEqual(
+        expect.objectContaining({ op: "add", path: "/session" }),
+      );
+    }
+    observer.close();
     store.close();
   });
 
