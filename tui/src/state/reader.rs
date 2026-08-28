@@ -1,5 +1,6 @@
 //! Read-only access to the canonical Pi Workflows SQLite database.
 
+use crate::protocol::{PageKind, PatchOp};
 use crate::state::types::{
     DefinitionSnapshot, Manifest, ManifestPaths, RunState, SessionBinding, SessionCapture,
     SessionEntryRecord, SessionEventRecord, TraceEvent, DEFINITION_SNAPSHOT_SCHEMA,
@@ -9,15 +10,18 @@ use anyhow::{bail, Context, Result};
 use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+pub const VIEWER_PAGE_SIZE: u64 = 256;
 
 const APPLICATION_ID: i64 = 0x5049_5746;
 const USER_VERSION: i64 = 1;
 const SCHEMA_NAME: &str = "pi-workflows-state";
 const APP_VERSION: &str = "0.13.3";
 pub const SCHEMA_DIGEST: [u8; 32] = [
-    0x46, 0x6d, 0xdb, 0xae, 0x92, 0x1f, 0x26, 0x19, 0xff, 0x81, 0xdb, 0x56, 0x73, 0x95, 0x18, 0xe7,
-    0xef, 0x68, 0xfa, 0x0a, 0x23, 0xbf, 0xf8, 0x0d, 0xf0, 0x29, 0x6b, 0x3a, 0xfd, 0x01, 0xc8, 0x56,
+    0x80, 0x0c, 0x33, 0x49, 0x21, 0x9a, 0xba, 0xf9, 0xc6, 0x1b, 0xbc, 0x59, 0x2e, 0x46, 0x3f, 0x8a,
+    0x61, 0x8b, 0x49, 0xa0, 0x2f, 0xfd, 0x99, 0xa7, 0xea, 0x59, 0xa1, 0x3b, 0xc3, 0x22, 0x36, 0x29,
 ];
 const RESET_INSTRUCTION: &str = "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
 
@@ -28,23 +32,225 @@ type LoadedSession = (
     Option<SessionCapture>,
 );
 
+type ProjectionCursors = (Option<u64>, Option<u64>, Option<u64>, Option<u64>);
+
+type LoadedSessionWindow = (
+    Option<SessionBinding>,
+    Vec<SessionEntryRecord>,
+    u64,
+    u64,
+    Vec<SessionEventRecord>,
+    u64,
+    u64,
+    Option<SessionCapture>,
+);
+
 #[derive(Debug, Clone)]
 pub struct LoadedRun {
     pub manifest: Manifest,
     pub state: RunState,
+    pub graph_steps: Vec<crate::state::types::StepRecord>,
+    pub taken_transitions: Vec<String>,
+    pub step_start: u64,
+    pub step_total: u64,
     pub snapshot: Option<DefinitionSnapshot>,
     pub trace: Vec<TraceEvent>,
+    pub trace_start: u64,
+    pub trace_total: u64,
     pub session_binding: Option<SessionBinding>,
     pub session_entries: Vec<SessionEntryRecord>,
+    pub session_entry_start: u64,
+    pub session_entry_total: u64,
     pub session_events: Vec<SessionEventRecord>,
+    pub session_event_start: u64,
+    pub session_event_total: u64,
     pub session_capture: Option<SessionCapture>,
     pub settings_scopes: Vec<Value>,
     pub follow_up_queue: Option<Value>,
     pub possibly_interrupted: bool,
+    pub presentation_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunIndexRow {
+    pub manifest: Manifest,
+    pub live: bool,
+    pub possibly_interrupted: bool,
+    pub presentation_revision: u64,
+    pub retained_from_revision: u64,
+    pub lease_owner_id: Option<String>,
+    pub lease_expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewerTargetDelta {
+    pub target_type: String,
+    pub target_key: String,
+    pub patch: Vec<PatchOp>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewerRevisionDelta {
+    pub revision: u64,
+    pub targets: Vec<ViewerTargetDelta>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectionPage {
+    pub start: u64,
+    pub total: u64,
+    pub items: Vec<Value>,
+}
+
+pub enum ViewerDeltaRead {
+    Deltas {
+        current_revision: u64,
+        deltas: Vec<ViewerRevisionDelta>,
+    },
+    SnapshotRequired {
+        current_revision: u64,
+        retained_from_revision: u64,
+    },
+}
+
+pub struct ProjectionReader {
+    connection: Connection,
+}
+
+impl ProjectionReader {
+    pub fn open(database_path: &Path) -> Result<Self> {
+        Ok(Self {
+            connection: open(database_path)?,
+        })
+    }
+
+    pub fn data_version(&self) -> Result<u64> {
+        Ok(self
+            .connection
+            .pragma_query_value(None, "data_version", |row| row.get(0))?)
+    }
+
+    pub fn list_run_index(&self) -> Result<Vec<RunIndexRow>> {
+        list_run_index(&self.connection)
+    }
+
+    pub fn read_window(
+        &self,
+        run_id: &str,
+        step_cursor: Option<u64>,
+        trace_cursor: Option<u64>,
+        session_entry_cursor: Option<u64>,
+        session_event_cursor: Option<u64>,
+    ) -> Result<LoadedRun> {
+        read_run_from_connection(
+            &self.connection,
+            run_id,
+            Some((
+                step_cursor,
+                trace_cursor,
+                session_entry_cursor,
+                session_event_cursor,
+            )),
+        )
+    }
+
+    pub fn read_page(&self, run_id: &str, kind: PageKind, cursor: u64) -> Result<ProjectionPage> {
+        match kind {
+            PageKind::Steps => read_step_page(&self.connection, run_id, Some(cursor)),
+            PageKind::Trace => {
+                let (items, start, total) =
+                    read_trace_window(&self.connection, run_id, Some(cursor))?;
+                Ok(ProjectionPage {
+                    start,
+                    total,
+                    items: items
+                        .into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            }
+            PageKind::SessionEntries => {
+                read_session_entry_page(&self.connection, run_id, Some(cursor))
+            }
+            PageKind::SessionEvents => {
+                read_session_event_page(&self.connection, run_id, Some(cursor))
+            }
+        }
+    }
+
+    pub fn read_deltas(&self, run_id: &str, after_revision: u64) -> Result<ViewerDeltaRead> {
+        let (current_revision, retained_from_revision): (u64, u64) = self.connection.query_row(
+            "SELECT presentation_revision, retained_from_revision
+             FROM viewer_runs WHERE run_id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if after_revision == 0
+            || after_revision > current_revision
+            || after_revision < retained_from_revision.saturating_sub(1)
+        {
+            return Ok(ViewerDeltaRead::SnapshotRequired {
+                current_revision,
+                retained_from_revision,
+            });
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT presentation_revision, target_type, target_key, patch_hash
+             FROM viewer_deltas
+             WHERE run_id = ?1 AND presentation_revision > ?2
+             ORDER BY presentation_revision, delta_index",
+        )?;
+        let rows = statement.query_map(rusqlite::params![run_id, after_revision], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        let mut grouped: BTreeMap<u64, Vec<ViewerTargetDelta>> = BTreeMap::new();
+        for row in rows {
+            let (revision, target_type, target_key, patch_hash) = row?;
+            let patch = serde_json::from_value(read_json_blob(&self.connection, &patch_hash)?)?;
+            grouped
+                .entry(revision)
+                .or_default()
+                .push(ViewerTargetDelta {
+                    target_type,
+                    target_key,
+                    patch,
+                });
+        }
+        let contiguous = grouped
+            .keys()
+            .copied()
+            .eq((after_revision + 1)..=current_revision);
+        if !contiguous {
+            return Ok(ViewerDeltaRead::SnapshotRequired {
+                current_revision,
+                retained_from_revision,
+            });
+        }
+        Ok(ViewerDeltaRead::Deltas {
+            current_revision,
+            deltas: grouped
+                .into_iter()
+                .map(|(revision, targets)| ViewerRevisionDelta { revision, targets })
+                .collect(),
+        })
+    }
 }
 
 pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     let connection = open(database_path)?;
+    read_run_from_connection(&connection, run_id, None)
+}
+
+fn read_run_from_connection(
+    connection: &Connection,
+    run_id: &str,
+    cursors: Option<ProjectionCursors>,
+) -> Result<LoadedRun> {
     let row = connection
         .query_row(
             "SELECT d.definition_hash, l.owner_id, l.expires_at
@@ -65,7 +271,7 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     let Some((definition_hash, owner_id, lease_expires_at)) = row else {
         bail!("workflow run not found: {run_id}");
     };
-    let definition_value = read_json_blob(&connection, &definition_hash)?;
+    let definition_value = read_json_blob(connection, &definition_hash)?;
     let snapshot: DefinitionSnapshot = serde_json::from_value(definition_value.clone())?;
     if snapshot.schema != DEFINITION_SNAPSHOT_SCHEMA {
         bail!(
@@ -73,12 +279,86 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
             snapshot.schema
         );
     }
-    let state = read_state(&connection, run_id, &definition_value)?;
-    let trace = read_trace(&connection, run_id)?;
-    let (session_binding, session_entries, session_events, session_capture) =
-        read_session(&connection, run_id)?;
-    let settings_scopes = read_settings(&connection, run_id)?;
-    let follow_up_queue = read_follow_ups(&connection, run_id)?;
+    let step_total: u64 = connection.query_row(
+        "SELECT count(*) FROM run_steps WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let step_start = match cursors {
+        Some((step_cursor, _, _, _)) => page_start(step_total, step_cursor),
+        None => 0,
+    };
+    let state = read_state(
+        connection,
+        run_id,
+        &definition_value,
+        cursors.map(|_| step_start),
+    )?;
+    let (graph_steps, taken_transitions) = match cursors {
+        Some((step_cursor, _, _, _)) => {
+            let cutoff = step_cursor
+                .unwrap_or_else(|| step_total.saturating_sub(1))
+                .min(step_total.saturating_sub(1));
+            (
+                read_graph_steps(connection, run_id, cutoff)?,
+                read_taken_transitions(connection, run_id, cutoff)?,
+            )
+        }
+        None => (
+            state.steps.clone(),
+            state
+                .steps
+                .windows(2)
+                .map(|pair| format!("{}->{}", pair[0].node_id, pair[1].node_id))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        ),
+    };
+    let (trace, trace_start, trace_total) = match cursors {
+        Some((_, trace_cursor, _, _)) => read_trace_window(connection, run_id, trace_cursor)?,
+        None => {
+            let trace = read_trace(connection, run_id)?;
+            let total = trace.len() as u64;
+            (trace, 0, total)
+        }
+    };
+    let (
+        session_binding,
+        session_entries,
+        session_entry_start,
+        session_entry_total,
+        session_events,
+        session_event_start,
+        session_event_total,
+        session_capture,
+    ) = match cursors {
+        Some((_, _, entry_cursor, event_cursor)) => {
+            read_session_window(connection, run_id, entry_cursor, event_cursor)?
+        }
+        None => {
+            let (binding, entries, events, capture) = read_session(connection, run_id)?;
+            let entry_total = entries.len() as u64;
+            let event_total = events.len() as u64;
+            (
+                binding,
+                entries,
+                0,
+                entry_total,
+                events,
+                0,
+                event_total,
+                capture,
+            )
+        }
+    };
+    let settings_scopes = read_settings(connection, run_id)?;
+    let follow_up_queue = read_follow_ups(connection, run_id)?;
+    let presentation_revision = connection.query_row(
+        "SELECT presentation_revision FROM viewer_runs WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
     let manifest = manifest_from_state(&state);
     let possibly_interrupted = state.status.label() == "running"
         && (owner_id.is_none()
@@ -87,15 +367,26 @@ pub fn read_run(database_path: &Path, run_id: &str) -> Result<LoadedRun> {
     Ok(LoadedRun {
         manifest,
         state,
+        graph_steps,
+        taken_transitions,
+        step_start,
+        step_total,
         snapshot: Some(snapshot),
         trace,
+        trace_start,
+        trace_total,
         session_binding,
         session_entries,
+        session_entry_start,
+        session_entry_total,
         session_events,
+        session_event_start,
+        session_event_total,
         session_capture,
         settings_scopes,
         follow_up_queue,
         possibly_interrupted,
+        presentation_revision,
     })
 }
 
@@ -103,19 +394,116 @@ pub fn list_runs(database_path: &Path) -> Vec<(String, Manifest)> {
     let Ok(connection) = open(database_path) else {
         return Vec::new();
     };
-    let Ok(mut statement) = connection.prepare("SELECT run_id FROM runs ORDER BY created_at DESC")
-    else {
-        return Vec::new();
-    };
-    let Ok(ids) = statement.query_map([], |row| row.get::<_, String>(0)) else {
-        return Vec::new();
-    };
-    ids.filter_map(|id| {
-        let id = id.ok()?;
-        let run = read_run(database_path, &id).ok()?;
-        Some((id, run.manifest))
-    })
-    .collect()
+    list_run_index(&connection)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row.manifest.run_id.clone(), row.manifest))
+        .collect()
+}
+
+fn list_run_index(connection: &Connection) -> Result<Vec<RunIndexRow>> {
+    let now = Utc::now().timestamp_millis();
+    let mut statement = connection.prepare(
+        "SELECT r.run_id, d.workflow_name, r.title, r.status,
+                r.created_at, r.finished_at,
+                v.presentation_revision, v.retained_from_revision,
+                l.owner_id, l.expires_at,
+                s.source_type, s.source_ref, s.source_revision
+         FROM runs r
+         JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+         JOIN viewer_runs v ON v.run_id = r.run_id
+         JOIN leases l ON l.resource_id = r.resource_id
+         LEFT JOIN run_sources s ON s.run_id = r.run_id AND s.mount_path = ''
+         ORDER BY r.created_at DESC, r.run_id DESC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, u64>(6)?,
+            row.get::<_, u64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+        ))
+    })?;
+    let mut index = Vec::new();
+    for row in rows {
+        let (
+            run_id,
+            workflow_name,
+            run_title,
+            status_value,
+            started_at,
+            finished_at,
+            presentation_revision,
+            retained_from_revision,
+            owner_id,
+            expires_at,
+            source_type,
+            source_ref,
+            source_revision,
+        ) = row?;
+        let status = parse_run_status(&status_value)?;
+        let workflow_source = match (source_type.as_deref(), source_ref, source_revision) {
+            (Some("builtin"), Some(id), Some(revision)) => {
+                Some(crate::state::types::WorkflowSource::Builtin { id, revision })
+            }
+            (Some("file"), Some(path), Some(hash)) => {
+                Some(crate::state::types::WorkflowSource::File { path, hash })
+            }
+            (None, None, None) => None,
+            _ => bail!("workflow run source is incomplete: {run_id}"),
+        };
+        index.push(RunIndexRow {
+            manifest: Manifest {
+                schema: "pi-workflows.sqlite-view.v1".to_string(),
+                run_id,
+                workflow_name,
+                run_title,
+                workflow_source,
+                started_at: timestamp(started_at),
+                finished_at: finished_at.map(timestamp),
+                status,
+                trace_schema: "pi-workflows.event.v1".to_string(),
+                paths: ManifestPaths {
+                    workflow: String::new(),
+                    state: String::new(),
+                    trace: String::new(),
+                    session: None,
+                    artifacts: None,
+                },
+            },
+            live: status.label() == "running",
+            possibly_interrupted: status.label() == "running"
+                && (owner_id.is_none() || expires_at.is_none_or(|value| value <= now)),
+            presentation_revision,
+            retained_from_revision,
+            lease_owner_id: owner_id,
+            lease_expires_at: expires_at,
+        });
+    }
+    Ok(index)
+}
+
+fn parse_run_status(value: &str) -> Result<crate::state::types::RunStatus> {
+    use crate::state::types::RunStatus;
+    match value {
+        "queued" => Ok(RunStatus::Queued),
+        "running" => Ok(RunStatus::Running),
+        "waiting" => Ok(RunStatus::Waiting),
+        "completed" => Ok(RunStatus::Completed),
+        "failed" => Ok(RunStatus::Failed),
+        "timed_out" => Ok(RunStatus::TimedOut),
+        "cancelled" => Ok(RunStatus::Cancelled),
+        _ => bail!("workflow run status is invalid: {value}"),
+    }
 }
 
 pub fn with_artifact_placeholders(value: &Value) -> Value {
@@ -198,7 +586,7 @@ fn read_settings(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
          FROM workflow_settings s
          JOIN resources r ON r.resource_id = s.resource_id
          WHERE s.active_run_id = ?1
-         ORDER BY s.mount_path, s.invocation",
+         ORDER BY s.mount_path, s.invocation LIMIT 256",
     )?;
     let rows = statement.query_map([run_id], |row| {
         Ok((
@@ -236,7 +624,7 @@ fn read_follow_ups(connection: &Connection, run_id: &str) -> Result<Option<Value
     };
     let mut statement = connection.prepare(
         "SELECT follow_up_id, order_number, status, source_type, session_entry_id
-         FROM workflow_follow_ups WHERE run_id = ?1 ORDER BY order_number",
+         FROM workflow_follow_ups WHERE run_id = ?1 ORDER BY order_number LIMIT 256",
     )?;
     let rows = statement.query_map([run_id], |row| {
         Ok(json!({
@@ -254,7 +642,12 @@ fn read_follow_ups(connection: &Connection, run_id: &str) -> Result<Option<Value
     })))
 }
 
-fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Result<RunState> {
+fn read_state(
+    connection: &Connection,
+    run_id: &str,
+    definition: &Value,
+    step_start: Option<u64>,
+) -> Result<RunState> {
     let row = connection.query_row(
         "SELECT r.resource_id, d.workflow_name, r.parent_run_id, r.title, r.status,
                 r.paused, r.status_detail, r.input_hash, r.final_output_hash, r.error_hash,
@@ -303,7 +696,7 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
         revision,
     ) = row;
 
-    let steps = read_steps(connection, run_id)?;
+    let steps = read_steps(connection, run_id, step_start)?;
     let mut outputs = serde_json::Map::new();
     let mut results = serde_json::Map::new();
     for step in &steps {
@@ -473,7 +866,104 @@ fn read_state(connection: &Connection, run_id: &str, definition: &Value) -> Resu
     Ok(serde_json::from_value(state)?)
 }
 
-fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
+fn read_graph_steps(
+    connection: &Connection,
+    run_id: &str,
+    cutoff: u64,
+) -> Result<Vec<crate::state::types::StepRecord>> {
+    let mut statement = connection.prepare(
+        "WITH ranked AS (
+           SELECT s.step_index, a.attempt_id, a.node_id, a.node_type, a.status,
+                  a.settings_scope_id, a.settings_change_number, a.settings_hash,
+                  a.started_at, a.finished_at,
+                  row_number() OVER (
+                    PARTITION BY a.node_id ORDER BY s.step_index DESC
+                  ) AS position
+           FROM run_steps s
+           JOIN node_attempts a ON a.attempt_id = s.attempt_id
+           WHERE s.run_id = ?1 AND s.step_index <= ?2
+         )
+         SELECT attempt_id, node_id, node_type, status,
+                settings_scope_id, settings_change_number, settings_hash,
+                started_at, finished_at
+         FROM ranked WHERE position = 1 ORDER BY step_index",
+    )?;
+    let rows = statement.query_map(rusqlite::params![run_id, cutoff], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<u64>>(5)?,
+            row.get::<_, Option<Vec<u8>>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?,
+        ))
+    })?;
+    let mut steps = Vec::new();
+    for row in rows {
+        let (
+            attempt_id,
+            node_id,
+            node_type,
+            status,
+            settings_scope_id,
+            settings_change_number,
+            settings_hash,
+            started_at,
+            finished_at,
+        ) = row?;
+        let mut value = json!({
+            "attemptId": attempt_id,
+            "nodeId": node_id,
+            "nodeType": node_type,
+            "outcome": outcome_for_status(&status)?,
+            "startedAt": timestamp(started_at),
+            "finishedAt": timestamp(finished_at),
+            "prompt": null,
+            "output": null,
+        });
+        if let Some(scope_id) = settings_scope_id {
+            value["settingsScopeId"] = json!(scope_id);
+        }
+        if let Some(change_number) = settings_change_number {
+            value["settingsChangeNumber"] = json!(change_number);
+        }
+        if let Some(hash) = settings_hash {
+            value["settingsHash"] = json!(encode_hex(&hash));
+        }
+        steps.push(serde_json::from_value(value)?);
+    }
+    Ok(steps)
+}
+
+fn read_taken_transitions(
+    connection: &Connection,
+    run_id: &str,
+    cutoff: u64,
+) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "WITH ordered AS (
+           SELECT s.step_index, a.node_id,
+                  lag(a.node_id) OVER (ORDER BY s.step_index) AS previous_node
+           FROM run_steps s
+           JOIN node_attempts a ON a.attempt_id = s.attempt_id
+           WHERE s.run_id = ?1 AND s.step_index <= ?2
+         )
+         SELECT DISTINCT previous_node, node_id
+         FROM ordered WHERE previous_node IS NOT NULL
+         ORDER BY previous_node, node_id",
+    )?;
+    let rows = statement.query_map(rusqlite::params![run_id, cutoff], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.map(|row| row.map(|(from, to)| format!("{from}->{to}")))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_steps(connection: &Connection, run_id: &str, start: Option<u64>) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "SELECT a.attempt_id, a.node_id, a.node_type, a.status,
                 a.prompt_hash, a.output_hash, s.output_override_hash, a.receipt_hash, a.error_hash,
@@ -494,9 +984,11 @@ fn read_steps(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
            ON first_link.attempt_id = a.attempt_id AND first_link.role = 'first'
          LEFT JOIN attempt_entries last_link
            ON last_link.attempt_id = a.attempt_id AND last_link.role = 'last'
-         WHERE s.run_id = ?1 ORDER BY s.step_index",
+         WHERE s.run_id = ?1 AND (?2 IS NULL OR s.step_index >= ?2)
+         ORDER BY s.step_index LIMIT ?3",
     )?;
-    let rows = statement.query_map([run_id], |row| {
+    let limit = start.map_or(-1_i64, |_| VIEWER_PAGE_SIZE as i64);
+    let rows = statement.query_map(rusqlite::params![run_id, start, limit], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -660,12 +1152,23 @@ fn read_sources(
 
 fn read_updates(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
-        "SELECT u.update_id, u.run_revision, a.node_id, u.attempt_id,
-                u.update_type, u.update_key, u.data_hash, u.recorded_at
-         FROM workflow_updates u JOIN node_attempts a ON a.attempt_id = u.attempt_id
-         WHERE a.run_id = ?1 ORDER BY u.run_revision",
+        "WITH latest AS (
+           SELECT u.update_id, u.run_revision, a.node_id, u.attempt_id,
+                  u.update_type, u.update_key, u.data_hash, u.recorded_at,
+                  row_number() OVER (
+                    PARTITION BY u.update_type, u.update_key
+                    ORDER BY u.run_revision DESC
+                  ) AS position
+           FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ?1
+         )
+         SELECT update_id, run_revision, node_id, attempt_id,
+                update_type, update_key, data_hash, recorded_at
+         FROM latest WHERE position = 1
+         ORDER BY run_revision DESC LIMIT ?2",
     )?;
-    let rows = statement.query_map([run_id], |row| {
+    let rows = statement.query_map(rusqlite::params![run_id, VIEWER_PAGE_SIZE], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, u64>(1)?,
@@ -677,19 +1180,15 @@ fn read_updates(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             row.get::<_, i64>(7)?,
         ))
     })?;
-    let mut current = std::collections::BTreeMap::new();
+    let mut values = Vec::new();
     for row in rows {
         let (update_id, seq, node_id, attempt_id, kind, key, hash, at) = row?;
-        current.insert(
-            (kind.clone(), key.clone()),
-            json!({
-                "updateId": update_id, "seq": seq, "at": timestamp(at), "runId": run_id,
-                "nodeId": node_id, "attemptId": attempt_id, "type": kind, "key": key,
-                "data": read_json_blob(connection, &hash)?,
-            }),
-        );
+        values.push(json!({
+            "updateId": update_id, "seq": seq, "at": timestamp(at), "runId": run_id,
+            "nodeId": node_id, "attemptId": attempt_id, "type": kind, "key": key,
+            "data": read_json_blob(connection, &hash)?,
+        }));
     }
-    let mut values = current.into_values().collect::<Vec<_>>();
     values.sort_by_key(|value| value["seq"].as_u64().unwrap_or_default());
     Ok(values)
 }
@@ -832,6 +1331,65 @@ fn read_trace(connection: &Connection, run_id: &str) -> Result<Vec<TraceEvent>> 
     Ok(events)
 }
 
+fn read_trace_window(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<(Vec<TraceEvent>, u64, u64)> {
+    let resource_id: String = connection.query_row(
+        "SELECT resource_id FROM runs WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM events WHERE resource_id = ?1",
+        [&resource_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    let mut statement = connection.prepare(
+        "SELECT resource_revision, event_type, payload_hash, recorded_at
+         FROM events
+         WHERE resource_id = ?1 AND resource_revision > ?2
+         ORDER BY resource_revision LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        rusqlite::params![resource_id, start, VIEWER_PAGE_SIZE],
+        |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (seq, event_type, payload_hash, recorded_at) = row?;
+        let envelope = match payload_hash {
+            Some(hash) => read_json_blob(connection, &hash)?,
+            None => json!({}),
+        };
+        let mut event = json!({
+            "seq": seq,
+            "at": timestamp(recorded_at),
+            "runId": run_id,
+            "scope": envelope.get("scope").and_then(Value::as_str).unwrap_or("run"),
+            "type": event_type,
+            "payload": envelope.get("payload").cloned().unwrap_or_else(|| json!({})),
+        });
+        if let Some(node_id) = envelope.get("nodeId") {
+            event["nodeId"] = node_id.clone();
+        }
+        if let Some(attempt_id) = envelope.get("attemptId") {
+            event["attemptId"] = attempt_id.clone();
+        }
+        events.push(serde_json::from_value(event)?);
+    }
+    Ok((events, start, total))
+}
+
 fn read_session(connection: &Connection, run_id: &str) -> Result<LoadedSession> {
     let mut segments_statement = connection.prepare(
         "SELECT segment_id, binding_hash, status, entry_count, event_count,
@@ -958,6 +1516,307 @@ fn read_session(connection: &Connection, run_id: &str) -> Result<LoadedSession> 
         events,
         Some(serde_json::from_value(capture)?),
     ))
+}
+
+fn read_step_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM run_steps WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    Ok(ProjectionPage {
+        start,
+        total,
+        items: read_steps(connection, run_id, Some(start))?,
+    })
+}
+
+fn read_session_entry_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM session_entries WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    let mut statement = connection.prepare(
+        "SELECT entry_hash, recorded_at
+         FROM session_entries
+         WHERE run_id = ?1 AND run_seq > ?2
+         ORDER BY run_seq LIMIT ?3",
+    )?;
+    let rows = statement.query_map(rusqlite::params![run_id, start, VIEWER_PAGE_SIZE], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut items = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let (hash, at) = row?;
+        items.push(json!({
+            "seq": start + index as u64 + 1,
+            "at": timestamp(at),
+            "entry": read_json_blob(connection, &hash)?,
+        }));
+    }
+    Ok(ProjectionPage {
+        start,
+        total,
+        items,
+    })
+}
+
+fn read_session_event_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM session_events WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    let mut statement = connection.prepare(
+        "SELECT e.event_type, e.node_id, e.attempt_id, e.turn_id,
+                e.message_id, e.tool_call_id, e.payload_hash, e.recorded_at,
+                s.step_index
+         FROM session_events e
+         LEFT JOIN run_steps s ON s.run_id = e.run_id AND s.attempt_id = e.attempt_id
+         WHERE e.run_id = ?1 AND e.run_seq > ?2
+         ORDER BY e.run_seq LIMIT ?3",
+    )?;
+    let rows = statement.query_map(rusqlite::params![run_id, start, VIEWER_PAGE_SIZE], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<u64>>(8)?,
+        ))
+    })?;
+    let mut items = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let (
+            event_type,
+            node_id,
+            attempt_id,
+            turn_id,
+            message_id,
+            tool_call_id,
+            hash,
+            at,
+            step_index,
+        ) = row?;
+        let mut value = json!({
+            "seq": start + index as u64 + 1,
+            "at": timestamp(at),
+            "nodeId": node_id,
+            "attemptId": attempt_id,
+            "type": event_type,
+            "payload": read_json_blob(connection, &hash)?,
+        });
+        if let Some(step_index) = step_index {
+            value["stepIndex"] = json!(step_index);
+        }
+        if let Some(turn_id) = turn_id {
+            value["turnId"] = json!(turn_id);
+        }
+        if let Some(message_id) = message_id {
+            value["messageId"] = json!(message_id);
+        }
+        if let Some(tool_call_id) = tool_call_id {
+            value["toolCallId"] = json!(tool_call_id);
+        }
+        items.push(value);
+    }
+    Ok(ProjectionPage {
+        start,
+        total,
+        items,
+    })
+}
+
+fn read_session_window(
+    connection: &Connection,
+    run_id: &str,
+    entry_cursor: Option<u64>,
+    event_cursor: Option<u64>,
+) -> Result<LoadedSessionWindow> {
+    let mut segments_statement = connection.prepare(
+        "SELECT binding_hash, status, entry_count, event_count, failure_hash
+         FROM session_segments
+         WHERE run_id = ?1
+         ORDER BY created_at, segment_id",
+    )?;
+    let segment_rows = segments_statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if segment_rows.is_empty() {
+        return Ok((None, Vec::new(), 0, 0, Vec::new(), 0, 0, None));
+    }
+
+    let mut binding = None;
+    let mut status = "complete".to_string();
+    let mut failure = None;
+    let mut entry_total = 0u64;
+    let mut event_total = 0u64;
+    for (binding_hash, segment_status, entry_count, event_count, failure_hash) in &segment_rows {
+        entry_total += entry_count;
+        event_total += event_count;
+        if binding.is_none() {
+            if let Some(hash) = binding_hash {
+                binding = Some(serde_json::from_value(read_json_blob(connection, hash)?)?);
+            }
+        }
+        if segment_status == "failed" {
+            status = "failed".to_string();
+            if failure.is_none() {
+                if let Some(hash) = failure_hash {
+                    failure = Some(read_json_blob(connection, hash)?);
+                }
+            }
+        } else if segment_status == "recording" && status != "failed" {
+            status = "recording".to_string();
+        }
+    }
+
+    let entry_start = page_start(entry_total, entry_cursor);
+    let mut entry_statement = connection.prepare(
+        "SELECT entry_hash, recorded_at
+         FROM session_entries
+         WHERE run_id = ?1 AND run_seq > ?2
+         ORDER BY run_seq
+         LIMIT ?3",
+    )?;
+    let entry_rows = entry_statement.query_map(
+        rusqlite::params![run_id, entry_start, VIEWER_PAGE_SIZE],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let mut entries = Vec::new();
+    for (index, row) in entry_rows.enumerate() {
+        let (hash, at) = row?;
+        entries.push(serde_json::from_value(json!({
+            "seq": entry_start + index as u64 + 1,
+            "at": timestamp(at),
+            "entry": read_json_blob(connection, &hash)?,
+        }))?);
+    }
+
+    let event_start = page_start(event_total, event_cursor);
+    let mut event_statement = connection.prepare(
+        "SELECT e.event_type, e.node_id, e.attempt_id, e.turn_id,
+                e.message_id, e.tool_call_id, e.payload_hash, e.recorded_at,
+                s.step_index
+         FROM session_events e
+         LEFT JOIN run_steps s ON s.run_id = e.run_id AND s.attempt_id = e.attempt_id
+         WHERE e.run_id = ?1 AND e.run_seq > ?2
+         ORDER BY e.run_seq
+         LIMIT ?3",
+    )?;
+    let event_rows = event_statement.query_map(
+        rusqlite::params![run_id, event_start, VIEWER_PAGE_SIZE],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<u64>>(8)?,
+            ))
+        },
+    )?;
+    let mut events = Vec::new();
+    for (index, row) in event_rows.enumerate() {
+        let (
+            event_type,
+            node_id,
+            attempt_id,
+            turn_id,
+            message_id,
+            tool_call_id,
+            hash,
+            at,
+            step_index,
+        ) = row?;
+        let mut value = json!({
+            "seq": event_start + index as u64 + 1,
+            "at": timestamp(at),
+            "nodeId": node_id,
+            "attemptId": attempt_id,
+            "type": event_type,
+            "payload": read_json_blob(connection, &hash)?,
+        });
+        if let Some(step_index) = step_index {
+            value["stepIndex"] = json!(step_index);
+        }
+        if let Some(turn_id) = turn_id {
+            value["turnId"] = json!(turn_id);
+        }
+        if let Some(message_id) = message_id {
+            value["messageId"] = json!(message_id);
+        }
+        if let Some(tool_call_id) = tool_call_id {
+            value["toolCallId"] = json!(tool_call_id);
+        }
+        events.push(serde_json::from_value(value)?);
+    }
+
+    let mut capture = json!({
+        "schema": "pi-workflows.session-capture.v1",
+        "eventSchema": "pi-workflows.session-event.v1",
+        "status": status,
+        "eventCount": event_total,
+        "entryCount": entry_total,
+        "lastEventSeq": event_total,
+    });
+    if let Some(failure) = failure {
+        capture["failure"] = failure;
+    }
+    Ok((
+        binding,
+        entries,
+        entry_start,
+        entry_total,
+        events,
+        event_start,
+        event_total,
+        Some(serde_json::from_value(capture)?),
+    ))
+}
+
+fn page_start(total: u64, cursor: Option<u64>) -> u64 {
+    if total <= VIEWER_PAGE_SIZE {
+        return 0;
+    }
+    let center = cursor
+        .unwrap_or(total.saturating_sub(1))
+        .min(total.saturating_sub(1));
+    center
+        .saturating_sub(VIEWER_PAGE_SIZE / 2)
+        .min(total - VIEWER_PAGE_SIZE)
 }
 
 fn manifest_from_state(state: &RunState) -> Manifest {

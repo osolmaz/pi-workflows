@@ -265,6 +265,24 @@ describe("WorkflowRunStore SQLite", () => {
     expect(loaded?.sessionEntries).toHaveLength(1);
     expect(loaded?.sessionEvents).toHaveLength(1);
     expect(loaded?.sessionIntegrity).toEqual({ status: "complete", diagnostics: [] });
+    expect(
+      store.state.connection
+        .prepare("SELECT run_seq AS runSeq FROM session_entries WHERE run_id = ?")
+        .all(result.runId),
+    ).toEqual([{ runSeq: 1 }]);
+    expect(
+      store.state.connection
+        .prepare("SELECT run_seq AS runSeq FROM session_events WHERE run_id = ?")
+        .all(result.runId),
+    ).toEqual([{ runSeq: 1 }]);
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT count(*) AS count FROM viewer_deltas
+           WHERE run_id = ? AND target_key IN ('entries:tail', 'session:tail')`,
+        )
+        .get(result.runId),
+    ).toEqual({ count: 2 });
     store.close();
   });
 

@@ -115,6 +115,31 @@ CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
 
+CREATE TABLE viewer_runs (
+  run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  presentation_revision INTEGER NOT NULL CHECK (presentation_revision >= 1),
+  retained_from_revision INTEGER NOT NULL CHECK (
+    retained_from_revision >= 1 AND retained_from_revision <= presentation_revision
+  ),
+  updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE viewer_deltas (
+  run_id TEXT NOT NULL REFERENCES viewer_runs(run_id) ON DELETE CASCADE,
+  presentation_revision INTEGER NOT NULL CHECK (presentation_revision >= 1),
+  delta_index INTEGER NOT NULL CHECK (delta_index >= 0),
+  target_type TEXT NOT NULL CHECK (target_type IN (
+    'summary', 'graph', 'replay', 'timeline', 'conversation', 'inspector'
+  )),
+  target_key TEXT NOT NULL,
+  patch_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  recorded_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, presentation_revision, delta_index)
+) STRICT;
+
+CREATE INDEX viewer_deltas_resume_idx
+  ON viewer_deltas(run_id, presentation_revision, delta_index);
+
 CREATE TABLE run_sources (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   mount_path TEXT NOT NULL,
@@ -314,13 +339,18 @@ CREATE INDEX session_segments_run_idx ON session_segments(run_id, created_at);
 
 CREATE TABLE session_entries (
   segment_id TEXT NOT NULL REFERENCES session_segments(segment_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   entry_seq INTEGER NOT NULL CHECK (entry_seq > 0),
+  run_seq INTEGER NOT NULL CHECK (run_seq > 0),
   entry_id TEXT NOT NULL,
   entry_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   recorded_at INTEGER NOT NULL,
   PRIMARY KEY (segment_id, entry_seq),
-  UNIQUE (segment_id, entry_id)
+  UNIQUE (segment_id, entry_id),
+  UNIQUE (run_id, run_seq)
 ) STRICT;
+
+CREATE INDEX session_entries_run_idx ON session_entries(run_id, run_seq);
 
 CREATE TABLE attempt_entries (
   attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
@@ -336,7 +366,9 @@ CREATE INDEX attempt_entries_entry_idx ON attempt_entries(segment_id, entry_id);
 
 CREATE TABLE session_events (
   segment_id TEXT NOT NULL REFERENCES session_segments(segment_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+  run_seq INTEGER NOT NULL CHECK (run_seq > 0),
   event_type TEXT NOT NULL,
   node_id TEXT,
   attempt_id TEXT,
@@ -345,8 +377,11 @@ CREATE TABLE session_events (
   tool_call_id TEXT,
   payload_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   recorded_at INTEGER NOT NULL,
-  PRIMARY KEY (segment_id, event_seq)
+  PRIMARY KEY (segment_id, event_seq),
+  UNIQUE (run_id, run_seq)
 ) STRICT;
+
+CREATE INDEX session_events_run_idx ON session_events(run_id, run_seq);
 
 CREATE TABLE human_decisions (
   decision_id TEXT PRIMARY KEY,

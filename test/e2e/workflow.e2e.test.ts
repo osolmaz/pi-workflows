@@ -1894,6 +1894,14 @@ describe.sequential("pi-workflows end to end", () => {
     expect(state.outputs.confirm).toMatchObject({ route: "y" });
     expect(state.finalOutput).toEqual({ marker: "implemented" });
 
+    await waitForCondition(
+      () =>
+        listWorkflowRuns({ databasePath: runsDir, includeTrace: true })
+          .find((run) => run.runId === runId)
+          ?.traceEvents?.at(-1)?.type === "completed",
+      () => `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-15).join("\n")}`,
+      20_000,
+    );
     const loaded = listWorkflowRuns({ databasePath: runsDir, includeTrace: true }).find(
       (run) => run.runId === runId,
     );

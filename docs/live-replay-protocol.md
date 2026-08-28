@@ -1,146 +1,174 @@
 # Live replay protocol
 
-The Rust viewer (`tui/`) can watch runs in two ways: by reading SQLite runs
-directly from the filesystem (the default, in-process) or by connecting to a
-`piw serve` WebSocket server. Both paths produce the same semantic state; the
-protocol below is the network form of that state. Protocol id:
-`pi-workflows.replay.v1`.
+The Rust viewer (`tui/`) can read SQLite directly or connect to `piw serve`. Both modes use the same bounded viewer projection. The protocol ID is `pi-workflows.replay.v1`.
 
-The server is a reader like any other: it only consumes SQLite runs (see
-[SQLITE_STATE.md](SQLITE_STATE.md)) and never writes them. The protocol has no
-authentication, so the server only accepts loopback bind addresses and refuses
-to start on anything else; workflow state contains private data, and remote viewing
-goes through an SSH tunnel. Handshakes that
-carry an `Origin` header are rejected: browsers always send one, and a web
-page must not be able to read workflow state by opening a WebSocket to localhost.
+The server reads SQLite and never writes it. It accepts loopback addresses only. Remote use goes through an SSH tunnel. The server rejects WebSocket handshakes with an `Origin` header so a web page cannot read workflow state from localhost.
 
-## Transport and framing
+## Framing
 
-A single WebSocket endpoint (`/ws`). Every message is one JSON object with a
-`type` field. Unknown message types and unknown fields must be ignored by both
-sides. The server sends `hello` on connect; a client that does not recognize
-the protocol id must disconnect.
+The endpoint is `/ws`. Each message is one JSON object with a `type` field. Unknown message types and fields are ignored. The server sends `hello` first. A client disconnects when it does not support the protocol ID.
 
 ```json
 { "type": "hello", "protocol": "pi-workflows.replay.v1" }
 ```
 
-## Run views
+## Bounded run view
 
-The unit of synchronization is the **run view**, the semantic state of one
-run:
+A snapshot contains one bounded run view:
 
 ```json
 {
+  "presentationRevision": 42,
+  "graphRevision": 17,
   "manifest": { … },
   "workflow": { … },
-  "state": { … },
-  "events": [ … ],
+  "graphScene": {
+    "ranks": [ … ],
+    "edges": [ … ],
+    "segments": [ … ],
+    "rankOfNode": { … }
+  },
+  "graphSteps": [ … ],
+  "takenTransitions": [ "prepare->run" ],
+  "stepStart": 768,
+  "stepTotal": 1000,
+  "state": {
+    "steps": [ … ]
+  },
+  "tracePage": {
+    "presentationRevision": 42,
+    "start": 768,
+    "total": 1000,
+    "items": [ … ]
+  },
   "session": {
+    "presentationRevision": 42,
     "binding": { … },
-    "entries": [ … ],
-    "events": [ … ],
-    "eventsMalformed": false,
-    "eventsTornTail": false,
+    "entryPage": {
+      "presentationRevision": 42,
+      "start": 768,
+      "total": 1000,
+      "items": [ … ]
+    },
+    "eventPage": {
+      "presentationRevision": 42,
+      "start": 768,
+      "total": 1000,
+      "items": [ … ]
+    },
     "capture": { … }
   },
+  "settingsScopes": [ … ],
+  "followUpQueue": { … },
   "live": true,
   "possiblyInterrupted": false
 }
 ```
 
-- `manifest`, `workflow`, `state`, `events`, and every `session` field are
-  semantic projections from SQLite. `workflow` is the definition snapshot,
-  top-level `events` are workflow events, `session.entries` are settled Pi
-  entries, `session.events` are normalized temporal events, and
-  `session.capture` is capture integrity. `session` is `null` until a binding
-  exists.
-- `live` is true while the run status is non-terminal. `possiblyInterrupted`
-  is a reader-side diagnostic based on current ownership and update time.
-- Values are resolved from content-addressed SQLite blobs.
+Each step, trace, session-entry, and session-event page contains at most 256 rows. `graphSteps` contains at most one latest attempt per node at the replay cursor. `takenTransitions` contains distinct transitions up to that cursor. `graphScene` is the retained language-neutral rank and route plan shared by Rust and TypeScript.
 
-Because the full trace and session history are part of the view, replay
-scrubbing is a pure client-side operation; rewinding never requires the
-server. Clients order session events by `seq` and use `at` only for playback
-timing.
+A snapshot does not contain complete trace or session history. A replay jump fetches the page that contains the requested zero-based cursor.
 
-## Snapshot, then patches
+## Revisions and target patches
 
-State synchronization follows a snapshot-then-patch model. After a client
-subscribes to a run, the server sends one `run_snapshot`, then a stream of
-`run_patch` messages:
+Each viewer-visible SQLite transaction advances the run presentation revision and commits ordered target patches with the same transaction. The server reads those patches. It does not build complete old and new run views to compare them.
 
 ```json
-{ "type": "run_snapshot", "runId": "…", "revision": 3, "view": { … } }
-{ "type": "run_patch", "runId": "…", "revision": 4, "patch": [
-  { "op": "append", "path": "/events", "value": [ { "seq": 18, … } ] },
-  { "op": "replace", "path": "/state", "value": { … } }
-] }
+{
+  "type": "run_patch",
+  "runId": "run-1",
+  "revision": 43,
+  "targets": [
+    {
+      "targetType": "conversation",
+      "targetKey": "entries:tail",
+      "patch": [
+        { "op": "replace", "path": "/presentationRevision", "value": 43 },
+        { "op": "remove", "path": "/items/0" },
+        { "op": "append", "path": "/items", "value": [ { "seq": 1001, … } ] },
+        { "op": "replace", "path": "/start", "value": 745 },
+        { "op": "replace", "path": "/total", "value": 1001 }
+      ]
+    }
+  ]
+}
 ```
 
-- `revision` increases by exactly 1 per patch. A client that observes a gap
-  must resubscribe and take a fresh snapshot.
-- `patch` is JSON Patch (RFC 6902) plus one extension op: `append`, whose
-  `value` is an array of items appended to the array at `path`. Semantically
-  `append` equals a sequence of `add` ops at `/-`; it exists so that the
-  common case (trace and session growth) stays compact and readable.
-- Session growth uses `append` at `/session/entries` and `/session/events`.
-  Capture changes use `replace` at `/session/capture`. Changes to the derived
-  tail diagnostics use `replace` at `/session/eventsMalformed` and
-  `/session/eventsTornTail`.
-- The server waits 50 ms after a filesystem notification before refreshing,
-  so one token burst normally becomes one revision. Batch boundaries never
-  merge or alter event records.
-- Patches are computed against the previous view revision; applying them in
-  order reproduces the server's view exactly.
+The patch set supports `add`, `replace`, `remove`, and `append`. `append` adds each value to the target array in order. Tail patches keep their page at 256 rows by removing old leading rows when necessary.
+
+A patch targets one bounded document or page. A client applies a tail patch only when it holds that tail page. Older loaded pages stay valid because committed history is immutable. A target that needs a fresh bounded projection causes a snapshot. This still avoids complete-run reads and complete-run JSON comparison.
+
+Revisions must arrive in order. Duplicate state is harmless because a client ignores an old revision. A wrong run, malformed patch, missing path, stale page, future revision, or gap cannot replace the last good view. A gap or a cursor older than retained patches causes a bounded snapshot.
+
+The database retains 256 presentation revisions per run. The server does not replay an unbounded patch backlog.
+
+## Pages
+
+A client asks for a page with `fetch_page`:
+
+```json
+{
+  "type": "fetch_page",
+  "runId": "run-1",
+  "kind": "session_events",
+  "cursor": 20000
+}
+```
+
+`kind` is one of `steps`, `trace`, `session_entries`, or `session_events`. The server answers with `run_page`:
+
+```json
+{
+  "type": "run_page",
+  "runId": "run-1",
+  "revision": 43,
+  "kind": "session_events",
+  "start": 19872,
+  "total": 48620,
+  "items": [ … ]
+}
+```
+
+Page reads use indexed run-wide sequence ranges. A page request does not change the shared watched-run projection or another client's cursor.
 
 ## Messages
 
 Client to server:
 
-| type             | fields          | meaning                      |
-| ---------------- | --------------- | ---------------------------- |
-| `watch_runs`     | —               | subscribe to the run listing |
-| `watch_run`      | `runId`         | subscribe to one run's view  |
-| `unwatch_run`    | `runId`         | end a run subscription       |
-| `fetch_artifact` | `runId`, `path` | unsupported; returns `error` |
+| Type             | Fields                                                                                                | Meaning                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `watch_runs`     | none                                                                                                  | Subscribe to run-list rows.                    |
+| `watch_run`      | `runId`, optional `revision`, `stepCursor`, `traceCursor`, `sessionEntryCursor`, `sessionEventCursor` | Subscribe or resume one run.                   |
+| `unwatch_run`    | `runId`                                                                                               | End one run subscription.                      |
+| `fetch_page`     | `runId`, `kind`, `cursor`                                                                             | Read one bounded page.                         |
+| `fetch_artifact` | `runId`, `path`                                                                                       | Unsupported for SQLite state; returns `error`. |
 
 Server to client:
 
-| type           | fields                       | meaning                                         |
-| -------------- | ---------------------------- | ----------------------------------------------- |
-| `hello`        | `protocol`                   | sent once on connect                            |
-| `runs`         | `runs`                       | full run listing (summaries), re-sent on change |
-| `run_snapshot` | `runId`, `revision`, `view`  | full view after subscribe                       |
-| `run_patch`    | `runId`, `revision`, `patch` | incremental view update                         |
-| `artifact`     | `runId`, `path`, `content`   | reserved; not sent by SQLite-backed servers     |
-| `error`        | `message`, `runId?`          | request failed                                  |
+| Type           | Fields                                                 | Meaning                                  |
+| -------------- | ------------------------------------------------------ | ---------------------------------------- |
+| `hello`        | `protocol`                                             | Identify the protocol.                   |
+| `runs`         | `runs`                                                 | Send all lightweight run-list rows.      |
+| `run_snapshot` | `runId`, `revision`, `view`                            | Send one bounded run view.               |
+| `run_patch`    | `runId`, `revision`, `targets`                         | Apply direct bounded target patches.     |
+| `run_page`     | `runId`, `revision`, `kind`, `start`, `total`, `items` | Return one bounded page.                 |
+| `artifact`     | `runId`, `path`, `content`                             | Reserved and not sent by SQLite servers. |
+| `error`        | `message`, optional `runId`                            | Report a sanitized request failure.      |
 
-SQLite-backed views contain resolved values. A `fetch_artifact` request returns
-an `error` because there is no artifact directory.
+The run list contains `presentationRevision`, `manifest`, `live`, and `possiblyInterrupted`. It contains no payload bodies.
 
-Run listing summaries are the manifest plus `live` and
-`possiblyInterrupted`:
+## Several clients
 
-```json
-{ "type": "runs", "runs": [ { "manifest": { … }, "live": true, "possiblyInterrupted": false } ] }
-```
+The server keeps one projection and graph scene for each watched run. The first watcher loads it. Later watchers reuse it. The last unwatch or disconnect releases it. Different watched runs load independently.
 
-The run listing is small and changes rarely, so it is always sent whole; only
-run views use patches.
+Each client keeps its own revision and page cursors. Network sends happen outside the shared state lock. A slow client cannot stop another client. If a broadcast receiver falls behind, that client receives a bounded snapshot.
 
 ## Reconnection
 
-The native client treats the run listing and selected run as desired state rather
-than one-shot commands. After a connection closes,
-it keeps the cached run visible with a stale/reconnecting label, retries with
-bounded backoff, sends `watch_runs` after the next valid `hello`, and restores
-the current `watch_run`. A reconnect receives a fresh snapshot before later
-patches.
+The client keeps the run list and selected run as desired state. After a disconnect, it keeps cached content visible with a stale or reconnecting label. It retries with bounded backoff, sends `watch_runs` after the next valid `hello`, and resumes `watch_run` from its revision and page cursors. A retained cursor receives patches. A stale cursor receives a bounded snapshot and requested pages.
 
-## SQLite semantics behind the protocol
+## SQLite consistency
 
-The server polls `state.sqlite` through a query-only connection. Each refresh
-reads a committed run projection, immutable events, session rows, and blob
-values. A transaction is either fully visible or not visible, so a client never
-observes half of a state transition.
+The server uses a query-only SQLite connection. A writer commits the domain change, presentation revision, and patch records atomically. A reader sees all of that transaction or none of it.
+
+The refresh timer first checks `PRAGMA data_version`. An unchanged value causes no run-index query and no payload read. A changed value refreshes lightweight rows and only the watched projections whose presentation revisions changed.

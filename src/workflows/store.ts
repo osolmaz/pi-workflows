@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
-import { canonicalJson, type JsonValue } from "../state/json.js";
+import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import {
   StateMutationStore,
   StaleResourceError,
@@ -11,6 +11,12 @@ import {
   type MutationActor,
   type OwnerType,
 } from "../state/mutation.js";
+import {
+  initializeViewerRun,
+  recordViewerDeltas,
+  viewerTailPatch,
+  type ViewerDeltaDraft,
+} from "../state/viewer.js";
 import { compositionMetadata } from "./composition.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
@@ -383,6 +389,8 @@ export class WorkflowRunStore {
             payload: { workflowName: workflow.name },
           });
           this.persistRunState(reserved, state, revision, now);
+          initializeViewerRun(this.state, state.runId, now);
+          recordViewerDeltas(this.state, state.runId, runViewerTargets(), now);
           this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
           this.syncNodeAttempts(state, snapshot, now);
           this.syncContinuationIdentity(state);
@@ -442,6 +450,7 @@ export class WorkflowRunStore {
             now,
             state.finishedAt === undefined ? null : Date.parse(state.finishedAt),
           );
+        initializeViewerRun(this.state, state.runId, now);
         this.insertRunSources(state.runId, source, state.workflowSources ?? []);
         this.syncContinuationIdentity(state);
         insertRunEvent(this.state, resourceId, 1, at, {
@@ -496,6 +505,12 @@ export class WorkflowRunStore {
           now,
           now,
         );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "inspector", targetKey: "settings" }],
+        now,
+      );
       return this.settingsScopeRecord(this.requireSettingsScopeRow(scopeId));
     });
   }
@@ -680,6 +695,12 @@ export class WorkflowRunStore {
                 `UPDATE workflow_settings SET current_hash = ?, updated_at = ? WHERE scope_id = ?`,
               )
               .run(savedAfterHash, now, request.scopeId);
+            recordViewerDeltas(
+              this.state,
+              request.runId,
+              [{ targetType: "inspector", targetKey: "settings" }],
+              now,
+            );
             return changeId;
           },
           {
@@ -784,6 +805,12 @@ export class WorkflowRunStore {
                 now,
                 now,
               );
+            recordViewerDeltas(
+              this.state,
+              request.runId,
+              [{ targetType: "inspector", targetKey: "follow-ups" }],
+              now,
+            );
             return followUpId;
           },
           { payload: { runId: request.runId, requestId: request.requestId } },
@@ -834,6 +861,12 @@ export class WorkflowRunStore {
         if (update.changes !== 1) {
           throw new StaleResourceError("Workflow follow-up changed before removal");
         }
+        recordViewerDeltas(
+          this.state,
+          request.runId,
+          [{ targetType: "inspector", targetKey: "follow-ups" }],
+          now,
+        );
       },
       { payload: { followUpId: request.followUpId, source: request.source } },
     );
@@ -956,6 +989,12 @@ export class WorkflowRunStore {
              WHERE run_id = ? AND status = 'pending_presentation'`,
             )
             .run(now, options.runId);
+          recordViewerDeltas(
+            this.state,
+            options.runId,
+            [{ targetType: "inspector", targetKey: "follow-ups" }],
+            now,
+          );
         },
         { payload: { runId: options.runId, state: options.state } },
       );
@@ -1036,6 +1075,12 @@ export class WorkflowRunStore {
         if (update.changes !== 1) {
           throw new StaleResourceError("Workflow follow-up changed before delivery completed");
         }
+        recordViewerDeltas(
+          this.state,
+          row.runId,
+          [{ targetType: "inspector", targetKey: "follow-ups" }],
+          now,
+        );
       },
       { payload: { followUpId, sessionEntryId } },
     );
@@ -1079,6 +1124,7 @@ export class WorkflowRunStore {
       loaded.state.traceSeq = nextRevision;
       loaded.state.updatedAt = at;
       this.persistRunState(row, loaded.state, nextRevision, now);
+      recordViewerDeltas(this.state, runId, runViewerTargets(), now);
       context.revision = nextRevision;
     });
     const prepared = this.readRun(runId, { includeTrace: true });
@@ -1185,7 +1231,9 @@ export class WorkflowRunStore {
             Date.now(),
           );
         insertRunEvent(this.state, run.resourceId, revision, at, event);
-        this.persistRunState(run, state, revision, Date.now());
+        const committedAt = Date.now();
+        this.persistRunState(run, state, revision, committedAt);
+        recordViewerDeltas(this.state, runId, runViewerTargets(), committedAt);
         context.revision = revision;
         acceptedEvent = event;
         acceptedRecord = record;
@@ -1220,6 +1268,7 @@ export class WorkflowRunStore {
         this.persistRunState(run, state, revision, now);
         this.transitionFollowUpsForRunState(state, event, now);
         this.syncNodeAttempts(state, snapshot, now);
+        recordViewerDeltas(this.state, runId, runViewerTargets(), now);
         context.revision = revision;
         accepted = traceEvent;
       });
@@ -1328,6 +1377,16 @@ export class WorkflowRunStore {
         current.traceSeq = revision;
         current.updatedAt = at;
         this.persistRunState(run, current, revision, now);
+        recordViewerDeltas(
+          this.state,
+          runId,
+          [
+            ...runViewerTargets(),
+            { targetType: "conversation", targetKey: "binding" },
+            { targetType: "inspector", targetKey: "session" },
+          ],
+          now,
+        );
         context.revision = revision;
       });
     });
@@ -1343,15 +1402,26 @@ export class WorkflowRunStore {
       this.assertSessionWriteAuthority(runId);
       const revision = this.requireResourceRevision(segmentResourceId(segment));
       const sequence = segment.entryCount + 1;
+      const runSequenceRow = this.state.connection
+        .prepare(
+          `SELECT COALESCE(MAX(run_seq), 0) + 1 AS count
+           FROM session_entries WHERE run_id = ?`,
+        )
+        .get(runId);
+      if (!isCountRow(runSequenceRow)) {
+        throw new Error("Workflow session entry sequence is unavailable");
+      }
+      const runSequence = runSequenceRow.count;
       const now = Date.now();
       const entryHash = this.state.putJson(entry, now);
       const entryId = typeof entry.id === "string" ? entry.id : `entry-${sequence}`;
       this.state.connection
         .prepare(
-          `INSERT INTO session_entries(segment_id, entry_seq, entry_id, entry_hash, recorded_at)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO session_entries(
+             segment_id, run_id, entry_seq, run_seq, entry_id, entry_hash, recorded_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(segment.segmentId, sequence, entryId, entryHash, now);
+        .run(segment.segmentId, runId, sequence, runSequence, entryId, entryHash, now);
       this.state.connection
         .prepare("UPDATE session_segments SET entry_count = ? WHERE segment_id = ?")
         .run(sequence, segment.segmentId);
@@ -1364,6 +1434,37 @@ export class WorkflowRunStore {
         "session",
         segment.sessionId,
         null,
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        runId,
+        [
+          {
+            targetType: "conversation",
+            targetKey: "entries:tail",
+            patch: viewerTailPatch(runSequence - 1, [
+              parseJson(
+                canonicalJson({
+                  seq: runSequence,
+                  at: new Date(now).toISOString(),
+                  entry,
+                }),
+              ),
+            ]),
+          },
+          {
+            targetType: "conversation",
+            targetKey: "capture",
+            patch: [
+              {
+                op: "replace",
+                path: "/capture/entryCount",
+                value: runSequence,
+              },
+            ],
+          },
+        ],
         now,
       );
       return sequence;
@@ -1382,6 +1483,18 @@ export class WorkflowRunStore {
       const current = this.requireSegment(segment.segmentId);
       if (current.status !== "recording") throw new Error("Session event capture has stopped");
       let expected = current.eventCount + 1;
+      const runSequenceRow = this.state.connection
+        .prepare(
+          `SELECT COALESCE(MAX(run_seq), 0) + 1 AS count
+           FROM session_events WHERE run_id = ?`,
+        )
+        .get(runId);
+      if (!isCountRow(runSequenceRow)) {
+        throw new Error("Workflow session event sequence is unavailable");
+      }
+      let runSequence = runSequenceRow.count;
+      const firstRunSequence = runSequence;
+      const projectedRecords: JsonValue[] = [];
       for (const record of records) {
         validateSessionEventRecord(record);
         if (record.seq !== expected) {
@@ -1394,13 +1507,15 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `INSERT INTO session_events(
-               segment_id, event_seq, event_type, node_id, attempt_id,
+               segment_id, run_id, event_seq, run_seq, event_type, node_id, attempt_id,
                turn_id, message_id, tool_call_id, payload_hash, recorded_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             current.segmentId,
+            runId,
             record.seq,
+            runSequence,
             record.type,
             record.nodeId,
             record.attemptId,
@@ -1410,11 +1525,55 @@ export class WorkflowRunStore {
             payloadHash,
             Date.parse(record.at),
           );
+        const stepIndex = this.state.connection
+          .prepare(
+            `SELECT step_index AS stepIndex
+             FROM run_steps WHERE run_id = ? AND attempt_id = ?`,
+          )
+          .get(runId, record.attemptId);
+        projectedRecords.push(
+          parseJson(
+            canonicalJson({
+              ...record,
+              seq: runSequence,
+              ...(isStepIndexRow(stepIndex) ? { stepIndex: stepIndex.stepIndex } : {}),
+            }),
+          ),
+        );
         expected += 1;
+        runSequence += 1;
       }
       this.state.connection
         .prepare("UPDATE session_segments SET event_count = ? WHERE segment_id = ?")
         .run(expected - 1, current.segmentId);
+      recordViewerDeltas(
+        this.state,
+        runId,
+        [
+          {
+            targetType: "timeline",
+            targetKey: "session:tail",
+            patch: viewerTailPatch(firstRunSequence - 1, projectedRecords),
+          },
+          {
+            targetType: "conversation",
+            targetKey: "capture",
+            patch: [
+              {
+                op: "replace",
+                path: "/capture/eventCount",
+                value: firstRunSequence - 1 + projectedRecords.length,
+              },
+              {
+                op: "replace",
+                path: "/capture/lastEventSeq",
+                value: firstRunSequence - 1 + projectedRecords.length,
+              },
+            ],
+          },
+        ],
+        Date.now(),
+      );
     });
   }
 
@@ -1459,6 +1618,16 @@ export class WorkflowRunStore {
         "session",
         segment.sessionId,
         payloadHash,
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        runId,
+        [
+          { targetType: "conversation", targetKey: "capture" },
+          { targetType: "replay", targetKey: "session" },
+          { targetType: "inspector", targetKey: "session" },
+        ],
         now,
       );
     });
@@ -2987,9 +3156,30 @@ export class WorkflowRunStore {
           payloadHash,
           now,
         );
+        recordViewerDeltas(
+          this.state,
+          runId,
+          [
+            { targetType: "conversation", targetKey: "capture" },
+            { targetType: "replay", targetKey: "session" },
+            { targetType: "inspector", targetKey: "session" },
+          ],
+          now,
+        );
       });
     }
   }
+}
+
+function runViewerTargets(): ViewerDeltaDraft[] {
+  return [
+    { targetType: "summary" },
+    { targetType: "graph" },
+    { targetType: "replay" },
+    { targetType: "timeline", targetKey: "trace:tail" },
+    { targetType: "inspector", targetKey: "run" },
+    { targetType: "inspector", targetKey: "follow-ups" },
+  ];
 }
 
 export function readWorkflowRun(
@@ -3471,6 +3661,10 @@ function isStatusRow(value: unknown): value is { status: string } {
 
 function isCountRow(value: unknown): value is { count: number } {
   return isRecord(value) && typeof value.count === "number";
+}
+
+function isStepIndexRow(value: unknown): value is { stepIndex: number } {
+  return isRecord(value) && typeof value.stepIndex === "number";
 }
 
 function isLeaseExpiryRow(value: unknown): value is { expiresAt: number | null } {

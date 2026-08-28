@@ -139,7 +139,7 @@ struct CanvasChar {
 /// A styled run of consecutive characters on one canvas row.
 pub type StyledRun = (String, CanvasStyle);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CharCanvas {
     cells: HashMap<i64, HashMap<i64, CanvasChar>>,
     max_x: i64,
@@ -274,6 +274,54 @@ impl CharCanvas {
         }
     }
 
+    pub fn size(&self) -> (usize, usize) {
+        (
+            usize::try_from(self.max_x.saturating_add(1)).unwrap_or(0),
+            usize::try_from(self.max_y.saturating_add(1)).unwrap_or(0),
+        )
+    }
+
+    /// Materialize only the requested viewport. The complete logical scene
+    /// remains in sparse cells, but large off-screen rows and columns never
+    /// become strings or Ratatui spans.
+    pub fn render_runs_window(
+        &self,
+        origin_x: i64,
+        origin_y: i64,
+        width: usize,
+        height: usize,
+    ) -> Vec<Vec<StyledRun>> {
+        let mut lines = Vec::with_capacity(height);
+        for viewport_y in 0..height {
+            let y = origin_y + viewport_y as i64;
+            let row = (y >= 0).then(|| self.cells.get(&y)).flatten();
+            let mut runs: Vec<StyledRun> = Vec::new();
+            let mut run_text = String::new();
+            let mut run_style = CanvasStyle::Plain;
+            for viewport_x in 0..width {
+                let x = origin_x + viewport_x as i64;
+                let (char, style) = if x < 0 {
+                    (' ', CanvasStyle::Plain)
+                } else {
+                    row.and_then(|row| row.get(&x))
+                        .map_or((' ', CanvasStyle::Plain), |cell| (cell.char, cell.style))
+                };
+                if style != run_style {
+                    if !run_text.is_empty() {
+                        runs.push((std::mem::take(&mut run_text), run_style));
+                    }
+                    run_style = style;
+                }
+                run_text.push(char);
+            }
+            if !run_text.is_empty() {
+                runs.push((run_text, run_style));
+            }
+            lines.push(runs);
+        }
+        lines
+    }
+
     /// Render to rows of styled runs, gaps filled with plain spaces.
     /// Trailing whitespace is trimmed from every row.
     pub fn render_runs(&self) -> Vec<Vec<StyledRun>> {
@@ -319,5 +367,31 @@ impl CharCanvas {
                 line.trim_end().to_string()
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_materialization_is_bounded_by_visible_cells() {
+        let mut canvas = CharCanvas::new();
+        canvas.text(100_000, 100_000, "far", CanvasStyle::Plain);
+        canvas.text(5, 5, "near", CanvasStyle::Taken);
+        assert_eq!(canvas.size(), (100_003, 100_001));
+        let window = canvas.render_runs_window(4, 4, 8, 3);
+        assert_eq!(window.len(), 3);
+        assert!(window
+            .iter()
+            .flat_map(|row| row.iter())
+            .all(|(text, _)| text.chars().count() <= 8));
+        assert_eq!(
+            window[1]
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            " near   "
+        );
     }
 }

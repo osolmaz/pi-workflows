@@ -169,6 +169,36 @@ function humanDecisionFixture(): LayoutFixture {
   return buildFixture("human-multigate", snapshot, state);
 }
 
+function boundedGeometryFixture(): LayoutFixture {
+  const cases = Object.fromEntries(
+    Array.from({ length: 14 }, (_, index) => [`分岐_${index}`, `target_${index}`]),
+  );
+  const targets = Object.fromEntries(
+    Array.from({ length: 14 }, (_, index) => [`target_${index}`, { nodeType: "compute" as const }]),
+  );
+  const snapshot: WorkflowDefinitionSnapshot = {
+    schema: "pi-workflows.definition-snapshot.v1",
+    name: "bounded-unicode-geometry",
+    startAt: "ordinary",
+    nodes: {
+      ordinary: { nodeType: "compute" },
+      "階層.とても長いノード名.🧪": {
+        nodeType: "agent",
+        mountPath: ["親", "子"],
+        localNodeId: "とても長いローカル名🧪",
+      },
+      decision: { nodeType: "compute" },
+      ...targets,
+    },
+    edges: [
+      { from: "ordinary", to: "階層.とても長いノード名.🧪" },
+      { from: "階層.とても長いノード名.🧪", to: "decision" },
+      { from: "decision", switch: { on: "$.route", cases } },
+    ],
+  };
+  return buildFixture("bounded-unicode-geometry", snapshot, freshState(snapshot));
+}
+
 function buildFixture(
   name: string,
   snapshot: WorkflowDefinitionSnapshot,
@@ -210,6 +240,7 @@ export async function buildLayoutFixtures(): Promise<LayoutFixture[]> {
     fixtures.push(buildFixture(`example-${workflow.name}`, snapshot, freshState(snapshot)));
   }
   fixtures.push(humanDecisionFixture());
+  fixtures.push(boundedGeometryFixture());
   for (const seed of RANDOM_SEEDS) {
     const snapshot = randomSnapshot(seed);
     const steps = randomSteps(snapshot, seed);

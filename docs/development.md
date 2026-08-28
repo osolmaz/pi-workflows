@@ -3,6 +3,8 @@
 This document covers the standards for working on pi-workflows itself. For
 authoring workflows, see [workflows.md](workflows.md).
 
+The viewer follows the [incremental and virtualized viewer plan](plans/2026-08-28-piw-incremental-viewer-plan.md). Durable writers create revisioned target patches. Rust reads small run-list rows, bounded replay pages, and one shared watched-run projection. Rust and TypeScript share graph fixtures and the same retained scene contract.
+
 ## Layout and boundaries
 
 ```
@@ -11,7 +13,7 @@ src/builtins/    default workflows shipped at lowest discovery precedence
 src/controllers/ durable resources, queue, reconciliation, effects, child runs
 src/extension/   pi integration: commands, workflow tool, controller host, widget
 src/viewer/      standalone read-only views over runs and controller resources
-tui/             Rust piw viewer and live replay server
+tui/             Rust piw viewer, bounded SQLite projection, and replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
@@ -104,6 +106,23 @@ npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 ```
 
+## Viewer performance checks
+
+Create a synthetic growing database and run the release benchmark:
+
+```bash
+mkdir -m 700 /tmp/piw-viewer-benchmark
+npx tsx scripts/generate-viewer-benchmark.ts \
+  /tmp/piw-viewer-benchmark/state.sqlite 44 405 211 1105 1200
+cargo run --release --manifest-path tui/Cargo.toml \
+  --example refresh_benchmark -- \
+  /tmp/piw-viewer-benchmark/state.sqlite 1000
+```
+
+The generator prints only row counts and database size. The benchmark prints run count, query and load counts, payload rows, raw tick times, and peak RSS. It does not print run IDs or payload text.
+
+The deterministic gate is zero payload reads after the first bounded selected window during unchanged idle checks. The measured gates are p99 main-thread checks below 16 ms and peak RSS below 185 MB on a database close to the registered 97 MB fixture. Run the benchmark several times and report the median, range, p99, maximum, and peak memory. Do not select extra complexity from one best run.
+
 ## End-to-end tests
 
 ```bash
@@ -155,9 +174,8 @@ before publishing.
 ## Conventions
 
 - Conventional Commits for commit messages and PR titles.
-- Persisted JSON uses camelCase keys and versioned `schema` identifiers; see
-  [SQLITE_STATE.md](SQLITE_STATE.md). Breaking a persisted shape means bumping
-  the schema version string.
+- Persisted JSON uses camelCase keys and current `schema` identifiers; see
+  [SQLITE_STATE.md](SQLITE_STATE.md). During alpha, a breaking shape changes the current contract in place and uses the clear reset failure. Do not add a compatibility path or `v2` only to preserve old alpha state.
 - Every exported API of the engine (`src/workflows/index.ts`) is covered by
   unit tests; new node types or edge semantics need tests in `test/` and a
   section in [workflows.md](workflows.md).

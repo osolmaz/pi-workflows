@@ -14,10 +14,26 @@ pub enum ClientMessage {
     WatchRun {
         #[serde(rename = "runId")]
         run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+        #[serde(rename = "stepCursor", skip_serializing_if = "Option::is_none")]
+        step_cursor: Option<u64>,
+        #[serde(rename = "traceCursor", skip_serializing_if = "Option::is_none")]
+        trace_cursor: Option<u64>,
+        #[serde(rename = "sessionEntryCursor", skip_serializing_if = "Option::is_none")]
+        session_entry_cursor: Option<u64>,
+        #[serde(rename = "sessionEventCursor", skip_serializing_if = "Option::is_none")]
+        session_event_cursor: Option<u64>,
     },
     UnwatchRun {
         #[serde(rename = "runId")]
         run_id: String,
+    },
+    FetchPage {
+        #[serde(rename = "runId")]
+        run_id: String,
+        kind: PageKind,
+        cursor: u64,
     },
     FetchArtifact {
         #[serde(rename = "runId")]
@@ -45,7 +61,16 @@ pub enum ServerMessage {
         #[serde(rename = "runId")]
         run_id: String,
         revision: u64,
-        patch: Vec<PatchOp>,
+        targets: Vec<TargetPatch>,
+    },
+    RunPage {
+        #[serde(rename = "runId")]
+        run_id: String,
+        revision: u64,
+        kind: PageKind,
+        start: u64,
+        total: u64,
+        items: Vec<Value>,
     },
     Artifact {
         #[serde(rename = "runId")]
@@ -58,6 +83,24 @@ pub enum ServerMessage {
         #[serde(rename = "runId", skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    Steps,
+    Trace,
+    SessionEntries,
+    SessionEvents,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetPatch {
+    #[serde(rename = "targetType")]
+    pub target_type: String,
+    #[serde(rename = "targetKey")]
+    pub target_key: String,
+    pub patch: Vec<PatchOp>,
 }
 
 /// RFC 6902 ops we use, plus `append` (add a batch of items to an array).

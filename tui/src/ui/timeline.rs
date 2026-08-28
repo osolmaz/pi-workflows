@@ -325,6 +325,7 @@ fn status_label(status: RunStatus, paused: bool) -> &'static str {
 
 fn status_glyph(status: RunStatus) -> &'static str {
     match status {
+        RunStatus::Queued => "·",
         RunStatus::Running => "◐",
         RunStatus::Waiting => "⏸",
         RunStatus::Completed => "✓",
@@ -336,6 +337,7 @@ fn status_glyph(status: RunStatus) -> &'static str {
 
 fn status_color(status: RunStatus, palette: &Palette) -> ratatui::style::Color {
     match status {
+        RunStatus::Queued => palette.muted,
         RunStatus::Running => palette.running,
         RunStatus::Waiting => palette.warning,
         RunStatus::Completed => palette.success,

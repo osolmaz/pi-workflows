@@ -1,0 +1,509 @@
+{
+  "name": "bounded-unicode-geometry",
+  "snapshot": {
+    "schema": "pi-workflows.definition-snapshot.v1",
+    "name": "bounded-unicode-geometry",
+    "startAt": "ordinary",
+    "nodes": {
+      "ordinary": {
+        "nodeType": "compute"
+      },
+      "階層.とても長いノード名.🧪": {
+        "nodeType": "agent",
+        "mountPath": ["親", "子"],
+        "localNodeId": "とても長いローカル名🧪"
+      },
+      "decision": {
+        "nodeType": "compute"
+      },
+      "target_0": {
+        "nodeType": "compute"
+      },
+      "target_1": {
+        "nodeType": "compute"
+      },
+      "target_2": {
+        "nodeType": "compute"
+      },
+      "target_3": {
+        "nodeType": "compute"
+      },
+      "target_4": {
+        "nodeType": "compute"
+      },
+      "target_5": {
+        "nodeType": "compute"
+      },
+      "target_6": {
+        "nodeType": "compute"
+      },
+      "target_7": {
+        "nodeType": "compute"
+      },
+      "target_8": {
+        "nodeType": "compute"
+      },
+      "target_9": {
+        "nodeType": "compute"
+      },
+      "target_10": {
+        "nodeType": "compute"
+      },
+      "target_11": {
+        "nodeType": "compute"
+      },
+      "target_12": {
+        "nodeType": "compute"
+      },
+      "target_13": {
+        "nodeType": "compute"
+      }
+    },
+    "edges": [
+      {
+        "from": "ordinary",
+        "to": "階層.とても長いノード名.🧪"
+      },
+      {
+        "from": "階層.とても長いノード名.🧪",
+        "to": "decision"
+      },
+      {
+        "from": "decision",
+        "switch": {
+          "on": "$.route",
+          "cases": {
+            "分岐_0": "target_0",
+            "分岐_1": "target_1",
+            "分岐_2": "target_2",
+            "分岐_3": "target_3",
+            "分岐_4": "target_4",
+            "分岐_5": "target_5",
+            "分岐_6": "target_6",
+            "分岐_7": "target_7",
+            "分岐_8": "target_8",
+            "分岐_9": "target_9",
+            "分岐_10": "target_10",
+            "分岐_11": "target_11",
+            "分岐_12": "target_12",
+            "分岐_13": "target_13"
+          }
+        }
+      }
+    ]
+  },
+  "layout": {
+    "ranks": [
+      [
+        {
+          "kind": "node",
+          "nodeId": "ordinary"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "階層.とても長いノード名.🧪"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "decision"
+        }
+      ],
+      [
+        {
+          "kind": "node",
+          "nodeId": "target_0"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_1"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_2"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_3"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_4"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_5"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_6"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_7"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_8"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_9"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_10"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_11"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_12"
+        },
+        {
+          "kind": "node",
+          "nodeId": "target_13"
+        }
+      ]
+    ],
+    "edges": [
+      {
+        "edgeId": "ordinary->階層.とても長いノード名.🧪#0.0",
+        "from": "ordinary",
+        "to": "階層.とても長いノード名.🧪",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "階層.とても長いノード名.🧪->decision#1.0",
+        "from": "階層.とても長いノード名.🧪",
+        "to": "decision",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_0#2.0",
+        "from": "decision",
+        "to": "target_0",
+        "label": "分岐_0",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_1#2.1",
+        "from": "decision",
+        "to": "target_1",
+        "label": "分岐_1",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_2#2.2",
+        "from": "decision",
+        "to": "target_2",
+        "label": "分岐_2",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_3#2.3",
+        "from": "decision",
+        "to": "target_3",
+        "label": "分岐_3",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_4#2.4",
+        "from": "decision",
+        "to": "target_4",
+        "label": "分岐_4",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_5#2.5",
+        "from": "decision",
+        "to": "target_5",
+        "label": "分岐_5",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_6#2.6",
+        "from": "decision",
+        "to": "target_6",
+        "label": "分岐_6",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_7#2.7",
+        "from": "decision",
+        "to": "target_7",
+        "label": "分岐_7",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_8#2.8",
+        "from": "decision",
+        "to": "target_8",
+        "label": "分岐_8",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_9#2.9",
+        "from": "decision",
+        "to": "target_9",
+        "label": "分岐_9",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_10#2.10",
+        "from": "decision",
+        "to": "target_10",
+        "label": "分岐_10",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_11#2.11",
+        "from": "decision",
+        "to": "target_11",
+        "label": "分岐_11",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_12#2.12",
+        "from": "decision",
+        "to": "target_12",
+        "label": "分岐_12",
+        "isBackEdge": false
+      },
+      {
+        "edgeId": "decision->target_13#2.13",
+        "from": "decision",
+        "to": "target_13",
+        "label": "分岐_13",
+        "isBackEdge": false
+      }
+    ],
+    "segments": [
+      {
+        "edgeId": "ordinary->階層.とても長いノード名.🧪#0.0",
+        "rank": 0,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "階層.とても長いノード名.🧪->decision#1.0",
+        "rank": 1,
+        "fromCell": 0,
+        "toCell": 0
+      },
+      {
+        "edgeId": "decision->target_0#2.0",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 0,
+        "label": "分岐_0"
+      },
+      {
+        "edgeId": "decision->target_1#2.1",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 1,
+        "label": "分岐_1"
+      },
+      {
+        "edgeId": "decision->target_2#2.2",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 2,
+        "label": "分岐_2"
+      },
+      {
+        "edgeId": "decision->target_3#2.3",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 3,
+        "label": "分岐_3"
+      },
+      {
+        "edgeId": "decision->target_4#2.4",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 4,
+        "label": "分岐_4"
+      },
+      {
+        "edgeId": "decision->target_5#2.5",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 5,
+        "label": "分岐_5"
+      },
+      {
+        "edgeId": "decision->target_6#2.6",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 6,
+        "label": "分岐_6"
+      },
+      {
+        "edgeId": "decision->target_7#2.7",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 7,
+        "label": "分岐_7"
+      },
+      {
+        "edgeId": "decision->target_8#2.8",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 8,
+        "label": "分岐_8"
+      },
+      {
+        "edgeId": "decision->target_9#2.9",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 9,
+        "label": "分岐_9"
+      },
+      {
+        "edgeId": "decision->target_10#2.10",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 10,
+        "label": "分岐_10"
+      },
+      {
+        "edgeId": "decision->target_11#2.11",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 11,
+        "label": "分岐_11"
+      },
+      {
+        "edgeId": "decision->target_12#2.12",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 12,
+        "label": "分岐_12"
+      },
+      {
+        "edgeId": "decision->target_13#2.13",
+        "rank": 2,
+        "fromCell": 0,
+        "toCell": 13,
+        "label": "分岐_13"
+      }
+    ],
+    "rankOfNode": {
+      "ordinary": 0,
+      "階層.とても長いノード名.🧪": 1,
+      "decision": 2,
+      "target_0": 3,
+      "target_1": 3,
+      "target_2": 3,
+      "target_3": 3,
+      "target_4": 3,
+      "target_5": 3,
+      "target_6": 3,
+      "target_7": 3,
+      "target_8": 3,
+      "target_9": 3,
+      "target_10": 3,
+      "target_11": 3,
+      "target_12": 3,
+      "target_13": 3
+    }
+  },
+  "state": {
+    "schema": "pi-workflows.run-state.v1",
+    "traceSeq": 1,
+    "runId": "run-bounded-unicode-geometry",
+    "workflowName": "bounded-unicode-geometry",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:01:00.000Z",
+    "status": "running",
+    "input": {},
+    "outputs": {},
+    "results": {},
+    "steps": []
+  },
+  "frames": [
+    {
+      "stepIndex": -1,
+      "nodeStyle": "line",
+      "lines": [
+        "                                                                                                                                                                                                                                                         ▶ · ordinary [compute] not visited",
+        "                                                                                                                                                                                                                                                                           │",
+        "                                                                                                                                                                                                                                                                           ▼",
+        "                                                                                                                                                                                                                                                      · 親 › 子 › とても長いローカル名🧪 [agent] not visited",
+        "                                                                                                                                                                                                                                                                           │",
+        "                                                                                                                                                                                                                                                                           ▼",
+        "                                                                                                                                                                                                                                                           · decision [compute] not visited",
+        "                  ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────── 分岐_0 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤│ └─┼─┼─┼─┼─┼─┼────────────────┐",
+        "                  │                                     ┌────────────────────────────────────────────────────────────────────────────────────────────── 分岐_1 ───────────────────────────────────────────────────────────────────────────────────────────────┤│   └─┼─┼─┼─┼─┼────────────────┼─ 分岐_8 ──────────────────────────────┐",
+        "                  │                                     │                                     ┌─────────────────────────────────────────────────────────────────────────── 分岐_2 ────────────────────────────────────────────────────────────────────────────┤│     └─┼─┼─┼─┼────────────────┼───────────────────── 分岐_9 ──────────┼─────────────────────────────────────┐",
+        "                  │                                     │                                     │                                     ┌──────────────────────────────────────────────────────── 分岐_3 ─────────────────────────────────────────────────────────┤│       └─┼─┼─┼────────────────┼─────────────────────────────────────┼─── 分岐_10 ───────────────────────────┼─────────────────────────────────────┐",
+        "                  │                                     │                                     │                                     │                                     ┌───────────────────────────────────── 分岐_4 ──────────────────────────────────────┤│         └─┼─┼────────────────┼─────────────────────────────────────┼──────────────────────── 分岐_11 ──────┼─────────────────────────────────────┼──────────────────────────────────────┐",
+        "                  │                                     │                                     │                                     │                                     │                                     ┌────────────────── 分岐_5 ───────────────────┘│           └─┼────────────────┼─────────────────────────────────────┼─────────────────────────────────────┼────── 分岐_12 ────────────────────────┼──────────────────────────────────────┼──────────────────────────────────────┐",
+        "                  │                                     │                                     │                                     │                                     │                                     │                                     ┌──────┘             └────────────────┼─────────────────────────────────────┼─────────────────────────────────────┼─────────────────────────── 分岐_13 ───┼──────────────────────────────────────┼──────────────────────────────────────┼──────────────────────────────────────┐",
+        "                  │                                     │                                     │                                     │                                     │                                     │                                     │ 分岐_6                           分岐_7 │                                     │                                     │                                     │                                      │                                      │                                      │",
+        "                  │                                     │                                     │                                     │                                     │                                     │                                     │                                     │                                     │                                     │                                     │                                      │                                      │                                      │",
+        "                  ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                     ▼                                      ▼                                      ▼                                      ▼",
+        "  · target_0 [compute] not visited ■    · target_1 [compute] not visited ■    · target_2 [compute] not visited ■    · target_3 [compute] not visited ■    · target_4 [compute] not visited ■    · target_5 [compute] not visited ■    · target_6 [compute] not visited ■    · target_7 [compute] not visited ■    · target_8 [compute] not visited ■    · target_9 [compute] not visited ■    · target_10 [compute] not visited ■    · target_11 [compute] not visited ■    · target_12 [compute] not visited ■    · target_13 [compute] not visited ■"
+      ]
+    },
+    {
+      "stepIndex": -1,
+      "nodeStyle": "box",
+      "lines": [
+        "                                                                                                                                                                                                     ┌──────────────────────┐",
+        "                                                                                                                                                                                                   ▶ │       ordinary       │",
+        "                                                                                                                                                                                                     ├──────────────────────┤",
+        "                                                                                                                                                                                                     │ ƒ compute   · queued │",
+        "                                                                                                                                                                                                     │ ↻ 0              ◷ — │",
+        "                                                                                                                                                                                                     │                      │",
+        "                                                                                                                                                                                                     └──────────────────────┘",
+        "                                                                                                                                                                                                                 │",
+        "                                                                                                                                                                                                                 ▼",
+        "                                                                                                                                                                                                     ┌──────────────────────┐",
+        "                                                                                                                                                                                                     │ 親 › 子 › とても長いローカル名🧪  │",
+        "                                                                                                                                                                                                     ├──────────────────────┤",
+        "                                                                                                                                                                                                     │ ● agent     · queued │",
+        "                                                                                                                                                                                                     │ ↻ 0              ◷ — │",
+        "                                                                                                                                                                                                     │                      │",
+        "                                                                                                                                                                                                     └──────────────────────┘",
+        "                                                                                                                                                                                                                 │",
+        "                                                                                                                                                                                                                 ▼",
+        "                                                                                                                                                                                                     ┌──────────────────────┐",
+        "                                                                                                                                                                                                     │       decision       │",
+        "                                                                                                                                                                                                     ├──────────────────────┤",
+        "                                                                                                                                                                                                     │ ƒ compute   · queued │",
+        "                                                                                                                                                                                                     │ ↻ 0              ◷ — │",
+        "                                                                                                                                                                                                     │ ◇ 分岐_0               │",
+        "                                                                                                                                                                                                     │ ◇ 分岐_1               │",
+        "                                                                                                                                                                                                     │ +12 branches         │",
+        "                                                                                                                                                                                                     │                      │",
+        "                                                                                                                                                                                                     └──────────────────────┘",
+        "              ┌──────────────────────────────────────────────────────────────────────────────────────── 分岐_0 ─────────────────────────────────────────────────────────────────────────────────────────┤└─┼─┼─┼─┼─┼───────────── 分岐_8 ─────────────────────────┐",
+        "              │                             ┌───────────────────────────────────────────────────────────────────────── 分岐_1 ──────────────────────────────────────────────────────────────────────────┤  └─┼─┼─┼─┼───────────────────────────── 分岐_9 ─────────┼─────────────────────────────┐",
+        "              │                             │                             ┌────────────────────────────────────────────────────────── 分岐_2 ───────────────────────────────────────────────────────────┤    └─┼─┼─┼────────────────────────────────────────────┼─────────────────────────────┼─────────────────────────────┐",
+        "              │                             │                             │                             ┌─────────────────────────────────────────── 分岐_3 ────────────────────────────────────────────┤      └─┼─┼────────────────────────────────────────────┼──────────────── 分岐_11 ──────┼─────────────────────────────┼─────────────────────────────┐",
+        "              │                             │                             │                             │                             ┌──────────────────────────── 分岐_4 ─────────────────────────────┤        └─┼────────────────────────────────────────────┼─────────────────────────────┼── 分岐_12 ────────────────────┼─────────────────────────────┼─────────────────────────────┐",
+        "              │                             │                             │                             │                             │                             ┌───────────── 分岐_5 ──────────────┤          └────────────────────────────────────────────┼─────────────────────────────┼────────────────── 分岐_13 ────┼─────────────────────────────┼─────────────────────────────┼─────────────────────────────┐",
+        "              │                             │                             │                             │                             │                             │                             ┌───┤                                                       │                             │                             │                             │                             │                             │",
+        "              │                             │                             │                             │                             │                             │                             │   └───────── 分岐_7 ──────────┐                             │                             │                             │                             │                             │                             │",
+        "              │                             │                             │                             │                             │                             │                             │ 分岐_6                        │                             │                             │                       分岐_10 │                             │                             │                             │",
+        "              │                             │                             │                             │                             │                             │                             │                             │                             │                             │                             │                             │                             │                             │",
+        "              ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼                             ▼",
+        "  ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐",
+        "  │       target_0       │ ■    │       target_1       │ ■    │       target_2       │ ■    │       target_3       │ ■    │       target_4       │ ■    │       target_5       │ ■    │       target_6       │ ■    │       target_7       │ ■    │       target_8       │ ■    │       target_9       │ ■    │      target_10       │ ■    │      target_11       │ ■    │      target_12       │ ■    │      target_13       │ ■",
+        "  ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤      ├──────────────────────┤",
+        "  │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │      │ ƒ compute   · queued │",
+        "  │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │      │ ↻ 0              ◷ — │",
+        "  │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │      │                      │",
+        "  └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘      └──────────────────────┘"
+      ]
+    }
+  ]
+}

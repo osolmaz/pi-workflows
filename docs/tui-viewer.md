@@ -5,6 +5,16 @@ the same graph as the bundled TypeScript viewer, pinned by the golden fixtures
 under `fixtures/layout/`, and adds live following, replay, detailed inspection,
 a recorded Pi conversation, themes, and remote viewing.
 
+## Incremental projection
+
+The viewer uses the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md).
+
+The run browser reads small metadata rows. It does not load trace, step, session, settings, or follow-up payloads. The local viewer checks SQLite `data_version` on its timer. When the value is unchanged, the timer does not scan runs or read payloads.
+
+The selected run contains bounded pages. Step, trace, session-entry, and session-event pages contain at most 256 rows. Replay can jump to any position. The viewer loads the page that contains that position and keeps only the current windows. A compact graph projection keeps the latest attempt for each node and the taken transitions up to the replay point.
+
+Local page reads run outside input and drawing through one overwrite-only request slot. A newer selection replaces pending work. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
+
 ## Install
 
 The crates.io package uses the project name and installs the shorter `piw`
@@ -43,6 +53,10 @@ run title and focused after Pi reload. Normal Pi sessions do not probe Herdr or
 show the shortcut.
 
 ## Layout
+
+Boxed graph cards use only their own content. Their outer width is 24 through 32 cells. Their height is 7 through 10 rows. A switch with more than three branches shows its first two branch names and a `+N branches` row. Edge labels and the inspector keep the complete branch information.
+
+Ranks use the tallest card in that rank. Cards are top-aligned. Edge ports, clipping, centering, keyboard movement, and mouse hits use each card's exact bounds. The server sends one retained language-neutral graph scene per watched run. The TUI reuses that scene across status changes and turns only viewport rows and columns into Ratatui spans.
 
 The normal layout contains a run browser, graph, inspector, and two-line replay
 timeline. Short terminals use a compact one-line transport. Terminals below 100
@@ -195,7 +209,9 @@ at the bottom until the user moves to an older message and returns with End.
 The client reconnects automatically with bounded backoff. It restores the run
 listing and selected-run subscription after the server returns. Cached content
 stays visible but is labeled reconnecting or disconnected, never current.
-Revision gaps still force a fresh snapshot.
+Revision gaps force a bounded snapshot.
+
+`piw serve` keeps one loaded projection and one graph scene for each watched run. The first watcher loads it. Later watchers reuse it. The last unwatch or disconnect releases it. Clients keep separate revision and page cursors, so one client's replay jump does not move another client. A lagged client gets a bounded snapshot instead of an unbounded patch backlog.
 
 Expanded prompt and output fields come from content-addressed SQLite blobs.
 The local reader uses query-only mode. Remote snapshots carry the same bounded
