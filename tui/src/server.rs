@@ -182,6 +182,7 @@ async fn handle_connection(
     let mut watching_runs = false;
     let mut watched: HashMap<String, u64> = HashMap::new();
 
+    let session_result: Result<()> = async {
     loop {
         tokio::select! {
             incoming = reads.next() => {
@@ -215,14 +216,23 @@ async fn handle_connection(
                             if first_watch {
                                 source.watch(&request_run_id)?;
                             }
-                            let resume = revision
-                                .map(|cursor| source.deltas_after(&request_run_id, cursor))
-                                .transpose()?;
-                            let snapshot = source
-                                .get(&request_run_id)
-                                .map(|entry| (entry.revision, entry.view()));
-                            Ok((resume, snapshot))
+                            let result = (|| -> Result<_> {
+                                let resume = revision
+                                    .map(|cursor| source.deltas_after(&request_run_id, cursor))
+                                    .transpose()?;
+                                let snapshot = source
+                                    .get(&request_run_id)
+                                    .map(|entry| (entry.revision, entry.view()));
+                                Ok((resume, snapshot))
+                            })();
+                            if first_watch && result.is_err() {
+                                source.unwatch(&request_run_id);
+                            }
+                            result
                         }).await?;
+                        if first_watch && result.is_ok() {
+                            watched.insert(run_id.clone(), revision.unwrap_or(0));
+                        }
                         let available = match result {
                             Ok((Some(ViewerDeltaRead::Deltas { deltas, current_revision }), snapshot))
                                 if revision.is_some() => {
@@ -344,6 +354,8 @@ async fn handle_connection(
             }
         }
     }
+    Ok(())
+    }.await;
 
     let watched_ids: Vec<String> = watched.into_keys().collect();
     let _ = run_blocking(&source, move |source| {
@@ -352,7 +364,7 @@ async fn handle_connection(
         }
     })
     .await;
-    Ok(())
+    session_result
 }
 
 async fn send_projection_page(

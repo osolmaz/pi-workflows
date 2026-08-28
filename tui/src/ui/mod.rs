@@ -268,16 +268,20 @@ impl Provider {
     ) {
         match self {
             Provider::Local { source, .. } => {
-                let _ = source.request_window(
-                    run_id,
-                    crate::source::WindowCursor {
-                        step,
-                        trace,
-                        session_entry,
-                        session_event,
-                        ..crate::source::WindowCursor::default()
-                    },
-                );
+                let mut cursor = source.cursor(run_id);
+                if let Some(value) = step {
+                    cursor.step = Some(value);
+                }
+                if let Some(value) = trace {
+                    cursor.trace = Some(value);
+                }
+                if let Some(value) = session_entry {
+                    cursor.session_entry = Some(value);
+                }
+                if let Some(value) = session_event {
+                    cursor.session_event = Some(value);
+                }
+                let _ = source.request_window(run_id, cursor);
             }
             Provider::Remote(remote) => {
                 if let Some(cursor) = step {
@@ -306,9 +310,15 @@ impl Provider {
         match self {
             Provider::Local { source, .. } => {
                 let mut cursor = source.cursor(run_id);
-                cursor.settings = settings;
-                cursor.follow_ups = follow_ups;
-                cursor.updates = updates;
+                if let Some(value) = settings {
+                    cursor.settings = Some(value);
+                }
+                if let Some(value) = follow_ups {
+                    cursor.follow_ups = Some(value);
+                }
+                if let Some(value) = updates {
+                    cursor.updates = Some(value);
+                }
                 let _ = source.request_window(run_id, cursor);
             }
             Provider::Remote(remote) => {
