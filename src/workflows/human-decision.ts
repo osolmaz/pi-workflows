@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { resourceIdFor, tokenHash } from "../state/mutation.js";
+import { recordViewerDeltas } from "../state/viewer.js";
 import {
   digestCanonical,
   normalizeDecisionPresentation,
@@ -451,6 +452,7 @@ export class HumanDecisionStore {
         requestHash,
         now,
       );
+      recordDecisionViewerChange(this.state, request.runId, request.decisionId, now);
       return "created";
     });
   }
@@ -630,6 +632,7 @@ export class HumanDecisionStore {
         now,
       );
       this.enqueueResolutionEffects(row.resourceId, row.revision + 1, request, "cancelled", now);
+      recordDecisionViewerChange(this.state, request.runId, request.decisionId, now);
       return "created";
     });
   }
@@ -837,6 +840,7 @@ export class HumanDecisionStore {
       );
       this.enqueueResolutionEffects(row.resourceId, row.revision + 1, request, "accepted", now);
       this.markSubmission(request.decisionId, attempt.attemptId, "won", responseHash);
+      recordDecisionViewerChange(this.state, request.runId, request.decisionId, now);
       return { status: "accepted", decision };
     });
   }
@@ -1173,6 +1177,24 @@ export class HumanDecisionStore {
       createdAt: new Date(row.createdAt).toISOString(),
     };
   }
+}
+
+function recordDecisionViewerChange(
+  state: StateDatabase,
+  runId: string,
+  decisionId: string,
+  now: number,
+): void {
+  recordViewerDeltas(
+    state,
+    runId,
+    [
+      { targetType: "graph" },
+      { targetType: "replay" },
+      { targetType: "inspector", targetKey: `decision:${decisionId}` },
+    ],
+    now,
+  );
 }
 
 function digestBuffer(value: string): Buffer {

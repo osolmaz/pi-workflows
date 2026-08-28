@@ -134,16 +134,6 @@ pub fn viewport_line(
     Line::from(spans)
 }
 
-/// The canvas dimensions of rendered rows: (max line width, row count).
-pub fn content_size(rows: &[Vec<StyledRun>]) -> (usize, usize) {
-    let width = rows
-        .iter()
-        .map(|runs| runs.iter().map(|(text, _)| text.chars().count()).sum())
-        .max()
-        .unwrap_or(0);
-    (width, rows.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

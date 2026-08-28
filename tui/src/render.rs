@@ -17,6 +17,8 @@ use std::collections::HashSet;
 pub struct GraphView<'a> {
     pub state: &'a RunState,
     pub snapshot: Option<&'a DefinitionSnapshot>,
+    pub graph_steps: Option<&'a [StepRecord]>,
+    pub taken_transitions: Option<&'a [String]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +94,6 @@ impl NodeStatus {
 const CELL_GAP: i64 = 6;
 const GUTTER_GAP: i64 = 2;
 const GRAPH_SIDE_MARGIN: i64 = 2;
-const CARD_MIN_CONTENT_WIDTH: i64 = 28;
-const CARD_DYNAMIC_RESERVE: &str = "↻ 100  ◷ 9999d 23h 59m 59s";
 
 fn node_type_glyph(node_type: &str, action_execution: Option<&str>) -> char {
     match (node_type, action_execution) {
@@ -154,16 +154,20 @@ pub enum GraphNodeStyle {
     Box,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CardMetrics {
+const CARD_MIN_CONTENT_WIDTH: i64 = 20;
+const CARD_MAX_CONTENT_WIDTH: i64 = 28;
+const CARD_CORE_HEIGHT: i64 = 7;
+const CARD_MAX_BRANCH_ROWS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CardShape {
     width: i64,
     height: i64,
-    branch_rows: usize,
 }
 
-fn cell_height(node_style: GraphNodeStyle, box_height: i64) -> i64 {
+fn cell_height(node_style: GraphNodeStyle, cell: &RenderedCell) -> i64 {
     match node_style {
-        GraphNodeStyle::Box => box_height,
+        GraphNodeStyle::Box => cell.height,
         GraphNodeStyle::Line => 1,
     }
 }
@@ -247,50 +251,93 @@ fn hierarchical_node_label(node_id: &str, node: Option<&Value>) -> String {
     }
 }
 
-fn card_metrics(view: &GraphView) -> CardMetrics {
-    let Some(snapshot) = view.snapshot else {
-        return CardMetrics {
-            width: CARD_MIN_CONTENT_WIDTH + 4,
-            height: 7,
-            branch_rows: 0,
-        };
-    };
-    let mut content_width = CARD_MIN_CONTENT_WIDTH.max(js_len(CARD_DYNAMIC_RESERVE));
-    let mut branch_rows = 0usize;
-    for status in [
-        NodeStatus::Completed,
-        NodeStatus::Failed,
-        NodeStatus::TimedOut,
-        NodeStatus::Active,
-        NodeStatus::ReplayFocus,
-        NodeStatus::Waiting,
-        NodeStatus::Queued,
-        NodeStatus::Cancelled,
-    ] {
-        content_width = content_width.max(js_len(&format!(
-            "{}  {} {}",
-            node_type_badge("checkpoint", None),
-            status.glyph(),
-            status.label()
-        )));
+fn card_shape(view: &GraphView, node_id: &str) -> CardShape {
+    let node = view
+        .snapshot
+        .and_then(|snapshot| snapshot.nodes.get(node_id));
+    let labels = node_branch_labels(view, node_id);
+    let branch_rows = labels.len().min(CARD_MAX_BRANCH_ROWS);
+    let node_type = node
+        .and_then(|value| value.get("nodeType"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let action_execution = node
+        .and_then(|value| value.get("actionExecution"))
+        .and_then(Value::as_str);
+    let mut candidates = vec![
+        hierarchical_node_label(node_id, node),
+        node_type_badge(node_type, action_execution),
+    ];
+    if let Some(audience) = node
+        .and_then(|value| value.pointer("/humanDecision/audience"))
+        .and_then(Value::as_str)
+    {
+        candidates.push(format!("… human decision · {audience}"));
     }
-    for (node_id, node) in &snapshot.nodes {
-        content_width = content_width.max(js_len(&hierarchical_node_label(node_id, Some(node))));
-        if let Some(node_type) = node.get("nodeType").and_then(Value::as_str) {
-            let action_execution = node.get("actionExecution").and_then(Value::as_str);
-            content_width =
-                content_width.max(js_len(&node_type_badge(node_type, action_execution)));
-        }
-        let labels = node_branch_labels(view, node_id);
-        branch_rows = branch_rows.max(labels.len());
-        for label in labels {
-            content_width = content_width.max(js_len(&format!("◇ {label}")));
-        }
+    let configured_detail = node
+        .and_then(|value| value.get("statusDetail").or_else(|| value.get("summary")))
+        .and_then(Value::as_str);
+    let assistant_detail = (node
+        .filter(|value| value.get("nodeType").and_then(Value::as_str) == Some("agent"))
+        .and_then(|value| value.pointer("/expectedOutput/kind"))
+        .and_then(Value::as_str)
+        == Some("assistant-message"))
+    .then_some("assistant response");
+    let detail = [assistant_detail, configured_detail]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !detail.is_empty() {
+        candidates.push(format!("… {detail}"));
     }
-    CardMetrics {
+    candidates.extend(bounded_branch_lines(&labels));
+    let content_width = candidates
+        .iter()
+        .map(|value| js_len(value))
+        .max()
+        .unwrap_or(CARD_MIN_CONTENT_WIDTH)
+        .clamp(CARD_MIN_CONTENT_WIDTH, CARD_MAX_CONTENT_WIDTH);
+    CardShape {
         width: content_width + 4,
-        height: 7 + branch_rows as i64,
-        branch_rows,
+        height: CARD_CORE_HEIGHT + branch_rows as i64,
+    }
+}
+
+fn bounded_node_label(node_id: &str, node: Option<&Value>, content_width: i64) -> String {
+    let full = hierarchical_node_label(node_id, node);
+    if js_len(&full) <= content_width {
+        return full;
+    }
+    let local = node
+        .and_then(|value| value.get("localNodeId"))
+        .and_then(Value::as_str)
+        .map(sanitize_text)
+        .unwrap_or_else(|| sanitize_text(node_id));
+    let suffix = match node
+        .and_then(|value| value.get("includeTransition"))
+        .and_then(Value::as_str)
+    {
+        Some("entry") => "enter".to_string(),
+        Some("exit") => format!("{local} exit"),
+        _ => local,
+    };
+    let candidate = format!("… › {suffix}");
+    if js_len(&candidate) <= content_width {
+        candidate
+    } else {
+        fit_text(&suffix, content_width as usize)
+    }
+}
+
+fn bounded_branch_lines(labels: &[String]) -> Vec<String> {
+    match labels.len() {
+        0..=CARD_MAX_BRANCH_ROWS => labels.iter().map(|label| format!("◇ {label}")).collect(),
+        count => vec![
+            format!("◇ {}", labels[0]),
+            format!("◇ {}", labels[1]),
+            format!("+{} branches", count - 2),
+        ],
     }
 }
 
@@ -305,36 +352,7 @@ fn human_decision_detail(state: &RunState, node_id: &str, node: Option<&Value>) 
             .and_then(Value::as_str)
             .or_else(|| human.get("audience").and_then(Value::as_str))
             .unwrap_or("operator");
-        let labels = choices
-            .values()
-            .filter_map(|choice| choice.get("label").and_then(Value::as_str))
-            .map(sanitize_text)
-            .collect::<Vec<_>>()
-            .join(" / ");
-        let summary = state
-            .final_output
-            .as_ref()
-            .and_then(|request| request.pointer("/presentation/summary"))
-            .and_then(Value::as_str)
-            .map(sanitize_text);
-        let fingerprint = state
-            .final_output
-            .as_ref()
-            .and_then(|request| request.get("presentationDigest"))
-            .and_then(Value::as_str)
-            .and_then(|digest| digest.strip_prefix("sha256:"))
-            .map(|digest| digest.chars().take(12).collect::<String>());
-        return Some(format!(
-            "human decision · {}{} · {}{}",
-            sanitize_text(audience),
-            summary
-                .map(|value| format!(" · {value}"))
-                .unwrap_or_default(),
-            labels,
-            fingerprint
-                .map(|value| format!(" · {value}"))
-                .unwrap_or_default()
-        ));
+        return Some(format!("human decision · {}", sanitize_text(audience)));
     }
     state
         .human_decision
@@ -362,6 +380,7 @@ struct RenderedCell {
     is_start: bool,
     is_end: bool,
     width: i64,
+    height: i64,
 }
 
 fn render_cell_text(
@@ -371,7 +390,7 @@ fn render_cell_text(
     at_latest_step: bool,
     now_ms: i64,
     node_style: GraphNodeStyle,
-    metrics: CardMetrics,
+    shape: CardShape,
 ) -> RenderedCell {
     let GraphCell::Node { node_id } = cell else {
         return RenderedCell {
@@ -388,6 +407,7 @@ fn render_cell_text(
             is_start: false,
             is_end: false,
             width: 1,
+            height: 1,
         };
     };
     let state = view.state;
@@ -438,27 +458,36 @@ fn render_cell_text(
         "—".to_string()
     };
     let detail = human_decision_detail(state, node_id, node).unwrap_or_else(|| {
-        if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
-            state
-                .status_detail
-                .as_deref()
+        let configured =
+            if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+                state
+                    .status_detail
+                    .as_deref()
+                    .map(sanitize_text)
+                    .unwrap_or_default()
+            } else {
+                node.and_then(|node| {
+                    node.get("statusDetail")
+                        .or_else(|| node.get("summary"))
+                        .and_then(Value::as_str)
+                })
                 .map(sanitize_text)
                 .unwrap_or_default()
-        } else {
-            node.and_then(|node| {
-                node.get("statusDetail")
-                    .or_else(|| node.get("summary"))
-                    .and_then(Value::as_str)
-            })
-            .map(sanitize_text)
-            .unwrap_or_default()
-        }
+            };
+        let assistant = node
+            .filter(|node| node.get("nodeType").and_then(Value::as_str) == Some("agent"))
+            .and_then(|node| node.pointer("/expectedOutput/kind"))
+            .and_then(Value::as_str)
+            .filter(|kind| *kind == "assistant-message")
+            .map(|_| "assistant response")
+            .unwrap_or_default();
+        [assistant, configured.as_str()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     });
-    let mut branch_lines: Vec<String> = labels
-        .into_iter()
-        .map(|label| format!("◇ {label}"))
-        .collect();
-    branch_lines.resize(metrics.branch_rows, String::new());
+    let branch_lines = bounded_branch_lines(&labels);
     let count = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
         attempts.max(1)
     } else {
@@ -472,7 +501,7 @@ fn render_cell_text(
     } else {
         "not visited".to_string()
     };
-    let display_node_id = hierarchical_node_label(node_id, node);
+    let display_node_id = bounded_node_label(node_id, node, shape.width - 4);
     let text = format!("{display_node_id} [{node_type}] {timing}");
     RenderedCell {
         cell: cell.clone(),
@@ -492,8 +521,12 @@ fn render_cell_text(
         is_start,
         is_end,
         width: match node_style {
-            GraphNodeStyle::Box => metrics.width,
+            GraphNodeStyle::Box => shape.width,
             GraphNodeStyle::Line => js_len(&text) + 2,
+        },
+        height: match node_style {
+            GraphNodeStyle::Box => shape.height,
+            GraphNodeStyle::Line => 1,
         },
     }
 }
@@ -507,12 +540,14 @@ struct PlacedRank {
     cells: Vec<RenderedCell>,
     centers: Vec<i64>,
     y: i64,
+    height: i64,
 }
 
 /// A strip segment with final pixel geometry and its assigned track row.
 struct GeomSegment {
     edge_id: String,
     label: Option<String>,
+    from_cell: usize,
     from_x: i64,
     to_x: i64,
     track: i64,
@@ -544,6 +579,7 @@ pub struct NodeBounds {
     pub height: i64,
 }
 
+#[derive(Clone)]
 pub struct RenderedGraph {
     pub canvas: CharCanvas,
     pub node_bounds: Vec<NodeBounds>,
@@ -559,13 +595,40 @@ pub fn render_graph(
     now_ms: i64,
     node_style: GraphNodeStyle,
 ) -> Option<RenderedGraph> {
-    let snapshot = view.snapshot?;
-    let metrics = card_metrics(view);
-    let layout = layout_graph(snapshot);
-    let steps = &view.state.steps;
-    let bounded_index = selected_step_index.max(-1).min(steps.len() as i64 - 1);
-    let visible_steps = &steps[0..(bounded_index + 1) as usize];
-    let transitions = taken_transitions(visible_steps);
+    let layout = layout_graph(view.snapshot?);
+    render_graph_with_layout(
+        view,
+        &layout,
+        selected_step_index,
+        at_latest_step,
+        now_ms,
+        node_style,
+    )
+}
+
+/// Render against a retained language-neutral scene. Workflow definitions are
+/// immutable, so ranks and routes can be shared by local and remote clients
+/// and reused across status-only revisions.
+pub fn render_graph_with_layout(
+    view: &GraphView,
+    layout: &GraphLayout,
+    selected_step_index: i64,
+    at_latest_step: bool,
+    now_ms: i64,
+    node_style: GraphNodeStyle,
+) -> Option<RenderedGraph> {
+    view.snapshot?;
+    let state_steps = &view.state.steps;
+    let bounded_index = selected_step_index
+        .max(-1)
+        .min(state_steps.len() as i64 - 1);
+    let visible_steps = view
+        .graph_steps
+        .unwrap_or(&state_steps[0..(bounded_index + 1) as usize]);
+    let transitions = view.taken_transitions.map_or_else(
+        || taken_transitions(visible_steps),
+        |transitions| transitions.iter().cloned().collect(),
+    );
     let active_pair = derive_pair_in_flight(view, visible_steps, at_latest_step);
 
     let rendered: Vec<Vec<RenderedCell>> = layout
@@ -581,7 +644,13 @@ pub fn render_graph(
                         at_latest_step,
                         now_ms,
                         node_style,
-                        metrics,
+                        match cell {
+                            GraphCell::Node { node_id } => card_shape(view, node_id),
+                            GraphCell::Virtual { .. } => CardShape {
+                                width: 1,
+                                height: 1,
+                            },
+                        },
                     )
                 })
                 .collect()
@@ -621,22 +690,29 @@ pub fn render_graph(
     // Horizontal edge geometry (exit/entry columns, pixel-space track rows)
     // is fully decided before vertical placement, so row budgeting is exact.
     let strips: Vec<StripGeometry> = (0..geometry.len())
-        .map(|rank_index| compute_strip_geometry(&layout, rank_index, &geometry))
+        .map(|rank_index| compute_strip_geometry(layout, rank_index, &geometry))
         .collect();
 
-    let lanes = BackEdgeLanes::new(&layout);
+    let lanes = BackEdgeLanes::new(layout);
     let mut placed: Vec<PlacedRank> = Vec::new();
     // Entry lanes above the first rank need an arrow row of their own.
     let top_lanes = lanes.above(0).len() as i64;
     let mut y = if top_lanes > 0 { top_lanes + 1 } else { 0 };
     let rank_count = geometry.len();
     for (rank_index, rank) in geometry.into_iter().enumerate() {
+        let height = rank
+            .cells
+            .iter()
+            .map(|cell| cell_height(node_style, cell))
+            .max()
+            .unwrap_or(1);
         placed.push(PlacedRank {
             cells: rank.cells,
             centers: rank.centers,
             y,
+            height,
         });
-        y += cell_height(node_style, metrics.height)
+        y += height
             + lanes.below(rank_index).len() as i64
             + gap_rows(&strips[rank_index], rank_index, rank_count)
             + lanes.above(rank_index + 1).len() as i64;
@@ -654,7 +730,7 @@ pub fn render_graph(
                         x: center - cell.width / 2,
                         y: rank.y,
                         width: cell.width,
-                        height: cell_height(node_style, metrics.height),
+                        height: cell_height(node_style, cell),
                     }),
                     GraphCell::Virtual { .. } => None,
                 })
@@ -662,34 +738,24 @@ pub fn render_graph(
         .collect();
 
     let mut canvas = CharCanvas::new();
-    draw_nodes(
-        &mut canvas,
-        &placed,
-        &layout,
-        &transitions,
-        node_style,
-        metrics.height,
-    );
+    draw_nodes(&mut canvas, &placed, layout, &transitions, node_style);
     let labels = draw_segments(
         &mut canvas,
         &placed,
         &strips,
-        &layout,
+        layout,
         &transitions,
         active_pair.as_deref(),
         graph_width,
         node_style,
-        metrics.height,
         &lanes,
     );
     draw_back_edges(
         &mut canvas,
         &placed,
-        &layout,
+        layout,
         &transitions,
         graph_width,
-        node_style,
-        metrics.height,
         &lanes,
     );
     // Labels go on last, once every line is on the canvas: placement can then
@@ -851,6 +917,7 @@ fn compute_strip_geometry(
     struct Resolved {
         edge_id: String,
         label: Option<String>,
+        from_cell: usize,
         from_x: i64,
         to_x: i64,
         target_is_node: bool,
@@ -873,6 +940,7 @@ fn compute_strip_geometry(
             Resolved {
                 edge_id: segment.edge_id.clone(),
                 label: segment.label.clone(),
+                from_cell: segment.from_cell,
                 from_x,
                 to_x,
                 target_is_node,
@@ -909,6 +977,7 @@ fn compute_strip_geometry(
         segments.push(GeomSegment {
             edge_id: segment.edge_id,
             label: segment.label,
+            from_cell: segment.from_cell,
             from_x: segment.from_x,
             to_x: segment.to_x,
             track,
@@ -1024,7 +1093,6 @@ fn draw_nodes(
     layout: &GraphLayout,
     transitions: &HashSet<String>,
     node_style: GraphNodeStyle,
-    box_height: i64,
 ) {
     for rank in placed {
         for (index, rendered) in rank.cells.iter().enumerate() {
@@ -1043,7 +1111,7 @@ fn draw_nodes(
                     canvas.vline(
                         center,
                         rank.y,
-                        rank.y + cell_height(node_style, box_height) - 1,
+                        rank.y + rank.height - 1,
                         if taken {
                             CanvasStyle::Taken
                         } else {
@@ -1251,7 +1319,6 @@ fn draw_segments(
     active_pair: Option<&str>,
     graph_width: i64,
     node_style: GraphNodeStyle,
-    box_height: i64,
     lanes: &BackEdgeLanes,
 ) -> Vec<PendingLabel> {
     let mut labels = Vec::new();
@@ -1265,11 +1332,19 @@ fn draw_segments(
         // Forward lines start right below the source cell, cross any
         // back-edge lane rows (as ┼ crossings), run their strip tracks, then
         // cross the entry lanes to the arrow row directly above the target.
-        let stub_top = top.y + cell_height(node_style, box_height);
-        let strip_top = stub_top + lanes.below(rank).len() as i64;
         let arrow_y = bottom.y - 1;
         let strip_bottom = arrow_y - 1 - lanes.above(rank + 1).len() as i64;
         for segment in &strip.segments {
+            let source_height = top
+                .cells
+                .get(segment.from_cell)
+                .map(|cell| match cell.cell {
+                    GraphCell::Node { .. } => cell_height(node_style, cell),
+                    GraphCell::Virtual { .. } => top.height,
+                })
+                .unwrap_or(top.height);
+            let stub_top = top.y + source_height;
+            let strip_top = top.y + top.height + lanes.below(rank).len() as i64;
             let Some(edge) = layout
                 .edges
                 .iter()
@@ -1357,15 +1432,12 @@ fn draw_segment_label(canvas: &mut CharCanvas, label: &PendingLabel) {
 /// Each back edge leaves its source cell downward into its own lane row,
 /// runs right to a private gutter column, climbs the gutter, and re-enters
 /// through its target's entry lane and arrow row from above.
-#[allow(clippy::too_many_arguments)]
 fn draw_back_edges(
     canvas: &mut CharCanvas,
     placed: &[PlacedRank],
     layout: &GraphLayout,
     transitions: &HashSet<String>,
     graph_width: i64,
-    node_style: GraphNodeStyle,
-    box_height: i64,
     lanes: &BackEdgeLanes,
 ) {
     let mut gutter_x = graph_width + GUTTER_GAP;
@@ -1391,19 +1463,15 @@ fn draw_back_edges(
         } else {
             CanvasStyle::Back
         };
-        let exit_lane_y = from.y + cell_height(node_style, box_height) + exit.lane;
+        let exit_lane_y = from.y + from.height + exit.lane;
         let above_count = above.len() as i64;
         let arrow_y = to.y - 1;
         let entry_lane_y = arrow_y - above_count + entry.lane;
 
-        // Downward stub out of the source cell, then right along the exit lane.
-        if exit_lane_y > from.y + cell_height(node_style, box_height) {
-            canvas.vline(
-                exit.x,
-                from.y + cell_height(node_style, box_height),
-                exit_lane_y - 1,
-                style,
-            );
+        // Continue below the tallest card before turning. A short card must
+        // not route an edge through a taller card in the same rank.
+        if exit_lane_y > from.y + exit.height {
+            canvas.vline(exit.x, from.y + exit.height, exit_lane_y - 1, style);
         }
         canvas.put(exit.x, exit_lane_y, '└', style);
         canvas.hline(exit_lane_y, exit.x + 1, gutter_x - 1, style);
@@ -1430,6 +1498,7 @@ fn draw_back_edges(
 struct Anchor {
     x: i64,
     lane: i64,
+    height: i64,
 }
 
 /// Where a back edge touches a node cell: offset right of center so the
@@ -1454,5 +1523,6 @@ fn cell_anchor(
     Some(Anchor {
         x: (center + 2 + lane * 2).min(rightmost),
         lane,
+        height: cell.height,
     })
 }

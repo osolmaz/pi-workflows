@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { canonicalJson } from "../src/state/json.js";
 import { resourceIdFor } from "../src/state/mutation.js";
+import { initializeViewerRun } from "../src/state/viewer.js";
 import type { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import type {
   AgentStepExecutor,
@@ -81,6 +82,7 @@ export async function seedHumanDecisionRequest(
           now,
           now,
         );
+      initializeViewerRun(state, request.runId, now);
       state.connection
         .prepare(
           `INSERT INTO run_sources(run_id, mount_path, source_type, source_ref, source_revision)

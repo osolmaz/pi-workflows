@@ -252,15 +252,61 @@ describe("renderGraphLines", () => {
     expect(lines.join("\n")).not.toContain("■ end");
   });
 
-  it("keeps full card bounds fixed across replay positions", () => {
+  it("keeps each card's bounds stable across replay positions", () => {
     const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, { status: "completed" });
     const sizes = [
-      graphCardSize(bundle),
-      graphCardSize({ ...bundle, state: { ...bundle.state, currentNode: "review" } }),
-      graphCardSize({ ...bundle, state: { ...bundle.state, status: "failed" } }),
+      graphCardSize(bundle, "review"),
+      graphCardSize({ ...bundle, state: { ...bundle.state, currentNode: "review" } }, "review"),
+      graphCardSize({ ...bundle, state: { ...bundle.state, status: "failed" } }, "review"),
     ];
     expect(sizes[1]).toEqual(sizes[0]);
     expect(sizes[2]).toEqual(sizes[0]);
+  });
+
+  it("bounds one long high-fan-out card without enlarging unrelated cards", () => {
+    const cases = Object.fromEntries(
+      Array.from({ length: 14 }, (_, index) => [`branch_${index}`, `target_${index}`]),
+    );
+    const targets = Object.fromEntries(
+      Array.from({ length: 14 }, (_, index) => [
+        `target_${index}`,
+        { nodeType: "compute" as const },
+      ]),
+    );
+    const snapshot: WorkflowDefinitionSnapshot = {
+      schema: "pi-workflows.definition-snapshot.v1",
+      name: "bounded-cards",
+      startAt: "ordinary",
+      nodes: {
+        ordinary: { nodeType: "compute" },
+        "this.is.a.very.long.hierarchical.node.label.that.must.be.bounded": {
+          nodeType: "compute",
+        },
+        decision: { nodeType: "compute" },
+        ...targets,
+      },
+      edges: [
+        {
+          from: "ordinary",
+          to: "this.is.a.very.long.hierarchical.node.label.that.must.be.bounded",
+        },
+        {
+          from: "this.is.a.very.long.hierarchical.node.label.that.must.be.bounded",
+          to: "decision",
+        },
+        { from: "decision", switch: { on: "$.route", cases } },
+      ],
+    };
+    const bundle = makeBundle(snapshot, [], { status: "running" });
+    expect(graphCardSize(bundle, "ordinary")).toEqual({ width: 24, height: 7 });
+    expect(
+      graphCardSize(bundle, "this.is.a.very.long.hierarchical.node.label.that.must.be.bounded"),
+    ).toEqual({ width: 32, height: 7 });
+    expect(graphCardSize(bundle, "decision")).toEqual({ width: 24, height: 10 });
+    const text = renderGraphLines(bundle, -1, new Date(), { nodeStyle: "box" })
+      .map(stripAnsi)
+      .join("\n");
+    expect(text).toContain("+12 branches");
   });
 
   it("marks failed steps", () => {

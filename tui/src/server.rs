@@ -1,10 +1,8 @@
-//! `piw serve`: a WebSocket server exposing run views over the live replay
-//! protocol. The server is a run reader like any other — it never writes
-//! database runs — and binds to localhost by default because database runs contain
-//! private data.
+//! `piw serve`: loopback-only, revisioned live replay over bounded projections.
 
-use crate::protocol::{ClientMessage, PatchOp, ServerMessage, PROTOCOL_ID};
-use crate::source::RunSource;
+use crate::protocol::{ClientMessage, PageKind, PatchOp, ServerMessage, TargetPatch, PROTOCOL_ID};
+use crate::source::{ProjectionUpdate, RefreshOutcome, RunSource};
+use crate::state::reader::ViewerDeltaRead;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -14,14 +12,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Broadcast from the refresh loop to every connection task.
 #[derive(Clone, Debug)]
 enum Update {
     Runs(Vec<serde_json::Value>),
-    Patch {
+    Delta {
         run_id: String,
         revision: u64,
-        patch: Vec<PatchOp>,
+        targets: Vec<TargetPatch>,
+    },
+    SnapshotRequired {
+        run_id: String,
     },
 }
 
@@ -42,12 +42,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     serve_on(listener, options.database_path).await
 }
 
-/// Accept-loop core, split out so tests can bind an ephemeral port.
 pub async fn serve_on(listener: TcpListener, database_path: PathBuf) -> Result<()> {
-    // The protocol has no authentication, so a reachable server hands run
-    // database runs to anyone. Refuse non-loopback listeners here, at the single
-    // entry point every caller goes through; view remote runs through an
-    // SSH tunnel instead.
     let local = listener.local_addr()?;
     if !local.ip().is_loopback() {
         anyhow::bail!(
@@ -59,25 +54,16 @@ pub async fn serve_on(listener: TcpListener, database_path: PathBuf) -> Result<(
     let source = Arc::new(Mutex::new(RunSource::new(&database_path)?));
     let (updates_tx, _) = broadcast::channel::<Update>(256);
 
-    // Refresh loop: wake on filesystem changes (plus a slow safety tick for
-    // the possibly-interrupted timer) and broadcast the resulting patches.
     {
         let source = Arc::clone(&source);
         let updates_tx = updates_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let outcome = source.lock().await.refresh_all();
-                for (run_id, revision, patch) in outcome.patches {
-                    let _ = updates_tx.send(Update::Patch {
-                        run_id,
-                        revision,
-                        patch,
-                    });
-                }
-                if outcome.listing_changed {
-                    let _ = updates_tx.send(Update::Runs(source.lock().await.summaries()));
-                }
+                let Ok(outcome) = run_blocking(&source, RunSource::refresh_all).await else {
+                    continue;
+                };
+                broadcast_outcome(&updates_tx, &source, outcome).await;
             }
         });
     }
@@ -92,6 +78,65 @@ pub async fn serve_on(listener: TcpListener, database_path: PathBuf) -> Result<(
     }
 }
 
+async fn broadcast_outcome(
+    updates_tx: &broadcast::Sender<Update>,
+    source: &Arc<Mutex<RunSource>>,
+    outcome: RefreshOutcome,
+) {
+    for ProjectionUpdate { run_id, delta } in outcome.updates {
+        let targets = delta
+            .targets
+            .into_iter()
+            .map(|target| TargetPatch {
+                target_type: target.target_type,
+                target_key: target.target_key,
+                patch: target.patch,
+            })
+            .collect::<Vec<_>>();
+        if targets_are_direct(&targets) {
+            let _ = updates_tx.send(Update::Delta {
+                run_id,
+                revision: delta.revision,
+                targets,
+            });
+        } else {
+            let _ = updates_tx.send(Update::SnapshotRequired { run_id });
+        }
+    }
+    for run_id in outcome.snapshots_required {
+        let _ = updates_tx.send(Update::SnapshotRequired { run_id });
+    }
+    if outcome.listing_changed {
+        let runs = source.lock().await.summaries();
+        let _ = updates_tx.send(Update::Runs(runs));
+    }
+}
+
+fn targets_are_direct(targets: &[TargetPatch]) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|target| {
+            target.patch.iter().any(|operation| {
+                !matches!(
+                    operation,
+                    PatchOp::Replace { path, .. } if path == "/presentationRevision"
+                )
+            })
+        })
+}
+
+async fn run_blocking<T, F>(source: &Arc<Mutex<RunSource>>, operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut RunSource) -> T + Send + 'static,
+{
+    let source = Arc::clone(source);
+    Ok(tokio::task::spawn_blocking(move || {
+        let mut source = source.blocking_lock();
+        operation(&mut source)
+    })
+    .await?)
+}
+
 async fn send(
     sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
     message: &ServerMessage,
@@ -101,8 +146,6 @@ async fn send(
     Ok(())
 }
 
-// The error type (a full HTTP response) is dictated by tungstenite's
-// handshake callback signature.
 #[allow(clippy::result_large_err)]
 fn reject_browser_origins(
     request: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -126,10 +169,6 @@ async fn handle_connection(
     source: Arc<Mutex<RunSource>>,
     mut updates_rx: broadcast::Receiver<Update>,
 ) -> Result<()> {
-    // Browsers always send an Origin header; native clients do not. The
-    // protocol is unauthenticated, so a web page must never be able to read
-    // SQLite workflow state by opening a WebSocket to localhost — reject any
-    // browser-originated handshake outright.
     let ws = tokio_tungstenite::accept_hdr_async(stream, reject_browser_origins).await?;
     let (mut sink, mut reads) = ws.split();
     send(
@@ -141,9 +180,6 @@ async fn handle_connection(
     .await?;
 
     let mut watching_runs = false;
-    // Last revision sent per watched run; a broadcast patch is forwarded only
-    // when it is exactly the next revision, otherwise the client gets a fresh
-    // snapshot (covers the subscribe/broadcast race).
     let mut watched: HashMap<String, u64> = HashMap::new();
 
     loop {
@@ -157,7 +193,6 @@ async fn handle_connection(
                     Err(_) => break,
                 };
                 let Ok(request) = serde_json::from_str::<ClientMessage>(&message) else {
-                    // Unknown message types must be ignored.
                     continue;
                 };
                 match request {
@@ -166,32 +201,109 @@ async fn handle_connection(
                         let runs = source.lock().await.summaries();
                         send(&mut sink, &ServerMessage::Runs { runs }).await?;
                     }
-                    ClientMessage::WatchRun { run_id } => {
-                        // Snapshot under the lock, send after releasing it: a
-                        // slow client must not stall the refresh loop.
-                        let snapshot = {
-                            let source = source.lock().await;
-                            source.get(&run_id).map(|entry| (entry.revision, entry.view()))
-                        };
-                        match snapshot {
-                            Some((revision, view)) => {
-                                watched.insert(run_id.clone(), revision);
+                    ClientMessage::WatchRun {
+                        run_id,
+                        revision,
+                        step_cursor,
+                        trace_cursor,
+                        session_entry_cursor,
+                        session_event_cursor,
+                    } => {
+                        let first_watch = !watched.contains_key(&run_id);
+                        let request_run_id = run_id.clone();
+                        let result = run_blocking(&source, move |source| -> Result<_> {
+                            if first_watch {
+                                source.watch(&request_run_id)?;
+                            }
+                            let resume = revision
+                                .map(|cursor| source.deltas_after(&request_run_id, cursor))
+                                .transpose()?;
+                            let snapshot = source
+                                .get(&request_run_id)
+                                .map(|entry| (entry.revision, entry.view()));
+                            Ok((resume, snapshot))
+                        }).await?;
+                        let available = match result {
+                            Ok((Some(ViewerDeltaRead::Deltas { deltas, current_revision }), snapshot))
+                                if revision.is_some() => {
+                                    let mut sent = revision.unwrap_or(0);
+                                    for delta in deltas {
+                                        let targets = delta.targets.into_iter().map(|target| TargetPatch {
+                                            target_type: target.target_type,
+                                            target_key: target.target_key,
+                                            patch: target.patch,
+                                        }).collect::<Vec<_>>();
+                                        if !targets_are_direct(&targets) {
+                                            sent = 0;
+                                            break;
+                                        }
+                                        send(&mut sink, &ServerMessage::RunPatch {
+                                            run_id: run_id.clone(),
+                                            revision: delta.revision,
+                                            targets,
+                                        }).await?;
+                                        sent = delta.revision;
+                                    }
+                                    watched.insert(run_id.clone(), sent.max(current_revision));
+                                    if sent < current_revision {
+                                        if let Some((snapshot_revision, view)) = snapshot {
+                                            watched.insert(run_id.clone(), snapshot_revision);
+                                            send(&mut sink, &ServerMessage::RunSnapshot {
+                                                run_id: run_id.clone(),
+                                                revision: snapshot_revision,
+                                                view,
+                                            }).await?;
+                                        }
+                                    }
+                                true
+                            }
+                            Ok((_, Some((snapshot_revision, view)))) => {
+                                watched.insert(run_id.clone(), snapshot_revision);
                                 send(&mut sink, &ServerMessage::RunSnapshot {
-                                    run_id,
-                                    revision,
+                                    run_id: run_id.clone(),
+                                    revision: snapshot_revision,
                                     view,
                                 }).await?;
+                                true
                             }
-                            None => {
+                            Ok((_, None)) | Err(_) => {
                                 send(&mut sink, &ServerMessage::Error {
-                                    message: format!("unknown run {run_id}"),
-                                    run_id: Some(run_id),
+                                    message: format!("run {run_id} is unavailable"),
+                                    run_id: Some(run_id.clone()),
                                 }).await?;
+                                false
+                            }
+                        };
+                        if available {
+                            for (kind, cursor) in [
+                                (PageKind::Steps, step_cursor),
+                                (PageKind::Trace, trace_cursor),
+                                (PageKind::SessionEntries, session_entry_cursor),
+                                (PageKind::SessionEvents, session_event_cursor),
+                            ] {
+                                if let Some(cursor) = cursor {
+                                    send_projection_page(
+                                        &mut sink,
+                                        &source,
+                                        run_id.clone(),
+                                        kind,
+                                        cursor,
+                                    )
+                                    .await?;
+                                }
                             }
                         }
                     }
                     ClientMessage::UnwatchRun { run_id } => {
-                        watched.remove(&run_id);
+                        if watched.remove(&run_id).is_some() {
+                            let remove_id = run_id.clone();
+                            let _ = run_blocking(&source, move |source| source.unwatch(&remove_id)).await;
+                        }
+                    }
+                    ClientMessage::FetchPage { run_id, kind, cursor } => {
+                        if watched.contains_key(&run_id) {
+                            send_projection_page(&mut sink, &source, run_id, kind, cursor).await?;
+                        }
                     }
                     ClientMessage::FetchArtifact { run_id, path } => {
                         send(&mut sink, &ServerMessage::Error {
@@ -203,40 +315,28 @@ async fn handle_connection(
             }
             update = updates_rx.recv() => {
                 match update {
-                    Ok(Update::Runs(runs)) => {
-                        if watching_runs {
-                            send(&mut sink, &ServerMessage::Runs { runs }).await?;
-                        }
+                    Ok(Update::Runs(runs)) if watching_runs => {
+                        send(&mut sink, &ServerMessage::Runs { runs }).await?;
                     }
-                    Ok(Update::Patch { run_id, revision, patch }) => {
+                    Ok(Update::Runs(_)) => {}
+                    Ok(Update::Delta { run_id, revision, targets }) => {
                         let Some(&last) = watched.get(&run_id) else { continue };
                         if revision == last + 1 {
                             watched.insert(run_id.clone(), revision);
-                            send(&mut sink, &ServerMessage::RunPatch { run_id, revision, patch }).await?;
+                            send(&mut sink, &ServerMessage::RunPatch { run_id, revision, targets }).await?;
                         } else if revision > last {
-                            // Missed one (lagged broadcast): resnapshot.
-                            let snapshot = {
-                                let source = source.lock().await;
-                                source.get(&run_id).map(|entry| (entry.revision, entry.view()))
-                            };
-                            if let Some((revision, view)) = snapshot {
-                                watched.insert(run_id.clone(), revision);
-                                send(&mut sink, &ServerMessage::RunSnapshot { run_id, revision, view }).await?;
-                            }
+                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
+                        }
+                    }
+                    Ok(Update::SnapshotRequired { run_id }) => {
+                        if watched.contains_key(&run_id) {
+                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Dropped updates: resnapshot everything we watch.
                         let run_ids: Vec<String> = watched.keys().cloned().collect();
                         for run_id in run_ids {
-                            let snapshot = {
-                                let source = source.lock().await;
-                                source.get(&run_id).map(|entry| (entry.revision, entry.view()))
-                            };
-                            if let Some((revision, view)) = snapshot {
-                                watched.insert(run_id.clone(), revision);
-                                send(&mut sink, &ServerMessage::RunSnapshot { run_id, revision, view }).await?;
-                            }
+                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -244,5 +344,114 @@ async fn handle_connection(
             }
         }
     }
+
+    let watched_ids: Vec<String> = watched.into_keys().collect();
+    let _ = run_blocking(&source, move |source| {
+        for run_id in watched_ids {
+            source.unwatch(&run_id);
+        }
+    })
+    .await;
     Ok(())
+}
+
+async fn send_projection_page(
+    sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    source: &Arc<Mutex<RunSource>>,
+    run_id: String,
+    kind: PageKind,
+    cursor: u64,
+) -> Result<()> {
+    let request_id = run_id.clone();
+    let page = run_blocking(source, move |source| source.page(&request_id, kind, cursor)).await?;
+    match page {
+        Ok((revision, page)) => {
+            send(
+                sink,
+                &ServerMessage::RunPage {
+                    run_id,
+                    revision,
+                    kind,
+                    start: page.start,
+                    total: page.total,
+                    items: page.items,
+                },
+            )
+            .await?;
+        }
+        Err(_) => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    message: "run page is unavailable".to_string(),
+                    run_id: Some(run_id),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn send_snapshot(
+    sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    source: &Arc<Mutex<RunSource>>,
+    watched: &mut HashMap<String, u64>,
+    run_id: String,
+) -> Result<()> {
+    let snapshot_id = run_id.clone();
+    let snapshot = run_blocking(source, move |source| {
+        source
+            .get(&snapshot_id)
+            .map(|entry| (entry.revision, entry.view()))
+    })
+    .await?;
+    if let Some((revision, view)) = snapshot {
+        watched.insert(run_id.clone(), revision);
+        send(
+            sink,
+            &ServerMessage::RunSnapshot {
+                run_id,
+                revision,
+                view,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sends_only_complete_direct_target_patches() {
+        let revision_only = TargetPatch {
+            target_type: "graph".to_string(),
+            target_key: String::new(),
+            patch: vec![PatchOp::Replace {
+                path: "/presentationRevision".to_string(),
+                value: json!(2),
+            }],
+        };
+        assert!(!targets_are_direct(&[revision_only]));
+
+        let tail = TargetPatch {
+            target_type: "conversation".to_string(),
+            target_key: "entries:tail".to_string(),
+            patch: vec![
+                PatchOp::Replace {
+                    path: "/presentationRevision".to_string(),
+                    value: json!(2),
+                },
+                PatchOp::Append {
+                    path: "/items".to_string(),
+                    value: vec![json!({"seq": 1})],
+                },
+            ],
+        };
+        assert!(targets_are_direct(&[tail]));
+    }
 }

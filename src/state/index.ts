@@ -20,6 +20,20 @@ export {
   type WritePermit,
 } from "./mutation.js";
 export {
+  VIEWER_DELTA_RETENTION,
+  VIEWER_PAGE_SIZE,
+  initializeViewerRun,
+  readViewerDeltas,
+  recordViewerDeltas,
+  viewerTailPatch,
+  type ViewerCursorResult,
+  type ViewerDeltaDraft,
+  type ViewerDeltaRecord,
+  type ViewerPatchOperation,
+  type ViewerTailItem,
+  type ViewerTargetType,
+} from "./viewer.js";
+export {
   STATE_APPLICATION_ID,
   STATE_APP_VERSION,
   STATE_SCHEMA_DIGEST,

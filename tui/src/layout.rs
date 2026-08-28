@@ -52,7 +52,7 @@ pub struct GraphSegment {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphLayout {
     pub ranks: Vec<Vec<GraphCell>>,
     pub edges: Vec<GraphEdge>,

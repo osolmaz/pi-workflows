@@ -4,6 +4,7 @@ import path from "node:path";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson } from "../state/json.js";
 import { resourceIdFor, tokenHash } from "../state/mutation.js";
+import { initializeViewerRun, recordViewerDeltas } from "../state/viewer.js";
 import {
   EffectRequestConflictError,
   ResourceConflictError,
@@ -1122,6 +1123,7 @@ export class SqliteControllerStore implements ControllerStore {
         now,
         now,
       );
+    initializeViewerRun(this.state, options.runId, now);
     insertQueuedRunSources(this.state, options.runId, queuedSource);
     this.state.connection
       .prepare(
@@ -1307,22 +1309,33 @@ export class SqliteControllerStore implements ControllerStore {
     now?: string;
   }): boolean {
     const now = epoch(validTimestamp(options.now));
-    const row = this.workflowRunRow(options.runId);
-    if (row === undefined || row.ownerId === null) return false;
-    const result = this.state.connection
-      .prepare(
-        `UPDATE leases SET heartbeat_at = ?, expires_at = ?
-         WHERE resource_id = ? AND token_hash = ? AND owner_id = ? AND expires_at > ?`,
-      )
-      .run(
-        now,
-        now + options.leaseMs,
-        row.resourceId,
-        tokenHash(options.claimToken),
-        row.ownerId,
-        now,
-      );
-    return result.changes === 1;
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (row === undefined || row.ownerId === null) return false;
+      const result = this.state.connection
+        .prepare(
+          `UPDATE leases SET heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND token_hash = ? AND owner_id = ? AND expires_at > ?`,
+        )
+        .run(
+          now,
+          now + options.leaseMs,
+          row.resourceId,
+          tokenHash(options.claimToken),
+          row.ownerId,
+          now,
+        );
+      if (result.changes === 1) {
+        recordViewerDeltas(
+          this.state,
+          options.runId,
+          [{ targetType: "summary" }, { targetType: "replay" }],
+          now,
+        );
+        return true;
+      }
+      return false;
+    });
   }
 
   verifyWorkflowRunClaim(options: { runId: string; claimToken: string; now?: string }): boolean {
@@ -1445,34 +1458,36 @@ export class SqliteControllerStore implements ControllerStore {
     runnerId?: string;
     now?: string;
   }): RunEventRecord {
-    const row = this.requireWorkflowRunRow(options.runId);
-    const now = epoch(validTimestamp(options.now));
-    const revision = this.resourceRevision(row.resourceId) + 1;
-    this.bumpResource(row.resourceId, revision - 1, now);
-    const eventId = this.insertEvent(
-      row.resourceId,
-      revision,
-      options.type,
-      options.runnerId?.startsWith("host-") ? "host" : "session",
-      options.runnerId ?? null,
-      options.payload ?? {},
-      now,
-      row.leaseGeneration || undefined,
-    );
-    const seq = this.state.connection
-      .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
-      .get(eventId);
-    /* istanbul ignore if -- exact schema and internal query shape */
-    if (!isSequenceRow(seq)) throw new Error("Run event was not recorded");
-    return {
-      seq: seq.seq,
-      recordedAt: new Date(now).toISOString(),
-      runId: options.runId,
-      workflowRef: options.workflowRef,
-      type: options.type,
-      runnerId: options.runnerId ?? null,
-      payload: options.payload ?? {},
-    };
+    return this.state.transaction(() => {
+      const row = this.requireWorkflowRunRow(options.runId);
+      const now = epoch(validTimestamp(options.now));
+      const revision = this.resourceRevision(row.resourceId) + 1;
+      this.bumpResource(row.resourceId, revision - 1, now);
+      const eventId = this.insertEvent(
+        row.resourceId,
+        revision,
+        options.type,
+        options.runnerId?.startsWith("host-") ? "host" : "session",
+        options.runnerId ?? null,
+        options.payload ?? {},
+        now,
+        row.leaseGeneration || undefined,
+      );
+      const seq = this.state.connection
+        .prepare("SELECT event_seq AS seq FROM events WHERE event_id = ?")
+        .get(eventId);
+      /* istanbul ignore if -- exact schema and internal query shape */
+      if (!isSequenceRow(seq)) throw new Error("Run event was not recorded");
+      return {
+        seq: seq.seq,
+        recordedAt: new Date(now).toISOString(),
+        runId: options.runId,
+        workflowRef: options.workflowRef,
+        type: options.type,
+        runnerId: options.runnerId ?? null,
+        payload: options.payload ?? {},
+      };
+    });
   }
 
   listRunEventsAfter(seq: number, options: { limit?: number } = {}): RunEventRecord[] {
@@ -2141,6 +2156,26 @@ export class SqliteControllerStore implements ControllerStore {
       )
       .run(now, resourceId, expectedRevision);
     if (result.changes !== 1) throw new Error("Resource revision conflict");
+    const run = this.state.connection
+      .prepare(
+        `SELECT r.run_id AS runId
+         FROM runs r JOIN viewer_runs v ON v.run_id = r.run_id
+         WHERE r.resource_id = ?`,
+      )
+      .get(resourceId);
+    if (isRecord(run) && typeof run.runId === "string") {
+      recordViewerDeltas(
+        this.state,
+        run.runId,
+        [
+          { targetType: "summary" },
+          { targetType: "graph" },
+          { targetType: "replay" },
+          { targetType: "inspector", targetKey: "run" },
+        ],
+        now,
+      );
+    }
   }
 
   private insertEvent(

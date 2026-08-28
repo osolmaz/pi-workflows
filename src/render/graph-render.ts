@@ -26,6 +26,9 @@ import { nodeTypeBadge } from "./node-type.js";
 export type GraphView = {
   state: WorkflowRunState;
   snapshot: WorkflowDefinitionSnapshot | null;
+  graphScene?: GraphLayout;
+  graphSteps?: WorkflowStepRecord[];
+  takenTransitions?: string[];
 };
 
 type NodeStatus =
@@ -74,8 +77,10 @@ const STATUS_STYLES: Record<NodeStatus, CanvasStyle> = {
 const CELL_GAP = 6;
 const GUTTER_GAP = 2;
 const GRAPH_SIDE_MARGIN = 2;
-const CARD_MIN_CONTENT_WIDTH = 28;
-const CARD_DYNAMIC_RESERVE = "↻ 100  ◷ 9999d 23h 59m 59s";
+const CARD_MIN_CONTENT_WIDTH = 20;
+const CARD_MAX_CONTENT_WIDTH = 28;
+const CARD_CORE_HEIGHT = 7;
+const CARD_MAX_BRANCH_ROWS = 3;
 
 function nodeTypeStyle(nodeType: string): CanvasStyle {
   switch (nodeType) {
@@ -110,15 +115,13 @@ export type GraphRenderOptions = {
   nodeStyle?: GraphNodeStyle;
 };
 
-type CardMetrics = {
+type CardShape = {
   width: number;
   height: number;
-  contentWidth: number;
-  branchRows: number;
 };
 
-function cellHeight(nodeStyle: GraphNodeStyle, boxHeight: number): number {
-  return nodeStyle === "box" ? boxHeight : 1;
+function cellHeight(nodeStyle: GraphNodeStyle, cell: RenderedCell): number {
+  return nodeStyle === "box" ? cell.height : 1;
 }
 
 function paint(text: string, style: CanvasStyle): string {
@@ -201,39 +204,64 @@ function nodeBranchLabels(view: GraphView, nodeId: string): string[] {
   ).map(sanitizeText);
 }
 
-function cardMetrics(view: GraphView): CardMetrics {
-  const snapshot = view.snapshot;
-  if (!snapshot) {
-    return { width: CARD_MIN_CONTENT_WIDTH + 4, height: 7, contentWidth: 24, branchRows: 0 };
-  }
-  let contentWidth = CARD_MIN_CONTENT_WIDTH;
-  let branchRows = 0;
-  const measure = (text: string) => {
-    contentWidth = Math.max(contentWidth, text.length);
-  };
-  measure(CARD_DYNAMIC_RESERVE);
-  for (const status of Object.keys(STATUS_LABELS) as NodeStatus[]) {
-    measure(`${nodeTypeBadge("checkpoint")}  ${STATUS_GLYPHS[status]} ${STATUS_LABELS[status]}`);
-  }
-  for (const [nodeId, node] of Object.entries(snapshot.nodes)) {
-    measure(sanitizeText(hierarchicalNodeLabel(nodeId, node)));
-    measure(nodeTypeBadge(node.nodeType, node.actionExecution));
-    const labels = nodeBranchLabels(view, nodeId);
-    branchRows = Math.max(branchRows, labels.length);
-    for (const label of labels) measure(`◇ ${label}`);
-  }
+function cardShape(view: GraphView, nodeId: string): CardShape {
+  const node = view.snapshot?.nodes[nodeId];
+  const labels = nodeBranchLabels(view, nodeId);
+  const branchRows = Math.min(labels.length, CARD_MAX_BRANCH_ROWS);
+  const actionExecution = "actionExecution" in (node ?? {}) ? node?.actionExecution : undefined;
+  const humanAudience = node && "humanDecision" in node ? node.humanDecision.audience : undefined;
+  const configuredDetail = node?.statusDetail ?? node?.summary;
+  const assistantDetail =
+    node?.nodeType === "agent" &&
+    typeof node.expectedOutput === "object" &&
+    node.expectedOutput.kind === "assistant-message"
+      ? "assistant response"
+      : undefined;
+  const cardDetail = [assistantDetail, configuredDetail].filter(Boolean).join(" · ");
+  const candidates = [
+    hierarchicalNodeLabel(nodeId, node),
+    node ? nodeTypeBadge(node.nodeType, actionExecution) : "? unknown",
+    ...(humanAudience === undefined ? [] : [`… human decision · ${humanAudience}`]),
+    ...(cardDetail === "" ? [] : [`… ${cardDetail}`]),
+    ...boundedBranchLines(labels),
+  ];
+  const desiredWidth = Math.max(...candidates.map((value) => [...value].length));
+  const contentWidth = Math.max(
+    CARD_MIN_CONTENT_WIDTH,
+    Math.min(CARD_MAX_CONTENT_WIDTH, desiredWidth),
+  );
   return {
     width: contentWidth + 4,
-    height: 7 + branchRows,
-    contentWidth,
-    branchRows,
+    height: CARD_CORE_HEIGHT + branchRows,
   };
 }
 
-/** Canonical outer dimensions shared by every full card in this graph. */
-export function graphCardSize(view: GraphView): { width: number; height: number } {
-  const { width, height } = cardMetrics(view);
-  return { width, height };
+/** Canonical bounded outer dimensions for one boxed node card. */
+export function graphCardSize(view: GraphView, nodeId: string): { width: number; height: number } {
+  return cardShape(view, nodeId);
+}
+
+function boundedNodeLabel(
+  nodeId: string,
+  node: WorkflowDefinitionSnapshot["nodes"][string] | undefined,
+  contentWidth: number,
+): string {
+  const full = hierarchicalNodeLabel(nodeId, node);
+  if ([...full].length <= contentWidth) return full;
+  const local = sanitizeText(node?.localNodeId ?? nodeId);
+  const suffix =
+    node?.includeTransition === "entry"
+      ? "enter"
+      : node?.includeTransition === "exit"
+        ? `${local} exit`
+        : local;
+  const candidate = `… › ${suffix}`;
+  return [...candidate].length <= contentWidth ? candidate : fitText(suffix, contentWidth);
+}
+
+function boundedBranchLines(labels: string[]): string[] {
+  if (labels.length <= CARD_MAX_BRANCH_ROWS) return labels.map((label) => `◇ ${label}`);
+  return [`◇ ${labels[0]}`, `◇ ${labels[1]}`, `+${labels.length - 2} branches`];
 }
 
 type RenderedCell = {
@@ -250,6 +278,7 @@ type RenderedCell = {
   isStart: boolean;
   isEnd: boolean;
   width: number;
+  height: number;
 };
 
 function renderCellText(
@@ -259,7 +288,7 @@ function renderCellText(
   atLatestStep: boolean,
   now: Date,
   nodeStyle: GraphNodeStyle,
-  metrics: CardMetrics,
+  shape: CardShape,
 ): RenderedCell {
   if (cell.kind === "virtual") {
     return {
@@ -276,6 +305,7 @@ function renderCellText(
       isStart: false,
       isEnd: false,
       width: 1,
+      height: 1,
     };
   }
   const state = view.state;
@@ -330,13 +360,7 @@ function renderCellText(
     human === undefined
       ? undefined
       : state.waitingOn === nodeId
-        ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)}${typeof waitingRequest?.presentation?.summary === "string" ? ` · ${sanitizeText(waitingRequest.presentation.summary)}` : ""} · ${Object.values(
-            human.choices,
-          )
-            .map((choice) => sanitizeText(choice.label))
-            .join(
-              " / ",
-            )}${typeof waitingRequest?.presentationDigest === "string" ? ` · ${waitingRequest.presentationDigest.slice(7, 19)}` : ""}`
+        ? `human decision · ${sanitizeText(typeof waitingRequest?.audience === "string" ? waitingRequest.audience : human.audience)}`
         : selected !== undefined
           ? `human: ${sanitizeText(selected.label)}`
           : undefined;
@@ -356,13 +380,11 @@ function renderCellText(
       : "";
   const nodeDetail = [assistantDetail, configuredDetail].filter(Boolean).join(" · ");
   const detail = humanDetail ?? nodeDetail;
-  const branchLines = Array.from({ length: metrics.branchRows }, (_, index) =>
-    labels[index] ? `◇ ${labels[index]}` : "",
-  );
+  const branchLines = boundedBranchLines(labels);
   const count = atLatestStep && state.currentNode === nodeId ? Math.max(attempts, 1) : attempts;
   const timing =
     attempt || count > 0 ? `${count} attempt${count === 1 ? "" : "s"} · ${elapsed}` : "not visited";
-  const displayNodeId = hierarchicalNodeLabel(nodeId, node);
+  const displayNodeId = boundedNodeLabel(nodeId, node, shape.width - 4);
   const text = `${displayNodeId} [${nodeType}] ${timing}`;
   return {
     cell,
@@ -377,7 +399,8 @@ function renderCellText(
     branchLines,
     isStart,
     isEnd,
-    width: nodeStyle === "box" ? metrics.width : text.length + 2,
+    width: nodeStyle === "box" ? shape.width : text.length + 2,
+    height: nodeStyle === "box" ? shape.height : 1,
   };
 }
 
@@ -397,12 +420,13 @@ type RankGeometry = {
   centers: number[];
 };
 
-type PlacedRank = RankGeometry & { y: number };
+type PlacedRank = RankGeometry & { y: number; height: number };
 
 /** A strip segment with final pixel geometry and its assigned track row. */
 type GeomSegment = {
   edgeId: string;
   label?: string | undefined;
+  fromCell: number;
   fromX: number;
   toX: number;
   track: number;
@@ -441,18 +465,26 @@ export function renderGraphLines(
     return [];
   }
   const nodeStyle = options.nodeStyle ?? "line";
-  const metrics = cardMetrics(view);
-  const layout = layoutGraph(snapshot);
-  const steps = view.state.steps;
+  const layout = view.graphScene ?? layoutGraph(snapshot);
+  const stateSteps = view.state.steps;
+  const steps = view.graphSteps ?? stateSteps;
   const boundedIndex = Math.min(Math.max(selectedStepIndex, -1), steps.length - 1);
   const atLatestStep = boundedIndex >= steps.length - 1;
   const visibleSteps = steps.slice(0, boundedIndex + 1);
-  const transitions = takenTransitions(visibleSteps);
+  const transitions = new Set(view.takenTransitions ?? takenTransitions(visibleSteps));
   const activePair = derivePairInFlight(view, visibleSteps, atLatestStep);
 
   const rendered = layout.ranks.map((rank) =>
     rank.map((cell) =>
-      renderCellText(view, cell, visibleSteps, atLatestStep, now, nodeStyle, metrics),
+      renderCellText(
+        view,
+        cell,
+        visibleSteps,
+        atLatestStep,
+        now,
+        nodeStyle,
+        cell.kind === "node" ? cardShape(view, cell.nodeId) : { width: 1, height: 1 },
+      ),
     ),
   );
 
@@ -489,16 +521,17 @@ export function renderGraphLines(
   const topLanes = lanes.above(0).length;
   let y = topLanes > 0 ? topLanes + 1 : 0;
   for (const [rankIndex, rank] of geometry.entries()) {
-    placed.push({ ...rank, y });
+    const height = Math.max(1, ...rank.cells.map((cell) => cellHeight(nodeStyle, cell)));
+    placed.push({ ...rank, y, height });
     y +=
-      cellHeight(nodeStyle, metrics.height) +
+      height +
       lanes.below(rankIndex).length +
       gapRows(strips[rankIndex] as StripGeometry, rankIndex, layout.ranks.length) +
       lanes.above(rankIndex + 1).length;
   }
 
   const canvas = new CharCanvas();
-  drawNodes(canvas, placed, layout, transitions, nodeStyle, metrics.height);
+  drawNodes(canvas, placed, layout, transitions, nodeStyle);
   const labels = drawSegments(
     canvas,
     placed,
@@ -508,10 +541,9 @@ export function renderGraphLines(
     activePair,
     graphWidth,
     nodeStyle,
-    metrics.height,
     lanes,
   );
-  drawBackEdges(canvas, placed, layout, transitions, graphWidth, nodeStyle, metrics.height, lanes);
+  drawBackEdges(canvas, placed, layout, transitions, graphWidth, lanes);
   // Labels go on last, once every line is on the canvas: placement can then
   // guarantee no later stroke crosses through a label.
   for (const label of labels) {
@@ -610,7 +642,14 @@ function computeStripGeometry(
     if (targetIsNode && Math.abs(toX - fromX) <= 1) {
       toX = fromX;
     }
-    return { edgeId: segment.edgeId, label: segment.label, fromX, toX, targetIsNode };
+    return {
+      edgeId: segment.edgeId,
+      label: segment.label,
+      fromCell: segment.fromCell,
+      fromX,
+      toX,
+      targetIsNode,
+    };
   });
 
   // First-fit track assignment over pixel spans; straight unlabeled
@@ -697,7 +736,6 @@ function drawNodes(
   layout: GraphLayout,
   transitions: Set<string>,
   nodeStyle: GraphNodeStyle,
-  boxHeight: number,
 ): void {
   for (const rank of placed) {
     for (const [index, rendered] of rank.cells.entries()) {
@@ -708,12 +746,7 @@ function drawNodes(
         const taken = edge ? transitions.has(`${edge.from}->${edge.to}`) : false;
         // Pass-through cells span the full cell height so the edge stays
         // visually continuous across the rank row(s).
-        canvas.vline(
-          center,
-          rank.y,
-          rank.y + cellHeight(nodeStyle, boxHeight) - 1,
-          taken ? "taken" : "dim",
-        );
+        canvas.vline(center, rank.y, rank.y + rank.height - 1, taken ? "taken" : "dim");
         continue;
       }
       const status = rendered.status ?? "queued";
@@ -825,7 +858,6 @@ function drawSegments(
   activePair: string | null,
   graphWidth: number,
   nodeStyle: GraphNodeStyle,
-  boxHeight: number,
   lanes: BackEdgeLanes,
 ): PendingLabel[] {
   const labels: PendingLabel[] = [];
@@ -839,11 +871,13 @@ function drawSegments(
     // Forward lines start right below the source cell, cross any back-edge
     // lane rows (as ┼ crossings), run their strip tracks, then cross the
     // entry lanes to the arrow row directly above the target cell.
-    const stubTop = top.y + cellHeight(nodeStyle, boxHeight);
-    const stripTop = stubTop + lanes.below(rank).length;
+    const stripTop = top.y + top.height + lanes.below(rank).length;
     const arrowY = bottom.y - 1;
     const stripBottom = arrowY - 1 - lanes.above(rank + 1).length;
     for (const segment of strip.segments) {
+      const source = top.cells[segment.fromCell];
+      const stubTop =
+        source?.cell.kind === "node" ? top.y + cellHeight(nodeStyle, source) : top.y + top.height;
       const edge = layout.edges.find((candidate) => candidate.edgeId === segment.edgeId);
       if (!edge) {
         continue;
@@ -946,8 +980,6 @@ function drawBackEdges(
   layout: GraphLayout,
   transitions: Set<string>,
   graphWidth: number,
-  nodeStyle: GraphNodeStyle,
-  boxHeight: number,
   lanes: BackEdgeLanes,
 ): void {
   let gutterX = graphWidth + GUTTER_GAP;
@@ -965,14 +997,16 @@ function drawBackEdges(
       continue;
     }
     const style: CanvasStyle = transitions.has(`${edge.from}->${edge.to}`) ? "taken" : "back";
-    const exitLaneY = from.y + cellHeight(nodeStyle, boxHeight) + exit.lane;
+    const exitLaneY = from.y + from.height + exit.lane;
     const aboveCount = lanes.above(toRank).length;
     const arrowY = to.y - 1;
     const entryLaneY = arrowY - aboveCount + entry.lane;
 
-    // Downward stub out of the source cell, then right along the exit lane.
-    if (exitLaneY > from.y + cellHeight(nodeStyle, boxHeight)) {
-      canvas.vline(exit.x, from.y + cellHeight(nodeStyle, boxHeight), exitLaneY - 1, style);
+    // Downward stub out of the source cell, through any rank padding, then
+    // right below the tallest card. A short card must not route an edge
+    // through a taller card in the same rank.
+    if (exitLaneY > from.y + exit.height) {
+      canvas.vline(exit.x, from.y + exit.height, exitLaneY - 1, style);
     }
     canvas.put(exit.x, exitLaneY, "└", style);
     canvas.hline(exitLaneY, exit.x + 1, gutterX - 1, style);
@@ -1006,7 +1040,7 @@ function cellAnchor(
   nodeId: string,
   laneEdges: GraphEdge[],
   edge: GraphEdge,
-): { x: number; lane: number } | null {
+): { x: number; lane: number; height: number } | null {
   const index = rank.cells.findIndex(
     (cell) => cell.cell.kind === "node" && cell.cell.nodeId === nodeId,
   );
@@ -1017,5 +1051,5 @@ function cellAnchor(
   const cell = rank.cells[index] as RenderedCell;
   const center = rank.centers[index] as number;
   const rightmost = center + Math.floor(cell.width / 2) - 1;
-  return { x: Math.min(center + 2 + lane * 2, rightmost), lane };
+  return { x: Math.min(center + 2 + lane * 2, rightmost), lane, height: cell.height };
 }

@@ -2,8 +2,11 @@
 //! The background task treats subscriptions and artifact requests as desired
 //! state, so reconnects cannot replay stale commands.
 
-use crate::protocol::{apply_patch, ClientMessage, ServerMessage, PROTOCOL_ID};
-use crate::state::types::{DefinitionSnapshot, Manifest, RunState};
+use crate::layout::{layout_graph, GraphLayout};
+use crate::protocol::{
+    apply_patch, ClientMessage, PageKind, ServerMessage, TargetPatch, PROTOCOL_ID,
+};
+use crate::state::types::{DefinitionSnapshot, Manifest, RunState, StepRecord};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -16,14 +19,26 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub struct RemoteView {
     pub revision: u64,
+    pub graph_revision: u64,
     generation: u64,
     pub manifest: Manifest,
     pub state: RunState,
+    pub graph_steps: Vec<StepRecord>,
+    pub taken_transitions: Vec<String>,
+    pub step_start: u64,
+    pub step_total: u64,
     pub snapshot: Option<DefinitionSnapshot>,
+    pub graph_layout: Option<GraphLayout>,
     pub events: Vec<Value>,
+    pub trace_start: u64,
+    pub trace_total: u64,
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
+    pub session_entry_start: u64,
+    pub session_entry_total: u64,
     pub session_events: Vec<Value>,
+    pub session_event_start: u64,
+    pub session_event_total: u64,
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
@@ -34,27 +49,72 @@ pub struct RemoteView {
 }
 
 fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView> {
+    let graph_revision = raw
+        .get("graphRevision")
+        .and_then(Value::as_u64)
+        .unwrap_or(revision);
     let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
     let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
+    let graph_steps = raw
+        .get("graphSteps")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| state.steps.clone());
+    let taken_transitions = raw
+        .get("takenTransitions")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let step_start = raw.get("stepStart").and_then(Value::as_u64).unwrap_or(0);
+    let step_total = raw
+        .get("stepTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.steps.len() as u64);
     let snapshot: Option<DefinitionSnapshot> = raw
         .get("workflow")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let graph_layout = raw
+        .get("graphScene")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| snapshot.as_ref().map(layout_graph));
     let events = raw
-        .get("events")
+        .pointer("/tracePage/items")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let trace_start = raw
+        .pointer("/tracePage/start")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let trace_total = raw
+        .pointer("/tracePage/total")
+        .and_then(Value::as_u64)
+        .unwrap_or(events.len() as u64);
     let session_binding = raw.pointer("/session/binding").cloned();
     let session_entries = raw
-        .pointer("/session/entries")
+        .pointer("/session/entryPage/items")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let session_entry_start = raw
+        .pointer("/session/entryPage/start")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let session_entry_total = raw
+        .pointer("/session/entryPage/total")
+        .and_then(Value::as_u64)
+        .unwrap_or(session_entries.len() as u64);
     let session_events = raw
-        .pointer("/session/events")
+        .pointer("/session/eventPage/items")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let session_event_start = raw
+        .pointer("/session/eventPage/start")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let session_event_total = raw
+        .pointer("/session/eventPage/total")
+        .and_then(Value::as_u64)
+        .unwrap_or(session_events.len() as u64);
     let session_events_malformed = raw
         .pointer("/session/eventsMalformed")
         .and_then(Value::as_bool)
@@ -75,14 +135,26 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .filter(|value| !value.is_null());
     Some(RemoteView {
         revision,
+        graph_revision,
         generation,
         manifest,
         state,
+        graph_steps,
+        taken_transitions,
+        step_start,
+        step_total,
         snapshot,
+        graph_layout,
         events,
+        trace_start,
+        trace_total,
         session_binding,
         session_entries,
+        session_entry_start,
+        session_entry_total,
         session_events,
+        session_event_start,
+        session_event_total,
         session_events_malformed,
         session_events_torn_tail,
         session_capture,
@@ -94,6 +166,60 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })
+}
+
+fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<(), String> {
+    let mut next = view.clone();
+    for target in targets {
+        if target.target_key.ends_with(":tail") {
+            let pointer = if target.target_type == "timeline" {
+                if target.target_key.starts_with("session:") {
+                    "/session/eventPage"
+                } else {
+                    "/tracePage"
+                }
+            } else if target.target_key.starts_with("entries:") {
+                "/session/entryPage"
+            } else {
+                "/session/eventPage"
+            };
+            if next.pointer(pointer).is_none_or(|page| !is_tail_page(page)) {
+                continue;
+            }
+        }
+        let document = match target.target_type.as_str() {
+            "timeline" if target.target_key.starts_with("session:") => {
+                next.pointer_mut("/session/eventPage")
+            }
+            "timeline" => next.pointer_mut("/tracePage"),
+            "conversation" if target.target_key.starts_with("entries:") => {
+                next.pointer_mut("/session/entryPage")
+            }
+            "conversation" if target.target_key.starts_with("events:") => {
+                next.pointer_mut("/session/eventPage")
+            }
+            "conversation" => next.pointer_mut("/session"),
+            "summary" | "graph" | "replay" | "inspector" => Some(&mut next),
+            _ => None,
+        }
+        .ok_or_else(|| format!("projection target is not loaded: {}", target.target_key))?;
+        apply_patch(document, &target.patch)?;
+    }
+    *view = next;
+    Ok(())
+}
+
+fn is_tail_page(page: &Value) -> bool {
+    let Some(start) = page.get("start").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(total) = page.get("total").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(items) = page.get("items").and_then(Value::as_array) else {
+        return false;
+    };
+    start.saturating_add(items.len() as u64) == total
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +239,7 @@ struct Shared {
     raw_views: HashMap<String, (u64, u64, Value)>,
     next_view_generation: u64,
     watched: HashSet<String>,
+    page_requests: HashMap<(String, PageKind), u64>,
     artifacts: HashMap<(String, String), ArtifactEntry>,
 }
 
@@ -183,12 +310,27 @@ impl RemoteRuns {
             for old in &previous {
                 shared.raw_views.remove(old);
             }
+            shared
+                .page_requests
+                .retain(|(candidate, _), _| candidate == run_id);
+            shared
+                .artifacts
+                .retain(|(candidate, _), _| candidate == run_id);
             shared.watched.insert(run_id.to_string());
             previous
         };
         for old in previous {
             self.decoded.remove(&old);
         }
+        self.wake();
+    }
+
+    pub fn request_page(&self, run_id: &str, kind: PageKind, cursor: u64) {
+        self.shared
+            .lock()
+            .unwrap()
+            .page_requests
+            .insert((run_id.to_string(), kind), cursor);
         self.wake();
     }
 
@@ -354,6 +496,7 @@ async fn run_socket(
     let mut hello_received = false;
     let mut subscribed = HashSet::new();
     let mut submitted_artifacts = HashSet::new();
+    let mut submitted_pages = HashSet::new();
 
     loop {
         tokio::select! {
@@ -367,6 +510,7 @@ async fn run_socket(
                         &shared,
                         &mut subscribed,
                         &mut submitted_artifacts,
+                        &mut submitted_pages,
                     ).await?;
                 }
             }
@@ -400,6 +544,7 @@ async fn run_socket(
                             &shared,
                             &mut subscribed,
                             &mut submitted_artifacts,
+                            &mut submitted_pages,
                         ).await?;
                     }
                     ServerMessage::Runs { runs } => {
@@ -413,18 +558,62 @@ async fn run_socket(
                             state.raw_views.insert(run_id, (revision, generation, view));
                         }
                     }
-                    ServerMessage::RunPatch { run_id, revision, patch } => {
+                    ServerMessage::RunPatch { run_id, revision, targets } => {
                         let mut state = shared.lock().unwrap();
                         match state.raw_views.get_mut(&run_id) {
-                            Some((current, _, view)) if revision == *current + 1 => {
-                                if apply_patch(view, &patch).is_ok() {
+                            Some((current, _, _)) if revision == *current => {}
+                            Some((current, generation, view)) if revision == *current + 1 => {
+                                if apply_target_patches(view, &targets).is_ok() {
                                     *current = revision;
+                                    *generation = (*generation).wrapping_add(1);
                                 } else {
                                     resubscribe = Some(run_id);
                                 }
                             }
                             Some(_) => resubscribe = Some(run_id),
                             None => {}
+                        }
+                    }
+                    ServerMessage::RunPage {
+                        run_id,
+                        revision,
+                        kind,
+                        start,
+                        total,
+                        items,
+                    } => {
+                        let page_key = (run_id.clone(), kind);
+                        submitted_pages.remove(&page_key);
+                        let mut state = shared.lock().unwrap();
+                        state.page_requests.remove(&page_key);
+                        if let Some((current, generation, view)) = state.raw_views.get_mut(&run_id) {
+                            if revision != *current {
+                                resubscribe = Some(run_id);
+                            } else {
+                                let pointer = match kind {
+                                    PageKind::Steps => "/state/steps",
+                                    PageKind::Trace => "/tracePage",
+                                    PageKind::SessionEntries => "/session/entryPage",
+                                    PageKind::SessionEvents => "/session/eventPage",
+                                };
+                                if let Some(page) = view.pointer_mut(pointer) {
+                                    if kind == PageKind::Steps {
+                                        *page = Value::Array(items);
+                                        view["stepStart"] = serde_json::json!(start);
+                                        view["stepTotal"] = serde_json::json!(total);
+                                    } else {
+                                        *page = serde_json::json!({
+                                            "presentationRevision": revision,
+                                            "start": start,
+                                            "total": total,
+                                            "items": items,
+                                        });
+                                    }
+                                    *generation = (*generation).wrapping_add(1);
+                                } else {
+                                    resubscribe = Some(run_id);
+                                }
+                            }
                         }
                     }
                     ServerMessage::Artifact { run_id, path, content } => {
@@ -460,10 +649,22 @@ async fn run_socket(
                         &shared,
                         &mut subscribed,
                         &mut submitted_artifacts,
+                        &mut submitted_pages,
                     ).await?;
                 }
                 if let Some(run_id) = resubscribe {
-                    send_message(&mut sink, &ClientMessage::WatchRun { run_id }).await?;
+                    send_message(
+                        &mut sink,
+                        &ClientMessage::WatchRun {
+                            run_id,
+                            revision: None,
+                            step_cursor: None,
+                            trace_cursor: None,
+                            session_entry_cursor: None,
+                            session_event_cursor: None,
+                        },
+                    )
+                    .await?;
                 }
             }
         }
@@ -475,8 +676,9 @@ async fn reconcile_desired(
     shared: &Arc<Mutex<Shared>>,
     subscribed: &mut HashSet<String>,
     submitted_artifacts: &mut HashSet<(String, String)>,
+    submitted_pages: &mut HashSet<(String, PageKind)>,
 ) -> Result<()> {
-    let (desired, artifacts) = {
+    let (desired, artifacts, pages) = {
         let state = shared.lock().unwrap();
         let desired = state.watched.clone();
         let artifacts = state
@@ -486,7 +688,12 @@ async fn reconcile_desired(
                 matches!(entry, ArtifactEntry::Loading).then_some(key.clone())
             })
             .collect::<Vec<_>>();
-        (desired, artifacts)
+        let pages = state
+            .page_requests
+            .iter()
+            .map(|(key, cursor)| (key.clone(), *cursor))
+            .collect::<Vec<_>>();
+        (desired, artifacts, pages)
     };
     let removals: Vec<String> = subscribed.difference(&desired).cloned().collect();
     let additions: Vec<String> = desired.difference(subscribed).cloned().collect();
@@ -499,16 +706,54 @@ async fn reconcile_desired(
         )
         .await?;
         subscribed.remove(&run_id);
+        submitted_pages.retain(|(candidate, _)| candidate != &run_id);
+        submitted_artifacts.retain(|(candidate, _)| candidate != &run_id);
     }
     for run_id in additions {
+        let (revision, step_cursor, trace_cursor, session_entry_cursor, session_event_cursor) = {
+            let state = shared.lock().unwrap();
+            state.raw_views.get(&run_id).map_or(
+                (None, None, None, None, None),
+                |(revision, _, view)| {
+                    (
+                        Some(*revision),
+                        view.get("stepStart").and_then(Value::as_u64),
+                        view.pointer("/tracePage/start").and_then(Value::as_u64),
+                        view.pointer("/session/entryPage/start")
+                            .and_then(Value::as_u64),
+                        view.pointer("/session/eventPage/start")
+                            .and_then(Value::as_u64),
+                    )
+                },
+            )
+        };
         send_message(
             sink,
             &ClientMessage::WatchRun {
                 run_id: run_id.clone(),
+                revision,
+                step_cursor,
+                trace_cursor,
+                session_entry_cursor,
+                session_event_cursor,
             },
         )
         .await?;
         subscribed.insert(run_id);
+    }
+    for ((run_id, kind), cursor) in pages {
+        let key = (run_id.clone(), kind);
+        if submitted_pages.insert(key) {
+            send_message(
+                sink,
+                &ClientMessage::FetchPage {
+                    run_id,
+                    kind,
+                    cursor,
+                },
+            )
+            .await?;
+        }
     }
     if submitted_artifacts.is_empty() {
         if let Some((run_id, path)) = artifacts.into_iter().next() {
@@ -527,4 +772,92 @@ async fn send_message(
     let text = serde_json::to_string(message).context("encoding client message")?;
     sink.send(Message::Text(text.into())).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::PatchOp;
+    use serde_json::json;
+
+    fn entry_tail_target() -> TargetPatch {
+        TargetPatch {
+            target_type: "conversation".to_string(),
+            target_key: "entries:tail".to_string(),
+            patch: vec![
+                PatchOp::Replace {
+                    path: "/presentationRevision".to_string(),
+                    value: json!(2),
+                },
+                PatchOp::Remove {
+                    path: "/items/0".to_string(),
+                },
+                PatchOp::Append {
+                    path: "/items".to_string(),
+                    value: vec![json!({"seq": 3})],
+                },
+                PatchOp::Replace {
+                    path: "/start".to_string(),
+                    value: json!(1),
+                },
+                PatchOp::Replace {
+                    path: "/total".to_string(),
+                    value: json!(3),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn applies_tail_patches_only_to_the_loaded_tail_page() {
+        let mut tail = json!({
+            "session": {
+                "entryPage": {
+                    "presentationRevision": 1,
+                    "start": 0,
+                    "total": 2,
+                    "items": [{"seq": 1}, {"seq": 2}]
+                }
+            }
+        });
+        apply_target_patches(&mut tail, &[entry_tail_target()]).unwrap();
+        assert_eq!(tail.pointer("/session/entryPage/start"), Some(&json!(1)));
+        assert_eq!(
+            tail.pointer("/session/entryPage/items/1/seq"),
+            Some(&json!(3))
+        );
+
+        let mut middle = json!({
+            "session": {
+                "entryPage": {
+                    "presentationRevision": 1,
+                    "start": 0,
+                    "total": 5,
+                    "items": [{"seq": 1}, {"seq": 2}]
+                }
+            }
+        });
+        let before = middle.clone();
+        apply_target_patches(&mut middle, &[entry_tail_target()]).unwrap();
+        assert_eq!(middle, before);
+    }
+
+    #[test]
+    fn rejects_a_patch_without_mutating_the_last_good_view() {
+        let mut view = json!({"presentationRevision": 1});
+        let before = view.clone();
+        let result = apply_target_patches(
+            &mut view,
+            &[TargetPatch {
+                target_type: "graph".to_string(),
+                target_key: String::new(),
+                patch: vec![PatchOp::Replace {
+                    path: "/missing/value".to_string(),
+                    value: json!(2),
+                }],
+            }],
+        );
+        assert!(result.is_err());
+        assert_eq!(view, before);
+    }
 }

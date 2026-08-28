@@ -8,6 +8,18 @@ Pi Workflows stores all live durable state in one database:
 
 There is one database for the user installation. Project and run IDs separate data inside it. Workflow targets do not read or write this database.
 
+## Viewer projection
+
+The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md).
+
+`viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit.
+
+The store retains 256 presentation revisions. A reader with an older cursor must take a bounded snapshot. Patches use `add`, `replace`, `remove`, and `append`. They target small projection documents or pages. Patch creation does not reconstruct and compare complete run views.
+
+`session_entries` and `session_events` have run-wide sequence numbers and indexed `(run_id, run_seq)` ranges. Step, trace, entry, and event reads contain at most 256 rows. Run-list queries read metadata, status, lease facts, and the presentation revision. They do not read payload bodies.
+
+This is an in-place alpha schema change. The schema name and version remain `pi-workflows-state` version 1. The DDL digest and exact shape changed. An older alpha database fails with the standard reset instruction and remains untouched. There is no compatibility reader, migration shim, dual path, feature flag, alias, or `v2` schema.
+
 ## Storage boundary
 
 The database stores:

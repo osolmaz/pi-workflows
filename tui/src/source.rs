@@ -1,26 +1,50 @@
-//! Database-backed run views for the local TUI and replay server.
+//! Revisioned, bounded database views for the local TUI and replay server.
 
-use crate::protocol::PatchOp;
-use crate::state::reader::{list_runs, read_run, LoadedRun};
+use crate::layout::{layout_graph, GraphLayout};
+use crate::protocol::{apply_patch, PageKind, PatchOp};
+use crate::source_loader::{LoadRequest, SourceLoader};
+use crate::state::reader::{
+    LoadedRun, ProjectionPage, ProjectionReader, RunIndexRow, ViewerDeltaRead, ViewerRevisionDelta,
+};
 use crate::state::types::{
     DefinitionSnapshot, Manifest, RunState, SessionBinding, SessionCapture, SessionEntryRecord,
     SessionEventRecord,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
+use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowCursor {
+    pub step: Option<u64>,
+    pub trace: Option<u64>,
+    pub session_entry: Option<u64>,
+    pub session_event: Option<u64>,
+}
 
 pub struct RunEntry {
     pub dir: PathBuf,
     pub manifest: Manifest,
     pub manifest_raw: Value,
     pub workflow: Value,
+    pub graph_layout: Option<GraphLayout>,
     pub state_raw: Value,
+    pub graph_steps: Vec<crate::state::types::StepRecord>,
+    pub taken_transitions: Vec<String>,
+    pub step_start: u64,
+    pub step_total: u64,
     pub events: Vec<Value>,
+    pub trace_start: u64,
+    pub trace_total: u64,
     pub session_binding: Option<Value>,
     pub session_entries: Vec<Value>,
+    pub session_entry_start: u64,
+    pub session_entry_total: u64,
     pub session_events: Vec<Value>,
+    pub session_event_start: u64,
+    pub session_event_total: u64,
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
@@ -31,15 +55,13 @@ pub struct RunEntry {
     pub live: bool,
     pub possibly_interrupted: bool,
     pub revision: u64,
+    pub graph_revision: u64,
 }
 
 impl RunEntry {
-    pub fn open(database_path: &Path, run_id: &str) -> Result<Self> {
-        Self::from_loaded(database_path, read_run(database_path, run_id)?, 1)
-    }
-
-    fn from_loaded(database_path: &Path, loaded: LoadedRun, revision: u64) -> Result<Self> {
+    fn from_loaded(database_path: &Path, loaded: LoadedRun) -> Result<Self> {
         let manifest_raw = serde_json::to_value(&loaded.manifest)?;
+        let graph_layout = loaded.snapshot.as_ref().map(layout_graph);
         let workflow = loaded
             .snapshot
             .as_ref()
@@ -78,11 +100,22 @@ impl RunEntry {
             manifest: loaded.manifest,
             manifest_raw,
             workflow,
+            graph_layout,
             state_raw,
+            graph_steps: loaded.graph_steps,
+            taken_transitions: loaded.taken_transitions,
+            step_start: loaded.step_start,
+            step_total: loaded.step_total,
             events,
+            trace_start: loaded.trace_start,
+            trace_total: loaded.trace_total,
             session_binding,
             session_entries,
+            session_entry_start: loaded.session_entry_start,
+            session_entry_total: loaded.session_entry_total,
             session_events,
+            session_event_start: loaded.session_event_start,
+            session_event_total: loaded.session_event_total,
             session_events_malformed: false,
             session_events_torn_tail: false,
             session_capture,
@@ -92,7 +125,8 @@ impl RunEntry {
             snapshot: loaded.snapshot,
             live,
             possibly_interrupted: loaded.possibly_interrupted,
-            revision,
+            revision: loaded.presentation_revision,
+            graph_revision: loaded.presentation_revision,
         })
     }
 
@@ -106,8 +140,19 @@ impl RunEntry {
         } else {
             json!({
                 "binding": self.session_binding,
-                "entries": self.session_entries,
-                "events": self.session_events,
+                "presentationRevision": self.revision,
+                "entryPage": {
+                    "presentationRevision": self.revision,
+                    "start": self.session_entry_start,
+                    "total": self.session_entry_total,
+                    "items": self.session_entries,
+                },
+                "eventPage": {
+                    "presentationRevision": self.revision,
+                    "start": self.session_event_start,
+                    "total": self.session_event_total,
+                    "items": self.session_events,
+                },
                 "eventsMalformed": self.session_events_malformed,
                 "eventsTornTail": self.session_events_torn_tail,
                 "capture": self.session_capture,
@@ -115,12 +160,69 @@ impl RunEntry {
         }
     }
 
+    fn apply_delta(&mut self, delta: &ViewerRevisionDelta) -> bool {
+        if delta.revision != self.revision + 1 {
+            return false;
+        }
+        for target in &delta.targets {
+            let applied = match (target.target_type.as_str(), target.target_key.as_str()) {
+                ("conversation", key) if key.starts_with("entries:") => apply_page_patch(
+                    &mut self.session_entry_start,
+                    &mut self.session_entry_total,
+                    &mut self.session_entries,
+                    self.revision,
+                    &target.patch,
+                ),
+                ("timeline", key) if key.starts_with("session:") => apply_page_patch(
+                    &mut self.session_event_start,
+                    &mut self.session_event_total,
+                    &mut self.session_events,
+                    self.revision,
+                    &target.patch,
+                ),
+                ("conversation", "capture") => {
+                    let mut document = json!({
+                        "presentationRevision": self.revision,
+                        "capture": self.session_capture,
+                    });
+                    if apply_patch(&mut document, &target.patch).is_err() {
+                        false
+                    } else {
+                        self.session_capture = document
+                            .get("capture")
+                            .filter(|value| !value.is_null())
+                            .cloned();
+                        true
+                    }
+                }
+                _ => false,
+            };
+            if !applied {
+                return false;
+            }
+        }
+        self.revision = delta.revision;
+        true
+    }
+
     pub fn view(&self) -> Value {
         json!({
+            "presentationRevision": self.revision,
+            "graphRevision": self.graph_revision,
             "manifest": self.manifest_raw,
             "workflow": self.workflow,
+            "graphScene": self.graph_layout,
             "state": self.state_raw,
-            "events": self.events,
+            "graphSteps": self.graph_steps,
+            "takenTransitions": self.taken_transitions,
+            "stepStart": self.step_start,
+            "stepTotal": self.step_total,
+            "tracePage": {
+                "presentationRevision": self.revision,
+                "start": self.trace_start,
+                "total": self.trace_total,
+                "items": self.events,
+            },
             "session": self.session_value(),
             "settingsScopes": self.settings_scopes,
             "followUpQueue": self.follow_up_queue,
@@ -128,77 +230,117 @@ impl RunEntry {
             "possiblyInterrupted": self.possibly_interrupted,
         })
     }
+}
 
-    pub fn summary(&self) -> Value {
-        json!({
-            "manifest": self.manifest_raw,
-            "live": self.live,
-            "possiblyInterrupted": self.possibly_interrupted,
-        })
-    }
+pub struct ProjectionUpdate {
+    pub run_id: String,
+    pub delta: ViewerRevisionDelta,
+}
 
-    fn refresh(&mut self) -> Option<Vec<PatchOp>> {
-        let next = RunEntry::open(&self.dir, &self.manifest.run_id).ok()?;
-        let old_view = self.view();
-        let next_view = next.view();
-        if old_view == next_view {
-            return None;
-        }
-        let revision = self.revision + 1;
-        *self = Self { revision, ..next };
-        let mut patch = Vec::new();
-        for key in [
-            "manifest",
-            "workflow",
-            "state",
-            "events",
-            "session",
-            "live",
-            "possiblyInterrupted",
-        ] {
-            if old_view.get(key) != next_view.get(key) {
-                patch.push(PatchOp::Replace {
-                    path: format!("/{key}"),
-                    value: next_view.get(key).cloned().unwrap_or(Value::Null),
-                });
-            }
-        }
-        Some(patch)
+pub struct RefreshOutcome {
+    pub updates: Vec<ProjectionUpdate>,
+    pub snapshots_required: Vec<String>,
+    pub listing_changed: bool,
+}
+
+fn apply_page_patch(
+    start: &mut u64,
+    total: &mut u64,
+    items: &mut Vec<Value>,
+    revision: u64,
+    patch: &[PatchOp],
+) -> bool {
+    if start.saturating_add(items.len() as u64) != *total {
+        return true;
     }
+    let mut page = json!({
+        "presentationRevision": revision,
+        "start": *start,
+        "total": *total,
+        "items": items,
+    });
+    if apply_patch(&mut page, patch).is_err() {
+        return false;
+    }
+    let (Some(next_start), Some(next_total), Some(next_items)) = (
+        page.get("start").and_then(Value::as_u64),
+        page.get("total").and_then(Value::as_u64),
+        page.get("items").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    *start = next_start;
+    *total = next_total;
+    *items = next_items.clone();
+    true
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceStats {
+    pub data_version_checks: u64,
+    pub index_reads: u64,
+    pub window_reads: u64,
+    pub page_reads: u64,
+    pub payload_rows_read: u64,
 }
 
 pub struct RunSource {
     database_path: PathBuf,
+    reader: ProjectionReader,
+    loader: SourceLoader,
+    next_generation: u64,
+    pending: BTreeMap<String, u64>,
+    data_version: u64,
+    index: BTreeMap<String, RunIndexRow>,
     runs: BTreeMap<String, RunEntry>,
+    cursors: BTreeMap<String, WindowCursor>,
+    watched: BTreeMap<String, usize>,
+    local_selected: Option<String>,
     single_run_id: Option<String>,
-}
-
-pub struct RefreshOutcome {
-    pub patches: Vec<(String, u64, Vec<PatchOp>)>,
-    pub listing_changed: bool,
+    load_errors: BTreeMap<String, String>,
+    stats: SourceStats,
 }
 
 impl RunSource {
     pub fn new(database_path: &Path) -> Result<Self> {
-        crate::state::reader::validate_database(database_path)?;
-        let mut source = Self {
+        let reader = ProjectionReader::open(database_path)?;
+        let loader = SourceLoader::new(database_path)?;
+        let data_version = reader.data_version()?;
+        let index = reader
+            .list_run_index()?
+            .into_iter()
+            .map(|row| (row.manifest.run_id.clone(), row))
+            .collect();
+        Ok(Self {
             database_path: database_path.to_path_buf(),
+            reader,
+            loader,
+            next_generation: 0,
+            pending: BTreeMap::new(),
+            data_version,
+            index,
             runs: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            watched: BTreeMap::new(),
+            local_selected: None,
             single_run_id: None,
-        };
-        source.scan();
-        Ok(source)
+            load_errors: BTreeMap::new(),
+            stats: SourceStats {
+                data_version_checks: 1,
+                index_reads: 1,
+                ..SourceStats::default()
+            },
+        })
     }
 
     pub fn single(database_path: &Path, run_id: &str) -> Result<Self> {
-        let entry = RunEntry::open(database_path, run_id)?;
-        let mut runs = BTreeMap::new();
-        runs.insert(run_id.to_string(), entry);
-        Ok(Self {
-            database_path: database_path.to_path_buf(),
-            runs,
-            single_run_id: Some(run_id.to_string()),
-        })
+        let mut source = Self::new(database_path)?;
+        if !source.index.contains_key(run_id) {
+            bail!("workflow run not found: {run_id}");
+        }
+        source.single_run_id = Some(run_id.to_string());
+        source.select(run_id)?;
+        Ok(source)
     }
 
     pub fn database_path(&self) -> &Path {
@@ -210,73 +352,360 @@ impl RunSource {
     }
 
     pub fn ordered_run_ids(&self) -> Vec<String> {
-        let mut entries: Vec<&RunEntry> = self.runs.values().collect();
-        entries.sort_by(|a, b| {
-            b.manifest
+        let mut ids: Vec<String> = self.index.keys().cloned().collect();
+        ids.sort_by(|left, right| {
+            let left_row = &self.index[left];
+            let right_row = &self.index[right];
+            right_row
+                .manifest
                 .started_at
-                .cmp(&a.manifest.started_at)
-                .then_with(|| b.manifest.run_id.cmp(&a.manifest.run_id))
+                .cmp(&left_row.manifest.started_at)
+                .then_with(|| right.cmp(left))
         });
-        entries
-            .into_iter()
-            .map(|entry| entry.manifest.run_id.clone())
-            .collect()
+        ids
     }
 
     pub fn summaries(&self) -> Vec<Value> {
         self.ordered_run_ids()
             .iter()
-            .filter_map(|id| self.runs.get(id))
-            .map(RunEntry::summary)
+            .filter_map(|id| self.index.get(id))
+            .map(|row| {
+                json!({
+                    "presentationRevision": row.presentation_revision,
+                    "manifest": row.manifest,
+                    "live": row.live,
+                    "possiblyInterrupted": row.possibly_interrupted,
+                })
+            })
             .collect()
     }
 
-    pub fn scan(&mut self) -> bool {
-        if self.single_run_id.is_some() {
-            return false;
+    pub fn select(&mut self, run_id: &str) -> Result<()> {
+        if self.local_selected.as_deref() == Some(run_id) && self.runs.contains_key(run_id) {
+            return Ok(());
         }
-        let found = list_runs(&self.database_path);
-        let mut changed = false;
-        let mut seen = std::collections::HashSet::new();
-        for (run_id, _) in found {
-            seen.insert(run_id.clone());
-            if !self.runs.contains_key(&run_id) {
-                if let Ok(entry) = RunEntry::open(&self.database_path, &run_id) {
-                    self.runs.insert(run_id, entry);
-                    changed = true;
+        if !self.index.contains_key(run_id) {
+            bail!("workflow run not found: {run_id}");
+        }
+        let previous = self.local_selected.replace(run_id.to_string());
+        self.submit_load(run_id);
+        if let Some(previous) = previous {
+            if previous != run_id {
+                self.pending.remove(&previous);
+                if !self.watched.contains_key(&previous) {
+                    self.runs.remove(&previous);
+                    self.cursors.remove(&previous);
+                    self.load_errors.remove(&previous);
                 }
             }
         }
-        let stale: Vec<String> = self
-            .runs
-            .keys()
-            .filter(|id| !seen.contains(*id))
-            .cloned()
-            .collect();
-        for id in stale {
-            self.runs.remove(&id);
-            changed = true;
+        Ok(())
+    }
+
+    pub fn watch(&mut self, run_id: &str) -> Result<()> {
+        if !self.index.contains_key(run_id) {
+            bail!("workflow run not found: {run_id}");
         }
-        changed
+        let count = self.watched.entry(run_id.to_string()).or_default();
+        *count += 1;
+        if *count == 1 && !self.runs.contains_key(run_id) {
+            self.load(run_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn unwatch(&mut self, run_id: &str) {
+        let Some(count) = self.watched.get_mut(run_id) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.watched.remove(run_id);
+            if self.local_selected.as_deref() != Some(run_id) {
+                self.runs.remove(run_id);
+                self.cursors.remove(run_id);
+                self.load_errors.remove(run_id);
+            }
+        }
+    }
+
+    pub fn watcher_count(&self, run_id: &str) -> usize {
+        self.watched.get(run_id).copied().unwrap_or(0)
+    }
+
+    pub fn deltas_after(&self, run_id: &str, revision: u64) -> Result<ViewerDeltaRead> {
+        self.reader.read_deltas(run_id, revision)
+    }
+
+    pub fn page(
+        &mut self,
+        run_id: &str,
+        kind: PageKind,
+        cursor: u64,
+    ) -> Result<(u64, ProjectionPage)> {
+        let revision = self
+            .index
+            .get(run_id)
+            .map(|row| row.presentation_revision)
+            .ok_or_else(|| anyhow::anyhow!("workflow run not found: {run_id}"))?;
+        let page = self.reader.read_page(run_id, kind, cursor)?;
+        self.stats.page_reads += 1;
+        self.stats.payload_rows_read += page.items.len() as u64;
+        Ok((revision, page))
+    }
+
+    pub fn stats(&self) -> SourceStats {
+        self.stats
+    }
+
+    pub fn load_error(&self, run_id: &str) -> Option<&str> {
+        self.load_errors.get(run_id).map(String::as_str)
+    }
+
+    pub fn is_stale(&self, run_id: &str) -> bool {
+        self.runs.contains_key(run_id) && self.load_errors.contains_key(run_id)
+    }
+
+    pub fn cursor(&self, run_id: &str) -> WindowCursor {
+        self.cursors.get(run_id).copied().unwrap_or_default()
+    }
+
+    pub fn request_window(&mut self, run_id: &str, cursor: WindowCursor) -> Result<()> {
+        self.cursors.insert(run_id.to_string(), cursor);
+        if self.watched.contains_key(run_id) {
+            self.load(run_id)?;
+        } else if self.local_selected.as_deref() == Some(run_id) {
+            self.submit_load(run_id);
+        }
+        Ok(())
+    }
+
+    pub fn drain(&mut self) {
+        for result in self.loader.drain() {
+            if self.pending.get(&result.run_id).copied() != Some(result.generation) {
+                continue;
+            }
+            self.pending.remove(&result.run_id);
+            match result.loaded {
+                Ok(loaded) => {
+                    self.stats.window_reads += 1;
+                    self.stats.payload_rows_read += loaded_payload_rows(&loaded);
+                    if self.index.get(&result.run_id).is_some_and(|row| {
+                        row.presentation_revision == loaded.presentation_revision
+                    }) {
+                        match RunEntry::from_loaded(&self.database_path, loaded) {
+                            Ok(mut entry) => {
+                                if let Some(layout) = self
+                                    .runs
+                                    .get(&result.run_id)
+                                    .and_then(|current| current.graph_layout.clone())
+                                {
+                                    entry.graph_layout = Some(layout);
+                                }
+                                self.load_errors.remove(&result.run_id);
+                                self.runs.insert(result.run_id, entry);
+                            }
+                            Err(_) => {
+                                self.load_errors
+                                    .insert(result.run_id, "run data is unavailable".to_string());
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    self.load_errors
+                        .insert(result.run_id, "run data is unavailable".to_string());
+                }
+            }
+        }
     }
 
     pub fn refresh_all(&mut self) -> RefreshOutcome {
-        let mut listing_changed = self.scan();
-        let mut patches = Vec::new();
-        for (run_id, entry) in &mut self.runs {
-            let live_before = entry.live;
-            if let Some(patch) = entry.refresh() {
-                patches.push((run_id.clone(), entry.revision, patch));
-                if live_before != entry.live {
-                    listing_changed = true;
+        self.drain();
+        self.stats.data_version_checks += 1;
+        let Ok(next_data_version) = self.reader.data_version() else {
+            return RefreshOutcome {
+                updates: Vec::new(),
+                snapshots_required: Vec::new(),
+                listing_changed: false,
+            };
+        };
+        let mut listing_changed = self.refresh_interruption_clock();
+        if next_data_version == self.data_version {
+            return RefreshOutcome {
+                updates: Vec::new(),
+                snapshots_required: Vec::new(),
+                listing_changed,
+            };
+        }
+        self.data_version = next_data_version;
+        let Ok(rows) = self.reader.list_run_index() else {
+            return RefreshOutcome {
+                updates: Vec::new(),
+                snapshots_required: Vec::new(),
+                listing_changed,
+            };
+        };
+        self.stats.index_reads += 1;
+        let next_index: BTreeMap<String, RunIndexRow> = rows
+            .into_iter()
+            .map(|row| (row.manifest.run_id.clone(), row))
+            .collect();
+        listing_changed |= index_changed(&self.index, &next_index);
+        self.index = next_index;
+
+        let demanded: BTreeSet<String> = self
+            .watched
+            .keys()
+            .cloned()
+            .chain(self.local_selected.iter().cloned())
+            .collect();
+        let mut updates = Vec::new();
+        let mut snapshots_required = Vec::new();
+        for run_id in demanded {
+            let Some(index) = self.index.get(&run_id) else {
+                self.runs.remove(&run_id);
+                self.load_errors.remove(&run_id);
+                continue;
+            };
+            let target_revision = index.presentation_revision;
+            let previous_revision = self.runs.get(&run_id).map_or(0, |entry| entry.revision);
+            if previous_revision == target_revision {
+                continue;
+            }
+            let mut needs_load = previous_revision == 0;
+            match self.reader.read_deltas(&run_id, previous_revision) {
+                Ok(ViewerDeltaRead::Deltas { deltas, .. }) => {
+                    for delta in deltas {
+                        if let Some(entry) = self.runs.get_mut(&run_id) {
+                            needs_load |= !entry.apply_delta(&delta);
+                        }
+                        updates.push(ProjectionUpdate {
+                            run_id: run_id.clone(),
+                            delta,
+                        });
+                    }
                 }
+                Ok(ViewerDeltaRead::SnapshotRequired { .. }) | Err(_) => {
+                    needs_load = true;
+                    snapshots_required.push(run_id.clone());
+                }
+            }
+            needs_load |= self
+                .runs
+                .get(&run_id)
+                .is_none_or(|entry| entry.revision != target_revision);
+            if !needs_load {
+                continue;
+            }
+            if self.watched.contains_key(&run_id) {
+                let _ = self.load(&run_id);
+            } else {
+                self.submit_load(&run_id);
             }
         }
         RefreshOutcome {
-            patches,
+            updates,
+            snapshots_required,
             listing_changed,
         }
     }
+
+    fn submit_load(&mut self, run_id: &str) {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.pending.insert(run_id.to_string(), generation);
+        self.loader.submit(LoadRequest {
+            run_id: run_id.to_string(),
+            cursor: self.cursors.get(run_id).copied().unwrap_or_default(),
+            generation,
+        });
+    }
+
+    fn load(&mut self, run_id: &str) -> Result<()> {
+        let cursor = self.cursors.get(run_id).copied().unwrap_or_default();
+        let loaded = match self.reader.read_window(
+            run_id,
+            cursor.step,
+            cursor.trace,
+            cursor.session_entry,
+            cursor.session_event,
+        ) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.load_errors
+                    .insert(run_id.to_string(), "run data is unavailable".to_string());
+                return Err(error);
+            }
+        };
+        self.stats.window_reads += 1;
+        self.stats.payload_rows_read += loaded_payload_rows(&loaded);
+        match RunEntry::from_loaded(&self.database_path, loaded) {
+            Ok(mut entry) => {
+                if let Some(layout) = self
+                    .runs
+                    .get(run_id)
+                    .and_then(|current| current.graph_layout.clone())
+                {
+                    entry.graph_layout = Some(layout);
+                }
+                self.load_errors.remove(run_id);
+                self.runs.insert(run_id.to_string(), entry);
+                Ok(())
+            }
+            Err(error) => {
+                self.load_errors
+                    .insert(run_id.to_string(), "run data is unavailable".to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn refresh_interruption_clock(&mut self) -> bool {
+        let now = Utc::now().timestamp_millis();
+        let mut changed = false;
+        for row in self.index.values_mut() {
+            let next = row.live
+                && (row.lease_owner_id.is_none()
+                    || row
+                        .lease_expires_at
+                        .is_none_or(|expires_at| expires_at <= now));
+            if next != row.possibly_interrupted {
+                row.possibly_interrupted = next;
+                if let Some(entry) = self.runs.get_mut(&row.manifest.run_id) {
+                    entry.possibly_interrupted = next;
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn loaded_payload_rows(loaded: &LoadedRun) -> u64 {
+    (loaded.state.steps.len()
+        + loaded.graph_steps.len()
+        + loaded.trace.len()
+        + loaded.session_entries.len()
+        + loaded.session_events.len()
+        + loaded.settings_scopes.len()
+        + usize::from(loaded.follow_up_queue.is_some())) as u64
+}
+
+fn index_changed(
+    before: &BTreeMap<String, RunIndexRow>,
+    after: &BTreeMap<String, RunIndexRow>,
+) -> bool {
+    if before.len() != after.len() || before.keys().ne(after.keys()) {
+        return true;
+    }
+    before.iter().any(|(run_id, prior)| {
+        after.get(run_id).is_none_or(|next| {
+            prior.manifest != next.manifest
+                || prior.live != next.live
+                || prior.possibly_interrupted != next.possibly_interrupted
+        })
+    })
 }
 
 #[allow(dead_code)]

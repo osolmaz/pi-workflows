@@ -16,6 +16,7 @@ pub const SESSION_CAPTURE_SCHEMA: &str = "pi-workflows.session-capture.v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    Queued,
     Running,
     Waiting,
     Completed,
@@ -31,6 +32,7 @@ impl RunStatus {
 
     pub fn label(self) -> &'static str {
         match self {
+            RunStatus::Queued => "queued",
             RunStatus::Running => "running",
             RunStatus::Waiting => "waiting",
             RunStatus::Completed => "completed",

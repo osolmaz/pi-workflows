@@ -1,5 +1,11 @@
 # PIW viewer experience implementation plan
 
+This plan records the earlier viewer experience work. Its graph-wide card sizing and
+complete-run loading decisions are superseded by the
+[incremental and virtualized viewer plan](2026-08-28-piw-incremental-viewer-plan.md).
+The remaining sections are kept as implementation history and must not be used as the
+target architecture for new viewer work.
+
 ## Objective
 
 Make `piw` a state-rich, terminal-native workflow viewer with Catppuccin as
@@ -46,7 +52,11 @@ Adopt ACPX ideas that improve inspection and state comprehension:
 Do not adopt ELK, React Flow, browser card decoration, smooth zoom, animated
 edges, multiple ACP-session concepts, or character-by-character replay.
 
-### Stable full node cards
+### Stable full node cards (superseded)
+
+The graph-wide sizing rule in this section is historical. The selected replacement gives
+each node bounded adaptive dimensions and keeps the complete logical graph outside the
+materialized viewport.
 
 Box mode is the canonical graph presentation. Each node is a full card with a
 border, an interior surface, and enough padding to keep its outer dimensions

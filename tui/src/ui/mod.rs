@@ -11,13 +11,17 @@ mod timeline;
 
 use crate::client::RemoteRuns;
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
-use crate::render::{render_graph, GraphNodeStyle, GraphView, NodeBounds};
+use crate::layout::GraphLayout;
+use crate::protocol::PageKind;
+use crate::render::{
+    render_graph, render_graph_with_layout, GraphNodeStyle, GraphView, NodeBounds, RenderedGraph,
+};
 use crate::session::{assess_capture, CaptureIntegrity};
 use crate::source::RunSource;
 use crate::state::reader::with_artifact_placeholders;
 use crate::state::types::{
-    DefinitionSnapshot, NodeOutcome, RunState, RunStatus, SessionCapture, SessionEntryRecord,
-    SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
+    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, SessionCapture,
+    SessionEntryRecord, SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
 };
 use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
@@ -57,12 +61,24 @@ pub struct RunSummary {
 
 /// Borrowed view of one run, identical for local and remote providers.
 pub struct RunData<'a> {
+    pub graph_revision: u64,
     pub state: &'a RunState,
+    pub graph_steps: &'a [crate::state::types::StepRecord],
+    pub taken_transitions: &'a [String],
+    pub step_start: u64,
+    pub step_total: u64,
     pub snapshot: Option<&'a DefinitionSnapshot>,
+    pub graph_layout: Option<&'a GraphLayout>,
     pub events: &'a [Value],
+    pub trace_start: u64,
+    pub trace_total: u64,
     pub session_bound: bool,
     pub session_entries: &'a [Value],
+    pub session_entry_start: u64,
+    pub session_entry_total: u64,
     pub session_events: &'a [Value],
+    pub session_event_start: u64,
+    pub session_event_total: u64,
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<&'a Value>,
@@ -78,7 +94,7 @@ pub struct RunData<'a> {
 
 pub enum Provider {
     Local {
-        source: RunSource,
+        source: Box<RunSource>,
         last_refresh: Instant,
     },
     Remote(RemoteRuns),
@@ -91,6 +107,27 @@ fn valid_session_binding(binding: Option<&Value>) -> bool {
         == Some(SESSION_BINDING_SCHEMA)
 }
 
+fn parse_run_summary(summary: &Value) -> Option<RunSummary> {
+    let manifest: crate::state::types::Manifest =
+        serde_json::from_value(summary.get("manifest")?.clone()).ok()?;
+    Some(RunSummary {
+        run_id: manifest.run_id,
+        workflow_name: manifest.workflow_name,
+        run_title: manifest.run_title,
+        status: manifest.status,
+        started_at: manifest.started_at,
+        finished_at: manifest.finished_at,
+        live: summary
+            .get("live")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        possibly_interrupted: summary
+            .get("possiblyInterrupted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
 impl Provider {
     fn tick(&mut self) {
         if let Provider::Local {
@@ -98,6 +135,7 @@ impl Provider {
             last_refresh,
         } = self
         {
+            source.drain();
             if last_refresh.elapsed() >= LOCAL_REFRESH_INTERVAL {
                 source.refresh_all();
                 *last_refresh = Instant::now();
@@ -106,51 +144,25 @@ impl Provider {
     }
 
     fn ensure_watch(&mut self, run_id: &str) {
-        if let Provider::Remote(remote) = self {
-            remote.watch(run_id);
+        match self {
+            Provider::Local { source, .. } => {
+                let _ = source.select(run_id);
+            }
+            Provider::Remote(remote) => remote.watch(run_id),
         }
     }
 
     fn summaries(&self) -> Vec<RunSummary> {
         match self {
             Provider::Local { source, .. } => source
-                .ordered_run_ids()
+                .summaries()
                 .iter()
-                .filter_map(|id| source.get(id))
-                .map(|entry| RunSummary {
-                    run_id: entry.manifest.run_id.clone(),
-                    workflow_name: entry.manifest.workflow_name.clone(),
-                    run_title: entry.manifest.run_title.clone(),
-                    status: entry.manifest.status,
-                    started_at: entry.manifest.started_at.clone(),
-                    finished_at: entry.manifest.finished_at.clone(),
-                    live: entry.live,
-                    possibly_interrupted: entry.possibly_interrupted,
-                })
+                .filter_map(parse_run_summary)
                 .collect(),
             Provider::Remote(remote) => remote
                 .summaries()
                 .iter()
-                .filter_map(|summary| {
-                    let manifest: crate::state::types::Manifest =
-                        serde_json::from_value(summary.get("manifest")?.clone()).ok()?;
-                    Some(RunSummary {
-                        run_id: manifest.run_id,
-                        workflow_name: manifest.workflow_name,
-                        run_title: manifest.run_title,
-                        status: manifest.status,
-                        started_at: manifest.started_at,
-                        finished_at: manifest.finished_at,
-                        live: summary
-                            .get("live")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        possibly_interrupted: summary
-                            .get("possiblyInterrupted")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    })
-                })
+                .filter_map(parse_run_summary)
                 .collect(),
         }
     }
@@ -160,12 +172,24 @@ impl Provider {
             Provider::Local { source, .. } => {
                 let entry = source.get(run_id)?;
                 Some(RunData {
+                    graph_revision: entry.graph_revision,
                     state: &entry.state,
+                    graph_steps: &entry.graph_steps,
+                    taken_transitions: &entry.taken_transitions,
+                    step_start: entry.step_start,
+                    step_total: entry.step_total,
                     snapshot: entry.snapshot.as_ref(),
+                    graph_layout: entry.graph_layout.as_ref(),
                     events: &entry.events,
+                    trace_start: entry.trace_start,
+                    trace_total: entry.trace_total,
                     session_bound: valid_session_binding(entry.session_binding.as_ref()),
                     session_entries: &entry.session_entries,
+                    session_entry_start: entry.session_entry_start,
+                    session_entry_total: entry.session_entry_total,
                     session_events: &entry.session_events,
+                    session_event_start: entry.session_event_start,
+                    session_event_total: entry.session_event_total,
                     session_events_malformed: entry.session_events_malformed,
                     session_events_torn_tail: entry.session_events_torn_tail,
                     session_capture: entry.session_capture.as_ref(),
@@ -181,12 +205,24 @@ impl Provider {
                 let remote_artifacts = remote.artifact_snapshot(run_id);
                 let view = remote.view(run_id)?;
                 Some(RunData {
+                    graph_revision: view.graph_revision,
                     state: &view.state,
+                    graph_steps: &view.graph_steps,
+                    taken_transitions: &view.taken_transitions,
+                    step_start: view.step_start,
+                    step_total: view.step_total,
                     snapshot: view.snapshot.as_ref(),
+                    graph_layout: view.graph_layout.as_ref(),
                     events: &view.events,
+                    trace_start: view.trace_start,
+                    trace_total: view.trace_total,
                     session_bound: valid_session_binding(view.session_binding.as_ref()),
                     session_entries: &view.session_entries,
+                    session_entry_start: view.session_entry_start,
+                    session_entry_total: view.session_entry_total,
                     session_events: &view.session_events,
+                    session_event_start: view.session_event_start,
+                    session_event_total: view.session_event_total,
                     session_events_malformed: view.session_events_malformed,
                     session_events_torn_tail: view.session_events_torn_tail,
                     session_capture: view.session_capture.as_ref(),
@@ -197,6 +233,43 @@ impl Provider {
                     run_dir: None,
                     remote_artifacts,
                 })
+            }
+        }
+    }
+
+    fn request_window(
+        &mut self,
+        run_id: &str,
+        step: Option<u64>,
+        trace: Option<u64>,
+        session_entry: Option<u64>,
+        session_event: Option<u64>,
+    ) {
+        match self {
+            Provider::Local { source, .. } => {
+                let _ = source.request_window(
+                    run_id,
+                    crate::source::WindowCursor {
+                        step,
+                        trace,
+                        session_entry,
+                        session_event,
+                    },
+                );
+            }
+            Provider::Remote(remote) => {
+                if let Some(cursor) = step {
+                    remote.request_page(run_id, PageKind::Steps, cursor);
+                }
+                if let Some(cursor) = trace {
+                    remote.request_page(run_id, PageKind::Trace, cursor);
+                }
+                if let Some(cursor) = session_entry {
+                    remote.request_page(run_id, PageKind::SessionEntries, cursor);
+                }
+                if let Some(cursor) = session_event {
+                    remote.request_page(run_id, PageKind::SessionEvents, cursor);
+                }
             }
         }
     }
@@ -275,15 +348,15 @@ struct InspectorTabHit {
 enum TraceScope {
     SelectedAttempt,
     ReplayVisible,
-    FullRun,
+    LoadedPage,
 }
 
 impl TraceScope {
     fn next(self) -> Self {
         match self {
             Self::SelectedAttempt => Self::ReplayVisible,
-            Self::ReplayVisible => Self::FullRun,
-            Self::FullRun => Self::SelectedAttempt,
+            Self::ReplayVisible => Self::LoadedPage,
+            Self::LoadedPage => Self::SelectedAttempt,
         }
     }
 
@@ -291,7 +364,7 @@ impl TraceScope {
         match self {
             Self::SelectedAttempt => "selected attempt",
             Self::ReplayVisible => "replay visible",
-            Self::FullRun => "full run",
+            Self::LoadedPage => "loaded page",
         }
     }
 }
@@ -306,6 +379,21 @@ enum DragTarget {
     },
     Sidebar,
     Inspector,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphCacheKey {
+    run_id: String,
+    graph_revision: u64,
+    replay_position: i64,
+    at_latest: bool,
+    node_style: GraphNodeStyle,
+    elapsed_second: i64,
+}
+
+struct GraphCache {
+    key: GraphCacheKey,
+    rendered: Option<RenderedGraph>,
 }
 
 struct App {
@@ -333,6 +421,7 @@ struct App {
     /// provide the padding needed to truly center edge nodes and small graphs.
     graph_offset: (i64, i64),
     graph_nodes: Vec<NodeBounds>,
+    graph_cache: Option<GraphCache>,
     dragging: Option<DragTarget>,
     tab: InspectorTab,
     inspector_scroll: usize,
@@ -364,7 +453,7 @@ pub fn run_local(database_path: &Path, cli_theme: Option<&str>) -> Result<()> {
     let source = RunSource::new(database_path)?;
     run_app(
         Provider::Local {
-            source,
+            source: Box::new(source),
             last_refresh: Instant::now(),
         },
         true,
@@ -376,7 +465,7 @@ pub fn run_single(database_path: &Path, run_id: &str, cli_theme: Option<&str>) -
     let source = RunSource::single(database_path, run_id)?;
     run_app(
         Provider::Local {
-            source,
+            source: Box::new(source),
             last_refresh: Instant::now(),
         },
         false,
@@ -436,6 +525,7 @@ fn event_loop(
         follow: true,
         graph_offset: (0, 0),
         graph_nodes: Vec::new(),
+        graph_cache: None,
         dragging: None,
         tab: InspectorTab::Steps,
         inspector_scroll: 0,
@@ -475,6 +565,8 @@ fn event_loop(
         if let Some(run_id) = app.selected_run.clone() {
             app.provider.ensure_watch(&run_id);
         }
+        app.ensure_step_window();
+        app.ensure_replay_window();
         app.advance_playback();
         terminal.draw(|frame| draw(frame, &mut app, &summaries))?;
 
@@ -492,6 +584,43 @@ fn event_loop(
 }
 
 impl App {
+    fn ensure_step_window(&mut self) {
+        let (Some(run_id), Some(position)) = (
+            self.selected_run.clone(),
+            self.replay.filter(|value| *value >= 0),
+        ) else {
+            return;
+        };
+        let cursor = position as u64;
+        let loaded = self.provider.data(&run_id).is_some_and(|data| {
+            cursor >= data.step_start && cursor < data.step_start + data.state.steps.len() as u64
+        });
+        if !loaded {
+            self.provider
+                .request_window(&run_id, Some(cursor), None, None, None);
+        }
+    }
+
+    fn ensure_replay_window(&mut self) {
+        let (Some(run_id), Some(position)) = (
+            self.selected_run.clone(),
+            self.temporal_replay.filter(|value| *value >= 0),
+        ) else {
+            return;
+        };
+        let cursor = position as u64;
+        let loaded = self.provider.data(&run_id).is_some_and(|data| {
+            cursor >= data.session_event_start
+                && cursor < data.session_event_start + data.session_events.len() as u64
+        });
+        if loaded {
+            self.sync_step_to_temporal();
+        } else {
+            self.provider
+                .request_window(&run_id, None, None, None, Some(cursor));
+        }
+    }
+
     fn replay_counts(&mut self) -> (i64, i64, bool) {
         let Some(run_id) = self.selected_run.clone() else {
             return (0, 0, false);
@@ -500,8 +629,8 @@ impl App {
             .data(&run_id)
             .map(|data| {
                 (
-                    data.state.steps.len() as i64,
-                    data.session_events.len() as i64,
+                    data.step_total as i64,
+                    data.session_event_total as i64,
                     data.live,
                 )
             })
@@ -511,7 +640,8 @@ impl App {
     fn temporal_delay(&mut self, current: i64, speed: u32) -> Option<Duration> {
         let run_id = self.selected_run.clone()?;
         let data = self.provider.data(&run_id)?;
-        let next = usize::try_from(current + 1).ok()?;
+        let next = u64::try_from(current + 1).ok()?;
+        let next = next.checked_sub(data.session_event_start)? as usize;
         let next_at = data
             .session_events
             .get(next)?
@@ -521,9 +651,11 @@ impl App {
         if current < 0 {
             return Some(Duration::ZERO);
         }
+        let current = u64::try_from(current).ok()?;
+        let current = current.checked_sub(data.session_event_start)? as usize;
         let current_at = data
             .session_events
-            .get(current as usize)?
+            .get(current)?
             .get("at")
             .and_then(Value::as_str)
             .and_then(parse_timestamp_ms)?;
@@ -546,15 +678,31 @@ impl App {
             let Some(data) = self.provider.data(&run_id) else {
                 return;
             };
-            let Some(event) = data.session_events.get(position as usize) else {
+            let Ok(position) = u64::try_from(position) else {
+                return;
+            };
+            let Some(local) = position.checked_sub(data.session_event_start) else {
+                return;
+            };
+            let Some(event) = data.session_events.get(local as usize) else {
                 return;
             };
             event
-                .get("at")
-                .and_then(Value::as_str)
-                .and_then(parse_timestamp_ms)
-                .map_or(-1, |event_at| {
-                    completed_step_at(&data.state.steps, event_at)
+                .get("stepIndex")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| {
+                    event
+                        .get("at")
+                        .and_then(Value::as_str)
+                        .and_then(parse_timestamp_ms)
+                        .map_or(-1, |event_at| {
+                            let local = completed_step_at(&data.state.steps, event_at);
+                            if local < 0 {
+                                -1
+                            } else {
+                                data.step_start as i64 + local
+                            }
+                        })
                 })
         };
         self.replay = Some(selected);
@@ -693,7 +841,7 @@ impl App {
             let Some(data) = self.provider.data(&run_id) else {
                 return;
             };
-            let index = replay.unwrap_or(data.state.steps.len() as i64 - 1);
+            let index = replay.unwrap_or(data.step_total as i64 - 1) - data.step_start as i64;
             let Some(step) = usize::try_from(index)
                 .ok()
                 .and_then(|index| data.state.steps.get(index))
@@ -738,7 +886,7 @@ impl App {
             let Some(data) = self.provider.data(&run_id) else {
                 return;
             };
-            let upper = replay.unwrap_or(data.state.steps.len() as i64 - 1);
+            let upper = replay.unwrap_or(data.step_total as i64 - 1) - data.step_start as i64;
             data.state
                 .steps
                 .iter()
@@ -753,8 +901,8 @@ impl App {
                             event.get("attemptId").and_then(Value::as_str)
                                 == Some(step.attempt_id.as_str())
                         })
-                        .map(|index| index as i64);
-                    (index as i64, temporal)
+                        .map(|index| data.session_event_start as i64 + index as i64);
+                    (data.step_start as i64 + index as i64, temporal)
                 })
         };
         if let Some((index, temporal)) = selected {
@@ -1339,6 +1487,7 @@ fn handle_theme_picker_mouse(app: &mut App, mouse: MouseEvent) {
 
 fn status_style(status: RunStatus, palette: &Palette) -> Style {
     let color = match status {
+        RunStatus::Queued => palette.muted,
         RunStatus::Running => palette.running,
         RunStatus::Waiting => palette.warning,
         RunStatus::Completed => palette.success,
@@ -1351,6 +1500,7 @@ fn status_style(status: RunStatus, palette: &Palette) -> Style {
 
 fn status_glyph(status: RunStatus) -> &'static str {
     match status {
+        RunStatus::Queued => "·",
         RunStatus::Running => "◐",
         RunStatus::Waiting => "⏸",
         RunStatus::Completed => "✓",
@@ -1493,18 +1643,27 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         Provider::Remote(remote) if !remote.connected() => Some(remote.status_label()),
         _ => None,
     };
+    let (local_load_error, local_stale) = match &app.provider {
+        Provider::Local { source, .. } => (
+            source.load_error(&run_id).map(str::to_string),
+            source.is_stale(&run_id),
+        ),
+        Provider::Remote(_) => (None, false),
+    };
 
     let Some(data) = app.provider.data(&run_id) else {
         frame.render_widget(
-            Paragraph::new("Loading run…")
-                .style(Style::default().fg(palette.text).bg(palette.panel_bg))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" piw ")
-                        .style(Style::default().bg(palette.panel_bg))
-                        .border_style(pane_border(&palette, false)),
-                ),
+            Paragraph::new(local_load_error.as_deref().map_or("Loading run…", |_| {
+                "Run unavailable. The run list is still usable."
+            }))
+            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" piw ")
+                    .style(Style::default().bg(palette.panel_bg))
+                    .border_style(pane_border(&palette, false)),
+            ),
             main_area,
         );
         app.timeline = draw_transport(
@@ -1526,11 +1685,15 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     };
 
     let steps = &data.state.steps;
-    let selected_index = replay.unwrap_or(steps.len() as i64 - 1);
-    let bounded_index = selected_index.max(-1).min(steps.len() as i64 - 1);
+    let selected_index = replay.unwrap_or(data.step_total as i64 - 1);
+    let bounded_index = (selected_index - data.step_start as i64)
+        .max(-1)
+        .min(steps.len() as i64 - 1);
     let at_latest = replay.is_none() && temporal_replay.is_none();
-    let through_event_seq =
-        temporal_replay.map(|position| temporal_through_seq(data.session_events, position));
+    let through_event_seq = temporal_replay.map(|position| {
+        let local = position - data.session_event_start as i64;
+        temporal_through_seq(data.session_events, local)
+    });
     let visible_steps = &steps[0..(bounded_index + 1).max(0) as usize];
     let selected_step = if bounded_index >= 0 {
         steps.get(bounded_index as usize)
@@ -1542,6 +1705,8 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let view = GraphView {
         state: data.state,
         snapshot: data.snapshot,
+        graph_steps: Some(data.graph_steps),
+        taken_transitions: Some(data.taken_transitions),
     };
     let render_index = if at_latest {
         steps.len() as i64 - 1
@@ -1549,7 +1714,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         bounded_index
     };
     let temporal_node_id = temporal_replay.and_then(|position| {
-        usize::try_from(position)
+        usize::try_from(position - data.session_event_start as i64)
             .ok()
             .and_then(|index| data.session_events.get(index))
             .and_then(|event| event.get("nodeId"))
@@ -1564,17 +1729,54 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     } else {
         temporal_node_id.or_else(|| selected_step.map(|step| step.node_id.as_str()))
     };
-    let rendered_graph = render_graph(&view, render_index, at_latest, now_ms(), node_style);
-    let rows_runs = rendered_graph
+    let rendered_at = now_ms();
+    let cache_key = GraphCacheKey {
+        run_id: run_id.clone(),
+        graph_revision: data.graph_revision,
+        replay_position: selected_index,
+        at_latest,
+        node_style,
+        elapsed_second: if at_latest && data.state.current_node.is_some() {
+            rendered_at / 1_000
+        } else {
+            0
+        },
+    };
+    if app
+        .graph_cache
         .as_ref()
-        .map(|rendered| rendered.canvas.render_runs())
-        .unwrap_or_default();
+        .is_none_or(|cache| cache.key != cache_key)
+    {
+        let rendered = data.graph_layout.map_or_else(
+            || render_graph(&view, render_index, at_latest, rendered_at, node_style),
+            |layout| {
+                render_graph_with_layout(
+                    &view,
+                    layout,
+                    render_index,
+                    at_latest,
+                    rendered_at,
+                    node_style,
+                )
+            },
+        );
+        app.graph_cache = Some(GraphCache {
+            key: cache_key,
+            rendered,
+        });
+    }
+    let rendered_graph = app
+        .graph_cache
+        .as_ref()
+        .and_then(|cache| cache.rendered.as_ref());
     app.graph_nodes = rendered_graph
-        .map(|rendered| rendered.node_bounds)
+        .map(|rendered| rendered.node_bounds.clone())
         .unwrap_or_default();
     let inner_width = graph_rect.width.saturating_sub(2) as usize;
     let inner_height = graph_rect.height.saturating_sub(2) as usize;
-    let content_size = graph::content_size(&rows_runs);
+    let content_size = rendered_graph
+        .map(|rendered| rendered.canvas.size())
+        .unwrap_or_default();
     let mut offset = app.graph_offset;
     if follow {
         let focused = followed_node_id
@@ -1584,18 +1786,16 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     offset.0 = clamp_camera_axis(offset.0, content_size.0, inner_width);
     offset.1 = clamp_camera_axis(offset.1, content_size.1, inner_height);
     app.graph_offset = offset;
-    let lines: Vec<Line> = (0..inner_height)
-        .map(|viewport_y| {
-            let canvas_y = offset.1 + viewport_y as i64;
-            if canvas_y < 0 {
-                Line::from("")
-            } else {
-                rows_runs
-                    .get(canvas_y as usize)
-                    .map(|runs| graph::viewport_line(runs, offset.0, inner_width, &palette))
-                    .unwrap_or_else(|| Line::from(""))
-            }
+    let rows_runs = rendered_graph
+        .map(|rendered| {
+            rendered
+                .canvas
+                .render_runs_window(offset.0, offset.1, inner_width, inner_height)
         })
+        .unwrap_or_else(|| vec![Vec::new(); inner_height]);
+    let lines: Vec<Line> = rows_runs
+        .iter()
+        .map(|runs| graph::viewport_line(runs, 0, inner_width, &palette))
         .collect();
     let capture = capture_integrity(&data);
     let mut graph_flags = Vec::new();
@@ -1609,6 +1809,9 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         graph_flags.push("CAPTURE FAILED");
     } else if capture.status == "invalid" {
         graph_flags.push("CAPTURE INVALID");
+    }
+    if local_stale {
+        graph_flags.push("STALE DATA");
     }
     if let Some(status) = remote_status {
         graph_flags.push(match status {
@@ -1721,13 +1924,14 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     };
     let inspector_height = content_rect.height as usize;
     let max_scroll = inspector_lines.len().saturating_sub(inspector_height);
-    let scroll = if (tab == InspectorTab::Trace && at_latest && trace_scope == TraceScope::FullRun)
-        || (tab == InspectorTab::Conversation && at_latest && conversation_follow)
-    {
-        max_scroll
-    } else {
-        inspector_scroll.min(max_scroll)
-    };
+    let scroll =
+        if (tab == InspectorTab::Trace && at_latest && trace_scope == TraceScope::LoadedPage)
+            || (tab == InspectorTab::Conversation && at_latest && conversation_follow)
+        {
+            max_scroll
+        } else {
+            inspector_scroll.min(max_scroll)
+        };
     app.inspector_scroll = scroll;
     app.inspector_scrolls[tab.index()] = scroll;
     let shown: Vec<Line> = inspector_lines
@@ -1750,7 +1954,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     app.timeline = draw_transport(
         frame,
         transport,
-        Some((&data, bounded_index, at_latest)),
+        Some((&data, selected_index, at_latest)),
         TransportOptions {
             temporal_replay,
             playing,
@@ -2274,6 +2478,27 @@ fn steps_lines(
             },
             Style::default().fg(palette.muted),
         )));
+        if let Some(snapshot) = data.snapshot {
+            for edge in &snapshot.edges {
+                if let EdgeDef::Switch { from, switch } = edge {
+                    if from == &step.node_id {
+                        for (case, target) in &switch.cases {
+                            push_detail_line(
+                                &mut lines,
+                                "branch",
+                                &format!(
+                                    "{} -> {}",
+                                    sanitize_text(case),
+                                    target.as_str().map(sanitize_text).unwrap_or_default()
+                                ),
+                                width,
+                                palette,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if expanded {
             if !step.prompt.is_null() {
                 push_value_lines(
@@ -2451,7 +2676,7 @@ fn trace_events_for_scope<'a>(
                     .collect()
             })
         }
-        TraceScope::FullRun => events.iter().collect(),
+        TraceScope::LoadedPage => events.iter().collect(),
     }
 }
 
@@ -2516,6 +2741,14 @@ fn trace_lines(
 }
 
 fn capture_integrity(data: &RunData) -> CaptureIntegrity {
+    if data.session_entry_total != data.session_entries.len() as u64
+        || data.session_event_total != data.session_events.len() as u64
+    {
+        return CaptureIntegrity {
+            status: "paged",
+            diagnostics: vec!["integrity applies to the complete durable capture".into()],
+        };
+    }
     let entries: Result<Vec<SessionEntryRecord>, _> = data
         .session_entries
         .iter()
@@ -2601,8 +2834,7 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         label("trace"),
         Span::raw(format!(
             "{} events (seq {})",
-            data.events.len(),
-            state.trace_seq
+            data.trace_total, state.trace_seq
         )),
     ]));
     lines.extend(progress_info_lines(data.events, palette));
@@ -2669,8 +2901,7 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         Span::raw(if data.session_bound {
             format!(
                 "{} entries · {} events",
-                data.session_entries.len(),
-                data.session_events.len()
+                data.session_entry_total, data.session_event_total
             )
         } else {
             "not bound".to_string()
@@ -2958,20 +3189,20 @@ fn draw_transport(
         format_duration((end - start).max(0))
     });
     let view = data.map(|(data, bounded_index, at_latest)| {
-        let temporal = !data.session_events.is_empty();
+        let temporal = data.session_event_total > 0;
         timeline::TimelineView {
             status: data.state.status,
             paused: data.state.paused == Some(true),
             elapsed: elapsed.as_deref().unwrap_or("0ms"),
             steps: if temporal {
-                data.session_events.len()
+                data.session_event_total as usize
             } else {
-                data.state.steps.len()
+                data.step_total as usize
             },
             position: if temporal {
                 options
                     .temporal_replay
-                    .unwrap_or(data.session_events.len() as i64 - 1)
+                    .unwrap_or(data.session_event_total as i64 - 1)
             } else {
                 bounded_index
             },
