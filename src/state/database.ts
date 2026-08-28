@@ -5,6 +5,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { canonicalJson, parseJson, type JsonValue } from "./json.js";
 import {
+  PRE_VIEWER_STATE_SCHEMA_DIGEST,
   STATE_APPLICATION_ID,
   STATE_APP_VERSION,
   STATE_SCHEMA_DIGEST,
@@ -18,6 +19,8 @@ const BUSY_TIMEOUT_MS = 5_000;
 const JOURNAL_SIZE_LIMIT = 64 * 1024 * 1024;
 const RESET_INSTRUCTION =
   "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
+const UPGRADE_INSTRUCTION =
+  "Pi Workflows durable state needs the viewer schema upgrade. Stop Pi Workflows, then run `pi-workflows state upgrade --backup <absolute-path> --apply`.";
 
 export type StateDatabaseMode = "read-write" | "read-only";
 
@@ -278,6 +281,15 @@ export class StateDatabase {
          FROM schema_meta WHERE id = 1`,
       )
       .get();
+    if (
+      isSchemaMetaRow(row) &&
+      row.schemaName === STATE_SCHEMA_NAME &&
+      row.schemaVersion === STATE_SCHEMA_VERSION &&
+      row.appVersion === STATE_APP_VERSION &&
+      row.schemaDigest.equals(PRE_VIEWER_STATE_SCHEMA_DIGEST)
+    ) {
+      throw new Error(UPGRADE_INSTRUCTION);
+    }
     if (
       !isSchemaMetaRow(row) ||
       row.schemaName !== STATE_SCHEMA_NAME ||

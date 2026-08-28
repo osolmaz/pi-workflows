@@ -7,6 +7,7 @@ import { syncHerdrPlugin } from "../herdr/setup.js";
 import { sanitizeText } from "../render/ansi.js";
 import { StateDatabase } from "../state/database.js";
 import { pruneState } from "../state/prune.js";
+import { upgradePreViewerStateDatabase } from "../workflows/state-upgrade.js";
 import { WorkflowRunStore, workflowStateDatabasePath } from "../workflows/store.js";
 import {
   formatDuration,
@@ -26,6 +27,7 @@ Usage:
   pi-workflows controller <controller> <key>
   pi-workflows state status|verify
   pi-workflows state backup <destination>
+  pi-workflows state upgrade --backup <absolute-path> --apply
   pi-workflows state prune --before <timestamp> --dry-run
   pi-workflows state prune --before <timestamp> --backup <absolute-path> --apply
   pi-workflows host [--project <dir>] [-- <extra pi args>]
@@ -41,7 +43,7 @@ export type CliArgs = {
   controllerName?: string;
   resourceKey?: string;
   herdrAction?: string;
-  stateAction?: "status" | "verify" | "backup" | "prune";
+  stateAction?: "status" | "verify" | "backup" | "upgrade" | "prune";
   backupDestination?: string;
   pruneBefore?: string;
   pruneApply?: boolean;
@@ -93,8 +95,14 @@ export function parseCliArgs(argv: string[]): CliArgs {
   }
   if (command === "state") {
     const action = positionals[0];
-    if (action !== "status" && action !== "verify" && action !== "backup" && action !== "prune") {
-      throw new Error("state requires status, verify, backup, or prune");
+    if (
+      action !== "status" &&
+      action !== "verify" &&
+      action !== "backup" &&
+      action !== "upgrade" &&
+      action !== "prune"
+    ) {
+      throw new Error("state requires status, verify, backup, upgrade, or prune");
     }
     if (action === "prune") {
       if (positionals.length !== 1) throw new Error("state prune accepts no positional arguments");
@@ -124,6 +132,21 @@ export function parseCliArgs(argv: string[]): CliArgs {
         command,
         stateAction: action,
         backupDestination: positionals[1] as string,
+        once,
+        json,
+      };
+    }
+    if (action === "upgrade") {
+      if (positionals.length !== 1)
+        throw new Error("state upgrade accepts no positional arguments");
+      if (!pruneApply || backupDestination === undefined || pruneDryRun) {
+        throw new Error("state upgrade requires --backup <absolute-path> --apply");
+      }
+      return {
+        command,
+        stateAction: action,
+        backupDestination,
+        pruneApply,
         once,
         json,
       };
@@ -286,6 +309,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 async function runStateCommand(databasePath: string, args: CliArgs): Promise<void> {
+  if (args.stateAction === "upgrade") {
+    const report = upgradePreViewerStateDatabase(databasePath, args.backupDestination as string);
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return;
+  }
   if (args.stateAction === "prune") {
     const report = await pruneState(databasePath, {
       before: args.pruneBefore as string,
