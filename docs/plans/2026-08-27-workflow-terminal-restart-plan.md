@@ -281,6 +281,45 @@ Document:
 
 No workflow definition needs an opt-in or terminal restart step.
 
+### 9. Render deferred terminal turns as compact cards
+
+**Where**
+
+- `src/extension/deferred-turn.ts`
+- `src/extension/index.ts`
+- Deferred-turn renderer unit tests
+- Real-Pi end-to-end tests
+
+**Change**
+
+Register a custom TUI message renderer for the existing `pi-workflows-deferred-turn` message type through Pi's documented `pi.registerMessageRenderer()` API.
+
+Keep the complete existing message content unchanged. The model and session history must still receive the terminal facts, exact input, bounded result, restart history, and instructions. Do not replace that content with a summary, split it into another entry, or hide the deferred fallback with `display: false`.
+
+Add small, bounded presentation fields to the existing message details. The fields cover the workflow name, terminal state or cause, run identity, terminal reason kind, and restart count and limit when available. The renderer must read those fields directly and must not parse the model prompt.
+
+The collapsed card must show a concise workflow summary. It must not show the terminal facts JSON, exact input, result, fingerprint, or full model instructions. The expanded card must show the complete existing content through Pi's standard `expanded` state, consistent with agent-step message cards.
+
+Use standard Pi TUI components and theme colors. Sanitize all workflow-derived display text. Missing or malformed details must produce a safe generic card instead of an exception.
+
+Keep the behavior workflow-agnostic. Ordinary deferred fallbacks, terminal decisions, and restored messages use the same renderer. Presentation messages that already use `display: false` stay unchanged. Headless and RPC behavior stays unchanged. Rendering must not create a duplicate session entry or model turn.
+
+This change uses only `pi.sendMessage()` and `pi.registerMessageRenderer()`. It adds no Pi core or private API use, database table, migration, store, service, controller, daemon, or external resource.
+
+**Verification**
+
+Focused tests must prove that:
+
+- collapsed output shows bounded workflow, state or cause, run, and restart fields
+- collapsed output omits the full prompt, terminal JSON, input, result, and fingerprint
+- expanded output contains the complete model-facing content
+- completed, failed, timed-out, cancelled, launch-failure, and maxSteps states render correctly
+- long or terminal-unsafe fields are safe
+- missing and malformed details do not throw
+- the renderer registers once for `pi-workflows-deferred-turn`
+- restored messages render without creating another entry or turn
+- real Pi still gives the provider the complete prompt while the session record keeps the custom message type and renderer details
+
 ## Contract changes
 
 - The workflow tool gains `restart`.
@@ -293,6 +332,9 @@ No workflow definition needs an opt-in or terminal restart step.
 - Restart lineage uses existing run launch data.
 - No new store, service, controller, or Pi API is added.
 - No original-message provenance contract is added.
+- The existing deferred-turn message details gain small, bounded presentation fields.
+- The existing deferred-turn message content remains complete and unchanged for the model and session history.
+- Interactive Pi renders deferred turns through the public message-renderer API. Headless and RPC delivery do not change.
 
 ## Test plan
 

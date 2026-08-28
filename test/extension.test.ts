@@ -1289,6 +1289,7 @@ describe("pi-workflows extension", () => {
       });
       expect(harness.sentUserMessages).toHaveLength(0);
       expect(harness.messageRenderers.has("pi-workflows-agent-step")).toBe(true);
+      expect(harness.messageRenderers.has("pi-workflows-deferred-turn")).toBe(true);
 
       await waitFor(() => harness.notifications.some((note) => note.includes("completed")));
       await harness.emitAsync("agent_settled");
@@ -1369,6 +1370,12 @@ describe("pi-workflows extension", () => {
           content: expect.stringContaining('"terminalState": "cancelled"'),
           details: expect.objectContaining({
             cause: "agentCancelled",
+            presentation: {
+              workflowName: "mini",
+              state: "cancelled",
+              reasonKind: "cancelled",
+              restart: { count: 0, limit: 3 },
+            },
             terminalDecision: expect.objectContaining({
               schema: "pi-workflows.terminal-decision.v1",
             }),
@@ -1692,6 +1699,12 @@ export default defineWorkflow({
           content: expect.stringContaining('"terminalState": "failed"'),
           details: expect.objectContaining({
             cause: "launchFailed",
+            presentation: {
+              workflowName: "mini",
+              state: "failed",
+              reasonKind: "launchFailed",
+              restart: { count: 0, limit: 3 },
+            },
             terminalDecision: expect.objectContaining({
               schema: "pi-workflows.terminal-decision.v1",
             }),
@@ -1915,6 +1928,19 @@ export default defineWorkflow({
             entry.message.content.includes(sourceRunId),
         ),
       );
+      const sourceTerminalMessage = harness.sentMessages.find(
+        (entry) =>
+          entry.message.customType === "pi-workflows-deferred-turn" &&
+          entry.message.content.includes(sourceRunId),
+      );
+      expect(sourceTerminalMessage?.message.details).toMatchObject({
+        presentation: {
+          workflowName: "max-steps",
+          state: "failed",
+          reasonKind: "maxSteps",
+          restart: { count: 0, limit: 3 },
+        },
+      });
       const sourceBefore = readWorkflowRun(sourceRunId, {
         databasePath: workflowStateDatabasePath(runsDir),
       });

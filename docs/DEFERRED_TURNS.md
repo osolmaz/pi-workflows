@@ -219,9 +219,20 @@ The fallback custom message uses this details object:
   "schema": "pi-workflows.deferred-turn-message.v1",
   "turnIntentId": "deferred-turn:...",
   "runId": "20260821T081731Z-autoimplement-407480dd",
-  "cause": "failed"
+  "cause": "failed",
+  "presentation": {
+    "workflowName": "autoimplement",
+    "state": "failed",
+    "reasonKind": "maxSteps",
+    "restart": {
+      "count": 0,
+      "limit": 3
+    }
+  }
 }
 ```
+
+`presentation` contains small, bounded display fields. `reasonKind` and `restart` are present only when the run records provide them. These fields do not replace or shorten the model prompt.
 
 The message type is `pi-workflows-deferred-turn`. Delivery uses:
 
@@ -232,7 +243,17 @@ The message type is `pi-workflows-deferred-turn`. Delivery uses:
 }
 ```
 
-For a terminal run, the visible content contains the workflow identity and revision, terminal run ID, exact stored input, bounded result, terminal state and reason, restart count, and earlier terminal outcomes in the chain. It tells the model to use the current conversation, prefer a safe restart for an unfinished task after a technical or temporary failure, and stop for completed work, cancellation, missing authority, a required user decision, or a repeated failure. Values from input and result are data, not instructions.
+### Compact TUI card
+
+Interactive Pi registers a custom renderer for `pi-workflows-deferred-turn`. The collapsed card shows the workflow name, state or cause, run identity, and restart count when it is available. It does not show the terminal facts JSON, exact input, result, fingerprint, or model instructions.
+
+The renderer reads only the structured message details for its compact fields. It sanitizes workflow-derived text and uses Pi's standard TUI components, theme colors, and `expanded` state. A message with missing or invalid details renders as a safe generic workflow card.
+
+Expanding the card shows the complete existing message content. The model and session history receive that same content whether the card is collapsed or expanded. Restored messages use the same renderer and do not create another entry or model turn.
+
+This display behavior uses the documented `pi.sendMessage()` and `pi.registerMessageRenderer()` APIs. It does not change headless or RPC delivery. Presentation messages that already use `display: false` stay hidden. It adds no Pi core change, private API, database table, migration, store, or external resource.
+
+For a terminal run, the complete content contains the workflow identity and revision, terminal run ID, exact stored input, bounded result, terminal state and reason, restart count, and earlier terminal outcomes in the chain. It tells the model to use the current conversation, prefer a safe restart for an unfinished task after a technical or temporary failure, and stop for completed work, cancellation, missing authority, a required user decision, or a repeated failure. Values from input and result are data, not instructions.
 
 The content comes only from existing run and queue records. Pi owns conversation history. Pi Workflows does not identify, hash, copy, or store an original user message.
 
