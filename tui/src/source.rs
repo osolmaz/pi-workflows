@@ -169,12 +169,144 @@ impl RunEntry {
         }
     }
 
+    fn apply_root_patch(&mut self, patch: &[PatchOp]) -> bool {
+        let mut document = self.view();
+        if apply_patch(&mut document, patch).is_err() {
+            return false;
+        }
+        let Some(manifest_raw) = document.get("manifest").cloned() else {
+            return false;
+        };
+        let Some(state_raw) = document.get("state").cloned() else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_value(manifest_raw.clone()) else {
+            return false;
+        };
+        let Ok(state) = serde_json::from_value(state_raw.clone()) else {
+            return false;
+        };
+        let Ok(graph_steps) = serde_json::from_value(
+            document
+                .get("graphSteps")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        ) else {
+            return false;
+        };
+        let Ok(taken_transitions) = serde_json::from_value(
+            document
+                .get("takenTransitions")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        ) else {
+            return false;
+        };
+        let Some(graph_revision) = document.get("graphRevision").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(graph_cursor) = document.get("graphCursor").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(step_start) = document.get("stepStart").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(step_total) = document.get("stepTotal").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(update_start) = document.get("updateStart").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(update_total) = document.get("updateTotal").and_then(Value::as_u64) else {
+            return false;
+        };
+        let Some(live) = document.get("live").and_then(Value::as_bool) else {
+            return false;
+        };
+
+        self.manifest_raw = manifest_raw;
+        self.manifest = manifest;
+        self.state_raw = state_raw;
+        self.state = state;
+        self.graph_steps = graph_steps;
+        self.taken_transitions = taken_transitions;
+        self.graph_revision = graph_revision;
+        self.graph_cursor = graph_cursor;
+        self.step_start = step_start;
+        self.step_total = step_total;
+        self.update_start = update_start;
+        self.update_total = update_total;
+        self.live = live;
+        if let Some(possibly_interrupted) =
+            document.get("possiblyInterrupted").and_then(Value::as_bool)
+        {
+            self.possibly_interrupted = possibly_interrupted;
+        }
+        if let Some(session) = document.get("session") {
+            if session.is_null() {
+                self.session_binding = None;
+                self.session_entries.clear();
+                self.session_entry_start = 0;
+                self.session_entry_total = 0;
+                self.session_events.clear();
+                self.session_event_start = 0;
+                self.session_event_total = 0;
+                self.session_capture = None;
+            } else {
+                self.session_binding = session
+                    .get("binding")
+                    .cloned()
+                    .filter(|value| !value.is_null());
+                self.session_entries = session
+                    .pointer("/entryPage/items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.session_entry_start = session
+                    .pointer("/entryPage/start")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                self.session_entry_total = session
+                    .pointer("/entryPage/total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(self.session_entries.len() as u64);
+                self.session_events = session
+                    .pointer("/eventPage/items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.session_event_start = session
+                    .pointer("/eventPage/start")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                self.session_event_total = session
+                    .pointer("/eventPage/total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(self.session_events.len() as u64);
+                self.session_capture = session
+                    .get("capture")
+                    .cloned()
+                    .filter(|value| !value.is_null());
+                self.session_events_malformed = session
+                    .get("eventsMalformed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.session_events_torn_tail = session
+                    .get("eventsTornTail")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            }
+        }
+        true
+    }
+
     fn apply_delta(&mut self, delta: &ViewerRevisionDelta) -> bool {
         if delta.revision != self.revision + 1 {
             return false;
         }
         for target in &delta.targets {
             let applied = match (target.target_type.as_str(), target.target_key.as_str()) {
+                ("graph", "") => self.apply_root_patch(&target.patch),
                 ("conversation", key) if key.starts_with("entries:") => apply_page_patch(
                     &mut self.session_entry_start,
                     &mut self.session_entry_total,

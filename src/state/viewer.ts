@@ -115,6 +115,15 @@ export function recordViewerDeltas(
         path: "/presentationRevision",
         value: revision,
       },
+      ...(draft.targetType === "graph"
+        ? [
+            {
+              op: "replace" as const,
+              path: "/graphRevision",
+              value: revision,
+            },
+          ]
+        : []),
       ...(draft.patch ?? []),
     ];
     const patchHash = state.putJson(patch, now);

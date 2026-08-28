@@ -154,7 +154,10 @@ impl ProjectionReader {
     }
 
     pub fn read_window(&self, run_id: &str, cursors: ProjectionCursors) -> Result<LoadedRun> {
-        read_run_from_connection(&self.connection, run_id, Some(cursors))
+        let transaction = self.connection.unchecked_transaction()?;
+        let loaded = read_run_from_connection(&transaction, run_id, Some(cursors))?;
+        transaction.commit()?;
+        Ok(loaded)
     }
 
     pub fn read_page(

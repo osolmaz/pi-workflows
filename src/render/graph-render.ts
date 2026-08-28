@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -97,14 +98,24 @@ function nodeTypeStyle(nodeType: string): CanvasStyle {
 }
 
 function fitText(text: string, width: number): string {
-  const chars = [...text];
-  if (chars.length <= width) return text;
-  return width <= 1 ? chars.slice(0, width).join("") : `${chars.slice(0, width - 1).join("")}…`;
+  if (visibleWidth(text) <= width) return text;
+  if (width <= 0) return "";
+  const ellipsis = "…";
+  const available = Math.max(0, width - visibleWidth(ellipsis));
+  let fitted = "";
+  let used = 0;
+  for (const char of text) {
+    const charWidth = visibleWidth(char);
+    if (used + charWidth > available) break;
+    fitted += char;
+    used += charWidth;
+  }
+  return `${fitted}${ellipsis}`;
 }
 
 function centeredText(text: string, width: number): string {
   const fitted = fitText(text, width);
-  const left = Math.max(0, Math.floor((width - [...fitted].length) / 2));
+  const left = Math.max(0, Math.floor((width - visibleWidth(fitted)) / 2));
   return `${" ".repeat(left)}${fitted}`;
 }
 
@@ -225,7 +236,7 @@ function cardShape(view: GraphView, nodeId: string): CardShape {
     ...(cardDetail === "" ? [] : [`… ${cardDetail}`]),
     ...boundedBranchLines(labels),
   ];
-  const desiredWidth = Math.max(...candidates.map((value) => [...value].length));
+  const desiredWidth = Math.max(...candidates.map(visibleWidth));
   const contentWidth = Math.max(
     CARD_MIN_CONTENT_WIDTH,
     Math.min(CARD_MAX_CONTENT_WIDTH, desiredWidth),
@@ -247,7 +258,7 @@ function boundedNodeLabel(
   contentWidth: number,
 ): string {
   const full = hierarchicalNodeLabel(nodeId, node);
-  if ([...full].length <= contentWidth) return full;
+  if (visibleWidth(full) <= contentWidth) return full;
   const local = sanitizeText(node?.localNodeId ?? nodeId);
   const suffix =
     node?.includeTransition === "entry"
@@ -256,7 +267,7 @@ function boundedNodeLabel(
         ? `${local} exit`
         : local;
   const candidate = `… › ${suffix}`;
-  return [...candidate].length <= contentWidth ? candidate : fitText(suffix, contentWidth);
+  return visibleWidth(candidate) <= contentWidth ? candidate : fitText(suffix, contentWidth);
 }
 
 function boundedBranchLines(labels: string[]): string[] {
@@ -399,7 +410,7 @@ function renderCellText(
     branchLines,
     isStart,
     isEnd,
-    width: nodeStyle === "box" ? shape.width : text.length + 2,
+    width: nodeStyle === "box" ? shape.width : visibleWidth(text) + 2,
     height: nodeStyle === "box" ? shape.height : 1,
   };
 }
@@ -800,7 +811,7 @@ function drawNodeBox(
     rowBorder(row);
     canvas.text(startX + 2, row, fitText(left, innerWidth - 2), leftStyle);
     const rightText = fitText(right, innerWidth - 2);
-    canvas.text(rightX - 1 - [...rightText].length, row, rightText, rightStyle);
+    canvas.text(rightX - 1 - visibleWidth(rightText), row, rightText, rightStyle);
   };
 
   canvas.text(startX, y, `${chars.tl}${horizontal}${chars.tr}`, borderStyle);
@@ -940,23 +951,25 @@ function drawSegmentLabel(canvas: CharCanvas, label: PendingLabel): void {
   if (fromX !== toX) {
     const runStart = Math.min(fromX, toX) + 1;
     const runEnd = Math.max(fromX, toX) - 1;
-    const center = Math.floor((runStart + runEnd) / 2) - Math.floor(padded.length / 2);
+    const paddedWidth = visibleWidth(padded);
+    const center = Math.floor((runStart + runEnd) / 2) - Math.floor(paddedWidth / 2);
     if (
-      runEnd - runStart + 1 >= padded.length + 2 &&
+      runEnd - runStart + 1 >= paddedWidth + 2 &&
       canvas.textOverRun(center, trackY, padded, style)
     ) {
       return;
     }
   }
+  const textWidth = visibleWidth(text);
   const candidates: [number, number][] =
     toX >= Math.floor(graphWidth / 2)
       ? [
-          [toX - text.length - 1, labelRow],
+          [toX - textWidth - 1, labelRow],
           [toX + 2, labelRow],
         ]
       : [
           [toX + 2, labelRow],
-          [toX - text.length - 1, labelRow],
+          [toX - textWidth - 1, labelRow],
         ];
   for (const [x, y] of candidates) {
     if (canvas.textIfEmpty(x, y, text, style)) {
@@ -1026,7 +1039,7 @@ function drawBackEdges(
       canvas.text(gutterX + 2, entryLaneY, edge.label, style);
     }
     // Reserve horizontal room for this gutter and its label before the next.
-    gutterX += 2 + (edge.label === undefined ? 0 : edge.label.length + 1);
+    gutterX += 2 + (edge.label === undefined ? 0 : visibleWidth(edge.label) + 1);
   }
 }
 

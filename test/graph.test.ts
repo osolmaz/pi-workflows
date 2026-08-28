@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../src/render/ansi.js";
 import { graphCardSize, renderGraphLines } from "../src/render/graph-render.js";
@@ -307,6 +308,27 @@ describe("renderGraphLines", () => {
       .map(stripAnsi)
       .join("\n");
     expect(text).toContain("+12 branches");
+  });
+
+  it("measures and truncates wide labels in terminal cells", () => {
+    const nodeId = "界界界界界界界界界界界界界界界";
+    const snapshot: WorkflowDefinitionSnapshot = {
+      schema: "pi-workflows.definition-snapshot.v1",
+      name: "wide-label",
+      startAt: nodeId,
+      nodes: { [nodeId]: { nodeType: "compute" } },
+      edges: [],
+    };
+    const bundle = makeBundle(snapshot, [], { status: "running" });
+    expect(graphCardSize(bundle, nodeId)).toEqual({ width: 32, height: 7 });
+    const lines = renderGraphLines(bundle, -1, new Date(), { nodeStyle: "box" }).map(stripAnsi);
+    const header = lines.find((line) => line.includes("界"));
+    expect(header).toBeDefined();
+    const firstBorder = header?.indexOf("│") ?? -1;
+    const lastBorder = header?.lastIndexOf("│") ?? -1;
+    expect(firstBorder).toBeGreaterThanOrEqual(0);
+    expect(lastBorder).toBeGreaterThan(firstBorder);
+    expect(visibleWidth(header?.slice(firstBorder, lastBorder + 1) ?? "")).toBe(32);
   });
 
   it("marks failed steps", () => {
