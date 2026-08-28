@@ -210,6 +210,24 @@ describe("WorkflowRunStore branch behavior", () => {
     }
     expect(row.eventSeq).toBe(256);
     expect(observer.readJson(row.stateHash)).toMatchObject({ throughSeq: 256 });
+    const revisionRow = observer.connection
+      .prepare("SELECT presentation_revision AS revision FROM viewer_runs WHERE run_id = ?")
+      .get("run-checkpoints");
+    if (
+      typeof revisionRow !== "object" ||
+      revisionRow === null ||
+      !("revision" in revisionRow) ||
+      typeof revisionRow.revision !== "number"
+    ) {
+      throw new Error("Viewer revision row is invalid");
+    }
+    const deltas = readViewerDeltas(observer, "run-checkpoints", revisionRow.revision - 1);
+    expect(deltas.kind).toBe("deltas");
+    if (deltas.kind === "deltas") {
+      expect(deltas.deltas).toContainEqual(
+        expect.objectContaining({ targetType: "timeline", targetKey: "session:reload" }),
+      );
+    }
     observer.close();
     store.close();
   });

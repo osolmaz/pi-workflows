@@ -94,7 +94,7 @@ Each viewer-visible SQLite transaction advances the run presentation revision an
 }
 ```
 
-The patch set supports `add`, `replace`, `remove`, and `append`. `append` adds each value to the target array in order. Tail patches keep their page at 256 rows by removing old leading rows when necessary.
+The patch set supports `add`, `replace`, `remove`, and `append`. `append` adds each value to the target array in order. Sliding tail pages keep 256 rows by removing old leading rows when necessary. Session-event pages stay aligned to 256-event checkpoint boundaries. They append inside one block and request the next page when a write crosses a boundary.
 
 A patch targets one bounded document or page. A client applies a tail patch only when it holds that tail page. Older loaded pages stay valid because committed history is immutable. A target that needs a fresh bounded projection causes a snapshot. This still avoids complete-run reads and complete-run JSON comparison.
 

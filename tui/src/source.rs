@@ -355,7 +355,7 @@ impl RunEntry {
         }
         for target in &delta.targets {
             let applied = match (target.target_type.as_str(), target.target_key.as_str()) {
-                ("replay", "steps:reload") => false,
+                ("replay", "steps:reload") | ("timeline", "session:reload") => false,
                 ("summary" | "graph" | "replay" | "inspector", _) => {
                     self.apply_root_patch(&target.patch)
                 }

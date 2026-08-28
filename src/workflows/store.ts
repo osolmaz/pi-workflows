@@ -1611,14 +1611,23 @@ export class WorkflowRunStore {
       const recordedAt = Date.now();
       this.recordSessionReplayCheckpoints(runId, firstRunSequence, projectedRecords, recordedAt);
       const projectedValues = projectedRecords.map((record) => parseJson(canonicalJson(record)));
+      const nextEventTotal = firstRunSequence - 1 + projectedValues.length;
+      const previousBlock = Math.floor(Math.max(0, firstRunSequence - 2) / VIEWER_PAGE_SIZE);
+      const nextBlock = Math.floor(Math.max(0, nextEventTotal - 1) / VIEWER_PAGE_SIZE);
+      const crossesPageBoundary = previousBlock !== nextBlock;
       recordViewerDeltas(
         this.state,
         runId,
         [
           {
             targetType: "timeline",
-            targetKey: "session:tail",
-            patch: viewerTailPatch(firstRunSequence - 1, projectedValues),
+            targetKey: crossesPageBoundary ? "session:reload" : "session:tail",
+            patch: crossesPageBoundary
+              ? [{ op: "replace", path: "/total", value: nextEventTotal }]
+              : [
+                  { op: "append", path: "/items", value: projectedValues },
+                  { op: "replace", path: "/total", value: nextEventTotal },
+                ],
           },
           {
             targetType: "conversation",
@@ -1627,12 +1636,12 @@ export class WorkflowRunStore {
               {
                 op: "replace",
                 path: "/capture/eventCount",
-                value: firstRunSequence - 1 + projectedValues.length,
+                value: nextEventTotal,
               },
               {
                 op: "replace",
                 path: "/capture/lastEventSeq",
-                value: firstRunSequence - 1 + projectedValues.length,
+                value: nextEventTotal,
               },
             ],
           },
