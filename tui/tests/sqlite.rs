@@ -352,12 +352,28 @@ fn refreshes_a_run_after_one_committed_update() {
             [patch_hash],
         )
         .unwrap();
+    let trace_patch_hash = blob(
+        &connection,
+        &json!([
+            {"op": "replace", "path": "/presentationRevision", "value": 2},
+            {"op": "append", "path": "/items", "value": [{"seq": 2, "at": "1970-01-01T00:00:00.002Z", "runId": "run-1", "scope": "run", "type": "run_completed", "payload": {"finalOutput": true}}]},
+            {"op": "replace", "path": "/total", "value": 2}
+        ]),
+    );
+    connection
+        .execute(
+            "INSERT INTO viewer_deltas(run_id, presentation_revision, delta_index, target_type, target_key, patch_hash, recorded_at) VALUES ('run-1', 2, 1, 'timeline', 'trace:tail', ?1, 2)",
+            [trace_patch_hash],
+        )
+        .unwrap();
     drop(connection);
 
     let outcome = source.refresh_all();
     assert_eq!(outcome.updates.len(), 1);
     assert_eq!(source.get("run-1").unwrap().revision, before + 1);
     assert_eq!(source.stats().window_reads, window_reads);
+    assert_eq!(source.get("run-1").unwrap().trace_total, 2);
+    assert_eq!(source.get("run-1").unwrap().events.len(), 2);
     assert_eq!(
         source.get("run-1").unwrap().state.status.label(),
         "completed"

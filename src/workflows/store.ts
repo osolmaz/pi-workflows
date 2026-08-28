@@ -3298,7 +3298,6 @@ function runViewerTargets(
       : { settingsChangeNumber: step.settingsChangeNumber }),
     ...(step.settingsHash === undefined ? {} : { settingsHash: step.settingsHash }),
   });
-  const boundedSteps = state.steps.slice(stepStart).map(compactStep);
   const latestStepByNode = new Map<string, WorkflowStepRecord>();
   for (const step of state.steps) latestStepByNode.set(step.nodeId, step);
   const graphSteps = state.steps
@@ -3316,11 +3315,6 @@ function runViewerTargets(
     { op: "replace", path: "/state/traceSeq", value: state.traceSeq },
     { op: "replace", path: "/state/updatedAt", value: state.updatedAt },
     { op: "replace", path: "/state/status", value: state.status },
-    {
-      op: "replace",
-      path: "/state/steps",
-      value: parseJson(canonicalJson(boundedSteps)),
-    },
     {
       op: "add",
       path: "/state/updates",
@@ -3380,7 +3374,7 @@ function runViewerTargets(
       value: state.status === "running" || state.status === "waiting",
     },
   ];
-  return [
+  const targets: ViewerDeltaDraft[] = [
     { targetType: "graph", patch: graphPatch },
     {
       targetType: "timeline",
@@ -3395,6 +3389,14 @@ function runViewerTargets(
       ]),
     },
   ];
+  if (traceEvent.type === "node_finished" || traceEvent.type === "node_failed") {
+    targets.push({
+      targetType: "replay",
+      targetKey: "steps:reload",
+      patch: [{ op: "replace", path: "/stepTotal", value: stepTotal }],
+    });
+  }
+  return targets;
 }
 
 export function readWorkflowRun(

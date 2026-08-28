@@ -259,6 +259,15 @@ fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<(),
     Ok(())
 }
 
+fn step_reload_cursor(targets: &[TargetPatch], view: &Value) -> Option<u64> {
+    targets
+        .iter()
+        .any(|target| target.target_type == "replay" && target.target_key == "steps:reload")
+        .then(|| view.get("stepTotal").and_then(Value::as_u64))
+        .flatten()
+        .and_then(|total| total.checked_sub(1))
+}
+
 fn accept_page_response(
     desired: &mut HashMap<(String, PageKind), u64>,
     submitted: &mut HashMap<(String, PageKind), u64>,
@@ -629,18 +638,25 @@ async fn run_socket(
                     }
                     ServerMessage::RunPatch { run_id, revision, targets } => {
                         let mut state = shared.lock().unwrap();
+                        let mut step_cursor = None;
                         match state.raw_views.get_mut(&run_id) {
                             Some((current, _, _)) if revision == *current => {}
                             Some((current, generation, view)) if revision == *current + 1 => {
                                 if apply_target_patches(view, &targets).is_ok() {
                                     *current = revision;
                                     *generation = (*generation).wrapping_add(1);
+                                    step_cursor = step_reload_cursor(&targets, view);
                                 } else {
-                                    resubscribe = Some(run_id);
+                                    resubscribe = Some(run_id.clone());
                                 }
                             }
-                            Some(_) => resubscribe = Some(run_id),
+                            Some(_) => resubscribe = Some(run_id.clone()),
                             None => {}
+                        }
+                        if let Some(cursor) = step_cursor {
+                            state
+                                .page_requests
+                                .insert((run_id, PageKind::Steps), cursor);
                         }
                     }
                     ServerMessage::RunPage {
@@ -955,6 +971,23 @@ mod tests {
         let before = middle.clone();
         apply_target_patches(&mut middle, &[entry_tail_target()]).unwrap();
         assert_eq!(middle, before);
+    }
+
+    #[test]
+    fn a_step_reload_delta_requests_the_latest_step_page() {
+        let targets = vec![TargetPatch {
+            target_type: "replay".to_string(),
+            target_key: "steps:reload".to_string(),
+            patch: vec![PatchOp::Replace {
+                path: "/stepTotal".to_string(),
+                value: json!(12),
+            }],
+        }];
+        assert_eq!(
+            step_reload_cursor(&targets, &json!({"stepTotal": 12})),
+            Some(11)
+        );
+        assert_eq!(step_reload_cursor(&targets, &json!({"stepTotal": 0})), None);
     }
 
     #[test]

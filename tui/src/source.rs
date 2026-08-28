@@ -337,6 +337,7 @@ impl RunEntry {
         }
         for target in &delta.targets {
             let applied = match (target.target_type.as_str(), target.target_key.as_str()) {
+                ("replay", "steps:reload") => false,
                 ("summary" | "graph" | "replay" | "inspector", _) => {
                     self.apply_root_patch(&target.patch)
                 }
@@ -344,6 +345,13 @@ impl RunEntry {
                     &mut self.session_entry_start,
                     &mut self.session_entry_total,
                     &mut self.session_entries,
+                    self.revision,
+                    &target.patch,
+                ),
+                ("timeline", key) if key.starts_with("trace:") => apply_page_patch(
+                    &mut self.trace_start,
+                    &mut self.trace_total,
+                    &mut self.events,
                     self.revision,
                     &target.patch,
                 ),
