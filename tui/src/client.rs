@@ -265,6 +265,18 @@ fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<(),
     Ok(())
 }
 
+fn session_reload_cursor(targets: &[TargetPatch], view: &Value) -> Option<u64> {
+    targets
+        .iter()
+        .any(|target| target.target_type == "timeline" && target.target_key == "session:reload")
+        .then(|| {
+            view.pointer("/session/eventPage/total")
+                .and_then(Value::as_u64)
+        })
+        .flatten()
+        .and_then(|total| total.checked_sub(1))
+}
+
 fn step_reload_cursor(targets: &[TargetPatch], view: &Value) -> Option<u64> {
     targets
         .iter()
@@ -645,6 +657,7 @@ async fn run_socket(
                     ServerMessage::RunPatch { run_id, revision, targets } => {
                         let mut state = shared.lock().unwrap();
                         let mut step_cursor = None;
+                        let mut session_cursor = None;
                         match state.raw_views.get_mut(&run_id) {
                             Some((current, _, _)) if revision == *current => {}
                             Some((current, generation, view)) if revision == *current + 1 => {
@@ -652,6 +665,7 @@ async fn run_socket(
                                     *current = revision;
                                     *generation = (*generation).wrapping_add(1);
                                     step_cursor = step_reload_cursor(&targets, view);
+                                    session_cursor = session_reload_cursor(&targets, view);
                                 } else {
                                     resubscribe = Some(run_id.clone());
                                 }
@@ -662,7 +676,15 @@ async fn run_socket(
                         if let Some(cursor) = step_cursor {
                             state
                                 .page_requests
-                                .insert((run_id, PageKind::Steps), cursor);
+                                .insert((run_id.clone(), PageKind::Steps), cursor);
+                        }
+                        if let Some(cursor) = session_cursor {
+                            state
+                                .page_requests
+                                .insert((run_id.clone(), PageKind::SessionEvents), cursor);
+                            state
+                                .page_requests
+                                .insert((run_id, PageKind::SessionEntries), cursor);
                         }
                     }
                     ServerMessage::RunPage {
@@ -990,6 +1012,20 @@ mod tests {
         let before = middle.clone();
         apply_target_patches(&mut middle, &[entry_tail_target()]).unwrap();
         assert_eq!(middle, before);
+    }
+
+    #[test]
+    fn a_session_reload_delta_requests_the_new_aligned_page() {
+        let targets = vec![TargetPatch {
+            target_type: "timeline".to_string(),
+            target_key: "session:reload".to_string(),
+            patch: vec![PatchOp::Replace {
+                path: "/total".to_string(),
+                value: json!(257),
+            }],
+        }];
+        let view = json!({"session": {"eventPage": {"total": 257}}});
+        assert_eq!(session_reload_cursor(&targets, &view), Some(256));
     }
 
     #[test]
