@@ -18,13 +18,13 @@ import {
   VIEWER_PAGE_SIZE,
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
+import { compositionMetadata } from "./composition.js";
+import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
   reduceSessionEvents,
   reduceSessionEventsFromCheckpoint,
   type TemporalSessionState,
-} from "../viewer/session-reducer.js";
-import { compositionMetadata } from "./composition.js";
-import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
+} from "./session-reducer.js";
 import {
   applyWorkflowSettingsPatch,
   workflowSettingsScopeId,

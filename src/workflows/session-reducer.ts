@@ -1,4 +1,4 @@
-import type { WorkflowSessionEntryRecord, WorkflowSessionEventRecord } from "../workflows/types.js";
+import type { WorkflowSessionEntryRecord, WorkflowSessionEventRecord } from "./types.js";
 
 export type TemporalContentBlock = {
   contentIndex: number;
