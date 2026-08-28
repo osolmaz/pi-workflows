@@ -246,9 +246,7 @@ pi-workflows runs          # plain list of recent runs
 pi-workflows view --once   # print a snapshot and exit (good for scripts)
 ```
 
-The run detail view draws the workflow as a boxed graph, like the replay
-viewer in [openclaw/acpx](https://github.com/openclaw/acpx), whose flows the
-pi-workflows workflow model was originally ported from. `←/→` replays the
+The run detail view draws the workflow as a boxed graph. `←/→` replays the
 recorded steps with each step's full output, and scrubbing to the end snaps
 back to following the run live.
 
@@ -393,6 +391,11 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
 The controller example at `examples/controllers/pull-request.controller.ts`
 shows child repair work and check polling. It also uses expected-head guards
 and recoverable merge effects.
+
+## Origins
+
+The workflow model was originally ported from
+[openclaw/acpx](https://github.com/openclaw/acpx) flows.
 
 ## License
 
