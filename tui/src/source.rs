@@ -459,12 +459,7 @@ impl RunSource {
         kind: PageKind,
         cursor: u64,
     ) -> Result<(u64, ProjectionPage)> {
-        let revision = self
-            .index
-            .get(run_id)
-            .map(|row| row.presentation_revision)
-            .ok_or_else(|| anyhow::anyhow!("workflow run not found: {run_id}"))?;
-        let page = self.reader.read_page(run_id, kind, cursor)?;
+        let (revision, page) = self.reader.read_page(run_id, kind, cursor)?;
         self.stats.page_reads += 1;
         self.stats.payload_rows_read += page.items.len() as u64;
         Ok((revision, page))

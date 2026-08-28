@@ -381,6 +381,7 @@ async fn send_projection_page(
                     run_id,
                     revision,
                     kind,
+                    cursor,
                     start: page.start,
                     total: page.total,
                     items: page.items,

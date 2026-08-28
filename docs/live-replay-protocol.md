@@ -123,13 +123,14 @@ A client asks for a page with `fetch_page`:
   "runId": "run-1",
   "revision": 43,
   "kind": "session_events",
+  "cursor": 20000,
   "start": 19872,
   "total": 48620,
   "items": [ … ]
 }
 ```
 
-Page reads use bounded ranges. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
+Page reads use bounded ranges. The response echoes the requested `cursor` and carries the presentation revision read in the same SQLite snapshot as its rows. A client ignores an older response when a newer cursor is pending. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
 
 ## Messages
 
