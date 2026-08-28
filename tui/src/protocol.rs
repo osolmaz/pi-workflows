@@ -71,6 +71,12 @@ pub enum ServerMessage {
         start: u64,
         total: u64,
         items: Vec<Value>,
+        #[serde(rename = "graphCursor", skip_serializing_if = "Option::is_none")]
+        graph_cursor: Option<u64>,
+        #[serde(rename = "graphSteps", skip_serializing_if = "Option::is_none")]
+        graph_steps: Option<Vec<Value>>,
+        #[serde(rename = "takenTransitions", skip_serializing_if = "Option::is_none")]
+        taken_transitions: Option<Vec<String>>,
     },
     Artifact {
         #[serde(rename = "runId")]
@@ -92,6 +98,9 @@ pub enum PageKind {
     Trace,
     SessionEntries,
     SessionEvents,
+    Settings,
+    FollowUps,
+    Updates,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

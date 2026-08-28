@@ -230,8 +230,7 @@ semantic view and do not expose a filesystem path.
 - Browser: `b` expands or collapses it. Up/Down or `j`/`k` selects a run. Drag
   its right border to resize it.
 - Inspector: Enter expands the selected step, trace payload, or conversation
-  entry. In Trace, `v` changes scope. Page Up/Down scrolls long content. Drag
-  its top border to resize the bottom panel.
+  entry. In Trace, `v` changes scope. In Info, `<` and `>` load the previous or next settings, follow-up, and current-update pages. Page Up/Down scrolls long content. Drag its top border to resize the bottom panel.
 - Theme: `,` opens the picker; arrows or `j`/`k` preview. Click `[✓ Apply]` or
   `[× Cancel]`; Enter and Escape remain the keyboard equivalents.
 - `q` or Ctrl-C quits.

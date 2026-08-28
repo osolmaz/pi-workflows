@@ -32,7 +32,16 @@ type LoadedSession = (
     Option<SessionCapture>,
 );
 
-type ProjectionCursors = (Option<u64>, Option<u64>, Option<u64>, Option<u64>);
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProjectionCursors {
+    pub step: Option<u64>,
+    pub trace: Option<u64>,
+    pub session_entry: Option<u64>,
+    pub session_event: Option<u64>,
+    pub settings: Option<u64>,
+    pub follow_ups: Option<u64>,
+    pub updates: Option<u64>,
+}
 
 type LoadedSessionWindow = (
     Option<SessionBinding>,
@@ -51,6 +60,7 @@ pub struct LoadedRun {
     pub state: RunState,
     pub graph_steps: Vec<crate::state::types::StepRecord>,
     pub taken_transitions: Vec<String>,
+    pub graph_cursor: u64,
     pub step_start: u64,
     pub step_total: u64,
     pub snapshot: Option<DefinitionSnapshot>,
@@ -66,7 +76,13 @@ pub struct LoadedRun {
     pub session_event_total: u64,
     pub session_capture: Option<SessionCapture>,
     pub settings_scopes: Vec<Value>,
+    pub settings_start: u64,
+    pub settings_total: u64,
     pub follow_up_queue: Option<Value>,
+    pub follow_up_start: u64,
+    pub follow_up_total: u64,
+    pub update_start: u64,
+    pub update_total: u64,
     pub possibly_interrupted: bool,
     pub presentation_revision: u64,
 }
@@ -100,6 +116,9 @@ pub struct ProjectionPage {
     pub start: u64,
     pub total: u64,
     pub items: Vec<Value>,
+    pub graph_cursor: Option<u64>,
+    pub graph_steps: Option<Vec<crate::state::types::StepRecord>>,
+    pub taken_transitions: Option<Vec<String>>,
 }
 
 pub enum ViewerDeltaRead {
@@ -134,24 +153,8 @@ impl ProjectionReader {
         list_run_index(&self.connection)
     }
 
-    pub fn read_window(
-        &self,
-        run_id: &str,
-        step_cursor: Option<u64>,
-        trace_cursor: Option<u64>,
-        session_entry_cursor: Option<u64>,
-        session_event_cursor: Option<u64>,
-    ) -> Result<LoadedRun> {
-        read_run_from_connection(
-            &self.connection,
-            run_id,
-            Some((
-                step_cursor,
-                trace_cursor,
-                session_entry_cursor,
-                session_event_cursor,
-            )),
-        )
+    pub fn read_window(&self, run_id: &str, cursors: ProjectionCursors) -> Result<LoadedRun> {
+        read_run_from_connection(&self.connection, run_id, Some(cursors))
     }
 
     pub fn read_page(&self, run_id: &str, kind: PageKind, cursor: u64) -> Result<ProjectionPage> {
@@ -167,6 +170,9 @@ impl ProjectionReader {
                         .into_iter()
                         .map(serde_json::to_value)
                         .collect::<Result<Vec<_>, _>>()?,
+                    graph_cursor: None,
+                    graph_steps: None,
+                    taken_transitions: None,
                 })
             }
             PageKind::SessionEntries => {
@@ -175,6 +181,9 @@ impl ProjectionReader {
             PageKind::SessionEvents => {
                 read_session_event_page(&self.connection, run_id, Some(cursor))
             }
+            PageKind::Settings => read_settings_page(&self.connection, run_id, Some(cursor)),
+            PageKind::FollowUps => read_follow_up_page(&self.connection, run_id, Some(cursor)),
+            PageKind::Updates => read_update_page(&self.connection, run_id, Some(cursor)),
         }
     }
 
@@ -284,26 +293,39 @@ fn read_run_from_connection(
         [run_id],
         |row| row.get(0),
     )?;
-    let step_start = match cursors {
-        Some((step_cursor, _, _, _)) => page_start(step_total, step_cursor),
-        None => 0,
-    };
+    let step_start = cursors.map_or(0, |cursors| page_start(step_total, cursors.step));
+    let mut update_page = read_update_page(
+        connection,
+        run_id,
+        cursors.and_then(|cursors| cursors.updates),
+    )?;
+    if cursors.is_none() && update_page.total > update_page.items.len() as u64 {
+        update_page.items = read_updates_range(connection, run_id, 0, -1)?;
+        update_page.start = 0;
+    }
+    let update_start = update_page.start;
+    let update_total = update_page.total;
     let state = read_state(
         connection,
         run_id,
         &definition_value,
         cursors.map(|_| step_start),
+        update_page.items,
     )?;
-    let (graph_steps, taken_transitions) = match cursors {
-        Some((step_cursor, _, _, _)) => {
-            let cutoff = step_cursor
+    let graph_cursor = cursors.map_or_else(
+        || step_total.saturating_sub(1),
+        |cursors| {
+            cursors
+                .step
                 .unwrap_or_else(|| step_total.saturating_sub(1))
-                .min(step_total.saturating_sub(1));
-            (
-                read_graph_steps(connection, run_id, cutoff)?,
-                read_taken_transitions(connection, run_id, cutoff)?,
-            )
-        }
+                .min(step_total.saturating_sub(1))
+        },
+    );
+    let (graph_steps, taken_transitions) = match cursors {
+        Some(_) => (
+            read_graph_steps(connection, run_id, graph_cursor)?,
+            read_taken_transitions(connection, run_id, graph_cursor)?,
+        ),
         None => (
             state.steps.clone(),
             state
@@ -316,7 +338,7 @@ fn read_run_from_connection(
         ),
     };
     let (trace, trace_start, trace_total) = match cursors {
-        Some((_, trace_cursor, _, _)) => read_trace_window(connection, run_id, trace_cursor)?,
+        Some(cursors) => read_trace_window(connection, run_id, cursors.trace)?,
         None => {
             let trace = read_trace(connection, run_id)?;
             let total = trace.len() as u64;
@@ -333,9 +355,12 @@ fn read_run_from_connection(
         session_event_total,
         session_capture,
     ) = match cursors {
-        Some((_, _, entry_cursor, event_cursor)) => {
-            read_session_window(connection, run_id, entry_cursor, event_cursor)?
-        }
+        Some(cursors) => read_session_window(
+            connection,
+            run_id,
+            cursors.session_entry,
+            cursors.session_event,
+        )?,
         None => {
             let (binding, entries, events, capture) = read_session(connection, run_id)?;
             let entry_total = entries.len() as u64;
@@ -352,8 +377,30 @@ fn read_run_from_connection(
             )
         }
     };
-    let settings_scopes = read_settings(connection, run_id)?;
-    let follow_up_queue = read_follow_ups(connection, run_id)?;
+    let mut settings_page = read_settings_page(
+        connection,
+        run_id,
+        cursors.and_then(|cursors| cursors.settings),
+    )?;
+    if cursors.is_none() && settings_page.total > settings_page.items.len() as u64 {
+        settings_page.items = read_settings_range(connection, run_id, 0, -1)?;
+        settings_page.start = 0;
+    }
+    let mut follow_up_page = read_follow_up_page(
+        connection,
+        run_id,
+        cursors.and_then(|cursors| cursors.follow_ups),
+    )?;
+    if cursors.is_none() && follow_up_page.total > follow_up_page.items.len() as u64 {
+        follow_up_page.items = read_follow_up_range(connection, run_id, 0, -1)?;
+        follow_up_page.start = 0;
+    }
+    let follow_up_queue = read_follow_up_state(connection, run_id)?.map(|presentation_state| {
+        json!({
+            "presentationState": presentation_state,
+            "items": follow_up_page.items,
+        })
+    });
     let presentation_revision = connection.query_row(
         "SELECT presentation_revision FROM viewer_runs WHERE run_id = ?1",
         [run_id],
@@ -369,6 +416,7 @@ fn read_run_from_connection(
         state,
         graph_steps,
         taken_transitions,
+        graph_cursor,
         step_start,
         step_total,
         snapshot: Some(snapshot),
@@ -383,8 +431,14 @@ fn read_run_from_connection(
         session_event_start,
         session_event_total,
         session_capture,
-        settings_scopes,
+        settings_scopes: settings_page.items,
+        settings_start: settings_page.start,
+        settings_total: settings_page.total,
         follow_up_queue,
+        follow_up_start: follow_up_page.start,
+        follow_up_total: follow_up_page.total,
+        update_start,
+        update_total,
         possibly_interrupted,
         presentation_revision,
     })
@@ -580,15 +634,20 @@ fn read_text_blob(connection: &Connection, hash: &[u8]) -> Result<String> {
     Ok(String::from_utf8(content)?)
 }
 
-fn read_settings(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
+fn read_settings_range(
+    connection: &Connection,
+    run_id: &str,
+    start: u64,
+    limit: i64,
+) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "SELECT s.scope_id, s.mount_path, s.invocation, s.current_hash, r.revision
          FROM workflow_settings s
          JOIN resources r ON r.resource_id = s.resource_id
          WHERE s.active_run_id = ?1
-         ORDER BY s.mount_path, s.invocation LIMIT 256",
+         ORDER BY s.mount_path, s.invocation LIMIT ?2 OFFSET ?3",
     )?;
-    let rows = statement.query_map([run_id], |row| {
+    let rows = statement.query_map(rusqlite::params![run_id, limit, start], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -597,10 +656,10 @@ fn read_settings(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             row.get::<_, u64>(4)?,
         ))
     })?;
-    let mut scopes = Vec::new();
+    let mut items = Vec::new();
     for row in rows {
         let (scope_id, mount_path, invocation, settings_hash, change_number) = row?;
-        scopes.push(json!({
+        items.push(json!({
             "scopeId": scope_id,
             "mountPath": mount_path,
             "invocation": invocation,
@@ -608,25 +667,39 @@ fn read_settings(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
             "settingsHash": encode_hex(&settings_hash),
         }));
     }
-    Ok(scopes)
+    Ok(items)
 }
 
-fn read_follow_ups(connection: &Connection, run_id: &str) -> Result<Option<Value>> {
-    let queue = connection
-        .query_row(
-            "SELECT presentation_state FROM workflow_follow_up_queues WHERE run_id = ?1",
-            [run_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let Some(presentation_state) = queue else {
-        return Ok(None);
-    };
+fn read_settings_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM workflow_settings WHERE active_run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    Ok(projection_page(
+        start,
+        total,
+        read_settings_range(connection, run_id, start, VIEWER_PAGE_SIZE as i64)?,
+    ))
+}
+
+fn read_follow_up_range(
+    connection: &Connection,
+    run_id: &str,
+    start: u64,
+    limit: i64,
+) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "SELECT follow_up_id, order_number, status, source_type, session_entry_id
-         FROM workflow_follow_ups WHERE run_id = ?1 ORDER BY order_number LIMIT 256",
+         FROM workflow_follow_ups
+         WHERE run_id = ?1 ORDER BY order_number LIMIT ?2 OFFSET ?3",
     )?;
-    let rows = statement.query_map([run_id], |row| {
+    let rows = statement.query_map(rusqlite::params![run_id, limit, start], |row| {
         Ok(json!({
             "followUpId": row.get::<_, String>(0)?,
             "order": row.get::<_, u64>(1)?,
@@ -635,11 +708,35 @@ fn read_follow_ups(connection: &Connection, run_id: &str) -> Result<Option<Value
             "sessionEntryId": row.get::<_, Option<String>>(4)?,
         }))
     })?;
-    let items = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(json!({
-        "presentationState": presentation_state,
-        "items": items,
-    })))
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_follow_up_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM workflow_follow_ups WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    Ok(projection_page(
+        start,
+        total,
+        read_follow_up_range(connection, run_id, start, VIEWER_PAGE_SIZE as i64)?,
+    ))
+}
+
+fn read_follow_up_state(connection: &Connection, run_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT presentation_state FROM workflow_follow_up_queues WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?)
 }
 
 fn read_state(
@@ -647,6 +744,7 @@ fn read_state(
     run_id: &str,
     definition: &Value,
     step_start: Option<u64>,
+    updates: Vec<Value>,
 ) -> Result<RunState> {
     let row = connection.query_row(
         "SELECT r.resource_id, d.workflow_name, r.parent_run_id, r.title, r.status,
@@ -856,7 +954,6 @@ fn read_state(
     if !state["workflowSources"].is_null() || has_composed_mounts {
         state["definitionDigest"] = json!(format!("sha256:{}", encode_hex(&definition_digest)));
     }
-    let updates = read_updates(connection, run_id)?;
     if !updates.is_empty() {
         state["updates"] = json!(updates);
     }
@@ -1150,7 +1247,12 @@ fn read_sources(
     Ok((root, mounted))
 }
 
-fn read_updates(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
+fn read_updates_range(
+    connection: &Connection,
+    run_id: &str,
+    start: u64,
+    limit: i64,
+) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(
         "WITH latest AS (
            SELECT u.update_id, u.run_revision, a.node_id, u.attempt_id,
@@ -1166,9 +1268,9 @@ fn read_updates(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
          SELECT update_id, run_revision, node_id, attempt_id,
                 update_type, update_key, data_hash, recorded_at
          FROM latest WHERE position = 1
-         ORDER BY run_revision DESC LIMIT ?2",
+         ORDER BY run_revision LIMIT ?2 OFFSET ?3",
     )?;
-    let rows = statement.query_map(rusqlite::params![run_id, VIEWER_PAGE_SIZE], |row| {
+    let rows = statement.query_map(rusqlite::params![run_id, limit, start], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, u64>(1)?,
@@ -1191,6 +1293,28 @@ fn read_updates(connection: &Connection, run_id: &str) -> Result<Vec<Value>> {
     }
     values.sort_by_key(|value| value["seq"].as_u64().unwrap_or_default());
     Ok(values)
+}
+
+fn read_update_page(
+    connection: &Connection,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Result<ProjectionPage> {
+    let total: u64 = connection.query_row(
+        "SELECT count(*) FROM (
+           SELECT 1 FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ?1 GROUP BY u.update_type, u.update_key
+         )",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let start = page_start(total, cursor);
+    Ok(projection_page(
+        start,
+        total,
+        read_updates_range(connection, run_id, start, VIEWER_PAGE_SIZE as i64)?,
+    ))
 }
 
 fn read_human_decision_receipt(connection: &Connection, run_id: &str) -> Result<Option<Value>> {
@@ -1529,10 +1653,16 @@ fn read_step_page(
         |row| row.get(0),
     )?;
     let start = page_start(total, cursor);
+    let graph_cursor = cursor
+        .unwrap_or_else(|| total.saturating_sub(1))
+        .min(total.saturating_sub(1));
     Ok(ProjectionPage {
         start,
         total,
         items: read_steps(connection, run_id, Some(start))?,
+        graph_cursor: Some(graph_cursor),
+        graph_steps: Some(read_graph_steps(connection, run_id, graph_cursor)?),
+        taken_transitions: Some(read_taken_transitions(connection, run_id, graph_cursor)?),
     })
 }
 
@@ -1569,6 +1699,9 @@ fn read_session_entry_page(
         start,
         total,
         items,
+        graph_cursor: None,
+        graph_steps: None,
+        taken_transitions: None,
     })
 }
 
@@ -1644,6 +1777,9 @@ fn read_session_event_page(
         start,
         total,
         items,
+        graph_cursor: None,
+        graph_steps: None,
+        taken_transitions: None,
     })
 }
 
@@ -1805,6 +1941,17 @@ fn read_session_window(
         event_total,
         Some(serde_json::from_value(capture)?),
     ))
+}
+
+fn projection_page(start: u64, total: u64, items: Vec<Value>) -> ProjectionPage {
+    ProjectionPage {
+        start,
+        total,
+        items,
+        graph_cursor: None,
+        graph_steps: None,
+        taken_transitions: None,
+    }
 }
 
 fn page_start(total: u64, cursor: Option<u64>) -> u64 {

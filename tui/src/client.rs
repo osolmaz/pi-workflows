@@ -25,6 +25,7 @@ pub struct RemoteView {
     pub state: RunState,
     pub graph_steps: Vec<StepRecord>,
     pub taken_transitions: Vec<String>,
+    pub graph_cursor: u64,
     pub step_start: u64,
     pub step_total: u64,
     pub snapshot: Option<DefinitionSnapshot>,
@@ -43,7 +44,13 @@ pub struct RemoteView {
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
     pub settings_scopes: Vec<Value>,
+    pub settings_start: u64,
+    pub settings_total: u64,
     pub follow_up_queue: Option<Value>,
+    pub follow_up_start: u64,
+    pub follow_up_total: u64,
+    pub update_start: u64,
+    pub update_total: u64,
     pub live: bool,
     pub possibly_interrupted: bool,
 }
@@ -63,6 +70,10 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .get("takenTransitions")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
+    let graph_cursor = raw
+        .get("graphCursor")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| state.steps.len().saturating_sub(1) as u64);
     let step_start = raw.get("stepStart").and_then(Value::as_u64).unwrap_or(0);
     let step_total = raw
         .get("stepTotal")
@@ -129,10 +140,42 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let settings_start = raw
+        .get("settingsStart")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let settings_total = raw
+        .get("settingsTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or(settings_scopes.len() as u64);
     let follow_up_queue = raw
         .get("followUpQueue")
         .cloned()
         .filter(|value| !value.is_null());
+    let follow_up_start = raw
+        .get("followUpStart")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let follow_up_total = raw
+        .get("followUpTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            follow_up_queue
+                .as_ref()
+                .and_then(|queue| queue.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len() as u64)
+        });
+    let update_start = raw.get("updateStart").and_then(Value::as_u64).unwrap_or(0);
+    let update_total = raw
+        .get("updateTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            state
+                .updates
+                .as_ref()
+                .map_or(0, |updates| updates.len() as u64)
+        });
     Some(RemoteView {
         revision,
         graph_revision,
@@ -141,6 +184,7 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         state,
         graph_steps,
         taken_transitions,
+        graph_cursor,
         step_start,
         step_total,
         snapshot,
@@ -159,7 +203,13 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         session_events_torn_tail,
         session_capture,
         settings_scopes,
+        settings_start,
+        settings_total,
         follow_up_queue,
+        follow_up_start,
+        follow_up_total,
+        update_start,
+        update_total,
         live: raw.get("live").and_then(Value::as_bool).unwrap_or(false),
         possibly_interrupted: raw
             .get("possiblyInterrupted")
@@ -581,6 +631,9 @@ async fn run_socket(
                         start,
                         total,
                         items,
+                        graph_cursor,
+                        graph_steps,
+                        taken_transitions,
                     } => {
                         let page_key = (run_id.clone(), kind);
                         submitted_pages.remove(&page_key);
@@ -595,19 +648,52 @@ async fn run_socket(
                                     PageKind::Trace => "/tracePage",
                                     PageKind::SessionEntries => "/session/entryPage",
                                     PageKind::SessionEvents => "/session/eventPage",
+                                    PageKind::Settings => "/settingsScopes",
+                                    PageKind::FollowUps => "/followUpQueue/items",
+                                    PageKind::Updates => "/state/updates",
                                 };
                                 if let Some(page) = view.pointer_mut(pointer) {
-                                    if kind == PageKind::Steps {
-                                        *page = Value::Array(items);
-                                        view["stepStart"] = serde_json::json!(start);
-                                        view["stepTotal"] = serde_json::json!(total);
-                                    } else {
-                                        *page = serde_json::json!({
-                                            "presentationRevision": revision,
-                                            "start": start,
-                                            "total": total,
-                                            "items": items,
-                                        });
+                                    match kind {
+                                        PageKind::Steps => {
+                                            *page = Value::Array(items);
+                                            view["stepStart"] = serde_json::json!(start);
+                                            view["stepTotal"] = serde_json::json!(total);
+                                            if let Some(cursor) = graph_cursor {
+                                                view["graphCursor"] = serde_json::json!(cursor);
+                                            }
+                                            if let Some(steps) = graph_steps {
+                                                view["graphSteps"] = Value::Array(steps);
+                                            }
+                                            if let Some(transitions) = taken_transitions {
+                                                view["takenTransitions"] =
+                                                    serde_json::json!(transitions);
+                                            }
+                                        }
+                                        PageKind::Settings => {
+                                            *page = Value::Array(items);
+                                            view["settingsStart"] = serde_json::json!(start);
+                                            view["settingsTotal"] = serde_json::json!(total);
+                                        }
+                                        PageKind::FollowUps => {
+                                            *page = Value::Array(items);
+                                            view["followUpStart"] = serde_json::json!(start);
+                                            view["followUpTotal"] = serde_json::json!(total);
+                                        }
+                                        PageKind::Updates => {
+                                            *page = Value::Array(items);
+                                            view["updateStart"] = serde_json::json!(start);
+                                            view["updateTotal"] = serde_json::json!(total);
+                                        }
+                                        PageKind::Trace
+                                        | PageKind::SessionEntries
+                                        | PageKind::SessionEvents => {
+                                            *page = serde_json::json!({
+                                                "presentationRevision": revision,
+                                                "start": start,
+                                                "total": total,
+                                                "items": items,
+                                            });
+                                        }
                                     }
                                     *generation = (*generation).wrapping_add(1);
                                 } else {

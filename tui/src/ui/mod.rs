@@ -65,6 +65,7 @@ pub struct RunData<'a> {
     pub state: &'a RunState,
     pub graph_steps: &'a [crate::state::types::StepRecord],
     pub taken_transitions: &'a [String],
+    pub graph_cursor: u64,
     pub step_start: u64,
     pub step_total: u64,
     pub snapshot: Option<&'a DefinitionSnapshot>,
@@ -83,7 +84,13 @@ pub struct RunData<'a> {
     pub session_events_torn_tail: bool,
     pub session_capture: Option<&'a Value>,
     pub settings_scopes: &'a [Value],
+    pub settings_start: u64,
+    pub settings_total: u64,
     pub follow_up_queue: Option<&'a Value>,
+    pub follow_up_start: u64,
+    pub follow_up_total: u64,
+    pub update_start: u64,
+    pub update_total: u64,
     pub live: bool,
     pub possibly_interrupted: bool,
     /// Bundle directory when reading the filesystem directly; lets previews
@@ -176,6 +183,7 @@ impl Provider {
                     state: &entry.state,
                     graph_steps: &entry.graph_steps,
                     taken_transitions: &entry.taken_transitions,
+                    graph_cursor: entry.graph_cursor,
                     step_start: entry.step_start,
                     step_total: entry.step_total,
                     snapshot: entry.snapshot.as_ref(),
@@ -194,7 +202,13 @@ impl Provider {
                     session_events_torn_tail: entry.session_events_torn_tail,
                     session_capture: entry.session_capture.as_ref(),
                     settings_scopes: &entry.settings_scopes,
+                    settings_start: entry.settings_start,
+                    settings_total: entry.settings_total,
                     follow_up_queue: entry.follow_up_queue.as_ref(),
+                    follow_up_start: entry.follow_up_start,
+                    follow_up_total: entry.follow_up_total,
+                    update_start: entry.update_start,
+                    update_total: entry.update_total,
                     live: entry.live,
                     possibly_interrupted: entry.possibly_interrupted,
                     run_dir: Some(&entry.dir),
@@ -209,6 +223,7 @@ impl Provider {
                     state: &view.state,
                     graph_steps: &view.graph_steps,
                     taken_transitions: &view.taken_transitions,
+                    graph_cursor: view.graph_cursor,
                     step_start: view.step_start,
                     step_total: view.step_total,
                     snapshot: view.snapshot.as_ref(),
@@ -227,7 +242,13 @@ impl Provider {
                     session_events_torn_tail: view.session_events_torn_tail,
                     session_capture: view.session_capture.as_ref(),
                     settings_scopes: &view.settings_scopes,
+                    settings_start: view.settings_start,
+                    settings_total: view.settings_total,
                     follow_up_queue: view.follow_up_queue.as_ref(),
+                    follow_up_start: view.follow_up_start,
+                    follow_up_total: view.follow_up_total,
+                    update_start: view.update_start,
+                    update_total: view.update_total,
                     live: view.live,
                     possibly_interrupted: view.possibly_interrupted,
                     run_dir: None,
@@ -254,6 +275,7 @@ impl Provider {
                         trace,
                         session_entry,
                         session_event,
+                        ..crate::source::WindowCursor::default()
                     },
                 );
             }
@@ -269,6 +291,35 @@ impl Provider {
                 }
                 if let Some(cursor) = session_event {
                     remote.request_page(run_id, PageKind::SessionEvents, cursor);
+                }
+            }
+        }
+    }
+
+    fn request_info_window(
+        &mut self,
+        run_id: &str,
+        settings: Option<u64>,
+        follow_ups: Option<u64>,
+        updates: Option<u64>,
+    ) {
+        match self {
+            Provider::Local { source, .. } => {
+                let mut cursor = source.cursor(run_id);
+                cursor.settings = settings;
+                cursor.follow_ups = follow_ups;
+                cursor.updates = updates;
+                let _ = source.request_window(run_id, cursor);
+            }
+            Provider::Remote(remote) => {
+                if let Some(cursor) = settings {
+                    remote.request_page(run_id, PageKind::Settings, cursor);
+                }
+                if let Some(cursor) = follow_ups {
+                    remote.request_page(run_id, PageKind::FollowUps, cursor);
+                }
+                if let Some(cursor) = updates {
+                    remote.request_page(run_id, PageKind::Updates, cursor);
                 }
             }
         }
@@ -386,6 +437,7 @@ struct GraphCacheKey {
     run_id: String,
     graph_revision: u64,
     replay_position: i64,
+    graph_cursor: u64,
     at_latest: bool,
     node_style: GraphNodeStyle,
     elapsed_second: i64,
@@ -593,7 +645,12 @@ impl App {
         };
         let cursor = position as u64;
         let loaded = self.provider.data(&run_id).is_some_and(|data| {
-            cursor >= data.step_start && cursor < data.step_start + data.state.steps.len() as u64
+            step_projection_contains(
+                cursor,
+                data.graph_cursor,
+                data.step_start,
+                data.state.steps.len(),
+            )
         });
         if !loaded {
             self.provider
@@ -830,6 +887,46 @@ impl App {
         self.inspector_scrolls[self.tab.index()] = self.inspector_scroll;
         self.tab = tab;
         self.inspector_scroll = self.inspector_scrolls[tab.index()];
+    }
+
+    fn page_info(&mut self, direction: i64) {
+        let Some(run_id) = self.selected_run.clone() else {
+            return;
+        };
+        let cursors = {
+            let Some(data) = self.provider.data(&run_id) else {
+                return;
+            };
+            let follow_up_len = data
+                .follow_up_queue
+                .and_then(|queue| queue.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let settings = next_page_cursor(
+                data.settings_start,
+                data.settings_total,
+                data.settings_scopes.len(),
+                direction,
+            );
+            let follow_ups = next_page_cursor(
+                data.follow_up_start,
+                data.follow_up_total,
+                follow_up_len,
+                direction,
+            );
+            let updates = next_page_cursor(
+                data.update_start,
+                data.update_total,
+                data.state.updates.as_ref().map_or(0, Vec::len),
+                direction,
+            );
+            (settings, follow_ups, updates)
+        };
+        if cursors.0.is_some() || cursors.1.is_some() || cursors.2.is_some() {
+            self.provider
+                .request_info_window(&run_id, cursors.0, cursors.1, cursors.2);
+            self.inspector_scroll = 0;
+        }
     }
 
     fn request_selected_artifacts(&mut self) {
@@ -1165,6 +1262,8 @@ fn handle_key(app: &mut App, summaries: &[RunSummary], key: KeyEvent) {
                     app.trace_payload_expanded = false;
                     app.inspector_scroll = 0;
                 }
+                KeyCode::Char('<') if app.tab == InspectorTab::Info => app.page_info(-1),
+                KeyCode::Char('>') if app.tab == InspectorTab::Info => app.page_info(1),
                 KeyCode::PageUp => app.inspector_scroll = app.inspector_scroll.saturating_sub(10),
                 KeyCode::PageDown => app.inspector_scroll += 10,
                 _ => {}
@@ -1730,10 +1829,12 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         temporal_node_id.or_else(|| selected_step.map(|step| step.node_id.as_str()))
     };
     let rendered_at = now_ms();
+    let graph_projection_ready = selected_index < 0 || data.graph_cursor == selected_index as u64;
     let cache_key = GraphCacheKey {
         run_id: run_id.clone(),
         graph_revision: data.graph_revision,
         replay_position: selected_index,
+        graph_cursor: data.graph_cursor,
         at_latest,
         node_style,
         elapsed_second: if at_latest && data.state.current_node.is_some() {
@@ -1747,19 +1848,23 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         .as_ref()
         .is_none_or(|cache| cache.key != cache_key)
     {
-        let rendered = data.graph_layout.map_or_else(
-            || render_graph(&view, render_index, at_latest, rendered_at, node_style),
-            |layout| {
-                render_graph_with_layout(
-                    &view,
-                    layout,
-                    render_index,
-                    at_latest,
-                    rendered_at,
-                    node_style,
+        let rendered = graph_projection_ready
+            .then(|| {
+                data.graph_layout.map_or_else(
+                    || render_graph(&view, render_index, at_latest, rendered_at, node_style),
+                    |layout| {
+                        render_graph_with_layout(
+                            &view,
+                            layout,
+                            render_index,
+                            at_latest,
+                            rendered_at,
+                            node_style,
+                        )
+                    },
                 )
-            },
-        );
+            })
+            .flatten();
         app.graph_cache = Some(GraphCache {
             key: cache_key,
             rendered,
@@ -1809,6 +1914,9 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         graph_flags.push("CAPTURE FAILED");
     } else if capture.status == "invalid" {
         graph_flags.push("CAPTURE INVALID");
+    }
+    if !graph_projection_ready {
+        graph_flags.push("LOADING REPLAY");
     }
     if local_stale {
         graph_flags.push("STALE DATA");
@@ -1969,6 +2077,30 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     if let Some(picker) = &app.theme_picker {
         theme_picker::render(frame, area, picker, &palette);
     }
+}
+
+fn next_page_cursor(start: u64, total: u64, length: usize, direction: i64) -> Option<u64> {
+    if total == 0 || length == 0 {
+        return None;
+    }
+    if direction > 0 && start.saturating_add(length as u64) < total {
+        return Some(start.saturating_add(length as u64));
+    }
+    if direction < 0 && start > 0 {
+        return Some(start - 1);
+    }
+    Some(start.saturating_add(length as u64 / 2).min(total - 1))
+}
+
+fn step_projection_contains(
+    cursor: u64,
+    graph_cursor: u64,
+    page_start: u64,
+    page_len: usize,
+) -> bool {
+    graph_cursor == cursor
+        && cursor >= page_start
+        && cursor < page_start.saturating_add(page_len as u64)
 }
 
 fn temporal_through_seq(events: &[Value], position: i64) -> u64 {
@@ -2783,6 +2915,14 @@ fn capture_integrity(data: &RunData) -> CaptureIntegrity {
     )
 }
 
+fn page_range(start: u64, length: usize, total: u64) -> String {
+    if total == 0 || length == 0 {
+        "empty".to_string()
+    } else {
+        format!("showing {}-{}", start + 1, start + length as u64)
+    }
+}
+
 fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'static>> {
     let state = data.state;
     let label =
@@ -2841,7 +2981,15 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
     if !data.settings_scopes.is_empty() {
         lines.push(Line::from(vec![
             label("settings"),
-            Span::raw(format!("{} scope(s)", data.settings_scopes.len())),
+            Span::raw(format!(
+                "{} scope(s) · {}",
+                data.settings_total,
+                page_range(
+                    data.settings_start,
+                    data.settings_scopes.len(),
+                    data.settings_total
+                )
+            )),
         ]));
         for scope in data.settings_scopes {
             let mount = scope
@@ -2878,8 +3026,9 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         lines.push(Line::from(vec![
             label("follow-ups"),
             Span::raw(format!(
-                "{} item(s) · presentation {}",
-                items.len(),
+                "{} item(s) · {} · presentation {}",
+                data.follow_up_total,
+                page_range(data.follow_up_start, items.len(), data.follow_up_total),
                 sanitize_text(presentation)
             )),
         ]));
@@ -2894,6 +3043,34 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
                 Span::raw(format!("{} · {}", order, sanitize_text(state))),
             ]));
         }
+    }
+    if let Some(updates) = &state.updates {
+        lines.push(Line::from(vec![
+            label("updates"),
+            Span::raw(format!(
+                "{} current key(s) · {}",
+                data.update_total,
+                page_range(data.update_start, updates.len(), data.update_total)
+            )),
+        ]));
+    }
+    if data.settings_total > data.settings_scopes.len() as u64
+        || data.follow_up_total
+            > data
+                .follow_up_queue
+                .and_then(|queue| queue.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len() as u64)
+        || data.update_total
+            > state
+                .updates
+                .as_ref()
+                .map_or(0, |updates| updates.len() as u64)
+    {
+        lines.push(Line::from(Span::styled(
+            "< previous inspector page · > next inspector page",
+            Style::default().fg(palette.muted),
+        )));
     }
     let capture = capture_integrity(data);
     lines.push(Line::from(vec![
@@ -3222,11 +3399,11 @@ mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
         current_progress_epoch, graph_position_label, inspector_height_for_drag,
-        inspector_tab_label, inspector_tab_layout, progress_rates,
+        inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, progress_rates,
         push_human_decision_presentation, resolve_remote_artifacts, resolved_inspector_height,
-        sidebar_width_for_drag, temporal_through_seq, trace_events_for_scope,
-        valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds, Palette, Rect, StepRecord,
-        TraceScope, DEFAULT_NODE_STYLE,
+        sidebar_width_for_drag, step_projection_contains, temporal_through_seq,
+        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
+        Palette, Rect, StepRecord, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -3301,6 +3478,21 @@ mod tests {
         assert!(!valid_session_binding(Some(&json!({ "schema": "future" }))));
         assert!(!valid_session_binding(Some(&json!("binding"))));
         assert!(!valid_session_binding(None));
+    }
+
+    #[test]
+    fn inspector_pages_keep_a_complete_navigation_path() {
+        assert_eq!(next_page_cursor(0, 600, 256, 1), Some(256));
+        assert_eq!(next_page_cursor(256, 600, 256, -1), Some(255));
+        assert_eq!(next_page_cursor(344, 600, 256, 1), Some(472));
+        assert_eq!(page_range(256, 256, 600), "showing 257-512");
+    }
+
+    #[test]
+    fn replay_requires_graph_state_for_the_exact_cursor() {
+        assert!(step_projection_contains(130, 130, 0, 256));
+        assert!(!step_projection_contains(129, 130, 0, 256));
+        assert!(!step_projection_contains(300, 300, 0, 256));
     }
 
     #[test]
