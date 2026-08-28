@@ -5,9 +5,9 @@
 </p>
 
 pi-workflows is a workflow extension for the [Pi coding agent](https://pi.dev).
-It lets you define multi-step agent workflows as TypeScript graphs, trigger
-them at any point in a Pi conversation with `/workflow`, and watch them run
-live in a standalone terminal viewer.
+It lets you define multi-step agent workflows as TypeScript graphs and trigger
+them at any point in a Pi conversation with `/workflow`. A standalone terminal
+viewer shows each run live.
 
 Agent steps run inside your current Pi conversation, so the model keeps
 everything it already knows from the discussion. A submitted agent step
@@ -41,7 +41,7 @@ The Pi package includes the extension and six optional skills:
 - `autoplan` selects the best practical solution and writes an implementation plan.
 - `autodoc` records an existing plan in canonical documentation.
 - `autoimplement` implements an existing plan and verifies the result.
-- `sanity-check` reviews whether a contribution is necessary, focused, and well supported.
+- `sanity-check` reviews whether a contribution is necessary, and whether it is focused and well supported.
 
 Pi discovers these skills when it loads the package. Use `pi config` to disable
 the extension, all bundled skills, or one skill independently. The equivalent
@@ -131,9 +131,6 @@ A workflow can also expose [settings that change during a
 run](docs/2026-08-25-workflow-settings.md) and queue [normal follow-up work
 after completion](docs/2026-08-25-workflow-follow-ups.md).
 
-While a run is on screen, the footer status bar shows a compact
-`wf <name> [status] <node>` indicator alongside the widget.
-
 `presentationPrompt` is optional. After each top-level interactive run ends,
 pi-workflows gives the model one normal terminal decision turn with the exact
 stored input, result, terminal reason, and restart history. A presentation
@@ -184,8 +181,8 @@ trace, pause state, and cancellation state. See
 ## Agent-managed workflows
 
 The model can use the same `workflow` tool to list, start, restart, inspect,
-pause, resume, cancel, and answer workflows. `restart` takes a terminal run ID,
-reuses its exact workflow reference and input, and creates a new immutable run.
+pause, resume, cancel, and answer workflows. `restart` takes a terminal run ID
+and reuses its exact workflow reference and input to create a new immutable run.
 Submitted-step contracts use the tool's
 `submit` action, while assistant-step contracts require a normal assistant
 response instead. Slash commands and model actions share one lifecycle
@@ -227,8 +224,9 @@ runner resumes it.
 
 Because the workflow runs in your current conversation, you can have a long
 discussion first and then trigger a workflow that builds on it. The
-`autoplan` example does exactly that. It frames the problem and scope, devises
-an elegant production-ready solution, and compares it with the holy grail. It
+`autoplan` example does exactly that. It frames the problem and scope, then
+devises an elegant production-ready solution and compares it with the holy
+grail. It
 then selects the best practical in-scope solution without asking the user to
 resolve the gap. The ideal can win when it is feasible, but work outside the
 current authority cannot block a valid practical solution. The workflow keeps
@@ -250,46 +248,18 @@ pi-workflows view --once   # print a snapshot and exit (good for scripts)
 
 The run detail view draws the workflow as a boxed graph, like the replay
 viewer in [openclaw/acpx](https://github.com/openclaw/acpx), whose flows the
-pi-workflows workflow model was originally ported from. Included nodes use
-hierarchical labels such as `implementation › redesign › plan`, and each card
-shows its step name plus node type, status, attempts, and timing in compact
-symbol rows. Node types have distinct semantic colors, active cards use a
-heavy border, branches carry their case labels, the taken path is highlighted,
-and loops route through a gutter on the right back into their target from
-above. `←/→` scrubs backwards and forwards through the recorded steps and
-re-derives every node's status as of that step, with the selected step's full
-output shown below. Scrubbing to the end snaps back to following the run live.
+pi-workflows workflow model was originally ported from. `←/→` replays the
+recorded steps with each step's full output, and scrubbing to the end snaps
+back to following the run live.
 
-```
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃            review            ┃
-  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
-  ┃ ● agent            ◐ running ┃
-  ┃ ↻ 2                    ◷ 12s ┃
-  ┃ ◇ clean                     ┃
-  ┃ ◇ issues_found              ┃
-  ┃ … reviewing implementation  ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-```
-
-The Rust `piw` viewer under `tui/` adds a Catppuccin interface, selectable
-themes, centered active-node following, draggable browser and inspector sizes,
-detailed trace and conversation inspection, temporal replay, and reconnecting
-remote viewing. Cards have one fixed graph-wide size, so streaming, selection,
-timer ticks, and replay never move nodes or edges. Live conversation capture
-shows text, thinking, tool calls, and tool execution as they happen, then
-reconciles settled messages to verbatim Pi entries. See
+The Rust `piw` viewer under `tui/` is the full interactive terminal UI, with
+selectable themes, detailed trace and conversation inspection, temporal
+replay, and reconnecting remote viewing. See
 [the piw guide](docs/tui-viewer.md).
 
-Inside Pi, a compact widget above the editor shows one line per workflow node.
-The first glyph is the node status. The second glyph is the node type: `●`
-agent, `ƒ` compute, `!` notification, `$` shell action, `*` function action, or
-`◆` checkpoint. Repeated visits, runtime details, and timing appear on the same
-line when they apply. Pi's current theme highlights the full active-node line,
-while status glyphs keep every state readable without color. Long workflows are
-windowed around the active node. Scroll the list with `shift+↑` / `shift+↓`.
-It snaps back to following the active node whenever the workflow advances a
-step. Use `piw` when you need the full boxed graph and its edges.
+Inside Pi, a compact widget above the editor shows one line per workflow node,
+with glyphs for node status and type. Scroll it with `shift+↑` / `shift+↓`.
+Use `piw` when you need the full boxed graph and its edges.
 
 ## Herdr integration
 
@@ -300,10 +270,8 @@ pi-workflows also ships as a [Herdr](https://herdr.dev) plugin. After installing
 pi-workflows herdr sync
 ```
 
-Run the same command after a pi-workflows update. It finds the package that
-provides the running CLI and repairs a Herdr link when npm moved that package.
-`pi-workflows herdr setup` remains an alias for existing installations. Use
-`--json` for versioned machine-readable output.
+Run the same command after a pi-workflows update. `pi-workflows herdr setup`
+remains an alias for existing installations.
 
 When Pi runs inside Herdr, the workflow widget shows a `Ctrl+Shift+R piw`
 shortcut. The shortcut opens the exact SQLite run state and lets you choose a
@@ -341,7 +309,7 @@ and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk run format.
 
 ## Controllers
 
-Controllers keep long-running automation aligned with current external state. They store desired state in `spec`, report observed state through conditions and `status`, and reconcile a deduplicated resource key whenever an event or retry makes it ready.
+Controllers keep long-running automation aligned with current external state. They store desired state in `spec` and report observed state through conditions and `status`, then reconcile a deduplicated resource key whenever an event or retry makes it ready.
 
 Put `*.controller.ts` files in `.pi/controllers/` or `~/.pi/agent/controllers/`. Import the API from `@osolmaz/pi-workflows/controllers`:
 
@@ -404,8 +372,8 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
 - `autoimplement` finds a clear existing plan, prepares a safe branch or
   worktree before mutation, documents it when needed, and verifies the current
   change against eligible base-branch failures. It writes and runs the exact
-  pi-reviewer command, tracks P0 through P2, handles PR comments and CI, and
-  finalizes the PR. P0 and P1 fixes require another review, while P2-only work
+  pi-reviewer command and tracks P0 through P2 findings, then handles PR
+  comments and CI and finalizes the PR. P0 and P1 fixes require another review, while P2-only work
   is verified without another reviewer round. A five-minute CI wait routes to
   additional useful local testing, and new evidence can route through autoplan
   and autodoc before implementation resumes.
