@@ -1,7 +1,6 @@
 //! Read-only access to the canonical Pi Workflows SQLite database.
 
 use crate::protocol::{PageKind, PatchOp};
-use crate::session::SessionReplayIndex;
 use crate::state::types::{
     DefinitionSnapshot, Manifest, ManifestPaths, RunState, SessionBinding, SessionCapture,
     SessionEntryRecord, SessionEventRecord, TraceEvent, DEFINITION_SNAPSHOT_SCHEMA,
@@ -21,8 +20,8 @@ const USER_VERSION: i64 = 1;
 const SCHEMA_NAME: &str = "pi-workflows-state";
 const APP_VERSION: &str = "0.13.3";
 pub const SCHEMA_DIGEST: [u8; 32] = [
-    0x80, 0x0c, 0x33, 0x49, 0x21, 0x9a, 0xba, 0xf9, 0xc6, 0x1b, 0xbc, 0x59, 0x2e, 0x46, 0x3f, 0x8a,
-    0x61, 0x8b, 0x49, 0xa0, 0x2f, 0xfd, 0x99, 0xa7, 0xea, 0x59, 0xa1, 0x3b, 0xc3, 0x22, 0x36, 0x29,
+    0xb5, 0xbc, 0xda, 0x10, 0x34, 0xe2, 0xee, 0x30, 0x13, 0xd8, 0xee, 0x2c, 0xc6, 0x5d, 0xcf, 0xe8,
+    0xa2, 0xad, 0x6e, 0x6a, 0xd8, 0xab, 0x1e, 0xeb, 0xab, 0x7f, 0x89, 0x0d, 0xe6, 0x00, 0x31, 0xed,
 ];
 const RESET_INSTRUCTION: &str = "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
 
@@ -1779,64 +1778,11 @@ fn read_session_event_page(
         [run_id],
         |row| row.get(0),
     )?;
-    let start = page_start(total, cursor);
-    let mut statement = connection.prepare(
-        "SELECT e.event_type, e.node_id, e.attempt_id, e.turn_id,
-                e.message_id, e.tool_call_id, e.payload_hash, e.recorded_at,
-                s.step_index
-         FROM session_events e
-         LEFT JOIN run_steps s ON s.run_id = e.run_id AND s.attempt_id = e.attempt_id
-         WHERE e.run_id = ?1 AND e.run_seq > ?2
-         ORDER BY e.run_seq LIMIT ?3",
-    )?;
-    let rows = statement.query_map(rusqlite::params![run_id, start, VIEWER_PAGE_SIZE], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Vec<u8>>(6)?,
-            row.get::<_, i64>(7)?,
-            row.get::<_, Option<u64>>(8)?,
-        ))
-    })?;
-    let mut items = Vec::new();
-    for (index, row) in rows.enumerate() {
-        let (
-            event_type,
-            node_id,
-            attempt_id,
-            turn_id,
-            message_id,
-            tool_call_id,
-            hash,
-            at,
-            step_index,
-        ) = row?;
-        let mut value = json!({
-            "seq": start + index as u64 + 1,
-            "at": timestamp(at),
-            "nodeId": node_id,
-            "attemptId": attempt_id,
-            "type": event_type,
-            "payload": read_json_blob(connection, &hash)?,
-        });
-        if let Some(step_index) = step_index {
-            value["stepIndex"] = json!(step_index);
-        }
-        if let Some(turn_id) = turn_id {
-            value["turnId"] = json!(turn_id);
-        }
-        if let Some(message_id) = message_id {
-            value["messageId"] = json!(message_id);
-        }
-        if let Some(tool_call_id) = tool_call_id {
-            value["toolCallId"] = json!(tool_call_id);
-        }
-        items.push(value);
-    }
+    let start = session_page_start(total, cursor);
+    let items = read_session_events_range(connection, run_id, start, VIEWER_PAGE_SIZE as i64)?
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ProjectionPage {
         start,
         total,
@@ -1922,23 +1868,18 @@ fn session_replay_checkpoint(
     if start == 0 {
         return Ok(None);
     }
-    let prior = read_session_events_range(connection, run_id, 0, start as i64)?;
-    let mut state =
-        SessionReplayIndex::new(&[], &prior, VIEWER_PAGE_SIZE as usize).state_at_seq(start);
-    state
-        .messages
-        .retain(|message| message.status == "streaming");
-    let active_messages = state
-        .messages
-        .iter()
-        .map(|message| message.message_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    state.tools.retain(|tool| {
-        tool.status == "running" && active_messages.contains(tool.message_id.as_str())
-    });
-    state.settled_entry_ids.clear();
-    state.diagnostics = vec!["earlier session messages are outside this page".to_string()];
-    Ok(Some(serde_json::to_value(state)?))
+    let hash = connection
+        .query_row(
+            "SELECT state_hash FROM viewer_session_checkpoints
+             WHERE run_id = ?1 AND event_seq = ?2",
+            rusqlite::params![run_id, start],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    let Some(hash) = hash else {
+        bail!("session replay checkpoint is missing for run {run_id} at {start}");
+    };
+    Ok(Some(read_json_blob(connection, &hash)?))
 }
 
 fn read_session_window(
@@ -2015,7 +1956,7 @@ fn read_session_window(
         }))?);
     }
 
-    let event_start = page_start(event_total, event_cursor);
+    let event_start = session_page_start(event_total, event_cursor);
     let mut event_statement = connection.prepare(
         "SELECT e.event_type, e.node_id, e.attempt_id, e.turn_id,
                 e.message_id, e.tool_call_id, e.payload_hash, e.recorded_at,
@@ -2116,6 +2057,16 @@ fn projection_page(start: u64, total: u64, items: Vec<Value>) -> ProjectionPage 
         taken_transitions: None,
         replay_checkpoint: None,
     }
+}
+
+fn session_page_start(total: u64, cursor: Option<u64>) -> u64 {
+    if total <= VIEWER_PAGE_SIZE {
+        return 0;
+    }
+    let selected = cursor
+        .unwrap_or(total.saturating_sub(1))
+        .min(total.saturating_sub(1));
+    (selected / VIEWER_PAGE_SIZE) * VIEWER_PAGE_SIZE
 }
 
 fn page_start(total: u64, cursor: Option<u64>) -> u64 {

@@ -39,7 +39,7 @@ describe("StateDatabase", () => {
       state.connection
         .prepare("SELECT count(*) AS count FROM sqlite_schema WHERE sql LIKE '% STRICT'")
         .get(),
-    ).toEqual({ count: 41 });
+    ).toEqual({ count: 42 });
     state.integrityCheck();
   });
 

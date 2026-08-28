@@ -112,6 +112,18 @@ async fn broadcast_outcome(
     }
 }
 
+fn page_cursors_for_run(
+    page_cursors: &HashMap<(String, PageKind), u64>,
+    run_id: &str,
+) -> Vec<(PageKind, u64)> {
+    let mut cursors = page_cursors
+        .iter()
+        .filter_map(|((candidate, kind), cursor)| (candidate == run_id).then_some((*kind, *cursor)))
+        .collect::<Vec<_>>();
+    cursors.sort_unstable();
+    cursors
+}
+
 fn targets_are_direct(targets: &[TargetPatch]) -> bool {
     !targets.is_empty()
         && targets.iter().all(|target| {
@@ -182,6 +194,7 @@ async fn handle_connection(
 
     let mut watching_runs = false;
     let mut watched: HashMap<String, u64> = HashMap::new();
+    let mut page_cursors: HashMap<(String, PageKind), u64> = HashMap::new();
 
     let session_result: Result<()> = async {
     loop {
@@ -293,6 +306,7 @@ async fn handle_connection(
                                 (PageKind::SessionEvents, session_event_cursor),
                             ] {
                                 if let Some(cursor) = cursor {
+                                    page_cursors.insert((run_id.clone(), kind), cursor);
                                     send_projection_page(
                                         &mut sink,
                                         &source,
@@ -307,12 +321,14 @@ async fn handle_connection(
                     }
                     ClientMessage::UnwatchRun { run_id } => {
                         if watched.remove(&run_id).is_some() {
+                            page_cursors.retain(|(candidate, _), _| candidate != &run_id);
                             let remove_id = run_id.clone();
                             let _ = run_blocking(&source, move |source| source.unwatch(&remove_id)).await;
                         }
                     }
                     ClientMessage::FetchPage { run_id, kind, cursor } => {
                         if watched.contains_key(&run_id) {
+                            page_cursors.insert((run_id.clone(), kind), cursor);
                             send_projection_page(&mut sink, &source, run_id, kind, cursor).await?;
                         }
                     }
@@ -336,18 +352,39 @@ async fn handle_connection(
                             watched.insert(run_id.clone(), revision);
                             send(&mut sink, &ServerMessage::RunPatch { run_id, revision, targets }).await?;
                         } else if revision > last {
-                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
+                            send_snapshot(
+                                &mut sink,
+                                &source,
+                                &mut watched,
+                                &page_cursors,
+                                run_id,
+                            )
+                            .await?;
                         }
                     }
                     Ok(Update::SnapshotRequired { run_id }) => {
                         if watched.contains_key(&run_id) {
-                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
+                            send_snapshot(
+                                &mut sink,
+                                &source,
+                                &mut watched,
+                                &page_cursors,
+                                run_id,
+                            )
+                            .await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let run_ids: Vec<String> = watched.keys().cloned().collect();
                         for run_id in run_ids {
-                            send_snapshot(&mut sink, &source, &mut watched, run_id).await?;
+                            send_snapshot(
+                                &mut sink,
+                                &source,
+                                &mut watched,
+                                &page_cursors,
+                                run_id,
+                            )
+                            .await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -424,6 +461,7 @@ async fn send_snapshot(
     sink: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
     source: &Arc<Mutex<RunSource>>,
     watched: &mut HashMap<String, u64>,
+    page_cursors: &HashMap<(String, PageKind), u64>,
     run_id: String,
 ) -> Result<()> {
     let snapshot_id = run_id.clone();
@@ -438,12 +476,15 @@ async fn send_snapshot(
         send(
             sink,
             &ServerMessage::RunSnapshot {
-                run_id,
+                run_id: run_id.clone(),
                 revision,
                 view,
             },
         )
         .await?;
+        for (kind, cursor) in page_cursors_for_run(page_cursors, &run_id) {
+            send_projection_page(sink, source, run_id.clone(), kind, cursor).await?;
+        }
     }
     Ok(())
 }
@@ -452,6 +493,19 @@ async fn send_snapshot(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recovery_keeps_each_run_page_cursor() {
+        let cursors = HashMap::from([
+            (("run-1".to_string(), PageKind::Trace), 40),
+            (("run-1".to_string(), PageKind::SessionEvents), 80),
+            (("run-2".to_string(), PageKind::Trace), 120),
+        ]);
+        assert_eq!(
+            page_cursors_for_run(&cursors, "run-1"),
+            vec![(PageKind::Trace, 40), (PageKind::SessionEvents, 80)]
+        );
+    }
 
     #[test]
     fn sends_only_complete_direct_target_patches() {

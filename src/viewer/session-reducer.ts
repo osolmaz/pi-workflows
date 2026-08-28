@@ -267,6 +267,16 @@ export function reduceSessionEvents(
   return foldSessionEvents(entries, events, throughSeq);
 }
 
+/** Continue a bounded page fold from a durable replay checkpoint. */
+export function reduceSessionEventsFromCheckpoint(
+  entries: WorkflowSessionEntryRecord[],
+  events: WorkflowSessionEventRecord[],
+  throughSeq: number,
+  checkpoint: TemporalSessionState,
+): TemporalSessionState {
+  return foldSessionEvents(entries, events, throughSeq, checkpoint);
+}
+
 /**
  * In-memory seek index. Checkpoints are viewer-only cache state and are never
  * persisted into a SQLite run state.

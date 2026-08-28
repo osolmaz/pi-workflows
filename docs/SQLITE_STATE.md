@@ -12,7 +12,7 @@ There is one database for the user installation. Project and run IDs separate da
 
 The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md).
 
-`viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit.
+`viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. `viewer_session_checkpoints` stores the bounded active message and tool state at each 256-event boundary. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit. Session-event transactions write each reached replay checkpoint in that transaction.
 
 The store retains 256 presentation revisions. A reader with an older cursor must take a bounded snapshot. Patches use `add`, `replace`, `remove`, and `append`. They target small projection documents or pages. Patch creation does not reconstruct and compare complete run views.
 

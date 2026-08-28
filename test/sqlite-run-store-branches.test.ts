@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { StateDatabase } from "../src/state/database.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import {
   RUN_STATE_SCHEMA,
@@ -139,6 +140,51 @@ describe("WorkflowRunStore branch behavior", () => {
     expect(await store.hasSessionBinding("run-3")).toBe(true);
     expect(await store.listSessionSegments("run-3")).toEqual(["capture-b"]);
     expect(store.readRun("run-3")?.sessionSegments).toHaveLength(1);
+    store.close();
+  });
+
+  it("persists bounded session replay checkpoints", async () => {
+    const databasePath = await makeStateDatabasePath("run-replay-checkpoints");
+    const store = new WorkflowRunStore(databasePath);
+    await store.initializeRun(workflow, state("run-checkpoints"));
+    await store.writeSessionBinding("run-checkpoints", {
+      schema: SESSION_BINDING_SCHEMA,
+      runId: "run-checkpoints",
+      piSessionId: "session-a",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    await store.appendSessionEventBatch(
+      "run-checkpoints",
+      Array.from({ length: 300 }, (_, index) => ({
+        seq: index + 1,
+        at: new Date(index + 1).toISOString(),
+        nodeId: "work",
+        attemptId: "attempt",
+        turnId: `turn-${index + 1}`,
+        type: "turn_started" as const,
+        payload: {},
+      })),
+    );
+    const observer = new StateDatabase({ filePath: databasePath });
+    const row = observer.connection
+      .prepare(
+        "SELECT event_seq AS eventSeq, state_hash AS stateHash FROM viewer_session_checkpoints WHERE run_id = ?",
+      )
+      .get("run-checkpoints");
+    if (
+      typeof row !== "object" ||
+      row === null ||
+      !("eventSeq" in row) ||
+      typeof row.eventSeq !== "number" ||
+      !("stateHash" in row) ||
+      !Buffer.isBuffer(row.stateHash)
+    ) {
+      throw new Error("Viewer session checkpoint row is invalid");
+    }
+    expect(row.eventSeq).toBe(256);
+    expect(observer.readJson(row.stateHash)).toMatchObject({ throughSeq: 256 });
+    observer.close();
     store.close();
   });
 
