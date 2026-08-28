@@ -44,6 +44,7 @@ pub struct RunEntry {
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<Value>,
+    pub session_replay_checkpoint: Option<Value>,
     pub settings_scopes: Vec<Value>,
     pub settings_start: u64,
     pub settings_total: u64,
@@ -122,6 +123,7 @@ impl RunEntry {
             session_events_malformed: false,
             session_events_torn_tail: false,
             session_capture,
+            session_replay_checkpoint: loaded.session_replay_checkpoint,
             settings_scopes: loaded.settings_scopes,
             settings_start: loaded.settings_start,
             settings_total: loaded.settings_total,
@@ -165,6 +167,7 @@ impl RunEntry {
                 "eventsMalformed": self.session_events_malformed,
                 "eventsTornTail": self.session_events_torn_tail,
                 "capture": self.session_capture,
+                "replayCheckpoint": self.session_replay_checkpoint,
             })
         }
     }
@@ -283,6 +286,7 @@ impl RunEntry {
                 self.session_event_start = 0;
                 self.session_event_total = 0;
                 self.session_capture = None;
+                self.session_replay_checkpoint = None;
             } else {
                 self.session_binding = session
                     .get("binding")
@@ -316,6 +320,10 @@ impl RunEntry {
                     .unwrap_or(self.session_events.len() as u64);
                 self.session_capture = session
                     .get("capture")
+                    .cloned()
+                    .filter(|value| !value.is_null());
+                self.session_replay_checkpoint = session
+                    .get("replayCheckpoint")
                     .cloned()
                     .filter(|value| !value.is_null());
                 self.session_events_malformed = session

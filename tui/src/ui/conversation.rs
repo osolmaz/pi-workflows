@@ -4,7 +4,10 @@
 //! that belongs to the selected step.
 
 use crate::format::sanitize_text;
-use crate::session::{SessionReplayIndex, TemporalMessage, TemporalSessionState};
+use crate::session::{
+    reduce_session_events_from_checkpoint, SessionReplayIndex, TemporalMessage,
+    TemporalSessionState,
+};
 use crate::state::types::{ConversationRange, SessionEntryRecord, SessionEventRecord, StepRecord};
 use crate::theme::Palette;
 use ratatui::style::{Modifier, Style};
@@ -148,6 +151,7 @@ pub struct ConversationRenderOptions<'a> {
     pub remote_artifacts: &'a HashMap<String, std::result::Result<String, String>>,
     pub selected_entry: Option<usize>,
     pub payload_expanded: bool,
+    pub replay_checkpoint: Option<&'a Value>,
 }
 
 pub fn conversation_lines(
@@ -166,12 +170,14 @@ pub fn conversation_lines(
         remote_artifacts,
         selected_entry,
         payload_expanded,
+        replay_checkpoint,
     } = options;
     if !events.is_empty() {
         return temporal_conversation_lines(
             entries,
             events,
             through_event_seq,
+            replay_checkpoint,
             TemporalRenderContext {
                 width,
                 palette,
@@ -264,6 +270,7 @@ fn temporal_conversation_lines(
     entries: &[Value],
     events: &[Value],
     through_event_seq: Option<u64>,
+    replay_checkpoint: Option<&Value>,
     context: TemporalRenderContext<'_>,
 ) -> Vec<Line<'static>> {
     let parsed_entries: Result<Vec<SessionEntryRecord>, _> = entries
@@ -280,8 +287,18 @@ fn temporal_conversation_lines(
         ))];
     };
     let through = through_event_seq.unwrap_or(u64::MAX);
-    let index = SessionReplayIndex::new(&parsed_entries, &parsed_events, 256);
-    let state = index.state_at_seq(through);
+    let state = if let Some(checkpoint) = replay_checkpoint {
+        let Ok(checkpoint) = serde_json::from_value::<TemporalSessionState>(checkpoint.clone())
+        else {
+            return vec![Line::from(Span::styled(
+                "invalid temporal replay checkpoint",
+                Style::default().fg(context.palette.error),
+            ))];
+        };
+        reduce_session_events_from_checkpoint(&parsed_entries, &parsed_events, through, &checkpoint)
+    } else {
+        SessionReplayIndex::new(&parsed_entries, &parsed_events, 256).state_at_seq(through)
+    };
     render_temporal_state(
         entries,
         &state,
@@ -549,6 +566,7 @@ mod tests {
                 remote_artifacts: &HashMap::new(),
                 selected_entry: None,
                 payload_expanded: false,
+                replay_checkpoint: None,
             },
         )
         .into_iter()
@@ -575,6 +593,52 @@ mod tests {
     }
 
     #[test]
+    fn temporal_replay_continues_from_a_page_checkpoint() {
+        let fixture = fixture();
+        let entries = fixture.get("entries").unwrap().as_array().unwrap();
+        let events = fixture.get("events").unwrap().as_array().unwrap();
+        let parsed_entries = entries
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<SessionEntryRecord>, _>>()
+            .unwrap();
+        let parsed_events = events
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<SessionEventRecord>, _>>()
+            .unwrap();
+        let checkpoint = serde_json::to_value(
+            SessionReplayIndex::new(&parsed_entries, &parsed_events, 256).state_at_seq(4),
+        )
+        .unwrap();
+        let text = conversation_lines(
+            entries,
+            &events[4..],
+            &[],
+            None,
+            ConversationRenderOptions {
+                at_latest_step: false,
+                through_event_seq: Some(7),
+                width: 100,
+                palette: &Palette::catppuccin(),
+                run_dir: None,
+                remote_artifacts: &HashMap::new(),
+                selected_entry: None,
+                payload_expanded: false,
+                replay_checkpoint: Some(&checkpoint),
+            },
+        )
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(text.contains("hello"));
+        assert!(!text.contains("sequence gap"));
+    }
+
+    #[test]
     fn malformed_temporal_records_are_explicit() {
         let lines = conversation_lines(
             &[],
@@ -590,6 +654,7 @@ mod tests {
                 remote_artifacts: &HashMap::new(),
                 selected_entry: None,
                 payload_expanded: false,
+                replay_checkpoint: None,
             },
         );
         assert!(lines[0]

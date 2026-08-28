@@ -400,6 +400,7 @@ async fn send_projection_page(
                     graph_cursor: page.graph_cursor,
                     graph_steps,
                     taken_transitions: page.taken_transitions,
+                    replay_checkpoint: page.replay_checkpoint,
                 },
             )
             .await?;

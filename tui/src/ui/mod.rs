@@ -83,6 +83,7 @@ pub struct RunData<'a> {
     pub session_events_malformed: bool,
     pub session_events_torn_tail: bool,
     pub session_capture: Option<&'a Value>,
+    pub session_replay_checkpoint: Option<&'a Value>,
     pub settings_scopes: &'a [Value],
     pub settings_start: u64,
     pub settings_total: u64,
@@ -201,6 +202,7 @@ impl Provider {
                     session_events_malformed: entry.session_events_malformed,
                     session_events_torn_tail: entry.session_events_torn_tail,
                     session_capture: entry.session_capture.as_ref(),
+                    session_replay_checkpoint: entry.session_replay_checkpoint.as_ref(),
                     settings_scopes: &entry.settings_scopes,
                     settings_start: entry.settings_start,
                     settings_total: entry.settings_total,
@@ -241,6 +243,7 @@ impl Provider {
                     session_events_malformed: view.session_events_malformed,
                     session_events_torn_tail: view.session_events_torn_tail,
                     session_capture: view.session_capture.as_ref(),
+                    session_replay_checkpoint: view.session_replay_checkpoint.as_ref(),
                     settings_scopes: &view.settings_scopes,
                     settings_start: view.settings_start,
                     settings_total: view.settings_total,
@@ -271,9 +274,11 @@ impl Provider {
                 let mut cursor = source.cursor(run_id);
                 if let Some(value) = step {
                     cursor.step = Some(value);
+                    cursor.trace_step = Some(value);
                 }
                 if let Some(value) = trace {
                     cursor.trace = Some(value);
+                    cursor.trace_step = None;
                 }
                 if let Some(value) = session_entry {
                     cursor.session_entry = Some(value);
@@ -286,6 +291,7 @@ impl Provider {
             Provider::Remote(remote) => {
                 if let Some(cursor) = step {
                     remote.request_page(run_id, PageKind::Steps, cursor);
+                    remote.request_page(run_id, PageKind::TraceAtStep, cursor);
                 }
                 if let Some(cursor) = trace {
                     remote.request_page(run_id, PageKind::Trace, cursor);
@@ -691,7 +697,7 @@ impl App {
             self.sync_step_to_temporal();
         } else {
             self.provider
-                .request_window(&run_id, None, None, None, Some(cursor));
+                .request_window(&run_id, None, None, Some(cursor), Some(cursor));
         }
     }
 
@@ -728,7 +734,7 @@ impl App {
             });
         if let TemporalDelay::Pending(cursor) = delay {
             self.provider
-                .request_window(&run_id, None, None, None, Some(cursor));
+                .request_window(&run_id, None, None, Some(cursor), Some(cursor));
         }
         delay
     }
@@ -2043,6 +2049,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
                 remote_artifacts: &data.remote_artifacts,
                 selected_entry: Some(conversation_selected),
                 payload_expanded: conversation_payload_expanded,
+                replay_checkpoint: data.session_replay_checkpoint,
             },
         ),
         InspectorTab::Info => info_lines(&data, &run_id, &palette),
