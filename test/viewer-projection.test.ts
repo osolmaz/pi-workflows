@@ -72,7 +72,9 @@ describe("revisioned viewer projection", () => {
       throw new Error("Viewer revision row is invalid");
     }
     const latest = readViewerDeltas(state, result.runId, row.revision - 1);
+    const history = readViewerDeltas(state, result.runId, 1);
     expect(latest.kind).toBe("deltas");
+    expect(history.kind).toBe("deltas");
     if (latest.kind === "deltas") {
       const graph = latest.deltas.find((delta) => delta.targetType === "graph");
       const timeline = latest.deltas.find((delta) => delta.targetType === "timeline");
@@ -81,15 +83,44 @@ describe("revisioned viewer projection", () => {
         path: "/state/status",
         value: "completed",
       });
-      expect(graph?.patch).toContainEqual(
-        expect.objectContaining({ op: "replace", path: "/state/steps" }),
-      );
+      if (history.kind === "deltas") {
+        expect(history.deltas).toContainEqual(
+          expect.objectContaining({ targetType: "replay", targetKey: "steps:reload" }),
+        );
+      }
       expect(graph?.patch).toContainEqual(
         expect.objectContaining({ op: "add", path: "/state/updates" }),
       );
       expect(timeline?.patch).toContainEqual(
         expect.objectContaining({ op: "append", path: "/items" }),
       );
+      const append = timeline?.patch.find(
+        (operation) => operation.op === "append" && operation.path === "/items",
+      );
+      const eventRow = state.connection
+        .prepare(
+          `SELECT e.payload_hash AS payloadHash
+           FROM events e JOIN runs r ON r.resource_id = e.resource_id
+           WHERE r.run_id = ? ORDER BY e.resource_revision DESC LIMIT 1`,
+        )
+        .get(result.runId);
+      if (
+        append?.op !== "append" ||
+        typeof append.value[0] !== "object" ||
+        append.value[0] === null ||
+        Array.isArray(append.value[0]) ||
+        typeof eventRow !== "object" ||
+        eventRow === null ||
+        !("payloadHash" in eventRow) ||
+        !Buffer.isBuffer(eventRow.payloadHash)
+      ) {
+        throw new Error("Viewer trace patch evidence is invalid");
+      }
+      const storedEvent = state.readJson(eventRow.payloadHash);
+      if (typeof storedEvent !== "object" || storedEvent === null || Array.isArray(storedEvent)) {
+        throw new Error("Stored trace event is invalid");
+      }
+      expect(append.value[0].payload).toEqual(storedEvent.payload);
       expect(latest.deltas.every((delta) => delta.patch.length > 1)).toBe(true);
     }
     state.close();
