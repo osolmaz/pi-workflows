@@ -1,22 +1,41 @@
 import { execFileSync } from "node:child_process";
-import { rmSync, statSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const cliPath = path.join(repoRoot, "dist", "viewer", "cli.js");
 
 describe("package preparation", () => {
   it("makes the generated command executable", { timeout: 30_000 }, () => {
     if (process.platform === "win32") return;
-    rmSync(cliPath, { force: true });
+    const packageRoot = mkdtempSync(path.join(tmpdir(), "pi-workflows-prepare-"));
 
-    execFileSync(process.execPath, ["scripts/prepare.mjs"], {
-      cwd: repoRoot,
-      stdio: "pipe",
-    });
+    try {
+      for (const entry of [
+        "package.json",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        "src",
+        "scripts",
+      ]) {
+        cpSync(path.join(repoRoot, entry), path.join(packageRoot, entry), { recursive: true });
+      }
+      symlinkSync(
+        path.join(repoRoot, "node_modules"),
+        path.join(packageRoot, "node_modules"),
+        "dir",
+      );
 
-    expect(statSync(cliPath).mode & 0o111).not.toBe(0);
+      execFileSync(process.execPath, ["scripts/prepare.mjs"], {
+        cwd: packageRoot,
+        stdio: "pipe",
+      });
+
+      expect(statSync(path.join(packageRoot, "dist", "viewer", "cli.js")).mode & 0o111).not.toBe(0);
+    } finally {
+      rmSync(packageRoot, { force: true, recursive: true });
+    }
   });
 });
