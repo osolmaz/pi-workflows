@@ -4,10 +4,6 @@ export const STATE_APPLICATION_ID = 0x50495746;
 export const STATE_SCHEMA_NAME = "pi-workflows-state";
 export const STATE_SCHEMA_VERSION = 1;
 export const STATE_APP_VERSION = "0.13.3";
-export const PRE_VIEWER_STATE_SCHEMA_DIGEST = Buffer.from(
-  "466ddbae921f2619ff81db56739518e7ef68fa0a23bff80df0296b3afd01c856",
-  "hex",
-);
 
 export const STATE_SCHEMA_SQL = String.raw`
 CREATE TABLE schema_meta (

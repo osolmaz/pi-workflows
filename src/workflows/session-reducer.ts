@@ -277,24 +277,9 @@ export function reduceSessionEventsFromCheckpoint(
   return foldSessionEvents(entries, events, throughSeq, checkpoint);
 }
 
-/** Keep only state that a later bounded replay page can continue. */
-export function boundedTemporalCheckpoint(state: TemporalSessionState): TemporalSessionState {
-  const messages = state.messages.filter((message) => message.status === "streaming");
-  const activeMessages = new Set(messages.map((message) => message.messageId));
-  return {
-    ...state,
-    messages,
-    tools: state.tools.filter(
-      (tool) => tool.status === "running" && activeMessages.has(tool.messageId),
-    ),
-    settledEntryIds: [],
-    diagnostics: ["earlier session messages are outside this page"],
-  };
-}
-
 /**
- * In-memory seek index. Durable viewers use the persisted SQLite replay
- * checkpoints; this index remains for complete in-memory session projections.
+ * In-memory seek index. Checkpoints are viewer-only cache state and are never
+ * persisted into a SQLite run state.
  */
 export class SessionReplayIndex {
   private readonly entries: WorkflowSessionEntryRecord[];

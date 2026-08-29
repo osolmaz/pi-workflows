@@ -21,7 +21,6 @@ import {
 import { compositionMetadata } from "./composition.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
-  boundedTemporalCheckpoint,
   reduceSessionEvents,
   reduceSessionEventsFromCheckpoint,
   type TemporalSessionState,
@@ -4120,6 +4119,20 @@ function isTemporalSessionState(value: unknown): value is TemporalSessionState {
     Array.isArray(value.diagnostics) &&
     value.diagnostics.every((item) => typeof item === "string")
   );
+}
+
+function boundedTemporalCheckpoint(state: TemporalSessionState): TemporalSessionState {
+  const messages = state.messages.filter((message) => message.status === "streaming");
+  const activeMessages = new Set(messages.map((message) => message.messageId));
+  return {
+    ...state,
+    messages,
+    tools: state.tools.filter(
+      (tool) => tool.status === "running" && activeMessages.has(tool.messageId),
+    ),
+    settledEntryIds: [],
+    diagnostics: ["earlier session messages are outside this page"],
+  };
 }
 
 function assertValidRunId(runId: string): void {

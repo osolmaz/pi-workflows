@@ -32,15 +32,6 @@ describe("pi-workflows CLI", () => {
       backupDestination: "/tmp/state-backup.sqlite",
     });
     expect(
-      parseCliArgs(["state", "upgrade", "--backup", "/tmp/state-before-viewer.sqlite", "--apply"]),
-    ).toMatchObject({
-      command: "state",
-      stateAction: "upgrade",
-      backupDestination: "/tmp/state-before-viewer.sqlite",
-      pruneApply: true,
-    });
-    expect(() => parseCliArgs(["state", "upgrade", "--apply"])).toThrow(/requires --backup/);
-    expect(
       parseCliArgs([
         "state",
         "prune",
