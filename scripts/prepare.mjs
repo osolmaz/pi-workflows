@@ -3,6 +3,7 @@
 // because pi loads the extension from src via jiti. Only build when tsc is
 // actually available (dev installs, npm link, publishing).
 import { spawnSync } from "node:child_process";
+import { chmodSync } from "node:fs";
 
 try {
   const { createRequire } = await import("node:module");
@@ -13,4 +14,7 @@ try {
 }
 
 const result = spawnSync("npm", ["run", "build"], { stdio: "inherit", shell: false });
+if (result.status === 0) {
+  chmodSync(new URL("../dist/viewer/cli.js", import.meta.url), 0o755);
+}
 process.exit(result.status ?? 1);
