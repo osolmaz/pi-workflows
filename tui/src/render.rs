@@ -160,6 +160,19 @@ fn centered_text(text: &str, width: usize) -> String {
     format!("{}{fitted}", " ".repeat(left))
 }
 
+fn paired_text(left: &str, right: &str, width: usize) -> (String, String, i64) {
+    let right_text = fit_text(right, width);
+    let right_width = UnicodeWidthStr::width(right_text.as_str());
+    let gap = if left.is_empty() || right_text.is_empty() {
+        0
+    } else {
+        CARD_PAIRED_ROW_GAP
+    };
+    let left_text = fit_text(left, width.saturating_sub(right_width + gap));
+    let right_offset = width.saturating_sub(right_width) as i64;
+    (left_text, right_text, right_offset)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphNodeStyle {
     Line,
@@ -170,6 +183,8 @@ const CARD_MIN_CONTENT_WIDTH: i64 = 20;
 const CARD_MAX_CONTENT_WIDTH: i64 = 28;
 const CARD_CORE_HEIGHT: i64 = 7;
 const CARD_MAX_BRANCH_ROWS: usize = 3;
+const CARD_WIDEST_STATUS_BADGE: &str = "◆ replay focus";
+const CARD_PAIRED_ROW_GAP: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CardShape {
@@ -275,9 +290,11 @@ fn card_shape(view: &GraphView, node_id: &str) -> CardShape {
     let action_execution = node
         .and_then(|value| value.get("actionExecution"))
         .and_then(Value::as_str);
+    let type_badge = node_type_badge(node_type, action_execution);
     let mut candidates = vec![
         hierarchical_node_label(node_id, node),
-        node_type_badge(node_type, action_execution),
+        type_badge.clone(),
+        format!("{type_badge} {CARD_WIDEST_STATUS_BADGE}"),
     ];
     if let Some(audience) = node
         .and_then(|value| value.pointer("/humanDecision/audience"))
@@ -1233,16 +1250,15 @@ fn draw_node_box(
         border_style,
     );
 
-    let type_badge = fit_text(&rendered.type_badge, inner_width - 2);
-    let status_badge = fit_text(
-        &format!("{} {}", status.glyph(), status.label()),
-        inner_width - 2,
-    );
+    let paired_width = inner_width.saturating_sub(2);
+    let status_text = format!("{} {}", status.glyph(), status.label());
+    let (type_badge, status_badge, status_offset) =
+        paired_text(&rendered.type_badge, &status_text, paired_width);
     canvas.text(start_x, y + 3, &chars.v.to_string(), border_style);
     canvas.text(right_x, y + 3, &chars.v.to_string(), border_style);
     canvas.text(start_x + 2, y + 3, &type_badge, type_style);
     canvas.text(
-        right_x - 1 - display_width(&status_badge),
+        start_x + 2 + status_offset,
         y + 3,
         &status_badge,
         status_style,
@@ -1250,15 +1266,11 @@ fn draw_node_box(
 
     let attempts = format!("↻ {}", rendered.attempts);
     let elapsed = format!("◷ {}", rendered.elapsed);
+    let (attempts, elapsed, elapsed_offset) = paired_text(&attempts, &elapsed, paired_width);
     canvas.text(start_x, y + 4, &chars.v.to_string(), border_style);
     canvas.text(right_x, y + 4, &chars.v.to_string(), border_style);
     canvas.text(start_x + 2, y + 4, &attempts, content_style);
-    canvas.text(
-        right_x - 1 - display_width(&elapsed),
-        y + 4,
-        &elapsed,
-        content_style,
-    );
+    canvas.text(start_x + 2 + elapsed_offset, y + 4, &elapsed, content_style);
 
     for (index, branch) in rendered.branch_lines.iter().enumerate() {
         let row = y + 5 + index as i64;

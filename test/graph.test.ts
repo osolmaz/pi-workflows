@@ -263,6 +263,24 @@ describe("renderGraphLines", () => {
     expect(lines.join("\n")).not.toContain("■ end");
   });
 
+  it("keeps paired card badges separated", () => {
+    const replaySteps = [makeStep("plan", 0), makeStep("implement", 1)];
+    const replayBundle = makeBundle(LOOP_SNAPSHOT, replaySteps, { status: "completed" });
+    const replayRow = renderGraphLines(replayBundle, 0, new Date(), { nodeStyle: "box" })
+      .map(stripAnsi)
+      .find((line) => line.includes("replay focus"));
+    expect(replayRow).toMatch(/ƒ compute\s+◆ replay focus/u);
+    expect(replayRow).not.toContain("comp◆");
+
+    const checkpointBundle = makeBundle(HUMAN_SNAPSHOT, [], { status: "running" });
+    const checkpointRow = renderGraphLines(checkpointBundle, -1, new Date(), {
+      nodeStyle: "box",
+    })
+      .map(stripAnsi)
+      .find((line) => line.includes("checkpoint"));
+    expect(checkpointRow).toMatch(/◆ checkpoint\s+· queued/u);
+  });
+
   it("keeps each card's bounds stable across replay positions", () => {
     const bundle = makeBundle(LOOP_SNAPSHOT, loopSteps, { status: "completed" });
     const sizes = [
@@ -309,11 +327,11 @@ describe("renderGraphLines", () => {
       ],
     };
     const bundle = makeBundle(snapshot, [], { status: "running" });
-    expect(graphCardSize(bundle, "ordinary")).toEqual({ width: 24, height: 7 });
+    expect(graphCardSize(bundle, "ordinary")).toEqual({ width: 28, height: 7 });
     expect(
       graphCardSize(bundle, "this.is.a.very.long.hierarchical.node.label.that.must.be.bounded"),
     ).toEqual({ width: 32, height: 7 });
-    expect(graphCardSize(bundle, "decision")).toEqual({ width: 24, height: 10 });
+    expect(graphCardSize(bundle, "decision")).toEqual({ width: 28, height: 10 });
     const text = renderGraphLines(bundle, -1, new Date(), { nodeStyle: "box" })
       .map(stripAnsi)
       .join("\n");

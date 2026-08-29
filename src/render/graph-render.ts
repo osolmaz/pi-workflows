@@ -82,6 +82,8 @@ const CARD_MIN_CONTENT_WIDTH = 20;
 const CARD_MAX_CONTENT_WIDTH = 28;
 const CARD_CORE_HEIGHT = 7;
 const CARD_MAX_BRANCH_ROWS = 3;
+const CARD_WIDEST_STATUS_BADGE = "◆ replay focus";
+const CARD_PAIRED_ROW_GAP = 1;
 
 function nodeTypeStyle(nodeType: string): CanvasStyle {
   switch (nodeType) {
@@ -229,9 +231,11 @@ function cardShape(view: GraphView, nodeId: string): CardShape {
       ? "assistant response"
       : undefined;
   const cardDetail = [assistantDetail, configuredDetail].filter(Boolean).join(" · ");
+  const typeBadge = node ? nodeTypeBadge(node.nodeType, actionExecution) : "? unknown";
   const candidates = [
     hierarchicalNodeLabel(nodeId, node),
-    node ? nodeTypeBadge(node.nodeType, actionExecution) : "? unknown",
+    typeBadge,
+    `${typeBadge} ${CARD_WIDEST_STATUS_BADGE}`,
     ...(humanAudience === undefined ? [] : [`… human decision · ${humanAudience}`]),
     ...(cardDetail === "" ? [] : [`… ${cardDetail}`]),
     ...boundedBranchLines(labels),
@@ -809,9 +813,13 @@ function drawNodeBox(
     rightStyle: CanvasStyle,
   ) => {
     rowBorder(row);
-    canvas.text(startX + 2, row, fitText(left, innerWidth - 2), leftStyle);
-    const rightText = fitText(right, innerWidth - 2);
-    canvas.text(rightX - 1 - visibleWidth(rightText), row, rightText, rightStyle);
+    const contentWidth = Math.max(0, innerWidth - 2);
+    const rightText = fitText(right, contentWidth);
+    const rightWidth = visibleWidth(rightText);
+    const gap = left === "" || rightText === "" ? 0 : CARD_PAIRED_ROW_GAP;
+    const leftText = fitText(left, Math.max(0, contentWidth - rightWidth - gap));
+    canvas.text(startX + 2, row, leftText, leftStyle);
+    canvas.text(startX + 2 + contentWidth - rightWidth, row, rightText, rightStyle);
   };
 
   canvas.text(startX, y, `${chars.tl}${horizontal}${chars.tr}`, borderStyle);
