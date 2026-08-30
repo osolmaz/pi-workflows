@@ -19,7 +19,7 @@ The controller runtime provides:
 - Recoverable records for external effects.
 - Child workflow runs with stable request keys.
 - Conditions and generations, with cleanup and structured events.
-- Local interactive use through the Pi extension and headless use through the engine API.
+- Local resource control through the Pi extension and reconciliation through the global host.
 
 The first production use case is pull request automation. A controller can observe a pull request, start a review or repair workflow, wait for checks, validate the current head, and apply an approved change through deterministic code.
 
@@ -27,7 +27,7 @@ The first production use case is pull request automation. A controller can obser
 
 The graph engine remains the execution layer for finite work. A finite workflow can include another finite workflow in the same run through `includeWorkflow()`. Use a controller child run when work needs an independent retry history, stable request key, parallel lifecycle, or indefinite reconciliation. The graph engine does not import the controller runtime. The controller runtime may start workflows through a narrow scheduler interface.
 
-The Pi extension is a host. It discovers definitions, displays status, and supplies the conversation-backed agent executor while Pi is running. A headless host can use the same controller runtime with another `AgentStepExecutor`.
+The Pi extension is a thin client. It resolves controller initialization in a dedicated child process and sends declarative resource commands to the one global host. The host schedules reconciliation but does not load controller definitions in its event loop. A supervised controller worker loads one definition and proposes bounded state changes through the host.
 
 External events are wake-up hints. An event enqueues a resource key and carries no transition command. The reconciler reloads the resource and the external system before deciding what to do.
 
@@ -155,15 +155,15 @@ export type EffectRecord = {
 
 The key names one intended effect. Reusing the key with another request fingerprint is an error. The next reconciliation observes the external system before retrying an existing pending or indeterminate effect. The effect can be treated as effectively once when the provider offers an idempotency token, a conditional request, or a reliable way to observe the requested result. The runtime does not promise generic exactly-once execution.
 
-Mutation policy stays in deterministic effect drivers. Agent workflows return findings or artifacts for deterministic code to check and apply. The in-process Pi host shares its process environment with agent tools, so it does not provide credential isolation. Deployments that require that boundary should put authenticated effects behind a separate broker or controller host.
+Mutation policy stays in deterministic effect drivers. Agent workflows return findings or artifacts for deterministic code to check and apply. Worker processes run as the same operating-system user and are not credential sandboxes. Deployments that require credential isolation should put authenticated effects behind a separate broker.
 
 ## Child workflows
 
 `ctx.workflows.ensure()` creates or finds a workflow run by a stable request key and input fingerprint. Repeated reconciliations find the same active or completed request. A changed input must use a new key. An asynchronous child completion validates the reserved request and run IDs through a separate scheduler-completion command; it never reuses the controller claim that launched the child. The controller transaction reserves and saves each attempt's run ID before the scheduler starts it, so recovery can find the run row.
 
-A child run is one immutable attempt. Its existing SQLite run state remains the execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. A host restart can record an abandoned attempt and create another attempt for the same stable request.
+A child run has one durable execution record. The parent resource points to the current run, and workflow completion enqueues the parent key. The global host runs it through the same queue and supervised worker protocol as other workflows.
 
-The workflow scheduler records an abandoned running run as `failed` with a final `run_interrupted` event. The controller store treats that child attempt as `interrupted`, so the next reconciliation starts another immutable attempt. Compute work can run again, while consequential external actions belong in the effect API so recovery observes them before retrying.
+A stopped worker does not make the child failed by itself. The host reads the last committed node and effect state. It resumes pure or idempotent work in a new worker epoch. An uncertain manual effect becomes ambiguous and blocks automatic retry. A changed input still requires a new stable request key.
 
 ## Deletion and cleanup
 
@@ -175,9 +175,9 @@ Controllers should add finalizers only when they own something that needs cleanu
 
 A source maps an external event to one or more resource keys. Sources include filesystem watches, webhooks, scheduled polling, and child workflow completion. They share the same enqueue API.
 
-`ControllerManager` sets global and per-controller worker limits. A reconciliation deadline stops lease renewal and requeues the key even when controller code ignores its abort signal. JavaScript cannot stop that non-cooperative promise, so reconciler code must pass the signal to provider calls and keep consequential writes inside guarded effect drivers. The local store supports expiring claims from the start, while the first release can run one process. Leader election belongs in a remote store implementation if several hosts later share the same resources.
+The global host claims controller keys and starts a supervised process group for each active reconciliation. A reconciliation deadline stops and requeues the child even when controller code ignores its abort signal. Reconciler code must still pass the signal to provider calls and keep consequential writes inside guarded effect drivers. One host owns the local database. Distributed leader election remains outside this local runtime.
 
-The Pi extension starts local workers during `session_start` and closes them during `session_shutdown`. It can reconcile only while Pi is running. Another program can host `ControllerManager` through the public engine API. The package does not install a service.
+The extension starts the package host on demand. Reconciliation continues when the Pi session closes. The package installs no operating-system service.
 
 ## Observability
 
@@ -202,13 +202,13 @@ A production controller must follow these rules:
 
 The controller API is exported from `@osolmaz/pi-workflows/controllers`. Controller definitions use a `.controller.ts` suffix. Project definitions live under `.pi/controllers/`; global definitions live under `~/.pi/agent/controllers/`.
 
-The implementation uses documented Pi extension APIs only. Commands and tools use `registerCommand` and `registerTool`. Session lifecycle uses `session_start` and `session_shutdown`. Workflow prompts use `sendUserMessage`, while status uses `setWidget` and `setStatus`.
+The implementation uses documented Pi extension APIs only. `/controller` lists and inspects resources, applies specs, and requests reconciliation or deletion. There are no extension-local worker start or stop controls.
 
-The `/controller` command lists and inspects resources, applies specs, requests reconciliation or deletion, and starts or stops local workers. Stopping workers records an active child as interrupted, so a later worker can create another attempt.
+For `apply`, a source resolver child discovers the named controller, verifies its exported name, computes `initialStatus(spec)`, and hashes the source. The host accepts the proposal only while the path still follows discovery rules and the exact digest still matches. Reconcile code runs only in a supervised controller worker.
 
-Controller resources use the canonical [SQLite state](SQLITE_STATE.md) database. `projects` separates repository-local resources by canonical project path. Controller claims use the shared lease generation, token, expiry, and expected resource revision. Effects and child workflows use the shared transactional outbox and deterministic receipts.
+Controller resources use the canonical [SQLite state](SQLITE_STATE.md) database. `projects` separates repository-local resources by canonical project path. Controller claims use the shared lease generation, token, expiry, and expected resource revision. Effects and child workflows use durable request keys and receipts.
 
-The same database backs the standalone host (`pi-workflows host`). The host reconciles controllers without a Pi session and claims parked interactive runs from `run_queue`. Conversation children execute in headless `pi --mode rpc` sessions. A Pi session and the host can share the database safely because SQLite transactions and durable leases arbitrate ownership, but only one owner can mutate a resource at a time.
+One global host owns that database for all Pi sessions and projects. The extension and mutating CLI paths are local protocol clients; viewers remain read-only. A controller child without an origin session uses a headless `pi --mode rpc` process for structured agent steps.
 
 Normal workflow prompts, tool calls, and replies remain part of the Pi session. No Pi internal type, private API, or persistent Pi schema changes.
 

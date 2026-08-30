@@ -96,7 +96,6 @@ import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
 
 export default defineWorkflow({
   name: "echo",
-  presentationPrompt: "Give the user the concise reply from the workflow result.",
   startAt: "reply",
   nodes: {
     reply: agent({
@@ -115,28 +114,19 @@ Then, from any Pi conversation:
 ```
 
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
-lets the current step finish and then holds the run before the next node,
-which is useful when you want to interject in the conversation mid-workflow.
-`/workflow resume` continues it. Pressing escape to interrupt a turn pauses
-the workflow automatically, so the run never nudges the model while you have
-taken the conversation back. `/workflow resume` then re-delivers the pending
-step prompt. `/workflow cancel` stops the active run. If the last run already
-ended (for example parked at a checkpoint), it clears the leftover widget
-instead. Trailing text becomes `{ task: "..." }`, and `--input-json
-{"key": "value"}` passes arbitrary input. The names `answer`, `cancel`,
-`list`, `pause`, `resume`, and `status` are reserved and rejected as workflow
-names.
+stops the worker and parks the run at its last durable boundary. `/workflow
+resume` starts a new worker generation from that boundary. `/workflow cancel`
+stops the active run; `/workflow cancel <run-id>` can also cancel a named stale
+run when no live owner holds it. A checkpoint waits until `/workflow answer
+<json-or-text>` supplies its input.
+
+Trailing text becomes `{ task: "..." }`, and `--input-json {"key": "value"}`
+passes arbitrary input. The names `answer`, `cancel`, `list`, `pause`, `resume`,
+and `status` are reserved and rejected as workflow names.
 
 A workflow can also expose [settings that change during a
 run](docs/2026-08-25-workflow-settings.md) and queue [normal follow-up work
 after completion](docs/2026-08-25-workflow-follow-ups.md).
-
-`presentationPrompt` is optional. After each top-level interactive run ends,
-pi-workflows gives the model one normal terminal decision turn with the exact
-stored input, result, terminal reason, and restart history. A presentation
-prompt adds instructions for the human-readable response. Presentation and
-factual fallback share one durable turn intent, so only one decision turn is
-sent. Waiting checkpoints and controller child runs do not create this turn.
 
 Use `expectedOutput: assistantMessage()` when a normal assistant response must
 be a node inside the graph rather than a presentation after the run. Its exact
@@ -180,26 +170,17 @@ trace, pause state, and cancellation state. See
 
 ## Agent-managed workflows
 
-The model can use the same `workflow` tool to list, start, restart, inspect,
-pause, resume, cancel, and answer workflows. `restart` takes a terminal run ID
-and reuses its exact workflow reference and input to create a new immutable run.
-Submitted-step contracts use the tool's
-`submit` action, while assistant-step contracts require a normal assistant
-response instead. Slash commands and model actions share one lifecycle
-implementation.
+The model can use the `workflow` tool to list, start, inspect, pause, resume,
+cancel, and answer workflows. It uses `update` for durable progress from the
+current attempt and `submit` for structured step output. Assistant-message
+steps require a normal visible assistant response instead. The extension sends
+all lifecycle mutations to the host and reports success only after the host
+commits them.
 
-A model-started workflow is saved before the tool reports it as queued, so the
-returned run ID works with `workflow status` and `workflow cancel` before
-execution starts. pi-workflows waits for the current agent turn to settle
-before activation. A terminal decision turn can reserve at most one restart,
-Monitor run, or other workflow start. Activation waits for that turn to settle.
-If activation fails, pi-workflows saves the failure and sends one decision turn
-so the model can correct the cause safely.
-
-Restart is never automatic. Explicit cancellation is not restartable through
-the shortcut. A chain permits at most three restarts and rejects a repeated
-terminal fingerprint. Pi Workflows uses Pi's current conversation for the
-continuation decision and does not capture or persist an original user message.
+A model-started workflow is saved before the tool reports it as accepted, so
+the returned run ID works with `workflow status` and `workflow cancel`
+immediately. Duplicate host commands and step submissions adopt their stored
+receipts instead of repeating a committed transition.
 
 pi-workflows includes a [monitor](docs/MONITOR.md) workflow for plain-language
 requests such as:
@@ -218,12 +199,12 @@ target again after repair and stops when the same issue and target evidence
 return without progress. Project and global workflows can replace the built-in
 `monitor` by using the same file name.
 
-A monitor occupies the session's one active workflow slot. If its Pi runner
-stops during the shell wait, the run parks and repeats that wait node when a
-runner resumes it.
+A monitor occupies the session's one active workflow slot. If its worker or the
+host stops during the shell wait, the run parks and repeats that idempotent wait
+node when the host resumes it.
 
-Because the workflow runs in your current conversation, you can have a long
-discussion first and then trigger a workflow that builds on it. The
+Because interactive agent steps run in the origin conversation, you can have a
+long discussion first and then trigger a workflow that builds on it. The
 `autoplan` example does exactly that. It frames the problem and scope, then
 devises an elegant production-ready solution and compares it with the holy
 grail. It
@@ -286,16 +267,16 @@ is also available through the [Herdr plugin marketplace](https://herdr.dev/plugi
 A workflow is a graph of named nodes with exactly one entry point. Each node
 finishes with an output, and edges decide what runs next.
 
-An `agent` node sends a prompt into the Pi conversation as a compact
+An `agent` node sends a prompt into the origin Pi conversation as a compact
 [workflow step message](docs/WORKFLOW_STEP_MESSAGES.md). By default, it waits
 for structured output through the `workflow` tool. With
 `expectedOutput: assistantMessage()`, it waits for a normal visible assistant
 response and uses the exact text as its output. A `compute` node runs a pure
 TypeScript function. A `notify` node writes a durable message for the Pi
-session that started the run. An `action` node performs a side effect, either a
-TypeScript function (`action({ run })`) or a runtime-owned shell command
-(`shell({ exec, parse })`). A `checkpoint` node ends the run in a `waiting`
-state so a human can pick it up. On top of `agent`, the `decision` helper asks
+session that started the run. An `action` or `shell` node must declare an
+`idempotentEffect(...)` or `manualEffect(...)` recovery contract before it can
+perform a side effect. A `checkpoint` node ends the run in a `waiting` state so
+a human can pick it up. On top of `agent`, the `decision` helper asks
 the model to pick from a fixed set of choices and validates the answer, and
 `decisionEdge` routes on the result with compile-time case checking.
 
@@ -333,21 +314,34 @@ Apply and inspect resources from Pi:
 /controller reconcile example item-1
 ```
 
-The standalone CLI provides read-only views with `pi-workflows controllers` and `pi-workflows controller <controller> <key>`. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md) for reconciliation, queue, effect, and child workflow semantics.
+The extension resolves controller initialization in a child process, then sends the declarative resource to the global host. Controller reconciliation also runs in supervised children. The standalone CLI provides read-only views with `pi-workflows controllers` and `pi-workflows controller <controller> <key>`. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md) for reconciliation, queue, effect, and child workflow semantics.
 
 ## Always-on workflows
 
-Runs do not depend on the Pi window. Every `/workflow` run is claimed through a durable queue, so closing Pi mid-run **parks** the run instead of cancelling it. Another interactive session cannot claim it. Reopening the exact session that started the run resumes it, and a standalone host can also resume it without changing where reports go. A checkpointed run waits durably until you answer it with `/workflow answer <json>`, which continues the graph in a linked run.
+Every workflow enters one durable global queue. The extension starts the
+package-owned host on demand. Closing Pi does not stop a compute, action, or
+shell node. When a run reaches an interactive agent, assistant-message, or
+human-decision step, the host parks it and saves a request for the origin Pi
+session. Reopening that session presents the same request once.
 
-Workflow reports use a durable session-addressed outbox. A report waits while its starting session is closed and is delivered only to that session when it opens again. Runs in the same database do not broadcast messages to each other's conversations.
+The host also reconciles controllers. Controller child workflows without an
+origin session can use headless `pi --mode rpc` agent steps. A child that needs
+a visible assistant response must have an origin-session binding.
 
-For runs that must continue while Pi is closed, keep the standalone host running:
+Use the CLI to inspect or control the on-demand process:
 
 ```bash
-pi-workflows host --project /path/to/project
+pi-workflows host start
+pi-workflows host status
+pi-workflows host stop
+pi-workflows host run  # stay attached; stop with Ctrl-C
 ```
 
-The host claims parked runs and reconciles controllers without a Pi session. Conversation nodes execute in headless `pi --mode rpc` children that expose the same `workflow` tool contract. The host runs in the foreground, so stop it with Ctrl-C. A crashed host's leftovers are reaped by the next one. See [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) for the model and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk rules.
+These commands manage one host for the complete user database, not one host per
+project. They do not install an operating-system service. A new host reaps exact
+orphan process identities and resumes safe work from committed state. See
+[docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) and
+[docs/WORKFLOW_HOST.md](docs/WORKFLOW_HOST.md).
 
 ## Examples
 

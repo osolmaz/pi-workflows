@@ -11,7 +11,8 @@ The viewer follows the [incremental and virtualized viewer plan](plans/2026-08-2
 src/workflows/   finite graph engine: definitions, execution, SQLite stores, loader
 src/builtins/    default workflows shipped at lowest discovery precedence
 src/controllers/ durable resources, queue, reconciliation, effects, child runs
-src/extension/   pi integration: commands, workflow tool, controller host, widget
+src/host/        global host, local protocols, resolvers, and worker supervision
+src/extension/   thin Pi client: commands, workflow tool, and origin-session bridge
 src/viewer/      standalone read-only views over runs and controller resources
 tui/             Rust piw viewer, bounded SQLite projection, and replay server
 ```
@@ -22,10 +23,12 @@ progress validation, estimation, and text formatting stay in this layer so the
 engine, extension, hosts, and viewers share one contract. `src/builtins` contains
 package-owned definitions and imports only the public workflow engine.
 `src/controllers` may import the public workflow engine for child-run
-scheduling. `src/extension` and `src/host` may also import the built-in catalog.
-The extension and viewer never import each other. The viewer reads
-SQLite runs and opens the controller SQLite database read-only, so it works
-from any process.
+scheduling. `src/host` may import controller stores and workflow stores, but the
+host event loop never loads workflow or controller definitions. Resolver and
+worker child entry points load those definitions. The extension uses static
+built-in metadata and never imports the workflow engine. The extension and
+viewer never import each other. The viewer reads SQLite state in read-only mode,
+so it works from any process.
 
 Within `src/render`, `graph.ts` computes a pure layered layout (ported from
 the acpx replay viewer: labelled switch expansion, DFS back-edge detection,
@@ -33,12 +36,7 @@ longest-path layering, barycenter ordering, virtual pass-through cells for
 long edges), `canvas.ts` is a character grid that merges box-drawing
 characters by connectivity, and `graph-render.ts` turns a SQLite run state plus a
 replay position into the drawn graph in one of two node styles: `box`
-(bordered nodes, used by the viewer and the in-pi widget) or `line`
-(single-line nodes). The widget windows the boxed graph around the active
-node to stay inside pi's 10-line widget cap; `shift+↑`/`shift+↓` shortcuts
-(registered through pi's `registerShortcut`) scroll that window manually, and
-the scroll resets to follow mode when the run records a new step. `render.ts`
-in `src/viewer`
+(bordered nodes) or `line` (single-line nodes). `render.ts` in `src/viewer`
 composes the full detail view (header, graph, step timeline, step inspector)
 and stays pure so tests can assert on rendered lines.
 
@@ -65,18 +63,16 @@ workflow shapes at every replay position; if a rendering change breaks a
 line, misplaces an arrow, or lets a label damage an edge, those tests fail
 with the offending drawing in the assertion message.
 
-Inside the engine, the pi-facing seam is the `AgentStepExecutor` interface.
-The extension implements it on top of the live conversation
-(`src/extension/executor.ts`), and tests implement it with a scripted fake
-(`test/helpers.ts`). Anything that would couple the engine to pi belongs on
-the extension side of that seam.
+Inside the engine, the model-facing seam is the `AgentStepExecutor` interface.
+The production run worker uses an interaction executor for origin-session work
+and `RpcStepExecutor` for headless controller work. The worker receives a
+`HostBackedWorkflowStore`; it cannot open a writable production store.
 
-Temporal session capture follows the same boundary. `src/extension` listens to
-Pi's documented `turn_*`, `message_*`, and `tool_execution_*` hooks and
-normalizes them before passing records to `WorkflowRunStore`. The workflows layer owns persisted shapes and schema validation. It also owns
-ordered append chains but never imports Pi types. High-rate hooks only stamp and enqueue bounded records;
-disk writes run on a separate chain. Capture failures are explicit in
-the `session_segments` capture status and never fail workflow execution.
+The Pi extension uses documented session lifecycle, message, tool, and session
+manager APIs. It writes no Pi session file. It saves host mutations through the
+local protocol and uses the public session branch only to adopt the exact
+visible entry for a durable interaction request. Tests can still use scripted
+executors through the Pi-agnostic engine API.
 
 `src/viewer/session-reducer.ts` and `tui/src/session.rs` implement the same
 sequence-ordered fold. Shared fixtures in `fixtures/session-events/` pin their
@@ -139,10 +135,12 @@ the real pi CLI from `devDependencies` in RPC mode with:
 - `HOME` pointed at a temporary home containing the canonical workflow database,
 - the extension loaded from source with `-e src/extension/index.ts`.
 
-It drives `/workflow` over the RPC protocol and asserts on the resulting SQLite
-rows, including temporal events, final entry linkage, capture integrity, and
-terminal immutability, then renders the finished run through the viewer CLI.
-Nothing outside the temp directories is touched, and no real model is called.
+It drives `/workflow` over the RPC protocol and checks the global host,
+durable interaction request, origin-session presentation, accepted submission,
+worker recovery, final SQLite state, and viewer output. It also restarts the
+real Pi process while one request is pending and proves that the same request is
+not inserted twice. Nothing outside the temp directories is touched, and no
+real model is called.
 
 ## Publishing
 

@@ -19,14 +19,12 @@ Pi Workflows includes built-in `plain-summary`, `autoplan`, `autodoc`,
 `autoimplement`, `plan-approval`, `sanity-check`, and `monitor` workflows. `autoplan` is the current name for the
 planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
-replaces the built-in monitor. The package registers each built-in in
-a process-local catalog with a stable reference such as `builtin:monitor` and
-an explicit revision. Built-ins are imported with the engine when a Pi process
-starts. They are not read from the package directory when a run starts or
-resumes. Updating the package on disk cannot mix a new built-in with that
-process's old engine; reload or restart Pi to use the new built-in. A revision
-mismatch refuses resume. Project and global workflow files still reload on
-each run and use their path and SHA-256 hash as their source identity.
+replaces the built-in monitor. Each built-in has a stable reference such as
+`builtin:monitor` and an explicit revision. A resolver child snapshots the
+selected built-in before start, and each run worker verifies that identity
+before execution. A revision mismatch refuses resume. Project and global
+workflow files also use their absolute path and SHA-256 hash as source
+identity.
 
 The workflow's command name is the file stem, so `.pi/workflows/triage.workflow.ts`
 runs as `/workflow triage`. A direct path also works: `/workflow ./somewhere/x.workflow.ts`.
@@ -40,7 +38,6 @@ import { agent, compute, defineWorkflow } from "@osolmaz/pi-workflows";
 export default defineWorkflow({
   name: "example",
   title: ({ input }) => `example: ${(input as { task?: string }).task}`,
-  presentationPrompt: "Present the final answer clearly and concisely.",
   startAt: "ask",
   maxSteps: 50,
   nodes: {
@@ -56,20 +53,19 @@ export default defineWorkflow({
 
 Top-level fields:
 
-| Field                | Type                      | Notes                                                                                                                                                                                                              |
-| -------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`               | `string`                  | Required. Used in run ids and the step contract. `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are reserved for `/workflow` subcommands.                                                             |
-| `source`             | `string`                  | Optional `import.meta.url` for exact provenance when another TypeScript workflow imports this definition directly.                                                                                                 |
-| `contractId`         | `string`                  | Optional stable input-and-exit contract identity. Dynamic overrides must match it.                                                                                                                                 |
-| `input`              | `function`                | Optional runtime input normalizer and validator. Its return type is the workflow input type.                                                                                                                       |
-| `title`              | `string` or function      | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                                                                                      |
-| `presentationPrompt` | `string` or function      | Optional instructions for a normal assistant response after the run. A function receives `{ state, finalOutput, signal }` and may return a prompt or `undefined`. See [Result presentation](#result-presentation). |
-| `startAt`            | `string`                  | Required. Id of the first node.                                                                                                                                                                                    |
-| `nodes`              | `Record<string, node>`    | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                                                                                |
-| `includes`           | `Record<string, include>` | Optional imported or dynamically resolved child workflows.                                                                                                                                                         |
-| `exits`              | `Record<string, exit>`    | Optional named successful terminal nodes used when another workflow includes this workflow.                                                                                                                        |
-| `edges`              | `WorkflowEdge[]`          | Required. See routing below.                                                                                                                                                                                       |
-| `maxSteps`           | `number`                  | Optional loop bound, default 100. The run fails when exceeded.                                                                                                                                                     |
+| Field        | Type                      | Notes                                                                                                                                                  |
+| ------------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`       | `string`                  | Required. Used in run ids and the step contract. `answer`, `cancel`, `list`, `pause`, `resume`, and `status` are reserved for `/workflow` subcommands. |
+| `source`     | `string`                  | Optional `import.meta.url` for exact provenance when another TypeScript workflow imports this definition directly.                                     |
+| `contractId` | `string`                  | Optional stable input-and-exit contract identity. Dynamic overrides must match it.                                                                     |
+| `input`      | `function`                | Optional runtime input normalizer and validator. Its return type is the workflow input type.                                                           |
+| `title`      | `string` or function      | Optional run title, resolved once at start from `{ input, workflowName }`. Async resolution is bounded (30s) and cancellable.                          |
+| `startAt`    | `string`                  | Required. Id of the first node.                                                                                                                        |
+| `nodes`      | `Record<string, node>`    | Required, non-empty. Node ids must match `[A-Za-z_][A-Za-z0-9_-]*`.                                                                                    |
+| `includes`   | `Record<string, include>` | Optional imported or dynamically resolved child workflows.                                                                                             |
+| `exits`      | `Record<string, exit>`    | Optional named successful terminal nodes used when another workflow includes this workflow.                                                            |
+| `edges`      | `WorkflowEdge[]`          | Required. See routing below.                                                                                                                           |
+| `maxSteps`   | `number`                  | Optional loop bound, default 100. The run fails when exceeded.                                                                                         |
 
 `defineWorkflow` validates the shape eagerly (node ids, edge shapes, function
 fields) and validates the graph (unknown targets, duplicate outgoing edges,
@@ -112,36 +108,40 @@ Function actions receive `WorkflowActionContext`, which adds
 
 ## Durable runs, parking, and resume
 
-Every interactive `/workflow` run is tracked in the project run queue (see
-[CONTROLLERS.md](CONTROLLERS.md) for the store). The session that starts a run
-claims it and owns it while it executes; every owner-only SQLite write proves the claim
-first (write fencing).
+Every run enters one global SQLite queue. One package-owned host claims runs,
+renews live claims, commits state, and supervises one child process for each
+active run generation. The extension is a local host client. It does not run
+the workflow engine or workflow definitions.
 
-Closing the Pi session mid-run no longer cancels the run. The engine **parks**:
-it stops without a terminal event, releases the claim, and leaves the run
-resumable. When a runner is available again (a reopened Pi session or the
-standalone host), the run **resumes** at the node it stopped on. Completed
-nodes replay from the recorded state; only the interrupted node and everything
-downstream rerun. Resume repairs a torn trace tail, drops trace events the
-state projection never recorded, and refuses to continue if the workflow
-source changed since the run started (a forced resume records the mismatch).
-
-The standalone host runs without any Pi session:
+The host starts on demand when a Pi or CLI client needs it. These commands
+control the same user-level host for all projects:
 
 ```bash
-pi-workflows host --project /path/to/project
+pi-workflows host start
+pi-workflows host status
+pi-workflows host stop
+pi-workflows host run
 ```
 
-The host claims parked runs, resumes them, and reconciles durable controllers.
-Agent nodes that submit through the workflow tool execute in headless
-`pi --mode rpc` children that load a small bridge extension. An agent node with
-`expectedOutput: assistantMessage()` parks before prompting and waits for the
-origin Pi session because its result must be a visible assistant message. A
-detached run without an origin session fails clearly. The host is a foreground process: start it in a terminal and
-stop it with Ctrl-C. A second host for the same project refuses to start, and
-a host that dies has its orphaned children reaped by the next one. While the host works, reports enter a durable outbox addressed to the Pi
-session that started the run. They remain pending while that session is closed
-and never enter another conversation in the same project.
+`host run` stays attached. The other commands start, inspect, or stop the
+on-demand process. No command installs an operating-system service.
+
+A worker loads and verifies the workflow source, then executes from committed
+state through a host-backed store. If the worker stops, pure work can run again.
+A protected write checks and renews the exact live token and generation in one
+transaction. An expired or replaced owner cannot revive itself.
+
+Interactive agent and assistant-message steps do not run headlessly for a Pi
+session. The worker commits a durable interaction request and parks. The origin
+session presents the request through documented Pi APIs and submits the exact
+request, node, attempt, and revision. Closing Pi leaves that request pending;
+reopening the same session adopts the existing session entry or presents it
+once. A controller child without an origin session can use a supervised
+headless `pi --mode rpc` child for structured agent steps.
+
+Pause stops the worker and parks at the last durable boundary. Resume takes a
+new generation. Cancellation can stop a live worker or atomically claim and
+cancel an expired running row. Resume refuses changed workflow source.
 
 ## Node types
 
@@ -181,8 +181,8 @@ because an invalid response is already visible and must not be retried.
 For submitted output, the engine appends the existing workflow-tool contract.
 The output passes through tolerant JSON normalization and then `validate`.
 Rejected submissions can retry in the same step. If the model settles without
-submitting, the extension nudges it twice by default and then fails the step.
-For assistant-message output, the engine appends a normal-response contract,
+submitting, the durable request stays pending until it receives valid output,
+times out, or is cancelled. For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
 form's active Pi turn.
@@ -225,20 +225,34 @@ controller resource instead.
 
 ### action
 
-Performs a side effect. Two forms exist. The function form runs arbitrary
-TypeScript:
+Performs managed work. Every function action and shell action must declare how
+the host recovers if the worker exits after the external operation but before
+it saves a receipt.
+
+Use `idempotentEffect(type)` only when the operation has a stable external
+idempotency key or a read-back check that makes another attempt safe:
 
 ```typescript
-action({ run: async ({ input }) => await deployPreview(input) });
+import { action, idempotentEffect } from "@osolmaz/pi-workflows";
+
+action({
+  effect: idempotentEffect("preview.deploy"),
+  run: async ({ input }) => await deployPreview(input),
+});
 ```
 
+Use `manualEffect(type)` when the external system cannot prove whether an
+uncertain request applied. An uncertain worker exit marks that effect
+`ambiguous`, parks the run, and requires explicit operator recovery. The host
+does not retry it automatically.
+
 The shell form (`shell` is a synonym that requires `exec`) runs a command owned
-by the runtime, so the workflow author decides exactly what executes, with a
-timeout and captured output:
+by the workflow definition, with a timeout and captured output:
 
 ```typescript
 shell({
-  exec: ({ input }) => ({
+  effect: idempotentEffect("repository.status"),
+  exec: () => ({
     command: "git",
     args: ["status", "--porcelain"],
     cwd: "/path/to/repo",
@@ -261,6 +275,7 @@ A function action can publish a durable update without completing the node:
 
 ```typescript
 action({
+  effect: idempotentEffect("dataset.process"),
   run: async ({ publishUpdate }) => {
     await publishUpdate({
       type: "progress",
@@ -282,6 +297,12 @@ or more updates through `updates.parseLine`. Parsing applies backpressure and
 keeps normal output capture. Lines and update data are each limited to 64 KiB.
 See [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the envelope, progress
 schema, limits, estimation, and error rules.
+
+The host reserves the effect before it lets the action run. A repeated key with
+the same request adopts the durable record; the same key with another request
+is a conflict. A normal caught error settles the attempt as rejected. After an
+uncertain process exit, an idempotent effect returns to pending for retry, while
+a manual effect becomes ambiguous. This is not an exactly-once claim.
 
 ### checkpoint
 
@@ -428,72 +449,31 @@ The run records every mounted source and a digest of the resolved graph. Resume 
 
 The model sees one `workflow` tool. Its `action` field supports:
 
-- `list` for discovered workflow names and sources.
-- `start` with a workflow name or path and structured input.
-- `restart` with a terminal run ID. It creates a new run from the exact stored workflow reference and input.
-- `status` for the active run or a supplied run ID.
-- `pause`, `resume`, and `cancel` for the active run.
-- `answer` with ordinary checkpoint input and an optional run ID. Protected `humanDecision()` gates reject this model-facing action.
-- `change-settings` with an RFC 6902 patch, optional scope ID, and optional expected change number.
-- `queue-follow-up` to save one ordered normal user prompt for after successful completion.
-- `remove-follow-up` to remove an unsent prompt created by the same model source.
-- `update` for a non-completing update from the current agent attempt.
+- `list` for discovered workflow names and sources;
+- `start` with a workflow name or path and structured input;
+- `status` for the active run or a supplied run ID;
+- `pause` and `resume` for the active session run;
+- `cancel` for the active run or a supplied run ID;
+- `answer` with checkpoint input and an optional run ID;
+- `update` for a non-completing update from the current agent attempt;
 - `submit` for the current workflow step contract.
 
-A direct user request to continue or resume the active workflow maps to the
-`resume` action immediately. The model does not call `status` instead of
-`resume`, and it does not use `status` as a prerequisite.
+A direct user request to continue or resume the active workflow maps to
+`resume` immediately. The model does not call `status` instead of `resume` or
+use it as a prerequisite. An already active run adopts the resume request. A
+paused or parked run gets a new claim generation and worker. With no resumable
+run, the host rejects the request.
 
-`resume` is idempotent while a run is active. A held, pausing, or paused run is
-released and reports `resumed: true`. An active run that is already executing
-returns normal success with `resumed: false` and `alreadyRunning: true`. It does
-not change the run state. With no active run, `resume` still returns a warning.
+`status` reports the durable queue projection. A host command succeeds only
+after its transaction commits. The protocol stores request fingerprints and
+receipts, so an exact duplicate adopts the committed result and conflicting
+reuse is rejected.
 
-Model-facing `status` keeps `status` as the durable workflow lifecycle state.
-It also reports the host action fields `paused`, `workState`, and `resumable`.
-For the current active run, `paused` is true when the host has requested or
-applied a hold, or when the durable run state has `paused: true`. `workState`
-is `running`, `pausing`, or `paused` for that active host run and `inactive`
-when no current host run can act on the durable state. `resumable` is true only
-when `resume` can release the current active run. Queue-only status uses its
-launch state, such as `queued` or `starting`, as `workState`; queue-only and
-no-run results report `paused: false` and `resumable: false`. Thus, a durable
-`status: "running"` can correctly appear with `workState: "pausing"` or
-`workState: "paused"`, and the status message names that actionable state
-instead of saying only that the workflow is running.
-
-Restart uses this contract:
-
-```json
-{
-  "action": "restart",
-  "runId": "terminal-run-id"
-}
-```
-
-The terminal run must belong to the current Pi session and must not be active,
-waiting, or explicitly cancelled. Its source and revision must still resolve
-exactly. Restart creates a new immutable run and leaves the terminal run
-unchanged. It copies the stored input and safe launch settings; it does not
-reconstruct input from conversation history.
-
-A model-started run is queued until the model's current turn settles. A terminal
-decision turn can reserve one restart, Monitor run, or other workflow start.
-A second workflow launch from that turn fails. The first workflow prompt then
-starts a new turn. This keeps the requesting turn outside
-the workflow's first attempt and prevents an early missing-submission reminder.
-The normal extension offers all actions. The headless RPC bridge offers only
-`update` and `submit`, so a workflow child cannot recursively control other
-runs. Direct `/workflow change-settings`, `queue-follow-up`, and
-`remove-follow-up` commands use verified interactive provenance. Controller
-code can use the matching `ctx.workflows` methods. All surfaces call the same
-SQLite operations.
-
-Follow-up prompts stay separate from workflow settings. Successful terminal
-state is saved before delivery. A final presentation settles first. The Pi
-extension then sends prompts in order as normal user messages without
-reactivating the completed run. See [Continue normal work after a workflow
-finishes](2026-08-25-workflow-follow-ups.md).
+The normal extension offers these actions through the origin Pi session. The
+headless RPC bridge offers only `update` and `submit`, so a controller child
+cannot recursively control unrelated runs. Controller code can use its narrow
+`ctx.workflows` methods for child runs, settings, and follow-up records. Those
+methods also commit through the global host.
 
 ### Built-in plain summary
 
@@ -597,7 +577,7 @@ Only bounded final assistant text and safe operational facts leave a live child 
 
 The workflow publishes aggregate and per-agent `pi-workflows.progress.v1` tracks under `agents/review/*` and `agents/verification/*`. Progress contains role, the verified actual model when known, state, elapsed facts, and safe phases such as `thinking` or `tool: read`. The Pi widget shows the aggregate plus failed and active children within its ten-line limit. `piw` shows every durable child track and its samples. Both views use existing progress records, so no child workflow run or new persisted schema is needed.
 
-Serial mode still uses two child sessions, and parallel mode still uses five. Review prompts, review areas, strict result validation, verdicts, and progress stay unchanged. After verification, an assistant-message agent shows the full bounded report verbatim. A mismatch stops before summary generation. The graph then includes `plain-summary`, which shows a short plain-language explanation with the verdict and the most important next action. The detailed response always settles before the summary starts. A final compute node returns the original strict result, so presentation cannot change the verdict. Sanity Check uses no final notification or root `presentationPrompt`.
+Serial mode still uses two child sessions, and parallel mode still uses five. Review prompts, review areas, strict result validation, verdicts, and progress stay unchanged. After verification, an assistant-message agent shows the full bounded report verbatim. A mismatch stops before summary generation. The graph then includes `plain-summary`, which shows a short plain-language explanation with the verdict and the most important next action. The detailed response always settles before the summary starts. A final compute node returns the original strict result, so presentation cannot change the verdict. Sanity Check creates no extra terminal model turn.
 
 The CLI, JSON or RPC stream, temporary prompt file, standard-output cap, subprocess fallback, shared child runtime, and blanket child-extension ban are not retained. See [the Sanity Check plan](plans/2026-08-21-sanity-check-plan.md) for the selected implementation and test boundaries.
 
@@ -688,67 +668,22 @@ use an internal turn-intent contract instead of the notification outbox. See
 [WORKFLOW_STEP_MESSAGES.md](WORKFLOW_STEP_MESSAGES.md) for the step-message contract
 and [Deferred workflow turns](DEFERRED_TURNS.md) for the successor-turn contract.
 
-## Result presentation
+## Visible responses
 
 Workflow nodes normally produce structured values for routing and persistence.
-When a person should see a normal prose response only after the root run, add
-`presentationPrompt` at the top level:
+When a person must receive normal prose, use an agent node with
+`expectedOutput: assistantMessage()`. The worker parks and records the exact
+step request. The origin Pi session starts the model turn, and the visible
+assistant text becomes the node output after the turn settles.
 
-```typescript
-export default defineWorkflow({
-  name: "report",
-  presentationPrompt: ({ state, finalOutput }) =>
-    state.status === "waiting"
-      ? `Explain this recommendation and ask the user to decide: ${JSON.stringify(finalOutput)}`
-      : "Summarize the completed result and any remaining limitations.",
-  // ...startAt, nodes, and edges
-});
-```
+The request keeps its node and attempt ID across Pi reload. The extension first
+looks for an existing session entry with the durable request ID. It inserts a
+new visible message only when no adopted entry exists. A repeated submission
+returns its stored receipt.
 
-After a top-level interactive run becomes terminal, the Pi extension gives the
-model one normal terminal decision turn. The message contains the workflow name
-and revision, terminal run ID, exact stored input, bounded result, terminal
-state and reason, restart count, and earlier terminal outcomes in the restart
-chain. A completed state does not prove that the user's larger task is complete.
-The model uses the current Pi conversation to stop, restart safely, start
-Monitor for an authorized external wait, ask for a decision or authority, or
-take another safe authorized action.
-
-Interactive Pi shows a compact card for a factual terminal fallback. The
-collapsed card shows the workflow, state or cause, run identity, and restart
-count when available. It hides the full terminal facts, input, result,
-fingerprint, and model instructions. Expanding the card shows the complete
-model-facing content. The renderer uses structured display fields rather than
-parsing the prompt, so collapsing the card does not change session history,
-model context, replay, or recovery. Headless and RPC behavior stays unchanged.
-
-`presentationPrompt` adds workflow-specific presentation instructions to this
-shared terminal decision message for completed runs. Returning `undefined`,
-returning an empty string, omitting `presentationPrompt`, or ending in failure,
-timeout, or cancellation uses the factual terminal fallback instead. Normal
-presentation and fallback claim the same terminal turn intent, so races,
-reload, crash recovery, and compaction cannot create a second decision turn.
-Async prompt builders have 30 seconds to finish and receive an `AbortSignal`
-that fires on timeout, session shutdown, or when a new workflow or normal user
-turn starts; stale presentations are discarded.
-
-Waiting checkpoints are not terminal and do not create a terminal decision
-turn. Controller child runs and internally owned runs report to their owner and
-do not create competing turns. Explicit cancellation produces terminal facts,
-but its decision instruction defaults to stopping and the `restart` shortcut
-rejects it.
-
-An agent with `expectedOutput: assistantMessage()` is different. Its visible
-assistant response is the node output, can appear before later nodes, and also
-works inside an included workflow. A root `presentationPrompt` would add a
-second response, so workflows that end with assistant-message output normally
-omit it.
-
-Presentation and terminal decisions are outside the workflow graph: they cannot
-route to another node, change the terminal run, or alter its result. A selected
-restart always creates a new run. Workflow definitions need no opt-in,
-continuation node, or restart prompt. Pi owns conversation history. Pi Workflows
-does not identify, hash, copy, or store an original user message.
+A headless controller child cannot produce a visible assistant message without
+an approved origin-session binding. Use structured agent output for detached
+work. Terminal run state does not create an extra model turn.
 
 ## Runtime behavior
 
@@ -762,38 +697,22 @@ possible. Defaults worth knowing:
   turn, and late output for that attempt is rejected.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
-- `/workflow pause` requests a pause: the current step finishes normally,
-  then the run holds at the step boundary (`paused: true` in the run state,
-  `run_paused` in the trace) until `/workflow resume` or `/workflow cancel`.
-  Pausing never interrupts a node mid-flight.
-- Interrupting a turn (escape) auto-pauses the run: the pending agent step is
-  held without nudges and the engine pauses at the next boundary. Node
-  timeouts keep ticking while held, so a long-abandoned step still times out.
-  `/workflow resume` re-delivers the pending step prompt.
-- Resuming an active run that is already running succeeds without changing the
-  engine, executor, widget, or durable workflow state. This makes duplicate
-  `resume` calls safe.
-- A model-started workflow is persisted as `queued` with its final run ID before the start tool
-  returns. Activation waits for the initiating agent turn to settle, then moves through `starting`
-  and `running`. `workflow status` and `workflow cancel` accept the run ID before a SQLite run state
-  exists.
-- If deferred activation fails, the queue stores a bounded safe error, releases the session
-  reservation, and creates one terminal turn intent for the initiating session. A workflow that
-  reports `started` and then crashes before its first prompt follows the same path. The model gets
-  one factual decision turn after settlement. Pi Workflows does not retry automatically.
-- Agent-issued and direct `workflow cancel` actions that cancel an active or queued run create or
-  settle one terminal turn intent. The resulting decision defaults to stopping, and `restart`
-  rejects the cancelled run. When no run is live but the widget still shows a parked or finished
-  run, the command clears the widget.
-- A restart chain allows at most three restart actions after the original run. The terminal
-  fingerprint excludes timestamps and run IDs. If the same workflow revision, exact input, state,
-  result or error, and reason occur again in that chain, another restart fails immediately. A
-  changed outcome can remain restartable until the chain limit. Starting Monitor does not consume
-  a restart.
-- One workflow runs per session at a time.
-- After the workflow tool accepts an agent-step submission, any assistant text that follows remains visible. The next workflow message continues the graph. A deferred intent makes a workflow prompt, presentation, and factual fallback compete to provide one successor turn, so an abort cannot produce two continuation turns.
-- Agent nudges: if the model ends its turn without submitting the pending
-  step, it gets a reminder, twice by default, then the step fails.
+- `/workflow pause` stops the worker process group and atomically parks the run
+  with `paused: true`. `/workflow resume` takes a new generation and reruns only
+  work after the last durable boundary.
+- Resuming an active run adopts the existing work. Duplicate start, control,
+  update, and submission messages return their stored receipts.
+- A start is committed as `queued` with its final run ID before the command
+  reports success. `workflow status` and `workflow cancel` can use that ID
+  immediately.
+- One interactive workflow request is presented per Pi session. Other requests
+  remain durable and ordered.
+- Each protected write renews only its exact live token and generation in the
+  same transaction. Claim loss does not write a failed run event.
+- An uncommitted pure or idempotent node can run again after a worker crash. An
+  uncertain manual effect parks as ambiguous and never retries automatically.
+- Host status reports safe counts and timestamps. It does not report session
+  IDs, project paths, prompts, payloads, tokens, process IDs, or credentials.
 
 ## Workflows started by controllers
 
@@ -818,14 +737,16 @@ if (run.state !== "succeeded") {
 }
 ```
 
-Child workflow completion queues the parent resource again. A running child left by a stopped host is recorded as a failed SQLite run state with a `run_interrupted` event. The controller treats that child attempt as interrupted, and the next parent reconciliation starts another immutable attempt. Consequential external mutations should use the controller effect API so uncertain results are observed before retry.
+Child workflow completion queues the parent resource again. The global host runs the child through the same queue and supervised worker model as any other run. A host or worker crash resumes the existing durable run when its committed effect state makes that safe. Consequential external mutations belong in the workflow or controller effect API; an uncertain result stops for explicit recovery.
 
 See [CONTROLLERS.md](CONTROLLERS.md) for controller definitions and the full recovery contract.
 
-## Using the engine outside pi
+## Using the engine outside Pi
 
-The engine is pi-agnostic. `WorkflowEngine` takes any `AgentStepExecutor`, so
-tests (and other hosts) can script agent steps:
+The engine remains Pi-agnostic. `WorkflowEngine` takes any `AgentStepExecutor`,
+so tests and custom library integrations can script agent steps. The package's
+production extension does not use this as a selectable embedded runtime; it
+always sends runs to the global host.
 
 ```typescript
 import { WorkflowEngine, type AgentStepExecutor } from "@osolmaz/pi-workflows";
@@ -838,6 +759,9 @@ const executor: AgentStepExecutor = {
   },
 };
 
-const engine = new WorkflowEngine({ executor, outputRoot: "/tmp/runs" });
+const engine = new WorkflowEngine({
+  executor,
+  databasePath: "/tmp/workflow-state.sqlite",
+});
 const { state } = await engine.run(workflow, { task: "..." });
 ```

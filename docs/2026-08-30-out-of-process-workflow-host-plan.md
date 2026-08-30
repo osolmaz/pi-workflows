@@ -6,6 +6,8 @@ date: 2026-08-30
 
 # Run workflows outside Pi
 
+Status: implemented on the `feat/out-of-process-workflow-host` branch. The implementation keeps schema version 1, uses one global on-demand host, and has no embedded production fallback.
+
 A live workflow lost its lease while it was still working. The workflow engine kept the Node.js event loop busy, so its renewal timer did not run before the 30-second lease expired. The next state write used a generic error, the extension treated the error as a crash, and durable state was left with a running queue row, a running attempt, an expired lease, and a separate failed audit event.
 
 This plan fixes that failure first, then removes its root architectural cause. One user-level host will own workflow state. Each active run will execute in a supervised child process. Pi will become a client that starts work, presents interactive requests, and submits answers through documented extension APIs.
@@ -34,15 +36,15 @@ This plan fixes that failure first, then removes its root architectural cause. O
 - Do not add a compatibility reader, dual path, `v2` schema, or automatic state migration for older alpha databases.
 - Do not install an operating-system service as part of this change.
 
-## Current failure
+## Original failure
 
-`src/extension/index.ts` and `src/host/runner.ts` renew 30-second run claims from 10-second `setInterval` callbacks. `src/workflows/engine.ts` can execute a long sequence of synchronous graph transitions without a macrotask yield. A long synchronous node can also block the event loop by itself.
+The former extension and host renewed 30-second run claims from 10-second `setInterval` callbacks. `src/workflows/engine.ts` can execute a long sequence of synchronous graph transitions without a macrotask yield. A long synchronous node can also block the event loop by itself.
 
 `src/workflows/store.ts` checks lease expiry during a protected write. Every ownership failure currently becomes `Error("Workflow run write rejected because ownership changed")`. The extension handles `ClaimLostError` as a normal handoff, but it handles this generic error as a workflow crash.
 
-The public cancellation path handles an in-memory run, a queued or starting row, or a waiting human decision. It cannot claim and cancel an expired running row.
+The former public cancellation path handled an in-memory run, a queued or starting row, or a waiting human decision. It could not claim and cancel an expired running row.
 
-The current standalone host is not the final isolation boundary. It executes the workflow engine in the same process that renews claims. Workflow code can therefore block host renewal too.
+The former standalone host executed the workflow engine in the same process that renewed claims. Workflow code could therefore block host renewal too.
 
 ## Core rules
 
