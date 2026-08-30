@@ -504,7 +504,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("does not let an unclaimed cancellation override a live or expired owner", async () => {
+  it("rejects live-owner cancellation and atomically cancels an expired owner", async () => {
     const { store } = await setup();
     reserve(store);
     const now = Date.now();
@@ -520,8 +520,24 @@ describe("workflow run queue in canonical SQLite", () => {
     ).toBe(false);
     expect(
       store.cancelWorkflowRun({ runId: "run-1", now: new Date(now + 2_000).toISOString() }),
-    ).toBe(false);
-    expect(store.getWorkflowRun("run-1")?.status).toBe("starting");
+    ).toBe(true);
+    expect(store.getWorkflowRun("run-1")).toMatchObject({
+      status: "cancelled",
+      runnerId: null,
+      claimGeneration: null,
+      claimExpiresAt: null,
+    });
+    expect(
+      store.state.connection
+        .prepare(
+          `SELECT l.generation FROM leases l
+           JOIN runs r ON r.resource_id = l.resource_id WHERE r.run_id = ?`,
+        )
+        .get("run-1"),
+    ).toEqual({ generation: 2 });
+    expect(
+      new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
+    ).toMatchObject({ status: "cancelled", error: "Workflow run cancelled" });
     store.close();
   });
 

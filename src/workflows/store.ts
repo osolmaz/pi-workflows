@@ -19,6 +19,7 @@ import {
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
 import { compositionMetadata } from "./composition.js";
+import { ClaimLostError } from "./errors.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
   reduceSessionEvents,
@@ -100,6 +101,8 @@ export type RunWriteAuthority = {
   ownerId: string;
   token: string;
   generation: number;
+  /** Duration used when a protected write renews this exact live claim. */
+  leaseMs?: number;
 };
 
 export type WorkflowRunStoreOptions = {
@@ -1951,12 +1954,6 @@ export class WorkflowRunStore {
   }
 
   private assertWriteAuthority(run: RunRow, expectedRevision: number): void {
-    const actualRevision = this.requireResourceRevision(run.resourceId);
-    if (actualRevision !== expectedRevision) {
-      throw new Error(
-        `Workflow run revision conflict: expected ${expectedRevision}, got ${actualRevision}`,
-      );
-    }
     const lease = this.state.connection
       .prepare(
         `SELECT generation, owner_type AS ownerType, owner_id AS ownerId,
@@ -1966,19 +1963,56 @@ export class WorkflowRunStore {
       .get(run.resourceId);
     /* istanbul ignore if -- exact schema and internal query shape */
     if (!isLeaseAuthorityRow(lease)) throw new Error("Workflow run lease is missing");
-    if (lease.ownerId === null) return;
-    const authority = this.authorityProvider?.(run.runId);
-    if (
-      authority === undefined ||
-      authority.ownerType !== lease.ownerType ||
-      authority.ownerId !== lease.ownerId ||
-      authority.generation !== lease.generation ||
-      lease.tokenHash === null ||
-      !lease.tokenHash.equals(tokenHash(authority.token)) ||
-      lease.expiresAt === null ||
-      lease.expiresAt <= Date.now()
-    ) {
-      throw new Error("Workflow run write rejected because ownership changed");
+
+    if (lease.ownerId !== null || this.authorityProvider !== undefined) {
+      const authority = this.authorityProvider?.(run.runId);
+      if (authority === undefined) {
+        throw new ClaimLostError(run.runId, "missingAuthority");
+      }
+      const now = Date.now();
+      if (lease.expiresAt === null || lease.expiresAt <= now) {
+        throw new ClaimLostError(run.runId, "expired");
+      }
+      if (authority.ownerType !== lease.ownerType || authority.ownerId !== lease.ownerId) {
+        throw new ClaimLostError(run.runId, "ownerChanged");
+      }
+      if (lease.tokenHash === null || !lease.tokenHash.equals(tokenHash(authority.token))) {
+        throw new ClaimLostError(run.runId, "tokenChanged");
+      }
+      if (authority.generation !== lease.generation) {
+        throw new ClaimLostError(run.runId, "generationChanged");
+      }
+      const leaseMs = authority.leaseMs ?? 30_000;
+      if (!Number.isInteger(leaseMs) || leaseMs <= 0) {
+        throw new Error("Workflow run authority lease duration must be a positive integer");
+      }
+      const renewal = this.state.connection
+        .prepare(
+          `UPDATE leases SET heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND owner_type = ? AND owner_id = ?
+             AND token_hash = ? AND generation = ? AND expires_at > ?`,
+        )
+        .run(
+          now,
+          now + leaseMs,
+          run.resourceId,
+          authority.ownerType,
+          authority.ownerId,
+          tokenHash(authority.token),
+          authority.generation,
+          now,
+        );
+      /* istanbul ignore if -- BEGIN IMMEDIATE keeps the checked lease stable */
+      if (renewal.changes !== 1) {
+        throw new ClaimLostError(run.runId, "expired");
+      }
+    }
+
+    const actualRevision = this.requireResourceRevision(run.resourceId);
+    if (actualRevision !== expectedRevision) {
+      throw new Error(
+        `Workflow run revision conflict: expected ${expectedRevision}, got ${actualRevision}`,
+      );
     }
   }
 
