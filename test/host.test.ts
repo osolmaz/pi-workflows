@@ -48,6 +48,44 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeCrashEffectWorkflow(
+  cwd: string,
+  recovery: "idempotent" | "manual",
+  markerPath?: string,
+): Promise<string> {
+  const workflowPath = path.join(cwd, `${recovery}-crash.workflow.ts`);
+  const effectFactory = recovery === "idempotent" ? "idempotentEffect" : "manualEffect";
+  const run =
+    recovery === "idempotent"
+      ? `() => {
+          if (!existsSync(${JSON.stringify(markerPath)})) {
+            writeFileSync(${JSON.stringify(markerPath)}, "applied");
+            process.exit(23);
+          }
+          return { applied: true };
+        }`
+      : "() => process.exit(23)";
+  await fs.writeFile(
+    workflowPath,
+    `import { existsSync, writeFileSync } from "node:fs";
+import { action, defineWorkflow, ${effectFactory} } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: ${JSON.stringify(`host-${recovery}-crash`)},
+  startAt: "effect",
+  nodes: {
+    effect: action({
+      effect: ${effectFactory}(${JSON.stringify(`test.host-${recovery}-crash`)}),
+      run: ${run},
+    }),
+  },
+  edges: [],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function startRun(options: {
   client: WorkflowHostClient;
   cwd: string;
@@ -176,6 +214,97 @@ describe("global workflow host", () => {
           store.close();
         }
       }, 30_000);
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("retries an interrupted idempotent effect and adopts its durable reservation", async () => {
+    const cwd = await makeTempDir("host-idempotent-effect-project");
+    const databasePath = path.join(
+      await makeTempDir("host-idempotent-effect-state"),
+      "state.sqlite",
+    );
+    const markerPath = path.join(cwd, "effect-applied");
+    const workflowPath = await writeCrashEffectWorkflow(cwd, "idempotent", markerPath);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({ client, cwd, workflowPath, runId: "idempotent-crash-run" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("idempotent-crash-run")?.status === "done";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        const effect = store.state.connection
+          .prepare(
+            `SELECT e.status, e.attempt_count AS attemptCount FROM effects e
+             JOIN runs r ON r.resource_id = e.source_resource_id
+             WHERE r.run_id = ? AND e.effect_type = ?`,
+          )
+          .get("idempotent-crash-run", "test.host-idempotent-crash") as
+          | { status: string; attemptCount: number }
+          | undefined;
+        expect(effect).toEqual({ status: "applied", attemptCount: 2 });
+        const workers = store.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .get("idempotent-crash-run") as { count: number };
+        expect(workers.count).toBe(2);
+      } finally {
+        store.close();
+      }
+      expect(await fs.readFile(markerPath, "utf8")).toBe("applied");
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("parks an interrupted manual effect as ambiguous without retrying it", async () => {
+    const cwd = await makeTempDir("host-manual-effect-project");
+    const databasePath = path.join(await makeTempDir("host-manual-effect-state"), "state.sqlite");
+    const workflowPath = await writeCrashEffectWorkflow(cwd, "manual");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({ client, cwd, workflowPath, runId: "manual-crash-run" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          const run = store.getWorkflowRun("manual-crash-run");
+          return run?.status === "parked" && run.errorCode === "effectAmbiguous";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        const effect = store.state.connection
+          .prepare(
+            `SELECT e.status, e.attempt_count AS attemptCount FROM effects e
+             JOIN runs r ON r.resource_id = e.source_resource_id
+             WHERE r.run_id = ? AND e.effect_type = ?`,
+          )
+          .get("manual-crash-run", "test.host-manual-crash") as
+          | { status: string; attemptCount: number }
+          | undefined;
+        expect(effect).toEqual({ status: "ambiguous", attemptCount: 1 });
+        const workers = store.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .get("manual-crash-run") as { count: number };
+        expect(workers.count).toBe(1);
+      } finally {
+        store.close();
+      }
+      const status = await client.request({ operation: "host.status" });
+      expect(status.receipt).toMatchObject({ ambiguousEffects: 1 });
     } finally {
       await host.stop();
     }
