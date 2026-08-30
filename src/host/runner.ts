@@ -405,6 +405,10 @@ export class WorkflowHost {
           });
       }
     });
+    socket.on("error", (error) => {
+      this.log(`client socket error: ${errorMessage(error)}`);
+      socket.destroy();
+    });
     socket.on("close", () => {
       this.sockets.delete(socket);
     });
