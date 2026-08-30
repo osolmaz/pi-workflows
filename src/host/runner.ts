@@ -10,7 +10,11 @@ import {
   controllerSearchDirs,
   discoverControllers,
 } from "../controllers/loader.js";
-import { SqliteControllerStore, type WorkflowRunQueueRecord } from "../controllers/sqlite.js";
+import {
+  SqliteControllerStore,
+  type WorkflowRunQueueRecord,
+  type WorkflowTurnIntentFacts,
+} from "../controllers/sqlite.js";
 import type {
   ControllerQueueClaim,
   ControllerResource,
@@ -69,6 +73,7 @@ const HOST_RENEW_MS = 10_000;
 const CLAIM_POLL_MS = 2_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const PRESENTATION_CLAIM_LEASE_MS = 10_000;
+const DELIVERY_CLAIM_LEASE_MS = 10_000;
 const CONTROLLER_CLAIM_LEASE_MS = 120_000;
 const CONTROLLER_RENEW_MS = 30_000;
 const MAX_CONTROLLER_WORKERS = 4;
@@ -100,6 +105,15 @@ type ActiveRun = {
   exiting: boolean;
   control?: "cancel" | "pause" | "handoff";
   claimLost?: boolean;
+};
+
+type DeliveryClaim = {
+  clientId: string;
+  token: string;
+  targetSessionId: string;
+  kind: "notification" | "turn";
+  resourceId: string;
+  expiresAt: number;
 };
 
 type ActiveController = {
@@ -135,6 +149,7 @@ export class WorkflowHost {
   private readonly pendingStarts = new Set<string>();
   private readonly pendingResumes = new Set<string>();
   private readonly blockedRuns = new Set<string>();
+  private readonly deliveryClaims = new Map<string, DeliveryClaim>();
   private server: net.Server | null = null;
   private claim: HostClaim | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -240,6 +255,7 @@ export class WorkflowHost {
     );
     await Promise.allSettled(this.activationTasks.values());
     this.registry.killAll();
+    this.deliveryClaims.clear();
     if (this.claim !== null) this.hostState.releaseHost(this.claim);
     this.claim = null;
     if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
@@ -432,6 +448,16 @@ export class WorkflowHost {
       }
       case "run.start":
         return this.startRun(request, afterCommit);
+      case "checkpoint.answer":
+        return this.answerCheckpoint(request, afterCommit);
+      case "notification.claim":
+        return this.claimNotification(request);
+      case "notification.deliver":
+        return this.deliverNotification(request);
+      case "turn.claim":
+        return this.claimTurn(request);
+      case "turn.resolve":
+        return this.resolveTurn(request);
       case "controller.list":
       case "controller.get":
       case "controller.apply":
@@ -593,6 +619,187 @@ export class WorkflowHost {
     };
   }
 
+  private rememberDeliveryClaim(options: Omit<DeliveryClaim, "expiresAt">): string {
+    const now = Date.now();
+    for (const [claimId, claim] of this.deliveryClaims) {
+      if (claim.expiresAt <= now) this.deliveryClaims.delete(claimId);
+    }
+    const claimId = randomUUID();
+    this.deliveryClaims.set(claimId, {
+      ...options,
+      expiresAt: now + DELIVERY_CLAIM_LEASE_MS,
+    });
+    return claimId;
+  }
+
+  private deliveryClaim(
+    claimId: string,
+    clientId: string,
+    kind: DeliveryClaim["kind"],
+    resourceId: string,
+    targetSessionId: string,
+  ): DeliveryClaim | undefined {
+    const claim = this.deliveryClaims.get(claimId);
+    if (
+      claim === undefined ||
+      claim.expiresAt <= Date.now() ||
+      claim.clientId !== clientId ||
+      claim.kind !== kind ||
+      claim.resourceId !== resourceId ||
+      claim.targetSessionId !== targetSessionId
+    ) {
+      this.deliveryClaims.delete(claimId);
+      return undefined;
+    }
+    return claim;
+  }
+
+  private claimNotification(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+    const payload = requireRecord(command.payload, "notification claim payload");
+    const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
+    const token = randomUUID();
+    const notification = this.queue.claimPendingWorkflowNotifications({
+      targetSessionId,
+      claimToken: token,
+      leaseMs: DELIVERY_CLAIM_LEASE_MS,
+      limit: 1,
+    })[0];
+    if (notification === undefined) {
+      return { outcome: "accepted", receipt: { notification: null } };
+    }
+    const claimId = this.rememberDeliveryClaim({
+      clientId: command.clientId,
+      token,
+      targetSessionId,
+      kind: "notification",
+      resourceId: notification.notificationId,
+    });
+    return {
+      outcome: "accepted",
+      receipt: { claimId, notification } as unknown as JsonValue,
+    };
+  }
+
+  private deliverNotification(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+    const payload = requireRecord(command.payload, "notification delivery payload");
+    const notificationId = requireString(payload.notificationId, "notificationId");
+    const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
+    const claimId = requireString(payload.claimId, "claimId");
+    const claim = this.deliveryClaim(
+      claimId,
+      command.clientId,
+      "notification",
+      notificationId,
+      targetSessionId,
+    );
+    if (claim === undefined) {
+      return { outcome: "conflict", error: "Notification delivery claim is stale" };
+    }
+    const delivered = this.queue.markWorkflowNotificationDelivered({
+      notificationId,
+      targetSessionId,
+      claimToken: claim.token,
+    });
+    this.deliveryClaims.delete(claimId);
+    return delivered
+      ? { outcome: "accepted", receipt: { notificationId, delivered: true } }
+      : { outcome: "conflict", error: "Notification delivery claim is stale" };
+  }
+
+  private claimTurn(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+    const payload = requireRecord(command.payload, "turn claim payload");
+    const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
+    const token = randomUUID();
+    const intent = this.queue.claimEligibleWorkflowTurnIntents({
+      targetSessionId,
+      claimToken: token,
+      leaseMs: DELIVERY_CLAIM_LEASE_MS,
+      limit: 1,
+    })[0];
+    if (intent === undefined) {
+      return { outcome: "accepted", receipt: { turn: null } };
+    }
+    const claimId = this.rememberDeliveryClaim({
+      clientId: command.clientId,
+      token,
+      targetSessionId,
+      kind: "turn",
+      resourceId: intent.intentId,
+    });
+    return {
+      outcome: "accepted",
+      receipt: { claimId, turn: intent } as unknown as JsonValue,
+    };
+  }
+
+  private resolveTurn(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+    const payload = requireRecord(command.payload, "turn resolution payload");
+    const intentId = requireString(payload.intentId, "intentId");
+    const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
+    const claimId = requireString(payload.claimId, "claimId");
+    const claim = this.deliveryClaim(claimId, command.clientId, "turn", intentId, targetSessionId);
+    if (claim === undefined) {
+      return { outcome: "conflict", error: "Workflow turn delivery claim is stale" };
+    }
+    const resolved = this.queue.resolveWorkflowTurnIntent({
+      intentId,
+      targetSessionId,
+      claimToken: claim.token,
+      resolution: "presentation",
+      ...(typeof payload.messageId === "string" ? { messageId: payload.messageId } : {}),
+    });
+    this.deliveryClaims.delete(claimId);
+    return resolved
+      ? { outcome: "accepted", receipt: { intentId, resolved: true } }
+      : { outcome: "conflict", error: "Workflow turn delivery claim is stale" };
+  }
+
+  private answerCheckpoint(
+    command: HostRequest,
+    afterCommit: Array<() => void>,
+  ): Omit<HostResponse, "schema" | "requestId"> {
+    const parentRunId = requireRunId(command);
+    const payload = requireRecord(command.payload, "checkpoint answer payload");
+    const continuationRunId = requireString(payload.continuationRunId, "continuationRunId");
+    const parent = this.queue.getWorkflowRun(parentRunId);
+    const bundle = this.runStore.readRun(parentRunId);
+    if (parent === undefined || bundle === null || bundle instanceof Promise) {
+      return { outcome: "notFound", error: `Checkpoint run not found: ${parentRunId}` };
+    }
+    const waitingOn = bundle.state.waitingOn;
+    if (bundle.state.status !== "waiting" || waitingOn === undefined) {
+      return { outcome: "rejected", error: "Workflow run is not waiting at a checkpoint" };
+    }
+    if (bundle.snapshot.nodes[waitingOn]?.humanDecision !== undefined) {
+      return { outcome: "rejected", error: "Protected human decisions require a human channel" };
+    }
+    const projectPath = this.queue.workflowRunProjectPath(parentRunId);
+    if (projectPath === undefined || parent.originSessionId === null) {
+      throw new Error("Checkpoint parent provenance is missing");
+    }
+    const prepared = this.prepareContinuation(
+      {
+        parent,
+        parentRunId,
+        continuationRunId,
+        projectPath,
+        definitionSnapshot: bundle.snapshot,
+        input: payload.input as JsonValue,
+        launchOptions: {},
+        originSessionId: parent.originSessionId,
+      },
+      afterCommit,
+    );
+    return {
+      outcome: prepared.state === "adopted" ? "adopted" : "accepted",
+      receipt: {
+        parentRunId,
+        runId: continuationRunId,
+        status: prepared.run.status,
+      } as JsonValue,
+    };
+  }
+
   private answerDecision(
     command: HostRequest,
     afterCommit: Array<() => void>,
@@ -638,31 +845,19 @@ export class WorkflowHost {
     const continuationRunId = `continuation-${request.decisionId.replace(/^decision-/, "")}`;
     const projectPath = this.queue.workflowRunProjectPath(interaction.runId);
     if (projectPath === undefined) throw new Error("Decision parent project is missing");
-    const token = randomUUID();
-    const scoped = new SqliteControllerStore(this.databasePath, {
-      state: this.state,
-      projectPath,
-    });
-    const prepared = scoped.prepareOrAdoptWorkflowRun({
-      runId: continuationRunId,
-      workflowName: parent.workflowName,
-      workflowSourceRef: parent.workflowSourceRef,
-      workflowSource: parent.workflowSource,
-      definitionDigest: parent.definitionDigest,
-      definitionSnapshot: bundle.snapshot,
-      input: {},
-      launchOptions: { humanDecision: accepted.decision },
-      runnerId: this.hostId,
-      claimToken: token,
-      leaseMs: this.runClaimLeaseMs,
-      originSessionId: interaction.targetSessionId,
-      executionMode: parent.executionMode,
-      parentRunId: interaction.runId,
-    });
-    if (prepared.state === "claimed") {
-      this.pendingStarts.add(continuationRunId);
-      afterCommit.push(() => void this.activateRun(prepared.run, token));
-    }
+    this.prepareContinuation(
+      {
+        parent,
+        parentRunId: interaction.runId,
+        continuationRunId,
+        projectPath,
+        definitionSnapshot: bundle.snapshot,
+        input: {},
+        launchOptions: { humanDecision: accepted.decision },
+        originSessionId: interaction.targetSessionId,
+      },
+      afterCommit,
+    );
     return {
       outcome: accepted.status === "adopted" ? "adopted" : "accepted",
       receipt: {
@@ -672,6 +867,47 @@ export class WorkflowHost {
         decision: accepted.decision,
       } as JsonValue,
     };
+  }
+
+  private prepareContinuation(
+    options: {
+      parent: WorkflowRunQueueRecord;
+      parentRunId: string;
+      continuationRunId: string;
+      projectPath: string;
+      definitionSnapshot: WorkflowDefinitionSnapshot;
+      input: unknown;
+      launchOptions: JsonValue;
+      originSessionId: string;
+    },
+    afterCommit: Array<() => void>,
+  ) {
+    const token = randomUUID();
+    const scoped = new SqliteControllerStore(this.databasePath, {
+      state: this.state,
+      projectPath: options.projectPath,
+    });
+    const prepared = scoped.prepareOrAdoptWorkflowRun({
+      runId: options.continuationRunId,
+      workflowName: options.parent.workflowName,
+      workflowSourceRef: options.parent.workflowSourceRef,
+      workflowSource: options.parent.workflowSource,
+      definitionDigest: options.parent.definitionDigest,
+      definitionSnapshot: options.definitionSnapshot,
+      input: options.input,
+      launchOptions: options.launchOptions,
+      runnerId: this.hostId,
+      claimToken: token,
+      leaseMs: this.runClaimLeaseMs,
+      originSessionId: options.originSessionId,
+      executionMode: options.parent.executionMode,
+      parentRunId: options.parentRunId,
+    });
+    if (prepared.state === "claimed") {
+      this.pendingStarts.add(options.continuationRunId);
+      afterCommit.push(() => void this.activateRun(prepared.run, token));
+    }
+    return prepared;
   }
 
   private startRun(
@@ -1640,6 +1876,12 @@ export class WorkflowHost {
           result = null;
           break;
         }
+        case "notification.request":
+          result = this.enqueueWorkerNotification(active, message, payload);
+          break;
+        case "presentation.request":
+          result = this.requestWorkerPresentation(active, message, payload);
+          break;
         case "interaction.request": {
           result = this.parkForInteraction(active, message, payload);
           const exitDeadline = setTimeout(() => {
@@ -1664,6 +1906,81 @@ export class WorkflowHost {
     } catch (error) {
       return workerResponse(message, "rejected", undefined, errorMessage(error));
     }
+  }
+
+  private enqueueWorkerNotification(
+    active: ActiveRun,
+    message: WorkerMessage,
+    payload: Record<string, unknown>,
+  ): JsonValue {
+    if (active.record.originSessionId === null) {
+      throw new Error("Workflow notification has no origin Pi session");
+    }
+    const request = requireRecord(payload.request, "notification request");
+    if (
+      requireString(request.runId, "notification.runId") !== message.runId ||
+      requireString(request.workflowName, "notification.workflowName") !==
+        active.record.workflowName
+    ) {
+      throw new Error("Workflow notification provenance does not match the active run");
+    }
+    const notificationIndex = requireNonNegativeInteger(
+      request.notificationIndex,
+      "notificationIndex",
+    );
+    if (notificationIndex === 0) throw new Error("notificationIndex must be positive");
+    const kind = request.kind;
+    if (kind !== "progress" && kind !== "final") {
+      throw new Error("Workflow notification kind is invalid");
+    }
+    const record = this.queue.enqueueWorkflowNotification({
+      runId: message.runId,
+      nodeId: requireString(request.nodeId, "notification.nodeId"),
+      attemptId: requireString(request.attemptId, "notification.attemptId"),
+      notificationIndex,
+      targetSessionId: active.record.originSessionId,
+      kind,
+      content: requireString(request.content, "notification.content"),
+    });
+    return {
+      notificationId: record.notificationId,
+      targetSessionId: record.targetSessionId,
+    };
+  }
+
+  private requestWorkerPresentation(
+    active: ActiveRun,
+    message: WorkerMessage,
+    payload: Record<string, unknown>,
+  ): JsonValue {
+    if (active.record.originSessionId === null) {
+      throw new Error("Workflow presentation has no origin Pi session");
+    }
+    const instructions = requireString(payload.instructions, "presentation instructions").trim();
+    if (instructions.length === 0) throw new Error("Presentation instructions must not be empty");
+    const facts: WorkflowTurnIntentFacts & { presentationPrompt: string } = {
+      schema: "pi-workflows.deferred-turn-facts.v1",
+      workflowName: active.record.workflowName,
+      runId: message.runId,
+      observedState: "completed",
+      cause: "terminal",
+      nodeId: null,
+      attemptId: null,
+      reason: null,
+      handoff: false,
+      presentationPrompt: instructions,
+    };
+    const intent = this.queue.ensureWorkflowTurnIntent({
+      intentId: `presentation-${message.runId}`,
+      sourceEventId: `presentation-request-${message.runId}`,
+      runId: message.runId,
+      workflowRef: active.record.workflowSourceRef,
+      targetSessionId: active.record.originSessionId,
+      cause: "terminal",
+      fallbackFacts: facts,
+      eligible: false,
+    });
+    return intent as unknown as JsonValue;
   }
 
   private parkForInteraction(
@@ -1735,7 +2052,7 @@ export class WorkflowHost {
   private applyLifecycleProjection(context: {
     runId: string;
     state: WorkflowRunState;
-    event: { type: string; attemptId?: string };
+    event: { type: string; attemptId?: string; payload?: Record<string, unknown> };
     database: StateDatabase;
     now: number;
   }): void {
@@ -1785,6 +2102,46 @@ export class WorkflowHost {
         ["done", "failed", "cancelled"].includes(queueStatus) ? context.now : null,
         context.runId,
       );
+    if (context.state.status === "completed") {
+      if (
+        context.event.payload?.presentationRequired === true &&
+        active.record.originSessionId !== null &&
+        this.queue.findPendingWorkflowTurnIntent({
+          runId: context.runId,
+          targetSessionId: active.record.originSessionId,
+        }) === undefined
+      ) {
+        const facts: WorkflowTurnIntentFacts & { presentationPrompt: string } = {
+          schema: "pi-workflows.deferred-turn-facts.v1",
+          workflowName: active.record.workflowName,
+          runId: context.runId,
+          observedState: "completed",
+          cause: "terminal",
+          nodeId: null,
+          attemptId: null,
+          reason: "workflow presentation instructions were unavailable",
+          handoff: false,
+          presentationPrompt:
+            "Summarize the completed workflow result for the user in a normal response.",
+        };
+        this.queue.ensureWorkflowTurnIntent({
+          intentId: `presentation-${context.runId}`,
+          sourceEventId: `presentation-request-${context.runId}`,
+          runId: context.runId,
+          workflowRef: active.record.workflowSourceRef,
+          targetSessionId: active.record.originSessionId,
+          cause: "terminal",
+          fallbackFacts: facts,
+          eligible: false,
+        });
+      }
+      context.database.connection
+        .prepare(
+          `UPDATE turn_intents SET eligible_at = ?
+           WHERE run_id = ? AND resolved_at IS NULL AND eligible_at IS NULL`,
+        )
+        .run(context.now, context.runId);
+    }
     context.database.connection
       .prepare(
         `UPDATE leases

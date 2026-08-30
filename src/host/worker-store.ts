@@ -14,6 +14,8 @@ import type {
   WorkflowDefinition,
   WorkflowEffectRecovery,
   WorkflowEffectReservation,
+  WorkflowNotificationReceipt,
+  WorkflowNotificationRequest,
   WorkflowRunState,
   WorkflowTraceEvent,
   WorkflowTraceEventDraft,
@@ -174,6 +176,20 @@ export class HostBackedWorkflowStore implements WorkflowExecutionStore {
     contract: JsonValue;
   }): Promise<void> {
     await this.call("interaction.request", { runId: this.runId, ...options }, options.attemptId);
+  }
+
+  async requestNotification(
+    request: WorkflowNotificationRequest,
+  ): Promise<WorkflowNotificationReceipt> {
+    return await this.call<WorkflowNotificationReceipt>(
+      "notification.request",
+      { request },
+      request.attemptId,
+    );
+  }
+
+  async requestPresentation(instructions: string): Promise<void> {
+    await this.call("presentation.request", { instructions });
   }
 
   private async call<T>(

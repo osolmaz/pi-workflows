@@ -13,6 +13,8 @@ export const WORKER_MESSAGE_KINDS = [
   "run.parked",
   "run.finished",
   "interaction.requested",
+  "notification.requested",
+  "presentation.requested",
   "effect.reserve",
   "effect.settle",
   "worker.progress",
@@ -33,7 +35,9 @@ export type WorkerStoreOperation =
   | "store.readResolvedHumanDecision"
   | "store.reserveEffect"
   | "store.settleEffect"
-  | "interaction.request";
+  | "interaction.request"
+  | "notification.request"
+  | "presentation.request";
 
 export type WorkerMessage = {
   schema: typeof WORKER_MESSAGE_SCHEMA;
@@ -68,6 +72,8 @@ export function workerKindForOperation(
   if (operation === "store.createHumanDecisionRequest" || operation === "interaction.request") {
     return "interaction.requested";
   }
+  if (operation === "notification.request") return "notification.requested";
+  if (operation === "presentation.request") return "presentation.requested";
   if (operation === "store.writeSnapshot") {
     const event = payload.event;
     const eventType = isRecord(event) && typeof event.type === "string" ? event.type : "";

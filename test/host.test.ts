@@ -24,6 +24,27 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeDeliveryWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "delivery.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { compute, defineWorkflow, notify } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-delivery",
+  presentationPrompt: ({ finalOutput }) => "Present " + JSON.stringify(finalOutput) + ".",
+  startAt: "report",
+  nodes: {
+    report: notify({ kind: "progress", message: () => "Hosted progress." }),
+    finish: compute({ run: () => ({ delivered: true }) }),
+  },
+  edges: [{ from: "report", to: "finish" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeBlockingWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "blocking.workflow.ts");
   await fs.writeFile(
@@ -91,6 +112,7 @@ async function startRun(options: {
   cwd: string;
   workflowPath: string;
   runId: string;
+  executionMode?: "headless" | "interactive";
 }): Promise<void> {
   const resolved = await options.client.resolveWorkflow({
     cwd: options.cwd,
@@ -109,7 +131,7 @@ async function startRun(options: {
       input: { value: 1 },
       launchOptions: {},
       originSessionId: "host-test-session",
-      executionMode: "headless",
+      executionMode: options.executionMode ?? "headless",
     },
   });
   expect(response.outcome).toBe("accepted");
@@ -170,6 +192,107 @@ describe("global workflow host", () => {
       } finally {
         store.close();
       }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("stores and serves hosted notifications and completion presentations", async () => {
+    const cwd = await makeTempDir("host-delivery-project");
+    const databasePath = path.join(await makeTempDir("host-delivery-state"), "state.sqlite");
+    const workflowPath = await writeDeliveryWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "delivery-run",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("delivery-run")?.status === "done";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        expect(
+          store.listPendingWorkflowNotifications({ targetSessionId: "host-test-session" }),
+        ).toMatchObject([{ content: "Hosted progress.", kind: "progress" }]);
+        expect(
+          store.listWorkflowTurnIntents({
+            targetSessionId: "host-test-session",
+            unresolvedOnly: true,
+          }),
+        ).toMatchObject([
+          {
+            runId: "delivery-run",
+            cause: "terminal",
+            fallbackFacts: { presentationPrompt: 'Present {"delivered":true}.' },
+          },
+        ]);
+      } finally {
+        store.close();
+      }
+
+      const notificationClaim = "notification-claim";
+      const notification = await client.request({
+        operation: "notification.claim",
+        idempotencyKey: notificationClaim,
+        payload: { targetSessionId: "host-test-session" },
+      });
+      expect(notification.receipt).toMatchObject({
+        notification: { content: "Hosted progress." },
+      });
+      const notificationReceipt = notification.receipt as {
+        claimId: string;
+        notification: { notificationId: string };
+      };
+      const notificationRecord = notificationReceipt.notification;
+      expect(
+        await client.request({
+          operation: "notification.deliver",
+          payload: {
+            notificationId: notificationRecord.notificationId,
+            targetSessionId: "host-test-session",
+            claimId: notificationReceipt.claimId,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+
+      const turnClaim = "turn-claim";
+      const turn = await client.request({
+        operation: "turn.claim",
+        idempotencyKey: turnClaim,
+        payload: { targetSessionId: "host-test-session" },
+      });
+      expect(turn.receipt).toMatchObject({
+        turn: { runId: "delivery-run" },
+      });
+      expect(turn.receipt).not.toHaveProperty("state");
+      const turnReceipt = turn.receipt as {
+        claimId: string;
+        turn: { intentId: string };
+      };
+      const turnRecord = turnReceipt.turn;
+      expect(
+        await client.request({
+          operation: "turn.resolve",
+          payload: {
+            intentId: turnRecord.intentId,
+            targetSessionId: "host-test-session",
+            claimId: turnReceipt.claimId,
+            messageId: "entry-one",
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
     } finally {
       await host.stop();
     }

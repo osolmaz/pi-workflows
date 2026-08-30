@@ -19,12 +19,14 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PI_BIN = path.join(REPO_ROOT, "node_modules", ".bin", "pi");
 const EXTENSION_PATH = path.join(REPO_ROOT, "src", "extension", "index.ts");
 
-const ASSISTANT_WORKFLOW = `import { agent, assistantMessage, compute, defineWorkflow } from "@osolmaz/pi-workflows";
+const ASSISTANT_WORKFLOW = `import { agent, assistantMessage, compute, defineWorkflow, notify } from "@osolmaz/pi-workflows";
 
 export default defineWorkflow({
   name: "assistant-e2e",
-  startAt: "prepare",
+  presentationPrompt: "Summarize the completed E2E workflow.",
+  startAt: "report",
   nodes: {
+    report: notify({ message: () => "Durable E2E progress." }),
     prepare: agent({
       prompt: () => "Submit the structured E2E input.",
       expectedOutput: '{ "ready": true }',
@@ -38,6 +40,7 @@ export default defineWorkflow({
     }),
   },
   edges: [
+    { from: "report", to: "prepare" },
     { from: "prepare", to: "present" },
     { from: "present", to: "finish" },
   ],
@@ -341,6 +344,9 @@ describe.sequential("out-of-process workflow host end to end", () => {
     mock = await startMockOpenAiServer(
       ({ messages, lastRole }) => {
         if (lastRole === "tool") return { kind: "text", text: "Workflow tool result accepted." };
+        if (JSON.stringify(messages.at(-1)).includes("Summarize the completed E2E workflow.")) {
+          return { kind: "text", text: "Final hosted E2E summary." };
+        }
         const contract = latestStepContract(messages);
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
         if (contract.workflow === "assistant-e2e" && contract.step === "prepare") {
@@ -443,6 +449,17 @@ describe.sequential("out-of-process workflow host end to end", () => {
       prepared: { ready: true },
       visible: "Visible assistant E2E response.",
     });
+    await waitForCondition(
+      async () => {
+        const entries = await readRpcEntries(pi);
+        return (
+          entries.some((entry) => JSON.stringify(entry).includes("Durable E2E progress.")) &&
+          entries.some((entry) => JSON.stringify(entry).includes("Final hosted E2E summary."))
+        );
+      },
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
     expect(
       (await readRpcEntries(pi)).some((entry) =>
         JSON.stringify(entry).includes("Visible assistant E2E response."),

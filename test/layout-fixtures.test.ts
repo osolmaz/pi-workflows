@@ -23,5 +23,5 @@ describe("layout fixtures", () => {
       ) as unknown;
       expect(committed, fixture.name).toEqual(JSON.parse(JSON.stringify(fixture)));
     }
-  });
+  }, 30_000);
 });

@@ -2066,6 +2066,20 @@ export class SqliteControllerStore implements ControllerStore {
     return this.requireNotification(options.runId, options.attemptId, options.notificationIndex);
   }
 
+  listPendingWorkflowNotifications(options: {
+    targetSessionId: string;
+    limit?: number;
+  }): WorkflowNotificationRecord[] {
+    const now = Date.now();
+    return this.notificationRows(options.targetSessionId, options.limit ?? 20)
+      .map((row) => this.mapNotification(row))
+      .filter(
+        (notification) =>
+          notification.deliveryClaimExpiresAt === null ||
+          Date.parse(notification.deliveryClaimExpiresAt) <= now,
+      );
+  }
+
   claimPendingWorkflowNotifications(options: {
     targetSessionId: string;
     claimToken: string;

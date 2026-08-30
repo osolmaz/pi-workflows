@@ -171,11 +171,12 @@ trace, pause state, and cancellation state. See
 ## Agent-managed workflows
 
 The model can use the `workflow` tool to list, start, inspect, pause, resume,
-cancel, and answer workflows. It uses `update` for durable progress from the
-current attempt and `submit` for structured step output. Assistant-message
-steps require a normal visible assistant response instead. The extension sends
-all lifecycle mutations to the host and reports success only after the host
-commits them.
+cancel, and answer ordinary checkpoints. It cannot answer a protected human
+decision. A person must answer that request through `/workflow answer` in the
+origin Pi session. The model uses `update` for durable progress from the current
+attempt and `submit` for structured step output. Assistant-message steps require
+a normal visible assistant response instead. The extension sends all lifecycle
+mutations to the host and reports success only after the host commits them.
 
 A model-started workflow is saved before the tool reports it as accepted, so
 the returned run ID works with `workflow status` and `workflow cancel`
@@ -322,7 +323,9 @@ Every workflow enters one durable global queue. The extension starts the
 package-owned host on demand. Closing Pi does not stop a compute, action, or
 shell node. When a run reaches an interactive agent, assistant-message, or
 human-decision step, the host parks it and saves a request for the origin Pi
-session. Reopening that session presents the same request once.
+session. Reopening that session presents the same request once. A protected
+human decision does not start a model turn; a person answers it with
+`/workflow answer`.
 
 The host also reconciles controllers. Controller child workflows without an
 origin session can use headless `pi --mode rpc` agent steps. A child that needs

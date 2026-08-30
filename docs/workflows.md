@@ -136,7 +136,9 @@ session. The worker commits a durable interaction request and parks. The origin
 session presents the request through documented Pi APIs and submits the exact
 request, node, attempt, and revision. Closing Pi leaves that request pending;
 reopening the same session adopts the existing session entry or presents it
-once. A controller child without an origin session can use a supervised
+once. Notifications use the durable session outbox. A root
+`presentationPrompt` creates a durable terminal turn only after completion is
+committed. A controller child without an origin session can use a supervised
 headless `pi --mode rpc` child for structured agent steps.
 
 Pause stops the worker and parks at the last durable boundary. Resume takes a
@@ -356,7 +358,7 @@ humanDecision({
 
 The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, recovery applies the validated response with `timeout` provenance. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
 
-The model-facing workflow tool cannot answer a protected human decision. Pi interactive UI and configured external channels use a host-owned answer path. Ordinary checkpoints keep the existing `/workflow answer` behavior.
+The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the host-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
 See [Human decisions](HUMAN_DECISIONS.md) for channels, recovery, persistence, and plan approval.
 
