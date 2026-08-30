@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
+import { discoverControllers, loadControllerFile } from "../controllers/loader.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import { compositionMetadata } from "../workflows/composition.js";
 import { errorMessage } from "../workflows/errors.js";
@@ -19,6 +21,14 @@ export type ResolvedWorkflowLaunch = {
   workflowSource: JsonValue;
   definitionDigest: string;
   definitionSnapshot: JsonValue;
+};
+
+export type ResolvedControllerInitialization = {
+  schema: "pi-workflows.resolved-controller-initialization.v1";
+  controllerName: string;
+  controllerPath: string;
+  sourceHash: string;
+  initialStatus: JsonValue;
 };
 
 export type ResolvedSettingsChange = {
@@ -46,8 +56,18 @@ type SettingsValidationRequest = {
   actorId: string;
 };
 
-type ResolverInput = ResolverRequest | SettingsValidationRequest;
-type ResolverOutput = ResolvedWorkflowLaunch | ResolvedSettingsChange;
+type ControllerInitializationRequest = {
+  schema: "pi-workflows.controller-initialization-request.v1";
+  cwd: string;
+  controllerName: string;
+  spec: JsonValue;
+};
+
+type ResolverInput = ResolverRequest | SettingsValidationRequest | ControllerInitializationRequest;
+type ResolverOutput =
+  | ResolvedWorkflowLaunch
+  | ResolvedSettingsChange
+  | ResolvedControllerInitialization;
 
 export async function resolveWorkflowLaunch(
   request: ResolverRequest,
@@ -66,6 +86,32 @@ export async function resolveWorkflowLaunch(
     } as JsonValue,
     definitionDigest: resolved.definitionDigest,
     definitionSnapshot: resolved.snapshot,
+  };
+}
+
+export async function resolveControllerInitialization(
+  request: ControllerInitializationRequest,
+): Promise<ResolvedControllerInitialization> {
+  const discovered = (await discoverControllers({ cwd: request.cwd })).find(
+    (candidate) => candidate.name === request.controllerName,
+  );
+  if (discovered === undefined) {
+    throw new Error(`Controller not found: ${request.controllerName}`);
+  }
+  const definition = await loadControllerFile(discovered.path);
+  if (definition.name !== request.controllerName) {
+    throw new Error("Controller source name does not match its discovered name");
+  }
+  const initialStatus = parseJson(canonicalJson(definition.initialStatus(request.spec)));
+  const sourceHash = createHash("sha256")
+    .update(await fs.readFile(discovered.path))
+    .digest("hex");
+  return {
+    schema: "pi-workflows.resolved-controller-initialization.v1",
+    controllerName: definition.name,
+    controllerPath: discovered.path,
+    sourceHash,
+    initialStatus,
   };
 }
 
@@ -141,12 +187,22 @@ async function readRequest(): Promise<ResolverInput> {
     chunks.push(buffer);
   }
   const value = parseJson(Buffer.concat(chunks).toString("utf8").trimEnd());
-  if (!isRecord(value) || typeof value.cwd !== "string" || typeof value.workflowRef !== "string") {
-    throw new Error("Invalid workflow resolver request");
+  if (!isRecord(value) || typeof value.cwd !== "string") {
+    throw new Error("Invalid source resolver request");
   }
-  if (value.schema === "pi-workflows.resolve-request.v1") return value as ResolverRequest;
+  if (value.schema === "pi-workflows.resolve-request.v1" && typeof value.workflowRef === "string") {
+    return value as ResolverRequest;
+  }
+  if (
+    value.schema === "pi-workflows.controller-initialization-request.v1" &&
+    typeof value.controllerName === "string" &&
+    Object.hasOwn(value, "spec")
+  ) {
+    return value as ControllerInitializationRequest;
+  }
   if (
     value.schema === "pi-workflows.settings-validation-request.v1" &&
+    typeof value.workflowRef === "string" &&
     typeof value.definitionDigest === "string" &&
     typeof value.mountPath === "string" &&
     typeof value.actorId === "string" &&
@@ -164,7 +220,9 @@ async function main(): Promise<void> {
     const result: ResolverOutput =
       request.schema === "pi-workflows.resolve-request.v1"
         ? await resolveWorkflowLaunch(request)
-        : await resolveSettingsChange(request);
+        : request.schema === "pi-workflows.controller-initialization-request.v1"
+          ? await resolveControllerInitialization(request)
+          : await resolveSettingsChange(request);
     const encoded = `${canonicalJson(result)}\n`;
     if (Buffer.byteLength(encoded) > MAX_PROTOCOL_MESSAGE_BYTES) {
       throw new Error("Workflow resolver result exceeds 1 MiB");

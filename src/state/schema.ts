@@ -300,7 +300,9 @@ CREATE TABLE host_commands (
   client_id TEXT NOT NULL,
   operation TEXT NOT NULL CHECK (operation IN (
     'run.start', 'run.pause', 'run.resume', 'run.cancel', 'run.status', 'run.list',
-    'decision.answer', 'interaction.submit', 'interaction.update', 'host.status', 'host.stop'
+    'decision.answer', 'interaction.submit', 'interaction.update',
+    'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
+    'host.status', 'host.stop'
   )),
   idempotency_key TEXT NOT NULL,
   request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),

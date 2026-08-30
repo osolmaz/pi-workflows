@@ -1,5 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { parseWorkflowArgs } from "../src/extension/index.js";
+import { parseControllerArgs, parseWorkflowArgs } from "../src/extension/index.js";
+
+describe("parseControllerArgs", () => {
+  it("parses hosted controller commands", () => {
+    expect(parseControllerArgs("")).toEqual({ kind: "list" });
+    expect(parseControllerArgs("list")).toEqual({ kind: "list" });
+    expect(parseControllerArgs("get sample one")).toEqual({
+      kind: "get",
+      controller: "sample",
+      key: "one",
+    });
+    expect(parseControllerArgs('apply sample one {"enabled":true}')).toEqual({
+      kind: "apply",
+      controller: "sample",
+      key: "one",
+      spec: { enabled: true },
+    });
+    expect(parseControllerArgs("reconcile sample one")).toEqual({
+      kind: "reconcile",
+      controller: "sample",
+      key: "one",
+    });
+    expect(parseControllerArgs("delete sample one")).toEqual({
+      kind: "delete",
+      controller: "sample",
+      key: "one",
+    });
+  });
+
+  it("rejects embedded-host controls and malformed apply specs", () => {
+    expect(() => parseControllerArgs("start")).toThrow(/Usage/u);
+    expect(() => parseControllerArgs("stop")).toThrow(/Usage/u);
+    expect(() => parseControllerArgs("apply sample one {broken")).toThrow(
+      /Invalid controller spec JSON/u,
+    );
+  });
+});
 
 describe("parseWorkflowArgs", () => {
   it("lists on empty args", () => {

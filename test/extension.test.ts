@@ -28,8 +28,9 @@ type FakeContext = ReturnType<typeof makePi>["ctx"];
 function makePi(options: { cwd: string; sessionId?: string; branch?: Record<string, unknown>[] }) {
   const branch = options.branch ?? [];
   const sent: Record<string, unknown>[] = [];
+  const notifications: Array<{ message: string; level?: string }> = [];
   const listeners = new Map<string, Array<(event: unknown, ctx: FakeContext) => Promise<void>>>();
-  let command: ((args: string, ctx: FakeContext) => Promise<void>) | undefined;
+  const commands = new Map<string, (args: string, ctx: FakeContext) => Promise<void>>();
   let tool:
     | ((
         toolCallId: string,
@@ -52,15 +53,20 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
       getSessionFile: () => undefined,
     },
     ui: {
-      notify() {},
+      notify(message: string, level?: string) {
+        notifications.push({ message, ...(level === undefined ? {} : { level }) });
+      },
       setStatus() {},
       setWidget() {},
     },
   } as never;
   const pi = {
     registerMessageRenderer() {},
-    registerCommand(_name: string, spec: { handler: typeof command }) {
-      command = spec.handler;
+    registerCommand(
+      name: string,
+      spec: { handler: (args: string, ctx: FakeContext) => Promise<void> },
+    ) {
+      commands.set(name, spec.handler);
     },
     registerTool(spec: { execute: typeof tool }) {
       tool = spec.execute;
@@ -87,8 +93,15 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
     ctx,
     branch,
     sent,
+    notifications,
     runCommand: async (args: string) => {
+      const command = commands.get("workflow");
       if (command === undefined) throw new Error("workflow command was not registered");
+      await command(args, ctx);
+    },
+    runControllerCommand: async (args: string) => {
+      const command = commands.get("controller");
+      if (command === undefined) throw new Error("controller command was not registered");
       await command(args, ctx);
     },
     runTool: async (toolCallId: string, params: Record<string, unknown>) => {
@@ -171,6 +184,56 @@ describe("pi-workflows hosted extension", () => {
       store.close();
     }
     expect(fake.sent).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("applies controller resources through the host and a source resolver child", async () => {
+    const { cwd } = await setupProject();
+    const directory = path.join(cwd, ".pi", "controllers");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(
+      path.join(directory, "sample.controller.ts"),
+      `import { defineController } from ${JSON.stringify(path.resolve("src/controllers/index.ts"))};
+export default defineController({
+  name: "sample",
+  initialStatus: (spec) => ({
+    resolverPid: process.pid,
+    value: typeof spec === "object" && spec !== null && "value" in spec ? spec.value : null,
+  }),
+  reconcile: (ctx) => ctx.settled(),
+});\n`,
+    );
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runControllerCommand('apply sample one {"value":7}');
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        projectPath: cwd,
+        readOnly: true,
+      });
+      try {
+        return store.getResource({ controller: "sample", key: "one" }) !== undefined;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    const store = new SqliteControllerStore(workflowStatePath(), {
+      projectPath: cwd,
+      readOnly: true,
+    });
+    try {
+      const resource = store.getResource<unknown, { resolverPid: number; value: number }>({
+        controller: "sample",
+        key: "one",
+      });
+      expect(resource?.status.controllerStatus.value).toBe(7);
+      expect(resource?.status.controllerStatus.resolverPid).not.toBe(process.pid);
+    } finally {
+      store.close();
+    }
+    expect(fake.notifications).toContainEqual(
+      expect.objectContaining({ message: "Applied controller resource sample/one." }),
+    );
     await fake.emit("session_shutdown");
   }, 60_000);
 

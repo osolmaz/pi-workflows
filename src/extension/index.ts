@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
 import { SqliteControllerStore, type WorkflowRunQueueRecord } from "../controllers/sqlite.js";
@@ -11,6 +12,7 @@ import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
+import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
 import {
   recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
@@ -19,6 +21,8 @@ import {
   type WorkflowAgentStepMessageDetails,
 } from "./step-message.js";
 import { parseWorkflowToolInput, WorkflowToolParameters } from "./workflow-tool.js";
+
+export { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
 
 export {
   PiDecisionChannel,
@@ -169,6 +173,24 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         const result = await executeCommand(client, ctx, parsed);
         ctx.ui.notify(result.message, result.level ?? "info");
         await presentInOrder(ctx);
+      } catch (error) {
+        ctx.ui.notify(errorMessage(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("controller", {
+    description: "Manage hosted controller resources: list, get, apply, reconcile, or delete",
+    getArgumentCompletions: (prefix: string) => {
+      const items = ["list", "get", "apply", "reconcile", "delete"]
+        .filter((value) => value.startsWith(prefix))
+        .map((value) => ({ value, label: value }));
+      return items.length === 0 ? null : items;
+    },
+    handler: async (args, ctx) => {
+      try {
+        const result = await executeControllerCommand(client, ctx, parseControllerArgs(args));
+        ctx.ui.notify(result.message, result.level ?? "info");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
       }
@@ -361,6 +383,72 @@ async function executeCommand(
       };
     }
   }
+}
+
+async function executeControllerCommand(
+  client: WorkflowHostClient,
+  ctx: ExtensionContext,
+  command: ParsedControllerArgs,
+): Promise<CommandResult> {
+  const projectPath = path.resolve(ctx.cwd);
+  if (command.kind === "list") {
+    const response = await requestAccepted(client, {
+      operation: "controller.list",
+      payload: { projectPath },
+    });
+    return {
+      message: summarizeControllerResources(response.receipt),
+      details: { action: "list", resources: response.receipt ?? [] },
+    };
+  }
+
+  const idempotencyKey = randomUUID();
+  if (command.kind === "apply") {
+    const resolved = await client.resolveControllerInitialization({
+      cwd: projectPath,
+      controllerName: command.controller,
+      spec: command.spec,
+    });
+    const response = await requestAccepted(client, {
+      operation: "controller.apply",
+      requestId: `controller-apply-${idempotencyKey}`,
+      idempotencyKey,
+      payload: {
+        projectPath,
+        controller: resolved.controllerName,
+        key: command.key,
+        spec: command.spec,
+        initialStatus: resolved.initialStatus,
+        controllerPath: resolved.controllerPath,
+        sourceHash: resolved.sourceHash,
+      },
+    });
+    return {
+      message: `Applied controller resource ${command.controller}/${command.key}.`,
+      details: { action: "apply", resource: response.receipt ?? null },
+    };
+  }
+
+  const response = await requestAccepted(client, {
+    operation: `controller.${command.kind}`,
+    requestId: `controller-${command.kind}-${idempotencyKey}`,
+    idempotencyKey,
+    payload: {
+      projectPath,
+      controller: command.controller,
+      key: command.key,
+    },
+  });
+  if (command.kind === "get") {
+    return {
+      message: JSON.stringify(response.receipt ?? null, null, 2),
+      details: { action: "get", resource: response.receipt ?? null },
+    };
+  }
+  return {
+    message: `Controller resource ${command.controller}/${command.key} ${command.kind} request accepted.`,
+    details: { action: command.kind, resource: response.receipt ?? null },
+  };
 }
 
 async function presentPendingInteraction(
@@ -624,6 +712,20 @@ function summarizeRun(value: JsonValue | undefined): string {
   const runId = typeof value.runId === "string" ? value.runId : "unknown";
   const status = typeof value.status === "string" ? value.status : "unknown";
   return `Workflow ${runId} is ${status}.`;
+}
+
+function summarizeControllerResources(value: JsonValue | undefined): string {
+  if (!Array.isArray(value) || value.length === 0) return "No controller resources.";
+  const resources = value.map((item) => {
+    if (!isRecord(item) || !isRecord(item.metadata)) return "unknown";
+    const controller =
+      typeof item.metadata.controller === "string" ? item.metadata.controller : "unknown";
+    const key = typeof item.metadata.key === "string" ? item.metadata.key : "unknown";
+    const generation =
+      typeof item.metadata.generation === "number" ? item.metadata.generation : "unknown";
+    return `${controller}/${key} generation=${generation}`;
+  });
+  return `Controller resources: ${resources.join(", ")}.`;
 }
 
 function jsonValue(value: unknown): JsonValue {

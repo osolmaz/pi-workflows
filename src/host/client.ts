@@ -16,7 +16,11 @@ import {
   type HostRequest,
   type HostResponse,
 } from "./protocol.js";
-import type { ResolvedSettingsChange, ResolvedWorkflowLaunch } from "./resolver-entry.js";
+import type {
+  ResolvedControllerInitialization,
+  ResolvedSettingsChange,
+  ResolvedWorkflowLaunch,
+} from "./resolver-entry.js";
 
 const CONNECT_TIMEOUT_MS = 2_000;
 const START_TIMEOUT_MS = 10_000;
@@ -82,6 +86,25 @@ export class WorkflowHostClient {
       "pi-workflows.resolved-launch.v1",
       options.timeoutMs,
     )) as unknown as ResolvedWorkflowLaunch;
+  }
+
+  async resolveControllerInitialization(options: {
+    cwd: string;
+    controllerName: string;
+    spec: JsonValue;
+    timeoutMs?: number;
+  }): Promise<ResolvedControllerInitialization> {
+    return (await this.runResolver(
+      {
+        schema: "pi-workflows.controller-initialization-request.v1",
+        cwd: options.cwd,
+        controllerName: options.controllerName,
+        spec: options.spec,
+      },
+      options.cwd,
+      "pi-workflows.resolved-controller-initialization.v1",
+      options.timeoutMs,
+    )) as unknown as ResolvedControllerInitialization;
   }
 
   async resolveSettingsChange(options: {

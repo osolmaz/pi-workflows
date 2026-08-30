@@ -17,6 +17,11 @@ export const HOST_OPERATIONS = [
   "decision.answer",
   "interaction.submit",
   "interaction.update",
+  "controller.list",
+  "controller.get",
+  "controller.apply",
+  "controller.reconcile",
+  "controller.delete",
   "host.status",
   "host.stop",
 ] as const;

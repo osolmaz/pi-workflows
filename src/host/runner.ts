@@ -5,7 +5,11 @@ import net, { type Socket } from "node:net";
 import path from "node:path";
 import { applyStatusPatch } from "../controllers/conditions.js";
 import { ResourceConflictError } from "../controllers/errors.js";
-import { discoverControllers } from "../controllers/loader.js";
+import {
+  controllerFileStem,
+  controllerSearchDirs,
+  discoverControllers,
+} from "../controllers/loader.js";
 import { SqliteControllerStore, type WorkflowRunQueueRecord } from "../controllers/sqlite.js";
 import type {
   ControllerQueueClaim,
@@ -428,6 +432,12 @@ export class WorkflowHost {
       }
       case "run.start":
         return this.startRun(request, afterCommit);
+      case "controller.list":
+      case "controller.get":
+      case "controller.apply":
+      case "controller.reconcile":
+      case "controller.delete":
+        return this.executeControllerOperation(request);
       case "interaction.update": {
         const payload = requireRecord(request.payload, "interaction update payload");
         if (payload.claimPresentation === true) {
@@ -468,6 +478,66 @@ export class WorkflowHost {
       case "decision.answer":
         return this.answerDecision(request, afterCommit);
     }
+  }
+
+  private executeControllerOperation(
+    request: HostRequest,
+  ): Omit<HostResponse, "schema" | "requestId"> {
+    const payload = requireRecord(request.payload, "controller payload");
+    const projectPath = path.resolve(requireString(payload.projectPath, "projectPath"));
+    if (payload.projectPath !== projectPath) {
+      return {
+        outcome: "rejected",
+        error: "Controller projectPath must be absolute and normalized",
+      };
+    }
+    const store = new SqliteControllerStore(this.databasePath, {
+      state: this.state,
+      projectPath,
+    });
+    if (request.operation === "controller.list") {
+      return { outcome: "accepted", receipt: store.listResources() as unknown as JsonValue };
+    }
+    const controller = requireString(payload.controller, "controller");
+    const key = requireString(payload.key, "key");
+    const ref = { controller, key };
+    if (request.operation === "controller.get") {
+      const resource = store.getResource(ref);
+      return resource === undefined
+        ? { outcome: "notFound", error: `Controller resource not found: ${controller}/${key}` }
+        : { outcome: "accepted", receipt: resource as unknown as JsonValue };
+    }
+    if (request.operation === "controller.apply") {
+      if (!Object.hasOwn(payload, "spec") || !Object.hasOwn(payload, "initialStatus")) {
+        return { outcome: "rejected", error: "Controller apply requires spec and initialStatus" };
+      }
+      const spec = payload.spec as JsonValue;
+      const initialStatus = payload.initialStatus as JsonValue;
+      const controllerPath = path.resolve(requireString(payload.controllerPath, "controllerPath"));
+      const sourceHash = requireString(payload.sourceHash, "sourceHash");
+      if (!controllerPathAllowed(projectPath, controller, controllerPath)) {
+        return { outcome: "rejected", error: "Controller source does not match discovery rules" };
+      }
+      const observedHash = createHash("sha256")
+        .update(fs.readFileSync(controllerPath))
+        .digest("hex");
+      if (observedHash !== sourceHash) {
+        return { outcome: "conflict", error: "Controller source changed before apply committed" };
+      }
+      const resource = store.putResource({ controller, key, spec, initialStatus });
+      return { outcome: "accepted", receipt: resource as unknown as JsonValue };
+    }
+    const existing = store.getResource(ref);
+    if (existing === undefined) {
+      return { outcome: "notFound", error: `Controller resource not found: ${controller}/${key}` };
+    }
+    if (request.operation === "controller.reconcile") {
+      store.enqueue(ref);
+      return { outcome: "accepted", receipt: existing as unknown as JsonValue };
+    }
+    const deleting = store.requestDeletion(ref);
+    store.enqueue(ref);
+    return { outcome: "accepted", receipt: deleting as unknown as JsonValue };
   }
 
   private statusReceipt(): JsonValue {
@@ -1931,6 +2001,22 @@ function hasUncertainEffect(state: StateDatabase, runId: string): boolean {
     )
     .get(runId);
   return row !== undefined;
+}
+
+function controllerPathAllowed(
+  projectPath: string,
+  controllerName: string,
+  controllerPath: string,
+): boolean {
+  if (
+    controllerFileStem(controllerPath) !== controllerName ||
+    !/\.controller\.(?:ts|js|mts|mjs)$/u.test(controllerPath)
+  ) {
+    return false;
+  }
+  return controllerSearchDirs({ cwd: projectPath }).some(
+    ({ dir }) => path.dirname(controllerPath) === path.resolve(dir),
+  );
 }
 
 function rootWorkflowSource(value: unknown): JsonValue {
