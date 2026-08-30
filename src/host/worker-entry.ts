@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
@@ -8,6 +8,7 @@ import { WorkflowEngine } from "../workflows/engine.js";
 import { ClaimLostError, RunParkedError, errorMessage } from "../workflows/errors.js";
 import { resolveWorkflowSource } from "../workflows/loader.js";
 import type {
+  AgentStepContract,
   AgentStepExecutor,
   AgentStepRequest,
   AgentStepSubmission,
@@ -161,8 +162,13 @@ class InteractiveExecutor implements AgentStepExecutor {
       this.accepted.attemptId === request.contract.attemptId
     ) {
       const submission = interactionSubmission(this.accepted.payload);
-      const accepted = await request.accept(submission.output);
-      if (accepted.ok) return { ...submission, output: accepted.value };
+      if (request.contract.completion === "assistant") {
+        const accepted = validateAcceptedAssistantSubmission(submission, request.contract);
+        if (accepted.ok) return accepted.value;
+      } else {
+        const accepted = await request.accept(submission.output);
+        if (accepted.ok) return { ...submission, output: accepted.value };
+      }
       await this.store.requestInteraction({
         attemptId: request.contract.attemptId,
         kind: request.contract.completion === "assistant" ? "assistant" : "agent",
@@ -197,6 +203,49 @@ function interactionSubmission(payload: JsonValue): AgentStepSubmission {
     return payload as unknown as AgentStepSubmission;
   }
   return { output: payload };
+}
+
+export function validateAcceptedAssistantSubmission(
+  submission: AgentStepSubmission,
+  contract: AgentStepContract,
+): { ok: true; value: AgentStepSubmission } | { ok: false; error: string } {
+  if (contract.completion !== "assistant") {
+    return { ok: false, error: "The interaction is not an assistant response" };
+  }
+  if (typeof submission.output !== "string" || submission.output.trim().length === 0) {
+    return { ok: false, error: "Assistant response has no visible text" };
+  }
+  if (contract.maxOutputChars !== undefined && submission.output.length > contract.maxOutputChars) {
+    return {
+      ok: false,
+      error: `Assistant response has ${submission.output.length} characters, above the configured limit of ${contract.maxOutputChars}`,
+    };
+  }
+  const receipt = submission.assistantMessage;
+  const conversation = submission.conversation;
+  const digest = createHash("sha256").update(submission.output).digest("hex");
+  if (
+    receipt === undefined ||
+    receipt.sha256 !== digest ||
+    typeof receipt.entryId !== "string" ||
+    receipt.entryId.length === 0 ||
+    receipt.recovered !== true ||
+    receipt.maxChars !== contract.maxOutputChars ||
+    conversation === undefined ||
+    typeof conversation.firstEntryId !== "string" ||
+    conversation.firstEntryId.length === 0 ||
+    conversation.lastEntryId !== receipt.entryId
+  ) {
+    return { ok: false, error: "Assistant response receipt is invalid" };
+  }
+  return {
+    ok: true,
+    value: {
+      output: submission.output,
+      assistantMessage: receipt,
+      conversation,
+    },
+  };
 }
 
 export async function runWorkflowWorker(): Promise<number> {
