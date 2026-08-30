@@ -118,7 +118,7 @@ Add a read-only diagnosis for contradictory rows. Add a focused repair operation
 
 Add an atomic control claim for an expired run. It will require an expired or absent lease, reject terminal rows, increase the claim generation, and bind a new token before any mutation.
 
-Cancellation will use that claim to commit one terminal cancellation. It will also close an active attempt and cancel a pending human decision. A live claim cannot use this path.
+Cancellation will use that claim to commit one terminal cancellation. It will also close an active attempt, cancel pending interactions and human decisions, cancel effects that have not started, and mark applying effects ambiguous. A live claim cannot use this path.
 
 Startup recovery will make expired running rows claimable. A resumable run will continue from its last durable boundary. A run with an uncertain unmanaged side effect will stop for manual review instead of retrying.
 
@@ -169,7 +169,8 @@ Each active workflow runs in a supervised child process. The child receives an i
 
 The child will:
 
-- load and verify the workflow source;
+- verify the root and every mounted source identity before it loads workflow modules;
+- load the workflow and compare the resolved mounted-source map with the saved map;
 - execute graph and node code;
 - propose state transitions to the host;
 - request interactive work or managed effects;
@@ -202,7 +203,7 @@ When a child reaches one of these steps:
 7. The child loads the workflow and runs the node's `validate` function.
 8. The host settles the request only after the child accepts it. A rejection keeps the request pending and returns the durable validation error to the model.
 
-If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry.
+If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry. If the host stops after it records `validating` but before activation, startup recovery schedules that same submission.
 
 Keep one active interactive request per Pi session. Other requests remain ordered and durable.
 
@@ -266,6 +267,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Crash before and after every lifecycle commit.
 - Verify run, queue, attempt, decision, lease, event, and viewer state.
 - Cancel an expired running row.
+- Commit live cancellation and its command receipt in one transaction before worker shutdown.
 - Reject stale cancellation against a live owner.
 - Recover a resumable expired run.
 - Stop an uncertain effect for manual review.
@@ -276,6 +278,8 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Kill Pi while a run computes.
 - Kill a child before and after a proposed transition.
 - Kill the host before and after a committed transition.
+- Restart after a provisional interaction submission commits but before child activation.
+- Change an included source and prove the resumed child rejects it before module execution.
 - Start two hosts and prove that one is rejected or fenced.
 - Reject stale child messages after a generation change.
 - Kill complete process groups on cancellation.

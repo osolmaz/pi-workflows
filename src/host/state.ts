@@ -518,6 +518,22 @@ export class HostStateStore {
     };
   }
 
+  validatingInteractionRunIds(): string[] {
+    return this.state.connection
+      .prepare(
+        `SELECT i.run_id AS runId
+         FROM interactive_requests i
+         JOIN interactive_submissions s ON s.request_id = i.request_id
+         JOIN run_queue q ON q.run_id = i.run_id
+         WHERE i.status IN ('pending', 'presenting') AND s.outcome = 'validating'
+           AND q.status NOT IN ('done', 'failed', 'cancelled')
+         GROUP BY i.run_id
+         ORDER BY MIN(s.submitted_at), i.run_id`,
+      )
+      .all()
+      .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
+  }
+
   interactionSubmission(
     requestId: string,
     submissionId: string,
@@ -904,6 +920,7 @@ type CommandRow = {
 
 type IdempotentCommandRow = CommandRow & { requestId: string };
 type RequestIdRow = { requestId: string };
+type RunIdRow = { runId: string };
 type SubmissionRow = {
   submissionId: string;
   payloadHash: Buffer;
@@ -986,6 +1003,10 @@ function isIdempotentCommandRow(value: unknown): value is IdempotentCommandRow {
 
 function isRequestIdRow(value: unknown): value is RequestIdRow {
   return isRecord(value) && typeof value.requestId === "string";
+}
+
+function isRunIdRow(value: unknown): value is RunIdRow {
+  return isRecord(value) && typeof value.runId === "string";
 }
 
 function isWorkerMessageRow(value: unknown): value is WorkerMessageRow {

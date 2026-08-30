@@ -3,10 +3,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
-import { parseJson, type JsonValue } from "../state/json.js";
+import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
+import { compositionMetadata } from "../workflows/composition.js";
 import { WorkflowEngine } from "../workflows/engine.js";
-import { ClaimLostError, RunParkedError, errorMessage } from "../workflows/errors.js";
-import { resolveWorkflowSource } from "../workflows/loader.js";
+import {
+  ClaimLostError,
+  RunParkedError,
+  WorkflowSourceChangedError,
+  errorMessage,
+} from "../workflows/errors.js";
+import { hashWorkflowSource, resolveWorkflowSource } from "../workflows/loader.js";
 import type {
   AgentStepContract,
   AgentStepExecutor,
@@ -14,7 +20,9 @@ import type {
   AgentStepSubmission,
   ResolvedHumanDecision,
   WorkflowDefinition,
+  WorkflowMountedSource,
   WorkflowRunState,
+  WorkflowSource,
 } from "../workflows/types.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
 import type { WorkerLaunchEnvelope } from "./state.js";
@@ -277,12 +285,8 @@ export async function runWorkflowWorker(): Promise<number> {
       throw new Error(ready.error ?? "Workflow host rejected worker startup");
     }
     const bootstrap = ready.result as unknown as WorkerBootstrap;
-    const workflowSource = launch.workflowSource as never;
-    const workflow = await resolveWorkflowSource(
-      workflowSource,
-      builtinWorkflowCatalog,
-      launch.runId,
-    );
+    const workflowSource = parseWorkerWorkflowSources(launch.workflowSource);
+    const workflow = await resolveVerifiedWorkflow(launch.runId, workflowSource);
     const store = new HostBackedWorkflowStore(launch.runId, transport, ready.revision ?? 0);
     let executor: AgentStepExecutor;
     let closeExecutor: (() => Promise<void>) | undefined;
@@ -318,16 +322,19 @@ export async function runWorkflowWorker(): Promise<number> {
     try {
       const result = bootstrap.initialized
         ? await engine.resumeRun(workflow, launch.runId, {
-            workflowSource,
+            workflowSource: workflowSource.root,
             ...(bootstrap.candidateInteraction === undefined
               ? {}
               : { acceptedInteractionAttemptId: bootstrap.candidateInteraction.attemptId }),
           })
         : bootstrap.parentRunId === null
-          ? await engine.run(workflow, bootstrap.input, { runId: launch.runId, workflowSource })
+          ? await engine.run(workflow, bootstrap.input, {
+              runId: launch.runId,
+              workflowSource: workflowSource.root,
+            })
           : await engine.continueRun(workflow, bootstrap.parentRunId, bootstrap.input, {
               runId: launch.runId,
-              workflowSource,
+              workflowSource: workflowSource.root,
               ...(launchOptions.humanDecision === undefined
                 ? {}
                 : { humanDecision: launchOptions.humanDecision as ResolvedHumanDecision }),
@@ -380,6 +387,76 @@ async function resolvePresentationInstructions(
   } finally {
     clearTimeout(timer);
   }
+}
+
+type WorkerWorkflowSources = {
+  root: WorkflowSource;
+  mounted: WorkflowMountedSource[];
+};
+
+function parseWorkerWorkflowSources(value: JsonValue): WorkerWorkflowSources {
+  if (!isRecord(value) || !isWorkflowSource(value.root) || !Array.isArray(value.mounted)) {
+    throw new Error("Workflow worker source identity is invalid");
+  }
+  const mounted = value.mounted;
+  if (!mounted.every(isMountedWorkflowSource)) {
+    throw new Error("Workflow worker mounted source identity is invalid");
+  }
+  return { root: value.root, mounted };
+}
+
+async function resolveVerifiedWorkflow(
+  runId: string,
+  sources: WorkerWorkflowSources,
+): Promise<WorkflowDefinition> {
+  for (const source of [sources.root, ...sources.mounted.map((mounted) => mounted.source)]) {
+    if (source.kind === "file") {
+      if ((await hashWorkflowSource(source.path)) !== source.hash) {
+        throw new WorkflowSourceChangedError(runId);
+      }
+    } else {
+      builtinWorkflowCatalog.resolve(source, runId);
+    }
+  }
+  const workflow = await resolveWorkflowSource(sources.root, builtinWorkflowCatalog, runId);
+  const observed = compositionMetadata(workflow)?.sources ?? [];
+  if (
+    canonicalJson(sortMountedSources(observed)) !==
+    canonicalJson(sortMountedSources(sources.mounted))
+  ) {
+    throw new WorkflowSourceChangedError(runId);
+  }
+  return workflow;
+}
+
+function sortMountedSources(sources: WorkflowMountedSource[]): WorkflowMountedSource[] {
+  return [...sources].sort((left, right) =>
+    left.mountPath.join("/").localeCompare(right.mountPath.join("/")),
+  );
+}
+
+function isWorkflowSource(value: unknown): value is WorkflowSource {
+  return (
+    isRecord(value) &&
+    ((value.kind === "builtin" &&
+      typeof value.id === "string" &&
+      typeof value.revision === "string") ||
+      (value.kind === "file" && typeof value.path === "string" && typeof value.hash === "string"))
+  );
+}
+
+function isMountedWorkflowSource(value: unknown): value is WorkflowMountedSource {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.mountPath) &&
+    value.mountPath.every((part) => typeof part === "string") &&
+    typeof value.workflowName === "string" &&
+    isWorkflowSource(value.source)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readLaunchEnvelope(): WorkerLaunchEnvelope {

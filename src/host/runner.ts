@@ -465,8 +465,17 @@ export class WorkflowHost {
         const runId = requireRunId(request);
         const active = this.activeRuns.get(runId);
         if (active !== undefined) {
-          afterCommit.push(() => void this.cancelActive(active));
-          return { outcome: "accepted", receipt: { runId, cancelling: true } };
+          if (
+            !this.queue.cancelWorkflowRun({
+              runId: active.record.runId,
+              claimToken: active.claimToken,
+            })
+          ) {
+            return { outcome: "claimLost", error: "Run claim was lost before cancellation" };
+          }
+          active.control = "cancel";
+          afterCommit.push(() => void active.supervisor.stop("cancelled"));
+          return { outcome: "accepted", receipt: { runId, status: "cancelled" } };
         }
         const cancelled = this.queue.cancelWorkflowRun({ runId });
         return cancelled
@@ -477,8 +486,10 @@ export class WorkflowHost {
         const runId = requireRunId(request);
         const active = this.activeRuns.get(runId);
         if (active === undefined) return { outcome: "rejected", error: "Run is not active" };
-        afterCommit.push(() => void this.pauseActive(active));
-        return { outcome: "accepted", receipt: { runId, pausing: true } };
+        this.commitActivePause(active);
+        active.control = "pause";
+        afterCommit.push(() => void active.supervisor.stop("cancelled"));
+        return { outcome: "accepted", receipt: { runId, status: "parked", paused: true } };
       }
       case "run.resume": {
         const runId = requireRunId(request);
@@ -1630,12 +1641,34 @@ export class WorkflowHost {
 
   private async claimOne(): Promise<void> {
     if (this.stopping || this.claim === null) return;
+    const excluded = new Set([
+      ...this.activeRuns.keys(),
+      ...this.pendingStarts,
+      ...this.blockedRuns,
+    ]);
+    const validatingRunId = this.hostState
+      .validatingInteractionRunIds()
+      .find((runId) => !excluded.has(runId));
+    if (validatingRunId !== undefined) {
+      const validationToken = randomUUID();
+      const validationRun = this.queue.claimWorkflowRunForInteractionValidation({
+        runId: validatingRunId,
+        runnerId: this.hostId,
+        claimToken: validationToken,
+        leaseMs: this.runClaimLeaseMs,
+      });
+      if (validationRun !== undefined) {
+        this.pendingStarts.add(validatingRunId);
+        await this.activateRun(validationRun, validationToken);
+        return;
+      }
+    }
     const token = randomUUID();
     const claimed = this.queue.claimNextWorkflowRun({
       runnerId: this.hostId,
       claimToken: token,
       leaseMs: this.runClaimLeaseMs,
-      excludeRunIds: [...this.activeRuns.keys(), ...this.pendingStarts, ...this.blockedRuns],
+      excludeRunIds: [...excluded],
     });
     if (claimed === undefined) return;
     this.pendingStarts.add(claimed.runId);
@@ -1679,7 +1712,7 @@ export class WorkflowHost {
       generation,
       workerEpoch: randomUUID(),
       projectPath,
-      workflowSource: rootWorkflowSource(record.workflowSource),
+      workflowSource: record.workflowSource as JsonValue,
       definitionDigest: record.definitionDigest,
       inputHash: `sha256:${createHash("sha256").update(canonicalJson(record.input)).digest("hex")}`,
       protocolVersion: 1,
@@ -2374,18 +2407,7 @@ export class WorkflowHost {
     store.enqueue({ controller: row.controller, key: row.resourceKey });
   }
 
-  private async cancelActive(active: ActiveRun): Promise<void> {
-    active.control = "cancel";
-    await active.supervisor.stop("cancelled");
-    this.queue.cancelWorkflowRun({
-      runId: active.record.runId,
-      claimToken: active.claimToken,
-    });
-  }
-
-  private async pauseActive(active: ActiveRun): Promise<void> {
-    active.control = "pause";
-    await active.supervisor.stop("cancelled");
+  private commitActivePause(active: ActiveRun): void {
     const now = Date.now();
     this.state.transaction(() => {
       this.state.connection
@@ -2561,18 +2583,6 @@ function controllerPathAllowed(
   return controllerSearchDirs({ cwd: projectPath }).some(
     ({ dir }) => path.dirname(controllerPath) === path.resolve(dir),
   );
-}
-
-function rootWorkflowSource(value: unknown): JsonValue {
-  if (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    typeof (value as { root?: unknown }).root === "object"
-  ) {
-    return (value as { root: JsonValue }).root;
-  }
-  return value as JsonValue;
 }
 
 function payloadLimit(payload: JsonValue): number {
