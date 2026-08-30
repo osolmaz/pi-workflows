@@ -286,7 +286,7 @@ The host checks the generation and epoch before it reads the payload. A stale wo
 Reuse current rows when they already own a fact:
 
 - `runs`, `run_queue`, `leases`, and `events` own run lifecycle and claims.
-- `node_attempts` owns node execution state.
+- `node_attempts` owns node execution state and resolved wall-clock deadlines.
 - `human_decisions` and resolution tables own checkpoints.
 - `effects` and `effect_attempts` own side effects and ambiguous outcomes.
 - `notifications` and `turn_intents` own passive and terminal Pi messages.
@@ -300,7 +300,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Interactive requests
 
-`interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, and timestamps. One attempt has at most one request.
+`interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, and timestamps. One attempt has at most one request. The linked node attempt stores its resolved wall-clock deadline.
 
 `interactive_submissions` stores request ID, submission ID, idempotency key, payload hash, validating, accepted, or rejected outcome, receipt hash, and submission time. Repeated keys return the same receipt.
 
@@ -314,7 +314,7 @@ These tables remain part of `pi-workflows-state` schema version 1. The DDL diges
 
 Agent and assistant-message steps for an interactive run execute in the origin Pi session.
 
-The worker proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits.
+The worker commits the node's resolved wall-clock deadline before it proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits. The host continues to enforce the durable deadline while no worker exists. If the deadline passes, one control claim atomically closes the stale request and schedules a supervised timeout-resume child. The child preserves the same attempt and deadline, records `timed_out`, and follows any `$result.outcome` edge. A run with no timeout recovery edge becomes terminal and releases its session reservation. Restart recovery starts this timeout path before it schedules other work.
 
 The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
 
@@ -357,8 +357,9 @@ At startup the host:
 5. Parks uncertain effects for manual review.
 6. Makes pure and fully settled work claimable.
 7. Restores pending interactive requests and scheduled controller work.
-8. Resumes any provisional `validating` submission in a new supervised child.
-9. Starts no model turn until a matching Pi session connects or headless mode is declared.
+8. Starts supervised timeout recovery for pending interactive requests whose durable node deadlines expired.
+9. Resumes any remaining provisional `validating` submission in a new supervised child.
+10. Starts no model turn until a matching Pi session connects or headless mode is declared.
 
 Recovery resumes from the last committed boundary. An uncommitted compute node may run again because compute is pure. An action with a stored effect receipt adopts that receipt. An effect in `ambiguous` state requires explicit recovery.
 

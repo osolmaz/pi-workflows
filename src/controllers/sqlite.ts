@@ -239,6 +239,11 @@ type CancelledRunEffectRow = {
   attemptCount: number;
 };
 
+type ExpiredInteractionRow = {
+  requestId: string;
+  attemptId: string;
+};
+
 type WorkflowRow = {
   requestId: string;
   resourceUid: string;
@@ -1335,6 +1340,92 @@ export class SqliteControllerStore implements ControllerStore {
       now,
       { allowPendingInteraction: true, preserveQueueStatus: true },
     );
+  }
+
+  beginWorkflowRunInteractionTimeout(options: {
+    runId: string;
+    claimToken: string;
+    now?: string;
+  }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      if (
+        !this.verifyWorkflowRunClaim({
+          runId: options.runId,
+          claimToken: options.claimToken,
+          now: new Date(now).toISOString(),
+        })
+      ) {
+        return false;
+      }
+      const row = this.requireWorkflowRunRow(options.runId);
+      const interaction = this.state.connection
+        .prepare(
+          `SELECT i.request_id AS requestId, i.attempt_id AS attemptId
+           FROM interactive_requests i
+           JOIN node_attempts a ON a.attempt_id = i.attempt_id
+           WHERE i.run_id = ? AND i.status IN ('pending', 'presenting')
+             AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
+           ORDER BY a.deadline_at, i.request_id LIMIT 1`,
+        )
+        .get(options.runId, now);
+      if (!isExpiredInteractionRow(interaction)) return false;
+      const request = this.state.connection
+        .prepare(
+          `UPDATE interactive_requests
+           SET status = 'cancelled', presenter_id = NULL,
+               presentation_claim_expires_at = NULL, revision = revision + 1, updated_at = ?
+           WHERE request_id = ? AND run_id = ? AND status IN ('pending', 'presenting')`,
+        )
+        .run(now, interaction.requestId, options.runId);
+      const run = this.state.connection
+        .prepare(
+          `UPDATE runs
+           SET status = 'running', status_detail = 'finishing expired interaction deadline',
+               updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status = 'waiting'`,
+        )
+        .run(now, options.runId);
+      const queue = this.state.connection
+        .prepare(
+          `UPDATE run_queue SET status = 'starting', error_code = NULL, error_hash = NULL,
+                  updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status = 'parked'`,
+        )
+        .run(now, options.runId);
+      /* istanbul ignore if -- the expired parked interaction was selected above */
+      if (request.changes !== 1 || run.changes !== 1 || queue.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} changed during interaction timeout`);
+      }
+      const error = "Workflow node deadline expired before origin-session input arrived";
+      const receiptHash = this.state.putJson({ status: "rejected", error }, now);
+      this.state.connection
+        .prepare(
+          `UPDATE interactive_submissions SET outcome = 'rejected', receipt_hash = ?
+           WHERE request_id = ? AND outcome = 'validating'`,
+        )
+        .run(receiptHash, interaction.requestId);
+      const revision = this.resourceRevision(row.resourceId);
+      const lease = this.requireLease(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.interaction_timeout_started",
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { requestId: interaction.requestId, attemptId: interaction.attemptId },
+        now,
+        lease.generation || undefined,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }, { targetType: "conversation" }],
+        now,
+      );
+      return true;
+    });
   }
 
   markWorkflowRunRunning(options: { runId: string; claimToken: string; now?: string }): boolean {
@@ -3405,6 +3496,11 @@ function isCancelledRunEffectRow(value: unknown): value is CancelledRunEffectRow
     typeof value.resourceId === "string" &&
     (value.status === "pending" || value.status === "applying") &&
     typeof value.attemptCount === "number"
+  );
+}
+function isExpiredInteractionRow(value: unknown): value is ExpiredInteractionRow {
+  return (
+    isRecord(value) && typeof value.requestId === "string" && typeof value.attemptId === "string"
   );
 }
 function isWorkflowRow(value: unknown): value is WorkflowRow {

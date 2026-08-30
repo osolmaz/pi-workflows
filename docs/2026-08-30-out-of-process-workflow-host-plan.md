@@ -203,7 +203,7 @@ When a child reaches one of these steps:
 7. The child loads the workflow and runs the node's `validate` function.
 8. The host settles the request only after the child accepts it. A rejection keeps the request pending and returns the durable validation error to the model.
 
-If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry. If the host stops after it records `validating` but before activation, startup recovery schedules that same submission.
+If Pi closes, the request stays pending until its durable node deadline. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. The host enforces the saved deadline while the worker is absent and after restart. An expired request atomically closes and starts a supervised child that records the same attempt as timed out. The workflow can route that result through `$result.outcome`; otherwise the run becomes terminal and releases its session reservation. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry. If the host stops after it records `validating` but before activation, startup recovery schedules that same submission unless its deadline expired.
 
 Keep one active interactive request per Pi session. Other requests remain ordered and durable.
 
@@ -268,6 +268,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Verify run, queue, attempt, decision, lease, event, and viewer state.
 - Cancel an expired running row.
 - Commit live cancellation and its command receipt in one transaction before worker shutdown.
+- Cancel a committed run before its scheduled worker activation.
 - Reject stale cancellation against a live owner.
 - Recover a resumable expired run.
 - Stop an uncertain effect for manual review.
@@ -290,6 +291,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Start a workflow from real Pi with the mock provider.
 - Commit and present an interactive request.
 - Restart Pi before submission and present the same request once.
+- Restart the host after an interactive deadline expires, close the request, and resume the same attempt into its timeout route.
 - Submit once and replay the same receipt for a duplicate.
 - Run workflow-specific submission validation only in a supervised child.
 - Return an actionable validation error and accept a corrected submission for the same request.
@@ -330,6 +332,7 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 - Run lifecycle projections remain consistent after injected crashes.
 - Expired running rows can be resumed or cancelled safely.
 - Pi restart does not lose or falsely fail pending work.
+- An unanswered interactive request keeps its original node deadline, follows its timeout route, and cannot hold a stale session reservation forever.
 - Host restart recovers durable work without duplicate transitions.
 - Interactive steps still use the origin Pi session.
 - Duplicate commands and submissions return stored receipts.

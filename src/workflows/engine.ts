@@ -101,6 +101,7 @@ type ResumedNodeAttempt = {
   nodeId: string;
   attemptId: string;
   startedAt: string;
+  deadlineAt?: string | null;
   settings?: WorkflowSettingsScopeRecord;
 };
 
@@ -324,7 +325,7 @@ export class WorkflowEngine {
     options: {
       workflowSource?: WorkflowSource;
       force?: boolean;
-      acceptedInteractionAttemptId?: string;
+      resumeInteractionAttemptId?: string;
     } = {},
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
@@ -352,13 +353,16 @@ export class WorkflowEngine {
       state.currentNodeStartedAt !== undefined &&
       interruptedNode?.nodeType === "agent" &&
       (assistantMessageConfig(interruptedNode) !== undefined ||
-        options.acceptedInteractionAttemptId === state.currentAttemptId)
+        options.resumeInteractionAttemptId === state.currentAttemptId)
     ) {
       const resumedSettings = await this.persistedSettingsBinding(state);
       resumedAttempt = {
         nodeId: state.currentNode,
         attemptId: state.currentAttemptId,
         startedAt: state.currentNodeStartedAt,
+        ...(state.currentNodeDeadlineAt === undefined
+          ? {}
+          : { deadlineAt: state.currentNodeDeadlineAt }),
         ...(resumedSettings !== undefined ? { settings: resumedSettings } : {}),
       };
     }
@@ -371,6 +375,7 @@ export class WorkflowEngine {
       delete state.currentNode;
       delete state.currentAttemptId;
       delete state.currentNodeStartedAt;
+      delete state.currentNodeDeadlineAt;
       delete state.currentSettingsScopeId;
       delete state.currentSettingsChangeNumber;
       delete state.currentSettingsHash;
@@ -995,6 +1000,7 @@ export class WorkflowEngine {
     delete state.currentNode;
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
+    delete state.currentNodeDeadlineAt;
     delete state.currentSettingsScopeId;
     delete state.currentSettingsChangeNumber;
     delete state.currentSettingsHash;
@@ -1058,6 +1064,7 @@ export class WorkflowEngine {
         node,
         meta,
         settings,
+        resumedAttempt?.deadlineAt,
       );
       return {
         result: this.createNodeResult(nodeId, node, attemptId, startedAt, "ok", execution.output),
@@ -1125,6 +1132,7 @@ export class WorkflowEngine {
     node: WorkflowNodeDefinition,
     meta: NodeExecutionMeta,
     settings?: WorkflowSettingsScopeRecord,
+    persistedDeadlineAt?: string | null,
   ): Promise<NodeExecution> {
     const abort = new AbortController();
     const context = this.createNodeContext(state, abort.signal, settings);
@@ -1141,13 +1149,49 @@ export class WorkflowEngine {
         throw new CancelledError();
       }
 
-      const timeoutMs = await this.resolveNodeTimeout(node, context, abort);
+      let timeoutMs: number | null;
+      let timeoutErrorMs: number | null;
+      if (persistedDeadlineAt === undefined) {
+        timeoutMs = await this.resolveNodeTimeout(node, context, abort);
+        timeoutErrorMs = timeoutMs;
+        if (node.nodeType === "agent" && this.executor.preservesDeadlineWhileParked === true) {
+          state.currentNodeDeadlineAt =
+            timeoutMs === null ? null : new Date(Date.now() + timeoutMs).toISOString();
+          await this.persist(runId, state, {
+            scope: "node",
+            type: "node_deadline_set",
+            nodeId,
+            attemptId,
+            payload: { deadlineAt: state.currentNodeDeadlineAt },
+          });
+          if (state.currentNodeDeadlineAt !== null && timeoutErrorMs !== null) {
+            timeoutMs = Date.parse(state.currentNodeDeadlineAt) - Date.now();
+            if (timeoutMs <= 0) throw new TimeoutError(timeoutErrorMs);
+          }
+        } else {
+          delete state.currentNodeDeadlineAt;
+        }
+      } else if (persistedDeadlineAt === null) {
+        state.currentNodeDeadlineAt = null;
+        timeoutMs = null;
+        timeoutErrorMs = null;
+      } else {
+        const deadline = Date.parse(persistedDeadlineAt);
+        const started = Date.parse(state.currentNodeStartedAt ?? persistedDeadlineAt);
+        if (!Number.isFinite(deadline) || !Number.isFinite(started)) {
+          throw new Error("Persisted node deadline is invalid");
+        }
+        state.currentNodeDeadlineAt = persistedDeadlineAt;
+        timeoutMs = deadline - Date.now();
+        timeoutErrorMs = Math.max(1, deadline - started);
+        if (timeoutMs <= 0) throw new TimeoutError(timeoutErrorMs);
+      }
       if (abort.signal.aborted) {
         throw abortError(abort.signal);
       }
-      if (timeoutMs !== null) {
+      if (timeoutMs !== null && timeoutErrorMs !== null) {
         timer = setTimeout(() => {
-          abort.abort(new TimeoutError(timeoutMs));
+          abort.abort(new TimeoutError(timeoutErrorMs));
         }, timeoutMs);
       }
       this.activeAttempt = {
@@ -1624,6 +1668,7 @@ export class WorkflowEngine {
     delete state.currentNode;
     delete state.currentAttemptId;
     delete state.currentNodeStartedAt;
+    delete state.currentNodeDeadlineAt;
     delete state.currentSettingsScopeId;
     delete state.currentSettingsChangeNumber;
     delete state.currentSettingsHash;

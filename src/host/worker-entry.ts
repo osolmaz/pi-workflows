@@ -45,6 +45,7 @@ type WorkerBootstrap = {
   originSessionId: string | null;
   stateDirectory: string;
   piArgs?: string[];
+  resumeInteractionAttemptId?: string;
   candidateInteraction?: {
     requestId: string;
     attemptId: string;
@@ -159,6 +160,7 @@ class StdioWorkerTransport implements WorkerStoreTransport {
 
 class InteractiveExecutor implements AgentStepExecutor {
   readonly assistantMessageMode = "visible" as const;
+  readonly preservesDeadlineWhileParked = true;
 
   constructor(
     private readonly store: HostBackedWorkflowStore,
@@ -323,9 +325,9 @@ export async function runWorkflowWorker(): Promise<number> {
       const result = bootstrap.initialized
         ? await engine.resumeRun(workflow, launch.runId, {
             workflowSource: workflowSource.root,
-            ...(bootstrap.candidateInteraction === undefined
+            ...(bootstrap.resumeInteractionAttemptId === undefined
               ? {}
-              : { acceptedInteractionAttemptId: bootstrap.candidateInteraction.attemptId }),
+              : { resumeInteractionAttemptId: bootstrap.resumeInteractionAttemptId }),
           })
         : bootstrap.parentRunId === null
           ? await engine.run(workflow, bootstrap.input, {

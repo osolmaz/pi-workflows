@@ -704,7 +704,9 @@ possible. Defaults worth knowing:
 - Node timeout is 15 minutes unless the node sets `timeoutMs` to a positive
   number or context callback. A timed-out node has outcome `timed_out` and can
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
-  turn, and late output for that attempt is rejected.
+  turn, and late output for that attempt is rejected. Interactive runs save the
+  resolved wall-clock deadline before they park. The host enforces that deadline
+  while Pi is closed and after host restart.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` atomically parks the run with `paused: true`, stores the
@@ -714,10 +716,11 @@ resume` takes a new generation and reruns only work after the last durable
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command
-  reports success. Active cancellation commits its terminal state and command
-  receipt together before worker shutdown. It cancels effects that have not
-  started and marks applying effects ambiguous for explicit recovery. `workflow
-status` and `workflow cancel` can use the run ID immediately.
+  reports success. Cancellation can use that run ID before its scheduled worker
+  starts. Active cancellation commits its terminal state and command receipt
+  together before worker shutdown. It cancels effects that have not started and
+  marks applying effects ambiguous for explicit recovery. `workflow status` and
+  `workflow cancel` can use the run ID immediately.
 - One interactive workflow request is presented per Pi session. Other requests
   remain durable and ordered.
 - Each protected write renews only its exact live token and generation in the
