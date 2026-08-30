@@ -1,109 +1,166 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+export type ProcessIdentity = {
+  pid: number;
+  startIdentity: string;
+};
+
+type ProcessRegistryFile = {
+  schema: "pi-workflows.process-registry.v1";
+  processes: ProcessIdentity[];
+};
+
 /**
- * Tracks headless child processes (spawned `pi --mode rpc` sessions) so a
- * killed host never leaves orphans working. Children spawn in their own
- * process group; the registry file lets a later host reap leftovers by
- * killing the whole group. The file lives next to the project store and is
- * only ever touched by one host at a time (the advisory lock ensures it).
+ * Tracks supervised process groups by PID and operating-system start identity.
+ * A later host kills a recorded process only when both values still match.
  */
 export class HostProcessRegistry {
   private readonly filePath: string;
-  private readonly pids = new Set<number>();
+  private readonly processes = new Map<number, ProcessIdentity>();
 
   constructor(storeDir: string) {
     this.filePath = path.join(storeDir, "host.children.json");
   }
 
-  register(pid: number): void {
-    this.pids.add(pid);
+  register(pid: number): ProcessIdentity {
+    const startIdentity = processStartIdentity(pid);
+    if (startIdentity === undefined) {
+      throw new Error(`Cannot attest supervised process start identity: ${pid}`);
+    }
+    const identity = { pid, startIdentity };
+    this.processes.set(pid, identity);
     this.persist();
+    return identity;
   }
 
   unregister(pid: number): void {
-    this.pids.delete(pid);
+    this.processes.delete(pid);
     this.persist();
   }
 
   get size(): number {
-    return this.pids.size;
+    return this.processes.size;
   }
 
-  /** Kill every registered child's process group, escalating to SIGKILL. */
+  /** Kill every process that still has its registered start identity. */
   killAll(): void {
-    for (const pid of this.pids) {
-      killProcessGroup(pid, "SIGTERM");
+    for (const identity of this.processes.values()) {
+      if (matchesProcessIdentity(identity)) killProcessGroup(identity.pid, "SIGTERM");
     }
-    for (const pid of this.pids) {
-      killProcessGroup(pid, "SIGKILL");
+    for (const identity of this.processes.values()) {
+      if (matchesProcessIdentity(identity)) killProcessGroup(identity.pid, "SIGKILL");
     }
-    this.pids.clear();
+    this.processes.clear();
     this.persist();
   }
 
-  /**
-   * Reap children recorded by a previous host that died without cleanup.
-   * Called once at host start, before the lock is taken.
-   */
+  /** Reap only exact stale process identities recorded by an older host. */
   reapOrphans(): number[] {
     const recorded = this.readFile();
     const reaped: number[] = [];
-    const stillAlive: number[] = [];
-    for (const pid of recorded) {
-      if (isAlive(pid)) {
-        killProcessGroup(pid, "SIGKILL");
-        reaped.push(pid);
-        if (isAlive(pid)) {
-          // A group kill that left the leader alive stays registered so a
-          // later start tries again instead of forgetting it.
-          stillAlive.push(pid);
-        }
-      }
+    const stillAlive: ProcessIdentity[] = [];
+    for (const identity of recorded) {
+      if (!matchesProcessIdentity(identity)) continue;
+      killProcessGroup(identity.pid, "SIGKILL");
+      reaped.push(identity.pid);
+      if (matchesProcessIdentity(identity)) stillAlive.push(identity);
     }
-    this.pids.clear();
-    for (const pid of stillAlive) {
-      this.pids.add(pid);
-    }
+    this.processes.clear();
+    for (const identity of stillAlive) this.processes.set(identity.pid, identity);
     this.persist();
     return reaped;
   }
 
-  private readFile(): number[] {
+  private readFile(): ProcessIdentity[] {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as unknown;
-      if (!Array.isArray(parsed)) {
-        return [];
-      }
-      return parsed.filter((pid): pid is number => Number.isSafeInteger(pid) && pid > 0);
+      if (!isRegistryFile(parsed)) return [];
+      return parsed.processes;
     } catch {
       return [];
     }
   }
 
   private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-      // Write exactly the live set. Unioning with the previous file would
-      // resurrect exited pids, and a later host reaping them could kill an
-      // unrelated process group that reused one.
-      fs.writeFileSync(this.filePath, `${JSON.stringify([...this.pids])}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    } catch {
-      // Registry bookkeeping is best-effort; orphan reaping is the backstop.
-    }
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    const file: ProcessRegistryFile = {
+      schema: "pi-workflows.process-registry.v1",
+      processes: [...this.processes.values()].sort((left, right) => left.pid - right.pid),
+    };
+    const temporary = `${this.filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(file)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, this.filePath);
+    fs.chmodSync(this.filePath, 0o600);
   }
 }
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+/** Return an operating-system process start value that fences PID reuse. */
+export function processStartIdentity(pid: number): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) return undefined;
+      const fieldsAfterCommand = stat
+        .slice(commandEnd + 2)
+        .trim()
+        .split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      if (startTicks !== undefined) return `linux-proc-start:${startTicks}`;
+    } catch {
+      return undefined;
+    }
   }
+  if (process.platform === "win32") {
+    try {
+      const ticks = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        ],
+        { encoding: "utf8", timeout: 2_000, windowsHide: true },
+      ).trim();
+      return ticks.length === 0 ? undefined : `windows-start-ticks:${ticks}`;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 2_000,
+    }).trim();
+    return started.length === 0 ? undefined : `${process.platform}-ps-start:${started}`;
+  } catch {
+    return undefined;
+  }
+}
+
+export function matchesProcessIdentity(identity: ProcessIdentity): boolean {
+  return processStartIdentity(identity.pid) === identity.startIdentity;
+}
+
+function isRegistryFile(value: unknown): value is ProcessRegistryFile {
+  if (!isRecord(value) || value.schema !== "pi-workflows.process-registry.v1") return false;
+  if (!Array.isArray(value.processes)) return false;
+  return value.processes.every(
+    (entry) =>
+      isRecord(entry) &&
+      Number.isSafeInteger(entry.pid) &&
+      (entry.pid as number) > 0 &&
+      typeof entry.startIdentity === "string" &&
+      entry.startIdentity.length > 0,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
@@ -113,7 +170,7 @@ function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
     try {
       process.kill(pid, signal);
     } catch {
-      // Already gone.
+      // The exact process has already exited.
     }
   }
 }

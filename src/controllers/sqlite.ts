@@ -52,6 +52,7 @@ export type WorkflowRunReservationOptions = {
   launchOptions?: unknown;
   runnerId: string;
   originSessionId: string;
+  executionMode?: "interactive" | "headless";
   parentRunId?: string;
   now?: string;
 };
@@ -77,6 +78,7 @@ export type WorkflowRunQueueRecord = {
   claimExpiresAt: string | null;
   affinityRunnerId: string | null;
   originSessionId: string | null;
+  executionMode: "interactive" | "headless";
   parentRunId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
@@ -200,6 +202,7 @@ type RunRow = {
   errorCode: string | null;
   errorHash: Buffer | null;
   originSessionId: string | null;
+  executionMode: "interactive" | "headless";
   parentRunId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -250,7 +253,13 @@ export class SqliteControllerStore implements ControllerStore {
 
   constructor(
     filePath: string = workflowStatePath(),
-    options: { readOnly?: boolean; projectPath?: string; state?: StateDatabase } = {},
+    options: {
+      readOnly?: boolean;
+      projectPath?: string;
+      state?: StateDatabase;
+      /** Host-only global view. Project-scoped mutations still require projectPath. */
+      global?: boolean;
+    } = {},
   ) {
     this.ownsState = options.state === undefined;
     this.state =
@@ -261,9 +270,13 @@ export class SqliteControllerStore implements ControllerStore {
         checkLegacyState: filePath === workflowStatePath(),
       });
     this.filePath = this.state.filePath;
-    const projectPath = options.projectPath === undefined ? process.cwd() : options.projectPath;
-    this.projectId =
-      options.readOnly === true ? this.findProject(projectPath) : this.ensureProject(projectPath);
+    if (options.global === true) {
+      this.projectId = null;
+    } else {
+      const projectPath = options.projectPath === undefined ? process.cwd() : options.projectPath;
+      this.projectId =
+        options.readOnly === true ? this.findProject(projectPath) : this.ensureProject(projectPath);
+    }
   }
 
   close(): void {
@@ -531,10 +544,16 @@ export class SqliteControllerStore implements ControllerStore {
     ownerId: string;
     leaseMs: number;
     now?: string;
+    exclude?: ControllerResourceRef[];
   }): ControllerQueueClaim | undefined {
     if (options.controllers.length === 0) return undefined;
     const now = epoch(validTimestamp(options.now));
     const placeholders = options.controllers.map(() => "?").join(", ");
+    const exclusions = options.exclude ?? [];
+    const exclusionSql = exclusions
+      .map(() => "AND NOT (c.controller_name = ? AND c.resource_key = ?)")
+      .join("\n               ");
+    const exclusionParams = exclusions.flatMap((ref) => [ref.controller, ref.key]);
     return this.state.transaction(() => {
       const row = this.state.connection
         .prepare(
@@ -543,12 +562,13 @@ export class SqliteControllerStore implements ControllerStore {
              JOIN leases l ON l.resource_id = c.resource_id
              WHERE c.project_id = ?
                AND c.controller_name IN (${placeholders})
+               ${exclusionSql}
                AND q.available_at <= ?
                AND (l.owner_id IS NULL OR l.expires_at <= ?)
              ORDER BY q.available_at, c.controller_name, c.resource_key
              LIMIT 1`)}`,
         )
-        .get(this.requireProjectId(), ...options.controllers, now, now);
+        .get(this.requireProjectId(), ...options.controllers, ...exclusionParams, now, now);
       if (!isControllerRow(row)) return undefined;
       const lease = this.requireLease(row.resourceId);
       const token = randomBytes(32).toString("base64url");
@@ -1128,9 +1148,9 @@ export class SqliteControllerStore implements ControllerStore {
     this.state.connection
       .prepare(
         `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
-           VALUES (?, ?, 'interactive', ?)`,
+           VALUES (?, ?, ?, ?)`,
       )
-      .run(options.runId, options.originSessionId, now);
+      .run(options.runId, options.originSessionId, options.executionMode ?? "interactive", now);
     this.state.connection
       .prepare(
         `INSERT INTO run_queue(
@@ -1206,6 +1226,16 @@ export class SqliteControllerStore implements ControllerStore {
     return row === undefined ? undefined : this.mapWorkflowRun(row);
   }
 
+  workflowRunProjectPath(runId: string): string | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT p.canonical_path AS canonicalPath
+         FROM runs r JOIN projects p ON p.project_id = r.project_id WHERE r.run_id = ?`,
+      )
+      .get(runId);
+    return isCanonicalPathRow(row) ? row.canonicalPath : undefined;
+  }
+
   listWorkflowRuns(
     options: {
       statuses?: WorkflowRunLaunchStatus[];
@@ -1213,8 +1243,12 @@ export class SqliteControllerStore implements ControllerStore {
       limit?: number;
     } = {},
   ): WorkflowRunQueueRecord[] {
-    const clauses = ["r.project_id = ?"];
-    const params: unknown[] = [this.requireProjectId()];
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (this.projectId !== null) {
+      clauses.push("r.project_id = ?");
+      params.push(this.projectId);
+    }
     if (options.statuses !== undefined && options.statuses.length > 0) {
       clauses.push(`q.status IN (${options.statuses.map(() => "?").join(", ")})`);
       params.push(...options.statuses);
@@ -1226,7 +1260,9 @@ export class SqliteControllerStore implements ControllerStore {
     params.push(options.limit ?? 100);
     const rows = this.state.connection
       .prepare(
-        workflowRunSelect(`WHERE ${clauses.join(" AND ")} ORDER BY q.created_at DESC LIMIT ?`),
+        workflowRunSelect(
+          `${clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`} ORDER BY q.created_at DESC LIMIT ?`,
+        ),
       )
       .all(...params);
     return rows.filter(isRunRow).map((row) => this.mapWorkflowRun(row));
@@ -1254,6 +1290,25 @@ export class SqliteControllerStore implements ControllerStore {
     return this.claimRun(options.runId, options.runnerId, options.claimToken, options.leaseMs, now);
   }
 
+  /** Take a short host claim without scheduling a parked interactive run. */
+  claimWorkflowRunForControl(options: {
+    runId: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): WorkflowRunQueueRecord | undefined {
+    const now = epoch(validTimestamp(options.now));
+    return this.claimRun(
+      options.runId,
+      options.runnerId,
+      options.claimToken,
+      options.leaseMs,
+      now,
+      { allowPendingInteraction: true, preserveQueueStatus: true },
+    );
+  }
+
   markWorkflowRunRunning(options: { runId: string; claimToken: string; now?: string }): boolean {
     return this.updateClaimedRunStatus(options.runId, options.claimToken, "running", options.now);
   }
@@ -1268,19 +1323,18 @@ export class SqliteControllerStore implements ControllerStore {
   }): WorkflowRunQueueRecord | undefined {
     const now = epoch(validTimestamp(options.now));
     const clauses = [
-      "r.project_id = ?",
       "q.status IN ('queued', 'parked', 'starting', 'running')",
       "q.available_at <= ?",
       "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
       "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
+      "NOT (q.status = 'parked' AND (r.status = 'waiting' OR r.paused = 1))",
+      "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status IN ('pending', 'presenting'))",
     ];
-    const params: unknown[] = [
-      this.requireProjectId(),
-      now,
-      now,
-      options.runnerId,
-      options.runnerId,
-    ];
+    const params: unknown[] = [now, now, options.runnerId, options.runnerId];
+    if (this.projectId !== null) {
+      clauses.unshift("r.project_id = ?");
+      params.unshift(this.projectId);
+    }
     if (options.sessionId !== undefined) {
       clauses.push("b.origin_session_id = ?");
       params.push(options.sessionId);
@@ -1385,6 +1439,82 @@ export class SqliteControllerStore implements ControllerStore {
 
   parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
     return this.releaseRunClaim(options.runId, options.claimToken, "parked", options.now);
+  }
+
+  parkWorkflowRunForAmbiguousEffect(options: {
+    runId: string;
+    claimToken: string;
+    now?: string;
+  }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (
+        row === undefined ||
+        !this.verifyWorkflowRunClaim({
+          runId: options.runId,
+          claimToken: options.claimToken,
+          now: new Date(now).toISOString(),
+        })
+      ) {
+        return false;
+      }
+      const lease = this.requireLease(row.resourceId);
+      const detail = "effect outcome is ambiguous; explicit recovery is required";
+      const errorHash = this.state.putText(detail, now);
+      this.state.connection
+        .prepare(
+          `UPDATE node_attempts SET status = 'waiting', updated_at = ?
+           WHERE run_id = ? AND status IN ('pending', 'running')`,
+        )
+        .run(now, options.runId);
+      const run = this.state.connection
+        .prepare(
+          `UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ?
+           WHERE run_id = ? AND status = 'running'`,
+        )
+        .run(detail, now, now, options.runId);
+      const queue = this.state.connection
+        .prepare(
+          `UPDATE run_queue
+           SET status = 'parked', error_code = 'effectAmbiguous', error_hash = ?, updated_at = ?
+           WHERE run_id = ? AND status IN ('starting', 'running', 'parked')`,
+        )
+        .run(errorHash, now, options.runId);
+      if (run.changes !== 1 || queue.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} has inconsistent ambiguous-effect state`);
+      }
+      const released = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+               acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND token_hash = ? AND generation = ? AND expires_at > ?`,
+        )
+        .run(row.resourceId, tokenHash(options.claimToken), lease.generation, now);
+      if (released.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} claim changed during effect recovery`);
+      }
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.effect_ambiguous",
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status: "waiting", code: "effectAmbiguous" },
+        now,
+        lease.generation || undefined,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
   }
 
   failWorkflowRun(options: {
@@ -2442,6 +2572,7 @@ export class SqliteControllerStore implements ControllerStore {
       canonicalJson(this.state.readJson(row.launchOptionsHash)) ===
         canonicalJson(options.launchOptions ?? {}) &&
       row.originSessionId === options.originSessionId &&
+      row.executionMode === (options.executionMode ?? "interactive") &&
       row.parentRunId === (options.parentRunId ?? null);
     if (!compatible) {
       throw new Error(`Workflow run preparation conflicts: ${options.runId}`);
@@ -2466,7 +2597,8 @@ export class SqliteControllerStore implements ControllerStore {
       claimExpiresAt:
         row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
       affinityRunnerId: row.affinityRunnerId,
-      originSessionId: row.originSessionId,
+      originSessionId: row.executionMode === "headless" ? null : row.originSessionId,
+      executionMode: row.executionMode,
       parentRunId: row.parentRunId,
       errorCode: row.errorCode,
       errorMessage:
@@ -2486,9 +2618,10 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string,
     leaseMs: number,
     now: number,
+    options: { allowPendingInteraction?: boolean; preserveQueueStatus?: boolean } = {},
   ): WorkflowRunQueueRecord | undefined {
     return this.state.transaction(() =>
-      this.claimRunInTransaction(runId, runnerId, claimToken, leaseMs, now),
+      this.claimRunInTransaction(runId, runnerId, claimToken, leaseMs, now, options),
     );
   }
 
@@ -2498,9 +2631,21 @@ export class SqliteControllerStore implements ControllerStore {
     claimToken: string,
     leaseMs: number,
     now: number,
+    options: { allowPendingInteraction?: boolean; preserveQueueStatus?: boolean } = {},
   ): WorkflowRunQueueRecord | undefined {
     const row = this.workflowRunRow(runId);
     if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) return undefined;
+    if (
+      options.allowPendingInteraction !== true &&
+      this.state.connection
+        .prepare(
+          `SELECT 1 FROM interactive_requests
+           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+        )
+        .get(runId) !== undefined
+    ) {
+      return undefined;
+    }
     const lease = this.requireLease(row.resourceId);
     if (
       lease.ownerId !== null &&
@@ -2530,9 +2675,11 @@ export class SqliteControllerStore implements ControllerStore {
       );
     /* istanbul ignore if -- impossible after exact schema and transaction checks */
     if (result.changes !== 1) return undefined;
-    this.state.connection
-      .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
-      .run(now, runId);
+    if (options.preserveQueueStatus !== true) {
+      this.state.connection
+        .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
+        .run(now, runId);
+    }
     const revision = this.resourceRevision(row.resourceId);
     this.bumpResource(row.resourceId, revision, now);
     this.insertEvent(
@@ -2631,6 +2778,12 @@ export class SqliteControllerStore implements ControllerStore {
         { status },
         now,
         lease.generation || undefined,
+      );
+      recordViewerDeltas(
+        this.state,
+        runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
       );
       return true;
     });
@@ -3001,7 +3154,8 @@ function workflowRunSelect(clause: string): string {
     q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
     q.error_hash AS errorHash, b.origin_session_id AS originSessionId,
-    r.parent_run_id AS parentRunId, q.created_at AS createdAt, q.updated_at AS updatedAt,
+    b.execution_mode AS executionMode, r.parent_run_id AS parentRunId,
+    q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
     l.generation AS leaseGeneration, l.owner_id AS ownerId, l.expires_at AS claimExpiresAt
     FROM runs r JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
@@ -3130,6 +3284,9 @@ function isNotificationRow(value: unknown): value is NotificationRow {
 }
 function isProjectRow(value: unknown): value is { projectId: string } {
   return isRecord(value);
+}
+function isCanonicalPathRow(value: unknown): value is { canonicalPath: string } {
+  return isRecord(value) && typeof value.canonicalPath === "string";
 }
 function isFinalizerRow(value: unknown): value is { finalizer: string } {
   return isRecord(value);

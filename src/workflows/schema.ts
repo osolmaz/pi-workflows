@@ -104,6 +104,24 @@ export function assertValidActionNode(node: ActionNodeDefinition, nodeId = "acti
   if (hasExec === hasRun) {
     fail(`node ${nodeId} requires exactly one of run or exec`);
   }
+  if (node.effect === undefined || node.effect === null || typeof node.effect !== "object") {
+    fail(`node ${nodeId} requires a managed effect`);
+  }
+  if (typeof node.effect.type !== "string" || node.effect.type.trim().length === 0) {
+    fail(`node ${nodeId} effect type must be nonempty text`);
+  }
+  if (node.effect.recovery !== "idempotent" && node.effect.recovery !== "manual") {
+    fail(`node ${nodeId} effect recovery must be idempotent or manual`);
+  }
+  if (
+    typeof node.effect.idempotencyKey !== "string" &&
+    typeof node.effect.idempotencyKey !== "function"
+  ) {
+    fail(`node ${nodeId} effect idempotencyKey must be text or a function`);
+  }
+  if (!("request" in node.effect)) {
+    fail(`node ${nodeId} effect requires request data or a request function`);
+  }
   if (hasExec) {
     if (typeof node.exec !== "function") {
       fail(`node ${nodeId} exec must be a function`);
@@ -121,12 +139,7 @@ export function assertValidShellActionNode(
   node: ShellActionNodeDefinition,
   nodeId = "shell",
 ): void {
-  if (typeof node.exec !== "function") {
-    fail(`node ${nodeId} requires an exec function`);
-  }
-  assertOptionalFunction(node.parse, `node ${nodeId} parse`);
-  assertShellUpdates(node, nodeId);
-  assertCommonNodeFields(node, nodeId);
+  assertValidActionNode(node, nodeId);
 }
 
 function assertShellUpdates(node: ShellActionNodeDefinition, nodeId: string): void {

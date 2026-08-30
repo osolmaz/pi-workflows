@@ -17,7 +17,7 @@ const DATABASE_FILE = "state.sqlite";
 const BUSY_TIMEOUT_MS = 5_000;
 const JOURNAL_SIZE_LIMIT = 64 * 1024 * 1024;
 const RESET_INSTRUCTION =
-  "Pi Workflows durable state is incompatible. Move or remove the old workflow state, then create a new state.sqlite database.";
+  "Pi Workflows durable state is incompatible. Back up and move state.sqlite with its -wal and -shm files, then start Pi Workflows to create a new state.sqlite database. The incompatible state was not changed.";
 
 export type StateDatabaseMode = "read-write" | "read-only";
 
@@ -114,6 +114,7 @@ export class StateDatabase {
     if (this.mode === "read-only") {
       throw new Error("Cannot mutate a read-only Pi Workflows database");
     }
+    if (this.connection.inTransaction) return operation();
     this.connection.exec("BEGIN IMMEDIATE");
     try {
       const result = operation();

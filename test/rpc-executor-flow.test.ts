@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -198,16 +200,31 @@ describe("HostProcessRegistry edge cases", () => {
     expect(registry.reapOrphans()).toEqual([]);
     await fs.writeFile(file, '["not-a-pid", -1]', "utf8");
     expect(registry.reapOrphans()).toEqual([]);
-    registry.register(424_242);
-    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([424_242]);
+    const identity = registry.register(process.pid);
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
+      schema: "pi-workflows.process-registry.v1",
+      processes: [identity],
+    });
+    registry.unregister(process.pid);
   });
 
   it("killAll clears the registry and tolerates dead pids", async () => {
     const dir = await makeTempDir("pi-host-registry-kill");
     const registry = new HostProcessRegistry(dir);
-    registry.register(424_250);
+    expect(() => registry.register(424_250)).toThrow(/attest/);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    expect(child.pid).toBeTypeOf("number");
+    registry.register(child.pid as number);
+    const exited = once(child, "exit");
     registry.killAll();
+    await exited;
     expect(registry.size).toBe(0);
-    expect(JSON.parse(await fs.readFile(path.join(dir, "host.children.json"), "utf8"))).toEqual([]);
+    expect(JSON.parse(await fs.readFile(path.join(dir, "host.children.json"), "utf8"))).toEqual({
+      schema: "pi-workflows.process-registry.v1",
+      processes: [],
+    });
   });
 });

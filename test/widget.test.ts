@@ -15,6 +15,7 @@ import {
   checkpoint,
   compute,
   defineWorkflow,
+  idempotentEffect,
   notify,
   shell,
 } from "../src/workflows/definition.js";
@@ -588,8 +589,14 @@ describe("buildWidgetLines", () => {
           ask: agent({ prompt: () => "check" }),
           shape: compute({ run: () => ({}) }),
           tell: notify({ message: () => "done" }),
-          run_shell: shell({ exec: () => ({ command: "true" }) }),
-          run_function: action({ run: () => ({}) }),
+          run_shell: shell({
+            effect: idempotentEffect("test.widget-shell"),
+            exec: () => ({ command: "true" }),
+          }),
+          run_function: action({
+            effect: idempotentEffect("test.widget-function"),
+            run: () => ({}),
+          }),
           approve: checkpoint({ summary: "human approval" }),
         },
         edges: [

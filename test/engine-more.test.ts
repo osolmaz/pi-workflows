@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import { ansi } from "../src/render/ansi.js";
 import { stripAnsi } from "../src/render/ansi.js";
 import { renderRunListLines, statusLabel } from "../src/viewer/render.js";
-import { action, checkpoint, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
+import {
+  action,
+  checkpoint,
+  compute,
+  defineWorkflow,
+  idempotentEffect,
+  shell,
+} from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
@@ -49,7 +56,12 @@ describe("WorkflowEngine additional paths", () => {
     const workflow = defineWorkflow({
       name: "fn-action",
       startAt: "act",
-      nodes: { act: action({ run: ({ input }) => ({ echoed: input }) }) },
+      nodes: {
+        act: action({
+          effect: idempotentEffect("test.function-action"),
+          run: ({ input }) => ({ echoed: input }),
+        }),
+      },
       edges: [],
     });
     const { state } = await (await makeEngine()).run(workflow, { x: 1 });
@@ -62,7 +74,12 @@ describe("WorkflowEngine additional paths", () => {
     const workflow = defineWorkflow({
       name: "raw-shell",
       startAt: "run_cmd",
-      nodes: { run_cmd: shell({ exec: () => ({ command: "printf", args: ["%s", "raw"] }) }) },
+      nodes: {
+        run_cmd: shell({
+          effect: idempotentEffect("test.shell-action"),
+          exec: () => ({ command: "printf", args: ["%s", "raw"] }),
+        }),
+      },
       edges: [],
     });
     const { state } = await (await makeEngine()).run(workflow, {});

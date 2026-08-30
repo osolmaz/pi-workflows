@@ -14,6 +14,7 @@ import type {
   WorkflowEdge,
   WorkflowExitDefinition,
   WorkflowIncludeDefinition,
+  WorkflowManagedEffect,
   WorkflowMountedSource,
   WorkflowMountSnapshot,
   WorkflowNodeContext,
@@ -539,10 +540,18 @@ function wrapNode(
         return {
           ...common,
           nodeType: "action",
-          exec: (context) => shell.exec(project(context)),
+          ...(wrappedEffect(shell, project) === undefined
+            ? {}
+            : { effect: wrappedEffect(shell, project) }),
+          exec: (context) =>
+            shell.exec(projectActionContext(context, scopePath, scopes, entries, exits)),
           ...(shell.parse !== undefined
             ? {
-                parse: (result, context) => shell.parse?.(result, project(context)),
+                parse: (result, context) =>
+                  shell.parse?.(
+                    result,
+                    projectActionContext(context, scopePath, scopes, entries, exits),
+                  ),
               }
             : {}),
           ...(shell.updates !== undefined
@@ -564,12 +573,36 @@ function wrapNode(
       return {
         ...common,
         nodeType: "action",
+        ...(wrappedEffect(node, project) === undefined
+          ? {}
+          : { effect: wrappedEffect(node, project) }),
         run: (context) =>
           (node as FunctionActionNodeDefinition).run(
             projectActionContext(context, scopePath, scopes, entries, exits),
           ),
       } as ActionNodeDefinition;
   }
+}
+
+function wrappedEffect(
+  node: ActionNodeDefinition,
+  project: (context: WorkflowNodeContext) => WorkflowNodeContext,
+): WorkflowManagedEffect | undefined {
+  if (node.effect === undefined) return undefined;
+  const idempotencyKey = node.effect.idempotencyKey;
+  const request = node.effect.request;
+  return {
+    type: node.effect.type,
+    recovery: node.effect.recovery,
+    idempotencyKey:
+      typeof idempotencyKey === "function"
+        ? (context: WorkflowNodeContext) => idempotencyKey(project(context))
+        : idempotencyKey,
+    request:
+      typeof request === "function"
+        ? (context: WorkflowNodeContext) => request(project(context))
+        : request,
+  };
 }
 
 function projectActionContext(
@@ -581,6 +614,7 @@ function projectActionContext(
 ): WorkflowActionContext {
   return {
     ...projectWorkflowContext(context, scopePath, scopes, entries, exits),
+    effect: context.effect,
     publishUpdate: context.publishUpdate,
   };
 }

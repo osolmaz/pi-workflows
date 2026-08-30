@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const STATE_APPLICATION_ID = 0x50495746;
 export const STATE_SCHEMA_NAME = "pi-workflows-state";
 export const STATE_SCHEMA_VERSION = 1;
-export const STATE_APP_VERSION = "0.13.3";
+export const STATE_APP_VERSION = "0.14.0";
 
 export const STATE_SCHEMA_SQL = String.raw`
 CREATE TABLE schema_meta (
@@ -21,6 +21,28 @@ CREATE TABLE projects (
   canonical_path TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL
 ) STRICT;
+
+CREATE TABLE workflow_host_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),
+  host_id TEXT,
+  token_hash BLOB CHECK (token_hash IS NULL OR length(token_hash) = 32),
+  pid INTEGER CHECK (pid IS NULL OR pid > 0),
+  process_start_identity TEXT,
+  started_at INTEGER,
+  heartbeat_at INTEGER,
+  expires_at INTEGER,
+  CHECK (
+    (host_id IS NULL AND token_hash IS NULL AND pid IS NULL AND process_start_identity IS NULL
+      AND started_at IS NULL AND heartbeat_at IS NULL AND expires_at IS NULL)
+    OR
+    (host_id IS NOT NULL AND token_hash IS NOT NULL AND pid IS NOT NULL
+      AND process_start_identity IS NOT NULL AND started_at IS NOT NULL
+      AND heartbeat_at IS NOT NULL AND expires_at IS NOT NULL)
+  )
+) STRICT;
+
+INSERT INTO workflow_host_state(id, epoch) VALUES (1, 0);
 
 CREATE TABLE blobs (
   blob_hash BLOB PRIMARY KEY CHECK (length(blob_hash) = 32),
@@ -273,6 +295,67 @@ CREATE INDEX run_queue_claim_idx ON run_queue(status, available_at, created_at);
 CREATE UNIQUE INDEX run_queue_active_session_idx ON run_queue(origin_session_id)
 WHERE status IN ('queued', 'starting', 'running');
 
+CREATE TABLE host_commands (
+  request_id TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK (operation IN (
+    'run.start', 'run.pause', 'run.resume', 'run.cancel', 'run.status', 'run.list',
+    'decision.answer', 'interaction.submit', 'interaction.update', 'host.status', 'host.stop'
+  )),
+  idempotency_key TEXT NOT NULL,
+  request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
+  run_id TEXT REFERENCES runs(run_id) ON DELETE SET NULL,
+  accepted_revision INTEGER CHECK (accepted_revision IS NULL OR accepted_revision >= 0),
+  outcome TEXT NOT NULL CHECK (outcome IN (
+    'accepted', 'adopted', 'rejected', 'conflict', 'notFound', 'claimLost', 'unavailable'
+  )),
+  receipt_hash BLOB REFERENCES blobs(blob_hash),
+  error_hash BLOB REFERENCES blobs(blob_hash),
+  host_epoch INTEGER NOT NULL CHECK (host_epoch > 0),
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL,
+  UNIQUE (client_id, idempotency_key)
+) STRICT;
+
+CREATE INDEX host_commands_run_idx ON host_commands(run_id, created_at);
+
+CREATE TABLE run_workers (
+  worker_epoch TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  host_epoch INTEGER NOT NULL CHECK (host_epoch > 0),
+  launch_envelope_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  pid INTEGER,
+  process_start_identity TEXT,
+  status TEXT NOT NULL CHECK (status IN (
+    'starting', 'ready', 'running', 'exited', 'cancelled', 'timedOut',
+    'crashed', 'claimLost', 'orphaned'
+  )),
+  started_at INTEGER NOT NULL,
+  ready_at INTEGER,
+  finished_at INTEGER,
+  exit_code INTEGER,
+  signal TEXT,
+  diagnostic_hash BLOB REFERENCES blobs(blob_hash),
+  CHECK ((pid IS NULL) = (process_start_identity IS NULL))
+) STRICT;
+
+CREATE UNIQUE INDEX run_workers_active_idx ON run_workers(run_id)
+WHERE status IN ('starting', 'ready', 'running');
+CREATE INDEX run_workers_generation_idx ON run_workers(run_id, generation, started_at);
+
+CREATE TABLE worker_messages (
+  worker_epoch TEXT NOT NULL REFERENCES run_workers(worker_epoch) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'adopted', 'rejected', 'claimLost')),
+  accepted_revision INTEGER CHECK (accepted_revision IS NULL OR accepted_revision >= 0),
+  result_hash BLOB REFERENCES blobs(blob_hash),
+  error_hash BLOB REFERENCES blobs(blob_hash),
+  completed_at INTEGER NOT NULL,
+  PRIMARY KEY (worker_epoch, message_id)
+) STRICT;
+
 CREATE TABLE node_attempts (
   attempt_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -411,6 +494,44 @@ CREATE TABLE human_decisions (
 
 CREATE INDEX human_decisions_run_idx ON human_decisions(run_id, created_at);
 CREATE INDEX human_decisions_deadline_idx ON human_decisions(deadline_at) WHERE deadline_at IS NOT NULL;
+
+CREATE TABLE interactive_requests (
+  request_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  attempt_id TEXT NOT NULL UNIQUE REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
+  target_session_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('agent', 'assistant', 'decision')),
+  contract_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'presenting', 'settled', 'cancelled')),
+  presenter_id TEXT,
+  presentation_claim_expires_at INTEGER,
+  presentation_session_entry_id TEXT,
+  accepted_submission_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  settled_at INTEGER,
+  consumed_at INTEGER,
+  CHECK ((status = 'settled') = (accepted_submission_id IS NOT NULL AND settled_at IS NOT NULL)),
+  CHECK ((presenter_id IS NULL) = (presentation_claim_expires_at IS NULL)),
+  CHECK (presenter_id IS NULL OR status = 'presenting'),
+  CHECK (consumed_at IS NULL OR status = 'settled')
+) STRICT;
+
+CREATE INDEX interactive_requests_session_idx
+  ON interactive_requests(target_session_id, status, created_at);
+
+CREATE TABLE interactive_submissions (
+  submission_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES interactive_requests(request_id) ON DELETE CASCADE,
+  idempotency_key TEXT NOT NULL,
+  request_revision INTEGER NOT NULL CHECK (request_revision > 0),
+  payload_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'rejected', 'adopted')),
+  receipt_hash BLOB REFERENCES blobs(blob_hash),
+  submitted_at INTEGER NOT NULL,
+  UNIQUE (request_id, idempotency_key)
+) STRICT;
 
 CREATE TABLE human_decision_resolutions (
   decision_id TEXT PRIMARY KEY REFERENCES human_decisions(decision_id) ON DELETE CASCADE,

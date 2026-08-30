@@ -475,6 +475,13 @@ export class HumanDecisionStore {
     request: HumanDecisionRequest,
     submission: HumanDecisionSubmission,
   ): Promise<HumanDecisionAcceptance> {
+    return this.acceptSync(request, submission);
+  }
+
+  acceptSync(
+    request: HumanDecisionRequest,
+    submission: HumanDecisionSubmission,
+  ): HumanDecisionAcceptance {
     validateHumanDecisionRequestIntegrity(request);
     const normalized = validateHumanDecisionSubmission(request, submission);
     const attemptedAt = new Date().toISOString();

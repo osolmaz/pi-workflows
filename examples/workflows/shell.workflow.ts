@@ -1,4 +1,4 @@
-import { compute, defineWorkflow, shell } from "@osolmaz/pi-workflows";
+import { compute, defineWorkflow, manualEffect, shell } from "@osolmaz/pi-workflows";
 
 type ShellInput = {
   text?: string;
@@ -10,6 +10,7 @@ export default defineWorkflow({
   startAt: "echo_text",
   nodes: {
     echo_text: shell({
+      effect: manualEffect("example.shell.echo-text"),
       exec: ({ input }) => ({
         command: "printf",
         args: ["%s", (input as ShellInput).text ?? "hello from pi-workflows"],

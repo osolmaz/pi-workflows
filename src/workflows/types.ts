@@ -48,8 +48,29 @@ export type WorkflowUpdateReceipt = Pick<
   "updateId" | "seq" | "at" | "type" | "key"
 >;
 
+export type WorkflowEffectRecovery = "idempotent" | "manual";
+
+export type WorkflowManagedEffect = {
+  /** Stable external effect category, for example `github.comment`. */
+  type: string;
+  /** Stable key. Idempotent adapters must pass this key to the external system. */
+  idempotencyKey: string | ((context: WorkflowNodeContext) => MaybePromise<string>);
+  /** Canonical request data used to reject key reuse with another operation. */
+  request: unknown | ((context: WorkflowNodeContext) => MaybePromise<unknown>);
+  /** `manual` never retries after an uncertain child exit. */
+  recovery: WorkflowEffectRecovery;
+};
+
 export type WorkflowActionContext<TInput = unknown> = WorkflowNodeContext<TInput> & {
+  effect: { type: string; idempotencyKey: string; recovery: WorkflowEffectRecovery };
   publishUpdate(update: WorkflowUpdateInput): Promise<WorkflowUpdateReceipt>;
+};
+
+export type WorkflowEffectReservation = {
+  effectId: string;
+  attemptNumber: number;
+  disposition: "execute" | "adopted" | "ambiguous";
+  result?: unknown;
 };
 
 export type WorkflowProgressStatus =
@@ -150,6 +171,7 @@ export type NotifyNodeDefinition = WorkflowNodeCommon & {
 /** A deterministic runtime-owned step implemented as a local function. */
 export type FunctionActionNodeDefinition = WorkflowNodeCommon & {
   nodeType: "action";
+  effect?: WorkflowManagedEffect;
   run: (context: WorkflowActionContext) => MaybePromise<unknown>;
 };
 
@@ -193,8 +215,9 @@ export type ShellActionUpdates = {
 
 export type ShellActionNodeDefinition = WorkflowNodeCommon & {
   nodeType: "action";
-  exec: (context: WorkflowNodeContext) => MaybePromise<ShellActionExecution>;
-  parse?: (result: ShellActionResult, context: WorkflowNodeContext) => MaybePromise<unknown>;
+  effect?: WorkflowManagedEffect;
+  exec: (context: WorkflowActionContext) => MaybePromise<ShellActionExecution>;
+  parse?: (result: ShellActionResult, context: WorkflowActionContext) => MaybePromise<unknown>;
   updates?: ShellActionUpdates;
 };
 
@@ -717,6 +740,7 @@ export type WorkflowNodeSnapshot = {
   expectedOutput?: AgentExpectedOutput;
   settingsRoute?: true;
   actionExecution?: "function" | "shell";
+  effect?: { type: string; recovery: WorkflowEffectRecovery };
   mountPath?: string[];
   localNodeId?: string;
   includeTransition?: "entry" | "exit";
@@ -936,8 +960,8 @@ export type WorkflowEngineOptions = {
   notificationSink?: WorkflowNotificationSink;
   /** Canonical SQLite database. Defaults to `~/.pi/agent/workflows/state.sqlite`. */
   databasePath?: string;
-  /** Shared SQLite run store. */
-  store?: import("./store.js").WorkflowRunStore;
+  /** Durable execution store. Workers use a host-backed implementation. */
+  store?: import("./store.js").WorkflowExecutionStore;
   /**
    * Awaited after `run_started` is persisted, before any node executes.
    */

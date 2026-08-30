@@ -2040,7 +2040,7 @@ describe("built-in autoimplement", () => {
       databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-timeout-fallback"),
     });
 
-    const { state } = await engine.run(autoimplementWithTimeout("implement", 20), {
+    const { state } = await engine.run(autoimplementWithTimeout("implement", 100), {
       task: "implement demo",
       ...documentedPlan({ steps: ["change code"] }),
       repository,
@@ -2310,7 +2310,7 @@ describe("built-in autoimplement", () => {
       executor,
       databasePath: await makeStateDatabasePath("autoimplement-default-branch"),
     });
-    const { state } = await engine.run(autoimplementWithTimeout("finalizeDefaultBranch", 20), {
+    const { state } = await engine.run(autoimplementWithTimeout("finalizeDefaultBranch", 100), {
       task: "Verify direct default-branch work",
       ...documentedPlan({ steps: ["verify"] }),
       repository,

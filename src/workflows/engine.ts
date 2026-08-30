@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { canonicalJson } from "../state/json.js";
+import { canonicalJson, type JsonValue } from "../state/json.js";
 import { StaleResourceError } from "../state/mutation.js";
 import {
   compileWorkflowDefinition,
@@ -18,11 +18,7 @@ import {
   WorkflowSourceChangedError,
 } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
-import {
-  HumanDecisionStore,
-  createHumanDecisionRequest,
-  validateHumanDecisionResponse,
-} from "./human-decision.js";
+import { createHumanDecisionRequest, validateHumanDecisionResponse } from "./human-decision.js";
 import { extractJsonValue } from "./json.js";
 import {
   parseWorkflowSettingsValue,
@@ -35,6 +31,7 @@ import {
   WorkflowRunStore,
   createDefinitionSnapshot,
   createRunId,
+  type WorkflowExecutionStore,
 } from "./store.js";
 import type {
   ResolvedHumanDecision,
@@ -116,7 +113,7 @@ type ResumedNodeAttempt = {
 export class WorkflowEngine {
   private readonly executor: AgentStepExecutor;
   private readonly notificationSink: WorkflowNotificationSink | undefined;
-  private readonly store: WorkflowRunStore;
+  private readonly store: WorkflowExecutionStore;
   private readonly defaultNodeTimeoutMs: number;
   private readonly maxSteps: number;
   private readonly onEvent?: WorkflowEngineOptions["onEvent"];
@@ -306,6 +303,7 @@ export class WorkflowEngine {
     try {
       await this.executeGraph(workflow, state, runId);
     } catch (error) {
+      if (isClaimLostError(error)) throw error;
       if (isRunParkedError(error) || this.parked) {
         return { runId, state };
       }
@@ -323,7 +321,11 @@ export class WorkflowEngine {
   async resumeRun(
     workflow: WorkflowDefinition,
     runId: string,
-    options: { workflowSource?: WorkflowSource; force?: boolean } = {},
+    options: {
+      workflowSource?: WorkflowSource;
+      force?: boolean;
+      acceptedInteractionAttemptId?: string;
+    } = {},
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
@@ -349,9 +351,10 @@ export class WorkflowEngine {
       state.currentAttemptId !== undefined &&
       state.currentNodeStartedAt !== undefined &&
       interruptedNode?.nodeType === "agent" &&
-      assistantMessageConfig(interruptedNode) !== undefined
+      (assistantMessageConfig(interruptedNode) !== undefined ||
+        options.acceptedInteractionAttemptId === state.currentAttemptId)
     ) {
-      const resumedSettings = this.persistedSettingsBinding(state);
+      const resumedSettings = await this.persistedSettingsBinding(state);
       resumedAttempt = {
         nodeId: state.currentNode,
         attemptId: state.currentAttemptId,
@@ -359,10 +362,10 @@ export class WorkflowEngine {
         ...(resumedSettings !== undefined ? { settings: resumedSettings } : {}),
       };
     }
-    // A resumed run starts unpaused. Submitted and non-agent nodes discard
-    // stale in-flight markers and start a new attempt. Assistant-message
-    // nodes keep their attempt id so the origin session can adopt an already
-    // visible response without showing it twice.
+    // A resumed run starts unpaused. Submitted and non-agent nodes normally
+    // discard stale in-flight markers and start a new attempt. A submitted
+    // interaction and an assistant-message node keep their exact attempt id
+    // so durable origin-session work is never detached from its contract.
     delete state.paused;
     if (resumedAttempt === undefined) {
       delete state.currentNode;
@@ -416,6 +419,7 @@ export class WorkflowEngine {
         resumedAttempt,
       );
     } catch (error) {
+      if (isClaimLostError(error)) throw error;
       if (isRunParkedError(error) || this.parked) {
         return { runId, state };
       }
@@ -447,7 +451,7 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const parent = this.store.readRun(parentRunId);
+    const parent = await this.store.readRun(parentRunId);
     if (parent === null) {
       throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
     }
@@ -480,9 +484,7 @@ export class WorkflowEngine {
       ) {
         throw new Error("Accepted human decision does not match the waiting request");
       }
-      const durableDecision = await new HumanDecisionStore(this.store.databasePath, {
-        state: this.store.state,
-      }).readResolved(request.decisionId);
+      const durableDecision = await this.store.readResolvedHumanDecision(request.decisionId);
       if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
         throw new Error("Accepted human decision does not match the durable decision record");
       }
@@ -572,6 +574,7 @@ export class WorkflowEngine {
         point.lastOutput,
       );
     } catch (error) {
+      if (isClaimLostError(error)) throw error;
       if (isRunParkedError(error) || this.parked) {
         return { runId, state };
       }
@@ -1062,6 +1065,7 @@ export class WorkflowEngine {
         ...(settings !== undefined ? { settings } : {}),
       };
     } catch (error) {
+      if (isRunParkedError(error) || isClaimLostError(error)) throw error;
       const outcome = this.outcomeForError(error);
       return {
         result: {
@@ -1323,7 +1327,7 @@ export class WorkflowEngine {
     }
     if (definition === undefined) return undefined;
     const invocation = mountPath === "" ? 1 : currentMountInvocation(state, mountPath);
-    const existing = this.store.findSettingsScope(state.runId, mountPath, invocation);
+    const existing = await this.store.findSettingsScope(state.runId, mountPath, invocation);
     if (existing !== undefined) return existing;
     const input = mountPath === "" ? state.input : currentMountInput(state, mountPath);
     const mappedSettings =
@@ -1331,7 +1335,7 @@ export class WorkflowEngine {
     const initial = mappedSettings.present
       ? await parseWorkflowSettingsValue(definition, mappedSettings.value)
       : await resolveInitialWorkflowSettings(definition, input);
-    return this.store.ensureSettingsScope({
+    return await this.store.ensureSettingsScope({
       runId: state.runId,
       mountPath,
       invocation,
@@ -1339,9 +1343,9 @@ export class WorkflowEngine {
     });
   }
 
-  private persistedSettingsBinding(
+  private async persistedSettingsBinding(
     state: WorkflowRunState,
-  ): WorkflowSettingsScopeRecord | undefined {
+  ): Promise<WorkflowSettingsScopeRecord | undefined> {
     if (state.currentSettingsScopeId === undefined) return undefined;
     if (
       state.currentSettingsChangeNumber === undefined ||
@@ -1349,7 +1353,7 @@ export class WorkflowEngine {
     ) {
       throw new Error("Saved workflow settings binding is incomplete");
     }
-    const scope = this.store.getSettingsScopeAtChange(
+    const scope = await this.store.getSettingsScopeAtChange(
       state.currentSettingsScopeId,
       state.currentSettingsChangeNumber,
     );
@@ -1508,16 +1512,76 @@ export class WorkflowEngine {
     signal: AbortSignal,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
+    if (node.effect === undefined) {
+      throw new Error(
+        `Action node ${nodeId} must declare a managed effect with an explicit recovery policy`,
+      );
+    }
+    const effectType = node.effect.type.trim();
+    const idempotencyKey =
+      typeof node.effect.idempotencyKey === "function"
+        ? await node.effect.idempotencyKey(context)
+        : node.effect.idempotencyKey;
+    const request =
+      typeof node.effect.request === "function"
+        ? await node.effect.request(context)
+        : node.effect.request;
+    if (effectType.length === 0 || idempotencyKey.trim().length === 0) {
+      throw new Error("Managed effect type and idempotency key must be nonempty text");
+    }
+    canonicalJson(request);
+    const reservation = await this.store.reserveEffect({
+      runId: context.state.runId,
+      attemptId,
+      effectType,
+      idempotencyKey,
+      request: request as JsonValue,
+      recovery: node.effect.recovery,
+    });
+    if (reservation.disposition === "ambiguous") throw new RunParkedError();
+    if (reservation.disposition === "adopted") {
+      const adopted = reservation.result;
+      if (adopted === null || typeof adopted !== "object" || Array.isArray(adopted)) {
+        throw new Error("Managed effect receipt is invalid");
+      }
+      const execution = adopted as NodeExecution;
+      if (execution.action !== undefined) meta.action = execution.action;
+      return execution;
+    }
     const actionContext: WorkflowActionContext = {
       ...context,
+      effect: { type: effectType, idempotencyKey, recovery: node.effect.recovery },
       publishUpdate: async (update) => await this.publishUpdate(nodeId, attemptId, update),
     };
-    if ("exec" in node) {
-      return await runShellActionNode(node, context, actionContext, signal, meta);
+    try {
+      let execution: NodeExecution;
+      if ("exec" in node) {
+        execution = await runShellActionNode(node, actionContext, signal, meta);
+      } else {
+        meta.action = { actionType: "function" };
+        const output = await node.run(actionContext);
+        execution = { output, promptText: null, action: { actionType: "function" } };
+      }
+      canonicalJson(execution);
+      await this.store.settleEffect({
+        runId: context.state.runId,
+        effectId: reservation.effectId,
+        attemptNumber: reservation.attemptNumber,
+        outcome: "applied",
+        result: execution as JsonValue,
+      });
+      return execution;
+    } catch (error) {
+      if (isRunParkedError(error) || isClaimLostError(error)) throw error;
+      await this.store.settleEffect({
+        runId: context.state.runId,
+        effectId: reservation.effectId,
+        attemptNumber: reservation.attemptNumber,
+        outcome: "rejected",
+        error: errorMessage(error),
+      });
+      throw error;
     }
-    meta.action = { actionType: "function" };
-    const output = await node.run(actionContext);
-    return { output, promptText: null, action: { actionType: "function" } };
   }
 
   private async persist(
@@ -1586,7 +1650,7 @@ async function runCheckpointNode(
   node: CheckpointNodeDefinition,
   context: WorkflowNodeContext,
   execution: {
-    store: WorkflowRunStore;
+    store: WorkflowExecutionStore;
     workflowName: string;
     nodeId: string;
     attemptId: string;
@@ -1611,9 +1675,7 @@ async function runCheckpointNode(
       prompt,
       ...(timeout !== undefined ? { timeout } : {}),
     });
-    await new HumanDecisionStore(execution.store.databasePath, {
-      state: execution.store.state,
-    }).createRequest(request);
+    await execution.store.createHumanDecisionRequest(request);
     return { output: request, promptText: null };
   }
   const output = node.run ? await node.run(context) : { summary: node.summary ?? "checkpoint" };
@@ -1634,12 +1696,11 @@ function shellReceipt(result: ShellActionResult): WorkflowActionReceipt {
 
 async function runShellActionNode(
   node: ShellActionNodeDefinition,
-  context: WorkflowNodeContext,
   actionContext: WorkflowActionContext,
   signal: AbortSignal,
   meta: NodeExecutionMeta,
 ): Promise<NodeExecution> {
-  const spec = await node.exec(context);
+  const spec = await node.exec(actionContext);
   const streams = new Set(node.updates?.streams ?? ["stdout"]);
   let result: ShellActionResult;
   try {
@@ -1665,7 +1726,7 @@ async function runShellActionNode(
     throw error;
   }
   meta.action = shellReceipt(result);
-  const output = node.parse ? await node.parse(result, context) : result;
+  const output = node.parse ? await node.parse(result, actionContext) : result;
   return { output, promptText: null, action: shellReceipt(result) };
 }
 
@@ -1883,7 +1944,7 @@ function appendLiveControlInstructions(
   nodeId: string,
   context: WorkflowNodeContext,
 ): string {
-  const lines = [prompt.trimEnd(), "", "Workflow changes during this run:"];
+  const lines = [prompt.trimEnd(), "", "Workflow context for this run:"];
   if (
     context.settingsScopeId !== undefined &&
     context.settingsChangeNumber !== undefined &&
@@ -1907,18 +1968,12 @@ function appendLiveControlInstructions(
         ? [`- Settings purpose: ${definition.description}`]
         : []),
       `- Current settings: ${summary}`,
-      `- Changes allowed from this model step: ${allowed || "none"}`,
-      "- Treat the current settings as authoritative for future behavior in this workflow scope.",
-      "- To change future workflow settings, use the workflow tool with action change-settings, this scopeId, an RFC 6902 patch, and optionally expectedChangeNumber.",
+      `- Settings permissions: ${allowed || "none"}`,
+      "- Treat the current settings as authoritative for this workflow scope.",
     );
   } else {
     lines.push("- This workflow scope has no editable settings.");
   }
-  lines.push(
-    "- To save normal user work for after successful completion, use workflow action queue-follow-up once for each prompt.",
-    "- To remove an unsent prompt that this model queued, use workflow action remove-follow-up with its followUpId.",
-    "- Setting changes affect only future node attempts and future settings routes. They do not change this running attempt or completed work.",
-  );
   return lines.join("\n");
 }
 

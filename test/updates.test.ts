@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { action, agent, defineWorkflow, shell } from "../src/workflows/definition.js";
+import {
+  action,
+  agent,
+  defineWorkflow,
+  idempotentEffect,
+  shell,
+} from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import {
   appendProgressHistory,
@@ -27,6 +33,7 @@ describe("workflow updates", () => {
       startAt: "work",
       nodes: {
         work: action({
+          effect: idempotentEffect("test.function-updates"),
           run: async ({ publishUpdate }) => {
             await publishUpdate({ type: "progress", key: "overall", data: progress(1, 3) });
             await publishUpdate({ type: "progress", key: "overall", data: progress(2, 3) });
@@ -54,6 +61,7 @@ describe("workflow updates", () => {
       startAt: "work",
       nodes: {
         work: action({
+          effect: idempotentEffect("test.mutable-update-data"),
           run: async ({ publishUpdate }) => {
             const data = progress(1, 3);
             await publishUpdate({ type: "progress", key: "overall", data });
@@ -84,6 +92,7 @@ describe("workflow updates", () => {
       startAt: "work",
       nodes: {
         work: action({
+          effect: idempotentEffect("test.concurrent-update-limit"),
           run: async (context) => {
             context.state.updates = Array.from({ length: 1_023 }, (_, index) => ({
               updateId: `seed-${index}`,
@@ -151,6 +160,7 @@ describe("workflow updates", () => {
       startAt: "work",
       nodes: {
         work: shell({
+          effect: idempotentEffect("test.shell-updates"),
           exec: () => ({
             command: process.execPath,
             args: ["-e", "console.log(JSON.stringify({n:1})); console.log(JSON.stringify({n:2}))"],

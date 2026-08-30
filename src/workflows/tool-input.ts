@@ -11,7 +11,7 @@ const inputSchema = Type.Unknown({
   description: "Checkpoint answer for answer; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
-  description: "Run id; required for restart and optional for status, cancel, and answer",
+  description: "Run id; optional for status, cancel, and answer",
 });
 const stepSchema = Type.String({
   description: "Workflow step id; required when action is update or submit",
@@ -30,33 +30,6 @@ const updateSchema = Type.Object(
 const outputSchema = Type.Unknown({
   description: "Step output matching the expected shape; required when action is submit",
 });
-const scopeIdSchema = Type.String({
-  description: "Settings scope id; defaults to the active node scope",
-});
-const expectedChangeNumberSchema = Type.Integer({
-  minimum: 0,
-  description: "Optional settings change number for an atomic compare-and-change",
-});
-const patchOperationSchema = Type.Object(
-  {
-    op: Type.String({ enum: ["add", "remove", "replace", "move", "copy", "test"] }),
-    path: Type.String(),
-    from: Type.Optional(Type.String()),
-    value: Type.Optional(Type.Unknown()),
-  },
-  noExtraProperties,
-);
-const patchSchema = Type.Array(patchOperationSchema, {
-  maxItems: 256,
-  description: "RFC 6902 JSON Patch operations",
-});
-const followUpPromptSchema = Type.String({
-  minLength: 1,
-  maxLength: 65536,
-  description: "Normal user prompt to send after successful workflow completion",
-});
-const followUpIdSchema = Type.String({ description: "Queued follow-up id" });
-
 export const WorkflowActionSchemas = {
   list: Type.Object(
     { action: Type.Literal("list"), offset: Type.Optional(offsetSchema) },
@@ -67,13 +40,6 @@ export const WorkflowActionSchemas = {
       action: Type.Literal("start"),
       workflow: workflowSchema,
       input: Type.Optional(inputSchema),
-    },
-    noExtraProperties,
-  ),
-  restart: Type.Object(
-    {
-      action: Type.Literal("restart"),
-      runId: runIdSchema,
     },
     noExtraProperties,
   ),
@@ -92,32 +58,6 @@ export const WorkflowActionSchemas = {
       action: Type.Literal("answer"),
       input: inputSchema,
       runId: Type.Optional(runIdSchema),
-    },
-    noExtraProperties,
-  ),
-  "change-settings": Type.Object(
-    {
-      action: Type.Literal("change-settings"),
-      runId: Type.Optional(runIdSchema),
-      scopeId: Type.Optional(scopeIdSchema),
-      expectedChangeNumber: Type.Optional(expectedChangeNumberSchema),
-      patch: patchSchema,
-    },
-    noExtraProperties,
-  ),
-  "queue-follow-up": Type.Object(
-    {
-      action: Type.Literal("queue-follow-up"),
-      runId: Type.Optional(runIdSchema),
-      prompt: followUpPromptSchema,
-    },
-    noExtraProperties,
-  ),
-  "remove-follow-up": Type.Object(
-    {
-      action: Type.Literal("remove-follow-up"),
-      runId: Type.Optional(runIdSchema),
-      followUpId: followUpIdSchema,
     },
     noExtraProperties,
   ),
@@ -161,18 +101,11 @@ type ToolInputParser<Output> = (value: unknown) => Output;
 const workflowInputParsers = {
   list: (value) => parseToolInput(WorkflowActionSchemas.list, value, "workflow"),
   start: (value) => parseToolInput(WorkflowActionSchemas.start, value, "workflow"),
-  restart: (value) => parseToolInput(WorkflowActionSchemas.restart, value, "workflow"),
   status: (value) => parseToolInput(WorkflowActionSchemas.status, value, "workflow"),
   pause: (value) => parseToolInput(WorkflowActionSchemas.pause, value, "workflow"),
   resume: (value) => parseToolInput(WorkflowActionSchemas.resume, value, "workflow"),
   cancel: (value) => parseToolInput(WorkflowActionSchemas.cancel, value, "workflow"),
   answer: (value) => parseToolInput(WorkflowActionSchemas.answer, value, "workflow"),
-  "change-settings": (value) =>
-    parseToolInput(WorkflowActionSchemas["change-settings"], value, "workflow"),
-  "queue-follow-up": (value) =>
-    parseToolInput(WorkflowActionSchemas["queue-follow-up"], value, "workflow"),
-  "remove-follow-up": (value) =>
-    parseToolInput(WorkflowActionSchemas["remove-follow-up"], value, "workflow"),
   update: (value) => parseToolInput(WorkflowActionSchemas.update, value, "workflow"),
   submit: (value) => parseToolInput(WorkflowActionSchemas.submit, value, "workflow"),
 } satisfies Record<keyof typeof WorkflowActionSchemas, ToolInputParser<WorkflowToolInput>>;
