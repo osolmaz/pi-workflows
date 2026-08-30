@@ -83,6 +83,7 @@ export interface ControllerStore {
     ownerId: string;
     leaseMs: number;
     now?: string;
+    exclude?: ControllerResourceRef[];
   }): ControllerQueueClaim | undefined;
   renewClaim(claim: ControllerQueueClaim, leaseMs: number, now?: string): boolean;
   settleClaim(claim: ControllerQueueClaim, now?: string): boolean;

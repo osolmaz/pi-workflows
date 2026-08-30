@@ -38,23 +38,15 @@ describe("parseWorkflowArgs answer", () => {
     expect(() => parseWorkflowArgs("status bad id")).toThrow(/valid run id/);
   });
 
-  it("parses settings and follow-up commands", () => {
-    expect(
-      parseWorkflowArgs('change-settings [{"op":"replace","path":"/mode","value":"safe"}]'),
-    ).toEqual({
-      kind: "change-settings",
-      patch: [{ op: "replace", path: "/mode", value: "safe" }],
-    });
-    expect(parseWorkflowArgs("queue-follow-up Run the release checks.")).toEqual({
-      kind: "queue-follow-up",
-      prompt: "Run the release checks.",
-    });
-    const followUpId = `follow-up-${"a".repeat(40)}`;
-    expect(parseWorkflowArgs(`remove-follow-up ${followUpId}`)).toEqual({
-      kind: "remove-follow-up",
-      followUpId,
-    });
-    expect(() => parseWorkflowArgs("change-settings broken")).toThrow(/JSON Patch/);
+  it("rejects commands that are not in the hosted protocol", () => {
+    for (const args of [
+      "restart run-1",
+      'change-settings [{"op":"replace","path":"/mode","value":"safe"}]',
+      "queue-follow-up Run the release checks.",
+      `remove-follow-up follow-up-${"a".repeat(40)}`,
+    ]) {
+      expect(() => parseWorkflowArgs(args)).toThrow(/hosted workflow protocol/);
+    }
   });
 
   it("parses --input-json for runs", () => {

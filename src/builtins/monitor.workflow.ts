@@ -3,6 +3,7 @@ import {
   agent,
   compute,
   defineWorkflow,
+  idempotentEffect,
   includeWorkflow,
   includedResult,
   notify,
@@ -855,6 +856,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
     guard: compute({ run: guardObservation }),
     estimate: compute({ run: ({ outputs }) => estimateTracks(outputs) }),
     publish_progress: action({
+      effect: idempotentEffect("pi-workflows.monitor.publish-progress"),
       statusDetail: "publishing monitor progress",
       run: async ({ outputs, publishUpdate, signal }) => {
         const observation = currentObservation(outputs);
@@ -944,6 +946,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
       },
     }),
     schedule: action({
+      effect: idempotentEffect("pi-workflows.monitor.schedule"),
       statusDetail: "scheduling next monitor observation",
       run: async ({ outputs, publishUpdate }) => {
         const config = configFrom(outputs);
@@ -965,6 +968,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
       },
     }),
     sleep: shell({
+      effect: idempotentEffect("pi-workflows.monitor.sleep"),
       statusDetail: "waiting for next monitor observation",
       timeoutMs: MAX_INTERVAL_MINUTES * 60_000 + NODE_TIMEOUT_MARGIN_MS,
       exec: ({ outputs }) => {

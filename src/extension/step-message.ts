@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import type {
   AgentStepContract,
   AgentStepPresentation,
   AgentStepSubmission,
 } from "../workflows/types.js";
-import { visibleAssistantText, type PromptDeliveryKind } from "./executor.js";
 import {
   cleanOptionalSingleLine,
   cleanSingleLine,
@@ -17,6 +17,8 @@ import {
 
 export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = "pi-workflows-agent-step";
 export const WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA = "pi-workflows.agent-step-message.v1";
+
+type PromptDeliveryKind = "step" | "reminder" | "resume";
 
 export type WorkflowAgentStepMessageDetails = {
   schema: typeof WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA;
@@ -160,6 +162,43 @@ function sessionEntry(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function assistantMessageLike(
+  message: unknown,
+): Pick<AssistantMessage, "role" | "content" | "stopReason" | "errorMessage"> | undefined {
+  if (message === null || typeof message !== "object") return undefined;
+  const candidate = message as Partial<AssistantMessage>;
+  if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) return undefined;
+  if (typeof candidate.stopReason !== "string") return undefined;
+  return candidate as Pick<AssistantMessage, "role" | "content" | "stopReason" | "errorMessage">;
+}
+
+/** Extract the exact visible text blocks from one finalized assistant message. */
+export function visibleAssistantText(message: unknown, maxChars?: number): string {
+  const assistant = assistantMessageLike(message);
+  if (assistant === undefined) {
+    throw new Error("Assistant step settled without a final assistant message");
+  }
+  if (assistant.stopReason !== "stop" && assistant.stopReason !== "length") {
+    throw new Error(
+      assistant.errorMessage?.trim() ||
+        `Assistant step stopped with ${JSON.stringify(assistant.stopReason)} before a final response`,
+    );
+  }
+  const text = assistant.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  if (text.trim().length === 0) {
+    throw new Error("Assistant step returned no visible text");
+  }
+  if (maxChars !== undefined && text.length > maxChars) {
+    throw new Error(
+      `Assistant response has ${text.length} characters, above the configured limit of ${maxChars}`,
+    );
+  }
+  return text;
 }
 
 function isAssistantWithVisibleText(message: unknown): boolean {

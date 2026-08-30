@@ -6,6 +6,7 @@ import {
   checkpoint,
   compute,
   defineWorkflow,
+  idempotentEffect,
   isWorkflowDefinition,
   notify,
   shell,
@@ -168,15 +169,42 @@ describe("node constructors", () => {
     expect(() => action({ run: () => 1, exec: () => ({ command: "x" }) } as never)).toThrow(
       /exactly one of run or exec/,
     );
-    expect(() => action({ exec: () => ({ command: "x" }), parse: "y" as never })).toThrow(/parse/);
-    expect(action({ run: () => 1 }).nodeType).toBe("action");
-    expect(action({ exec: () => ({ command: "x" }) }).nodeType).toBe("action");
+    expect(() =>
+      action({
+        effect: idempotentEffect("test.invalid-action"),
+        exec: () => ({ command: "x" }),
+        parse: "y" as never,
+      }),
+    ).toThrow(/parse/);
+    expect(
+      action({ effect: idempotentEffect("test.function-action"), run: () => 1 }).nodeType,
+    ).toBe("action");
+    expect(
+      action({
+        effect: idempotentEffect("test.shell-action"),
+        exec: () => ({ command: "x" }),
+      }).nodeType,
+    ).toBe("action");
+    expect(() => action({ run: () => 1 } as never)).toThrow(/managed effect/);
   });
 
   it("validates shell nodes", () => {
-    expect(() => shell({ exec: undefined as never })).toThrow(/requires an exec function/);
-    expect(() => shell({ exec: () => ({ command: "x" }), parse: 1 as never })).toThrow(/parse/);
-    expect(shell({ exec: () => ({ command: "x" }) }).nodeType).toBe("action");
+    expect(() =>
+      shell({ effect: idempotentEffect("test.invalid-shell"), exec: undefined as never }),
+    ).toThrow(/exec must be a function/);
+    expect(() =>
+      shell({
+        effect: idempotentEffect("test.invalid-shell"),
+        exec: () => ({ command: "x" }),
+        parse: 1 as never,
+      }),
+    ).toThrow(/parse/);
+    expect(
+      shell({
+        effect: idempotentEffect("test.shell"),
+        exec: () => ({ command: "x" }),
+      }).nodeType,
+    ).toBe("action");
   });
 
   it("validates checkpoint nodes", () => {
@@ -220,8 +248,11 @@ describe("definition snapshots", () => {
           timeoutMs: 1000,
           statusDetail: "thinking",
         }),
-        act: shell({ exec: () => ({ command: "true" }) }),
-        fn: action({ run: () => 1 }),
+        act: shell({
+          effect: idempotentEffect("test.snapshot-shell"),
+          exec: () => ({ command: "true" }),
+        }),
+        fn: action({ effect: idempotentEffect("test.snapshot-function"), run: () => 1 }),
         report: notify({ message: () => "done", kind: "final" }),
         stop: checkpoint({ summary: "pause here" }),
       },
@@ -253,8 +284,16 @@ describe("definition snapshots", () => {
       nodeType: "agent",
       expectedOutput: { kind: "assistant-message" },
     });
-    expect(snapshot.nodes.act).toEqual({ nodeType: "action", actionExecution: "shell" });
-    expect(snapshot.nodes.fn).toEqual({ nodeType: "action", actionExecution: "function" });
+    expect(snapshot.nodes.act).toEqual({
+      nodeType: "action",
+      actionExecution: "shell",
+      effect: { type: "test.snapshot-shell", recovery: "idempotent" },
+    });
+    expect(snapshot.nodes.fn).toEqual({
+      nodeType: "action",
+      actionExecution: "function",
+      effect: { type: "test.snapshot-function", recovery: "idempotent" },
+    });
     expect(snapshot.nodes.report).toEqual({ nodeType: "notify", summary: "final" });
     expect(snapshot.nodes.stop).toEqual({ nodeType: "checkpoint", summary: "pause here" });
   });

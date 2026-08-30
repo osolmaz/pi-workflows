@@ -11,6 +11,7 @@ import {
   defineWorkflow,
   includeWorkflow,
   includedResult,
+  manualEffect,
 } from "../workflows/definition.js";
 import { digest } from "../workflows/human-decision.js";
 import { allowSettingsPath, workflowSettings } from "../workflows/settings.js";
@@ -1768,6 +1769,7 @@ export const autoimplementWorkflow = defineWorkflow({
       run: selectReviewCommands,
     }),
     runReview: action({
+      effect: manualEffect("pi-workflows.autoimplement.review"),
       statusDetail: "running pi-reviewer commands",
       timeoutMs: (context) => {
         const selected = latestOutput<ReviewCommandSelection>(context, ["selectReviewCommands"]);
@@ -1884,6 +1886,7 @@ export const autoimplementWorkflow = defineWorkflow({
       validate: parseCiInspectionForPublished,
     }),
     trackCi: action({
+      effect: manualEffect("pi-workflows.autoimplement.track-ci"),
       statusDetail: "tracking pending CI commands",
       timeoutMs: (context) => {
         const inspected = latestOutput<CiInspectionBatch>(context, ["inspectCi"]);

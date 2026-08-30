@@ -25,6 +25,7 @@ import type {
   WorkflowIncludedResult,
   WorkflowIncludeMap,
   WorkflowInputOf,
+  WorkflowManagedEffect,
   WorkflowNodeContext,
   WorkflowNodeDefinition,
   WorkflowSettingsOf,
@@ -169,6 +170,37 @@ export function isWorkflowDefinition(value: unknown): value is WorkflowDefinitio
     typeof value === "object" &&
     (value as Record<PropertyKey, unknown>)[WORKFLOW_DEFINITION_BRAND] === true
   );
+}
+
+export function manualEffect(type: string): WorkflowManagedEffect {
+  return workflowEffect(type, "manual");
+}
+
+export function idempotentEffect(type: string): WorkflowManagedEffect {
+  return workflowEffect(type, "idempotent");
+}
+
+function workflowEffect(
+  type: string,
+  recovery: WorkflowManagedEffect["recovery"],
+): WorkflowManagedEffect {
+  const normalized = type.trim();
+  if (normalized.length === 0 || normalized.length > 256) {
+    throw new Error("Managed effect type must be nonempty text of at most 256 characters");
+  }
+  return {
+    type: normalized,
+    recovery,
+    idempotencyKey: ({ state }: WorkflowNodeContext) => {
+      const nodeId = state.currentNode;
+      if (nodeId === undefined) {
+        throw new Error("Managed effect resolution requires an active workflow node");
+      }
+      const nodeInvocation = state.steps.filter((step) => step.nodeId === nodeId).length + 1;
+      return `${state.runId}:${normalized}:${nodeId}:${nodeInvocation}`;
+    },
+    request: ({ input, outputs }: WorkflowNodeContext) => ({ input, outputs }),
+  };
 }
 
 export function assistantMessage(options: { maxChars?: number } = {}): AssistantMessageOutput {

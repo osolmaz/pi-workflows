@@ -6,6 +6,7 @@ import {
   checkpoint,
   compute,
   defineWorkflow,
+  idempotentEffect,
   shell,
 } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -202,7 +203,7 @@ describe("WorkflowEngine", () => {
       statusDetail: "Checking the contract",
     });
     expect(prompt).toContain("This workflow scope has no editable settings.");
-    expect(prompt).toContain("queue-follow-up");
+    expect(prompt).not.toContain("queue-follow-up");
   });
 
   it("uses exact visible text for assistant-message agent output", async () => {
@@ -349,6 +350,7 @@ describe("WorkflowEngine", () => {
       startAt: "echo",
       nodes: {
         echo: shell({
+          effect: idempotentEffect("test.shell-receipt"),
           exec: () => ({ command: "printf", args: ["%s", "hi"] }),
           parse: (result) => ({ stdout: result.stdout }),
         }),

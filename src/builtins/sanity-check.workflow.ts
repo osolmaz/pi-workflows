@@ -10,6 +10,7 @@ import {
   compute,
   defineWorkflow,
   includeWorkflow,
+  manualEffect,
 } from "../workflows/definition.js";
 import { extractJsonValue } from "../workflows/json.js";
 import type { WorkflowActionContext, WorkflowProgressStatus } from "../workflows/types.js";
@@ -780,6 +781,7 @@ export const sanityCheckWorkflow = defineWorkflow({
       run: ({ input }) => input as SanityCheckConfig,
     }),
     collectEvidence: action({
+      effect: manualEffect("pi-workflows.sanity-check.collect-evidence"),
       statusDetail: "collecting contribution evidence",
       timeoutMs: 2 * 60_000,
       run: async ({ outputs, signal }) =>
@@ -790,11 +792,13 @@ export const sanityCheckWorkflow = defineWorkflow({
         ),
     }),
     review: action({
+      effect: manualEffect("pi-workflows.sanity-check.review"),
       statusDetail: "reviewing contribution",
       timeoutMs: REVIEW_TIMEOUT_MS,
       run: runReviews,
     }),
     verify: action({
+      effect: manualEffect("pi-workflows.sanity-check.verify"),
       statusDetail: "verifying findings",
       timeoutMs: REVIEW_TIMEOUT_MS,
       run: verifyReviews,

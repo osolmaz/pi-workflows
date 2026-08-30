@@ -39,7 +39,7 @@ describe("StateDatabase", () => {
       state.connection
         .prepare("SELECT count(*) AS count FROM sqlite_schema WHERE sql LIKE '% STRICT'")
         .get(),
-    ).toEqual({ count: 42 });
+    ).toEqual({ count: 48 });
     state.integrityCheck();
   });
 
@@ -130,9 +130,7 @@ describe("StateDatabase", () => {
   it("fails closed when old live stores exist", async () => {
     const home = await makeTempDir("state-old");
     fs.mkdirSync(path.join(home, ".pi", "agent", "workflows", "runs"), { recursive: true });
-    expect(() => new StateDatabase({ homeDir: home })).toThrow(
-      /Move or remove the old workflow state/,
-    );
+    expect(() => new StateDatabase({ homeDir: home })).toThrow(/Back up and move state\.sqlite/);
   });
 });
 

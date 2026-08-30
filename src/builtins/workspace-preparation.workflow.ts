@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
-import { action, agent, compute, defineWorkflow } from "../workflows/definition.js";
+import { action, agent, compute, defineWorkflow, manualEffect } from "../workflows/definition.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -625,6 +625,7 @@ export const workspacePreparationWorkflow = defineWorkflow({
   },
   nodes: {
     inspect: action({
+      effect: manualEffect("pi-workflows.workspace-preparation.inspect"),
       run: async ({ input }) => await inspectWorkspace(input as WorkspacePreparationInput),
     }),
     propose: agent({
@@ -638,6 +639,7 @@ export const workspacePreparationWorkflow = defineWorkflow({
       validate: parseProposal,
     }),
     apply: action({
+      effect: manualEffect("pi-workflows.workspace-preparation.apply"),
       run: async ({ input, outputs }) =>
         await prepareWorkspace(
           input as WorkspacePreparationInput,

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SqliteControllerStore } from "../controllers/sqlite.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
+import { WorkflowHostClient } from "../host/client.js";
 import { sanitizeText } from "../render/ansi.js";
 import { StateDatabase } from "../state/database.js";
 import { pruneState } from "../state/prune.js";
@@ -28,7 +29,10 @@ Usage:
   pi-workflows state backup <destination>
   pi-workflows state prune --before <timestamp> --dry-run
   pi-workflows state prune --before <timestamp> --backup <absolute-path> --apply
-  pi-workflows host [--project <dir>] [-- <extra pi args>]
+  pi-workflows host start
+  pi-workflows host status
+  pi-workflows host stop
+  pi-workflows host run [-- <extra pi args>]
   pi-workflows herdr sync [--json]
   pi-workflows herdr setup [--json]
 
@@ -41,13 +45,13 @@ export type CliArgs = {
   controllerName?: string;
   resourceKey?: string;
   herdrAction?: string;
+  hostAction?: "start" | "status" | "stop" | "run";
   stateAction?: "status" | "verify" | "backup" | "prune";
   backupDestination?: string;
   pruneBefore?: string;
   pruneApply?: boolean;
   once: boolean;
   json: boolean;
-  project?: string | undefined;
   piArgs?: string[] | undefined;
 };
 
@@ -80,7 +84,18 @@ export function parseCliArgs(argv: string[]): CliArgs {
   }
 
   if (command !== "herdr" && json) throw new Error("--json is available only for herdr sync");
-  if (command === "host") return { command, once, json, project, piArgs };
+  if (command === "host") {
+    if (project !== undefined) throw new Error("The global host does not accept --project");
+    const action = positionals[0];
+    if (action !== "start" && action !== "status" && action !== "stop" && action !== "run") {
+      throw new Error("host requires start, status, stop, or run");
+    }
+    if (positionals.length !== 1) throw new Error("host accepts one lifecycle action");
+    if (piArgs.length > 0 && action !== "run") {
+      throw new Error("Extra Pi arguments are available only for host run");
+    }
+    return { command, hostAction: action, once, json, piArgs };
+  }
   if (command === "controller") {
     if (positionals.length !== 2) throw new Error("controller requires <controller> and <key>");
     return {
@@ -266,7 +281,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       await runStateCommand(databasePath, args);
       return 0;
     }
-    if (args.command === "host") return await runHost(args.project ?? process.cwd(), args.piArgs);
+    if (args.command === "host") {
+      return await runHost(args.hostAction as "start" | "status" | "stop" | "run", args.piArgs);
+    }
     if (args.command === "herdr") {
       const result = syncHerdrPlugin(packageRoot());
       process.stdout.write(args.json ? `${JSON.stringify(result)}\n` : `${result.message}\n`);
@@ -333,20 +350,35 @@ async function runStateCommand(databasePath: string, args: CliArgs): Promise<voi
   }
 }
 
-async function runHost(project: string, piArgs: string[] | undefined): Promise<number> {
-  const { WorkflowHost } = await import("../host/runner.js");
-  const host = new WorkflowHost({
-    cwd: project,
-    piArgs: piArgs ?? [],
-    onLog: (message) => process.stdout.write(`[host] ${message}\n`),
+async function runHost(
+  action: "start" | "status" | "stop" | "run",
+  piArgs: string[] | undefined,
+): Promise<number> {
+  if (action === "run") {
+    const { WorkflowHost } = await import("../host/runner.js");
+    const host = new WorkflowHost({
+      piArgs: piArgs ?? [],
+      onLog: (message) => process.stdout.write(`[host] ${message}\n`),
+    });
+    await host.start();
+    await new Promise<void>((resolve) => {
+      const shutdown = () => void host.stop().then(resolve);
+      process.once("SIGTERM", shutdown);
+      process.once("SIGINT", shutdown);
+    });
+    return 0;
+  }
+  const client = new WorkflowHostClient();
+  if (action === "start") {
+    const response = await client.ensureRunning();
+    process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
+    return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
+  }
+  const response = await client.request({
+    operation: action === "status" ? "host.status" : "host.stop",
   });
-  await host.start();
-  await new Promise<void>((resolve) => {
-    const shutdown = () => void host.stop().then(resolve);
-    process.once("SIGTERM", shutdown);
-    process.once("SIGINT", shutdown);
-  });
-  return 0;
+  process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
+  return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
 }
 
 function openControllerStore(databasePath: string): SqliteControllerStore | undefined {

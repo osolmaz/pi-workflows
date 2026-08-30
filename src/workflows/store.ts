@@ -20,6 +20,7 @@ import {
 } from "../state/viewer.js";
 import { compositionMetadata } from "./composition.js";
 import { ClaimLostError } from "./errors.js";
+import { HumanDecisionStore } from "./human-decision.js";
 import { applyJsonPatch, validateJsonPatch } from "./json-patch.js";
 import {
   reduceSessionEvents,
@@ -45,7 +46,11 @@ import {
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
+  WorkflowEffectRecovery,
+  WorkflowEffectReservation,
   HumanDecisionReceipt,
+  HumanDecisionRequest,
+  ResolvedHumanDecision,
   WorkflowNodeDefinition,
   WorkflowNodeResult,
   WorkflowNodeSnapshot,
@@ -107,9 +112,78 @@ export type RunWriteAuthority = {
 
 export type WorkflowRunStoreOptions = {
   authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
+  /** Host-owned projection updates that must commit with each run snapshot. */
+  snapshotLifecycle?: (context: {
+    runId: string;
+    state: WorkflowRunState;
+    event: WorkflowTraceEvent;
+    database: StateDatabase;
+    now: number;
+  }) => void;
   state?: StateDatabase;
   readOnly?: boolean;
 };
+
+/** The state boundary used by workflow code, including out-of-process workers. */
+export interface WorkflowExecutionStore {
+  readonly databasePath: string;
+  initializeRun(
+    workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+    options?: InitializeWorkflowRunOptions,
+  ): Promise<string>;
+  prepareRunResume(runId: string): Promise<LoadedWorkflowRun>;
+  readRun(
+    runId: string,
+    options?: ReadWorkflowRunOptions,
+  ): LoadedWorkflowRun | null | Promise<LoadedWorkflowRun | null>;
+  writeSnapshot(
+    runId: string,
+    state: WorkflowRunState,
+    event: WorkflowTraceEventDraft,
+  ): Promise<WorkflowTraceEvent>;
+  publishUpdate(
+    runId: string,
+    state: WorkflowRunState,
+    nodeId: string,
+    attemptId: string,
+    update: WorkflowUpdateInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }>;
+  findSettingsScope(
+    runId: string,
+    mountPath: string,
+    invocation: number,
+  ): WorkflowSettingsScopeRecord | undefined | Promise<WorkflowSettingsScopeRecord | undefined>;
+  ensureSettingsScope(options: {
+    runId: string;
+    mountPath: string;
+    invocation: number;
+    settings: JsonValue;
+  }): WorkflowSettingsScopeRecord | Promise<WorkflowSettingsScopeRecord>;
+  getSettingsScopeAtChange(
+    scopeId: string,
+    changeNumber: number,
+  ): WorkflowSettingsScopeRecord | undefined | Promise<WorkflowSettingsScopeRecord | undefined>;
+  createHumanDecisionRequest(request: HumanDecisionRequest): Promise<"created" | "adopted">;
+  readResolvedHumanDecision(decisionId: string): Promise<ResolvedHumanDecision | null>;
+  reserveEffect(options: {
+    runId: string;
+    attemptId: string;
+    effectType: string;
+    idempotencyKey: string;
+    request: JsonValue;
+    recovery: WorkflowEffectRecovery;
+  }): Promise<WorkflowEffectReservation>;
+  settleEffect(options: {
+    runId: string;
+    effectId: string;
+    attemptNumber: number;
+    outcome: "applied" | "rejected" | "ambiguous" | "cancelled";
+    result?: JsonValue;
+    error?: string;
+  }): Promise<void>;
+}
 
 type RunContext = {
   revision: number;
@@ -350,12 +424,14 @@ export class WorkflowRunStore {
   private readonly authorityProvider:
     | ((runId: string) => RunWriteAuthority | undefined)
     | undefined;
+  private readonly snapshotLifecycle: WorkflowRunStoreOptions["snapshotLifecycle"];
   private readonly contexts = new Map<string, RunContext>();
   private readonly ownsState: boolean;
   private readonly mutations: StateMutationStore;
 
   constructor(databasePath: string = workflowStatePath(), options: WorkflowRunStoreOptions = {}) {
     this.authorityProvider = options.authorityProvider;
+    this.snapshotLifecycle = options.snapshotLifecycle;
     this.ownsState = options.state === undefined;
     this.state =
       options.state ??
@@ -372,8 +448,323 @@ export class WorkflowRunStore {
     if (this.ownsState) this.state.close();
   }
 
+  /** Host-only synchronization after a queue lifecycle mutation on the run resource. */
+  synchronizeRevision(runId: string): number {
+    const revision = this.resourceRevision(runId);
+    const context = this.contexts.get(runId);
+    if (context === undefined) {
+      this.contexts.set(runId, { revision, lock: Promise.resolve() });
+    } else {
+      context.revision = revision;
+    }
+    return revision;
+  }
+
+  async createHumanDecisionRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
+    return await new HumanDecisionStore(this.databasePath, { state: this.state }).createRequest(
+      request,
+    );
+  }
+
+  async readResolvedHumanDecision(decisionId: string): Promise<ResolvedHumanDecision | null> {
+    return await new HumanDecisionStore(this.databasePath, { state: this.state }).readResolved(
+      decisionId,
+    );
+  }
+
+  async reserveEffect(options: {
+    runId: string;
+    attemptId: string;
+    effectType: string;
+    idempotencyKey: string;
+    request: JsonValue;
+    recovery: WorkflowEffectRecovery;
+  }): Promise<WorkflowEffectReservation> {
+    return await this.withRunLock(options.runId, async () =>
+      this.state.transaction(() => {
+        requireBoundedEffectText(options.effectType, "type");
+        requireBoundedEffectText(options.idempotencyKey, "idempotency key");
+        const context = this.contextFor(options.runId);
+        const run = this.requireRunRow(options.runId);
+        this.assertWriteAuthority(run, context.revision);
+        const authority = this.authorityProvider?.(options.runId);
+        const payloadHash = this.state.putJson(
+          { recovery: options.recovery, request: options.request },
+          Date.now(),
+        );
+        const effectId = workflowEffectId(
+          run.resourceId,
+          options.effectType,
+          options.idempotencyKey,
+        );
+        const existing = this.state.connection
+          .prepare(
+            `SELECT status, payload_hash AS payloadHash, result_hash AS resultHash,
+                    attempt_count AS attemptCount
+             FROM effects WHERE effect_id = ?`,
+          )
+          .get(effectId);
+        if (isWorkflowEffectRow(existing)) {
+          if (!existing.payloadHash.equals(payloadHash)) {
+            throw new Error("Managed effect key was reused with another request");
+          }
+          if (existing.status === "applied") {
+            return {
+              effectId,
+              attemptNumber: existing.attemptCount,
+              disposition: "adopted",
+              ...(existing.resultHash === null
+                ? {}
+                : { result: this.state.readJson(existing.resultHash) }),
+            };
+          }
+          if (existing.status !== "pending") {
+            return {
+              effectId,
+              attemptNumber: existing.attemptCount,
+              disposition: "ambiguous",
+            };
+          }
+          return this.beginEffectAttempt(run, effectId, existing.attemptCount + 1, authority);
+        }
+        const now = Date.now();
+        const effectResourceId = this.mutations.ensureResource("effect", effectId, now);
+        this.mutations.mutate(
+          {
+            resourceId: effectResourceId,
+            operation: "effect.reserve",
+            actor: authority?.actor ?? { type: "system" },
+            expectedRevision: 0,
+          },
+          "effect.reserved",
+          () => {
+            this.state.connection
+              .prepare(
+                `INSERT INTO effects(
+                   effect_id, resource_id, source_resource_id, source_revision,
+                   effect_type, idempotency_key, payload_hash, owner_scope, status,
+                   attempt_count, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'run', 'applying', 1, ?, ?)`,
+              )
+              .run(
+                effectId,
+                effectResourceId,
+                run.resourceId,
+                context.revision,
+                options.effectType,
+                options.idempotencyKey,
+                payloadHash,
+                now,
+                now,
+              );
+            this.insertEffectAttempt(effectId, 1, authority, now);
+          },
+          { now, payload: { runId: options.runId, attemptId: options.attemptId } },
+        );
+        return { effectId, attemptNumber: 1, disposition: "execute" };
+      }),
+    );
+  }
+
+  async settleEffect(options: {
+    runId: string;
+    effectId: string;
+    attemptNumber: number;
+    outcome: "applied" | "rejected" | "ambiguous" | "cancelled";
+    result?: JsonValue;
+    error?: string;
+  }): Promise<void> {
+    await this.withRunLock(options.runId, async () =>
+      this.state.transaction(() => {
+        const context = this.contextFor(options.runId);
+        const run = this.requireRunRow(options.runId);
+        this.assertWriteAuthority(run, context.revision);
+        const row = this.state.connection
+          .prepare(
+            `SELECT e.resource_id AS resourceId, e.status
+             FROM effects e WHERE e.effect_id = ? AND e.source_resource_id = ?`,
+          )
+          .get(options.effectId, run.resourceId);
+        if (!isWorkflowEffectIdentityRow(row) || row.status !== "applying") {
+          throw new Error("Managed effect is not applying");
+        }
+        const now = Date.now();
+        const revision = this.requireResourceRevision(row.resourceId);
+        const resultHash =
+          options.result === undefined ? null : this.state.putJson(options.result, now);
+        const errorHash =
+          options.error === undefined ? null : this.state.putText(options.error, now);
+        this.mutations.mutate(
+          {
+            resourceId: row.resourceId,
+            operation: "effect.settle",
+            actor: this.authorityProvider?.(options.runId)?.actor ?? { type: "system" },
+            expectedRevision: revision,
+          },
+          `effect.${options.outcome}`,
+          () => {
+            const changed = this.state.connection
+              .prepare(
+                `UPDATE effects
+                 SET status = ?, result_hash = ?, error_hash = ?, updated_at = ?, settled_at = ?
+                 WHERE effect_id = ? AND status = 'applying' AND attempt_count = ?`,
+              )
+              .run(
+                options.outcome,
+                resultHash,
+                errorHash,
+                now,
+                now,
+                options.effectId,
+                options.attemptNumber,
+              );
+            if (changed.changes !== 1) throw new Error("Managed effect attempt changed");
+            this.state.connection
+              .prepare(
+                `UPDATE effect_attempts
+                 SET finished_at = ?, outcome = ?, result_hash = ?, error_hash = ?
+                 WHERE effect_id = ? AND attempt_number = ? AND finished_at IS NULL`,
+              )
+              .run(
+                now,
+                options.outcome === "cancelled" ? "interrupted" : options.outcome,
+                resultHash,
+                errorHash,
+                options.effectId,
+                options.attemptNumber,
+              );
+          },
+          { now, payload: { runId: options.runId, outcome: options.outcome } },
+        );
+      }),
+    );
+  }
+
+  async recoverApplyingEffects(runId: string): Promise<"safe" | "ambiguous"> {
+    return await this.withRunLock(runId, async () =>
+      this.state.transaction(() => {
+        const context = this.contextFor(runId);
+        const run = this.requireRunRow(runId);
+        this.assertWriteAuthority(run, context.revision);
+        const authority = this.authorityProvider?.(runId);
+        const rows = this.state.connection
+          .prepare(
+            `SELECT effect_id AS effectId, resource_id AS resourceId,
+                    payload_hash AS payloadHash, attempt_count AS attemptCount
+             FROM effects WHERE source_resource_id = ? AND status = 'applying'`,
+          )
+          .all(run.resourceId)
+          .filter(isApplyingEffectRow);
+        let ambiguous = false;
+        for (const row of rows) {
+          const payload = this.state.readJson(row.payloadHash);
+          const recovery = effectRecoveryFromPayload(payload);
+          const status = recovery === "idempotent" ? "pending" : "ambiguous";
+          if (status === "ambiguous") ambiguous = true;
+          const now = Date.now();
+          const revision = this.requireResourceRevision(row.resourceId);
+          this.mutations.mutate(
+            {
+              resourceId: row.resourceId,
+              operation: "effect.recover",
+              actor: authority?.actor ?? { type: "system" },
+              expectedRevision: revision,
+            },
+            status === "pending" ? "effect.retry_ready" : "effect.ambiguous",
+            () => {
+              this.state.connection
+                .prepare(
+                  `UPDATE effects SET status = ?, updated_at = ?, settled_at = ?
+                   WHERE effect_id = ? AND status = 'applying'`,
+                )
+                .run(status, now, status === "ambiguous" ? now : null, row.effectId);
+              this.state.connection
+                .prepare(
+                  `UPDATE effect_attempts SET finished_at = ?, outcome = 'interrupted'
+                   WHERE effect_id = ? AND attempt_number = ? AND finished_at IS NULL`,
+                )
+                .run(now, row.effectId, row.attemptCount);
+            },
+            { now, payload: { runId, recovery } },
+          );
+        }
+        return ambiguous ? "ambiguous" : "safe";
+      }),
+    );
+  }
+
+  private beginEffectAttempt(
+    run: RunRow,
+    effectId: string,
+    attemptNumber: number,
+    authority: RunWriteAuthority | undefined,
+  ): WorkflowEffectReservation {
+    const now = Date.now();
+    const row = this.state.connection
+      .prepare("SELECT resource_id AS resourceId FROM effects WHERE effect_id = ?")
+      .get(effectId);
+    if (!isResourceIdRow(row)) throw new Error("Managed effect resource is missing");
+    const revision = this.requireResourceRevision(row.resourceId);
+    this.mutations.mutate(
+      {
+        resourceId: row.resourceId,
+        operation: "effect.retry",
+        actor: authority?.actor ?? { type: "system" },
+        expectedRevision: revision,
+      },
+      "effect.retry_started",
+      () => {
+        this.state.connection
+          .prepare(
+            `UPDATE effects SET status = 'applying', attempt_count = ?, updated_at = ?,
+                    settled_at = NULL, error_hash = NULL
+             WHERE effect_id = ? AND status = 'pending'`,
+          )
+          .run(attemptNumber, now, effectId);
+        this.insertEffectAttempt(effectId, attemptNumber, authority, now);
+      },
+      { now, payload: { runId: run.runId, attemptNumber } },
+    );
+    return { effectId, attemptNumber, disposition: "execute" };
+  }
+
+  private insertEffectAttempt(
+    effectId: string,
+    attemptNumber: number,
+    authority: RunWriteAuthority | undefined,
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare(
+        `INSERT INTO effect_attempts(
+           effect_id, attempt_number, owner_id, lease_generation, started_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        effectId,
+        attemptNumber,
+        authority?.ownerId ?? "system",
+        authority?.generation ?? 1,
+        now,
+      );
+  }
+
   async initializeRun(
     workflow: WorkflowDefinition,
+    state: WorkflowRunState,
+    options: InitializeWorkflowRunOptions = {},
+  ): Promise<string> {
+    return await this.initializeRunFromSnapshot(
+      createDefinitionSnapshot(workflow),
+      workflow.name,
+      state,
+      options,
+    );
+  }
+
+  async initializeRunFromSnapshot(
+    snapshot: WorkflowDefinitionSnapshot,
+    workflowName: string,
     state: WorkflowRunState,
     options: InitializeWorkflowRunOptions = {},
   ): Promise<string> {
@@ -389,7 +780,6 @@ export class WorkflowRunStore {
       let acceptedRevision = 1;
       const now = Date.now();
       const at = new Date(now).toISOString();
-      const snapshot = createDefinitionSnapshot(workflow);
       const definitionJson = canonicalJson(snapshot);
       const definitionDigest = createHash("sha256").update(definitionJson).digest();
       const source = sourceForState(state, definitionDigest);
@@ -416,7 +806,7 @@ export class WorkflowRunStore {
             runId: state.runId,
             scope: "run",
             type: "run_initialized",
-            payload: { workflowName: workflow.name },
+            payload: { workflowName },
           };
           insertRunEvent(this.state, reserved.resourceId, revision, at, traceEvent);
           this.persistRunState(reserved, state, revision, now);
@@ -449,7 +839,7 @@ export class WorkflowRunStore {
              ) VALUES (?, ?, ?, ?)
              ON CONFLICT(definition_digest) DO NOTHING`,
           )
-          .run(definitionDigest, workflow.name, definitionHash, now);
+          .run(definitionDigest, workflowName, definitionHash, now);
         this.state.connection
           .prepare(
             `INSERT INTO resources(
@@ -500,7 +890,7 @@ export class WorkflowRunStore {
         insertRunEvent(this.state, resourceId, 1, at, {
           scope: "run",
           type: "run_created",
-          payload: { workflowName: workflow.name },
+          payload: { workflowName },
         });
         this.initializeRunSettingsAndFollowUps(state, options.initialSettings ?? [], now);
         if (state.parentRunId !== undefined) {
@@ -1217,83 +1607,95 @@ export class WorkflowRunStore {
     update: WorkflowUpdateInput,
     options: { signal?: AbortSignal } = {},
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
-    return await this.withRunLock(runId, async () => {
-      if (options.signal?.aborted === true) {
-        throw options.signal.reason ?? new Error("workflow update attempt is no longer active");
-      }
-      const exists = (state.updates ?? []).some(
-        (record) => record.type === update.type && record.key === update.key,
-      );
-      if (!exists && (state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
-        throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
-      }
-      const data = structuredClone(update.data) as Record<string, unknown>;
-      const updateId = createUpdateId();
-      let acceptedEvent: WorkflowTraceEvent | undefined;
-      let acceptedRecord: WorkflowUpdateRecord | undefined;
-      this.state.transaction(() => {
-        const context = this.contextFor(runId);
-        const run = this.requireRunRow(runId);
-        this.assertWriteAuthority(run, context.revision);
-        const revision = context.revision + 1;
-        const at = new Date().toISOString();
-        const event: WorkflowTraceEvent = {
-          seq: revision,
-          at,
-          runId,
-          scope: "node",
-          type: "update_published",
-          nodeId,
-          attemptId,
-          payload: { updateId, type: update.type, key: update.key, data },
-        };
-        const record: WorkflowUpdateRecord = {
-          updateId,
-          seq: revision,
-          at,
-          runId,
-          nodeId,
-          attemptId,
-          type: update.type,
-          key: update.key,
-          data,
-        };
-        state.updates = updateProjection(state.updates, record);
-        state.traceSeq = revision;
-        state.updatedAt = at;
-        this.ensureAttempt(state, nodeId, attemptId, Date.now());
-        const dataHash = this.state.putJson(data);
-        const nextUpdateSeq = this.nextUpdateSequence(attemptId);
-        this.state.connection
-          .prepare(
-            `INSERT INTO workflow_updates(
+    return await this.withRunLock(runId, async () =>
+      this.publishUpdateSynchronous(runId, state, nodeId, attemptId, update, options),
+    );
+  }
+
+  /** Host-only synchronous form for an already serialized command transaction. */
+  publishUpdateSynchronous(
+    runId: string,
+    state: WorkflowRunState,
+    nodeId: string,
+    attemptId: string,
+    update: WorkflowUpdateInput,
+    options: { signal?: AbortSignal } = {},
+  ): { event: WorkflowTraceEvent; record: WorkflowUpdateRecord } {
+    if (options.signal?.aborted === true) {
+      throw options.signal.reason ?? new Error("workflow update attempt is no longer active");
+    }
+    const exists = (state.updates ?? []).some(
+      (record) => record.type === update.type && record.key === update.key,
+    );
+    if (!exists && (state.updates?.length ?? 0) >= MAX_CURRENT_UPDATES) {
+      throw new Error(`workflow run supports at most ${MAX_CURRENT_UPDATES} current updates`);
+    }
+    const data = structuredClone(update.data) as Record<string, unknown>;
+    const updateId = createUpdateId();
+    let acceptedEvent: WorkflowTraceEvent | undefined;
+    let acceptedRecord: WorkflowUpdateRecord | undefined;
+    this.state.transaction(() => {
+      const context = this.contextFor(runId);
+      const run = this.requireRunRow(runId);
+      this.assertWriteAuthority(run, context.revision);
+      const revision = context.revision + 1;
+      const at = new Date().toISOString();
+      const event: WorkflowTraceEvent = {
+        seq: revision,
+        at,
+        runId,
+        scope: "node",
+        type: "update_published",
+        nodeId,
+        attemptId,
+        payload: { updateId, type: update.type, key: update.key, data },
+      };
+      const record: WorkflowUpdateRecord = {
+        updateId,
+        seq: revision,
+        at,
+        runId,
+        nodeId,
+        attemptId,
+        type: update.type,
+        key: update.key,
+        data,
+      };
+      state.updates = updateProjection(state.updates, record);
+      state.traceSeq = revision;
+      state.updatedAt = at;
+      this.ensureAttempt(state, nodeId, attemptId, Date.now());
+      const dataHash = this.state.putJson(data);
+      const nextUpdateSeq = this.nextUpdateSequence(attemptId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO workflow_updates(
                update_id, attempt_id, update_seq, run_revision,
                update_type, update_key, data_hash, recorded_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            updateId,
-            attemptId,
-            nextUpdateSeq,
-            revision,
-            update.type,
-            update.key,
-            dataHash,
-            Date.now(),
-          );
-        insertRunEvent(this.state, run.resourceId, revision, at, event);
-        const committedAt = Date.now();
-        this.persistRunState(run, state, revision, committedAt);
-        recordViewerDeltas(this.state, runId, runViewerTargets(state, event), committedAt);
-        context.revision = revision;
-        acceptedEvent = event;
-        acceptedRecord = record;
-      });
-      if (acceptedEvent === undefined || acceptedRecord === undefined) {
-        throw new Error("Workflow update transaction did not produce a result");
-      }
-      return { event: acceptedEvent, record: acceptedRecord };
+        )
+        .run(
+          updateId,
+          attemptId,
+          nextUpdateSeq,
+          revision,
+          update.type,
+          update.key,
+          dataHash,
+          Date.now(),
+        );
+      insertRunEvent(this.state, run.resourceId, revision, at, event);
+      const committedAt = Date.now();
+      this.persistRunState(run, state, revision, committedAt);
+      recordViewerDeltas(this.state, runId, runViewerTargets(state, event), committedAt);
+      context.revision = revision;
+      acceptedEvent = event;
+      acceptedRecord = record;
     });
+    if (acceptedEvent === undefined || acceptedRecord === undefined) {
+      throw new Error("Workflow update transaction did not produce a result");
+    }
+    return { event: acceptedEvent, record: acceptedRecord };
   }
 
   async writeSnapshot(
@@ -1320,6 +1722,13 @@ export class WorkflowRunStore {
         this.transitionFollowUpsForRunState(state, event, now);
         this.syncNodeAttempts(state, snapshot, now);
         recordViewerDeltas(this.state, runId, runViewerTargets(state, traceEvent), now);
+        this.snapshotLifecycle?.({
+          runId,
+          state,
+          event: traceEvent,
+          database: this.state,
+          now,
+        });
         context.revision = revision;
         accepted = traceEvent;
       });
@@ -4323,6 +4732,79 @@ function isLeaseAuthorityRow(value: unknown): value is {
   return isRecord(value);
 }
 
+type ApplyingEffectRow = {
+  effectId: string;
+  resourceId: string;
+  payloadHash: Buffer;
+  attemptCount: number;
+};
+
+type WorkflowEffectRow = {
+  status: "pending" | "applying" | "applied" | "rejected" | "ambiguous" | "cancelled";
+  payloadHash: Buffer;
+  resultHash: Buffer | null;
+  attemptCount: number;
+};
+
+function isApplyingEffectRow(value: unknown): value is ApplyingEffectRow {
+  return (
+    isRecord(value) &&
+    typeof value.effectId === "string" &&
+    typeof value.resourceId === "string" &&
+    Buffer.isBuffer(value.payloadHash) &&
+    typeof value.attemptCount === "number"
+  );
+}
+
+function effectRecoveryFromPayload(value: JsonValue): WorkflowEffectRecovery {
+  return typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    value.recovery === "idempotent"
+    ? "idempotent"
+    : "manual";
+}
+
+function isWorkflowEffectRow(value: unknown): value is WorkflowEffectRow {
+  return (
+    isRecord(value) &&
+    typeof value.status === "string" &&
+    Buffer.isBuffer(value.payloadHash) &&
+    (value.resultHash === null || Buffer.isBuffer(value.resultHash)) &&
+    typeof value.attemptCount === "number"
+  );
+}
+
+function isWorkflowEffectIdentityRow(
+  value: unknown,
+): value is { resourceId: string; status: string } {
+  return (
+    isRecord(value) && typeof value.resourceId === "string" && typeof value.status === "string"
+  );
+}
+
+function isResourceIdRow(value: unknown): value is { resourceId: string } {
+  return isRecord(value) && typeof value.resourceId === "string";
+}
+
+function workflowEffectId(
+  sourceResourceId: string,
+  effectType: string,
+  idempotencyKey: string,
+): string {
+  const digest = createHash("sha256")
+    .update(`${sourceResourceId}\0${effectType}\0${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 40);
+  return `effect-${digest}`;
+}
+
+function requireBoundedEffectText(value: string, label: string): void {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) {
+    throw new Error(`Managed effect ${label} must be nonempty text of at most 256 characters`);
+  }
+}
+
 export function createDefinitionSnapshot(workflow: WorkflowDefinition): WorkflowDefinitionSnapshot {
   const metadata = compositionMetadata(workflow);
   const composition = metadata?.snapshot;
@@ -4406,7 +4888,12 @@ function snapshotNode(
       ...(typeof node.humanDecision.onTimeout === "function" ? { dynamicTimeout: true } : {}),
     };
   }
-  if (node.nodeType === "action") common.actionExecution = "exec" in node ? "shell" : "function";
+  if (node.nodeType === "action") {
+    common.actionExecution = "exec" in node ? "shell" : "function";
+    if (node.effect !== undefined) {
+      common.effect = { type: node.effect.type, recovery: node.effect.recovery };
+    }
+  }
   return common;
 }
 

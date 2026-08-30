@@ -58,13 +58,14 @@ describe("pi-workflows CLI", () => {
       controllerName: "jobs",
       resourceKey: "one",
     });
-    expect(parseCliArgs(["host", "--project", "/tmp/project", "--", "--model", "test"])).toEqual({
+    expect(parseCliArgs(["host", "run", "--", "--model", "test"])).toEqual({
       command: "host",
+      hostAction: "run",
       once: false,
       json: false,
-      project: "/tmp/project",
       piArgs: ["--model", "test"],
     });
+    expect(() => parseCliArgs(["host", "run", "--project", "/tmp/project"])).toThrow(/global host/);
   });
 
   it("rejects a relative prune backup path", async () => {

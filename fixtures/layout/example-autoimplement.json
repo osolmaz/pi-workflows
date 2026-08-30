@@ -114,7 +114,11 @@
       "runReview": {
         "nodeType": "action",
         "statusDetail": "running pi-reviewer commands",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.autoimplement.review",
+          "recovery": "manual"
+        }
       },
       "repairReviewCommand": {
         "nodeType": "agent",
@@ -156,7 +160,11 @@
       "trackCi": {
         "nodeType": "action",
         "statusDetail": "tracking pending CI commands",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.autoimplement.track-ci",
+          "recovery": "manual"
+        }
       },
       "repairCiCommand": {
         "nodeType": "agent",
@@ -216,7 +224,11 @@
         "nodeType": "action",
         "mountPath": ["workspace"],
         "localNodeId": "inspect",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.inspect",
+          "recovery": "manual"
+        }
       },
       "workspace/propose": {
         "nodeType": "agent",
@@ -228,7 +240,11 @@
         "nodeType": "action",
         "mountPath": ["workspace"],
         "localNodeId": "apply",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.apply",
+          "recovery": "manual"
+        }
       },
       "workspace/ready": {
         "nodeType": "compute",
@@ -328,7 +344,11 @@
         "nodeType": "action",
         "mountPath": ["documentation", "workspace"],
         "localNodeId": "inspect",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.inspect",
+          "recovery": "manual"
+        }
       },
       "documentation/workspace/propose": {
         "nodeType": "agent",
@@ -340,7 +360,11 @@
         "nodeType": "action",
         "mountPath": ["documentation", "workspace"],
         "localNodeId": "apply",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.apply",
+          "recovery": "manual"
+        }
       },
       "documentation/workspace/ready": {
         "nodeType": "compute",
@@ -388,13 +412,21 @@
         "nodeType": "action",
         "mountPath": ["documentation", "verification"],
         "localNodeId": "runCandidate",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.candidate",
+          "recovery": "manual"
+        }
       },
       "documentation/verification/runBase": {
         "nodeType": "action",
         "mountPath": ["documentation", "verification"],
         "localNodeId": "runBase",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.base",
+          "recovery": "manual"
+        }
       },
       "documentation/verification/classify": {
         "nodeType": "compute",
@@ -410,7 +442,11 @@
         "nodeType": "action",
         "mountPath": ["documentation", "verification"],
         "localNodeId": "mechanicalRepair",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.mechanical-repair",
+          "recovery": "manual"
+        }
       },
       "documentation/verification/semanticRepair": {
         "nodeType": "agent",
@@ -470,13 +506,21 @@
         "nodeType": "action",
         "mountPath": ["localVerification"],
         "localNodeId": "runCandidate",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.candidate",
+          "recovery": "manual"
+        }
       },
       "localVerification/runBase": {
         "nodeType": "action",
         "mountPath": ["localVerification"],
         "localNodeId": "runBase",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.base",
+          "recovery": "manual"
+        }
       },
       "localVerification/classify": {
         "nodeType": "compute",
@@ -492,7 +536,11 @@
         "nodeType": "action",
         "mountPath": ["localVerification"],
         "localNodeId": "mechanicalRepair",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.mechanical-repair",
+          "recovery": "manual"
+        }
       },
       "localVerification/semanticRepair": {
         "nodeType": "agent",
@@ -780,7 +828,11 @@
         "nodeType": "action",
         "mountPath": ["redesign", "documentation", "workspace"],
         "localNodeId": "inspect",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.inspect",
+          "recovery": "manual"
+        }
       },
       "redesign/documentation/workspace/propose": {
         "nodeType": "agent",
@@ -792,7 +844,11 @@
         "nodeType": "action",
         "mountPath": ["redesign", "documentation", "workspace"],
         "localNodeId": "apply",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.workspace-preparation.apply",
+          "recovery": "manual"
+        }
       },
       "redesign/documentation/workspace/ready": {
         "nodeType": "compute",
@@ -840,13 +896,21 @@
         "nodeType": "action",
         "mountPath": ["redesign", "documentation", "verification"],
         "localNodeId": "runCandidate",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.candidate",
+          "recovery": "manual"
+        }
       },
       "redesign/documentation/verification/runBase": {
         "nodeType": "action",
         "mountPath": ["redesign", "documentation", "verification"],
         "localNodeId": "runBase",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.base",
+          "recovery": "manual"
+        }
       },
       "redesign/documentation/verification/classify": {
         "nodeType": "compute",
@@ -862,7 +926,11 @@
         "nodeType": "action",
         "mountPath": ["redesign", "documentation", "verification"],
         "localNodeId": "mechanicalRepair",
-        "actionExecution": "function"
+        "actionExecution": "function",
+        "effect": {
+          "type": "pi-workflows.change-verification.mechanical-repair",
+          "recovery": "manual"
+        }
       },
       "redesign/documentation/verification/semanticRepair": {
         "nodeType": "agent",

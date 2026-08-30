@@ -36,7 +36,9 @@ type StepAction = StepSubmission | StepUpdate;
 
 export type RpcStepExecutorOptions = {
   cwd: string;
-  registry: HostProcessRegistry;
+  registry?: HostProcessRegistry;
+  /** Start a separate process group, or inherit the supervised worker group. */
+  processGroup?: "own" | "inherit";
   /** Absolute path to the pi binary; defaults to the installed `pi`. */
   piBin?: string;
   /** Extra environment for the child; the host's environment is inherited. */
@@ -119,7 +121,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
       }
     }
     if (pid !== undefined) {
-      this.options.registry.unregister(pid);
+      this.options.registry?.unregister(pid);
     }
   }
 
@@ -159,19 +161,19 @@ export class RpcStepExecutor implements AgentStepExecutor {
         cwd: this.options.cwd,
         env: { ...process.env, ...this.options.env },
         stdio: ["pipe", "pipe", "pipe"],
-        // Own process group: the host kills groups, never individual PIDs,
-        // so a killed host cannot leave an orphaned agent working.
-        detached: true,
+        // Hosted workers inherit the worker group, so one host signal reaches
+        // the complete process tree. Standalone callers keep an owned group.
+        detached: this.options.processGroup !== "inherit",
       },
     );
     this.child = child;
     if (child.pid !== undefined) {
-      this.options.registry.register(child.pid);
+      this.options.registry?.register(child.pid);
     }
     child.on("exit", (code, signal) => {
       this.childExited = { code, signal };
       if (child.pid !== undefined) {
-        this.options.registry.unregister(child.pid);
+        this.options.registry?.unregister(child.pid);
       }
       this.wakeSubmissionWaiters();
     });

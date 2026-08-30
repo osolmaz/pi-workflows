@@ -2,6 +2,7 @@ import {
   action,
   compute,
   defineWorkflow,
+  manualEffect,
   runCommandBatch,
   type CommandBatchRequest,
 } from "@osolmaz/pi-workflows";
@@ -40,6 +41,7 @@ export default defineWorkflow({
         }) satisfies CommandBatchRequest,
     }),
     run: action({
+      effect: manualEffect("example.command-batch.run"),
       run: async (context) =>
         await runCommandBatch(context.outputs.prepare as CommandBatchRequest, {
           signal: context.signal,

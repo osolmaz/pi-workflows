@@ -11,7 +11,7 @@ import {
   type CommandBatchItemResult,
   type CommandBatchResult,
 } from "../workflows/command-batch.js";
-import { action, agent, compute, defineWorkflow } from "../workflows/definition.js";
+import { action, agent, compute, defineWorkflow, manualEffect } from "../workflows/definition.js";
 import type { WorkflowActionContext, WorkflowNodeContext } from "../workflows/types.js";
 import { validateVerificationCommandSafety } from "./autoimplement-command-batches.js";
 import {
@@ -1027,16 +1027,21 @@ export const changeVerificationWorkflow = defineWorkflow({
       validate: parsePlannedChecks,
     }),
     runCandidate: action({
+      effect: manualEffect("pi-workflows.change-verification.candidate"),
       run: async (context) =>
         await runCandidate(context, checksForContext(context as unknown as WorkflowNodeContext)),
     }),
     runBase: action({
+      effect: manualEffect("pi-workflows.change-verification.base"),
       run: async (context) =>
         await runBase(context, checksForContext(context as unknown as WorkflowNodeContext)),
     }),
     classify: compute({ run: latestClassification }),
     repairGuard: compute({ run: repairGuard }),
-    mechanicalRepair: action({ run: runMechanicalRepair }),
+    mechanicalRepair: action({
+      effect: manualEffect("pi-workflows.change-verification.mechanical-repair"),
+      run: runMechanicalRepair,
+    }),
     semanticRepair: agent({
       prompt: (context) => {
         const input = context.input as ChangeVerificationInput;

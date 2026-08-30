@@ -1,15 +1,19 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { ConversationStepExecutor, type PromptDelivery } from "../src/extension/executor.js";
 import { sanitizeText } from "../src/render/ansi.js";
 import { renderRunDetailLines } from "../src/viewer/render.js";
-import { agent, compute, defineWorkflow, shell } from "../src/workflows/definition.js";
+import {
+  agent,
+  compute,
+  defineWorkflow,
+  idempotentEffect,
+  shell,
+} from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
 import { extractJsonValue } from "../src/workflows/json.js";
 import { runShellAction } from "../src/workflows/shell.js";
-import { createDefinitionSnapshot, readWorkflowRun } from "../src/workflows/store.js";
-import type { AgentStepRequest } from "../src/workflows/types.js";
+import { createDefinitionSnapshot } from "../src/workflows/store.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function makeEngine(options: { executor?: ScriptedExecutor } = {}) {
@@ -74,7 +78,11 @@ describe("timeouts and cancellation for local nodes", () => {
       name: "hung-shell",
       startAt: "sleepy",
       nodes: {
-        sleepy: shell({ timeoutMs: 150, exec: () => ({ command: "sleep", args: ["10"] }) }),
+        sleepy: shell({
+          effect: idempotentEffect("test.timeout-shell"),
+          timeoutMs: 150,
+          exec: () => ({ command: "sleep", args: ["10"] }),
+        }),
       },
       edges: [],
     });
@@ -312,63 +320,6 @@ describe("non-finite timeouts", () => {
   });
 });
 
-describe("prompt delivery failures", () => {
-  it("clears the pending step so a recovery step can run", async () => {
-    let failFirst = true;
-    const executor = new ConversationStepExecutor({
-      sendPrompt: () => {
-        if (failFirst) {
-          failFirst = false;
-          throw new Error("delivery failed");
-        }
-      },
-    });
-    const request = (nodeId: string): AgentStepRequest => ({
-      contract: { runId: "r", workflowName: "w", nodeId, attemptId: nodeId, completion: "submit" },
-      prompt: nodeId,
-      accept: async (output) => ({ ok: true, value: output }),
-    });
-    await expect(executor.runAgentStep(request("a"), new AbortController().signal)).rejects.toThrow(
-      /delivery failed/,
-    );
-    expect(executor.pendingStepId).toBeNull();
-    const second = executor.runAgentStep(request("b"), new AbortController().signal);
-    await expect(executor.submit("b", "b", { done: true })).resolves.toMatchObject({
-      accepted: true,
-    });
-    await expect(second).resolves.toEqual({ output: { done: true } });
-  });
-});
-
-describe("hung validation after the step is cleared", () => {
-  it("unblocks the submit call when the step times out mid-validation", async () => {
-    const executor = new ConversationStepExecutor({ sendPrompt: () => {} });
-    const request: AgentStepRequest = {
-      contract: {
-        runId: "r",
-        workflowName: "w",
-        nodeId: "step",
-        attemptId: "a1",
-        completion: "submit",
-      },
-      prompt: "step",
-      accept: () => new Promise(() => {}), // validation never settles
-    };
-    const abort = new AbortController();
-    const stepPromise = executor.runAgentStep(request, abort.signal);
-    const submission = executor.submit("step", "a1", {});
-
-    abort.abort(new Error("timed out"));
-    await expect(stepPromise).rejects.toThrow(/timed out/);
-
-    // Without the cleared-race, this await would hang forever and block pi's
-    // tool execution.
-    const result = await submission;
-    expect(result.accepted).toBe(false);
-    expect(result.message).toMatch(/no longer awaiting/);
-  });
-});
-
 describe("checkpoint edges", () => {
   it("allows outgoing edges from checkpoint nodes for continuation runs", async () => {
     const { checkpoint } = await import("../src/workflows/definition.js");
@@ -380,96 +331,6 @@ describe("checkpoint edges", () => {
     });
     // Continuation runs route after the checkpoint, so the edge is live.
     expect(() => validateWorkflowDefinition(workflow)).not.toThrow();
-  });
-});
-
-describe("late prompt continuations", () => {
-  it("does not persist agent_prompt_sent after the node timed out", async () => {
-    let resolvePrompt: ((value: string) => void) | undefined;
-    const workflow = defineWorkflow({
-      name: "slow-prompt",
-      startAt: "ask",
-      nodes: {
-        ask: agent({
-          timeoutMs: 100,
-          prompt: () =>
-            new Promise<string>((resolve) => {
-              resolvePrompt = resolve;
-            }),
-        }),
-      },
-      edges: [],
-    });
-    const engine = await makeEngine();
-    const { state, runId } = await engine.run(workflow, {});
-    expect(state.status).toBe("timed_out");
-
-    // The stale continuation resolves after the run is terminal.
-    resolvePrompt?.("late prompt");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const types =
-      readWorkflowRun(runId, {
-        databasePath: engine.databasePath,
-        includeTrace: true,
-      })?.traceEvents?.map((event) => event.type) ?? [];
-    expect(types).not.toContain("agent_prompt_sent");
-    expect(types.at(-1)).toBe("run_timed_out");
-  });
-});
-
-describe("stale submissions after a step is replaced", () => {
-  it("does not clear a newer pending step", async () => {
-    const sent: PromptDelivery[] = [];
-    const executor = new ConversationStepExecutor({ sendPrompt: (d) => sent.push(d) });
-
-    let releaseAccept: (() => void) | undefined;
-    const slowRequest: AgentStepRequest = {
-      contract: {
-        runId: "r",
-        workflowName: "w",
-        nodeId: "first",
-        attemptId: "a1",
-        completion: "submit",
-      },
-      prompt: "first",
-      accept: () =>
-        new Promise((resolve) => {
-          releaseAccept = () => resolve({ ok: true, value: { late: true } });
-        }),
-    };
-
-    const firstAbort = new AbortController();
-    const firstStep = executor.runAgentStep(slowRequest, firstAbort.signal);
-    const staleSubmission = executor.submit("first", "a1", {});
-
-    // The step times out while validation is still pending, and the engine
-    // moves on to a new step.
-    firstAbort.abort(new Error("timed out"));
-    await expect(firstStep).rejects.toThrow(/timed out/);
-
-    const secondRequest: AgentStepRequest = {
-      contract: {
-        runId: "r",
-        workflowName: "w",
-        nodeId: "first",
-        attemptId: "a2",
-        completion: "submit",
-      },
-      prompt: "retry",
-      accept: async (output) => ({ ok: true, value: output }),
-    };
-    const secondStep = executor.runAgentStep(secondRequest, new AbortController().signal);
-
-    releaseAccept?.();
-    const stale = await staleSubmission;
-    expect(stale.accepted).toBe(false);
-    expect(stale.message).toMatch(/no longer awaiting/);
-
-    // The newer step is still submittable.
-    const fresh = await executor.submit("first", "a2", { ok: 1 });
-    expect(fresh.accepted).toBe(true);
-    await expect(secondStep).resolves.toEqual({ output: { ok: 1 } });
   });
 });
 
@@ -539,7 +400,12 @@ describe("failure metadata retention", () => {
     const workflow = defineWorkflow({
       name: "failing-shell",
       startAt: "boom",
-      nodes: { boom: shell({ exec: () => ({ command: "sh", args: ["-c", "exit 7"] }) }) },
+      nodes: {
+        boom: shell({
+          effect: idempotentEffect("test.failed-shell"),
+          exec: () => ({ command: "sh", args: ["-c", "exit 7"] }),
+        }),
+      },
       edges: [],
     });
     const { state } = await (await makeEngine()).run(workflow, {});
@@ -590,7 +456,11 @@ describe("shell robustness", () => {
       name: "receipt-on-timeout",
       startAt: "sleepy",
       nodes: {
-        sleepy: shell({ timeoutMs: 150, exec: () => ({ command: "sleep", args: ["10"] }) }),
+        sleepy: shell({
+          effect: idempotentEffect("test.receipt-timeout"),
+          timeoutMs: 150,
+          exec: () => ({ command: "sleep", args: ["10"] }),
+        }),
       },
       edges: [],
     });
@@ -621,42 +491,16 @@ describe("observer isolation", () => {
   });
 });
 
-describe("nudge delivery failures", () => {
-  it("fails the pending step promptly when the reminder cannot be sent", async () => {
-    let sends = 0;
-    const executor = new ConversationStepExecutor({
-      sendPrompt: () => {
-        sends += 1;
-        if (sends > 1) {
-          throw new Error("reminder delivery failed");
-        }
-      },
-    });
-    const request: AgentStepRequest = {
-      contract: {
-        runId: "r",
-        workflowName: "w",
-        nodeId: "step",
-        attemptId: "a1",
-        completion: "submit",
-      },
-      prompt: "step",
-      accept: async (output) => ({ ok: true, value: output }),
-    };
-    const stepPromise = executor.runAgentStep(request, new AbortController().signal);
-    expect(executor.handleAgentSettled()).toBe(false);
-    await expect(stepPromise).rejects.toThrow(/reminder delivery failed/);
-    expect(executor.pendingStepId).toBeNull();
-  });
-});
-
 describe("spawn failure receipts", () => {
   it("records a receipt when the executable does not exist", async () => {
     const workflow = defineWorkflow({
       name: "no-such-binary",
       startAt: "ghost",
       nodes: {
-        ghost: shell({ exec: () => ({ command: "definitely-not-a-real-binary-xyz" }) }),
+        ghost: shell({
+          effect: idempotentEffect("test.spawn-failure"),
+          exec: () => ({ command: "definitely-not-a-real-binary-xyz" }),
+        }),
       },
       edges: [],
     });

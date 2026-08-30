@@ -46,11 +46,6 @@ export {
   type DiscoveredController,
 } from "./loader.js";
 export {
-  WorkflowEngineScheduler,
-  type ResolvedChildWorkflow,
-  type WorkflowEngineSchedulerOptions,
-} from "./workflow-engine-scheduler.js";
-export {
   ControllerWorkflowCoordinator,
   type ControllerWorkflowControlRequest,
   type ControllerWorkflowScheduler,
