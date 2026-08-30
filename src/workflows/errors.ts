@@ -20,13 +20,22 @@ export class CancelledError extends Error {
  * The current claim holder owns the run from that point on, so the fenced
  * writer must stop changing the run immediately.
  */
+export type ClaimLostReason =
+  | "missingAuthority"
+  | "expired"
+  | "ownerChanged"
+  | "tokenChanged"
+  | "generationChanged";
+
 export class ClaimLostError extends Error {
   readonly runId: string;
+  readonly reason: ClaimLostReason;
 
-  constructor(runId: string) {
-    super(`Workflow run claim lost: ${runId}`);
+  constructor(runId: string, reason: ClaimLostReason = "missingAuthority") {
+    super(`Workflow run claim lost (${reason}): ${runId}`);
     this.name = "ClaimLostError";
     this.runId = runId;
+    this.reason = reason;
   }
 }
 

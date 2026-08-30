@@ -1312,17 +1312,21 @@ export class SqliteControllerStore implements ControllerStore {
     return this.state.transaction(() => {
       const row = this.workflowRunRow(options.runId);
       if (row === undefined || row.ownerId === null) return false;
+      const lease = this.requireLease(row.resourceId);
       const result = this.state.connection
         .prepare(
           `UPDATE leases SET heartbeat_at = ?, expires_at = ?
-           WHERE resource_id = ? AND token_hash = ? AND owner_id = ? AND expires_at > ?`,
+           WHERE resource_id = ? AND owner_type = ? AND owner_id = ?
+             AND token_hash = ? AND generation = ? AND expires_at > ?`,
         )
         .run(
           now,
           now + options.leaseMs,
           row.resourceId,
-          tokenHash(options.claimToken),
+          lease.ownerType,
           row.ownerId,
+          tokenHash(options.claimToken),
+          lease.generation,
           now,
         );
       if (result.changes === 1) {
@@ -1360,16 +1364,11 @@ export class SqliteControllerStore implements ControllerStore {
         ownerId: string;
         token: string;
         generation: number;
+        leaseMs: number;
       }
     | undefined {
     const row = this.workflowRunRow(runId);
-    if (
-      row === undefined ||
-      row.ownerId === null ||
-      row.claimExpiresAt === null ||
-      row.claimExpiresAt <= Date.now()
-    )
-      return undefined;
+    if (row === undefined || row.ownerId === null || row.claimExpiresAt === null) return undefined;
     const lease = this.requireLease(row.resourceId);
     if (lease.tokenHash === null || !lease.tokenHash.equals(tokenHash(claimToken)))
       return undefined;
@@ -1380,6 +1379,7 @@ export class SqliteControllerStore implements ControllerStore {
       ownerId: row.ownerId,
       token: claimToken,
       generation: row.leaseGeneration,
+      leaseMs: 30_000,
     };
   }
 
@@ -1405,7 +1405,7 @@ export class SqliteControllerStore implements ControllerStore {
   }
 
   cancelWorkflowRun(options: { runId: string; claimToken?: string; now?: string }): boolean {
-    return this.terminalRun(
+    const cancelled = this.terminalRun(
       options.runId,
       options.claimToken,
       "cancelled",
@@ -1413,6 +1413,129 @@ export class SqliteControllerStore implements ControllerStore {
       "Workflow run cancelled",
       options.now,
     );
+    if (cancelled || options.claimToken !== undefined) return cancelled;
+    return this.cancelStaleWorkflowRun({
+      runId: options.runId,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+  }
+
+  /** Cancel a nonterminal run only when its claim is absent or expired. */
+  cancelStaleWorkflowRun(options: {
+    runId: string;
+    controlId?: string;
+    claimToken?: string;
+    now?: string;
+  }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    const controlId = options.controlId ?? "workflow-control";
+    const claimToken = options.claimToken ?? randomUUID();
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (row === undefined || ["done", "failed", "cancelled"].includes(row.status)) return false;
+      const lease = this.requireLease(row.resourceId);
+      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+
+      const generation = lease.generation + 1;
+      const claimed = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET generation = ?, owner_type = 'system', owner_id = ?, token_hash = ?,
+               acquired_at = ?, heartbeat_at = ?, expires_at = ?
+           WHERE resource_id = ? AND generation = ?
+             AND (owner_id IS NULL OR expires_at IS NULL OR expires_at <= ?)`,
+        )
+        .run(
+          generation,
+          controlId,
+          tokenHash(claimToken),
+          now,
+          now,
+          now + 30_000,
+          row.resourceId,
+          lease.generation,
+          now,
+        );
+      if (claimed.changes !== 1) return false;
+
+      const errorHash = this.state.putText("Workflow run cancelled", now);
+      const queue = this.state.connection
+        .prepare(
+          `UPDATE run_queue
+           SET status = 'cancelled', error_code = 'cancelled', error_hash = ?,
+               updated_at = ?, finished_at = ?
+           WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
+        )
+        .run(errorHash, now, now, options.runId);
+      if (queue.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} has inconsistent queue state`);
+      }
+      const run = this.state.connection
+        .prepare(
+          `UPDATE runs
+           SET status = 'cancelled', paused = 0, status_detail = NULL, error_hash = ?,
+               updated_at = ?, finished_at = ?
+           WHERE run_id = ? AND status NOT IN ('completed', 'failed', 'timed_out', 'cancelled')`,
+        )
+        .run(errorHash, now, now, options.runId);
+      if (run.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} has inconsistent durable state`);
+      }
+      this.state.connection
+        .prepare(
+          `UPDATE node_attempts
+           SET status = 'cancelled', error_hash = COALESCE(error_hash, ?),
+               updated_at = ?, finished_at = COALESCE(finished_at, ?)
+           WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
+        )
+        .run(errorHash, now, now, options.runId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO human_decision_resolutions(
+             decision_id, outcome, provenance, response_hash, reason, channel,
+             actor_id, request_digest, resolved_at
+           )
+           SELECT d.decision_id, 'cancelled', 'explicit_cancel', NULL,
+                  'Workflow run cancelled', NULL, ?, d.request_digest, ?
+           FROM human_decisions d
+           LEFT JOIN human_decision_resolutions r ON r.decision_id = d.decision_id
+           WHERE d.run_id = ? AND r.decision_id IS NULL`,
+        )
+        .run(controlId, now, options.runId);
+
+      const released = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+               acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND owner_type = 'system' AND owner_id = ?
+             AND token_hash = ? AND generation = ? AND expires_at > ?`,
+        )
+        .run(row.resourceId, controlId, tokenHash(claimToken), generation, now);
+      /* istanbul ignore if -- the exact control claim was written in this transaction */
+      if (released.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} control claim changed during cancellation`);
+      }
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.queue_cancelled",
+        "control",
+        controlId,
+        { status: "cancelled", code: "cancelled", staleControl: true },
+        now,
+        generation,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
   }
 
   deleteWorkflowRun(options: { runId: string; claimToken: string }): boolean {

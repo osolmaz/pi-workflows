@@ -1532,6 +1532,7 @@ export class WorkflowEngine {
       // Observers (UI updates, loggers) must never determine workflow
       // correctness; a throwing observer would otherwise fail the run.
     }
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
   private async finishRun(

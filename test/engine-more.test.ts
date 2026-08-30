@@ -18,6 +18,33 @@ describe("WorkflowEngine additional paths", () => {
     expect(engine.databasePath).toBe(databasePath);
   });
 
+  it("yields to the host event loop after each committed graph transition", async () => {
+    let hostTurnRan = false;
+    const hostTurn = setImmediate(() => {
+      hostTurnRan = true;
+    });
+    const workflow = defineWorkflow({
+      name: "fair-transition",
+      startAt: "check",
+      nodes: {
+        check: compute({
+          run: () => {
+            expect(hostTurnRan).toBe(true);
+            return "done";
+          },
+        }),
+      },
+      edges: [],
+    });
+
+    try {
+      const { state } = await (await makeEngine()).run(workflow, {});
+      expect(state.status).toBe("completed");
+    } finally {
+      clearImmediate(hostTurn);
+    }
+  });
+
   it("runs function action nodes and records receipts", async () => {
     const workflow = defineWorkflow({
       name: "fn-action",
