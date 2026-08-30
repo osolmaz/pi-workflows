@@ -265,6 +265,8 @@ The private worker channel accepts these message kinds:
 - `run.parked`
 - `run.finished`
 - `interaction.requested`
+- `interaction.accepted`
+- `interaction.rejected`
 - `notification.requested`
 - `presentation.requested`
 - `effect.reserve`
@@ -297,7 +299,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 `interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, and timestamps. One attempt has at most one request.
 
-`interactive_submissions` stores request ID, submission ID, idempotency key, payload hash, accepted or rejected outcome, receipt hash, and submission time. Repeated keys return the same receipt.
+`interactive_submissions` stores request ID, submission ID, idempotency key, payload hash, validating, accepted, or rejected outcome, receipt hash, and submission time. Repeated keys return the same receipt.
 
 ### Worker epochs
 
@@ -313,7 +315,7 @@ The worker proposes `interaction.requested`. The host commits the request, chang
 
 The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
 
-A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host validates the payload against the stored contract. On acceptance, it settles the request and schedules the run. A rejected payload leaves the same request pending and returns an actionable error to the model.
+A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host first checks this transport contract and records a provisional `validating` submission. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the host. The host settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the host rejects the provisional submission and leaves the request ready for a corrected retry.
 
 An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`.
 

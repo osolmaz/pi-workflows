@@ -13,6 +13,8 @@ export const WORKER_MESSAGE_KINDS = [
   "run.parked",
   "run.finished",
   "interaction.requested",
+  "interaction.accepted",
+  "interaction.rejected",
   "notification.requested",
   "presentation.requested",
   "effect.reserve",
@@ -36,6 +38,8 @@ export type WorkerStoreOperation =
   | "store.reserveEffect"
   | "store.settleEffect"
   | "interaction.request"
+  | "interaction.accept"
+  | "interaction.reject"
   | "notification.request"
   | "presentation.request";
 
@@ -72,6 +76,8 @@ export function workerKindForOperation(
   if (operation === "store.createHumanDecisionRequest" || operation === "interaction.request") {
     return "interaction.requested";
   }
+  if (operation === "interaction.accept") return "interaction.accepted";
+  if (operation === "interaction.reject") return "interaction.rejected";
   if (operation === "notification.request") return "notification.requested";
   if (operation === "presentation.request") return "presentation.requested";
   if (operation === "store.writeSnapshot") {

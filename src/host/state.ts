@@ -46,6 +46,16 @@ export type WorkerOutcome =
   | "claimLost"
   | "orphaned";
 
+export type InteractiveSubmissionRecord = {
+  requestId: string;
+  submissionId: string;
+  idempotencyKey: string;
+  outcome: "validating" | "accepted" | "rejected" | "adopted";
+  payload: JsonValue;
+  receipt: JsonValue | null;
+  submittedAt: string;
+};
+
 export type InteractiveRequestRecord = {
   requestId: string;
   runId: string;
@@ -477,6 +487,106 @@ export class HostStateStore {
     };
   }
 
+  validatingInteraction(runId: string):
+    | {
+        requestId: string;
+        attemptId: string;
+        nodeId: string;
+        submissionId: string;
+        payload: JsonValue;
+      }
+    | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT i.request_id AS requestId, i.attempt_id AS attemptId, a.node_id AS nodeId,
+                s.submission_id AS submissionId, s.payload_hash AS payloadHash
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN interactive_submissions s ON s.request_id = i.request_id
+         WHERE i.run_id = ? AND i.status IN ('pending', 'presenting')
+           AND s.outcome = 'validating'
+         ORDER BY s.submitted_at DESC LIMIT 1`,
+      )
+      .get(runId);
+    if (!isAcceptedInteractionRow(row)) return undefined;
+    return {
+      requestId: row.requestId,
+      attemptId: row.attemptId,
+      nodeId: row.nodeId,
+      submissionId: row.submissionId,
+      payload: this.state.readJson(row.payloadHash),
+    };
+  }
+
+  interactionSubmission(
+    requestId: string,
+    submissionId: string,
+  ): InteractiveSubmissionRecord | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT request_id AS requestId, submission_id AS submissionId,
+                idempotency_key AS idempotencyKey, outcome, payload_hash AS payloadHash,
+                receipt_hash AS receiptHash, submitted_at AS submittedAt
+         FROM interactive_submissions WHERE request_id = ? AND submission_id = ?`,
+      )
+      .get(requestId, submissionId);
+    if (!isSubmissionDetailRow(row)) return undefined;
+    return {
+      requestId: row.requestId,
+      submissionId: row.submissionId,
+      idempotencyKey: row.idempotencyKey,
+      outcome: row.outcome,
+      payload: this.state.readJson(row.payloadHash),
+      receipt: row.receiptHash === null ? null : this.state.readJson(row.receiptHash),
+      submittedAt: new Date(row.submittedAt).toISOString(),
+    };
+  }
+
+  finishInteractionValidation(options: {
+    requestId: string;
+    submissionId: string;
+    accepted: boolean;
+    receipt: JsonValue;
+  }): InteractiveSubmissionRecord {
+    const now = Date.now();
+    return this.state.transaction(() => {
+      const submission = this.interactionSubmission(options.requestId, options.submissionId);
+      const expectedOutcome = options.accepted ? "accepted" : "rejected";
+      if (submission?.outcome === expectedOutcome) return submission;
+      if (submission === undefined || submission.outcome !== "validating") {
+        throw new Error("Interactive submission is not awaiting validation");
+      }
+      const request = this.requireInteractiveRequest(options.requestId);
+      const receiptHash = this.state.putJson(options.receipt, now);
+      this.state.connection
+        .prepare(
+          `UPDATE interactive_submissions SET outcome = ?, receipt_hash = ?
+           WHERE request_id = ? AND submission_id = ? AND outcome = 'validating'`,
+        )
+        .run(
+          options.accepted ? "accepted" : "rejected",
+          receiptHash,
+          options.requestId,
+          options.submissionId,
+        );
+      if (options.accepted) {
+        const changed = this.state.connection
+          .prepare(
+            `UPDATE interactive_requests
+             SET status = 'settled', presenter_id = NULL,
+                 presentation_claim_expires_at = NULL, accepted_submission_id = ?,
+                 revision = revision + 1, updated_at = ?, settled_at = ?
+             WHERE request_id = ? AND revision = ? AND status IN ('pending', 'presenting')`,
+          )
+          .run(options.submissionId, now, now, options.requestId, request.revision);
+        if (changed.changes !== 1) throw new Error("Interactive request validation is stale");
+      }
+      const settled = this.interactionSubmission(options.requestId, options.submissionId);
+      if (settled === undefined) throw new Error("Interactive submission result is missing");
+      return settled;
+    });
+  }
+
   consumeAcceptedInteraction(runId: string, attemptId: string, now: number = Date.now()): boolean {
     const changed = this.state.connection
       .prepare(
@@ -571,11 +681,52 @@ export class HostStateStore {
     outcome: "accepted" | "adopted";
     receipt: JsonValue;
   } {
+    return this.recordInteractionSubmission({
+      ...options,
+      outcome: options.accepted ? "accepted" : "rejected",
+      settle: options.accepted,
+    });
+  }
+
+  beginInteractionValidation(options: {
+    requestId: string;
+    submissionId: string;
+    idempotencyKey: string;
+    expectedRevision: number;
+    payload: JsonValue;
+    receipt?: JsonValue;
+  }): {
+    interaction: InteractiveRequestRecord;
+    outcome: "accepted" | "adopted";
+    receipt: JsonValue;
+  } {
+    return this.recordInteractionSubmission({
+      ...options,
+      outcome: "validating",
+      settle: false,
+    });
+  }
+
+  private recordInteractionSubmission(options: {
+    requestId: string;
+    submissionId: string;
+    idempotencyKey: string;
+    expectedRevision: number;
+    payload: JsonValue;
+    outcome: InteractiveSubmissionRecord["outcome"];
+    settle: boolean;
+    receipt?: JsonValue;
+  }): {
+    interaction: InteractiveRequestRecord;
+    outcome: "accepted" | "adopted";
+    receipt: JsonValue;
+  } {
     const now = Date.now();
     return this.state.transaction(() => {
       const existing = this.state.connection
         .prepare(
-          `SELECT payload_hash AS payloadHash, outcome, receipt_hash AS receiptHash
+          `SELECT submission_id AS submissionId, payload_hash AS payloadHash,
+                  outcome, receipt_hash AS receiptHash
            FROM interactive_submissions WHERE request_id = ? AND idempotency_key = ?`,
         )
         .get(options.requestId, options.idempotencyKey);
@@ -589,9 +740,20 @@ export class HostStateStore {
           outcome: "adopted",
           receipt:
             existing.receiptHash === null
-              ? { requestId: options.requestId, submissionId: options.submissionId }
+              ? { requestId: options.requestId, submissionId: existing.submissionId }
               : this.state.readJson(existing.receiptHash),
         };
+      }
+      if (options.outcome === "validating") {
+        const active = this.state.connection
+          .prepare(
+            `SELECT submission_id AS submissionId FROM interactive_submissions
+             WHERE request_id = ? AND outcome = 'validating' LIMIT 1`,
+          )
+          .get(options.requestId);
+        if (isSubmissionIdRow(active)) {
+          throw new Error("Interactive submission validation is already active");
+        }
       }
       const request = this.requireInteractiveRequest(options.requestId);
       if (
@@ -616,11 +778,11 @@ export class HostStateStore {
           options.idempotencyKey,
           options.expectedRevision,
           savedPayloadHash,
-          options.accepted ? "accepted" : "rejected",
+          options.outcome,
           receiptHash,
           now,
         );
-      if (options.accepted) {
+      if (options.settle) {
         this.state.connection
           .prepare(
             `UPDATE interactive_requests
@@ -742,7 +904,22 @@ type CommandRow = {
 
 type IdempotentCommandRow = CommandRow & { requestId: string };
 type RequestIdRow = { requestId: string };
-type SubmissionRow = { payloadHash: Buffer; outcome: string; receiptHash: Buffer | null };
+type SubmissionRow = {
+  submissionId: string;
+  payloadHash: Buffer;
+  outcome: string;
+  receiptHash: Buffer | null;
+};
+type SubmissionIdRow = { submissionId: string };
+type SubmissionDetailRow = {
+  requestId: string;
+  submissionId: string;
+  idempotencyKey: string;
+  outcome: InteractiveSubmissionRecord["outcome"];
+  payloadHash: Buffer;
+  receiptHash: Buffer | null;
+  submittedAt: number;
+};
 type WorkerMessageRow = {
   requestFingerprint: Buffer;
   outcome: WorkerResponse["outcome"];
@@ -836,9 +1013,27 @@ function isAcceptedInteractionRow(value: unknown): value is AcceptedInteractionR
 function isSubmissionRow(value: unknown): value is SubmissionRow {
   return (
     isRecord(value) &&
+    typeof value.submissionId === "string" &&
     Buffer.isBuffer(value.payloadHash) &&
     typeof value.outcome === "string" &&
     (value.receiptHash === null || Buffer.isBuffer(value.receiptHash))
+  );
+}
+
+function isSubmissionIdRow(value: unknown): value is SubmissionIdRow {
+  return isRecord(value) && typeof value.submissionId === "string";
+}
+
+function isSubmissionDetailRow(value: unknown): value is SubmissionDetailRow {
+  return (
+    isRecord(value) &&
+    typeof value.requestId === "string" &&
+    typeof value.submissionId === "string" &&
+    typeof value.idempotencyKey === "string" &&
+    ["validating", "accepted", "rejected", "adopted"].includes(value.outcome as string) &&
+    Buffer.isBuffer(value.payloadHash) &&
+    (value.receiptHash === null || Buffer.isBuffer(value.receiptHash)) &&
+    typeof value.submittedAt === "number"
   );
 }
 

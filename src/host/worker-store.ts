@@ -178,6 +178,24 @@ export class HostBackedWorkflowStore implements WorkflowExecutionStore {
     await this.call("interaction.request", { runId: this.runId, ...options }, options.attemptId);
   }
 
+  async acceptInteraction(options: {
+    requestId: string;
+    submissionId: string;
+    attemptId: string;
+    value: JsonValue;
+  }): Promise<void> {
+    await this.call("interaction.accept", options, options.attemptId);
+  }
+
+  async rejectInteraction(options: {
+    requestId: string;
+    submissionId: string;
+    attemptId: string;
+    error: string;
+  }): Promise<void> {
+    await this.call("interaction.reject", options, options.attemptId);
+  }
+
   async requestNotification(
     request: WorkflowNotificationRequest,
   ): Promise<WorkflowNotificationReceipt> {

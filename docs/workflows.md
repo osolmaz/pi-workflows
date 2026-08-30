@@ -134,9 +134,12 @@ transaction. An expired or replaced owner cannot revive itself.
 Interactive agent and assistant-message steps do not run headlessly for a Pi
 session. The worker commits a durable interaction request and parks. The origin
 session presents the request through documented Pi APIs and submits the exact
-request, node, attempt, and revision. Closing Pi leaves that request pending;
-reopening the same session adopts the existing session entry or presents it
-once. Notifications use the durable session outbox. A root
+request, node, attempt, and revision. The host records submitted output as
+provisional. A new supervised worker loads the workflow and runs its `validate`
+function before the host accepts the submission. A validation error leaves the
+same request pending and returns the error to the model. Closing Pi leaves that
+request pending; reopening the same session adopts the existing session entry
+or presents it once. Notifications use the durable session outbox. A root
 `presentationPrompt` creates a durable terminal turn only after completion is
 committed. A controller child without an origin session can use a supervised
 headless `pi --mode rpc` child for structured agent steps.
@@ -181,10 +184,13 @@ agent({
 because an invalid response is already visible and must not be retried.
 
 For submitted output, the engine appends the existing workflow-tool contract.
-The output passes through tolerant JSON normalization and then `validate`.
-Rejected submissions can retry in the same step. If the model settles without
-submitting, the durable request stays pending until it receives valid output,
-times out, or is cancelled. For assistant-message output, the engine appends a normal-response contract,
+The host checks the durable transport identifiers, stores a `validating`
+submission, and starts a supervised worker. In that worker, the output passes
+through tolerant JSON normalization and then `validate`. The tool reports
+success only after this check accepts the output. Rejected submissions return
+the validation error and can retry in the same step. If the model settles
+without submitting, the durable request stays pending until it receives valid
+output, times out, or is cancelled. For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
 form's active Pi turn.

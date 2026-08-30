@@ -37,7 +37,7 @@ type WorkerBootstrap = {
   originSessionId: string | null;
   stateDirectory: string;
   piArgs?: string[];
-  acceptedInteraction?: {
+  candidateInteraction?: {
     requestId: string;
     attemptId: string;
     nodeId: string;
@@ -154,34 +154,40 @@ class InteractiveExecutor implements AgentStepExecutor {
 
   constructor(
     private readonly store: HostBackedWorkflowStore,
-    private readonly accepted:
-      | { attemptId: string; nodeId: string; payload: JsonValue }
+    private readonly candidate:
+      | {
+          requestId: string;
+          submissionId: string;
+          attemptId: string;
+          nodeId: string;
+          payload: JsonValue;
+        }
       | undefined,
   ) {}
 
   async runAgentStep(request: AgentStepRequest): Promise<AgentStepSubmission> {
     if (
-      this.accepted?.nodeId === request.contract.nodeId &&
-      this.accepted.attemptId === request.contract.attemptId
+      this.candidate?.nodeId === request.contract.nodeId &&
+      this.candidate.attemptId === request.contract.attemptId
     ) {
-      const submission = interactionSubmission(this.accepted.payload);
+      const submission = interactionSubmission(this.candidate.payload);
+      let value: AgentStepSubmission;
       if (request.contract.completion === "assistant") {
         const accepted = validateAcceptedAssistantSubmission(submission, request.contract);
-        if (accepted.ok) return accepted.value;
+        if (!accepted.ok) return await this.rejectCandidate(accepted.error);
+        value = accepted.value;
       } else {
         const accepted = await request.accept(submission.output);
-        if (accepted.ok) return { ...submission, output: accepted.value };
+        if (!accepted.ok) return await this.rejectCandidate(accepted.error);
+        value = { ...submission, output: accepted.value };
       }
-      await this.store.requestInteraction({
-        attemptId: request.contract.attemptId,
-        kind: request.contract.completion === "assistant" ? "assistant" : "agent",
-        contract: {
-          contract: request.contract,
-          prompt: request.prompt,
-          ...(request.presentation === undefined ? {} : { presentation: request.presentation }),
-        } as JsonValue,
+      await this.store.acceptInteraction({
+        requestId: this.candidate.requestId,
+        submissionId: this.candidate.submissionId,
+        attemptId: this.candidate.attemptId,
+        value: value as unknown as JsonValue,
       });
-      throw new RunParkedError();
+      return value;
     }
     await this.store.requestInteraction({
       attemptId: request.contract.attemptId,
@@ -191,6 +197,17 @@ class InteractiveExecutor implements AgentStepExecutor {
         prompt: request.prompt,
         ...(request.presentation === undefined ? {} : { presentation: request.presentation }),
       } as JsonValue,
+    });
+    throw new RunParkedError();
+  }
+
+  private async rejectCandidate(error: string): Promise<never> {
+    if (this.candidate === undefined) throw new RunParkedError();
+    await this.store.rejectInteraction({
+      requestId: this.candidate.requestId,
+      submissionId: this.candidate.submissionId,
+      attemptId: this.candidate.attemptId,
+      error,
     });
     throw new RunParkedError();
   }
@@ -270,7 +287,7 @@ export async function runWorkflowWorker(): Promise<number> {
     let executor: AgentStepExecutor;
     let closeExecutor: (() => Promise<void>) | undefined;
     if (bootstrap.originSessionId !== null) {
-      executor = new InteractiveExecutor(store, bootstrap.acceptedInteraction);
+      executor = new InteractiveExecutor(store, bootstrap.candidateInteraction);
     } else {
       const rpc = new RpcStepExecutor({
         cwd: launch.projectPath,
@@ -302,9 +319,9 @@ export async function runWorkflowWorker(): Promise<number> {
       const result = bootstrap.initialized
         ? await engine.resumeRun(workflow, launch.runId, {
             workflowSource,
-            ...(bootstrap.acceptedInteraction === undefined
+            ...(bootstrap.candidateInteraction === undefined
               ? {}
-              : { acceptedInteractionAttemptId: bootstrap.acceptedInteraction.attemptId }),
+              : { acceptedInteractionAttemptId: bootstrap.candidateInteraction.attemptId }),
           })
         : bootstrap.parentRunId === null
           ? await engine.run(workflow, bootstrap.input, { runId: launch.runId, workflowSource })

@@ -1,10 +1,13 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { WorkflowHostClient } from "../src/host/client.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
+import { HostStateStore } from "../src/host/state.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeComputeWorkflow(cwd: string): Promise<string> {
@@ -144,6 +147,41 @@ describe("global workflow host", () => {
     await host.start();
     await host.stop();
   });
+
+  it("closes idle client sockets before it waits for listener shutdown", async () => {
+    const databasePath = path.join(await makeTempDir("host-idle-client"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const socket = net.createConnection(host.endpoint);
+    await once(socket, "connect");
+    const closed = once(socket, "close");
+    await host.stop();
+    await closed;
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "releases its claim and lock when the local listener cannot bind",
+    async () => {
+      const root = await makeTempDir("host-bind-failure");
+      const stateDirectory = path.join(root, "a".repeat(70), "b".repeat(70));
+      await fs.mkdir(stateDirectory, { recursive: true });
+      const databasePath = path.join(stateDirectory, "state.sqlite");
+      const host = new WorkflowHost({ databasePath, runnerId: "failed-host" });
+      await expect(host.start()).rejects.toThrow();
+
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(state.hostStatus()).toMatchObject({ hostId: null, live: false });
+      } finally {
+        state.close();
+      }
+      await expect(
+        fs.access(path.join(stateDirectory, "host", "host.lock.json")),
+      ).rejects.toThrow();
+      await host.stop();
+    },
+  );
 
   it("uses the database directory for its local process registry", async () => {
     const stateDir = await makeTempDir("host-state");

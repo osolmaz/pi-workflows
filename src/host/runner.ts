@@ -64,7 +64,12 @@ import {
   type HostRequest,
   type HostResponse,
 } from "./protocol.js";
-import { HostStateStore, type HostClaim, type WorkerLaunchEnvelope } from "./state.js";
+import {
+  HostStateStore,
+  type HostClaim,
+  type InteractiveSubmissionRecord,
+  type WorkerLaunchEnvelope,
+} from "./state.js";
 import type { WorkerMessage, WorkerResponse } from "./worker-protocol.js";
 import { WorkflowWorkerSupervisor } from "./worker-supervisor.js";
 
@@ -150,13 +155,13 @@ export class WorkflowHost {
   private readonly pendingResumes = new Set<string>();
   private readonly blockedRuns = new Set<string>();
   private readonly deliveryClaims = new Map<string, DeliveryClaim>();
+  private readonly sockets = new Set<Socket>();
   private server: net.Server | null = null;
   private claim: HostClaim | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private started = false;
-  private connections = 0;
   private controllerPollActive = false;
 
   constructor(options: WorkflowHostOptions = {}) {
@@ -215,6 +220,18 @@ export class WorkflowHost {
       void this.claimOne();
       void this.claimControllerOne();
     } catch (error) {
+      const server = this.server;
+      this.server = null;
+      await this.closeServer(server);
+      if (this.claim !== null) {
+        try {
+          this.hostState.releaseHost(this.claim);
+        } catch {
+          // Preserve the startup error when cleanup cannot release an already-lost claim.
+        }
+      }
+      this.claim = null;
+      if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
       this.releaseLock();
       throw error;
     }
@@ -229,10 +246,7 @@ export class WorkflowHost {
     this.pollTimer = null;
     const server = this.server;
     this.server = null;
-    if (server !== null) {
-      server.close();
-      await once(server, "close").catch(() => undefined);
-    }
+    await this.closeServer(server);
     await Promise.allSettled(
       [...this.activeRuns.values()].map(async (active) => {
         active.control = "handoff";
@@ -265,6 +279,23 @@ export class WorkflowHost {
     this.hostState.close();
     this.state.close();
     this.started = false;
+  }
+
+  private async closeServer(server: net.Server | null): Promise<void> {
+    const closed = new Promise<void>((resolve) => {
+      if (server === null || !server.listening) {
+        resolve();
+        return;
+      }
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    for (const socket of this.sockets) socket.destroy();
+    await closed;
+    this.sockets.clear();
   }
 
   private recoverPreviousHost(previousHostId: string | null, hostEpoch: number): void {
@@ -324,14 +355,34 @@ export class WorkflowHost {
     if (process.platform !== "win32") fs.rmSync(this.socketPath, { force: true });
     const server = net.createServer((socket) => this.handleConnection(socket));
     this.server = server;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        server.off("listening", onListening);
+        server.off("error", onError);
+      };
+      const onListening = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      server.once("listening", onListening);
+      server.once("error", onError);
+      try {
+        server.listen(this.socketPath);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
     server.on("error", (error) => this.log(`socket error: ${errorMessage(error)}`));
-    server.listen(this.socketPath);
-    await once(server, "listening");
     if (process.platform !== "win32") fs.chmodSync(this.socketPath, 0o600);
   }
 
   private handleConnection(socket: Socket): void {
-    this.connections += 1;
+    this.sockets.add(socket);
     const decoder = new NdjsonFrameDecoder();
     let processing = Promise.resolve();
     socket.on("data", (chunk: Buffer) => {
@@ -355,7 +406,7 @@ export class WorkflowHost {
       }
     });
     socket.on("close", () => {
-      this.connections = Math.max(0, this.connections - 1);
+      this.sockets.delete(socket);
     });
   }
 
@@ -500,7 +551,7 @@ export class WorkflowHost {
         return this.publishInteractionUpdate(request);
       }
       case "interaction.submit":
-        return this.submitInteraction(request, true);
+        return this.submitInteraction(request);
       case "decision.answer":
         return this.answerDecision(request, afterCommit);
     }
@@ -583,7 +634,7 @@ export class WorkflowHost {
       heartbeatAt: host.heartbeatAt,
       expiresAt: host.expiresAt,
       activeWorkers: this.activeRuns.size,
-      connectedClients: this.connections,
+      connectedClients: this.sockets.size,
       queuedRuns: count("SELECT COUNT(*) AS count FROM run_queue WHERE status = 'queued'"),
       runningRuns: count(
         "SELECT COUNT(*) AS count FROM run_queue WHERE status IN ('starting', 'running')",
@@ -1024,10 +1075,7 @@ export class WorkflowHost {
     }
   }
 
-  private submitInteraction(
-    request: HostRequest,
-    accepted: boolean,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  private submitInteraction(request: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
     const payload = requireRecord(request.payload, "interaction payload");
     const requestId = requireString(payload.requestId, "requestId");
     const current = this.hostState.getInteraction(requestId);
@@ -1044,25 +1092,26 @@ export class WorkflowHost {
     ) {
       return { outcome: "conflict", error: "Interactive request attempt is stale" };
     }
-    const submission = this.hostState.submitInteraction({
+    const submissionId = requireString(payload.submissionId, "submissionId");
+    const submission = this.hostState.beginInteractionValidation({
       requestId,
-      submissionId: requireString(payload.submissionId, "submissionId"),
+      submissionId,
       idempotencyKey: request.idempotencyKey,
       expectedRevision: requireNonNegativeInteger(request.expectedRevision, "expectedRevision"),
       payload: (payload.value ?? null) as JsonValue,
-      accepted,
       receipt: {
         operation: request.operation,
         requestId,
-        submissionId: requireString(payload.submissionId, "submissionId"),
+        submissionId,
+        status: "validating",
       },
     });
     const interaction = submission.interaction;
-    if (accepted && this.activeRuns.has(interaction.runId)) {
+    if (this.activeRuns.has(interaction.runId) || this.activationTasks.has(interaction.runId)) {
       this.pendingResumes.add(interaction.runId);
-    } else if (accepted) {
+    } else {
       const token = randomUUID();
-      const claimed = this.queue.claimWorkflowRun({
+      const claimed = this.queue.claimWorkflowRunForInteractionValidation({
         runId: interaction.runId,
         runnerId: this.hostId,
         claimToken: token,
@@ -1600,7 +1649,12 @@ export class WorkflowHost {
       if (this.activationTasks.get(record.runId) === task) {
         this.activationTasks.delete(record.runId);
       }
-      if (!this.stopping) setImmediate(() => void this.claimOne());
+      if (this.stopping) return;
+      if (this.pendingResumes.delete(record.runId)) {
+        setImmediate(() => void this.resumePendingRun(record.runId));
+      } else {
+        setImmediate(() => void this.claimOne());
+      }
     });
     this.activationTasks.set(record.runId, task);
     return task;
@@ -1675,7 +1729,11 @@ export class WorkflowHost {
         signal: result.signal,
         ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }),
       });
-      if (result.outcome !== "exited" && active.control === undefined) {
+      if (
+        active.control === undefined &&
+        (result.outcome !== "exited" ||
+          this.hostState.validatingInteraction(active.record.runId) !== undefined)
+      ) {
         await this.recoverWorkerExit(active, result.outcome);
       }
     } catch (error) {
@@ -1696,8 +1754,24 @@ export class WorkflowHost {
       if (active.control === undefined) await this.recoverWorkerExit(active, "crashed");
     } finally {
       this.activeRuns.delete(runId);
-      this.pendingResumes.delete(runId);
     }
+  }
+
+  private async resumePendingRun(runId: string): Promise<void> {
+    if (this.stopping || this.claim === null) return;
+    const token = randomUUID();
+    const claimed = this.queue.claimWorkflowRunForInteractionValidation({
+      runId,
+      runnerId: this.hostId,
+      claimToken: token,
+      leaseMs: this.runClaimLeaseMs,
+    });
+    if (claimed === undefined) {
+      await this.claimOne();
+      return;
+    }
+    this.pendingStarts.add(runId);
+    await this.activateRun(claimed, token);
   }
 
   private async handleWorkerMessage(message: WorkerMessage): Promise<WorkerResponse> {
@@ -1731,6 +1805,9 @@ export class WorkflowHost {
       this.queue.markWorkflowRunRunning({ runId: message.runId, claimToken: active.claimToken });
       const revision = this.runStore.synchronizeRevision(message.runId);
       const current = this.queue.getWorkflowRun(message.runId);
+      const candidateInteraction =
+        this.hostState.acceptedInteraction(message.runId) ??
+        this.hostState.validatingInteraction(message.runId);
       return workerResponse(
         message,
         "accepted",
@@ -1741,9 +1818,7 @@ export class WorkflowHost {
           parentRunId: active.record.parentRunId,
           originSessionId: active.record.originSessionId,
           stateDirectory: this.stateDirectory,
-          ...(this.hostState.acceptedInteraction(message.runId) === undefined
-            ? {}
-            : { acceptedInteraction: this.hostState.acceptedInteraction(message.runId) }),
+          ...(candidateInteraction === undefined ? {} : { candidateInteraction }),
           ...(this.options.piArgs === undefined ? {} : { piArgs: this.options.piArgs }),
         } as JsonValue,
         undefined,
@@ -1784,7 +1859,7 @@ export class WorkflowHost {
           );
           break;
         case "store.prepareRunResume":
-          await this.prepareAcceptedInteractionResume(message.runId);
+          await this.prepareInteractionResume(message.runId);
           result = await this.runStore.prepareRunResume(message.runId);
           break;
         case "store.readRun":
@@ -1876,6 +1951,12 @@ export class WorkflowHost {
           result = null;
           break;
         }
+        case "interaction.accept":
+          result = this.acceptWorkerInteraction(message, payload);
+          break;
+        case "interaction.reject":
+          result = this.rejectWorkerInteraction(active, message, payload);
+          break;
         case "notification.request":
           result = this.enqueueWorkerNotification(active, message, payload);
           break;
@@ -1906,6 +1987,101 @@ export class WorkflowHost {
     } catch (error) {
       return workerResponse(message, "rejected", undefined, errorMessage(error));
     }
+  }
+
+  private acceptWorkerInteraction(
+    message: WorkerMessage,
+    payload: Record<string, unknown>,
+  ): InteractiveSubmissionRecord {
+    const candidate = this.requireWorkerInteraction(message, payload, true);
+    return this.hostState.finishInteractionValidation({
+      requestId: candidate.requestId,
+      submissionId: candidate.submissionId,
+      accepted: true,
+      receipt: { status: "accepted" },
+    });
+  }
+
+  private rejectWorkerInteraction(
+    active: ActiveRun,
+    message: WorkerMessage,
+    payload: Record<string, unknown>,
+  ): InteractiveSubmissionRecord {
+    const candidate = this.requireWorkerInteraction(message, payload, false);
+    return this.settleRejectedInteraction(
+      active,
+      candidate,
+      requireString(payload.error, "interaction validation error"),
+    );
+  }
+
+  private requireWorkerInteraction(
+    message: WorkerMessage,
+    payload: Record<string, unknown>,
+    acceptSettled: boolean,
+  ) {
+    const candidate =
+      this.hostState.validatingInteraction(message.runId) ??
+      (acceptSettled ? this.hostState.acceptedInteraction(message.runId) : undefined);
+    if (
+      candidate === undefined ||
+      candidate.requestId !== requireString(payload.requestId, "interaction requestId") ||
+      candidate.submissionId !== requireString(payload.submissionId, "interaction submissionId") ||
+      candidate.attemptId !== message.attemptId ||
+      candidate.attemptId !== requireString(payload.attemptId, "interaction attemptId")
+    ) {
+      throw new Error("Interactive submission does not match the worker candidate");
+    }
+    return candidate;
+  }
+
+  private settleRejectedInteraction(
+    active: ActiveRun,
+    candidate: {
+      requestId: string;
+      submissionId: string;
+      attemptId: string;
+    },
+    error: string,
+  ): InteractiveSubmissionRecord {
+    const result = this.state.transaction(() => {
+      const submission = this.hostState.finishInteractionValidation({
+        requestId: candidate.requestId,
+        submissionId: candidate.submissionId,
+        accepted: false,
+        receipt: { status: "rejected", error },
+      });
+      const now = Date.now();
+      this.state.connection
+        .prepare(
+          `UPDATE node_attempts SET status = 'waiting', updated_at = ?
+           WHERE attempt_id = ? AND run_id = ? AND status IN ('running', 'interrupted')`,
+        )
+        .run(now, candidate.attemptId, active.record.runId);
+      this.state.connection
+        .prepare(
+          `UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ?
+           WHERE run_id = ? AND status = 'running'`,
+        )
+        .run(error, now, now, active.record.runId);
+      if (
+        !this.queue.parkWorkflowRun({
+          runId: active.record.runId,
+          claimToken: active.claimToken,
+        })
+      ) {
+        throw new Error("Rejected interaction could not release the run claim");
+      }
+      recordViewerDeltas(
+        this.state,
+        active.record.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }, { targetType: "conversation" }],
+        now,
+      );
+      return submission;
+    });
+    active.control = "handoff";
+    return result;
   }
 
   private enqueueWorkerNotification(
@@ -2029,9 +2205,10 @@ export class WorkflowHost {
     });
   }
 
-  private async prepareAcceptedInteractionResume(runId: string): Promise<void> {
+  private async prepareInteractionResume(runId: string): Promise<void> {
     const accepted = this.hostState.acceptedInteraction(runId);
-    if (accepted === undefined) return;
+    const candidate = accepted ?? this.hostState.validatingInteraction(runId);
+    if (candidate === undefined) return;
     const loaded = this.runStore.readRun(runId);
     if (loaded === null || loaded.state.status !== "waiting") return;
     loaded.state.status = "running";
@@ -2039,12 +2216,12 @@ export class WorkflowHost {
     delete loaded.state.finishedAt;
     await this.runStore.writeSnapshot(runId, loaded.state, {
       scope: "node",
-      type: "interaction_accepted",
-      nodeId: accepted.nodeId,
-      attemptId: accepted.attemptId,
+      type: accepted === undefined ? "interaction_validation_started" : "interaction_accepted",
+      nodeId: candidate.nodeId,
+      attemptId: candidate.attemptId,
       payload: {
-        requestId: accepted.requestId,
-        submissionId: accepted.submissionId,
+        requestId: candidate.requestId,
+        submissionId: candidate.submissionId,
       },
     });
   }
@@ -2246,6 +2423,16 @@ export class WorkflowHost {
         return;
       }
       this.log(`run ${active.record.runId} parked for ambiguous effect recovery`);
+      return;
+    }
+    const validating = this.hostState.validatingInteraction(active.record.runId);
+    if (validating !== undefined) {
+      this.settleRejectedInteraction(
+        active,
+        validating,
+        `Workflow worker ${outcome} before it completed interaction validation`,
+      );
+      this.log(`run ${active.record.runId} rejected an interrupted interaction validation`);
       return;
     }
     this.queue.parkWorkflowRun({ runId: active.record.runId, claimToken: active.claimToken });
