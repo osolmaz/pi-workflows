@@ -128,8 +128,10 @@ on-demand process. No command installs an operating-system service.
 
 A worker verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes
-from committed state through a host-backed store. If the worker stops, pure
-work can run again. A protected write checks and renews the exact live token and
+from committed state through a host-backed store. A headless Pi child uses its
+own registered process group. The worker stops that group on normal completion,
+and the host reaps it if the worker exits first. If the worker stops, pure work
+can run again. A protected write checks and renews the exact live token and
 generation in one transaction. An expired or replaced owner cannot revive
 itself.
 

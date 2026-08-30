@@ -55,7 +55,12 @@ import type {
   ControllerWorkerResponse,
 } from "./controller-worker-protocol.js";
 import { ControllerWorkerSupervisor } from "./controller-worker-supervisor.js";
-import { HostProcessRegistry, matchesProcessIdentity, processStartIdentity } from "./processes.js";
+import {
+  HostProcessRegistry,
+  matchesProcessIdentity,
+  processParentPid,
+  processStartIdentity,
+} from "./processes.js";
 import {
   encodeProtocolLine,
   hostSocketPath,
@@ -107,6 +112,7 @@ type ActiveRun = {
   claimToken: string;
   generation: number;
   supervisor: WorkflowWorkerSupervisor;
+  workerPid?: number;
   exiting: boolean;
   control?: "cancel" | "pause" | "handoff";
   claimLost?: boolean;
@@ -148,6 +154,7 @@ export class WorkflowHost {
   private readonly runStore: WorkflowRunStore;
   private readonly registry: HostProcessRegistry;
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly workerDescendants = new Map<string, Set<number>>();
   private readonly activeControllers = new Map<string, ActiveController>();
   private readonly controlClaims = new Map<string, string>();
   private readonly activationTasks = new Map<string, Promise<void>>();
@@ -1788,6 +1795,7 @@ export class WorkflowHost {
       protocolVersion: 1,
     };
     this.hostState.recordWorkerStart(envelope, this.claim.epoch);
+    let active: ActiveRun;
     const supervisor = new WorkflowWorkerSupervisor(envelope, {
       registry: this.registry,
       onMessage: async (message) => await this.handleWorkerMessage(message),
@@ -1798,15 +1806,17 @@ export class WorkflowHost {
       ...(this.options.workerStartupTimeoutMs === undefined
         ? {}
         : { startupTimeoutMs: this.options.workerStartupTimeoutMs }),
-      onSpawn: (identity) =>
+      onSpawn: (identity) => {
+        active.workerPid = identity.pid;
         this.hostState.attachWorkerProcess(
           envelope.workerEpoch,
           identity.pid,
           identity.startIdentity,
-        ),
+        );
+      },
       onDiagnostic: (message) => this.log(`worker ${envelope.workerEpoch}: ${message}`),
     });
-    const active: ActiveRun = { record, claimToken, generation, supervisor, exiting: false };
+    active = { record, claimToken, generation, supervisor, exiting: false };
     this.activeRuns.set(runId, active);
     this.clearPendingStart(runId, claimToken);
     try {
@@ -1856,6 +1866,7 @@ export class WorkflowHost {
       }
       if (active.control === undefined) await this.recoverWorkerExit(active, "crashed");
     } finally {
+      this.reapWorkerDescendants(envelope.workerEpoch);
       this.activeRuns.delete(runId);
     }
   }
@@ -1935,6 +1946,9 @@ export class WorkflowHost {
     if (message.operation === "worker.exiting") {
       active.exiting = true;
       return workerResponse(message, "accepted", {});
+    }
+    if (message.operation === "process.register" || message.operation === "process.unregister") {
+      return this.handleWorkerProcessOperation(active, message);
     }
     const currentRevision = runRevision(this.state, message.runId);
     if (message.expectedRevision !== currentRevision) {
@@ -2094,6 +2108,54 @@ export class WorkflowHost {
     } catch (error) {
       return workerResponse(message, "rejected", undefined, errorMessage(error));
     }
+  }
+
+  private handleWorkerProcessOperation(active: ActiveRun, message: WorkerMessage): WorkerResponse {
+    if (
+      message.operation === "process.register" &&
+      !this.queue.verifyWorkflowRunClaim({ runId: message.runId, claimToken: active.claimToken })
+    ) {
+      active.claimLost = true;
+      setImmediate(() => void active.supervisor.stop("claimLost"));
+      return workerResponse(message, "claimLost", undefined, "Run claim expired");
+    }
+    try {
+      const payload = requireRecord(message.payload, "worker process payload");
+      const pid = requireNonNegativeInteger(payload.pid, "pid");
+      if (pid === 0) throw new Error("Worker process PID must be positive");
+      const owned = this.workerDescendants.get(message.workerEpoch);
+      if (message.operation === "process.unregister") {
+        if (owned?.has(pid) !== true) {
+          throw new Error("Worker process is not registered to this worker epoch");
+        }
+        this.registry.unregister(pid);
+        owned.delete(pid);
+        if (owned.size === 0) this.workerDescendants.delete(message.workerEpoch);
+        return workerResponse(message, "accepted", { pid });
+      }
+      if (active.workerPid === undefined || processParentPid(pid) !== active.workerPid) {
+        throw new Error("Worker process is not a direct child of the active worker");
+      }
+      for (const [workerEpoch, pids] of this.workerDescendants) {
+        if (workerEpoch !== message.workerEpoch && pids.has(pid)) {
+          throw new Error("Worker process is already registered to another worker epoch");
+        }
+      }
+      this.registry.register(pid);
+      const descendants = owned ?? new Set<number>();
+      descendants.add(pid);
+      this.workerDescendants.set(message.workerEpoch, descendants);
+      return workerResponse(message, "accepted", { pid });
+    } catch (error) {
+      return workerResponse(message, "rejected", undefined, errorMessage(error));
+    }
+  }
+
+  private reapWorkerDescendants(workerEpoch: string): void {
+    const descendants = this.workerDescendants.get(workerEpoch);
+    if (descendants === undefined) return;
+    this.workerDescendants.delete(workerEpoch);
+    for (const pid of descendants) this.registry.kill(pid);
   }
 
   private acceptWorkerInteraction(

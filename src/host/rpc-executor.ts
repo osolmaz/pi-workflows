@@ -7,7 +7,6 @@ import type {
   AgentStepRequest,
   AgentStepSubmission,
 } from "../workflows/types.js";
-import type { HostProcessRegistry } from "./processes.js";
 import { RPC_SUBMISSION_PREFIX } from "./rpc-bridge.js";
 
 // Production resolves the compiled .js; tests and dev checkouts load the .ts
@@ -15,7 +14,7 @@ import { RPC_SUBMISSION_PREFIX } from "./rpc-bridge.js";
 const BRIDGE_PATH = ["./rpc-bridge.js", "./rpc-bridge.ts"]
   .map((candidate) => fileURLToPath(new URL(candidate, import.meta.url)))
   .find((candidate) => fs.existsSync(candidate));
-const ABORT_GRACE_MS = 3_000;
+const DEFAULT_ABORT_GRACE_MS = 3_000;
 
 type StepSubmission = {
   action: "submit";
@@ -34,11 +33,18 @@ type StepUpdate = {
 
 type StepAction = StepSubmission | StepUpdate;
 
+export interface SupervisedProcessRegistry {
+  register(pid: number): unknown | Promise<unknown>;
+  unregister(pid: number): unknown | Promise<unknown>;
+}
+
 export type RpcStepExecutorOptions = {
   cwd: string;
-  registry?: HostProcessRegistry;
-  /** Start a separate process group, or inherit the supervised worker group. */
+  registry?: SupervisedProcessRegistry;
+  /** Start a separate process group, or inherit the caller's process group. */
   processGroup?: "own" | "inherit";
+  /** Grace period before a process group receives SIGKILL. */
+  abortGraceMs?: number;
   /** Absolute path to the pi binary; defaults to the installed `pi`. */
   piBin?: string;
   /** Extra environment for the child; the host's environment is inherited. */
@@ -65,6 +71,8 @@ export class RpcStepExecutor implements AgentStepExecutor {
   private actions: StepAction[] = [];
   private submissionWaiters: Array<() => void> = [];
   private stdoutBuffer = "";
+  private registeredPid: number | null = null;
+  private closePromise: Promise<void> | null = null;
 
   constructor(options: RpcStepExecutorOptions) {
     this.options = options;
@@ -72,7 +80,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
   }
 
   async runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission> {
-    this.ensureStarted();
+    await this.ensureStarted();
     let prompt = request.prompt;
     for (;;) {
       throwIfAborted(signal);
@@ -90,38 +98,41 @@ export class RpcStepExecutor implements AgentStepExecutor {
     }
   }
 
-  /** Stop the child's whole process group, then unregister it. */
+  /** Stop the child process tree, then unregister its exact group leader. */
   async close(): Promise<void> {
+    this.closePromise ??= this.closeChild();
+    await this.closePromise;
+  }
+
+  private async closeChild(): Promise<void> {
     const child = this.child;
     this.child = null;
-    if (child === null) {
-      return;
-    }
+    if (child === null) return;
     const pid = child.pid;
-    if (this.childExited === null) {
+    try {
       try {
         child.stdin?.end();
       } catch {
         // The pipe may already be closed.
       }
-      // The child spawns in its own group; tool calls can leave
-      // grandchildren that leader-only signals would orphan forever.
-      if (pid !== undefined) {
+      const ownGroup = this.options.processGroup !== "inherit";
+      if (pid !== undefined && ownGroup) {
         killGroup(pid, "SIGTERM");
-      } else {
+        const exited = await waitForGroupExit(
+          pid,
+          this.options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS,
+        );
+        if (!exited) killGroup(pid, "SIGKILL");
+      } else if (this.childExited === null) {
         child.kill("SIGTERM");
+        const exited = await waitForExit(
+          child,
+          this.options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS,
+        );
+        if (!exited) child.kill("SIGKILL");
       }
-      const exited = await waitForExit(child, ABORT_GRACE_MS);
-      if (!exited) {
-        if (pid !== undefined) {
-          killGroup(pid, "SIGKILL");
-        } else {
-          child.kill("SIGKILL");
-        }
-      }
-    }
-    if (pid !== undefined) {
-      this.options.registry?.unregister(pid);
+    } finally {
+      await this.unregisterChild();
     }
   }
 
@@ -129,7 +140,8 @@ export class RpcStepExecutor implements AgentStepExecutor {
     return this.childExited;
   }
 
-  private ensureStarted(): void {
+  private async ensureStarted(): Promise<void> {
+    if (this.closePromise !== null) throw new Error("Headless pi session is closed");
     if (this.child !== null) {
       const exited = this.currentExit();
       if (exited !== null) {
@@ -161,20 +173,12 @@ export class RpcStepExecutor implements AgentStepExecutor {
         cwd: this.options.cwd,
         env: { ...process.env, ...this.options.env },
         stdio: ["pipe", "pipe", "pipe"],
-        // Hosted workers inherit the worker group, so one host signal reaches
-        // the complete process tree. Standalone callers keep an owned group.
         detached: this.options.processGroup !== "inherit",
       },
     );
     this.child = child;
-    if (child.pid !== undefined) {
-      this.options.registry?.register(child.pid);
-    }
     child.on("exit", (code, signal) => {
       this.childExited = { code, signal };
-      if (child.pid !== undefined) {
-        this.options.registry?.unregister(child.pid);
-      }
       this.wakeSubmissionWaiters();
     });
     // A failed spawn (missing binary, EACCES) emits error instead of exit;
@@ -215,6 +219,23 @@ export class RpcStepExecutor implements AgentStepExecutor {
     child.stdout?.on("data", (chunk: Buffer) => {
       this.stdoutBuffer = (this.stdoutBuffer + chunk.toString("utf8")).slice(-64 * 1024);
     });
+    if (child.pid !== undefined && this.options.registry !== undefined) {
+      try {
+        await this.options.registry.register(child.pid);
+        this.registeredPid = child.pid;
+      } catch (error) {
+        killGroup(child.pid, "SIGKILL");
+        this.child = null;
+        throw error;
+      }
+    }
+  }
+
+  private async unregisterChild(): Promise<void> {
+    const pid = this.registeredPid;
+    if (pid === null) return;
+    this.registeredPid = null;
+    await this.options.registry?.unregister(pid);
   }
 
   private async promptForSubmission(
@@ -309,6 +330,25 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw (signal.reason as unknown) ?? new Error("Workflow step aborted");
+  }
+}
+
+async function waitForGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  if (process.platform === "win32") return true;
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 

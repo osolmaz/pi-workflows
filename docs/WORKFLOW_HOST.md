@@ -168,7 +168,7 @@ A worker exit is not automatically a run failure. The host decides from the last
 
 ## Process supervision
 
-Each worker starts in its own process group.
+Each worker starts in its own process group. A headless Pi child starts in another process group so normal worker completion can stop all Pi tool descendants without signaling the worker itself. The worker registers that direct child with the host before it sends a prompt and unregisters it only after group shutdown. The host owns the one process registry and reaps a registered child if its worker exits first.
 
 The host enforces:
 
@@ -183,7 +183,7 @@ The host enforces:
 
 The child protocol must apply backpressure. A child that exceeds message or output limits fails its worker epoch with a clear infrastructure reason. The complete durable workflow result stays in SQLite within the existing value limits.
 
-The process registry must include a process start identity, not only a PID. A reused PID must not let a new host kill an unrelated process.
+The process registry includes a process start identity, not only a PID. The host accepts a worker registration only when the PID is a direct child of that active worker. A reused PID cannot let a new host kill an unrelated process.
 
 ## Local client protocol
 
@@ -277,7 +277,7 @@ The private worker channel accepts these message kinds:
 - `worker.progress`
 - `worker.exiting`
 
-Every worker message includes the worker launch schema, run ID, generation, worker epoch, attempt ID when applicable, expected revision, and a stable message ID.
+Every worker message includes the worker launch schema, run ID, generation, worker epoch, attempt ID when applicable, expected revision, and a stable message ID. Headless workers use `process.register` and `process.unregister` operations under `worker.progress` to attach their Pi child group to host supervision. Registration requires the live run claim. Unregistration remains valid after a terminal state releases that claim so cleanup can finish.
 
 The host checks the generation and epoch before it reads the payload. A stale worker gets one claim-loss response and must exit. The host stores receipts for accepted state-changing messages so a retry receives the same answer.
 

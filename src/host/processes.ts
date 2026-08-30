@@ -44,6 +44,19 @@ export class HostProcessRegistry {
     return this.processes.size;
   }
 
+  /** Kill one exact registered process group and remove its durable record. */
+  kill(pid: number): boolean {
+    const identity = this.processes.get(pid);
+    if (identity === undefined) return false;
+    if (matchesProcessIdentity(identity)) {
+      killProcessGroup(identity.pid, "SIGTERM");
+      if (matchesProcessIdentity(identity)) killProcessGroup(identity.pid, "SIGKILL");
+    }
+    this.processes.delete(pid);
+    this.persist();
+    return true;
+  }
+
   /** Kill every process that still has its registered start identity. */
   killAll(): void {
     for (const identity of this.processes.values()) {
@@ -96,19 +109,56 @@ export class HostProcessRegistry {
   }
 }
 
+/** Return the operating-system parent PID for a live process. */
+export function processParentPid(pid: number): number | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (process.platform === "linux") {
+    try {
+      const fields = linuxStatFields(pid);
+      const parentPid = Number(fields[1]);
+      return Number.isSafeInteger(parentPid) && parentPid > 0 ? parentPid : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === "win32") {
+    try {
+      const parentPid = Number(
+        execFileSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").ParentProcessId`,
+          ],
+          { encoding: "utf8", timeout: 2_000, windowsHide: true },
+        ).trim(),
+      );
+      return Number.isSafeInteger(parentPid) && parentPid > 0 ? parentPid : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const parentPid = Number(
+      execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+        encoding: "utf8",
+        timeout: 2_000,
+      }).trim(),
+    );
+    return Number.isSafeInteger(parentPid) && parentPid > 0 ? parentPid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Return an operating-system process start value that fences PID reuse. */
 export function processStartIdentity(pid: number): string | undefined {
   if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
   if (process.platform === "linux") {
     try {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-      const commandEnd = stat.lastIndexOf(")");
-      if (commandEnd < 0) return undefined;
-      const fieldsAfterCommand = stat
-        .slice(commandEnd + 2)
-        .trim()
-        .split(/\s+/);
-      const startTicks = fieldsAfterCommand[19];
+      const startTicks = linuxStatFields(pid)[19];
       if (startTicks !== undefined) return `linux-proc-start:${startTicks}`;
     } catch {
       return undefined;
@@ -140,6 +190,16 @@ export function processStartIdentity(pid: number): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function linuxStatFields(pid: number): string[] {
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+  const commandEnd = stat.lastIndexOf(")");
+  if (commandEnd < 0) throw new Error(`Linux process stat is invalid: ${pid}`);
+  return stat
+    .slice(commandEnd + 2)
+    .trim()
+    .split(/\s+/);
 }
 
 export function matchesProcessIdentity(identity: ProcessIdentity): boolean {
