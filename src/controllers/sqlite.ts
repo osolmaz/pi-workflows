@@ -232,6 +232,13 @@ type EffectRow = {
   errorHash: Buffer | null;
 };
 
+type CancelledRunEffectRow = {
+  effectId: string;
+  resourceId: string;
+  status: "pending" | "applying";
+  attemptCount: number;
+};
+
 type WorkflowRow = {
   requestId: string;
   resourceUid: string;
@@ -1636,27 +1643,7 @@ export class SqliteControllerStore implements ControllerStore {
       if (run.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent durable state`);
       }
-      this.state.connection
-        .prepare(
-          `UPDATE node_attempts
-           SET status = 'cancelled', error_hash = COALESCE(error_hash, ?),
-               updated_at = ?, finished_at = COALESCE(finished_at, ?)
-           WHERE run_id = ? AND status IN ('pending', 'running', 'waiting')`,
-        )
-        .run(errorHash, now, now, options.runId);
-      this.state.connection
-        .prepare(
-          `INSERT INTO human_decision_resolutions(
-             decision_id, outcome, provenance, response_hash, reason, channel,
-             actor_id, request_digest, resolved_at
-           )
-           SELECT d.decision_id, 'cancelled', 'explicit_cancel', NULL,
-                  'Workflow run cancelled', NULL, ?, d.request_digest, ?
-           FROM human_decisions d
-           LEFT JOIN human_decision_resolutions r ON r.decision_id = d.decision_id
-           WHERE d.run_id = ? AND r.decision_id IS NULL`,
-        )
-        .run(controlId, now, options.runId);
+      this.cancelWorkflowRunDependents(options.runId, controlId, errorHash, now);
 
       const released = this.state.connection
         .prepare(
@@ -2886,6 +2873,14 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE run_id = ?`,
         )
         .run(status, errorHash, now, now, runId);
+      if (status === "cancelled") {
+        this.cancelWorkflowRunDependents(
+          runId,
+          lease.ownerId ?? "workflow-control",
+          errorHash,
+          now,
+        );
+      }
       this.bumpResource(row.resourceId, revision, now);
       this.insertEvent(
         row.resourceId,
@@ -2897,8 +2892,108 @@ export class SqliteControllerStore implements ControllerStore {
         now,
         lease.generation || undefined,
       );
+      recordViewerDeltas(
+        this.state,
+        runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
       return true;
     });
+  }
+
+  private cancelWorkflowRunDependents(
+    runId: string,
+    actorId: string,
+    errorHash: Buffer,
+    now: number,
+  ): void {
+    this.state.connection
+      .prepare(
+        `UPDATE node_attempts
+         SET status = 'cancelled', error_hash = COALESCE(error_hash, ?),
+             updated_at = ?, finished_at = COALESCE(finished_at, ?)
+         WHERE run_id = ? AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
+      )
+      .run(errorHash, now, now, runId);
+
+    const effects = this.state.connection
+      .prepare(
+        `SELECT e.effect_id AS effectId, e.resource_id AS resourceId,
+                e.status, e.attempt_count AS attemptCount
+         FROM effects e JOIN runs r ON r.resource_id = e.source_resource_id
+         WHERE r.run_id = ? AND e.owner_scope = 'run' AND e.status IN ('pending', 'applying')
+         ORDER BY e.effect_id`,
+      )
+      .all(runId)
+      .filter(isCancelledRunEffectRow);
+    for (const effect of effects) {
+      const status = effect.status === "applying" ? "ambiguous" : "cancelled";
+      const revision = this.resourceRevision(effect.resourceId);
+      const changed = this.state.connection
+        .prepare(
+          `UPDATE effects
+           SET status = ?, next_attempt_at = NULL, error_hash = ?, updated_at = ?, settled_at = ?
+           WHERE effect_id = ? AND status = ? AND attempt_count = ?`,
+        )
+        .run(status, errorHash, now, now, effect.effectId, effect.status, effect.attemptCount);
+      /* istanbul ignore if -- cancellation serializes the selected effect transition */
+      if (changed.changes !== 1) {
+        throw new Error(`Workflow effect ${effect.effectId} changed during cancellation`);
+      }
+      if (effect.status === "applying") {
+        this.state.connection
+          .prepare(
+            `UPDATE effect_attempts
+             SET finished_at = ?, outcome = 'interrupted', error_hash = ?
+             WHERE effect_id = ? AND attempt_number = ? AND finished_at IS NULL`,
+          )
+          .run(now, errorHash, effect.effectId, effect.attemptCount);
+      }
+      this.bumpResource(effect.resourceId, revision, now);
+      this.insertEvent(
+        effect.resourceId,
+        revision + 1,
+        `effect.${status}`,
+        "control",
+        actorId,
+        { runId, reason: "workflowCancelled" },
+        now,
+      );
+    }
+
+    this.state.connection
+      .prepare(
+        `INSERT INTO human_decision_resolutions(
+           decision_id, outcome, provenance, response_hash, reason, channel,
+           actor_id, request_digest, resolved_at
+         )
+         SELECT d.decision_id, 'cancelled', 'explicit_cancel', NULL,
+                'Workflow run cancelled', NULL, ?, d.request_digest, ?
+         FROM human_decisions d
+         LEFT JOIN human_decision_resolutions r ON r.decision_id = d.decision_id
+         WHERE d.run_id = ? AND r.decision_id IS NULL`,
+      )
+      .run(actorId, now, runId);
+    const receiptHash = this.state.putJson(
+      { status: "rejected", error: "Workflow run cancelled" },
+      now,
+    );
+    this.state.connection
+      .prepare(
+        `UPDATE interactive_submissions SET outcome = 'rejected', receipt_hash = ?
+         WHERE outcome = 'validating'
+           AND request_id IN (SELECT request_id FROM interactive_requests WHERE run_id = ?)`,
+      )
+      .run(receiptHash, runId);
+    this.state.connection
+      .prepare(
+        `UPDATE interactive_requests
+         SET status = 'cancelled', presenter_id = NULL,
+             presentation_claim_expires_at = NULL, revision = revision + 1, updated_at = ?
+         WHERE run_id = ? AND status IN ('pending', 'presenting')`,
+      )
+      .run(now, runId);
   }
 
   private turnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
@@ -3302,6 +3397,15 @@ function isRunSourceIdentityRow(value: unknown): value is RunSourceIdentityRow {
 }
 function isEffectRow(value: unknown): value is EffectRow {
   return isRecord(value);
+}
+function isCancelledRunEffectRow(value: unknown): value is CancelledRunEffectRow {
+  return (
+    isRecord(value) &&
+    typeof value.effectId === "string" &&
+    typeof value.resourceId === "string" &&
+    (value.status === "pending" || value.status === "applying") &&
+    typeof value.attemptCount === "number"
+  );
 }
 function isWorkflowRow(value: unknown): value is WorkflowRow {
   return isRecord(value);

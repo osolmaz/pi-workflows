@@ -7,7 +7,7 @@ import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { WorkflowHostClient } from "../src/host/client.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
-import { HostStateStore } from "../src/host/state.js";
+import { HostStateStore, type InteractiveRequestRecord } from "../src/host/state.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeComputeWorkflow(cwd: string): Promise<string> {
@@ -25,6 +25,69 @@ export default defineWorkflow({
 });\n`,
   );
   return workflowPath;
+}
+
+async function writeInteractiveWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "interactive.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-interactive",
+  startAt: "ask",
+  nodes: {
+    ask: agent({ prompt: () => "Return a result." }),
+    done: compute({ run: ({ outputs }) => outputs.ask }),
+  },
+  edges: [{ from: "ask", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeIncludedInteractiveWorkflow(
+  cwd: string,
+): Promise<{ workflowPath: string; childPath: string }> {
+  const childPath = path.join(cwd, "child.workflow.ts");
+  const workflowPath = path.join(cwd, "included.workflow.ts");
+  await fs.writeFile(
+    childPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-included-child",
+  startAt: "ask",
+  exits: { done: { from: "finish" } },
+  nodes: {
+    ask: agent({ prompt: () => "Return a child result." }),
+    finish: compute({ run: ({ outputs }) => outputs.ask }),
+  },
+  edges: [{ from: "ask", to: "finish" }],
+});\n`,
+  );
+  await fs.writeFile(
+    workflowPath,
+    `import { compute, defineWorkflow, includeWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-included-parent",
+  startAt: "start",
+  includes: { child: includeWorkflow({ workflow: "./child.workflow.ts" }) },
+  nodes: {
+    start: compute({ run: () => ({}) }),
+    done: compute({ run: ({ outputs }) => outputs.child }),
+  },
+  edges: [
+    { from: "start", to: "child" },
+    { from: "child.done", to: "done" },
+  ],
+});\n`,
+  );
+  return { workflowPath, childPath };
 }
 
 async function writeDeliveryWorkflow(cwd: string): Promise<string> {
@@ -63,6 +126,31 @@ export default defineWorkflow({
       run: () => {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 900);
         return { finished: true };
+      },
+    }),
+  },
+  edges: [],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeBlockingEffectWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "blocking-effect.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { action, defineWorkflow, manualEffect } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-blocking-effect",
+  startAt: "effect",
+  nodes: {
+    effect: action({
+      effect: manualEffect("test.host-blocking-effect"),
+      run: () => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
+        return { applied: true };
       },
     }),
   },
@@ -203,6 +291,332 @@ describe("global workflow host", () => {
     await expect(second.start()).rejects.toThrow(/host/i);
     await first.stop();
   });
+
+  it("recovers a validating submission when the host restarts before activation", async () => {
+    const cwd = await makeTempDir("host-validation-recovery-project");
+    const databasePath = path.join(
+      await makeTempDir("host-validation-recovery-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeInteractiveWorkflow(cwd);
+    const first = new WorkflowHost({ databasePath, runnerId: "host-first", claimPollMs: 10 });
+    await first.start();
+    await startRun({
+      client: new WorkflowHostClient({ databasePath }),
+      cwd,
+      workflowPath,
+      runId: "validation-recovery-run",
+      executionMode: "interactive",
+    });
+    let interaction: InteractiveRequestRecord | undefined;
+    await waitUntil(() => {
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        interaction = state.listPendingInteractions("host-test-session")[0];
+        return interaction !== undefined;
+      } finally {
+        state.close();
+      }
+    }, 30_000);
+    await first.stop();
+    if (interaction === undefined) throw new Error("interaction was not created");
+    const recoveredInteraction = interaction;
+    const state = new HostStateStore(databasePath);
+    state.beginInteractionValidation({
+      requestId: recoveredInteraction.requestId,
+      submissionId: "restart-submission",
+      idempotencyKey: "restart-submission",
+      expectedRevision: recoveredInteraction.revision,
+      payload: { output: { answer: "done" } },
+      receipt: { status: "validating" },
+    });
+    state.close();
+
+    const restarted = new WorkflowHost({
+      databasePath,
+      runnerId: "host-restarted",
+      claimPollMs: 10,
+    });
+    await restarted.start();
+    try {
+      await waitUntil(() => {
+        const observed = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          return (
+            observed.interactionSubmission(recoveredInteraction.requestId, "restart-submission")
+              ?.outcome === "accepted"
+          );
+        } finally {
+          observed.close();
+        }
+      }, 30_000);
+    } finally {
+      await restarted.stop();
+    }
+  }, 60_000);
+
+  it("rejects changed mounted source before the resumed child executes it", async () => {
+    const cwd = await makeTempDir("host-mounted-source-project");
+    const databasePath = path.join(await makeTempDir("host-mounted-source-state"), "state.sqlite");
+    const markerPath = path.join(cwd, "changed-source-executed");
+    const { workflowPath, childPath } = await writeIncludedInteractiveWorkflow(cwd);
+    const first = new WorkflowHost({
+      databasePath,
+      runnerId: "host-source-first",
+      claimPollMs: 10,
+    });
+    await first.start();
+    await startRun({
+      client: new WorkflowHostClient({ databasePath }),
+      cwd,
+      workflowPath,
+      runId: "mounted-source-run",
+      executionMode: "interactive",
+    });
+    let interaction: InteractiveRequestRecord | undefined;
+    await waitUntil(() => {
+      const observed = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        interaction = observed.listPendingInteractions("host-test-session")[0];
+        return interaction !== undefined;
+      } finally {
+        observed.close();
+      }
+    }, 30_000);
+    await first.stop();
+    if (interaction === undefined) throw new Error("interaction was not created");
+    const changedSourceInteraction = interaction;
+    const state = new HostStateStore(databasePath);
+    state.beginInteractionValidation({
+      requestId: changedSourceInteraction.requestId,
+      submissionId: "changed-source-submission",
+      idempotencyKey: "changed-source-submission",
+      expectedRevision: changedSourceInteraction.revision,
+      payload: { output: { answer: "done" } },
+      receipt: { status: "validating" },
+    });
+    state.close();
+    await fs.writeFile(
+      childPath,
+      `import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(markerPath)}, "executed");
+export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.workflow.ts"))};\n`,
+    );
+
+    const restarted = new WorkflowHost({
+      databasePath,
+      runnerId: "host-source-restarted",
+      claimPollMs: 10,
+    });
+    await restarted.start();
+    try {
+      await waitUntil(() => {
+        const observed = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          return (
+            observed.interactionSubmission(
+              changedSourceInteraction.requestId,
+              "changed-source-submission",
+            )?.outcome === "rejected"
+          );
+        } finally {
+          observed.close();
+        }
+      }, 30_000);
+      await expect(fs.access(markerPath)).rejects.toThrow();
+    } finally {
+      await restarted.stop();
+    }
+  }, 60_000);
+
+  it("commits active cancellation before it returns the durable receipt", async () => {
+    const cwd = await makeTempDir("host-cancel-project");
+    const databasePath = path.join(await makeTempDir("host-cancel-state"), "state.sqlite");
+    const workflowPath = await writeBlockingWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-client" });
+    await host.start();
+    try {
+      await startRun({ client, cwd, workflowPath, runId: "cancel-run" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("cancel-run")?.status === "running";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      const cancelled = await client.request({
+        operation: "run.cancel",
+        runId: "cancel-run",
+        requestId: "cancel-request",
+        idempotencyKey: "cancel-request",
+      });
+      expect(cancelled).toMatchObject({
+        outcome: "accepted",
+        receipt: { runId: "cancel-run", status: "cancelled" },
+      });
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        expect(store.getWorkflowRun("cancel-run")?.status).toBe("cancelled");
+      } finally {
+        store.close();
+      }
+      await expect(
+        client.request({
+          operation: "run.cancel",
+          runId: "cancel-run",
+          requestId: "cancel-request",
+          idempotencyKey: "cancel-request",
+        }),
+      ).resolves.toMatchObject({ outcome: "adopted", receipt: { status: "cancelled" } });
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("cancels a parked interaction in the same durable transition", async () => {
+    const cwd = await makeTempDir("host-cancel-interaction-project");
+    const databasePath = path.join(
+      await makeTempDir("host-cancel-interaction-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeInteractiveWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-interaction-client" });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "cancel-interaction-run",
+        executionMode: "interactive",
+      });
+      let interaction: InteractiveRequestRecord | undefined;
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          interaction = state.listPendingInteractions("host-test-session")[0];
+          const worker = state.state.connection
+            .prepare(
+              `SELECT status FROM run_workers
+               WHERE run_id = ? ORDER BY started_at DESC LIMIT 1`,
+            )
+            .get("cancel-interaction-run") as { status: string } | undefined;
+          return (
+            interaction !== undefined &&
+            worker !== undefined &&
+            !["starting", "ready", "running"].includes(worker.status)
+          );
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      if (interaction === undefined) throw new Error("interaction was not created");
+
+      await expect(
+        client.request({
+          operation: "run.cancel",
+          runId: "cancel-interaction-run",
+          requestId: "cancel-interaction-request",
+          idempotencyKey: "cancel-interaction-request",
+        }),
+      ).resolves.toMatchObject({
+        outcome: "accepted",
+        receipt: { runId: "cancel-interaction-run", status: "cancelled" },
+      });
+
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(state.getInteraction(interaction.requestId)?.status).toBe("cancelled");
+        expect(state.listPendingInteractions("host-test-session")).toEqual([]);
+      } finally {
+        state.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("marks an applying effect ambiguous before cancellation returns", async () => {
+    const cwd = await makeTempDir("host-cancel-effect-project");
+    const databasePath = path.join(await makeTempDir("host-cancel-effect-state"), "state.sqlite");
+    const workflowPath = await writeBlockingEffectWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-effect-client" });
+    await host.start();
+    try {
+      await startRun({ client, cwd, workflowPath, runId: "cancel-effect-run" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          const effect = store.state.connection
+            .prepare(
+              `SELECT e.status FROM effects e
+               JOIN runs r ON r.resource_id = e.source_resource_id
+               WHERE r.run_id = ? AND e.effect_type = ?`,
+            )
+            .get("cancel-effect-run", "test.host-blocking-effect") as
+            | { status: string }
+            | undefined;
+          return effect?.status === "applying";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+
+      await expect(
+        client.request({
+          operation: "run.cancel",
+          runId: "cancel-effect-run",
+          requestId: "cancel-effect-request",
+          idempotencyKey: "cancel-effect-request",
+        }),
+      ).resolves.toMatchObject({
+        outcome: "accepted",
+        receipt: { runId: "cancel-effect-run", status: "cancelled" },
+      });
+
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        expect(store.getWorkflowRun("cancel-effect-run")?.status).toBe("cancelled");
+        const effect = store.state.connection
+          .prepare(
+            `SELECT e.effect_id AS effectId, e.status, e.settled_at AS settledAt,
+                    a.outcome AS attemptOutcome
+             FROM effects e
+             JOIN runs r ON r.resource_id = e.source_resource_id
+             JOIN effect_attempts a ON a.effect_id = e.effect_id
+             WHERE r.run_id = ? AND e.effect_type = ?`,
+          )
+          .get("cancel-effect-run", "test.host-blocking-effect") as
+          | {
+              effectId: string;
+              status: string;
+              settledAt: number | null;
+              attemptOutcome: string | null;
+            }
+          | undefined;
+        expect(effect).toMatchObject({
+          status: "ambiguous",
+          attemptOutcome: "interrupted",
+        });
+        expect(effect?.settledAt).toEqual(expect.any(Number));
+        const event = store.state.connection
+          .prepare(
+            `SELECT event_type AS eventType FROM events
+             WHERE resource_id = (SELECT resource_id FROM effects WHERE effect_id = ?)`,
+          )
+          .all(effect?.effectId) as Array<{ eventType: string }>;
+        expect(event.map((record) => record.eventType)).toContain("effect.ambiguous");
+      } finally {
+        store.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
 
   it("executes workflow code only in a supervised child", async () => {
     const cwd = await makeTempDir("host-child-project");

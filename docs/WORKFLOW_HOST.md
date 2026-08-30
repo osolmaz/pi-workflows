@@ -138,9 +138,12 @@ A worker launch envelope contains:
   "workerEpoch": "opaque-id",
   "projectPath": "/canonical/project/path",
   "workflowSource": {
-    "kind": "file",
-    "ref": "/canonical/project/path/.pi/workflows/example.workflow.ts",
-    "revision": "sha256:digest"
+    "root": {
+      "kind": "file",
+      "path": "/canonical/project/path/.pi/workflows/example.workflow.ts",
+      "hash": "sha256-digest"
+    },
+    "mounted": []
   },
   "definitionDigest": "sha256:digest",
   "inputHash": "sha256:digest",
@@ -148,7 +151,7 @@ A worker launch envelope contains:
 }
 ```
 
-The worker verifies the source and definition before execution. A mismatch parks the run with a source-change reason. It does not execute changed code unless an explicit force-resume contract permits that action.
+Before it loads workflow modules, the worker verifies the root identity and every saved mounted file hash or built-in revision. After loading, it also checks the complete mounted-source map against the saved map. A mismatch parks the run with a source-change reason. Changed included code does not execute.
 
 The host records a worker epoch before spawn. The child must return a ready message before the startup deadline. Every later child message includes the run ID, generation, and worker epoch.
 
@@ -335,11 +338,11 @@ The run binding records `interactive` or `headless` execution mode. Viewers show
 
 ## Pause and cancellation
 
-Pause stops the worker process group, then atomically commits `paused = 1`, parks the queue, and releases the claim. An uncommitted pure node can run again after resume. Resume takes a new generation and starts another worker from the last durable boundary.
+Pause atomically commits `paused = 1`, parks the queue, releases the exact claim, and stores the command receipt. The fenced worker process group then stops. An uncommitted pure node can run again after resume. Resume takes a new generation and starts another worker from the last durable boundary.
 
-Cancellation against a live worker sends a cancel request, waits for the child to stop, and then commits terminal cancellation. If the child does not stop by the deadline, the host kills its process group and commits cancellation with the infrastructure detail.
+Cancellation against a live worker atomically commits terminal cancellation, cancels pending attempt and interaction state, settles effect recovery state, releases the exact claim, and stores the command receipt. A pending effect becomes cancelled. An applying effect becomes ambiguous because the host cannot prove its external outcome. The host then stops the fenced worker process group. A host crash after the receipt cannot resume the cancelled run or retry the ambiguous effect. If the child does not stop by the deadline, the host kills its process group.
 
-Cancellation against an expired running row first takes a new control claim. The claim operation must prove that the old lease is absent or expired. The new owner then cancels the active attempt and pending interaction or human decision in one lifecycle transaction.
+Cancellation against an expired running row first takes a new control claim. The claim operation must prove that the old lease is absent or expired. The new owner then cancels the active attempt, effect recovery state, and pending interaction or human decision in one lifecycle transaction.
 
 A client cannot force-cancel a live claim through the stale recovery path.
 
@@ -354,7 +357,8 @@ At startup the host:
 5. Parks uncertain effects for manual review.
 6. Makes pure and fully settled work claimable.
 7. Restores pending interactive requests and scheduled controller work.
-8. Starts no model turn until a matching Pi session connects or headless mode is declared.
+8. Resumes any provisional `validating` submission in a new supervised child.
+9. Starts no model turn until a matching Pi session connects or headless mode is declared.
 
 Recovery resumes from the last committed boundary. An uncommitted compute node may run again because compute is pure. An action with a stored effect receipt adopts that receipt. An effect in `ambiguous` state requires explicit recovery.
 

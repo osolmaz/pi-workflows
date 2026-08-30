@@ -126,10 +126,12 @@ pi-workflows host run
 `host run` stays attached. The other commands start, inspect, or stop the
 on-demand process. No command installs an operating-system service.
 
-A worker loads and verifies the workflow source, then executes from committed
-state through a host-backed store. If the worker stops, pure work can run again.
-A protected write checks and renews the exact live token and generation in one
-transaction. An expired or replaced owner cannot revive itself.
+A worker verifies the root and all mounted source identities before it loads
+workflow modules. It then checks the resolved mounted-source map and executes
+from committed state through a host-backed store. If the worker stops, pure
+work can run again. A protected write checks and renews the exact live token and
+generation in one transaction. An expired or replaced owner cannot revive
+itself.
 
 Interactive agent and assistant-message steps do not run headlessly for a Pi
 session. The worker commits a durable interaction request and parks. The origin
@@ -705,14 +707,17 @@ possible. Defaults worth knowing:
   turn, and late output for that attempt is rejected.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
-- `/workflow pause` stops the worker process group and atomically parks the run
-  with `paused: true`. `/workflow resume` takes a new generation and reruns only
-  work after the last durable boundary.
+- `/workflow pause` atomically parks the run with `paused: true`, stores the
+  receipt, and fences the worker before process-group shutdown. `/workflow
+resume` takes a new generation and reruns only work after the last durable
+  boundary.
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command
-  reports success. `workflow status` and `workflow cancel` can use that ID
-  immediately.
+  reports success. Active cancellation commits its terminal state and command
+  receipt together before worker shutdown. It cancels effects that have not
+  started and marks applying effects ambiguous for explicit recovery. `workflow
+status` and `workflow cancel` can use the run ID immediately.
 - One interactive workflow request is presented per Pi session. Other requests
   remain durable and ordered.
 - Each protected write renews only its exact live token and generation in the
