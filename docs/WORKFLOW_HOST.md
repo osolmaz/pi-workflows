@@ -1,0 +1,428 @@
+# Workflow host
+
+Status: planned. The current implementation still runs interactive workflows inside the Pi extension and runs resumed workflows inside the existing host process. The implementation plan is [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md).
+
+## Purpose
+
+The workflow host keeps durable workflow state correct when Pi, a workflow, or the host stops unexpectedly. It owns the workflow database and supervises a separate process for each active run. Pi remains the user interface and performs interactive model turns through its documented extension APIs.
+
+The host solves two different failures:
+
+- A busy workflow cannot block the process that renews run claims.
+- A crashed or stale runner cannot leave contradictory state or continue writing after another runner takes over.
+
+## Terms
+
+- **Host:** The single user-level process that owns workflow state, claims, commands, and worker supervision.
+- **Client:** A Pi extension instance or command-line process connected to the host.
+- **Worker:** A child process that loads one workflow and executes one active run generation.
+- **Origin session:** The Pi session that started an interactive run.
+- **Claim:** A time-limited right to change one run.
+- **Generation:** A number increased each time a new owner claims a run. It fences older owners.
+- **Durable boundary:** A committed node or lifecycle transition from which execution can resume.
+- **Interactive request:** A durable agent or assistant-message step that must run in the origin Pi session.
+- **Managed effect:** A side effect reserved and settled through an idempotent durable record.
+
+## Boundaries
+
+The host belongs to the `@osolmaz/pi-workflows` package. It uses the existing SQLite database at `~/.pi/agent/workflows/state.sqlite` and documented Pi extension APIs.
+
+The design does not change Pi source, Pi session files, Pi message schemas, or private Pi APIs. It does not add a remote service or a second database. The package does not install an operating-system service.
+
+SQLite remains local to one machine. The protocol does not provide distributed consensus or network-filesystem safety.
+
+## Process model
+
+One host owns the global workflow database for one user installation.
+
+```text
+Pi extension ─┐
+Pi extension ─┼── local socket ── workflow host ── SQLite
+CLI client ───┘                         │
+                                         ├── run worker A
+                                         ├── run worker B
+                                         └── headless pi --mode rpc child
+```
+
+The host may manage runs from more than one project. Each run keeps its canonical project path and source identity.
+
+The host process performs only bounded protocol handling, short SQLite transactions, timers, queue scheduling, and process supervision. It does not import or execute workflow definitions.
+
+A worker loads one workflow source and executes one run generation. It cannot receive a writable `WorkflowRunStore`. It proposes changes to the host over a private child channel. This is an architectural guard against accidental writes. It is not a security sandbox against code running as the same operating-system user.
+
+## Host lifecycle
+
+The package CLI owns host lifecycle commands:
+
+```text
+pi-workflows host start
+pi-workflows host status
+pi-workflows host stop
+pi-workflows host run
+```
+
+`run` stays attached for direct operation and tests. `start` starts the package process on demand and waits for a ready handshake. It does not install systemd, launchd, or another persistent service.
+
+The host uses one global lock and one host epoch. Socket creation and the SQLite host claim must agree before the host accepts commands. A second live host refuses to start. After the old host lease expires, a new host increases the epoch before it handles work. Messages from an older epoch are rejected.
+
+The host stays alive while it has a connected client, an active worker, a scheduled wake, a pending controller, or unsettled work. An idle host may exit after a documented idle period. A later client can start it again.
+
+## Claim rules
+
+A run claim contains:
+
+- owner type and owner ID;
+- token hash;
+- generation;
+- acquisition time;
+- heartbeat time;
+- expiry time.
+
+A protected state write uses one SQLite transaction:
+
+1. Read the expected resource revision and lease.
+2. Compare owner type, owner ID, token hash, and generation.
+3. Require a future expiry time.
+4. Renew heartbeat and expiry for that exact claim.
+5. Apply the domain change.
+6. Add the immutable event and viewer delta.
+7. Increase the resource revision.
+8. Commit.
+
+The transaction fails without changes when any check fails.
+
+An expired claim cannot renew itself, even when the owner ID and token hash still match. Recovery first takes a new claim and increases the generation.
+
+The host also renews active claims from a timer. The timer is a backup for a run with no state writes. Normal write correctness does not depend on the timer.
+
+Claim rejection uses `ClaimLostError` with one internal reason:
+
+- `missingAuthority`
+- `expired`
+- `ownerChanged`
+- `tokenChanged`
+- `generationChanged`
+
+Logs may show the run ID, generation, and reason. They must not show a raw token or token hash.
+
+## Run lifecycle
+
+The run and queue projections follow these states:
+
+| Run state   | Queue state | Claim | Worker   | Meaning                                                 |
+| ----------- | ----------- | ----- | -------- | ------------------------------------------------------- |
+| `queued`    | `queued`    | none  | none     | Ready for host scheduling.                              |
+| `running`   | `starting`  | host  | starting | A worker launch is being recorded.                      |
+| `running`   | `running`   | host  | live     | A worker is executing one node.                         |
+| `running`   | `parked`    | none  | none     | Execution stopped at a durable boundary and can resume. |
+| `waiting`   | `parked`    | none  | none     | A checkpoint or interactive request needs input.        |
+| `completed` | `done`      | none  | none     | The run finished successfully.                          |
+| `failed`    | `failed`    | none  | none     | The run failed with a durable error.                    |
+| `timed_out` | `failed`    | none  | none     | The run exceeded a declared timeout.                    |
+| `cancelled` | `cancelled` | none  | none     | Cancellation completed.                                 |
+
+A lifecycle transaction updates the run, queue, attempt, decision, lease, event, and viewer facts that belong to one transition. The database must not commit a failed event while the run remains running, or a terminal queue row while the run remains nonterminal.
+
+Waiting and paused work does not keep a worker or a live claim. Resume takes a new claim generation and starts a new worker from the last durable boundary.
+
+## Worker lifecycle
+
+A worker launch envelope contains:
+
+```json
+{
+  "schema": "pi-workflows.worker-launch.v1",
+  "runId": "run-id",
+  "generation": 2,
+  "workerEpoch": "opaque-id",
+  "projectPath": "/canonical/project/path",
+  "workflowSource": {
+    "kind": "file",
+    "ref": "/canonical/project/path/.pi/workflows/example.workflow.ts",
+    "revision": "sha256:digest"
+  },
+  "definitionDigest": "sha256:digest",
+  "inputHash": "sha256:digest",
+  "protocolVersion": 1
+}
+```
+
+The worker verifies the source and definition before execution. A mismatch parks the run with a source-change reason. It does not execute changed code unless an explicit force-resume contract permits that action.
+
+The host records a worker epoch before spawn. The child must return a ready message before the startup deadline. Every later child message includes the run ID, generation, and worker epoch.
+
+The host records one terminal worker outcome:
+
+- `exited`
+- `cancelled`
+- `timedOut`
+- `crashed`
+- `claimLost`
+- `orphaned`
+
+A worker exit is not automatically a run failure. The host decides from the last committed attempt and effect state whether it can resume, must park, or must fail.
+
+## Process supervision
+
+Each worker starts in its own process group.
+
+The host enforces:
+
+- a startup handshake deadline;
+- node deadlines already declared by the workflow engine;
+- bounded protocol messages;
+- bounded captured stdout and stderr;
+- cancellation with `SIGTERM` and bounded `SIGKILL` escalation;
+- process-group cleanup;
+- orphan checks after host restart;
+- portable memory or process limits where Node and the operating system support them.
+
+The child protocol must apply backpressure. A child that exceeds message or output limits fails its worker epoch with a clear infrastructure reason. The complete durable workflow result stays in SQLite within the existing value limits.
+
+The process registry must include a process start identity, not only a PID. A reused PID must not let a new host kill an unrelated process.
+
+## Local client protocol
+
+Clients connect through a user-only local socket. Unix socket mode is `0600`. Other platforms use their equivalent local transport and access control.
+
+Messages use newline-delimited canonical JSON. One message is at most 1 MiB, matching the existing durable event limit. The receiver closes only the offending connection when framing or validation fails.
+
+Every request uses this envelope:
+
+```json
+{
+  "schema": "pi-workflows.host-request.v1",
+  "requestId": "opaque-id",
+  "clientId": "opaque-id",
+  "operation": "run.cancel",
+  "runId": "run-id",
+  "expectedRevision": 12,
+  "idempotencyKey": "stable-key",
+  "payload": {}
+}
+```
+
+A response uses:
+
+```json
+{
+  "schema": "pi-workflows.host-response.v1",
+  "requestId": "opaque-id",
+  "outcome": "accepted",
+  "revision": 13,
+  "receipt": {}
+}
+```
+
+Valid outcomes are:
+
+- `accepted`
+- `adopted`
+- `rejected`
+- `conflict`
+- `notFound`
+- `claimLost`
+- `unavailable`
+
+The host commits a command receipt before it acknowledges success. Repeating the same request ID and payload returns the stored receipt. Reusing an ID with another payload returns a conflict.
+
+The first command set is:
+
+- `run.start`
+- `run.pause`
+- `run.resume`
+- `run.cancel`
+- `run.status`
+- `run.list`
+- `decision.answer`
+- `interaction.submit`
+- `interaction.update`
+- `host.status`
+- `host.stop`
+
+Read operations may use the existing read-only store directly in viewers. Mutating Pi and CLI paths use the host.
+
+## Worker protocol
+
+The private worker channel accepts these message kinds:
+
+- `worker.ready`
+- `node.started`
+- `node.update`
+- `node.finished`
+- `node.failed`
+- `run.parked`
+- `run.finished`
+- `interaction.requested`
+- `effect.reserve`
+- `effect.settle`
+- `worker.progress`
+- `worker.exiting`
+
+Every worker message includes the worker launch schema, run ID, generation, worker epoch, attempt ID when applicable, expected revision, and a stable message ID.
+
+The host checks the generation and epoch before it reads the payload. A stale worker gets one claim-loss response and must exit. The host stores receipts for accepted state-changing messages so a retry receives the same answer.
+
+## Durable protocol records
+
+Reuse current rows when they already own a fact:
+
+- `runs`, `run_queue`, `leases`, and `events` own run lifecycle and claims.
+- `node_attempts` owns node execution state.
+- `human_decisions` and resolution tables own checkpoints.
+- `effects` and `effect_attempts` own side effects and ambiguous outcomes.
+- `notifications` and `turn_intents` own passive and terminal Pi messages.
+- `run_bindings` owns origin session and execution mode.
+
+Add only these records if implementation proves the current rows cannot hold the contract:
+
+### Host commands
+
+`host_commands` stores request ID, client ID, operation, idempotency key, request fingerprint, run ID, accepted revision, outcome, receipt or error hash, and timestamps. The unique request fingerprint prevents one request ID from naming two commands.
+
+### Interactive requests
+
+`interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, and timestamps. One attempt has at most one request.
+
+`interactive_submissions` stores request ID, submission ID, idempotency key, payload hash, accepted or rejected outcome, receipt hash, and submission time. Repeated keys return the same receipt.
+
+### Worker epochs
+
+`run_workers` stores run ID, generation, worker epoch, launch envelope hash, process identity, status, start time, ready time, finish time, exit code, signal, and bounded diagnostic hash. One run and generation can have several sequential worker epochs, but only one may be active.
+
+These tables remain part of `pi-workflows-state` schema version 1. The DDL digest changes in place under the alpha policy.
+
+## Interactive Pi execution
+
+Agent and assistant-message steps for an interactive run execute in the origin Pi session.
+
+The worker proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits.
+
+The extension finds pending requests for its session during `session_start`, after `agent_settled`, and after a host notification. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
+
+A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host validates the payload against the stored contract. On acceptance, it settles the request and schedules the run. A rejected payload leaves the same request pending and returns an actionable error to the model.
+
+The session keeps normal Pi entries for prompts, tools, replies, and final presentation. Pi Workflows continues to record those entries through documented session events. It does not edit the Pi session file.
+
+One session presents one workflow interaction at a time. Other requests remain ordered by creation time. A restart or reload can present an unresolved request again, but exact session-entry adoption prevents a second visible message when the first presentation was already recorded.
+
+## Detached execution
+
+A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The host supervises that Pi child separately from the workflow worker.
+
+The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same interaction contract and idempotency checks as an origin-session submission.
+
+The durable run records whether each interaction was origin-session or headless. Viewers show that provenance without exposing provider credentials.
+
+## Pause and cancellation
+
+Pause takes effect at the next durable node boundary. The host commits `paused = 1`, parks the queue, releases the claim, and stops the child after the current safe boundary. Resume clears the pause, takes a new generation, and starts another worker.
+
+Cancellation against a live worker sends a cancel request, waits for the child to stop, and then commits terminal cancellation. If the child does not stop by the deadline, the host kills its process group and commits cancellation with the infrastructure detail.
+
+Cancellation against an expired running row first takes a new control claim. The claim operation must prove that the old lease is absent or expired. The new owner then cancels the active attempt and pending interaction or human decision in one lifecycle transaction.
+
+A client cannot force-cancel a live claim through the stale recovery path.
+
+## Recovery
+
+At startup the host:
+
+1. Takes the global host epoch.
+2. Reaps worker records that match an exact stale process identity.
+3. Finds expired running runs and active attempts.
+4. Reads managed effect state before deciding whether work can repeat.
+5. Parks uncertain effects for manual review.
+6. Makes pure and fully settled work claimable.
+7. Restores pending interactive requests and scheduled controller work.
+8. Starts no model turn until a matching Pi session connects or headless mode is declared.
+
+Recovery resumes from the last committed boundary. An uncommitted compute node may run again because compute is pure. An action with a stored effect receipt adopts that receipt. An effect in `ambiguous` state requires explicit recovery.
+
+Claim loss is a handoff, not a run failure. The old owner writes no terminal event after claim loss.
+
+## Effects and retry safety
+
+Compute nodes must not perform external side effects. They can repeat after a worker crash.
+
+Side-effecting action and shell behavior must have one of these contracts:
+
+- a managed effect with an external idempotency key;
+- a managed effect with a read-back check that proves whether it applied;
+- an explicit non-resumable result that becomes `ambiguous` after an uncertain crash.
+
+The host reserves an effect before execution. The effect key includes the source resource, effect type, and author-provided idempotency key. The request fingerprint prevents key reuse with another payload.
+
+An applied, rejected, or cancelled effect is terminal. An ambiguous effect is also terminal for automatic retry. An operator may use a separate reviewed recovery action after inspecting the external system.
+
+## Controllers
+
+The global host also reconciles controllers. Controllers keep their existing resource claims, queue, effects, and child workflow request keys.
+
+A controller child run enters the same global run queue and worker process model. It does not need an origin Pi session unless its workflow declares an interactive step. A headless child uses the declared provider path. A child that needs an origin session parks with a clear unsupported-input result unless the controller supplied an approved session binding.
+
+Controller reconcile code must not run in the host event loop. It uses supervised workers or another bounded execution pool so user controller code cannot block host claims.
+
+## Failure classification
+
+Use separate states and messages for these failures:
+
+- `claimLost`: another generation owns the run, or the claim expired.
+- `workerCrashed`: the child exited without a terminal protocol message.
+- `workerTimedOut`: the child exceeded a declared deadline.
+- `hostUnavailable`: the client cannot reach or start the host.
+- `sourceChanged`: the workflow source does not match the saved identity.
+- `effectAmbiguous`: an external action may have applied without a receipt.
+- `nodeFailed`: workflow code returned a normal failure.
+- `protocolRejected`: a message failed schema, revision, attempt, or idempotency checks.
+
+A failure in one class must not be reported as another. In particular, claim loss does not create a failed run event.
+
+## Status and privacy
+
+`pi-workflows host status` reports:
+
+- host state and epoch;
+- socket availability;
+- active worker count;
+- queued, running, parked, and waiting counts;
+- expired claim count;
+- pending interaction count;
+- ambiguous effect count.
+
+It does not print actor IDs, session IDs, project paths, prompts, outputs, payloads, claim tokens, environment variables, or credentials.
+
+Logs use bounded safe errors. Child stdout and stderr may contain private content and stay in the user-only workflow state directory. Public issue and pull-request text must use generic fixtures and no operator-specific identifiers.
+
+## Alpha state policy
+
+This feature changes the current schema in place while the project is in alpha.
+
+Keep `pi-workflows-state` and schema version 1. Change the DDL digest and current contracts directly. Add no compatibility reader, migration shim, dual read, dual write, alias, feature flag, or parallel state root.
+
+When the installed state has the old digest, fail before mutation with the standard backup and reset instruction. Leave the old database untouched.
+
+## Pi API impact
+
+- **Session state:** Pi appends normal messages and tool results. Pi Workflows does not edit session files.
+- **Other persistent data:** The workflow SQLite shape changes in place and older alpha state requires reset.
+- **Pi internals:** None.
+- **Public API:** The extension uses documented command registration, tool registration, session lifecycle events, message sending, widgets, status, and session IDs.
+
+## Conformance
+
+The implementation conforms when:
+
+- every protected write checks and renews one live claim atomically;
+- an expired or replaced owner cannot write;
+- a blocked worker cannot stop host renewal;
+- Pi can restart while work computes or waits;
+- the host can restart and recover from committed state;
+- run, queue, attempt, decision, lease, event, and viewer projections remain consistent after injected crashes;
+- an expired running row can be resumed or cancelled safely;
+- duplicate commands and submissions return stored receipts;
+- an interactive request appears once in the origin session and survives reload;
+- effects are deduplicated or marked ambiguous;
+- the extension and host run no workflow or controller code in their own event loops;
+- the production package contains no embedded execution fallback;
+- real Pi end-to-end tests, repository checks, reviewer checks, and CI pass.
