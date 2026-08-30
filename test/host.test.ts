@@ -248,6 +248,36 @@ describe("global workflow host", () => {
     expect(socket.destroyed).toBe(true);
   });
 
+  it("contains accepted-client socket errors", async () => {
+    const databasePath = path.join(await makeTempDir("host-client-error"), "state.sqlite");
+    const logs: string[] = [];
+    const host = new WorkflowHost({
+      databasePath,
+      claimPollMs: 10,
+      onLog: (message) => logs.push(message),
+    });
+    await host.start();
+    try {
+      const socket = net.createConnection(host.endpoint);
+      await once(socket, "connect");
+      await waitUntil(() => (host as unknown as { sockets: Set<net.Socket> }).sockets.size === 1);
+      const acceptedSocket = [...(host as unknown as { sockets: Set<net.Socket> }).sockets][0];
+      if (acceptedSocket === undefined) throw new Error("accepted socket was not tracked");
+      const closed = once(socket, "close");
+      expect(() => acceptedSocket.emit("error", new Error("test reset"))).not.toThrow();
+      await closed;
+      expect(logs).toContain("client socket error: test reset");
+
+      const client = new WorkflowHostClient({ databasePath });
+      await expect(client.request({ operation: "host.status" })).resolves.toMatchObject({
+        outcome: "accepted",
+        receipt: { state: "running" },
+      });
+    } finally {
+      await host.stop();
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "releases its claim and lock when the local listener cannot bind",
     async () => {
