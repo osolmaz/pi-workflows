@@ -37,7 +37,7 @@ typescript:
       allow:
         - src/state
         - src/workflows
-    # The extension embeds the engine in pi and draws the widget graph.
+    # The extension is a host client and draws the widget graph. It never imports host execution code.
     - from: src/extension
       allow:
         - src/state
@@ -46,6 +46,7 @@ typescript:
         - src/controllers
         - src/render
         - src/herdr
+        - src/host
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
