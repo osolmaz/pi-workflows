@@ -45,8 +45,16 @@ describe("parseWorkflowArgs", () => {
 
   it("parses cancel, pause, and resume", () => {
     expect(parseWorkflowArgs("cancel")).toEqual({ kind: "cancel" });
+    expect(parseWorkflowArgs("cancel run-123")).toEqual({
+      kind: "cancel",
+      runId: "run-123",
+    });
     expect(parseWorkflowArgs("pause")).toEqual({ kind: "pause" });
     expect(parseWorkflowArgs("resume")).toEqual({ kind: "resume" });
+  });
+
+  it("rejects an invalid cancel run id", () => {
+    expect(() => parseWorkflowArgs("cancel two ids")).toThrow(/one valid run id/u);
   });
 
   it("parses a bare workflow ref", () => {
