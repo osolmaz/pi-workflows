@@ -152,6 +152,7 @@ export class WorkflowHost {
   private readonly controlClaims = new Map<string, string>();
   private readonly activationTasks = new Map<string, Promise<void>>();
   private readonly pendingStarts = new Set<string>();
+  private readonly pendingRunClaims = new Map<string, string>();
   private readonly pendingResumes = new Set<string>();
   private readonly blockedRuns = new Set<string>();
   private readonly deliveryClaims = new Map<string, DeliveryClaim>();
@@ -217,6 +218,7 @@ export class WorkflowHost {
       this.startTimers();
       this.started = true;
       this.log(`ready on ${this.socketPath} at epoch ${this.claim.epoch}`);
+      this.expireTimedOutInteraction();
       void this.claimOne();
       void this.claimControllerOne();
     } catch (error) {
@@ -247,6 +249,11 @@ export class WorkflowHost {
     const server = this.server;
     this.server = null;
     await this.closeServer(server);
+    for (const [runId, claimToken] of this.pendingRunClaims) {
+      this.queue.parkWorkflowRun({ runId, claimToken });
+    }
+    this.pendingRunClaims.clear();
+    this.pendingStarts.clear();
     await Promise.allSettled(
       [...this.activeRuns.values()].map(async (active) => {
         active.control = "handoff";
@@ -345,6 +352,7 @@ export class WorkflowHost {
     }, this.options.hostRenewMs ?? HOST_RENEW_MS);
     this.heartbeatTimer.unref?.();
     this.pollTimer = setInterval(() => {
+      this.expireTimedOutInteraction();
       void this.claimOne();
       void this.claimControllerOne();
     }, this.options.claimPollMs ?? CLAIM_POLL_MS);
@@ -481,6 +489,14 @@ export class WorkflowHost {
           afterCommit.push(() => void active.supervisor.stop("cancelled"));
           return { outcome: "accepted", receipt: { runId, status: "cancelled" } };
         }
+        const pendingClaim = this.pendingRunClaims.get(runId);
+        if (pendingClaim !== undefined) {
+          if (!this.queue.cancelWorkflowRun({ runId, claimToken: pendingClaim })) {
+            return { outcome: "claimLost", error: "Run claim was lost before cancellation" };
+          }
+          this.clearPendingStart(runId, pendingClaim);
+          return { outcome: "accepted", receipt: { runId, status: "cancelled" } };
+        }
         const cancelled = this.queue.cancelWorkflowRun({ runId });
         return cancelled
           ? { outcome: "accepted", receipt: { runId, status: "cancelled" } }
@@ -508,7 +524,7 @@ export class WorkflowHost {
           leaseMs: this.runClaimLeaseMs,
         });
         if (claimed === undefined) return { outcome: "rejected", error: "Run is not resumable" };
-        this.pendingStarts.add(runId);
+        this.markPendingStart(runId, token);
         afterCommit.push(() => void this.activateRun(claimed, token));
         return { outcome: "accepted", receipt: { runId, generation: claimed.claimGeneration } };
       }
@@ -970,7 +986,7 @@ export class WorkflowHost {
       parentRunId: options.parentRunId,
     });
     if (prepared.state === "claimed") {
-      this.pendingStarts.add(options.continuationRunId);
+      this.markPendingStart(options.continuationRunId, token);
       afterCommit.push(() => void this.activateRun(prepared.run, token));
     }
     return prepared;
@@ -1015,7 +1031,7 @@ export class WorkflowHost {
         receipt: { runId, status: prepared.run.status } as JsonValue,
       };
     }
-    this.pendingStarts.add(runId);
+    this.markPendingStart(runId, token);
     afterCommit.push(() => void this.activateRun(prepared.run, token));
     return {
       outcome: "accepted",
@@ -1133,7 +1149,7 @@ export class WorkflowHost {
         leaseMs: this.runClaimLeaseMs,
       });
       if (claimed !== undefined) {
-        this.pendingStarts.add(interaction.runId);
+        this.markPendingStart(interaction.runId, token);
         setImmediate(() => void this.activateRun(claimed, token));
       }
     }
@@ -1532,7 +1548,7 @@ export class WorkflowHost {
       executionMode: "headless",
     });
     if (prepared.state === "claimed") {
-      this.pendingStarts.add(request.runId);
+      this.markPendingStart(request.runId, token);
       setImmediate(() => void this.activateRun(prepared.run, token));
     }
     return controllerWorkflowResult(prepared.run);
@@ -1643,6 +1659,46 @@ export class WorkflowHost {
     active.settled = true;
   }
 
+  private expireTimedOutInteraction(): void {
+    if (this.stopping || this.claim === null) return;
+    const runId = this.hostState
+      .expiredInteractionRunIds()
+      .find((candidate) => !this.activeRuns.has(candidate) && !this.pendingStarts.has(candidate));
+    if (runId === undefined) return;
+    const claimToken = randomUUID();
+    const claimed = this.queue.claimWorkflowRunForControl({
+      runId,
+      runnerId: this.hostId,
+      claimToken,
+      leaseMs: this.runClaimLeaseMs,
+    });
+    if (claimed === undefined) return;
+    let activated = false;
+    try {
+      activated = this.queue.beginWorkflowRunInteractionTimeout({ runId, claimToken });
+      if (activated) {
+        this.markPendingStart(runId, claimToken);
+        setImmediate(() => void this.activateRun(claimed, claimToken));
+        this.log(`run ${runId} is finishing its expired origin-session deadline`);
+      }
+    } catch (error) {
+      this.log(`interaction timeout failed for run ${runId}: ${errorMessage(error)}`);
+    } finally {
+      if (!activated) this.queue.parkWorkflowRun({ runId, claimToken });
+    }
+  }
+
+  private markPendingStart(runId: string, claimToken: string): void {
+    this.pendingStarts.add(runId);
+    this.pendingRunClaims.set(runId, claimToken);
+  }
+
+  private clearPendingStart(runId: string, claimToken: string): void {
+    if (this.pendingRunClaims.get(runId) !== claimToken) return;
+    this.pendingRunClaims.delete(runId);
+    this.pendingStarts.delete(runId);
+  }
+
   private async claimOne(): Promise<void> {
     if (this.stopping || this.claim === null) return;
     const excluded = new Set([
@@ -1662,7 +1718,7 @@ export class WorkflowHost {
         leaseMs: this.runClaimLeaseMs,
       });
       if (validationRun !== undefined) {
-        this.pendingStarts.add(validatingRunId);
+        this.markPendingStart(validatingRunId, validationToken);
         await this.activateRun(validationRun, validationToken);
         return;
       }
@@ -1675,7 +1731,7 @@ export class WorkflowHost {
       excludeRunIds: [...excluded],
     });
     if (claimed === undefined) return;
-    this.pendingStarts.add(claimed.runId);
+    this.markPendingStart(claimed.runId, token);
     await this.activateRun(claimed, token);
   }
 
@@ -1699,14 +1755,24 @@ export class WorkflowHost {
 
   private async activateRunNow(record: WorkflowRunQueueRecord, claimToken: string): Promise<void> {
     const runId = record.runId;
-    if (this.stopping || this.activeRuns.has(runId)) {
-      this.pendingStarts.delete(runId);
+    if (this.pendingRunClaims.get(runId) !== claimToken) return;
+    if (this.stopping) {
+      this.clearPendingStart(runId, claimToken);
+      this.queue.parkWorkflowRun({ runId, claimToken });
+      return;
+    }
+    const existingActive = this.activeRuns.get(runId);
+    if (existingActive !== undefined) {
+      this.clearPendingStart(runId, claimToken);
+      if (existingActive.claimToken !== claimToken) {
+        this.queue.parkWorkflowRun({ runId, claimToken });
+      }
       return;
     }
     const generation = record.claimGeneration;
     const projectPath = this.queue.workflowRunProjectPath(runId);
     if (generation === null || projectPath === undefined || this.claim === null) {
-      this.pendingStarts.delete(runId);
+      this.clearPendingStart(runId, claimToken);
       this.queue.parkWorkflowRun({ runId, claimToken });
       return;
     }
@@ -1742,7 +1808,7 @@ export class WorkflowHost {
     });
     const active: ActiveRun = { record, claimToken, generation, supervisor, exiting: false };
     this.activeRuns.set(runId, active);
-    this.pendingStarts.delete(runId);
+    this.clearPendingStart(runId, claimToken);
     try {
       this.runStore.synchronizeRevision(runId);
       const effectRecovery = await this.runStore.recoverApplyingEffects(runId);
@@ -1807,7 +1873,7 @@ export class WorkflowHost {
       await this.claimOne();
       return;
     }
-    this.pendingStarts.add(runId);
+    this.markPendingStart(runId, token);
     await this.activateRun(claimed, token);
   }
 
@@ -1845,6 +1911,9 @@ export class WorkflowHost {
       const candidateInteraction =
         this.hostState.acceptedInteraction(message.runId) ??
         this.hostState.validatingInteraction(message.runId);
+      const timedOutInteraction = this.hostState.timedOutInteraction(message.runId);
+      const resumeInteractionAttemptId =
+        candidateInteraction?.attemptId ?? timedOutInteraction?.attemptId;
       return workerResponse(
         message,
         "accepted",
@@ -1855,6 +1924,7 @@ export class WorkflowHost {
           parentRunId: active.record.parentRunId,
           originSessionId: active.record.originSessionId,
           stateDirectory: this.stateDirectory,
+          ...(resumeInteractionAttemptId === undefined ? {} : { resumeInteractionAttemptId }),
           ...(candidateInteraction === undefined ? {} : { candidateInteraction }),
           ...(this.options.piArgs === undefined ? {} : { piArgs: this.options.piArgs }),
         } as JsonValue,
@@ -2245,9 +2315,17 @@ export class WorkflowHost {
   private async prepareInteractionResume(runId: string): Promise<void> {
     const accepted = this.hostState.acceptedInteraction(runId);
     const candidate = accepted ?? this.hostState.validatingInteraction(runId);
-    if (candidate === undefined) return;
+    const timedOut = this.hostState.timedOutInteraction(runId);
+    if (candidate === undefined && timedOut === undefined) return;
     const loaded = this.runStore.readRun(runId);
-    if (loaded === null || loaded.state.status !== "waiting") return;
+    if (loaded === null) return;
+    if (timedOut !== undefined) {
+      if (loaded.state.status !== "running") {
+        throw new Error(`Timed-out interaction run ${runId} is not running`);
+      }
+      return;
+    }
+    if (candidate === undefined || loaded.state.status !== "waiting") return;
     loaded.state.status = "running";
     delete loaded.state.statusDetail;
     delete loaded.state.finishedAt;

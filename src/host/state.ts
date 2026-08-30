@@ -534,6 +534,39 @@ export class HostStateStore {
       .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
   }
 
+  expiredInteractionRunIds(now: number = Date.now()): string[] {
+    return this.state.connection
+      .prepare(
+        `SELECT i.run_id AS runId
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN run_queue q ON q.run_id = i.run_id
+         WHERE i.status IN ('pending', 'presenting')
+           AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
+           AND q.status NOT IN ('done', 'failed', 'cancelled')
+         GROUP BY i.run_id
+         ORDER BY MIN(a.deadline_at), i.run_id`,
+      )
+      .all(now)
+      .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
+  }
+
+  timedOutInteraction(runId: string): TimedOutInteractionRow | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT i.request_id AS requestId, i.attempt_id AS attemptId, a.node_id AS nodeId
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN runs r ON r.run_id = i.run_id
+         WHERE i.run_id = ? AND i.status = 'cancelled' AND r.status = 'running'
+           AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
+           AND a.status IN ('pending', 'running', 'waiting', 'interrupted')
+         ORDER BY a.deadline_at, i.request_id LIMIT 1`,
+      )
+      .get(runId, Date.now());
+    return isTimedOutInteractionRow(row) ? row : undefined;
+  }
+
   interactionSubmission(
     requestId: string,
     submissionId: string,
@@ -951,6 +984,11 @@ type AcceptedInteractionRow = {
   submissionId: string;
   payloadHash: Buffer;
 };
+type TimedOutInteractionRow = {
+  requestId: string;
+  attemptId: string;
+  nodeId: string;
+};
 type InteractiveRequestRow = {
   requestId: string;
   runId: string;
@@ -1028,6 +1066,15 @@ function isAcceptedInteractionRow(value: unknown): value is AcceptedInteractionR
     typeof value.nodeId === "string" &&
     typeof value.submissionId === "string" &&
     Buffer.isBuffer(value.payloadHash)
+  );
+}
+
+function isTimedOutInteractionRow(value: unknown): value is TimedOutInteractionRow {
+  return (
+    isRecord(value) &&
+    typeof value.requestId === "string" &&
+    typeof value.attemptId === "string" &&
+    typeof value.nodeId === "string"
   );
 }
 

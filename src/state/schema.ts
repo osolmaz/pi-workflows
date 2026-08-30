@@ -387,6 +387,7 @@ CREATE TABLE node_attempts (
 CREATE UNIQUE INDEX node_attempts_active_idx ON node_attempts(run_id)
 WHERE status IN ('pending', 'running', 'waiting');
 CREATE INDEX node_attempts_run_idx ON node_attempts(run_id, created_at);
+CREATE INDEX node_attempts_deadline_idx ON node_attempts(deadline_at) WHERE deadline_at IS NOT NULL;
 
 CREATE TABLE run_steps (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,

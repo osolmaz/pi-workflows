@@ -1588,6 +1588,7 @@ export class WorkflowRunStore {
     delete loaded.state.currentNode;
     delete loaded.state.currentAttemptId;
     delete loaded.state.currentNodeStartedAt;
+    delete loaded.state.currentNodeDeadlineAt;
     delete loaded.state.currentSettingsScopeId;
     delete loaded.state.currentSettingsChangeNumber;
     delete loaded.state.currentSettingsHash;
@@ -3098,6 +3099,20 @@ export class WorkflowRunStore {
     }
     if (state.currentAttemptId !== undefined && state.currentNode !== undefined) {
       this.ensureAttempt(state, state.currentNode, state.currentAttemptId, now, snapshot);
+      if (state.currentNodeDeadlineAt !== undefined) {
+        const deadlineAt =
+          state.currentNodeDeadlineAt === null ? null : Date.parse(state.currentNodeDeadlineAt);
+        if (deadlineAt !== null && !Number.isFinite(deadlineAt)) {
+          throw new Error("Workflow node deadline is invalid");
+        }
+        this.state.connection
+          .prepare(
+            `UPDATE node_attempts SET deadline_at = ?, updated_at = ?
+             WHERE attempt_id = ? AND run_id = ?
+               AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
+          )
+          .run(deadlineAt, now, state.currentAttemptId, state.runId);
+      }
     }
     this.syncRunSteps(state, now);
   }
@@ -3441,6 +3456,14 @@ export class WorkflowRunStore {
       ...(activeAttempt?.startedAt === null || activeAttempt === undefined
         ? {}
         : { currentNodeStartedAt: new Date(activeAttempt.startedAt).toISOString() }),
+      ...(activeAttempt === undefined
+        ? {}
+        : {
+            currentNodeDeadlineAt:
+              activeAttempt.deadlineAt === null
+                ? null
+                : new Date(activeAttempt.deadlineAt).toISOString(),
+          }),
       ...savedCurrentSettingsBinding(
         activeAttempt?.settingsScopeId ?? null,
         activeAttempt?.settingsChangeNumber ?? null,
@@ -3591,6 +3614,7 @@ export class WorkflowRunStore {
         attemptId: string;
         nodeId: string;
         startedAt: number | null;
+        deadlineAt: number | null;
         settingsScopeId: string | null;
         settingsChangeNumber: number | null;
         settingsHash: Buffer | null;
@@ -3599,7 +3623,7 @@ export class WorkflowRunStore {
     const row = this.state.connection
       .prepare(
         `SELECT attempt_id AS attemptId, node_id AS nodeId, started_at AS startedAt,
-                settings_scope_id AS settingsScopeId,
+                deadline_at AS deadlineAt, settings_scope_id AS settingsScopeId,
                 settings_change_number AS settingsChangeNumber,
                 settings_hash AS settingsHash
          FROM node_attempts
@@ -3954,6 +3978,11 @@ function runViewerTargets(
       op: "add",
       path: "/state/currentNodeStartedAt",
       value: state.currentNodeStartedAt ?? null,
+    },
+    {
+      op: "add",
+      path: "/state/currentNodeDeadlineAt",
+      value: state.currentNodeDeadlineAt ?? null,
     },
     {
       op: "add",
@@ -4668,6 +4697,7 @@ function isActiveAttemptRow(value: unknown): value is {
   attemptId: string;
   nodeId: string;
   startedAt: number | null;
+  deadlineAt: number | null;
   settingsScopeId: string | null;
   settingsChangeNumber: number | null;
   settingsHash: Buffer | null;

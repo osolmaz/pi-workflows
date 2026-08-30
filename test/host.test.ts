@@ -6,6 +6,12 @@ import { describe, expect, it } from "vitest";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { WorkflowHostClient } from "../src/host/client.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
+import {
+  encodeProtocolLine,
+  parseHostResponse,
+  type HostRequest,
+  type HostResponse,
+} from "../src/host/protocol.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../src/host/state.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
@@ -42,6 +48,25 @@ export default defineWorkflow({
     done: compute({ run: ({ outputs }) => outputs.ask }),
   },
   edges: [{ from: "ask", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeTimedInteractiveWorkflow(cwd: string, timeoutMs: number): Promise<string> {
+  const workflowPath = path.join(cwd, "timed-interactive.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-timed-interactive",
+  startAt: "ask",
+  nodes: {
+    ask: agent({ timeoutMs: ${timeoutMs}, prompt: () => "Return before the deadline." }),
+  },
+  edges: [],
 });\n`,
   );
   return workflowPath;
@@ -196,6 +221,47 @@ export default defineWorkflow({
 });\n`,
   );
   return workflowPath;
+}
+
+async function sendHostPipeline(
+  endpoint: string,
+  requests: HostRequest[],
+): Promise<HostResponse[]> {
+  const socket = net.createConnection(endpoint);
+  await once(socket, "connect");
+  const responses = await new Promise<HostResponse[]>((resolve, reject) => {
+    let buffered = Buffer.alloc(0);
+    const values: HostResponse[] = [];
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      for (;;) {
+        const newline = buffered.indexOf(0x0a);
+        if (newline < 0) return;
+        const frame = buffered.subarray(0, newline);
+        buffered = buffered.subarray(newline + 1);
+        if (frame.byteLength === 0) continue;
+        values.push(parseHostResponse(frame));
+        if (values.length === requests.length) {
+          cleanup();
+          resolve(values);
+          return;
+        }
+      }
+    };
+    const cleanup = () => {
+      socket.off("data", onData);
+      socket.off("error", onError);
+    };
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.write(Buffer.concat(requests.map(encodeProtocolLine)));
+  });
+  socket.end();
+  return responses;
 }
 
 async function startRun(options: {
@@ -385,6 +451,94 @@ describe("global workflow host", () => {
     }
   }, 60_000);
 
+  it("expires a parked interaction from its durable deadline after restart", async () => {
+    const cwd = await makeTempDir("host-interaction-timeout-project");
+    const databasePath = path.join(
+      await makeTempDir("host-interaction-timeout-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeTimedInteractiveWorkflow(cwd, 1_500);
+    const first = new WorkflowHost({
+      databasePath,
+      runnerId: "host-timeout-first",
+      claimPollMs: 10,
+    });
+    await first.start();
+    await startRun({
+      client: new WorkflowHostClient({ databasePath }),
+      cwd,
+      workflowPath,
+      runId: "interaction-timeout-run",
+      executionMode: "interactive",
+    });
+    let requestId: string | undefined;
+    let deadlineAt: number | null | undefined;
+    await waitUntil(() => {
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        const interaction = state.listPendingInteractions("host-test-session")[0];
+        requestId = interaction?.requestId;
+        const deadline = state.state.connection
+          .prepare(
+            `SELECT a.deadline_at AS deadlineAt
+             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+             WHERE i.run_id = ?`,
+          )
+          .get("interaction-timeout-run") as { deadlineAt: number | null } | undefined;
+        deadlineAt = deadline?.deadlineAt;
+        return requestId !== undefined && deadlineAt !== null && deadlineAt !== undefined;
+      } finally {
+        state.close();
+      }
+    }, 30_000);
+    await first.stop();
+    if (requestId === undefined || deadlineAt === null || deadlineAt === undefined) {
+      throw new Error("durable interaction deadline was not created");
+    }
+    const timedRequestId = requestId;
+    const timedDeadlineAt = deadlineAt;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, timedDeadlineAt - Date.now()) + 50),
+    );
+
+    const restarted = new WorkflowHost({
+      databasePath,
+      runnerId: "host-timeout-restarted",
+      claimPollMs: 10,
+    });
+    await restarted.start();
+    try {
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("interaction-timeout-run")?.errorCode === "timed_out";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(state.getInteraction(timedRequestId)?.status).toBe("cancelled");
+        const attempt = state.state.connection
+          .prepare(
+            `SELECT a.status, a.deadline_at AS deadlineAt
+             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+             WHERE i.request_id = ?`,
+          )
+          .get(timedRequestId) as { status: string; deadlineAt: number | null } | undefined;
+        expect(attempt).toEqual({ status: "timed_out", deadlineAt: timedDeadlineAt });
+        const run = state.state.connection
+          .prepare("SELECT status FROM runs WHERE run_id = ?")
+          .get("interaction-timeout-run") as { status: string } | undefined;
+        expect(run?.status).toBe("timed_out");
+      } finally {
+        state.close();
+      }
+    } finally {
+      await restarted.stop();
+    }
+  }, 60_000);
+
   it("rejects changed mounted source before the resumed child executes it", async () => {
     const cwd = await makeTempDir("host-mounted-source-project");
     const databasePath = path.join(await makeTempDir("host-mounted-source-state"), "state.sqlite");
@@ -504,6 +658,72 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await host.stop();
     }
   }, 45_000);
+
+  it("cancels a committed run before its scheduled activation starts", async () => {
+    const cwd = await makeTempDir("host-cancel-pending-project");
+    const databasePath = path.join(await makeTempDir("host-cancel-pending-state"), "state.sqlite");
+    const workflowPath = await writeComputeWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath });
+    await host.start();
+    try {
+      const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
+      const runId = "cancel-pending-run";
+      const responses = await sendHostPipeline(host.endpoint, [
+        {
+          schema: "pi-workflows.host-request.v1",
+          requestId: "pending-start-request",
+          clientId: "pending-cancel-client",
+          operation: "run.start",
+          idempotencyKey: "pending-start-request",
+          runId,
+          payload: {
+            projectPath: cwd,
+            workflowName: resolved.workflowName,
+            workflowSourceRef: resolved.workflowSourceRef,
+            workflowSource: resolved.workflowSource,
+            definitionDigest: resolved.definitionDigest,
+            definitionSnapshot: resolved.definitionSnapshot,
+            input: { value: 1 },
+            launchOptions: {},
+            originSessionId: "host-test-session",
+            executionMode: "headless",
+          },
+        },
+        {
+          schema: "pi-workflows.host-request.v1",
+          requestId: "pending-cancel-request",
+          clientId: "pending-cancel-client",
+          operation: "run.cancel",
+          idempotencyKey: "pending-cancel-request",
+          runId,
+          payload: null,
+        },
+      ]);
+      expect(responses).toMatchObject([
+        { requestId: "pending-start-request", outcome: "accepted" },
+        {
+          requestId: "pending-cancel-request",
+          outcome: "accepted",
+          receipt: { runId, status: "cancelled" },
+        },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        expect(store.getWorkflowRun(runId)?.status).toBe("cancelled");
+        const workers = store.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .get(runId) as { count: number };
+        expect(workers.count).toBe(0);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  });
 
   it("cancels a parked interaction in the same durable transition", async () => {
     const cwd = await makeTempDir("host-cancel-interaction-project");
