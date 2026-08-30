@@ -1481,6 +1481,7 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE run_id = ? AND status IN ('starting', 'running', 'parked')`,
         )
         .run(errorHash, now, options.runId);
+      /* istanbul ignore if -- exact live claim and run checks make both updates mandatory */
       if (run.changes !== 1 || queue.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent ambiguous-effect state`);
       }
@@ -1492,6 +1493,7 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE resource_id = ? AND token_hash = ? AND generation = ? AND expires_at > ?`,
         )
         .run(row.resourceId, tokenHash(options.claimToken), lease.generation, now);
+      /* istanbul ignore if -- the exact live claim is stable in this transaction */
       if (released.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} claim changed during effect recovery`);
       }
@@ -1597,6 +1599,7 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE run_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
         )
         .run(errorHash, now, now, options.runId);
+      /* istanbul ignore if -- the control claim selects one nonterminal queue row */
       if (queue.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent queue state`);
       }
@@ -1608,6 +1611,7 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE run_id = ? AND status NOT IN ('completed', 'failed', 'timed_out', 'cancelled')`,
         )
         .run(errorHash, now, now, options.runId);
+      /* istanbul ignore if -- the control claim selects one nonterminal durable run */
       if (run.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent durable state`);
       }

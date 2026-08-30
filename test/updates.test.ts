@@ -243,6 +243,31 @@ describe("workflow updates", () => {
 });
 
 describe("progress estimation", () => {
+  it("rejects empty samples and handles invalid timestamps", () => {
+    expect(() => estimateProgress("empty", [])).toThrow(
+      "progress estimation requires at least one sample",
+    );
+    const estimate = estimateProgress(
+      "invalid-time",
+      [
+        { at: "not-a-time", data: progress(0, 2) },
+        { at: "still-not-a-time", data: progress(1, 2) },
+      ],
+      new Date("2026-08-16T10:00:00.000Z"),
+    );
+    expect(estimate.elapsedMs).toBeUndefined();
+    expect(estimate.unavailableReason).toBe("no positive progress rate");
+  });
+
+  it("assigns high confidence to a stable measured series", () => {
+    const samples = Array.from({ length: 6 }, (_, index) => ({
+      at: new Date(Date.parse("2026-08-16T10:00:00.000Z") + index * 1_000).toISOString(),
+      data: progress(index * 10, 100),
+    }));
+    const estimate = estimateProgress("stable", samples, new Date(samples.at(-1)!.at));
+    expect(estimate).toMatchObject({ sampleCount: 6, confidence: "high", delta: 10 });
+  });
+
   it("bounds live history per track and across tracks", () => {
     const records = Array.from({ length: 20 }, (_, index) => ({
       updateId: `u${index}`,
@@ -255,7 +280,7 @@ describe("progress estimation", () => {
       key: index % 2 === 0 ? "a" : "b",
       data: progress(index, 20),
     }));
-    const bounded = appendProgressHistory([], records, 3, 5);
+    const bounded = appendProgressHistory([{ ...records[0]!, type: "note" }], records, 3, 5);
     expect(bounded).toHaveLength(5);
     expect(bounded.filter((record) => record.key === "a")).toHaveLength(2);
     expect(bounded.filter((record) => record.key === "b")).toHaveLength(3);
@@ -475,6 +500,13 @@ describe("progress estimation", () => {
     expect(formatProgressLine(estimate, new Date("2026-08-16T10:10:00.000Z"))).toContain(
       "source ETA 20m",
     );
+    const waiting = estimateProgress(
+      "waiting-job",
+      [{ at: "2026-08-16T10:00:01.000Z", data: { ...data, status: "waiting" } }],
+      new Date("2026-08-16T10:10:00.000Z"),
+    );
+    expect(waiting.unavailableReason).toBeUndefined();
+    expect(waiting.sourceEstimatedFinishAt).toBe(data.sourceEstimatedFinishAt);
   });
 });
 

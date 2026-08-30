@@ -1,10 +1,12 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
+import { customMessageContentText, renderMessageCard } from "../src/extension/message-card.js";
 import {
   buildWorkflowAgentStepView,
   recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
+  visibleAssistantText,
   WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
   WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
   type WorkflowAgentStepMessageDetails,
@@ -176,6 +178,97 @@ describe("workflow agent-step messages", () => {
     expect(
       recoverAssistantStep(entries, { ...assistantDetails.contract, attemptId: "missing" }),
     ).toBeUndefined();
+    expect(
+      recoverAssistantStep(entries, { ...assistantDetails.contract, completion: "submit" }),
+    ).toBeUndefined();
+
+    const withoutIds = [
+      {
+        type: "custom_message",
+        customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+        details: {
+          ...assistantDetails,
+          contract: { ...assistantDetails.contract, maxOutputChars: 100 },
+        },
+      },
+      null,
+      { type: "metadata" },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "response without ids" }],
+          stopReason: "length",
+        },
+      },
+    ];
+    expect(
+      recoverAssistantStep(withoutIds, { ...assistantDetails.contract, maxOutputChars: 100 }),
+    ).toEqual({
+      output: "response without ids",
+      assistantMessage: {
+        recovered: true,
+        maxChars: 100,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expect(
+      recoverAssistantStep(
+        [
+          withoutIds[0],
+          {
+            type: "custom_message",
+            customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+            details: assistantDetails,
+          },
+        ],
+        { ...assistantDetails.contract, maxOutputChars: 100 },
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects invalid visible assistant responses", () => {
+    expect(() => visibleAssistantText(null)).toThrow(
+      "Assistant step settled without a final assistant message",
+    );
+    expect(() => visibleAssistantText({ role: "user", content: [] })).toThrow(
+      "Assistant step settled without a final assistant message",
+    );
+    expect(() => visibleAssistantText({ role: "assistant", content: [] })).toThrow(
+      "Assistant step settled without a final assistant message",
+    );
+    expect(() =>
+      visibleAssistantText({
+        role: "assistant",
+        content: [{ type: "text", text: "partial" }],
+        stopReason: "error",
+        errorMessage: "provider failed",
+      }),
+    ).toThrow("provider failed");
+    expect(() =>
+      visibleAssistantText({
+        role: "assistant",
+        content: [{ type: "text", text: "partial" }],
+        stopReason: "toolUse",
+      }),
+    ).toThrow('Assistant step stopped with "toolUse" before a final response');
+    expect(() =>
+      visibleAssistantText({
+        role: "assistant",
+        content: [{ type: "toolCall", name: "read" }],
+        stopReason: "stop",
+      }),
+    ).toThrow("Assistant step returned no visible text");
+    expect(() =>
+      visibleAssistantText(
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "too long" }],
+          stopReason: "length",
+        },
+        3,
+      ),
+    ).toThrow("Assistant response has 8 characters, above the configured limit of 3");
   });
 
   it("renders malformed details safely", () => {
@@ -187,6 +280,16 @@ describe("workflow agent-step messages", () => {
     expect(view.title).toBe("▶ Workflow › step");
     expect(view.expandedText).toContain("Run id: unknown");
     expect(view.expandedText).toContain("Do work");
+  });
+
+  it("normalizes custom message content and optional card rows", () => {
+    expect(customMessageContentText(3)).toBe("");
+    expect(customMessageContentText([null, 1, {}, { text: 2 }, { text: "first\r\nsecond" }])).toBe(
+      "first\nsecond",
+    );
+    expect(renderMessageCard({ title: "Only a title" }, theme).render(40).join("\n")).toContain(
+      "Only a title",
+    );
   });
 
   it("registers a bounded renderer for collapsed and expanded views", () => {

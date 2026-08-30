@@ -178,6 +178,31 @@ describe("CharCanvas", () => {
     expect(canvas.render((text) => text)).toEqual(["e\u0301"]);
     expect(visibleWidth(canvas.render((text) => text)[0] ?? "")).toBe(1);
   });
+
+  it("protects occupied cells and handles empty canvas rows", () => {
+    const canvas = new CharCanvas();
+    canvas.put(-1, 0, "x");
+    canvas.put(0, 2, " ");
+    canvas.text(0, 0, "界");
+    canvas.put(1, 0, "x");
+    canvas.put(2, 0, "label");
+    canvas.put(2, 0, "─");
+    canvas.put(3, 0, "─");
+    canvas.put(3, 0, "│", "active");
+    expect(canvas.textIfEmpty(-1, 0, "bad")).toBe(false);
+    expect(canvas.textIfEmpty(0, 0, "bad")).toBe(false);
+    expect(canvas.textIfEmpty(5, 0, "ok")).toBe(true);
+    expect(canvas.textOverRun(0, 0, "bad")).toBe(false);
+    expect(canvas.textOverRun(8, 0, "bad")).toBe(false);
+    canvas.hline(1, 0, 6);
+    expect(canvas.textOverRun(2, 1, "ok")).toBe(true);
+    canvas.vline(7, 3, 1);
+    canvas.put(0, 4, " ");
+    const lines = canvas.render((text) => text);
+    expect(lines[0]).toContain("label");
+    expect(lines[1]).toContain("ok");
+    expect(lines[4]).toBe("");
+  });
 });
 
 describe("renderGraphLines", () => {

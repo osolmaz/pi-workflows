@@ -33,6 +33,8 @@ describe("workflow tool input", () => {
   });
 
   it.each([
+    null,
+    { action: 1 },
     { action: "unknown" },
     { action: "start" },
     { action: "restart", runId: "run-1" },
@@ -52,6 +54,12 @@ describe("workflow tool input", () => {
     },
   ])("rejects invalid action input %#", (input) => {
     expect(() => parseWorkflowToolInput(input)).toThrow("Invalid workflow tool input");
+  });
+
+  it("reports integer requirements in plain text", () => {
+    expect(() => parseWorkflowToolInput({ action: "list", offset: 1.5 })).toThrow(
+      "offset must be an integer",
+    );
   });
 
   it("keeps the RPC bridge limited to update and submit", () => {

@@ -6,6 +6,7 @@ import {
   discoverWorkflows,
   loadWorkflowFile,
   resolveWorkflowRef,
+  resolveWorkflowSource,
   workflowFileStem,
 } from "../src/workflows/loader.js";
 import { makeTempDir } from "./helpers.js";
@@ -36,6 +37,7 @@ describe("workflowFileStem", () => {
   it("strips workflow suffixes", () => {
     expect(workflowFileStem("/a/b/echo.workflow.ts")).toBe("echo");
     expect(workflowFileStem("/a/b/echo.workflow.js")).toBe("echo");
+    expect(workflowFileStem("/a/b/plain")).toBe("plain");
   });
 });
 
@@ -245,5 +247,26 @@ describe("resolveWorkflowRef", () => {
     await expect(
       resolveWorkflowRef("unknown", { cwd, homeDir }, builtinWorkflowCatalog),
     ).rejects.toThrow(/known/);
+    const empty = await makeSearchDirs();
+    await expect(resolveWorkflowRef("unknown", empty)).rejects.toThrow(/\(none\)/);
+    await expect(
+      resolveWorkflowRef("builtin:missing", { cwd, homeDir }, builtinWorkflowCatalog),
+    ).rejects.toThrow("Unknown built-in workflow");
+  });
+
+  it("verifies stored file and built-in source identities", async () => {
+    const { cwd, homeDir } = await makeSearchDirs();
+    const file = await copyExample(path.join(cwd, ".pi", "workflows"), "stored.workflow.ts");
+    const resolved = await resolveWorkflowRef(file, { cwd, homeDir }, builtinWorkflowCatalog);
+    await expect(
+      resolveWorkflowSource(resolved.source, builtinWorkflowCatalog, "stored-run"),
+    ).resolves.toMatchObject({ name: "echo" });
+    await fs.appendFile(file, "\n// changed\n");
+    await expect(
+      resolveWorkflowSource(resolved.source, builtinWorkflowCatalog, "stored-run"),
+    ).rejects.toThrow(/source changed/i);
+    await expect(
+      resolveWorkflowSource({ kind: "builtin", id: "plain-summary", revision: "3" }),
+    ).rejects.toThrow("No built-in workflow catalog");
   });
 });

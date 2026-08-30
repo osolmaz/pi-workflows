@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitWidth, stripAnsi, visibleLength } from "../src/render/ansi.js";
+import { ansi, fitWidth, stripAnsi, visibleLength } from "../src/render/ansi.js";
 import {
   formatDuration,
   maxDetailScroll,
@@ -457,5 +457,32 @@ describe("ansi helpers", () => {
   it("fits lines to a width", () => {
     expect(fitWidth("short", 10)).toBe("short");
     expect(stripAnsi(fitWidth("a".repeat(20), 10))).toBe(`${"a".repeat(9)}…`);
+    expect(fitWidth("long", 1)).toBe("l");
+  });
+
+  it("honors explicit color environment controls", () => {
+    const saved = {
+      force: process.env.FORCE_COLOR,
+      noColor: process.env.NO_COLOR,
+      workflowNoColor: process.env.PI_WORKFLOWS_NO_COLOR,
+    };
+    try {
+      delete process.env.NO_COLOR;
+      delete process.env.PI_WORKFLOWS_NO_COLOR;
+      process.env.FORCE_COLOR = "1";
+      expect(ansi.green("ready")).toContain("\u001b[32m");
+      process.env.NO_COLOR = "1";
+      expect(ansi.green("ready")).toBe("ready");
+      delete process.env.NO_COLOR;
+      process.env.PI_WORKFLOWS_NO_COLOR = "1";
+      expect(ansi.green("ready")).toBe("ready");
+    } finally {
+      if (saved.force === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = saved.force;
+      if (saved.noColor === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = saved.noColor;
+      if (saved.workflowNoColor === undefined) delete process.env.PI_WORKFLOWS_NO_COLOR;
+      else process.env.PI_WORKFLOWS_NO_COLOR = saved.workflowNoColor;
+    }
   });
 });
