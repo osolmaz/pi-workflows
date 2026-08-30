@@ -33,6 +33,23 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeHeadlessAgentWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "headless-agent.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-headless-agent",
+  startAt: "ask",
+  nodes: { ask: agent({ prompt: () => "Return a result." }) },
+  edges: [],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeInteractiveWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
@@ -294,6 +311,15 @@ async function startRun(options: {
   expect(response.outcome).toBe("accepted");
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("global workflow host", () => {
   it("opens the canonical database and shuts down cleanly", async () => {
     const databasePath = path.join(await makeTempDir("host-state"), "state.sqlite");
@@ -365,6 +391,77 @@ describe("global workflow host", () => {
       ).rejects.toThrow();
       await host.stop();
     },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reaps the headless pi process group after normal worker completion",
+    async () => {
+      const cwd = await makeTempDir("host-headless-group-project");
+      const stateDir = await makeTempDir("host-headless-group-state");
+      const databasePath = path.join(stateDir, "state.sqlite");
+      const workflowPath = await writeHeadlessAgentWorkflow(cwd);
+      const binDir = path.join(cwd, "bin");
+      const pidFile = path.join(cwd, "fake-pi-pids.json");
+      const fakePi = path.join(binDir, "pi");
+      await fs.mkdir(binDir);
+      await fs.writeFile(
+        fakePi,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const readline = require("node:readline");
+const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.writeFileSync(process.env.FAKE_PI_PIDS, JSON.stringify({ leader: process.pid, grandchild: grandchild.pid }));
+let submitted = false;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  if (submitted) return;
+  const request = JSON.parse(line);
+  const contract = request.message.split("\\n").find((candidate) => candidate.startsWith('{"action": "submit"'));
+  if (contract === undefined) return;
+  const action = JSON.parse(contract.replace("<your result>", "null"));
+  submitted = true;
+  process.stderr.write("PI_WORKFLOWS_STEP_SUBMISSION " + JSON.stringify({ ...action, output: { done: true } }) + "\\n");
+});
+setInterval(() => {}, 1000);
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const registry = new HostProcessRegistry(stateDir);
+      const host = new WorkflowHost({
+        databasePath,
+        registry,
+        claimPollMs: 10,
+        env: {
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          FAKE_PI_PIDS: pidFile,
+        },
+      });
+      const client = new WorkflowHostClient({ databasePath });
+      await host.start();
+      try {
+        await startRun({ client, cwd, workflowPath, runId: "headless-group-run" });
+        await waitUntil(() => {
+          const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+          try {
+            return store.getWorkflowRun("headless-group-run")?.status === "done";
+          } finally {
+            store.close();
+          }
+        }, 30_000);
+        const pids = JSON.parse(await fs.readFile(pidFile, "utf8")) as {
+          leader: number;
+          grandchild: number;
+        };
+        await waitUntil(
+          () =>
+            !processExists(pids.leader) && !processExists(pids.grandchild) && registry.size === 0,
+        );
+        expect(registry.size).toBe(0);
+      } finally {
+        await host.stop();
+      }
+    },
+    45_000,
   );
 
   it("uses the database directory for its local process registry", async () => {

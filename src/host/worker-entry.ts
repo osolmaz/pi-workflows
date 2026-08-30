@@ -297,11 +297,44 @@ export async function runWorkflowWorker(): Promise<number> {
     } else {
       const rpc = new RpcStepExecutor({
         cwd: launch.projectPath,
-        processGroup: "inherit",
+        processGroup: "own",
+        abortGraceMs: 1_000,
+        registry: {
+          register: async (pid) => {
+            await transport.request({
+              messageId: randomUUID(),
+              operation: "process.register",
+              kind: "worker.progress",
+              expectedRevision: 0,
+              payload: { pid },
+            });
+          },
+          unregister: async (pid) => {
+            await transport.request({
+              messageId: randomUUID(),
+              operation: "process.unregister",
+              kind: "worker.progress",
+              expectedRevision: 0,
+              payload: { pid },
+            });
+          },
+        },
         ...(bootstrap.piArgs === undefined ? {} : { piArgs: bootstrap.piArgs }),
       });
+      const closeRpc = async () => await rpc.close();
+      const onShutdown = () => {
+        void closeRpc().catch((error: unknown) => {
+          process.stderr.write(`Headless pi shutdown failed: ${errorMessage(error)}\n`);
+        });
+      };
+      process.on("SIGTERM", onShutdown);
+      process.on("SIGINT", onShutdown);
       executor = rpc;
-      closeExecutor = async () => await rpc.close();
+      closeExecutor = async () => {
+        process.removeListener("SIGTERM", onShutdown);
+        process.removeListener("SIGINT", onShutdown);
+        await closeRpc();
+      };
     }
     const engine = new WorkflowEngine({
       store,

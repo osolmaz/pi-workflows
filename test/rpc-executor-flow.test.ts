@@ -208,6 +208,22 @@ describe("HostProcessRegistry edge cases", () => {
     registry.unregister(process.pid);
   });
 
+  it("kills one exact registered process group", async () => {
+    const dir = await makeTempDir("pi-host-registry-one");
+    const registry = new HostProcessRegistry(dir);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    expect(child.pid).toBeTypeOf("number");
+    registry.register(child.pid as number);
+    const exited = once(child, "exit");
+    expect(registry.kill(child.pid as number)).toBe(true);
+    await exited;
+    expect(registry.kill(child.pid as number)).toBe(false);
+    expect(registry.size).toBe(0);
+  });
+
   it("killAll clears the registry and tolerates dead pids", async () => {
     const dir = await makeTempDir("pi-host-registry-kill");
     const registry = new HostProcessRegistry(dir);

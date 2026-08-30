@@ -37,6 +37,8 @@ export type WorkerStoreOperation =
   | "store.readResolvedHumanDecision"
   | "store.reserveEffect"
   | "store.settleEffect"
+  | "process.register"
+  | "process.unregister"
   | "interaction.request"
   | "interaction.accept"
   | "interaction.reject"
