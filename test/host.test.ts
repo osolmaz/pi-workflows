@@ -50,6 +50,55 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeTimedDecisionWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "timed-decision.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import {
+  choice,
+  compute,
+  defineHumanChoices,
+  defineWorkflow,
+  humanDecision,
+  humanDecisionEdge,
+} from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+const choices = defineHumanChoices({
+  continue: choice({ label: "Continue" }),
+  stop: choice({ label: "Stop" }),
+});
+export default defineWorkflow({
+  name: "host-timed-decision",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({
+      audience: "operator",
+      choices,
+      request: () => ({
+        title: "Continue?",
+        subject: { task: "test" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Choose whether to continue.",
+          blocks: [],
+        },
+      }),
+      onTimeout: { afterMs: 100, response: { choice: "continue" } },
+    }),
+    continued: compute({ run: ({ outputs }) => outputs.approve }),
+    stopped: compute({ run: ({ outputs }) => outputs.approve }),
+  },
+  edges: [
+    humanDecisionEdge({
+      from: "approve",
+      choices,
+      cases: { continue: "continued", stop: "stopped" },
+    }),
+  ],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeInteractiveWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
@@ -548,6 +597,57 @@ setInterval(() => {}, 1000);
     }
   }, 60_000);
 
+  it("resolves a protected decision timeout and starts its continuation", async () => {
+    const cwd = await makeTempDir("host-decision-timeout-project");
+    const databasePath = path.join(
+      await makeTempDir("host-decision-timeout-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeTimedDecisionWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    try {
+      await startRun({
+        client: new WorkflowHostClient({ databasePath }),
+        cwd,
+        workflowPath,
+        runId: "decision-timeout-parent",
+        executionMode: "interactive",
+      });
+      let decisionId: string | undefined;
+      await waitUntil(() => {
+        const queue = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          const decision = queue.state.connection
+            .prepare(
+              `SELECT h.decision_id AS decisionId, r.provenance
+               FROM human_decisions h
+               LEFT JOIN human_decision_resolutions r ON r.decision_id = h.decision_id
+               WHERE h.run_id = ? LIMIT 1`,
+            )
+            .get("decision-timeout-parent") as
+            | { decisionId: string; provenance: string | null }
+            | undefined;
+          decisionId = decision?.decisionId;
+          if (decision?.provenance !== "timeout_policy") return false;
+          const continuationRunId = `continuation-${decision.decisionId.replace(/^decision-/, "")}`;
+          return queue.getWorkflowRun(continuationRunId)?.status === "done";
+        } finally {
+          queue.close();
+        }
+      }, 30_000);
+      if (decisionId === undefined) throw new Error("timed decision was not created");
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(state.getInteraction(decisionId)?.status).toBe("settled");
+      } finally {
+        state.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
   it("expires a parked interaction from its durable deadline after restart", async () => {
     const cwd = await makeTempDir("host-interaction-timeout-project");
     const databasePath = path.join(
@@ -709,6 +809,83 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       await restarted.stop();
     }
   }, 60_000);
+
+  it("parks a workflow load failure until an explicit resume", async () => {
+    const cwd = await makeTempDir("host-source-load-project");
+    const databasePath = path.join(await makeTempDir("host-source-load-state"), "state.sqlite");
+    const workflowPath = await writeComputeWorkflow(cwd);
+    const originalSource = await fs.readFile(workflowPath, "utf8");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowHostClient({ databasePath });
+    await host.start();
+    try {
+      const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
+      await fs.writeFile(workflowPath, `${originalSource}\n// changed before worker load\n`);
+      const response = await client.request({
+        operation: "run.start",
+        runId: "source-load-run",
+        payload: {
+          projectPath: cwd,
+          workflowName: resolved.workflowName,
+          workflowSourceRef: resolved.workflowSourceRef,
+          workflowSource: resolved.workflowSource,
+          definitionDigest: resolved.definitionDigest,
+          definitionSnapshot: resolved.definitionSnapshot,
+          input: { value: 1 },
+          launchOptions: {},
+          originSessionId: "host-test-session",
+          executionMode: "headless",
+        },
+      });
+      expect(response.outcome).toBe("accepted");
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("source-load-run")?.errorCode === "workflowSourceChanged";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const parked = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        const workers = parked.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .get("source-load-run") as { count: number };
+        expect(workers.count).toBe(1);
+      } finally {
+        parked.close();
+      }
+
+      await fs.writeFile(workflowPath, originalSource);
+      await expect(
+        client.request({ operation: "run.resume", runId: "source-load-run" }),
+      ).resolves.toMatchObject({ outcome: "accepted" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("source-load-run")?.status === "done";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      const completed = new SqliteControllerStore(databasePath, {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        expect(completed.getWorkflowRun("source-load-run")?.errorCode).toBeNull();
+        const workers = completed.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+          .get("source-load-run") as { count: number };
+        expect(workers.count).toBe(2);
+      } finally {
+        completed.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
 
   it("commits active cancellation before it returns the durable receipt", async () => {
     const cwd = await makeTempDir("host-cancel-project");

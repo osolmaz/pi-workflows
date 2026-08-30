@@ -520,6 +520,10 @@ export class HumanDecisionStore {
     request: HumanDecisionRequest,
     now = new Date(),
   ): Promise<HumanDecisionAcceptance> {
+    return this.resolveTimeoutSync(request, now);
+  }
+
+  resolveTimeoutSync(request: HumanDecisionRequest, now = new Date()): HumanDecisionAcceptance {
     validateHumanDecisionRequestIntegrity(request);
     if (request.expiresAt === undefined || request.defaultResponse === undefined) {
       throw new Error("Human decision request has no timeout default");
@@ -739,6 +743,22 @@ export class HumanDecisionStore {
     const rows = this.state.connection
       .prepare("SELECT request_hash AS requestHash FROM human_decisions ORDER BY created_at")
       .all();
+    return rows.filter(isRequestHashRow).map((row) => this.readRequestFromHash(row.requestHash));
+  }
+
+  async listExpiredDefaultRequests(now = new Date()): Promise<HumanDecisionRequest[]> {
+    const timestamp = now.getTime();
+    if (!Number.isFinite(timestamp)) throw new Error("Human decision timeout date is invalid");
+    const rows = this.state.connection
+      .prepare(
+        `SELECT h.request_hash AS requestHash
+         FROM human_decisions h
+         LEFT JOIN human_decision_resolutions r ON r.decision_id = h.decision_id
+         WHERE h.deadline_at IS NOT NULL AND h.deadline_at <= ?
+           AND h.default_response_hash IS NOT NULL AND r.decision_id IS NULL
+         ORDER BY h.deadline_at, h.decision_id`,
+      )
+      .all(timestamp);
     return rows.filter(isRequestHashRow).map((row) => this.readRequestFromHash(row.requestHash));
   }
 

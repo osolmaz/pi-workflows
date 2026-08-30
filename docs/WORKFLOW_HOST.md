@@ -151,7 +151,7 @@ A worker launch envelope contains:
 }
 ```
 
-Before it loads workflow modules, the worker verifies the root identity and every saved mounted file hash or built-in revision. After loading, it also checks the complete mounted-source map against the saved map. A mismatch parks the run with a source-change reason. Changed included code does not execute.
+Before it loads workflow modules, the worker verifies the root identity and every saved mounted file hash or built-in revision. After loading, it also checks the complete mounted-source map against the saved map. A mismatch parks the run with `workflowSourceChanged`. The normal scheduler does not claim that run again. The operator can restore the recorded source and explicitly resume the run, or cancel it. Changed included code does not execute.
 
 The host records a worker epoch before spawn. The child must return a ready message before the startup deadline. Every later child message includes the run ID, generation, and worker epoch.
 
@@ -320,7 +320,7 @@ The extension finds pending requests during `session_start`, after `agent_settle
 
 A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host first checks this transport contract and records a provisional `validating` submission. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the host. The host settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the host rejects the provisional submission and leaves the request ready for a corrected retry.
 
-An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`.
+An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`. When a protected decision reaches its saved `onTimeout` deadline, the host takes a control claim on the waiting parent, atomically records the validated default, closes the pending interaction, releases the parent claim, and reserves the continuation. A human answer cannot win after that deadline.
 
 The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
 
@@ -330,7 +330,7 @@ Notify nodes enqueue passive messages in the existing `notifications` outbox. Th
 
 ## Detached execution
 
-A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The Pi child stays in the workflow worker process group, so cancellation and orphan cleanup stop the complete tree.
+A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The Pi child uses a separate process group registered with the host. The worker stops that group during normal completion. Cancellation gives the worker a bounded cleanup interval, and the host reaps the registered group if the worker exits first.
 
 The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same step and attempt contract as origin-session work. A headless run cannot use a visible assistant-message step because it has no origin Pi session.
 

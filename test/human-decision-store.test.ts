@@ -355,6 +355,9 @@ describe("HumanDecisionStore SQLite", () => {
     const databasePath = await makeStateDatabasePath("decision-timeout");
     const { result, request, store } = await waitingDecision(databasePath);
     const defaulted = await defaultedRequest(store, request);
+    expect(
+      await store.listExpiredDefaultRequests(new Date("2026-08-23T00:00:00.000Z")),
+    ).toContainEqual(defaulted);
     const state = new StateDatabase({ filePath: databasePath });
     const mutations = new StateMutationStore(state);
     const resourceId = resourceIdFor("run", result.runId);
@@ -384,6 +387,9 @@ describe("HumanDecisionStore SQLite", () => {
       new Date("2026-08-23T00:00:01.000Z"),
     );
     expect(accepted.decision.provenance).toBe("timeout");
+    expect(
+      await ownerStore.listExpiredDefaultRequests(new Date("2026-08-23T00:00:02.000Z")),
+    ).toEqual([]);
     await expect(ownerStore.cancel(defaulted, "expired")).rejects.toThrow(/timeout policy/);
     ownerStore.close();
     store.close();

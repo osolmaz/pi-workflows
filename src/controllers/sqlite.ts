@@ -1448,6 +1448,7 @@ export class SqliteControllerStore implements ControllerStore {
       "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
       "NOT (q.status = 'parked' AND (r.status = 'waiting' OR r.paused = 1))",
       "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status IN ('pending', 'presenting'))",
+      "(q.error_code IS NULL OR q.error_code <> 'workflowSourceChanged')",
     ];
     const params: unknown[] = [now, now, options.runnerId, options.runnerId];
     if (this.projectId !== null) {
@@ -1558,6 +1559,80 @@ export class SqliteControllerStore implements ControllerStore {
 
   parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
     return this.releaseRunClaim(options.runId, options.claimToken, "parked", options.now);
+  }
+
+  parkWorkflowRunForSourceChange(options: {
+    runId: string;
+    claimToken: string;
+    detail: string;
+    now?: string;
+  }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (
+        row === undefined ||
+        !this.verifyWorkflowRunClaim({
+          runId: options.runId,
+          claimToken: options.claimToken,
+          now: new Date(now).toISOString(),
+        })
+      ) {
+        return false;
+      }
+      const lease = this.requireLease(row.resourceId);
+      const detail = options.detail.slice(0, 8_192);
+      const errorHash = this.state.putText(detail, now);
+      const run = this.state.connection
+        .prepare(
+          `UPDATE runs SET status_detail = ?, updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status NOT IN ('completed', 'failed', 'timed_out', 'cancelled')`,
+        )
+        .run(detail, now, options.runId);
+      const queue = this.state.connection
+        .prepare(
+          `UPDATE run_queue
+           SET status = 'parked', error_code = 'workflowSourceChanged', error_hash = ?,
+               available_at = ?, updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status IN ('queued', 'starting', 'running', 'parked')`,
+        )
+        .run(errorHash, now, now, options.runId);
+      /* istanbul ignore if -- exact live claim and nonterminal checks make both updates mandatory */
+      if (run.changes !== 1 || queue.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} has inconsistent source-change state`);
+      }
+      const released = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+               acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND token_hash = ? AND generation = ? AND expires_at > ?`,
+        )
+        .run(row.resourceId, tokenHash(options.claimToken), lease.generation, now);
+      /* istanbul ignore if -- the exact live claim is stable in this transaction */
+      if (released.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} claim changed during source recovery`);
+      }
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.source_changed",
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status: "parked", code: "workflowSourceChanged" },
+        now,
+        lease.generation || undefined,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
   }
 
   parkWorkflowRunForAmbiguousEffect(options: {
@@ -2794,7 +2869,11 @@ export class SqliteControllerStore implements ControllerStore {
     if (result.changes !== 1) return undefined;
     if (options.preserveQueueStatus !== true) {
       this.state.connection
-        .prepare("UPDATE run_queue SET status = 'starting', updated_at = ? WHERE run_id = ?")
+        .prepare(
+          `UPDATE run_queue
+           SET status = 'starting', error_code = NULL, error_hash = NULL, updated_at = ?
+           WHERE run_id = ?`,
+        )
         .run(now, runId);
     }
     const revision = this.resourceRevision(row.resourceId);
