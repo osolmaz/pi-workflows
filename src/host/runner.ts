@@ -42,6 +42,7 @@ import { WorkflowRunStore } from "../workflows/store.js";
 import type {
   HumanDecisionRequest,
   HumanDecisionResponse,
+  ResolvedHumanDecision,
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
   WorkflowTraceEventDraft,
@@ -72,6 +73,7 @@ import {
 import {
   HostStateStore,
   type HostClaim,
+  type InteractiveRequestRecord,
   type InteractiveSubmissionRecord,
   type WorkerLaunchEnvelope,
 } from "./state.js";
@@ -114,6 +116,7 @@ type ActiveRun = {
   supervisor: WorkflowWorkerSupervisor;
   workerPid?: number;
   exiting: boolean;
+  workflowLoadFailure?: string;
   control?: "cancel" | "pause" | "handoff";
   claimLost?: boolean;
 };
@@ -151,6 +154,7 @@ export class WorkflowHost {
   private readonly state: StateDatabase;
   private readonly hostState: HostStateStore;
   private readonly queue: SqliteControllerStore;
+  private readonly decisions: HumanDecisionStore;
   private readonly runStore: WorkflowRunStore;
   private readonly registry: HostProcessRegistry;
   private readonly activeRuns = new Map<string, ActiveRun>();
@@ -171,6 +175,7 @@ export class WorkflowHost {
   private stopping = false;
   private started = false;
   private controllerPollActive = false;
+  private decisionTimeoutActive = false;
 
   constructor(options: WorkflowHostOptions = {}) {
     this.options = options;
@@ -182,6 +187,13 @@ export class WorkflowHost {
     this.state = new StateDatabase({ filePath: this.databasePath });
     this.hostState = new HostStateStore(this.databasePath, { state: this.state });
     this.queue = new SqliteControllerStore(this.databasePath, { state: this.state, global: true });
+    this.decisions = new HumanDecisionStore(this.databasePath, {
+      state: this.state,
+      authorityProvider: (runId) => {
+        const token = this.controlClaims.get(runId) ?? this.activeRuns.get(runId)?.claimToken;
+        return token === undefined ? undefined : this.queue.workflowRunAuthority(runId, token);
+      },
+    });
     this.runStore = new WorkflowRunStore(this.databasePath, {
       state: this.state,
       authorityProvider: (runId) => {
@@ -226,6 +238,7 @@ export class WorkflowHost {
       this.started = true;
       this.log(`ready on ${this.socketPath} at epoch ${this.claim.epoch}`);
       this.expireTimedOutInteraction();
+      void this.expireTimedOutDecision();
       void this.claimOne();
       void this.claimControllerOne();
     } catch (error) {
@@ -360,6 +373,7 @@ export class WorkflowHost {
     this.heartbeatTimer.unref?.();
     this.pollTimer = setInterval(() => {
       this.expireTimedOutInteraction();
+      void this.expireTimedOutDecision();
       void this.claimOne();
       void this.claimControllerOne();
     }, this.options.claimPollMs ?? CLAIM_POLL_MS);
@@ -901,8 +915,7 @@ export class WorkflowHost {
     }
     const request = interaction.contract as unknown as HumanDecisionRequest;
     const response = payload.response as HumanDecisionResponse;
-    const decisions = new HumanDecisionStore(this.databasePath, { state: this.state });
-    const accepted = decisions.acceptSync(request, {
+    const accepted = this.decisions.acceptSync(request, {
       ...response,
       decisionId: request.decisionId,
       requestDigest: request.requestDigest,
@@ -926,6 +939,29 @@ export class WorkflowHost {
       receipt: accepted.decision as unknown as JsonValue,
     });
 
+    const continuationRunId = this.prepareDecisionContinuation(
+      interaction,
+      request,
+      accepted.decision,
+      afterCommit,
+    );
+    return {
+      outcome: accepted.status === "adopted" ? "adopted" : "accepted",
+      receipt: {
+        requestId,
+        parentRunId: interaction.runId,
+        runId: continuationRunId,
+        decision: accepted.decision,
+      } as JsonValue,
+    };
+  }
+
+  private prepareDecisionContinuation(
+    interaction: InteractiveRequestRecord,
+    request: HumanDecisionRequest,
+    decision: ResolvedHumanDecision,
+    afterCommit: Array<() => void>,
+  ): string {
     const parent = this.queue.getWorkflowRun(interaction.runId);
     const bundle = this.runStore.readRun(interaction.runId);
     if (parent === undefined || bundle === null || bundle instanceof Promise) {
@@ -942,20 +978,12 @@ export class WorkflowHost {
         projectPath,
         definitionSnapshot: bundle.snapshot,
         input: {},
-        launchOptions: { humanDecision: accepted.decision },
+        launchOptions: { humanDecision: decision },
         originSessionId: interaction.targetSessionId,
       },
       afterCommit,
     );
-    return {
-      outcome: accepted.status === "adopted" ? "adopted" : "accepted",
-      receipt: {
-        requestId,
-        parentRunId: interaction.runId,
-        runId: continuationRunId,
-        decision: accepted.decision,
-      } as JsonValue,
-    };
+    return continuationRunId;
   }
 
   private prepareContinuation(
@@ -1666,6 +1694,78 @@ export class WorkflowHost {
     active.settled = true;
   }
 
+  private async expireTimedOutDecision(): Promise<void> {
+    if (this.stopping || this.claim === null || this.decisionTimeoutActive) return;
+    this.decisionTimeoutActive = true;
+    try {
+      const now = new Date();
+      const requests = await this.decisions.listExpiredDefaultRequests(now);
+      const candidate = requests
+        .map((request) => ({
+          request,
+          interaction: this.hostState.getInteraction(request.decisionId),
+        }))
+        .find(
+          ({ request, interaction }) =>
+            interaction?.kind === "decision" &&
+            interaction.runId === request.runId &&
+            ["pending", "presenting"].includes(interaction.status) &&
+            !this.activeRuns.has(request.runId) &&
+            !this.pendingStarts.has(request.runId),
+        );
+      if (
+        candidate === undefined ||
+        candidate.interaction === undefined ||
+        candidate.request.defaultResponse === undefined
+      ) {
+        return;
+      }
+      const { request, interaction } = candidate;
+      const claimToken = randomUUID();
+      const claimed = this.queue.claimWorkflowRunForControl({
+        runId: request.runId,
+        runnerId: this.hostId,
+        claimToken,
+        leaseMs: this.runClaimLeaseMs,
+      });
+      if (claimed === undefined) return;
+      this.controlClaims.set(request.runId, claimToken);
+      let committed = false;
+      const afterCommit: Array<() => void> = [];
+      try {
+        this.state.transaction(() => {
+          const accepted = this.decisions.resolveTimeoutSync(request, new Date());
+          const submissionId = `timeout-${request.decisionId}`;
+          this.hostState.submitInteraction({
+            requestId: interaction.requestId,
+            submissionId,
+            idempotencyKey: submissionId,
+            expectedRevision: interaction.revision,
+            payload: request.defaultResponse as JsonValue,
+            accepted: true,
+            receipt: accepted.decision as unknown as JsonValue,
+          });
+          if (!this.queue.parkWorkflowRun({ runId: request.runId, claimToken })) {
+            throw new Error("Decision timeout could not release the parent run claim");
+          }
+          this.prepareDecisionContinuation(interaction, request, accepted.decision, afterCommit);
+        });
+        committed = true;
+        for (const effect of afterCommit) setImmediate(effect);
+        this.log(`human decision ${request.decisionId} resolved by its timeout policy`);
+      } catch (error) {
+        this.log(`human decision timeout failed for ${request.decisionId}: ${errorMessage(error)}`);
+      } finally {
+        this.controlClaims.delete(request.runId);
+        if (!committed) this.queue.parkWorkflowRun({ runId: request.runId, claimToken });
+      }
+    } catch (error) {
+      this.log(`human decision timeout scan failed: ${errorMessage(error)}`);
+    } finally {
+      this.decisionTimeoutActive = false;
+    }
+  }
+
   private expireTimedOutInteraction(): void {
     if (this.stopping || this.claim === null) return;
     const runId = this.hostState
@@ -1864,7 +1964,9 @@ export class WorkflowHost {
       } catch {
         // A completed worker record wins.
       }
-      if (active.control === undefined) await this.recoverWorkerExit(active, "crashed");
+      if (active.control === undefined) {
+        await this.recoverWorkerExit(active, "crashed");
+      }
     } finally {
       this.reapWorkerDescendants(envelope.workerEpoch);
       this.activeRuns.delete(runId);
@@ -1944,6 +2046,13 @@ export class WorkflowHost {
       );
     }
     if (message.operation === "worker.exiting") {
+      const payload = requireRecord(message.payload, "worker exit payload");
+      if (payload.status === "workflowLoadFailed") {
+        active.workflowLoadFailure = requireString(payload.error, "workflow load error").slice(
+          0,
+          8_192,
+        );
+      }
       active.exiting = true;
       return workerResponse(message, "accepted", {});
     }
@@ -2599,6 +2708,18 @@ export class WorkflowHost {
         `Workflow worker ${outcome} before it completed interaction validation`,
       );
       this.log(`run ${active.record.runId} rejected an interrupted interaction validation`);
+      return;
+    }
+    if (active.workflowLoadFailure !== undefined) {
+      if (
+        this.queue.parkWorkflowRunForSourceChange({
+          runId: active.record.runId,
+          claimToken: active.claimToken,
+          detail: active.workflowLoadFailure,
+        })
+      ) {
+        this.log(`run ${active.record.runId} parked because its workflow source could not load`);
+      }
       return;
     }
     this.queue.parkWorkflowRun({ runId: active.record.runId, claimToken: active.claimToken });

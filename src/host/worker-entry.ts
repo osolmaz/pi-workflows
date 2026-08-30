@@ -288,7 +288,19 @@ export async function runWorkflowWorker(): Promise<number> {
     }
     const bootstrap = ready.result as unknown as WorkerBootstrap;
     const workflowSource = parseWorkerWorkflowSources(launch.workflowSource);
-    const workflow = await resolveVerifiedWorkflow(launch.runId, workflowSource);
+    let workflow: WorkflowDefinition;
+    try {
+      workflow = await resolveVerifiedWorkflow(launch.runId, workflowSource);
+    } catch (error) {
+      const response = await transport.control("worker.exiting", {
+        status: "workflowLoadFailed",
+        error: errorMessage(error),
+      });
+      if (response.outcome !== "accepted") {
+        throw new Error(response.error ?? "Workflow host rejected the load-failure report");
+      }
+      return 1;
+    }
     const store = new HostBackedWorkflowStore(launch.runId, transport, ready.revision ?? 0);
     let executor: AgentStepExecutor;
     let closeExecutor: (() => Promise<void>) | undefined;

@@ -128,12 +128,14 @@ on-demand process. No command installs an operating-system service.
 
 A worker verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes
-from committed state through a host-backed store. A headless Pi child uses its
-own registered process group. The worker stops that group on normal completion,
-and the host reaps it if the worker exits first. If the worker stops, pure work
-can run again. A protected write checks and renews the exact live token and
-generation in one transaction. An expired or replaced owner cannot revive
-itself.
+from committed state through a host-backed store. A source mismatch parks the
+run with `workflowSourceChanged`; normal scheduling does not retry it. Restore
+the recorded source and explicitly resume, or cancel the run. A headless Pi
+child uses its own registered process group. The worker stops that group on
+normal completion, and the host reaps it if the worker exits first. If the
+worker stops for another recoverable reason, pure work can run again. A
+protected write checks and renews the exact live token and generation in one
+transaction. An expired or replaced owner cannot revive itself.
 
 Interactive agent and assistant-message steps do not run headlessly for a Pi
 session. The worker commits a durable interaction request and parks. The origin
@@ -366,7 +368,7 @@ humanDecision({
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, recovery applies the validated response with `timeout` provenance. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the host takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
 
 The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the host-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
