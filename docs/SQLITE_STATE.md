@@ -25,6 +25,8 @@ This is an in-place alpha schema change. The schema name and version remain `pi-
 The database stores:
 
 - workflow definitions, runs, events, node attempts, outputs, and updates
+- global host epochs, command receipts, worker epochs, and worker messages
+- durable origin-session interaction requests and submissions
 - captured Pi session entries and events
 - run and controller queues, claims, retries, and continuations
 - human-decision requests, submissions, resolutions, and cancellations
@@ -110,7 +112,8 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Schema and projects | `schema_meta`, `projects`                                                                                                    |
 | Content             | `blobs`                                                                                                                      |
-| Shared lifecycle    | `resources`, `leases`, `events`                                                                                              |
+| Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                       |
+| Host protocol       | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
 | Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
 | Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                              |
 | Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                                           |
@@ -123,29 +126,23 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 
 Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
-### Terminal restart state
+### Hosted commands and interactions
 
-The [terminal workflow restart contract](plans/2026-08-27-workflow-terminal-restart-plan.md)
-uses the existing tables. It adds no state store or table. A restarted run keeps
-its root run ID, parent run ID, restart number, and parent terminal fingerprint
-in the existing launch-options value. The fingerprint uses the workflow
-identity and revision, exact input, terminal state, canonical result or error,
-and canonical reason. It excludes run IDs, timestamps, and other values that
-change between equivalent attempts.
+`workflow_host_state` stores the one current host epoch and its live local
+claim. `host_commands` stores each client request fingerprint, operation,
+outcome, revision, and receipt or error. Repeating an exact request adopts the
+stored receipt. Reusing an ID or idempotency key for another request is a
+conflict.
 
-One terminal turn intent covers result presentation and factual fallback. A
-selected restart, Monitor run, or other workflow start uses the existing
-session reservation, run queue, and effect receipt. The successor run's launch
-options record the source terminal run, intent, model tool call, and canonical
-request fingerprint. A repeated call adopts that reservation or run. Activation
-waits for `agent_settled`, and normal queue recovery activates a surviving
-reservation once.
+`run_workers` records each worker epoch before spawn and later records its exact
+process identity and terminal outcome. `worker_messages` deduplicates accepted
+state-changing child messages.
 
-Restart creates a new run. The terminal run remains unchanged. Restart lineage
-allows three restarts after the original run and rejects a repeated terminal
-fingerprint in the same chain. A Monitor selection records terminal selection
-but no restart lineage. Conversation history remains in Pi. This state does not
-identify, hash, copy, or store an original user message.
+`interactive_requests` owns durable origin-session work. It stores the run,
+node attempt, target session, contract, presentation claim, accepted
+submission, and revision. `interactive_submissions` stores the idempotency key,
+payload, outcome, and receipt. Pi reload can adopt the saved presentation entry
+without inserting another visible message.
 
 ## Content-addressed values
 
@@ -161,9 +158,9 @@ Readers derive `steps`, `outputs`, `results`, carried-step count, current-node f
 
 An agent definition records `expectedOutput` as either a submitted-output description or `{ "kind": "assistant-message", "maxChars"?: number }`. Omitted `maxChars` means that Pi Workflows adds no character limit.
 
-A completed interactive assistant-message attempt uses the settled Pi response entry as its output. It does not store a second output blob. Its small receipt keeps the text digest, final Pi session entry ID, optional author-supplied limit, and whether recovery adopted an existing response. A noninteractive attempt with no captured response entry keeps one normal output blob.
+A completed interactive assistant-message attempt stores the accepted visible text as its node output. Its small receipt keeps the text digest, final Pi session entry ID, optional author-supplied limit, and whether recovery adopted an existing response.
 
-An interrupted assistant-message attempt keeps its attempt ID when the origin Pi session resumes it. The executor adopts a matching completed assistant child from the active Pi branch instead of displaying the response twice. Submitted and non-agent attempts keep their normal fresh-attempt resume behavior.
+An interrupted assistant-message attempt keeps its attempt ID. The extension adopts a matching durable request and existing Pi branch entry instead of displaying the prompt or accepting the response twice. Submitted and non-agent attempts use a fresh execution attempt after an uncommitted worker exit.
 
 ## Write contract
 
@@ -175,6 +172,7 @@ verify the exact schema
 verify the actor and operation
 verify the expected resource revision
 verify the claim token, generation, and expiry when ownership is required
+renew that exact still-live token and generation
 verify the domain transition
 write content-addressed values
 increment the resource revision
@@ -201,7 +199,7 @@ Reading or finding a row never gives write authority.
 - Control commands have narrow explicit operations, such as requesting cancellation or deletion.
 - Model-originated workflow answers cannot resolve protected human decisions.
 
-Stores check ownership in the same transaction as the write. Shared scans, status commands, lists, viewers, and the Rust `piw` program are read-only.
+The global host is the normal state writer. Its protected stores check ownership and renew the exact live claim in the same transaction as the write. A stale or expired owner cannot renew itself. Pi extensions and mutating CLI commands use the local host protocol. Shared scans, status commands, lists, viewers, and the Rust `piw` program are read-only.
 
 ## Competing outcomes
 
@@ -221,9 +219,9 @@ Status is a pure projection of domain rows, immutable facts, current leases, and
 
 A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
 
-A follow-up queue records acceptance order and final-presentation state. Successful terminalization changes queued items to ready or pending presentation in the same transaction as the terminal run fact. Failure, timeout, and cancellation cancel unsent items. Delivery uses item leases and active Pi branch evidence.
+A follow-up queue records acceptance order and settlement state. Failure, timeout, and cancellation cancel unsent items.
 
-- A terminal run fact overrides stale queue presentation.
+- A terminal run fact overrides stale delivery state.
 - An accepted decision is accepted even if its continuation effect is still pending.
 - A cancelled decision is cancelled even if parent cleanup is still pending.
 - A stale owner is not shown as current.
@@ -233,7 +231,7 @@ Read paths do not repair state. Owner reconcilers apply pending effects and writ
 
 ## Projects and concurrency
 
-All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key. Standalone host lock and child-process registry files use a project hash under the workflow state directory, so different projects can run hosts concurrently while two hosts for one project still conflict.
+All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key. One global host owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/host/`. A second live host is rejected even when it was started from another project.
 
 SQLite WAL permits concurrent readers while one writer commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions.
 
@@ -271,4 +269,4 @@ It does not print actor IDs, channel references, payloads, or credentials.
 
 This is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import.
 
-Older state remains untouched. If it is present when a new database would be created, Pi Workflows fails with a clear instruction instead of guessing or deleting data.
+Older state remains untouched. Pi Workflows fails before mutation with this instruction: “Pi Workflows durable state is incompatible. Back up and move state.sqlite with its -wal and -shm files, then start Pi Workflows to create a new state.sqlite database. The incompatible state was not changed.”

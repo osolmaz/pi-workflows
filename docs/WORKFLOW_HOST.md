@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: planned. The current implementation still runs interactive workflows inside the Pi extension and runs resumed workflows inside the existing host process. The implementation plan is [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md).
+Status: implemented. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md) records the approved implementation plan.
 
 ## Purpose
 
@@ -39,9 +39,10 @@ One host owns the global workflow database for one user installation.
 Pi extension ─┐
 Pi extension ─┼── local socket ── workflow host ── SQLite
 CLI client ───┘                         │
-                                         ├── run worker A
-                                         ├── run worker B
-                                         └── headless pi --mode rpc child
+                                        ├── run worker A
+                                        ├── run worker B ── headless pi --mode rpc
+                                        ├── controller worker
+                                        └── source resolver
 ```
 
 The host may manage runs from more than one project. Each run keeps its canonical project path and source identity.
@@ -237,6 +238,11 @@ The first command set is:
 - `decision.answer`
 - `interaction.submit`
 - `interaction.update`
+- `controller.list`
+- `controller.get`
+- `controller.apply`
+- `controller.reconcile`
+- `controller.delete`
 - `host.status`
 - `host.stop`
 
@@ -298,25 +304,25 @@ Agent and assistant-message steps for an interactive run execute in the origin P
 
 The worker proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits.
 
-The extension finds pending requests for its session during `session_start`, after `agent_settled`, and after a host notification. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
+The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
 
 A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host validates the payload against the stored contract. On acceptance, it settles the request and schedules the run. A rejected payload leaves the same request pending and returns an actionable error to the model.
 
-The session keeps normal Pi entries for prompts, tools, replies, and final presentation. Pi Workflows continues to record those entries through documented session events. It does not edit the Pi session file.
+The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
 
 One session presents one workflow interaction at a time. Other requests remain ordered by creation time. A restart or reload can present an unresolved request again, but exact session-entry adoption prevents a second visible message when the first presentation was already recorded.
 
 ## Detached execution
 
-A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The host supervises that Pi child separately from the workflow worker.
+A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The Pi child stays in the workflow worker process group, so cancellation and orphan cleanup stop the complete tree.
 
-The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same interaction contract and idempotency checks as an origin-session submission.
+The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same step and attempt contract as origin-session work. A headless run cannot use a visible assistant-message step because it has no origin Pi session.
 
-The durable run records whether each interaction was origin-session or headless. Viewers show that provenance without exposing provider credentials.
+The run binding records `interactive` or `headless` execution mode. Viewers show that mode without exposing provider credentials.
 
 ## Pause and cancellation
 
-Pause takes effect at the next durable node boundary. The host commits `paused = 1`, parks the queue, releases the claim, and stops the child after the current safe boundary. Resume clears the pause, takes a new generation, and starts another worker.
+Pause stops the worker process group, then atomically commits `paused = 1`, parks the queue, and releases the claim. An uncommitted pure node can run again after resume. Resume takes a new generation and starts another worker from the last durable boundary.
 
 Cancellation against a live worker sends a cancel request, waits for the child to stop, and then commits terminal cancellation. If the child does not stop by the deadline, the host kills its process group and commits cancellation with the infrastructure detail.
 
@@ -361,7 +367,7 @@ The global host also reconciles controllers. Controllers keep their existing res
 
 A controller child run enters the same global run queue and worker process model. It does not need an origin Pi session unless its workflow declares an interactive step. A headless child uses the declared provider path. A child that needs an origin session parks with a clear unsupported-input result unless the controller supplied an approved session binding.
 
-Controller reconcile code must not run in the host event loop. It uses supervised workers or another bounded execution pool so user controller code cannot block host claims.
+Controller reconcile code runs in a supervised controller worker, not in the host event loop. Controller initialization also runs in a source resolver child. Before `controller.apply` commits, the host checks that the resolved source still matches controller discovery rules and the exact source digest.
 
 ## Failure classification
 
