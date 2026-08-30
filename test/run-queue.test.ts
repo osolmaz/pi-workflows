@@ -56,7 +56,7 @@ function continuationPreparation() {
 
 describe("workflow run queue in canonical SQLite", () => {
   it("reserves one run with its definition, input, binding, and queue row", async () => {
-    const { store } = await setup();
+    const { store, projectPath } = await setup();
     const run = reserve(store);
     expect(run).toMatchObject({
       runId: "run-1",
@@ -80,6 +80,8 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM run_queue").get()).toEqual(
       { count: 1 },
     );
+    expect(store.workflowRunProjectPath("run-1")).toBe(path.resolve(projectPath));
+    expect(store.workflowRunProjectPath("missing")).toBeUndefined();
     store.close();
   });
 
@@ -258,6 +260,24 @@ describe("workflow run queue in canonical SQLite", () => {
     reserve(store);
     expect(() => reserve(store)).toThrow(/already reserved/);
     expect(() => reserve(store, "run-2")).toThrow(/UNIQUE constraint/);
+    store.close();
+  });
+
+  it("takes a short control claim without changing queue status", async () => {
+    const { store } = await setup();
+    reserve(store, "control-run");
+    const claimed = store.claimWorkflowRunForControl({
+      runId: "control-run",
+      runnerId: "host-control",
+      claimToken: "control-token",
+      leaseMs: 5_000,
+    });
+    expect(claimed).toMatchObject({ runId: "control-run", status: "queued" });
+    expect(store.getWorkflowRun("control-run")?.status).toBe("queued");
+
+    const global = new SqliteControllerStore(store.filePath, { readOnly: true, global: true });
+    expect(global.listWorkflowRuns().map((run) => run.runId)).toContain("control-run");
+    global.close();
     store.close();
   });
 

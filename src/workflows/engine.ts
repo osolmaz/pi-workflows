@@ -1512,6 +1512,7 @@ export class WorkflowEngine {
     signal: AbortSignal,
     meta: NodeExecutionMeta,
   ): Promise<NodeExecution> {
+    /* istanbul ignore if -- graph validation rejects action nodes without managed effects */
     if (node.effect === undefined) {
       throw new Error(
         `Action node ${nodeId} must declare a managed effect with an explicit recovery policy`,
@@ -1526,6 +1527,7 @@ export class WorkflowEngine {
       typeof node.effect.request === "function"
         ? await node.effect.request(context)
         : node.effect.request;
+    /* istanbul ignore if -- definition validation and effect helpers reject empty fields */
     if (effectType.length === 0 || idempotencyKey.trim().length === 0) {
       throw new Error("Managed effect type and idempotency key must be nonempty text");
     }

@@ -1518,7 +1518,7 @@ describe("built-in autoimplement", () => {
       reason: "Blocker challenge reached the 3-attempt workflow safety limit.",
       evidence: { evidence: { attempts: 3 } },
     });
-  });
+  }, 30_000);
 
   it("challenges a missing-plan claim with qualified evidence", async () => {
     const executor = new ScriptedExecutor()

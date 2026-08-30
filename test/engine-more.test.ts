@@ -11,6 +11,7 @@ import {
   shell,
 } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function makeEngine() {
@@ -68,6 +69,60 @@ describe("WorkflowEngine additional paths", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toEqual({ echoed: { x: 1 } });
     expect(state.steps[0]?.action).toEqual({ actionType: "function" });
+  });
+
+  it("resolves static managed effect fields", async () => {
+    const workflow = defineWorkflow({
+      name: "static-effect",
+      startAt: "act",
+      nodes: {
+        act: action({
+          effect: {
+            type: "test.static-action",
+            recovery: "manual",
+            idempotencyKey: "static-key",
+            request: { operation: "write" },
+          },
+          run: ({ effect }) => effect,
+        }),
+      },
+      edges: [],
+    });
+    const { state } = await (await makeEngine()).run(workflow, {});
+    expect(state.finalOutput).toEqual({
+      type: "test.static-action",
+      recovery: "manual",
+      idempotencyKey: "static-key",
+    });
+  });
+
+  it("fails closed on an invalid adopted effect receipt", async () => {
+    const databasePath = await makeStateDatabasePath("pi-workflows-invalid-effect-receipt");
+    const store = new WorkflowRunStore(databasePath);
+    store.reserveEffect = async () => ({
+      effectId: "effect-invalid",
+      attemptNumber: 1,
+      disposition: "adopted",
+      result: null,
+    });
+    const workflow = defineWorkflow({
+      name: "invalid-effect-receipt",
+      startAt: "act",
+      nodes: {
+        act: action({ effect: idempotentEffect("test.invalid-receipt"), run: () => "unused" }),
+      },
+      edges: [],
+    });
+    try {
+      const { state } = await new WorkflowEngine({ store, executor: new ScriptedExecutor() }).run(
+        workflow,
+        {},
+      );
+      expect(state.status).toBe("failed");
+      expect(state.error).toBe("Managed effect receipt is invalid");
+    } finally {
+      store.close();
+    }
   });
 
   it("runs shell actions without a parse function", async () => {

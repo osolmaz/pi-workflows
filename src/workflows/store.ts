@@ -618,6 +618,7 @@ export class WorkflowRunStore {
                 options.effectId,
                 options.attemptNumber,
               );
+            /* istanbul ignore if -- serialized effect mutation keeps this attempt current */
             if (changed.changes !== 1) throw new Error("Managed effect attempt changed");
             this.state.connection
               .prepare(
@@ -703,6 +704,7 @@ export class WorkflowRunStore {
     const row = this.state.connection
       .prepare("SELECT resource_id AS resourceId FROM effects WHERE effect_id = ?")
       .get(effectId);
+    /* istanbul ignore if -- beginEffectAttempt is called only for a persisted effect */
     if (!isResourceIdRow(row)) throw new Error("Managed effect resource is missing");
     const revision = this.requireResourceRevision(row.resourceId);
     this.mutations.mutate(
@@ -4890,6 +4892,7 @@ function snapshotNode(
   }
   if (node.nodeType === "action") {
     common.actionExecution = "exec" in node ? "shell" : "function";
+    /* istanbul ignore else -- validated action nodes always declare a managed effect */
     if (node.effect !== undefined) {
       common.effect = { type: node.effect.type, recovery: node.effect.recovery };
     }

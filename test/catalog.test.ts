@@ -60,6 +60,39 @@ describe("BuiltinWorkflowCatalog", () => {
     ).toThrow(/Duplicate built-in workflow id/);
   });
 
+  it("rejects invalid registrations and unresolved sources", () => {
+    const definition = fixture();
+    expect(
+      () => new BuiltinWorkflowCatalog([{ id: "Bad Id", revision: "r1", definition }]),
+    ).toThrow(/Invalid built-in workflow id/);
+    expect(
+      () => new BuiltinWorkflowCatalog([{ id: "fixture", revision: "bad revision", definition }]),
+    ).toThrow(/Invalid built-in workflow revision/);
+    expect(
+      () =>
+        new BuiltinWorkflowCatalog([{ id: "fixture", revision: "r1", definition: {} as never }]),
+    ).toThrow(/not defined with defineWorkflow/);
+    expect(
+      () =>
+        new BuiltinWorkflowCatalog([
+          { id: "first", revision: "r1", definition },
+          { id: "second", revision: "r1", definition },
+        ]),
+    ).toThrow(/Duplicate built-in workflow name/);
+
+    const catalog = new BuiltinWorkflowCatalog([{ id: "fixture", revision: "r1", definition }]);
+    expect(() => catalog.resolve({ kind: "file", path: "/tmp/example", hash: "hash" })).toThrow(
+      /cannot be resolved by the built-in catalog/,
+    );
+    expect(() => catalog.resolve({ kind: "builtin", id: "missing", revision: "r1" })).toThrow(
+      /Unknown built-in workflow/,
+    );
+    expect(catalog.get("missing")).toBeUndefined();
+    expect(
+      catalog.legacyPathEntry({ workflowName: "missing", workflowPath: "/tmp/missing.js" }),
+    ).toBeUndefined();
+  });
+
   it("matches only proved legacy paths and hashes", () => {
     const catalog = new BuiltinWorkflowCatalog([
       {

@@ -260,6 +260,34 @@ describe("run ownership fencing", () => {
     queue.close();
   });
 
+  it("rejects an invalid protected-write lease duration", async () => {
+    const { queue, databasePath } = await setup();
+    const runId = "invalid-renewal-duration";
+    const token = "invalid-duration-token";
+    queue.enqueueWorkflowRun({
+      runId,
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "session-invalid-duration",
+      claimToken: token,
+      leaseMs: 60_000,
+      originSessionId: "session-invalid-duration",
+    });
+    const current = queue.workflowRunAuthority(runId, token);
+    const store = new WorkflowRunStore(databasePath, {
+      authorityProvider: () => (current === undefined ? undefined : { ...current, leaseMs: 0 }),
+    });
+    await expect(
+      new WorkflowEngine({ store, executor: new ScriptedExecutor() }).run(workflow, {}, { runId }),
+    ).rejects.toThrow("Workflow run authority lease duration must be a positive integer");
+    store.close();
+    queue.close();
+  });
+
   it("rolls back claim renewal when the protected mutation fails", async () => {
     const { queue, databasePath } = await setup();
     const runId = "renewal-rollback";

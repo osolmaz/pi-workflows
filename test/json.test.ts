@@ -11,6 +11,7 @@ describe("parseJsonValue", () => {
   });
 
   it("throws on empty text", () => {
+    expect(() => parseJsonValue(null as never)).toThrow(/empty text/);
     expect(() => parseJsonValue("")).toThrow(/empty text/);
     expect(() => parseJsonValue("   ")).toThrow(/empty text/);
   });
@@ -53,6 +54,8 @@ describe("parseJsonValue", () => {
     expect(extractJsonValue(String.raw`noise {"text":"quote \" and {"} tail`)).toEqual({
       text: 'quote " and {',
     });
+    expect(extractJsonValue("noise [1,2] tail")).toEqual([1, 2]);
+    expect(extractJsonValue('noise {"nested":[1]} tail')).toEqual({ nested: [1] });
   });
 
   it("skips unbalanced candidates and finds later valid ones", () => {
@@ -61,6 +64,7 @@ describe("parseJsonValue", () => {
 
   it("throws when no JSON can be found", () => {
     expect(() => extractJsonValue("just prose")).toThrow(/Could not parse JSON/);
+    expect(() => extractJsonValue("{]")).toThrow(/Could not parse JSON/);
   });
 
   it("ignores fenced blocks without closing fence", () => {

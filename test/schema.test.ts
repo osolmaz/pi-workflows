@@ -186,6 +186,34 @@ describe("node constructors", () => {
       }).nodeType,
     ).toBe("action");
     expect(() => action({ run: () => 1 } as never)).toThrow(/managed effect/);
+    expect(() =>
+      action({
+        effect: { ...idempotentEffect("test.invalid-type"), type: " " },
+        run: () => 1,
+      }),
+    ).toThrow(/effect type must be nonempty text/);
+    expect(() =>
+      action({
+        effect: { ...idempotentEffect("test.invalid-recovery"), recovery: "automatic" as never },
+        run: () => 1,
+      }),
+    ).toThrow(/effect recovery must be idempotent or manual/);
+    expect(() =>
+      action({
+        effect: { ...idempotentEffect("test.invalid-key"), idempotencyKey: 1 as never },
+        run: () => 1,
+      }),
+    ).toThrow(/effect idempotencyKey must be text or a function/);
+    expect(() =>
+      action({
+        effect: {
+          type: "test.missing-request",
+          recovery: "manual",
+          idempotencyKey: "key",
+        } as never,
+        run: () => 1,
+      }),
+    ).toThrow(/effect requires request data or a request function/);
   });
 
   it("validates shell nodes", () => {
