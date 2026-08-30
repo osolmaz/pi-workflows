@@ -49,7 +49,7 @@ const WORKFLOW_INTERACTION_MESSAGE_TYPE = "pi-workflows-interaction";
 
 export type ParsedWorkflowArgs =
   | { kind: "list" }
-  | { kind: "cancel" }
+  | { kind: "cancel"; runId?: string }
   | { kind: "pause" }
   | { kind: "resume" }
   | { kind: "status"; runId?: string }
@@ -62,6 +62,11 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
   if (trimmed.length === 0) return { kind: "list" };
   if (trimmed === "cancel" || trimmed === "pause" || trimmed === "resume") {
     return { kind: trimmed };
+  }
+  if (trimmed.startsWith("cancel ")) {
+    const runId = trimmed.slice("cancel".length).trim();
+    if (!validRunId(runId)) throw new Error("cancel requires one valid run id");
+    return { kind: "cancel", runId };
   }
   if (trimmed === "status") return { kind: "status" };
   if (/^(?:restart|change-settings|queue-follow-up|remove-follow-up)(?:\s|$)/u.test(trimmed)) {
@@ -346,8 +351,7 @@ async function executeCommand(
       };
     }
     case "pause":
-    case "resume":
-    case "cancel": {
+    case "resume": {
       const run = activeSessionRun(ctx);
       if (run === undefined) throw new Error("No workflow run is active in this session");
       const response = await requestAccepted(client, {
@@ -359,6 +363,20 @@ async function executeCommand(
       return {
         message: `Workflow ${run.runId} ${command.kind} request accepted.`,
         details: { action: command.kind, runId: run.runId, response: response.receipt ?? null },
+      };
+    }
+    case "cancel": {
+      const runId = command.runId ?? activeSessionRun(ctx)?.runId;
+      if (runId === undefined) throw new Error("No workflow run is active in this session");
+      const response = await requestAccepted(client, {
+        operation: "run.cancel",
+        runId,
+        requestId: `cancel-${idempotencyKey}`,
+        idempotencyKey,
+      });
+      return {
+        message: `Workflow ${runId} cancel request accepted.`,
+        details: { action: "cancel", runId, response: response.receipt ?? null },
       };
     }
     case "answer": {
@@ -626,8 +644,12 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
       return { kind: "status", ...(params.runId === undefined ? {} : { runId: params.runId }) };
     case "pause":
     case "resume":
-    case "cancel":
       return { kind: params.action };
+    case "cancel":
+      return {
+        kind: "cancel",
+        ...(params.runId === undefined ? {} : { runId: params.runId }),
+      };
     case "answer":
       return {
         kind: "answer",
