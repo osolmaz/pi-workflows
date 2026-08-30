@@ -197,10 +197,12 @@ When a child reaches one of these steps:
 2. The host commits the request and parks the run.
 3. The child exits and the claim is released.
 4. The Pi extension presents the exact step contract through documented Pi messaging and tool APIs.
-5. The extension sends the accepted result to the host with the request, node, attempt, and revision identifiers.
-6. The host commits the result and schedules a new child from that durable boundary.
+5. The extension sends a provisional result to the host with the request, node, attempt, and revision identifiers.
+6. The host records it as `validating` and schedules a new supervised child from that durable boundary.
+7. The child loads the workflow and runs the node's `validate` function.
+8. The host settles the request only after the child accepts it. A rejection keeps the request pending and returns the durable validation error to the model.
 
-If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt.
+If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt. A child failure during validation rejects only that provisional submission and leaves the request ready for a corrected retry.
 
 Keep one active interactive request per Pi session. Other requests remain ordered and durable.
 
@@ -285,6 +287,8 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Commit and present an interactive request.
 - Restart Pi before submission and present the same request once.
 - Submit once and replay the same receipt for a duplicate.
+- Run workflow-specific submission validation only in a supervised child.
+- Return an actionable validation error and accept a corrected submission for the same request.
 - Reject a stale attempt submission.
 - Continue an ordinary checkpoint through the model-facing answer action.
 - Reject a protected human decision from that model-facing action.
@@ -325,6 +329,7 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 - Host restart recovers durable work without duplicate transitions.
 - Interactive steps still use the origin Pi session.
 - Duplicate commands and submissions return stored receipts.
+- A submission is not accepted until supervised workflow validation succeeds.
 - Effects are deduplicated or marked uncertain.
 - The extension and host execute no workflow code in production.
 - Pi source, private APIs, and session schemas remain unchanged.

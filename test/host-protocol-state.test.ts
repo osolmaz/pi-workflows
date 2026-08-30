@@ -206,43 +206,68 @@ describe("host durable state", () => {
       expectedRevision: adoptedPresentation.revision,
       sessionEntryId: "entry-1",
     });
-    const rejected = host.submitInteraction({
+    const validating = host.beginInteractionValidation({
       requestId: interaction.requestId,
       submissionId: "submission-rejected",
       idempotencyKey: "tool-1",
       expectedRevision: presenting.revision,
       payload: { invalid: true },
-      accepted: false,
+      receipt: { status: "validating" },
     });
-    expect(rejected.interaction.status).toBe("presenting");
-    const settled = host.submitInteraction({
+    expect(validating.interaction.status).toBe("presenting");
+    expect(host.validatingInteraction("run-1")).toMatchObject({
+      requestId: interaction.requestId,
+      submissionId: "submission-rejected",
+    });
+    expect(() =>
+      host.beginInteractionValidation({
+        requestId: interaction.requestId,
+        submissionId: "submission-conflict",
+        idempotencyKey: "tool-conflict",
+        expectedRevision: presenting.revision,
+        payload: { invalid: false },
+      }),
+    ).toThrow(/validation is already active/);
+    expect(
+      host.finishInteractionValidation({
+        requestId: interaction.requestId,
+        submissionId: "submission-rejected",
+        accepted: false,
+        receipt: { status: "rejected", error: "Try again" },
+      }),
+    ).toMatchObject({ outcome: "rejected", receipt: { error: "Try again" } });
+    expect(host.listPendingInteractions("session-1")).toHaveLength(1);
+
+    host.beginInteractionValidation({
       requestId: interaction.requestId,
       submissionId: "submission-accepted",
       idempotencyKey: "tool-2",
       expectedRevision: presenting.revision,
       payload: { result: "done" },
+      receipt: { status: "validating" },
+    });
+    const settled = host.finishInteractionValidation({
+      requestId: interaction.requestId,
+      submissionId: "submission-accepted",
       accepted: true,
-      receipt: { accepted: true },
+      receipt: { status: "accepted" },
     });
     expect(settled).toMatchObject({
       outcome: "accepted",
-      interaction: {
-        status: "settled",
-        acceptedSubmissionId: "submission-accepted",
-      },
-      receipt: { accepted: true },
+      receipt: { status: "accepted" },
+    });
+    expect(host.getInteraction(interaction.requestId)).toMatchObject({
+      status: "settled",
+      acceptedSubmissionId: "submission-accepted",
     });
     expect(
-      host.submitInteraction({
+      host.finishInteractionValidation({
         requestId: interaction.requestId,
         submissionId: "submission-accepted",
-        idempotencyKey: "tool-2",
-        expectedRevision: presenting.revision,
-        payload: { result: "done" },
         accepted: true,
-        receipt: { accepted: false },
+        receipt: { status: "changed" },
       }),
-    ).toMatchObject({ outcome: "adopted", receipt: { accepted: true } });
+    ).toMatchObject({ outcome: "accepted", receipt: { status: "accepted" } });
     expect(host.listPendingInteractions("session-1")).toEqual([]);
 
     runStore.close();

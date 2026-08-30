@@ -138,6 +138,34 @@ export default defineWorkflow({
   return { cwd, workflowPath };
 }
 
+async function writeValidatedWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "validated.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "hosted-validated",
+  startAt: "ask",
+  nodes: {
+    ask: agent({
+      prompt: () => "Return the accepted answer.",
+      validate: (output) => {
+        if (typeof output !== "object" || output === null || output.answer !== "accepted") {
+          throw new Error("answer must be accepted");
+        }
+        return output;
+      },
+    }),
+    done: compute({ run: ({ outputs }) => outputs.ask }),
+  },
+  edges: [{ from: "ask", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
 async function writeCheckpointWorkflow(cwd: string, protectedDecision = false): Promise<string> {
   const workflowPath = path.join(
     cwd,
@@ -258,6 +286,63 @@ describe("pi-workflows hosted extension", () => {
       store.close();
     }
     expect(fake.sent).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("rejects invalid child-validated output and accepts a corrected submission", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeValidatedWorkflow(cwd);
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    const contract = stepContract(fake.sent[0] as Record<string, unknown>);
+
+    await expect(
+      fake.runTool("submit-invalid", {
+        action: "submit",
+        step: contract.nodeId,
+        attempt: contract.attemptId,
+        output: { answer: "wrong" },
+      }),
+    ).rejects.toThrow(/answer must be accepted/);
+    const afterRejection = new HostStateStore(workflowStatePath(), { readOnly: true });
+    try {
+      expect(afterRejection.listPendingInteractions("session-one")).toHaveLength(1);
+      expect(
+        afterRejection.interactionSubmission(
+          afterRejection.listPendingInteractions("session-one")[0]?.requestId ?? "",
+          "submit-invalid",
+        ),
+      ).toMatchObject({
+        outcome: "rejected",
+        receipt: { status: "rejected", error: "answer must be accepted" },
+      });
+    } finally {
+      afterRejection.close();
+    }
+
+    await expect(
+      fake.runTool("submit-corrected", {
+        action: "submit",
+        step: contract.nodeId,
+        attempt: contract.attemptId,
+        output: { answer: "accepted" },
+      }),
+    ).resolves.toMatchObject({
+      content: [{ text: "Workflow step output accepted." }],
+    });
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store.listWorkflowRuns()[0]?.status === "done";
+      } finally {
+        store.close();
+      }
+    }, 30_000);
     await fake.emit("session_shutdown");
   }, 60_000);
 

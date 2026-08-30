@@ -45,6 +45,7 @@ export {
 } from "./decision-channels.js";
 
 const INTERACTION_POLL_MS = 1_000;
+const SUBMISSION_POLL_MS = 50;
 const WORKFLOW_INTERACTION_MESSAGE_TYPE = "pi-workflows-interaction";
 const WORKFLOW_NOTIFICATION_MESSAGE_TYPE = "pi-workflows-notification";
 const WORKFLOW_PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
@@ -219,7 +220,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       "Do not start repeated work without the user's request.",
     ].join(" "),
     parameters: WorkflowToolParameters,
-    async execute(toolCallId, rawParams, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
       return await runToolInOrder(async () => {
         const params = parseWorkflowToolInput(rawParams);
         if (params.action === "update" || params.action === "submit") {
@@ -246,6 +247,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
                 params.action === "update" ? { update: params.update } : { output: params.output },
             }),
           });
+          if (params.action === "submit") {
+            await waitForInteractionSubmission(interaction.requestId, toolCallId, signal);
+          }
           await presentInOrder(ctx);
           return toolResult(
             params.action === "update"
@@ -277,7 +281,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    await submitVisibleAssistantResponse(client, ctx).catch(() => undefined);
+    try {
+      await submitVisibleAssistantResponse(client, ctx);
+    } catch (error) {
+      ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
+    }
     await presentInOrder(ctx).catch(() => undefined);
   });
 
@@ -733,6 +741,52 @@ async function submitVisibleAssistantResponse(
       attempt: contract.attemptId,
       value: submission as unknown as JsonValue,
     },
+  });
+  await waitForInteractionSubmission(interaction.requestId, `assistant-${responseId}`);
+}
+
+async function waitForInteractionSubmission(
+  requestId: string,
+  submissionId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+  try {
+    for (;;) {
+      if (signal?.aborted === true) {
+        throw signal.reason ?? new Error("Workflow submission validation was cancelled");
+      }
+      const submission = store.interactionSubmission(requestId, submissionId);
+      if (submission?.outcome === "accepted" || submission?.outcome === "adopted") return;
+      if (submission?.outcome === "rejected") {
+        const receipt = isRecord(submission.receipt) ? submission.receipt : undefined;
+        throw new Error(
+          typeof receipt?.error === "string"
+            ? receipt.error
+            : "Workflow step output failed validation",
+        );
+      }
+      await waitForSubmissionPoll(signal);
+    }
+  } finally {
+    store.close();
+  }
+}
+
+async function waitForSubmissionPoll(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) {
+    throw signal.reason ?? new Error("Workflow submission was cancelled");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(finish, SUBMISSION_POLL_MS);
+    const onAbort = () => finish(signal?.reason ?? new Error("Workflow submission was cancelled"));
+    function finish(error?: unknown) {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error === undefined) resolve();
+      else reject(error);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

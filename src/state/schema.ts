@@ -530,7 +530,7 @@ CREATE TABLE interactive_submissions (
   idempotency_key TEXT NOT NULL,
   request_revision INTEGER NOT NULL CHECK (request_revision > 0),
   payload_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'rejected', 'adopted')),
+  outcome TEXT NOT NULL CHECK (outcome IN ('validating', 'accepted', 'rejected', 'adopted')),
   receipt_hash BLOB REFERENCES blobs(blob_hash),
   submitted_at INTEGER NOT NULL,
   UNIQUE (request_id, idempotency_key)

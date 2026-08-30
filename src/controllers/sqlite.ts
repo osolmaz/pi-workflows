@@ -1290,6 +1290,27 @@ export class SqliteControllerStore implements ControllerStore {
     return this.claimRun(options.runId, options.runnerId, options.claimToken, options.leaseMs, now);
   }
 
+  /** Schedule a worker that validates one pending interactive submission. */
+  claimWorkflowRunForInteractionValidation(options: {
+    runId: string;
+    runnerId: string;
+    claimToken: string;
+    leaseMs: number;
+    now?: string;
+  }): WorkflowRunQueueRecord | undefined {
+    const now = epoch(validTimestamp(options.now));
+    return this.claimRun(
+      options.runId,
+      options.runnerId,
+      options.claimToken,
+      options.leaseMs,
+      now,
+      {
+        allowPendingInteraction: true,
+      },
+    );
+  }
+
   /** Take a short host claim without scheduling a parked interactive run. */
   claimWorkflowRunForControl(options: {
     runId: string;
