@@ -541,6 +541,94 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
+  it("lets only the exact live generation park an ambiguous effect", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const now = Date.now();
+    store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "host-1",
+      claimToken: "expired-token",
+      leaseMs: 1_000,
+      now: new Date(now).toISOString(),
+    });
+    const runStore = new WorkflowRunStore(store.filePath, {
+      state: store.state,
+      authorityProvider: () => store.workflowRunAuthority("run-1", "expired-token"),
+    });
+    await runStore.initializeRun(workflow, {
+      schema: "pi-workflows.run-state.v1",
+      traceSeq: 0,
+      runId: "run-1",
+      workflowName: workflow.name,
+      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+      startedAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+      status: "running",
+      input: { task: "hello" },
+      outputs: {},
+      results: {},
+      steps: [],
+    });
+    expect(
+      store.markWorkflowRunRunning({
+        runId: "run-1",
+        claimToken: "expired-token",
+        now: new Date(now + 100).toISOString(),
+      }),
+    ).toBe(true);
+    const expiredAt = Date.parse(store.getWorkflowRun("run-1")?.claimExpiresAt ?? "");
+    expect(expiredAt).toBeGreaterThan(now);
+    expect(
+      store.parkWorkflowRunForAmbiguousEffect({
+        runId: "run-1",
+        claimToken: "expired-token",
+        now: new Date(expiredAt + 1).toISOString(),
+      }),
+    ).toBe(false);
+    expect(store.getWorkflowRun("run-1")).toMatchObject({
+      status: "running",
+      errorCode: null,
+    });
+
+    expect(
+      store.claimWorkflowRun({
+        runId: "run-1",
+        runnerId: "host-2",
+        claimToken: "current-token",
+        leaseMs: 1_000,
+        now: new Date(expiredAt + 1).toISOString(),
+      })?.claimGeneration,
+    ).toBe(2);
+    expect(
+      store.parkWorkflowRunForAmbiguousEffect({
+        runId: "run-1",
+        claimToken: "expired-token",
+        now: new Date(expiredAt + 100).toISOString(),
+      }),
+    ).toBe(false);
+    expect(
+      store.parkWorkflowRunForAmbiguousEffect({
+        runId: "run-1",
+        claimToken: "current-token",
+        now: new Date(expiredAt + 100).toISOString(),
+      }),
+    ).toBe(true);
+    expect(store.getWorkflowRun("run-1")).toMatchObject({
+      status: "parked",
+      errorCode: "effectAmbiguous",
+      runnerId: null,
+      claimGeneration: null,
+    });
+    expect(
+      new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
+    ).toMatchObject({
+      status: "waiting",
+      statusDetail: "effect outcome is ambiguous; explicit recovery is required",
+    });
+    store.close();
+  });
+
   it("does not let an expired claimant record a terminal failure", async () => {
     const { store } = await setup();
     reserve(store);
