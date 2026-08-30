@@ -1610,13 +1610,6 @@ export class WorkflowEngine {
     if (status === "failed" && state.status === "timed_out") {
       status = "timed_out";
     }
-    // Let observers (e.g. the session recorder) stop and drain before the
-    // terminal event exists, so the terminal fact is immutable from that point on.
-    try {
-      await this.onRunFinishing?.(runId, state);
-    } catch {
-      // Finishing the run wins over observer failures.
-    }
     state.status = status;
     state.finishedAt = new Date().toISOString();
     if (fields.error !== undefined) {
@@ -1634,6 +1627,13 @@ export class WorkflowEngine {
     delete state.currentSettingsScopeId;
     delete state.currentSettingsChangeNumber;
     delete state.currentSettingsHash;
+    // Let observers stop, drain, and prepare terminal delivery from the final
+    // in-memory state before the immutable terminal event is committed.
+    try {
+      await this.onRunFinishing?.(runId, state);
+    } catch {
+      // Finishing the run wins over observer failures.
+    }
     await this.persist(runId, state, {
       scope: "run",
       type: `run_${status}`,

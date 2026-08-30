@@ -76,13 +76,14 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
       current.push(handler);
       listeners.set(name, current);
     },
-    sendMessage(message: Record<string, unknown>) {
+    sendMessage(message: Record<string, unknown>, delivery?: Record<string, unknown>) {
       const entry = {
         id: `entry-${branch.length + 1}`,
         type: "custom_message",
         customType: message.customType,
         content: message.content,
         details: message.details,
+        delivery,
       };
       branch.push(entry);
       sent.push(entry);
@@ -137,6 +138,79 @@ export default defineWorkflow({
   return { cwd, workflowPath };
 }
 
+async function writeCheckpointWorkflow(cwd: string, protectedDecision = false): Promise<string> {
+  const workflowPath = path.join(
+    cwd,
+    protectedDecision ? "protected.workflow.ts" : "checkpoint.workflow.ts",
+  );
+  const gate = protectedDecision
+    ? `const choices = defineHumanChoices({
+  approve: choice({ label: "Approve" }),
+  reject: choice({ label: "Reject" }),
+});
+const gate = humanDecision({
+  audience: "operator",
+  choices,
+  request: () => ({
+    title: "Approve the protected action",
+    subject: { action: "test" },
+    presentation: {
+      schema: "pi-workflows.decision-presentation.v1",
+      summary: "A human must approve this test action.",
+      blocks: [{ kind: "paragraph", text: "Review the action before approval." }],
+    },
+  }),
+});`
+    : `const gate = checkpoint({ summary: "Continue the ordinary checkpoint" });`;
+  const edge = protectedDecision
+    ? `humanDecisionEdge({ from: "gate", choices, cases: { approve: "done", reject: "done" } })`
+    : `{ from: "gate", to: "done" }`;
+  await fs.writeFile(
+    workflowPath,
+    `import {
+  checkpoint,
+  choice,
+  compute,
+  defineHumanChoices,
+  defineWorkflow,
+  humanDecision,
+  humanDecisionEdge,
+} from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+${gate}
+export default defineWorkflow({
+  name: ${JSON.stringify(protectedDecision ? "protected-hosted" : "checkpoint-hosted")},
+  startAt: "gate",
+  nodes: {
+    gate,
+    done: compute({ run: ({ input, outputs }) => ({ input, gate: outputs.gate }) }),
+  },
+  edges: [${edge}],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeDeliveryWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "delivery.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { compute, defineWorkflow, notify } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "extension-delivery",
+  presentationPrompt: "Explain the completed delivery result.",
+  startAt: "notify",
+  nodes: {
+    notify: notify({ message: () => "Passive hosted update." }),
+    done: compute({ run: () => ({ complete: true }) }),
+  },
+  edges: [{ from: "notify", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
 function stepContract(entry: Record<string, unknown>): { nodeId: string; attemptId: string } {
   const details = entry.details as { contract?: unknown };
   const contract = details.contract as { nodeId?: unknown; attemptId?: unknown };
@@ -184,6 +258,120 @@ describe("pi-workflows hosted extension", () => {
       store.close();
     }
     expect(fake.sent).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("continues an ordinary checkpoint through the model-facing answer action", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeCheckpointWorkflow(cwd);
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store.findSessionReservation("session-one")?.status === "parked";
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    const result = await fake.runTool("checkpoint-answer", {
+      action: "answer",
+      input: { approved: true },
+    });
+    expect(result).toMatchObject({
+      content: [{ text: expect.stringContaining("Answered checkpoint") }],
+    });
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store
+          .listWorkflowRuns()
+          .some((run) => run.parentRunId !== null && run.status === "done");
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("keeps protected decisions out of the model-facing workflow tool", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeCheckpointWorkflow(cwd, true);
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+        ),
+      30_000,
+    );
+    const decisionEntry = fake.sent.find(
+      (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
+    );
+    expect(decisionEntry).toMatchObject({
+      delivery: { triggerTurn: false },
+      content: expect.stringContaining("A human must answer"),
+    });
+    await expect(
+      fake.runTool("forged-model-answer", {
+        action: "answer",
+        input: { choice: "approve" },
+      }),
+    ).rejects.toThrow(/Protected human decisions/);
+
+    await fake.runCommand('answer {"choice":"approve"}');
+    expect(fake.notifications).toContainEqual(
+      expect.objectContaining({ message: "Human decision answer accepted." }),
+    );
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store
+          .listWorkflowRuns()
+          .some((run) => run.parentRunId !== null && run.status === "done");
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("delivers hosted notifications and the terminal presentation turn", async () => {
+    const { cwd } = await setupProject();
+    const workflowPath = await writeDeliveryWorkflow(cwd);
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(
+      () =>
+        fake.sent.some((entry) => entry.customType === "pi-workflows-notification") &&
+        fake.sent.some((entry) => entry.customType === "pi-workflows-presentation"),
+      30_000,
+    );
+    expect(
+      fake.sent.find((entry) => entry.customType === "pi-workflows-notification"),
+    ).toMatchObject({
+      content: "Passive hosted update.",
+      delivery: { triggerTurn: false },
+    });
+    expect(
+      fake.sent.find((entry) => entry.customType === "pi-workflows-presentation"),
+    ).toMatchObject({
+      content: expect.stringContaining("Explain the completed delivery result."),
+      delivery: { triggerTurn: true, deliverAs: "followUp" },
+    });
     await fake.emit("session_shutdown");
   }, 60_000);
 

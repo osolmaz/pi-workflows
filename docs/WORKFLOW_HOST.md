@@ -235,9 +235,14 @@ The first command set is:
 - `run.cancel`
 - `run.status`
 - `run.list`
+- `checkpoint.answer`
 - `decision.answer`
 - `interaction.submit`
 - `interaction.update`
+- `notification.claim`
+- `notification.deliver`
+- `turn.claim`
+- `turn.resolve`
 - `controller.list`
 - `controller.get`
 - `controller.apply`
@@ -260,6 +265,8 @@ The private worker channel accepts these message kinds:
 - `run.parked`
 - `run.finished`
 - `interaction.requested`
+- `notification.requested`
+- `presentation.requested`
 - `effect.reserve`
 - `effect.settle`
 - `worker.progress`
@@ -308,9 +315,13 @@ The extension finds pending requests during `session_start`, after `agent_settle
 
 A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host validates the payload against the stored contract. On acceptance, it settles the request and schedules the run. A rejected payload leaves the same request pending and returns an actionable error to the model.
 
+An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`.
+
 The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
 
 One session presents one workflow interaction at a time. Other requests remain ordered by creation time. A restart or reload can present an unresolved request again, but exact session-entry adoption prevents a second visible message when the first presentation was already recorded.
+
+Notify nodes enqueue passive messages in the existing `notifications` outbox. The extension claims a message through the host, adopts an existing session entry after a crash, and marks delivery through the host. A completed run with a root `presentationPrompt` creates an ineligible `turn_intent` before the terminal commit. The same terminal transaction makes that intent eligible. The extension claims it, starts one normal Pi turn, and records the public session entry ID. No completion turn starts before the completed state is durable.
 
 ## Detached execution
 

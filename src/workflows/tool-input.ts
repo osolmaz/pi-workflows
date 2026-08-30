@@ -8,7 +8,8 @@ const workflowSchema = Type.String({
   description: "Discovered workflow name or workflow file path; required when action is start",
 });
 const inputSchema = Type.Unknown({
-  description: "Checkpoint answer for answer; optional structured workflow input for start",
+  description:
+    "Ordinary checkpoint answer for answer; protected human decisions require a human channel; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
   description: "Run id; optional for status, cancel, and answer",

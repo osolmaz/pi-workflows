@@ -300,7 +300,8 @@ CREATE TABLE host_commands (
   client_id TEXT NOT NULL,
   operation TEXT NOT NULL CHECK (operation IN (
     'run.start', 'run.pause', 'run.resume', 'run.cancel', 'run.status', 'run.list',
-    'decision.answer', 'interaction.submit', 'interaction.update',
+    'checkpoint.answer', 'decision.answer', 'interaction.submit', 'interaction.update',
+    'notification.claim', 'notification.deliver', 'turn.claim', 'turn.resolve',
     'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
     'host.status', 'host.stop'
   )),

@@ -157,7 +157,7 @@ Every request will include:
 - idempotency key;
 - bounded payload.
 
-The protocol will support start, pause, resume, cancel, answer, interactive step submission, node transition proposals, child progress, child exit, and managed effect operations.
+The protocol will support start, pause, resume, cancel, ordinary checkpoint answers, protected human answers, interactive step submission, notification delivery, terminal turn delivery, node transition proposals, child progress, child exit, and managed effect operations.
 
 A command is successful only after the host commits it. Duplicate request IDs return the stored receipt. Stale revisions, generations, attempts, and idempotency conflicts return typed rejections.
 
@@ -203,6 +203,10 @@ When a child reaches one of these steps:
 If Pi closes, the request stays pending. Reopening the same session presents the same request once. A duplicate submission returns the original receipt.
 
 Keep one active interactive request per Pi session. Other requests remain ordered and durable.
+
+A protected human decision is displayed without starting a model turn. The model-facing workflow tool rejects it. A person answers it through the origin Pi session, while an ordinary checkpoint keeps its model-facing answer path.
+
+Notify nodes use the durable notification outbox. A root presentation prompt creates a durable terminal turn intent before completion and becomes eligible in the terminal transaction. The origin Pi session claims and adopts both message types through the host.
 
 Detached workflows can use host-managed `pi --mode rpc` children. Their execution mode and origin are durable provenance.
 
@@ -282,6 +286,10 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Restart Pi before submission and present the same request once.
 - Submit once and replay the same receipt for a duplicate.
 - Reject a stale attempt submission.
+- Continue an ordinary checkpoint through the model-facing answer action.
+- Reject a protected human decision from that model-facing action.
+- Deliver a notify node through the durable origin-session outbox.
+- Start one terminal presentation turn only after completion commits.
 - Finish the run and preserve normal visible session entries.
 
 ### Effects
