@@ -292,6 +292,21 @@ function requestEntryCount(entries: Array<Record<string, unknown>>, requestId: s
     .length;
 }
 
+function customEntriesForRun(
+  entries: Array<Record<string, unknown>>,
+  customType: string,
+  runId: string,
+): Array<Record<string, unknown>> {
+  return entries.filter(
+    (entry) =>
+      entry.type === "custom_message" &&
+      entry.customType === customType &&
+      isRecord(entry.details) &&
+      (entry.details.runId === runId ||
+        (isRecord(entry.details.contract) && entry.details.contract.runId === runId)),
+  );
+}
+
 async function waitForRequestEntry(pi: RpcHandle, requestId: string): Promise<void> {
   await waitForCondition(
     async () => requestEntryCount(await readRpcEntries(pi), requestId) === 1,
@@ -460,11 +475,32 @@ describe.sequential("out-of-process workflow host end to end", () => {
       () => rpcDiagnostic(pi),
       30_000,
     );
+    const entries = await readRpcEntries(pi);
     expect(
-      (await readRpcEntries(pi)).some((entry) =>
-        JSON.stringify(entry).includes("Visible assistant E2E response."),
-      ),
+      entries.some((entry) => JSON.stringify(entry).includes("Visible assistant E2E response.")),
     ).toBe(true);
+
+    const stepEntries = customEntriesForRun(entries, "pi-workflows-agent-step", runId);
+    expect(stepEntries).toHaveLength(2);
+    const stepRequestIds = stepEntries.map((entry) =>
+      isRecord(entry.details) ? entry.details.requestId : undefined,
+    );
+    expect(stepRequestIds.every((requestId) => typeof requestId === "string")).toBe(true);
+    expect(new Set(stepRequestIds)).toHaveLength(2);
+    expect(customEntriesForRun(entries, "pi-workflows-notification", runId)).toHaveLength(1);
+    expect(customEntriesForRun(entries, "pi-workflows-presentation", runId)).toHaveLength(1);
+
+    for (const deliveryPrompt of [
+      "Submit the structured E2E input.",
+      "Write the visible assistant E2E response.",
+      "Summarize the completed E2E workflow.",
+    ]) {
+      expect(
+        mock.requests.filter(({ messages }) =>
+          JSON.stringify(messages.at(-1)).includes(deliveryPrompt),
+        ),
+      ).toHaveLength(1);
+    }
 
     const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
     try {

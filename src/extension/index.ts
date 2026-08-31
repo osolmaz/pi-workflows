@@ -13,6 +13,7 @@ import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId, WorkflowRunStore } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
 import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
+import { SessionDeliveryCoordinator, type ClaimedSessionDelivery } from "./session-delivery.js";
 import {
   recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
@@ -131,6 +132,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
+  const sessionDelivery = new SessionDeliveryCoordinator();
 
   const presentInOrder = async (ctx: ExtensionContext): Promise<void> => {
     const prior = presentationTail;
@@ -140,11 +142,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
-      await presentPendingInteraction(pi, client, ctx);
-      await deliverPendingNotification(pi, client, ctx);
-      if (pendingInteractionForSession(ctx.sessionManager.getSessionId()) === undefined) {
-        await presentPendingTurn(pi, client, ctx);
-      }
+      await sessionDelivery.synchronize(ctx, [
+        () => claimPendingInteractionDelivery(pi, client, ctx),
+        () => claimPendingNotificationDelivery(pi, client, ctx),
+        () => claimPendingTurnDelivery(pi, client, ctx),
+      ]);
     } finally {
       release?.();
     }
@@ -291,6 +293,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async () => {
     sessionContext = null;
+    sessionDelivery.clear();
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
   });
@@ -514,94 +517,95 @@ async function executeControllerCommand(
   };
 }
 
-async function presentPendingInteraction(
+async function claimPendingInteractionDelivery(
   pi: ExtensionAPI,
   client: WorkflowHostClient,
   ctx: ExtensionContext,
-): Promise<void> {
+): Promise<ClaimedSessionDelivery | undefined> {
   const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
-  if (interaction === undefined) return;
-  const entries = ctx.sessionManager.getBranch();
-  const existing = entries.find((entry) => interactionRequestId(entry) === interaction.requestId);
-  if (existing !== undefined) {
-    const entryId = entryIdentifier(existing);
-    if (entryId !== undefined && interaction.presentationSessionEntryId !== entryId) {
+  if (interaction === undefined || interaction.presentationSessionEntryId !== null)
+    return undefined;
+
+  const findSessionEntryId = (entries: readonly unknown[]): string | undefined =>
+    entryIdentifier(entries.find((entry) => interactionRequestId(entry) === interaction.requestId));
+  const existingEntryId = findSessionEntryId(ctx.sessionManager.getBranch());
+  let presentationRevision = interaction.revision;
+  if (existingEntryId === undefined) {
+    const claim = await requestAccepted(client, {
+      operation: "interaction.update",
+      requestId: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
+      idempotencyKey: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
+      runId: interaction.runId,
+      expectedRevision: interaction.revision,
+      payload: { requestId: interaction.requestId, claimPresentation: true },
+    });
+    if (claim.revision === undefined) throw new Error("Presentation claim has no revision");
+    presentationRevision = claim.revision;
+  }
+
+  const contract = interactionContract(interaction);
+  return {
+    deliveryId: `interaction:${interaction.requestId}`,
+    findSessionEntryId,
+    send: () => {
+      if (interaction.kind === "decision") {
+        pi.sendMessage(
+          {
+            customType: WORKFLOW_INTERACTION_MESSAGE_TYPE,
+            content: decisionPrompt(contract),
+            display: true,
+            details: {
+              requestId: interaction.requestId,
+              runId: interaction.runId,
+              kind: "decision",
+            },
+          },
+          { triggerTurn: false },
+        );
+        return;
+      }
+      const agent = agentContract(interaction);
+      if (agent === undefined) throw new Error("Stored workflow agent contract is invalid");
+      const details: WorkflowAgentStepMessageDetails & { requestId: string } = {
+        schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
+        kind: "step",
+        contract: agent,
+        requestId: interaction.requestId,
+        ...(isRecord(contract.presentation)
+          ? { presentation: contract.presentation as never }
+          : {}),
+      };
+      pi.sendMessage(
+        {
+          customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
+          content:
+            typeof contract.prompt === "string" ? contract.prompt : "Continue the workflow step.",
+          display: true,
+          details,
+        },
+        { triggerTurn: true },
+      );
+    },
+    settle: async (sessionEntryId) => {
       await requestAccepted(client, {
         operation: "interaction.update",
-        requestId: `present-${interaction.requestId}-${entryId}`,
-        idempotencyKey: `present-${interaction.requestId}-${entryId}`,
+        requestId: `present-${interaction.requestId}-${sessionEntryId}`,
+        idempotencyKey: `present-${interaction.requestId}-${sessionEntryId}`,
         runId: interaction.runId,
-        expectedRevision: interaction.revision,
-        payload: { requestId: interaction.requestId, sessionEntryId: entryId },
+        expectedRevision: presentationRevision,
+        payload: { requestId: interaction.requestId, sessionEntryId },
       });
-    }
-    return;
-  }
-  if (interaction.presentationSessionEntryId !== null) return;
-  const claim = await requestAccepted(client, {
-    operation: "interaction.update",
-    requestId: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
-    idempotencyKey: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
-    runId: interaction.runId,
-    expectedRevision: interaction.revision,
-    payload: { requestId: interaction.requestId, claimPresentation: true },
-  });
-  if (claim.revision === undefined) throw new Error("Presentation claim has no revision");
-  const presentationRevision = claim.revision;
-  const contract = interactionContract(interaction);
-  if (interaction.kind === "decision") {
-    pi.sendMessage(
-      {
-        customType: WORKFLOW_INTERACTION_MESSAGE_TYPE,
-        content: decisionPrompt(contract),
-        display: true,
-        details: { requestId: interaction.requestId, runId: interaction.runId, kind: "decision" },
-      },
-      { triggerTurn: false },
-    );
-  } else {
-    const agent = agentContract(interaction);
-    if (agent === undefined) throw new Error("Stored workflow agent contract is invalid");
-    const details: WorkflowAgentStepMessageDetails & { requestId: string } = {
-      schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
-      kind: "step",
-      contract: agent,
-      requestId: interaction.requestId,
-      ...(isRecord(contract.presentation) ? { presentation: contract.presentation as never } : {}),
-    };
-    pi.sendMessage(
-      {
-        customType: WORKFLOW_AGENT_STEP_MESSAGE_TYPE,
-        content:
-          typeof contract.prompt === "string" ? contract.prompt : "Continue the workflow step.",
-        display: true,
-        details,
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
-  }
-  const inserted = ctx.sessionManager
-    .getBranch()
-    .find((entry) => interactionRequestId(entry) === interaction.requestId);
-  const entryId = entryIdentifier(inserted);
-  if (entryId === undefined) return;
-  await requestAccepted(client, {
-    operation: "interaction.update",
-    requestId: `present-${interaction.requestId}-${entryId}`,
-    idempotencyKey: `present-${interaction.requestId}-${entryId}`,
-    runId: interaction.runId,
-    expectedRevision: presentationRevision,
-    payload: { requestId: interaction.requestId, sessionEntryId: entryId },
-  });
+    },
+  };
 }
 
-async function deliverPendingNotification(
+async function claimPendingNotificationDelivery(
   pi: ExtensionAPI,
   client: WorkflowHostClient,
   ctx: ExtensionContext,
-): Promise<void> {
+): Promise<ClaimedSessionDelivery | undefined> {
   const sessionId = ctx.sessionManager.getSessionId();
-  if (!hasClaimableNotification(sessionId)) return;
+  if (!hasClaimableNotification(sessionId)) return undefined;
   const claimRequestId = randomUUID();
   const claimed = await requestAccepted(client, {
     operation: "notification.claim",
@@ -611,57 +615,58 @@ async function deliverPendingNotification(
   });
   const receipt = isRecord(claimed.receipt) ? claimed.receipt : undefined;
   const notification = isRecord(receipt?.notification) ? receipt.notification : undefined;
-  if (notification === undefined) return;
+  if (notification === undefined) return undefined;
   const claimId = requireText(receipt?.claimId, "notification claimId");
   const notificationId = requireText(notification.notificationId, "notificationId");
-  const branch = ctx.sessionManager.getBranch();
-  let entry = branch.find(
-    (candidate) =>
-      customMessageDetail(candidate, WORKFLOW_NOTIFICATION_MESSAGE_TYPE, "notificationId") ===
-      notificationId,
-  );
-  if (entry === undefined) {
-    pi.sendMessage(
-      {
-        customType: WORKFLOW_NOTIFICATION_MESSAGE_TYPE,
-        content: requireText(notification.content, "notification content"),
-        display: true,
-        details: {
-          notificationId,
-          runId: requireText(notification.runId, "notification runId"),
-          kind: notification.kind,
+  return {
+    deliveryId: `notification:${notificationId}`,
+    findSessionEntryId: (entries) =>
+      entryIdentifier(
+        entries.find(
+          (entry) =>
+            customMessageDetail(entry, WORKFLOW_NOTIFICATION_MESSAGE_TYPE, "notificationId") ===
+            notificationId,
+        ),
+      ),
+    send: () => {
+      pi.sendMessage(
+        {
+          customType: WORKFLOW_NOTIFICATION_MESSAGE_TYPE,
+          content: requireText(notification.content, "notification content"),
+          display: true,
+          details: {
+            notificationId,
+            runId: requireText(notification.runId, "notification runId"),
+            kind: notification.kind,
+          },
         },
-      },
-      { triggerTurn: false },
-    );
-    entry = ctx.sessionManager
-      .getBranch()
-      .find(
-        (candidate) =>
-          customMessageDetail(candidate, WORKFLOW_NOTIFICATION_MESSAGE_TYPE, "notificationId") ===
-          notificationId,
+        { triggerTurn: false },
       );
-  }
-  if (entry === undefined) return;
-  await requestAccepted(client, {
-    operation: "notification.deliver",
-    requestId: `notification-deliver-${notificationId}-${claimId}`,
-    idempotencyKey: `notification-deliver-${notificationId}-${claimId}`,
-    payload: {
-      notificationId,
-      targetSessionId: sessionId,
-      claimId,
     },
-  });
+    settle: async () => {
+      await requestAccepted(client, {
+        operation: "notification.deliver",
+        requestId: `notification-deliver-${notificationId}-${claimId}`,
+        idempotencyKey: `notification-deliver-${notificationId}-${claimId}`,
+        payload: {
+          notificationId,
+          targetSessionId: sessionId,
+          claimId,
+        },
+      });
+    },
+  };
 }
 
-async function presentPendingTurn(
+async function claimPendingTurnDelivery(
   pi: ExtensionAPI,
   client: WorkflowHostClient,
   ctx: ExtensionContext,
-): Promise<void> {
+): Promise<ClaimedSessionDelivery | undefined> {
   const sessionId = ctx.sessionManager.getSessionId();
-  if (!hasClaimableTurn(sessionId)) return;
+  if (pendingInteractionForSession(sessionId) !== undefined || !hasClaimableTurn(sessionId)) {
+    return undefined;
+  }
   const claimRequestId = randomUUID();
   const claimed = await requestAccepted(client, {
     operation: "turn.claim",
@@ -671,49 +676,46 @@ async function presentPendingTurn(
   });
   const receipt = isRecord(claimed.receipt) ? claimed.receipt : undefined;
   const turn = isRecord(receipt?.turn) ? receipt.turn : undefined;
-  if (turn === undefined) return;
+  if (turn === undefined) return undefined;
   const claimId = requireText(receipt?.claimId, "turn claimId");
   const intentId = requireText(turn.intentId, "turn intentId");
   const runId = requireText(turn.runId, "turn runId");
   const state = terminalRunState(runId);
-  if (state === undefined) return;
-  let entry = ctx.sessionManager
-    .getBranch()
-    .find(
-      (candidate) =>
-        customMessageDetail(candidate, WORKFLOW_PRESENTATION_MESSAGE_TYPE, "intentId") === intentId,
-    );
-  if (entry === undefined) {
-    pi.sendMessage(
-      {
-        customType: WORKFLOW_PRESENTATION_MESSAGE_TYPE,
-        content: presentationMessage(turn, state),
-        display: false,
-        details: { intentId, runId },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
-    entry = ctx.sessionManager
-      .getBranch()
-      .find(
-        (candidate) =>
-          customMessageDetail(candidate, WORKFLOW_PRESENTATION_MESSAGE_TYPE, "intentId") ===
-          intentId,
+  if (state === undefined) return undefined;
+  return {
+    deliveryId: `turn:${intentId}`,
+    findSessionEntryId: (entries) =>
+      entryIdentifier(
+        entries.find(
+          (entry) =>
+            customMessageDetail(entry, WORKFLOW_PRESENTATION_MESSAGE_TYPE, "intentId") === intentId,
+        ),
+      ),
+    send: () => {
+      pi.sendMessage(
+        {
+          customType: WORKFLOW_PRESENTATION_MESSAGE_TYPE,
+          content: presentationMessage(turn, state),
+          display: false,
+          details: { intentId, runId },
+        },
+        { triggerTurn: true },
       );
-  }
-  const messageId = entryIdentifier(entry);
-  if (messageId === undefined) return;
-  await requestAccepted(client, {
-    operation: "turn.resolve",
-    requestId: `turn-resolve-${intentId}-${messageId}`,
-    idempotencyKey: `turn-resolve-${intentId}-${messageId}`,
-    payload: {
-      intentId,
-      targetSessionId: sessionId,
-      claimId,
-      messageId,
     },
-  });
+    settle: async (sessionEntryId) => {
+      await requestAccepted(client, {
+        operation: "turn.resolve",
+        requestId: `turn-resolve-${intentId}-${sessionEntryId}`,
+        idempotencyKey: `turn-resolve-${intentId}-${sessionEntryId}`,
+        payload: {
+          intentId,
+          targetSessionId: sessionId,
+          claimId,
+          messageId: sessionEntryId,
+        },
+      });
+    },
+  };
 }
 
 async function submitVisibleAssistantResponse(
