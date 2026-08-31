@@ -186,14 +186,16 @@ describe("host durable state", () => {
       presenterId: "pi-client-one",
       leaseMs: 1_000,
     });
-    expect(() =>
-      host.claimInteractionPresentation({
-        requestId: interaction.requestId,
-        expectedRevision: presentationClaim.revision,
-        presenterId: "pi-client-two",
-        leaseMs: 1_000,
-      }),
-    ).toThrow(/conflict/);
+    for (const presenterId of ["pi-client-one", "pi-client-two"]) {
+      expect(() =>
+        host.claimInteractionPresentation({
+          requestId: interaction.requestId,
+          expectedRevision: presentationClaim.revision,
+          presenterId,
+          leaseMs: 1_000,
+        }),
+      ).toThrow(/conflict/);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     const adoptedPresentation = host.claimInteractionPresentation({
       requestId: interaction.requestId,

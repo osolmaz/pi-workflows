@@ -25,9 +25,17 @@ afterEach(async () => {
 
 type FakeContext = ReturnType<typeof makePi>["ctx"];
 
-function makePi(options: { cwd: string; sessionId?: string; branch?: Record<string, unknown>[] }) {
+function makePi(options: {
+  cwd: string;
+  sessionId?: string;
+  branch?: Record<string, unknown>[];
+  idle?: boolean;
+  persistSentMessages?: boolean;
+}) {
   const branch = options.branch ?? [];
   const sent: Record<string, unknown>[] = [];
+  const deferred: Record<string, unknown>[] = [];
+  let idle = options.idle ?? true;
   const notifications: Array<{ message: string; level?: string }> = [];
   const listeners = new Map<string, Array<(event: unknown, ctx: FakeContext) => Promise<void>>>();
   const commands = new Map<string, (args: string, ctx: FakeContext) => Promise<void>>();
@@ -44,7 +52,8 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
     cwd: options.cwd,
     mode: "tui",
     hasUI: true,
-    isIdle: () => true,
+    isIdle: () => idle,
+    hasPendingMessages: () => false,
     abort() {},
     sessionManager: {
       getSessionId: () => options.sessionId ?? "session-one",
@@ -78,15 +87,16 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
     },
     sendMessage(message: Record<string, unknown>, delivery?: Record<string, unknown>) {
       const entry = {
-        id: `entry-${branch.length + 1}`,
+        id: `entry-${sent.length + 1}`,
         type: "custom_message",
         customType: message.customType,
         content: message.content,
         details: message.details,
         delivery,
       };
-      branch.push(entry);
       sent.push(entry);
+      if (options.persistSentMessages === false) deferred.push(entry);
+      else branch.push(entry);
     },
   } as never;
   piWorkflows(pi);
@@ -95,6 +105,12 @@ function makePi(options: { cwd: string; sessionId?: string; branch?: Record<stri
     branch,
     sent,
     notifications,
+    setIdle(value: boolean) {
+      idle = value;
+    },
+    flushSentMessages() {
+      branch.push(...deferred.splice(0));
+    },
     runCommand: async (args: string) => {
       const command = commands.get("workflow");
       if (command === undefined) throw new Error("workflow command was not registered");
@@ -289,6 +305,64 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("does not repeat a step while Pi delays the queued session entry", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fake.sent).toHaveLength(1);
+
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
+    await waitUntil(() => {
+      const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+      try {
+        return (
+          store.listPendingInteractions("session-one")[0]?.presentationSessionEntryId === "entry-1"
+        );
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    expect(fake.sent).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("waits for Pi to become idle before it claims or sends a step", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd, idle: false });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => {
+      const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+      try {
+        return store.listPendingInteractions("session-one").length === 1;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fake.sent).toEqual([]);
+    const pendingStore = new HostStateStore(workflowStatePath(), { readOnly: true });
+    try {
+      expect(pendingStore.listPendingInteractions("session-one")[0]).toMatchObject({
+        status: "pending",
+        revision: 1,
+      });
+    } finally {
+      pendingStore.close();
+    }
+
+    fake.setIdle(true);
+    await fake.emit("agent_settled");
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    expect(fake.sent).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
   it("rejects invalid child-validated output and accepts a corrected submission", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeValidatedWorkflow(cwd);
@@ -389,7 +463,7 @@ describe("pi-workflows hosted extension", () => {
   it("keeps protected decisions out of the model-facing workflow tool", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeCheckpointWorkflow(cwd, true);
-    const fake = makePi({ cwd });
+    const fake = makePi({ cwd, persistSentMessages: false });
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(
@@ -399,6 +473,10 @@ describe("pi-workflows hosted extension", () => {
         ),
       30_000,
     );
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(fake.sent).toHaveLength(1);
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
     const decisionEntry = fake.sent.find(
       (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
     );
@@ -433,18 +511,39 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("delivers hosted notifications and the terminal presentation turn", async () => {
+  it("delivers hosted notifications and the terminal presentation turn once each", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeDeliveryWorkflow(cwd);
-    const fake = makePi({ cwd });
+    const fake = makePi({ cwd, persistSentMessages: false });
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(
-      () =>
-        fake.sent.some((entry) => entry.customType === "pi-workflows-notification") &&
-        fake.sent.some((entry) => entry.customType === "pi-workflows-presentation"),
+      () => fake.sent.some((entry) => entry.customType === "pi-workflows-notification"),
       30_000,
     );
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-notification"),
+    ).toHaveLength(1);
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-presentation"),
+    ).toHaveLength(0);
+
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
+    await waitUntil(
+      () => fake.sent.some((entry) => entry.customType === "pi-workflows-presentation"),
+      30_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-notification"),
+    ).toHaveLength(1);
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-presentation"),
+    ).toHaveLength(1);
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
     expect(
       fake.sent.find((entry) => entry.customType === "pi-workflows-notification"),
     ).toMatchObject({
@@ -455,7 +554,7 @@ describe("pi-workflows hosted extension", () => {
       fake.sent.find((entry) => entry.customType === "pi-workflows-presentation"),
     ).toMatchObject({
       content: expect.stringContaining("Explain the completed delivery result."),
-      delivery: { triggerTurn: true, deliverAs: "followUp" },
+      delivery: { triggerTurn: true },
     });
     await fake.emit("session_shutdown");
   }, 60_000);

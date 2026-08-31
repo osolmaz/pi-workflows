@@ -316,7 +316,9 @@ Agent and assistant-message steps for an interactive run execute in the origin P
 
 The worker commits the node's resolved wall-clock deadline before it proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits. The host continues to enforce the durable deadline while no worker exists. If the deadline passes, one control claim atomically closes the stale request and schedules a supervised timeout-resume child. The child preserves the same attempt and deadline, records `timed_out`, and follows any `$result.outcome` edge. A run with no timeout recovery edge becomes terminal and releases its session reservation. Restart recovery starts this timeout path before it schedules other work.
 
-The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. It claims one request presentation, sends the step message through documented Pi APIs, and exposes the normal `workflow` tool contract.
+The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. One shared session-delivery coordinator handles step prompts, protected decisions, notifications, and terminal presentation turns. It waits until Pi is idle and has no pending messages before it claims new work. After a claim, it records the delivery ID in memory before it calls the documented `pi.sendMessage()` API. Polling only checks for delivery evidence while that ID remains queued; it cannot send the message again.
+
+The host grants one live presentation claim. The current presenter cannot claim the same request again before that claim expires. When the matching custom message appears in the active Pi branch, the coordinator records its public session entry ID through the host and clears the local queued state. If Pi becomes idle without exposing a matching entry after the confirmation interval, the coordinator reports the delivery as ambiguous and keeps it blocked. It does not infer success or retry. The normal `workflow` tool contract then submits updates and results.
 
 A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host first checks this transport contract and records a provisional `validating` submission. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the host. The host settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the host rejects the provisional submission and leaves the request ready for a corrected retry.
 
@@ -324,9 +326,9 @@ An ordinary checkpoint accepts the model-facing `answer` action and starts a con
 
 The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
 
-One session presents one workflow interaction at a time. Other requests remain ordered by creation time. A restart or reload can present an unresolved request again, but exact session-entry adoption prevents a second visible message when the first presentation was already recorded.
+One session delivers one host-owned message at a time. Other requests remain ordered by creation time. A reload or restart clears only the process-local queued state. The new extension instance scans the active Pi branch first, adopts an existing entry, and sends only when no matching entry exists and a new claim is available. It never retries only because a poll interval or claim lease elapsed.
 
-Notify nodes enqueue passive messages in the existing `notifications` outbox. The extension claims a message through the host, adopts an existing session entry after a crash, and marks delivery through the host. A completed run with a root `presentationPrompt` creates an ineligible `turn_intent` before the terminal commit. The same terminal transaction makes that intent eligible. The extension claims it, starts one normal Pi turn, and records the public session entry ID. No completion turn starts before the completed state is durable.
+Notify nodes enqueue passive messages in the existing `notifications` outbox. The shared coordinator claims a message through the host, adopts an existing session entry after a crash, and marks delivery through the host. A completed run with a root `presentationPrompt` creates an ineligible `turn_intent` before the terminal commit. The same terminal transaction makes that intent eligible. The coordinator claims it, starts one normal Pi turn while Pi is idle, and records the public session entry ID. No completion turn starts before the completed state is durable.
 
 ## Detached execution
 
@@ -446,6 +448,7 @@ The implementation conforms when:
 - an expired running row can be resumed or cancelled safely;
 - duplicate commands and submissions return stored receipts;
 - an interactive request appears once in the origin session and survives reload;
+- a busy Pi session held longer than both delivery leases does not queue duplicate messages or model turns;
 - effects are deduplicated or marked ambiguous;
 - the extension and host run no workflow or controller code in their own event loops;
 - the production package contains no embedded execution fallback;

@@ -36,7 +36,6 @@ pi.sendMessage(
   },
   {
     triggerTurn: true,
-    deliverAs: streaming ? "steer" : "followUp",
   },
 );
 ```
@@ -47,11 +46,19 @@ pi.sendMessage(
 
 `kind` distinguishes the first delivery from a reminder or a resume that must repeat the instructions. An ordinary resume that can continue without another prompt does not create a message.
 
+## Session delivery
+
+One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. Before it calls `pi.sendMessage()`, it records the stable delivery ID in a process-local queued map. The one-second poll can then look for the matching session entry, but it cannot send that ID again.
+
+The coordinator clears the queued ID only after it observes the custom message in the active branch and saves the public Pi session entry ID through the workflow host. If Pi becomes idle but does not expose that entry after the confirmation interval, the coordinator reports an ambiguous delivery and keeps it blocked. Reload and restart recovery first search the branch for that stable ID. An existing entry is adopted. A new message is sent only when no entry exists and the host grants a new claim.
+
+The host does not grant another live presentation claim to the same extension client. Claim expiry permits recovery by a new claimant; it is not permission for the current process to resend a queued message.
+
 ## Engine boundary
 
 The workflow engine remains independent of Pi. It continues to produce an `AgentStepRequest` with a complete prompt and structured contract.
 
-The request carries optional presentation data for the run title and node status detail. The conversation executor passes the prompt, contract, presentation data, delivery kind, and streaming state to the Pi extension. The RPC executor handles submitted steps. An assistant-message step parks for the origin Pi session; a detached run with no origin session fails before prompting.
+The request carries optional presentation data for the run title and node status detail. The workflow host stores the prompt, contract, presentation data, and delivery kind for the origin Pi extension. The RPC executor handles submitted steps. An assistant-message step parks for the origin Pi session; a detached run with no origin session fails before prompting.
 
 One pure formatter remains responsible for the model prompt used by both executors. Interactive delivery must not shorten, summarize, or rebuild the model prompt from display fields.
 
@@ -100,7 +107,7 @@ Workflow notifications keep the separate custom type `pi-workflows-notification`
 
 Agent-step messages use `triggerTurn: true` because they ask the model to work. Notifications use `triggerTurn: false` because they report state to the user without asking for an assistant response.
 
-The two message types must not share delivery code that can accidentally change this behavior.
+The two message types use the same delivery coordinator but keep separate send policies. The coordinator never changes whether a message starts a model turn.
 
 ## Session and persistence impact
 
@@ -123,7 +130,7 @@ The workflow package adds `assistantMessage()` as an `expectedOutput` value for 
 Tests verify:
 
 - interactive and RPC executors give the model the same complete prompt
-- one step message starts one model turn
+- one step message starts one model turn, even when Pi stays busy longer than the poll interval and delivery claim lease
 - collapsed rendering does not show the full prompt
 - expanded rendering shows the full prompt, settings scope and change number, allowed paths, and exact contract ids
 - long and missing display fields render safely

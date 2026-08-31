@@ -676,7 +676,7 @@ export class HostStateStore {
          WHERE request_id = ? AND revision = ? AND presentation_session_entry_id IS NULL
            AND (
              status = 'pending'
-             OR (status = 'presenting' AND (presenter_id = ? OR presentation_claim_expires_at <= ?))
+             OR (status = 'presenting' AND presentation_claim_expires_at <= ?)
            )`,
       )
       .run(
@@ -685,7 +685,6 @@ export class HostStateStore {
         now,
         options.requestId,
         options.expectedRevision,
-        options.presenterId,
         now,
       );
     if (changed.changes !== 1) throw new Error("Interactive request presentation claim conflict");
