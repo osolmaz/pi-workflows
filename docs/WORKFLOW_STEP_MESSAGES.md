@@ -48,7 +48,7 @@ pi.sendMessage(
 
 ## Session delivery
 
-One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. Before it calls `pi.sendMessage()`, it records the stable delivery ID in a process-local queued map. The one-second poll can then look for the matching session entry, but it cannot send that ID again.
+One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. It checks these conditions again after the asynchronous host claim and immediately before the synchronous send. If Pi became busy, the unused claim expires and is never sent later. Before it calls `pi.sendMessage()`, the coordinator records the stable delivery ID in a process-local queued map. The one-second poll can then look for the matching session entry, but it cannot send that ID again.
 
 The coordinator clears the queued ID only after it observes the custom message in the active branch and saves the public Pi session entry ID through the workflow host. If Pi becomes idle but does not expose that entry after the confirmation interval, the coordinator reports an ambiguous delivery and keeps it blocked. Reload and restart recovery first search the branch for that stable ID. An existing entry is adopted. A new message is sent only when no entry exists and the host grants a new claim.
 

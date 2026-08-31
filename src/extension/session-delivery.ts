@@ -48,6 +48,11 @@ export class SessionDeliveryCoordinator {
           return;
         }
 
+        // The host claim is asynchronous. Pi can start another turn while that
+        // request is in flight, so check again immediately before the
+        // synchronous send. An unused claim expires and is never sent later.
+        if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+
         this.queued.set(delivery.deliveryId, {
           delivery,
           queuedAt: Date.now(),

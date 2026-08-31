@@ -75,6 +75,29 @@ describe("SessionDeliveryCoordinator", () => {
     expect(claim).not.toHaveBeenCalled();
   });
 
+  it("does not send when Pi becomes busy while the host claim is in flight", async () => {
+    let idle = true;
+    const send = vi.fn();
+    const claim = vi.fn(async (): Promise<ClaimedSessionDelivery> => {
+      idle = false;
+      return {
+        deliveryId: "interaction:raced",
+        findSessionEntryId: () => undefined,
+        send,
+        settle: async () => {},
+      };
+    });
+    const coordinator = new SessionDeliveryCoordinator();
+
+    await coordinator.synchronize(
+      context([], () => idle),
+      [claim],
+    );
+
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("reports an unproved send once without retrying it", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
