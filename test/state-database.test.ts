@@ -115,15 +115,38 @@ describe("StateDatabase", () => {
     await expect(source.backup(source.filePath)).rejects.toThrow(/must differ/);
   });
 
-  it("rejects wrong SQLite identities", async () => {
-    const filePath = path.join(await makeTempDir("state-identity"), "state.sqlite");
-    const state = open(filePath);
-    state.close();
-    opened.pop();
-    const raw = new Database(filePath);
-    raw.pragma("application_id = 1");
-    raw.close();
-    expect(() => open(filePath)).toThrow(/incompatible/);
+  it("rejects wrong SQLite identities or schema metadata", async () => {
+    const corruptions: Array<(database: Database.Database) => void> = [
+      (database) => {
+        database.pragma("application_id = 1");
+      },
+      (database) => {
+        database.pragma(`user_version = ${STATE_SCHEMA_VERSION + 1}`);
+      },
+      (database) => {
+        database.prepare("UPDATE schema_meta SET schema_digest = ? WHERE id = 1").run(
+          Buffer.alloc(32, 0xff),
+        );
+      },
+      (database) => {
+        database.prepare("UPDATE schema_meta SET app_version = 'wrong' WHERE id = 1").run();
+      },
+      (database) => {
+        database.prepare("DELETE FROM schema_meta WHERE id = 1").run();
+      },
+    ];
+
+    const directory = await makeTempDir("state-identity");
+    for (const [index, corrupt] of corruptions.entries()) {
+      const filePath = path.join(directory, `state-${String(index)}.sqlite`);
+      const state = open(filePath);
+      state.close();
+      opened.pop();
+      const raw = new Database(filePath);
+      corrupt(raw);
+      raw.close();
+      expect(() => open(filePath)).toThrow(/incompatible/);
+    }
   });
 
   it("isolates current state from a frozen prior-path writer", async () => {
