@@ -4,9 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { WorkflowHostClient } from "../../src/host/client.js";
+import { hostSocketPath } from "../../src/host/protocol.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const piBin = path.join(repoRoot, "node_modules", ".bin", "pi");
+const HOST_STOP_TIMEOUT_MS = 5_000;
 const tempDirs: string[] = [];
 
 type CommandInfo = {
@@ -97,8 +100,39 @@ function command(commands: CommandInfo[], name: string): CommandInfo | undefined
   return commands.find((entry) => entry.name === name);
 }
 
+async function stopPackageHost(directory: string): Promise<void> {
+  const databasePath = path.join(directory, ".pi", "agent", "workflows", "state.sqlite");
+  const endpoint = hostSocketPath(databasePath);
+  const client = new WorkflowHostClient({ databasePath });
+  try {
+    await client.request({ operation: "host.stop" });
+  } catch (error) {
+    try {
+      await fs.access(endpoint);
+    } catch {
+      return;
+    }
+    throw error;
+  }
+
+  const deadline = Date.now() + HOST_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(endpoint);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return;
+    }
+  }
+  throw new Error(`Temporary workflow host did not stop: ${endpoint}`);
+}
+
 afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  for (const directory of tempDirs.splice(0)) {
+    await stopPackageHost(directory);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 describe.sequential("Pi package resource discovery", () => {
