@@ -52,9 +52,24 @@ describe("StateDatabase", () => {
     expect(second.equals(first)).toBe(true);
     expect(state.readJson(first)).toEqual({ a: [true, "x"], z: 1 });
     expect(state.readBlob(text)?.content.toString("utf8")).toBe("large text");
+    const missing = Buffer.alloc(32);
+    expect(state.readBlob(missing)).toBeUndefined();
+    expect(() => state.readJson(missing)).toThrow(/missing/);
+    expect(() => state.readJson(text)).toThrow(/wrong media type/);
     expect(state.connection.prepare("SELECT count(*) AS count FROM blobs").get()).toEqual({
       count: 2,
     });
+  });
+
+  it("keeps nested database work in the outer transaction", async () => {
+    const state = open(path.join(await makeTempDir("state-nested-transaction"), "state.sqlite"));
+    const hash = state.transaction(() => {
+      expect(state.connection.inTransaction).toBe(true);
+      return state.transaction(() => state.putText("nested"));
+    });
+
+    expect(state.readBlob(hash)?.content.toString("utf8")).toBe("nested");
+    expect(state.connection.inTransaction).toBe(false);
   });
 
   it("rejects incompatible or changed schemas", async () => {
