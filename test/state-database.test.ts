@@ -88,6 +88,19 @@ describe("StateDatabase", () => {
     expect(() => reader.putText("no")).toThrow(/read-only/);
   });
 
+  it("rejects missing or uninitialized read-only state without changing it", async () => {
+    const directory = await makeTempDir("state-empty-reader");
+    const missingPath = path.join(directory, "missing.sqlite");
+    expect(() => open(missingPath, "read-only")).toThrow(/does not exist/);
+    expect(fs.existsSync(missingPath)).toBe(false);
+
+    const emptyPath = path.join(directory, "empty.sqlite");
+    new Database(emptyPath).close();
+    const before = fs.readFileSync(emptyPath);
+    expect(() => open(emptyPath, "read-only")).toThrow(/Back up and move state\.sqlite/);
+    expect(fs.readFileSync(emptyPath)).toEqual(before);
+  });
+
   it("creates and verifies a transaction-safe backup", async () => {
     const dir = await makeTempDir("state-backup");
     const source = open(path.join(dir, "state.sqlite"));
