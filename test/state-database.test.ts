@@ -124,9 +124,9 @@ describe("StateDatabase", () => {
         database.pragma(`user_version = ${STATE_SCHEMA_VERSION + 1}`);
       },
       (database) => {
-        database.prepare("UPDATE schema_meta SET schema_digest = ? WHERE id = 1").run(
-          Buffer.alloc(32, 0xff),
-        );
+        database
+          .prepare("UPDATE schema_meta SET schema_digest = ? WHERE id = 1")
+          .run(Buffer.alloc(32, 0xff));
       },
       (database) => {
         database.prepare("UPDATE schema_meta SET app_version = 'wrong' WHERE id = 1").run();
