@@ -254,6 +254,8 @@ The first command set is:
 - `host.status`
 - `host.stop`
 
+`notification.claim` and `turn.claim` can create a claim or revalidate the exact retained claim before delivery. Revalidation checks the in-memory client claim and its durable lease without creating another claim.
+
 Read operations may use the existing read-only store directly in viewers. Mutating Pi and CLI paths use the host.
 
 ## Worker protocol

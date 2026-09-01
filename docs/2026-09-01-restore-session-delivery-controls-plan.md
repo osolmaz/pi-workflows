@@ -48,7 +48,7 @@ The coordinator will have three in-memory states for one delivery:
 2. `queued`: `pi.sendMessage()` was called and the matching Pi entry is not yet durably settled;
 3. settled or ambiguous: the host accepted the public Pi entry ID, or settlement could not be proved.
 
-The coordinator records `claimExpiresAt` with every claim. A later poll can use the same claim while it is live. It discards an expired unused claim and may then request a new claim. It does not request another claim while a live claim is remembered.
+The coordinator records `claimExpiresAt` with every claim. A later poll can use the same claim while it is live. Immediately before send, the extension revalidates that exact claim and durable resource through the host, then checks Pi and the lease again. It discards cancelled, paused, replaced, or expired work. It does not request another claim while a live claim is remembered.
 
 The extension reads the presentation claim owner and expiry from the existing version-1 interaction row. A live claim held by any extension is normal unavailable work. It is not a tool error. Notification and terminal-turn claim receipts also include their exact expiry.
 

@@ -31,6 +31,7 @@ describe("SessionDeliveryCoordinator", () => {
     const delivery: ClaimedSessionDelivery = {
       deliveryId: "interaction:one",
       claimExpiresAt: Date.now() + 10_000,
+      isStillDeliverable: () => true,
       findSessionEntryId: (entries) =>
         (
           entries.find((entry) => (entry as { id?: string }).id === "entry-one") as
@@ -84,6 +85,7 @@ describe("SessionDeliveryCoordinator", () => {
       return {
         deliveryId: "interaction:raced",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: () => undefined,
         send,
         settle: async () => {},
@@ -103,6 +105,36 @@ describe("SessionDeliveryCoordinator", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it("discards retained work that is no longer deliverable", async () => {
+    let idle = true;
+    const send = vi.fn();
+    const isStillDeliverable = vi.fn(() => false);
+    const claim = vi
+      .fn<() => Promise<ClaimedSessionDelivery | undefined>>()
+      .mockImplementationOnce(async () => {
+        idle = false;
+        return {
+          deliveryId: "interaction:cancelled",
+          claimExpiresAt: Date.now() + 10_000,
+          isStillDeliverable,
+          findSessionEntryId: () => undefined,
+          send,
+          settle: async () => {},
+        };
+      })
+      .mockResolvedValue(undefined);
+    const coordinator = new SessionDeliveryCoordinator();
+    const ctx = context([], () => idle);
+
+    await coordinator.synchronize(ctx, [claim]);
+    idle = true;
+    await coordinator.synchronize(ctx, [claim]);
+
+    expect(isStillDeliverable).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(claim).toHaveBeenCalledTimes(2);
+  });
+
   it("adopts a message that appears while a remembered claim waits for Pi", async () => {
     const branch: Record<string, unknown>[] = [];
     let idle = true;
@@ -113,6 +145,7 @@ describe("SessionDeliveryCoordinator", () => {
       return {
         deliveryId: "interaction:adopt-waiting",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
         send,
         settle,
@@ -143,6 +176,7 @@ describe("SessionDeliveryCoordinator", () => {
       return {
         deliveryId: "interaction:adopt-ambiguous",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
         send,
         settle,
@@ -176,6 +210,7 @@ describe("SessionDeliveryCoordinator", () => {
       return {
         deliveryId: "interaction:expired",
         claimExpiresAt: Date.now() + 1_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: () => undefined,
         send,
         settle: async () => {},
@@ -200,6 +235,7 @@ describe("SessionDeliveryCoordinator", () => {
       async (): Promise<ClaimedSessionDelivery> => ({
         deliveryId: "interaction:ambiguous",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: () => undefined,
         send,
         settle: async () => {},
@@ -230,6 +266,7 @@ describe("SessionDeliveryCoordinator", () => {
       async (): Promise<ClaimedSessionDelivery> => ({
         deliveryId: "interaction:visible",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
         send,
         settle,
@@ -264,6 +301,7 @@ describe("SessionDeliveryCoordinator", () => {
         async () => ({
           deliveryId: "notification:one",
           claimExpiresAt: Date.now() + 10_000,
+          isStillDeliverable: () => true,
           findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
           send,
           settle,
@@ -285,6 +323,7 @@ describe("SessionDeliveryCoordinator", () => {
       async (): Promise<ClaimedSessionDelivery> => ({
         deliveryId: "turn:one",
         claimExpiresAt: Date.now() + 10_000,
+        isStillDeliverable: () => true,
         findSessionEntryId: () => undefined,
         send,
         settle: async () => {},

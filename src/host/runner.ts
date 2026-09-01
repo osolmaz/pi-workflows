@@ -788,8 +788,39 @@ export class WorkflowHost {
     return claim;
   }
 
+  private validateDelivery(
+    command: HostRequest,
+    payload: Record<string, unknown>,
+    kind: DeliveryClaim["kind"],
+  ): Omit<HostResponse, "schema" | "requestId"> {
+    const resourceId = requireString(payload.resourceId, "resourceId");
+    const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
+    const claimId = requireString(payload.claimId, "claimId");
+    const claim = this.deliveryClaim(claimId, command.clientId, kind, resourceId, targetSessionId);
+    if (claim === undefined) {
+      return { outcome: "accepted", receipt: { claimId, live: false } };
+    }
+    const live =
+      kind === "notification"
+        ? this.queue.isWorkflowNotificationClaimLive({
+            notificationId: resourceId,
+            targetSessionId,
+            claimToken: claim.token,
+          })
+        : this.queue.isWorkflowTurnIntentClaimLive({
+            intentId: resourceId,
+            targetSessionId,
+            claimToken: claim.token,
+          });
+    if (!live) this.deliveryClaims.delete(claimId);
+    return { outcome: "accepted", receipt: { claimId, live } };
+  }
+
   private claimNotification(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
     const payload = requireRecord(command.payload, "notification claim payload");
+    if (payload.validateClaim === true) {
+      return this.validateDelivery(command, payload, "notification");
+    }
     const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
     const token = randomUUID();
     const notification = this.queue.claimPendingWorkflowNotifications({
@@ -842,6 +873,9 @@ export class WorkflowHost {
 
   private claimTurn(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
     const payload = requireRecord(command.payload, "turn claim payload");
+    if (payload.validateClaim === true) {
+      return this.validateDelivery(command, payload, "turn");
+    }
     const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
     const token = randomUUID();
     const intent = this.queue.claimEligibleWorkflowTurnIntents({

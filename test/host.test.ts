@@ -1234,6 +1234,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const notificationRecord = notificationReceipt.notification;
       expect(
         await client.request({
+          operation: "notification.claim",
+          payload: {
+            validateClaim: true,
+            resourceId: notificationRecord.notificationId,
+            targetSessionId: "host-test-session",
+            claimId: notificationReceipt.claimId,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted", receipt: { live: true } });
+      expect(
+        await client.request({
           operation: "notification.deliver",
           payload: {
             notificationId: notificationRecord.notificationId,
@@ -1242,6 +1253,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           },
         }),
       ).toMatchObject({ outcome: "accepted" });
+      expect(
+        await client.request({
+          operation: "notification.claim",
+          payload: {
+            validateClaim: true,
+            resourceId: notificationRecord.notificationId,
+            targetSessionId: "host-test-session",
+            claimId: notificationReceipt.claimId,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted", receipt: { live: false } });
 
       const turnClaim = "turn-claim";
       const turn = await client.request({
@@ -1260,6 +1282,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const turnRecord = turnReceipt.turn;
       expect(
         await client.request({
+          operation: "turn.claim",
+          payload: {
+            validateClaim: true,
+            resourceId: turnRecord.intentId,
+            targetSessionId: "host-test-session",
+            claimId: turnReceipt.claimId,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted", receipt: { live: true } });
+      expect(
+        await client.request({
           operation: "turn.resolve",
           payload: {
             intentId: turnRecord.intentId,
@@ -1269,6 +1302,17 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           },
         }),
       ).toMatchObject({ outcome: "accepted" });
+      expect(
+        await client.request({
+          operation: "turn.claim",
+          payload: {
+            validateClaim: true,
+            resourceId: turnRecord.intentId,
+            targetSessionId: "host-test-session",
+            claimId: turnReceipt.claimId,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted", receipt: { live: false } });
     } finally {
       await host.stop();
     }
