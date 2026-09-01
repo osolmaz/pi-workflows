@@ -475,8 +475,14 @@ The model sees one `workflow` tool. Its `action` field supports:
 A direct user request to continue or resume the active workflow maps to
 `resume` immediately. The model does not call `status` instead of `resume` or
 use it as a prerequisite. An already active run adopts the resume request. A
-paused or parked run gets a new claim generation and worker. With no resumable
-run, the host rejects the request.
+paused interaction remains the same durable request and resumes without a
+worker. Other paused or parked work gets a new claim generation and worker.
+With no resumable run, the host rejects the request.
+
+The origin Pi session shows its active run in the workflow widget. `Shift+Up`
+and `Shift+Down` scroll it. If Escape aborts a model turn that belongs to a
+presented workflow interaction, the extension pauses that run through the
+host. The paused run does not accept updates or submissions until `resume`.
 
 `status` reports the durable queue projection. A host command succeeds only
 after its transaction commits. The protocol stores request fingerprints and
