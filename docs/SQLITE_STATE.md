@@ -6,11 +6,11 @@ Pi Workflows stores all live durable state in one database:
 ~/.pi/agent/workflows/state.sqlite
 ```
 
-There is one database for the user installation. Project and run IDs separate data inside it. Workflow targets do not read or write this database. Under the planned [unified live workflow client](2026-09-01-unified-workflow-client-plan.md) hard cut, the host is also the only production process that opens this live database. Extensions, CLI clients, Herdr adapters, and `piw` use the versioned client protocol.
+There is one database for the user installation. Project and run IDs separate data inside it. The host is the only production process that opens this live database. Workflow targets, extensions, CLI clients, Herdr adapters, and `piw` do not open it. Live clients use `pi-workflows.client.v1`.
 
 ## Viewer projection
 
-The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md). After the planned unified-client hard cut, the host owns this projection and exposes it as the canonical live run view. Local and remote renderers will not recreate it or validate its SQLite tables.
+The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md). The host owns this projection and exposes it as the canonical live run view. Local and remote renderers do not recreate it or validate its SQLite tables.
 
 `viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. `viewer_session_checkpoints` stores the bounded active message and tool state at each 256-event boundary. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit. Session-event transactions write each reached replay checkpoint in that transaction.
 
@@ -62,7 +62,7 @@ The database also uses:
 
 The host opens the active database. It verifies the application ID, user version, schema metadata, compiled DDL digest, and exact SQLite schema shape. An incompatible database fails with the standard backup-and-reset instruction. Pi Workflows does not import, reinterpret, or delete that state.
 
-After the planned unified-client hard cut, the host completes this verification before it serves any client and no other production process opens the active database. A maintenance verifier may open an explicit inactive backup with SQLite read-only mode and `PRAGMA query_only = ON`. That offline verification path is not a live client and cannot select the active state database. TypeScript and Rust clients will validate the client protocol version, not the SQLite DDL digest.
+The host completes this verification before it serves any client, and no other production process opens the active database. A maintenance verifier may open an explicit inactive backup with SQLite read-only mode and `PRAGMA query_only = ON`. That offline verification path is not a live client and cannot select the active state database. TypeScript and Rust clients validate the client protocol and package versions, not the SQLite DDL digest.
 
 The normalized run layout is an in-place alpha cutover. It keeps SQLite user version `1` and the current `v1` public record identifiers. A database with the former nested run-snapshot layout is incompatible and must be moved or removed. There is no migration, compatibility reader, dual write, alias, or second schema generation.
 
@@ -199,7 +199,7 @@ Reading or finding a row never gives write authority.
 - Control commands have narrow explicit operations, such as requesting cancellation or deletion.
 - Model-originated workflow answers cannot resolve protected human decisions.
 
-The global host is the normal state writer. Its protected stores check ownership and renew the exact live claim in the same transaction as the write. A stale or expired owner cannot renew itself. After the planned unified-client hard cut, it will also be the sole live database owner. Pi extensions, CLI commands, Herdr adapters, and the Rust `piw` program will use the versioned client protocol for live reads and controls. They will not open the active database. Only explicit inactive backup verification will remain a direct read-only SQLite operation.
+The global host is the sole live database owner and the normal state writer. Its protected stores check ownership and renew the exact live claim in the same transaction as the write. A stale or expired owner cannot renew itself. Pi extensions, CLI commands, Herdr adapters, and the Rust `piw` program use the versioned client protocol for live reads and controls. They do not open the active database. Only explicit inactive backup verification remains a direct read-only SQLite operation.
 
 ## Competing outcomes
 
@@ -215,7 +215,7 @@ The same rule applies to run terminal outcomes, continuation admission, queue se
 
 ## Read contract
 
-Durable status is a pure projection of domain rows, immutable facts, current leases, and effect results. After the planned unified-client hard cut, the host will combine that projection with validated ephemeral origin-session activity to produce one live run view. Ephemeral activity can change display status only. It cannot change durable workflow state or authority. Every renderer will consume the host-produced display status and allowed controls without running another status reducer.
+Durable status is a pure projection of domain rows, immutable facts, current leases, and effect results. The host combines that projection with validated ephemeral origin-session activity to produce one live run view. Ephemeral activity can change display status only. It cannot change durable workflow state or authority. Every renderer consumes the host-produced display status and allowed controls without running another status reducer.
 
 A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
 
@@ -233,7 +233,7 @@ Read paths do not repair state. Owner reconcilers apply pending effects and writ
 
 All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key. One global host owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/host/`. A second live host is rejected even when it was started from another project.
 
-SQLite WAL keeps bounded projection reads consistent with commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions. After the planned unified-client hard cut, production clients will receive revisioned snapshots, patches, and pages from the host instead of opening concurrent SQLite readers.
+SQLite WAL keeps bounded projection reads consistent with commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions. Production clients receive revisioned snapshots, patches, and pages from the host instead of opening concurrent SQLite readers.
 
 This contract is for local storage on one machine. It does not claim distributed consensus or network-filesystem safety.
 
@@ -260,7 +260,7 @@ pi-workflows state prune --before 2026-08-01T00:00:00Z --dry-run
 pi-workflows state prune --before 2026-08-01T00:00:00Z --backup /absolute/path/to/before-prune.sqlite --apply
 ```
 
-After the planned unified-client hard cut, these commands will send maintenance operations to the host when they target the active database. Only `pi-workflows state verify` for an explicit inactive backup will open SQLite in the command process.
+These commands send maintenance operations to the host when they target the active database. Only `pi-workflows state verify` with an explicit inactive backup opens SQLite in the command process. It rejects the active database, including another path to the same file.
 
 `status` reports only safe counts, file size, active leases, and unsettled effects.
 It does not print actor IDs, channel references, payloads, or credentials.
@@ -269,6 +269,6 @@ It does not print actor IDs, channel references, payloads, or credentials.
 
 ## Alpha cutover
 
-The persisted-state alpha boundary is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import. The planned unified-client hard cut will also remove every direct live-state client, replay server reader, and Rust SQLite fallback outside the host.
+The persisted-state alpha boundary is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import. No direct live-state client, replay server reader, or Rust SQLite fallback remains outside the host.
 
 Older state remains untouched. Pi Workflows fails before mutation with this instruction: “Pi Workflows durable state is incompatible. Back up and move state.sqlite with its -wal and -shm files, then start Pi Workflows to create a new state.sqlite database. The incompatible state was not changed.”

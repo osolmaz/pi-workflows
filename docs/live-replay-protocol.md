@@ -1,177 +1,105 @@
-# Live replay protocol
+# Live client protocol
 
-Status: implemented, but scheduled for an alpha hard cut. The [unified live workflow client](2026-09-01-unified-workflow-client-plan.md) will replace this separate protocol in place. After that cut, the host will be the only production process that opens live SQLite state, and local and remote `piw` modes will use `pi-workflows.client.v1` with no direct database fallback.
+Pi Workflows uses one live client protocol for the Pi extension, the TypeScript CLI, local `piw`, and remote `piw` through the loopback relay.
 
-The current Rust viewer (`tui/`) can read SQLite directly or connect to `piw serve`. Both current modes use the same bounded viewer projection. The current protocol ID is `pi-workflows.replay.v1`.
+The protocol ID is `pi-workflows.client.v1`. Its schema is [`protocol/client.v1.schema.json`](../protocol/client.v1.schema.json). TypeScript and Rust use the same valid and invalid fixture corpus.
 
-The server reads SQLite and never writes it. It accepts loopback addresses only. Remote use goes through an SSH tunnel. The server rejects WebSocket handshakes with an `Origin` header so a web page cannot read workflow state from localhost.
+The host is the only process that reads or writes the active SQLite database. A client protocol or package-version mismatch does not mean that SQLite state is incompatible. The client stops and asks for matching `pi-workflows` and `piw` packages.
 
-## Framing
+## Transports
 
-The endpoint is `/ws`. Each message is one JSON object with a `type` field. Unknown message types and fields are ignored. The server sends `hello` first. A client disconnects when it does not support the protocol ID.
+The local transport is a user-only Unix socket:
 
-```json
-{ "type": "hello", "protocol": "pi-workflows.replay.v1" }
+```text
+~/.pi/agent/workflows/host/host.sock
 ```
 
-## Bounded run view
+Each message is one canonical JSON object followed by a newline. A message can be at most 1 MiB. Unknown envelope fields, non-canonical JSON, and invalid framing close only the offending connection.
 
-A snapshot contains one bounded run view:
+`piw serve` provides the remote transport at `/ws`. It binds to loopback only. Each WebSocket connection has one matching host-socket connection, and their lifecycles are coupled. The relay forwards one canonical JSON object per text frame. It does not read SQLite, translate views, multiplex clients, or retain state.
 
-```json
-{
-  "presentationRevision": 42,
-  "graphRevision": 17,
-  "manifest": { … },
-  "workflow": { … },
-  "graphScene": {
-    "ranks": [ … ],
-    "edges": [ … ],
-    "segments": [ … ],
-    "rankOfNode": { … }
-  },
-  "graphSteps": [ … ],
-  "takenTransitions": [ "prepare->run" ],
-  "stepStart": 768,
-  "stepTotal": 1000,
-  "state": {
-    "steps": [ … ]
-  },
-  "tracePage": {
-    "presentationRevision": 42,
-    "start": 768,
-    "total": 1000,
-    "items": [ … ]
-  },
-  "session": {
-    "presentationRevision": 42,
-    "binding": { … },
-    "entryPage": {
-      "presentationRevision": 42,
-      "start": 768,
-      "total": 1000,
-      "items": [ … ]
-    },
-    "eventPage": {
-      "presentationRevision": 42,
-      "start": 768,
-      "total": 1000,
-      "items": [ … ]
-    },
-    "capture": { … }
-  },
-  "settingsScopes": [ … ],
-  "followUpQueue": { … },
-  "live": true,
-  "possiblyInterrupted": false
-}
-```
+Remote clients use an SSH tunnel to reach the loopback relay.
 
-Each step, trace, session-entry, and session-event page contains at most 256 rows. `graphSteps` contains at most one latest attempt per node at the replay cursor. `takenTransitions` contains distinct transitions up to that cursor. `graphScene` is the retained language-neutral rank and route plan shared by Rust and TypeScript.
+## Envelope
 
-A snapshot does not contain complete trace or session history. A replay jump fetches the page that contains the requested zero-based cursor.
+The protocol has four message types:
 
-## Revisions and target patches
+- `hello` identifies the protocol connection and package version.
+- `request` carries one operation, request ID, client ID, idempotency key, optional run ID and revision, and payload.
+- `response` settles one request with an outcome, optional revision, receipt, or safe error.
+- `event` carries a revisioned run list, run snapshot, run patch, run page, session snapshot, or unavailable condition.
 
-Each viewer-visible SQLite transaction advances the run presentation revision and commits ordered target patches with the same transaction. The server reads those patches. It does not build complete old and new run views to compare them.
+The host sends `hello` first:
 
 ```json
 {
-  "type": "run_patch",
-  "runId": "run-1",
-  "revision": 43,
-  "targets": [
-    {
-      "targetType": "conversation",
-      "targetKey": "entries:tail",
-      "patch": [
-        { "op": "replace", "path": "/presentationRevision", "value": 43 },
-        { "op": "remove", "path": "/items/0" },
-        { "op": "append", "path": "/items", "value": [ { "seq": 1001, … } ] },
-        { "op": "replace", "path": "/start", "value": 745 },
-        { "op": "replace", "path": "/total", "value": 1001 }
-      ]
-    }
-  ]
+  "connectionId": "connection-1",
+  "packageVersion": "0.15.3",
+  "schema": "pi-workflows.client.v1",
+  "type": "hello"
 }
 ```
 
-The patch set supports `add`, `replace`, `remove`, and `append`. `append` adds each value to the target array in order. Sliding tail pages keep 256 rows by removing old leading rows when necessary. Session-event pages stay aligned to 256-event checkpoint boundaries. They append inside one block and request the next page when a write crosses a boundary.
-
-A patch targets one bounded document or page. A client applies a tail patch only when it holds that tail page. Older loaded pages stay valid because committed history is immutable. A target that needs a fresh bounded projection causes a snapshot. This still avoids complete-run reads and complete-run JSON comparison.
-
-Revisions must arrive in order. Duplicate state is harmless because a client ignores an old revision. A wrong run, malformed patch, missing path, stale page, future revision, or gap cannot replace the last good view. A gap or a cursor older than retained patches causes a bounded snapshot.
-
-The database retains 256 presentation revisions per run. The server does not replay an unbounded patch backlog.
-
-## Pages
-
-A client asks for a page with `fetch_page`:
+A request uses a stable request ID and idempotency key:
 
 ```json
 {
-  "type": "fetch_page",
-  "runId": "run-1",
-  "kind": "session_events",
-  "cursor": 20000
+  "clientId": "client-1",
+  "idempotencyKey": "status-1",
+  "operation": "host.status",
+  "payload": {},
+  "requestId": "request-1",
+  "schema": "pi-workflows.client.v1",
+  "type": "request"
 }
 ```
 
-`kind` is one of `steps`, `trace`, `trace_at_step`, `session_entries`, `session_events`, `settings`, `follow_ups`, or `updates`. `trace_at_step` uses a step index as its cursor and returns the trace page around that step's timestamp. The server answers with `run_page`:
+The closed outcomes are `accepted`, `adopted`, `rejected`, `conflict`, `notFound`, `claimLost`, and `unavailable`.
 
-```json
-{
-  "type": "run_page",
-  "runId": "run-1",
-  "revision": 43,
-  "kind": "session_events",
-  "cursor": 20000,
-  "start": 19872,
-  "total": 48620,
-  "items": [ … ]
-}
-```
+## Run and session views
 
-Page reads use bounded ranges. The response echoes the requested `cursor` and carries the presentation revision read in the same SQLite snapshot as its rows. A client ignores an older response when a newer cursor is pending. A step page also returns `graphCursor`, `graphSteps`, and `takenTransitions` for that exact replay point, even when the selected step was already in the prior page. A historical session-event page can return `replayCheckpoint`. The checkpoint contains only active message and tool state at the page boundary. The writer stores it at each 256-event boundary, so a page jump reads one checkpoint blob instead of predecessor event rows. It lets the client continue the temporal reducer without loading predecessor event pages. The client also requests the related entry page. Settings, follow-up, and current-update pages keep the Info inspector complete without loading every record. A page request does not change the shared watched-run projection or another client's cursor.
+The host produces `pi-workflows.run-view.v1` from one consistent database read. The view contains the bounded workflow state, graph, trace, session projection, page cursors, presentation revision, and one `display` object.
 
-## Messages
+The closed display statuses are:
 
-Client to server:
+- `queued`
+- `running`
+- `waiting`
+- `paused`
+- `completed`
+- `failed`
+- `timed_out`
+- `cancelled`
+- `ambiguous`
 
-| Type             | Fields                                                                                                | Meaning                                        |
-| ---------------- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `watch_runs`     | none                                                                                                  | Subscribe to run-list rows.                    |
-| `watch_run`      | `runId`, optional `revision`, `stepCursor`, `traceCursor`, `sessionEntryCursor`, `sessionEventCursor` | Subscribe or resume one run.                   |
-| `unwatch_run`    | `runId`                                                                                               | End one run subscription.                      |
-| `fetch_page`     | `runId`, `kind`, `cursor`                                                                             | Read one bounded page.                         |
-| `fetch_artifact` | `runId`, `path`                                                                                       | Unsupported for SQLite state; returns `error`. |
+Only the host computes this status. A parked queue is not a pause. `paused` requires the durable pause flag. An exact live worker or origin-session turn is `running`. An uncertain external effect that needs operator action is `ambiguous`. `unavailable` is a client connection condition, not a run status.
 
-Server to client:
+The run list uses the same display object. An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view and ordered pending interaction records in one read.
 
-| Type           | Fields                                                 | Meaning                                  |
-| -------------- | ------------------------------------------------------ | ---------------------------------------- |
-| `hello`        | `protocol`                                             | Identify the protocol.                   |
-| `runs`         | `runs`                                                 | Send all lightweight run-list rows.      |
-| `run_snapshot` | `runId`, `revision`, `view`                            | Send one bounded run view.               |
-| `run_patch`    | `runId`, `revision`, `targets`                         | Apply direct bounded target patches.     |
-| `run_page`     | `runId`, `revision`, `kind`, `start`, `total`, `items` | Return one bounded page.                 |
-| `artifact`     | `runId`, `path`, `content`                             | Reserved and not sent by SQLite servers. |
-| `error`        | `message`, optional `runId`                            | Report a sanitized request failure.      |
+A snapshot contains at most 256 items for each large history. `view.page` returns another 256-item window centered on the requested cursor. Page responses use `pi-workflows.run-page.v1`. The client can request other cursors, so the complete logical history remains available.
 
-The run list contains `presentationRevision`, `manifest`, `live`, and `possiblyInterrupted`. It contains no payload bodies.
+## Subscriptions and reconnection
 
-## Several clients
+A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. After reconnection, it sends those subscriptions again with its accepted run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches.
 
-The server keeps one projection and graph scene for each watched run. The first watcher loads it. Later watchers reuse it. The last unwatch or disconnect releases it. Different watched runs load independently.
+A slow or disconnected client cannot stop the host, another client, claim renewal, or workflow execution. When a connection closes, the host removes its subscriptions and exact origin-session activity immediately.
 
-Each client keeps its own revision and page cursors. Network sends happen outside the shared state lock. A slow client cannot stop another client. If a broadcast receiver falls behind, that client receives a bounded snapshot.
+## Origin-session activity
 
-## Reconnection
+The Pi extension reports `started`, `refresh`, and `settled` activity for the exact session, run, interaction request, delivery, and Pi session entry. Reports use a monotonic sequence. Refresh happens before the connection-scoped lease expires.
 
-The client keeps the run list and selected run as desired state. After a disconnect, it keeps cached content visible with a stale or reconnecting label. It retries with bounded backoff, sends `watch_runs` after the next valid `hello`, and resumes `watch_run` from its revision and page cursors. A retained cursor receives patches. A stale cursor receives a bounded snapshot and requested pages.
+The host accepts activity only when it matches the durable presented interaction. Activity changes display only. It does not grant authority, renew a workflow claim, settle a step, or change durable pause state. A disconnect or expired activity lease removes the overlay.
 
-## SQLite consistency
+## Commands and uncertain results
 
-The server uses a query-only SQLite connection. A writer commits the domain change, presentation revision, and patch records atomically. A reader sees all of that transaction or none of it.
+Durable commands use stable request IDs and idempotency keys. A retry with the same identity and payload adopts the stored receipt. Reusing an identity with another payload is a conflict.
 
-The refresh timer first checks `PRAGMA data_version`. An unchanged value causes no run-index query and no payload read. A changed value refreshes lightweight rows and only the watched projections whose presentation revisions changed.
+An `interaction.submit` response stays open while the supervised workflow child validates the value. The response settles only after the durable result is accepted, adopted, or rejected. A reconnect repeats the same request identity and adopts the same durable result. Clients do not poll SQLite.
+
+The protocol does not claim exactly-once behavior for an external system that cannot prove it. An uncertain non-idempotent effect becomes ambiguous and requires explicit recovery.
+
+## Maintenance
+
+Active `state.status`, `state.verify`, `state.backup`, and `state.prune` requests run in the host against its existing database connection.
+
+Only `pi-workflows state verify <inactive-backup>` opens SQLite outside the host. It uses a query-only TypeScript connection and rejects the active database, including another path to the same file.

@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: the out-of-process host and session-delivery repair are implemented. The [unified live workflow client](2026-09-01-unified-workflow-client-plan.md) is the approved next hard cut and is not implemented yet. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md) records the host redesign. [Restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md) records the delivery, widget, and Escape-control repair.
+Status: implemented. The out-of-process host, unified live workflow client, session delivery, widget, Herdr controls, and client-only `piw` viewer are one production path. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the approved redesigns.
 
 ## Purpose
 
@@ -441,7 +441,7 @@ When the installed state has the old digest, fail before mutation with the stand
 - **Other persistent data:** The workflow SQLite shape changes in place and older alpha state requires reset.
 - **Pi internals:** None.
 - **Public API:** The extension uses documented command and shortcut registration, tool registration, session lifecycle events, message sending, widgets, status, and session IDs.
-- **Client protocol:** The current version-1 host and replay wire contracts are replaced in place by one version-1 live client protocol. There is no compatibility transport or direct live-state fallback.
+- **Client protocol:** All live clients use `pi-workflows.client.v1`. There is no compatibility transport or direct live-state fallback.
 
 ## Conformance
 
