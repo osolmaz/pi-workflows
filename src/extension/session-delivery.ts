@@ -47,7 +47,8 @@ export class SessionDeliveryCoordinator {
 
         const existingEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
         if (existingEntryId !== undefined) {
-          await delivery.settle(existingEntryId);
+          this.rememberQueued(delivery);
+          await this.settleDelivery(ctx, delivery.deliveryId, existingEntryId);
           return;
         }
 
@@ -76,8 +77,9 @@ export class SessionDeliveryCoordinator {
 
     const existingEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
     if (existingEntryId !== undefined) {
+      this.rememberQueued(delivery);
       this.claimed = undefined;
-      await delivery.settle(existingEntryId);
+      await this.settleDelivery(ctx, delivery.deliveryId, existingEntryId);
       return true;
     }
     if (delivery.claimExpiresAt <= Date.now()) {
@@ -86,11 +88,7 @@ export class SessionDeliveryCoordinator {
     }
     if (!ctx.isIdle() || ctx.hasPendingMessages()) return true;
 
-    this.queued.set(delivery.deliveryId, {
-      delivery,
-      queuedAt: Date.now(),
-      ambiguityReported: false,
-    });
+    this.rememberQueued(delivery);
     this.claimed = undefined;
     try {
       delivery.send();
@@ -104,6 +102,15 @@ export class SessionDeliveryCoordinator {
       await this.settleDelivery(ctx, delivery.deliveryId, insertedEntryId);
     }
     return true;
+  }
+
+  private rememberQueued(delivery: ClaimedSessionDelivery): void {
+    if (this.queued.has(delivery.deliveryId)) return;
+    this.queued.set(delivery.deliveryId, {
+      delivery,
+      queuedAt: Date.now(),
+      ambiguityReported: false,
+    });
   }
 
   private async settleQueued(

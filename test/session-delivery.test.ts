@@ -130,6 +130,43 @@ describe("SessionDeliveryCoordinator", () => {
     expect(settle).toHaveBeenCalledWith("entry-other-presenter");
   });
 
+  it("keeps the guard when remembered-claim adoption cannot settle durably", async () => {
+    const branch: Record<string, unknown>[] = [];
+    let idle = true;
+    const send = vi.fn();
+    const settle = vi.fn(async () => {
+      throw new Error("receipt failed");
+    });
+    const notify = vi.fn();
+    const claim = vi.fn(async (): Promise<ClaimedSessionDelivery> => {
+      idle = false;
+      return {
+        deliveryId: "interaction:adopt-ambiguous",
+        claimExpiresAt: Date.now() + 10_000,
+        findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
+        send,
+        settle,
+      };
+    });
+    const coordinator = new SessionDeliveryCoordinator();
+    const ctx = context(branch, () => idle, { notify });
+
+    await coordinator.synchronize(ctx, [claim]);
+    branch.push({ id: "entry-adopt-ambiguous" });
+    await coordinator.synchronize(ctx, [claim]);
+    idle = true;
+    await coordinator.synchronize(ctx, [claim]);
+
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("durable receipt is ambiguous"),
+      "warning",
+    );
+  });
+
   it("discards an unused remembered claim after its lease expires", async () => {
     vi.useFakeTimers();
     let idle = true;
