@@ -1,6 +1,5 @@
-//! Serde types mirroring the SQLite workflow state documents specified in
-//! `docs/run-database runs.md`. Unknown fields are tolerated everywhere so database runs
-//! written by newer writers within the same schema version stay readable.
+//! Serde types for the workflow documents carried in host-owned run views.
+//! Unknown document fields are tolerated, but the client envelope is strict.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,10 +18,12 @@ pub enum RunStatus {
     Queued,
     Running,
     Waiting,
+    Paused,
     Completed,
     Failed,
     TimedOut,
     Cancelled,
+    Ambiguous,
 }
 
 impl RunStatus {
@@ -38,10 +39,12 @@ impl RunStatus {
             RunStatus::Queued => "queued",
             RunStatus::Running => "running",
             RunStatus::Waiting => "waiting",
+            RunStatus::Paused => "paused",
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",
             RunStatus::TimedOut => "timed_out",
             RunStatus::Cancelled => "cancelled",
+            RunStatus::Ambiguous => "ambiguous",
         }
     }
 }

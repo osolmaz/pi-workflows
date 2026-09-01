@@ -2,7 +2,7 @@
 name = "pi-workflows"
 version = "0.15.3"
 edition = "2021"
-description = "Terminal viewer and live replay server for pi-workflows SQLite state"
+description = "Terminal client and live relay for hosted pi-workflows state"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/osolmaz/pi-workflows"
@@ -25,12 +25,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
-notify = "8"
 ratatui = "0.30"
-rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
 thiserror = "2"
 toml = "0.9"
 toml_edit = "0.23"
