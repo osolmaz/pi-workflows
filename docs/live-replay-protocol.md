@@ -1,6 +1,8 @@
 # Live replay protocol
 
-The Rust viewer (`tui/`) can read SQLite directly or connect to `piw serve`. Both modes use the same bounded viewer projection. The protocol ID is `pi-workflows.replay.v1`.
+Status: implemented, but scheduled for an alpha hard cut. The [unified live workflow client](2026-09-01-unified-workflow-client-plan.md) will replace this separate protocol in place. After that cut, the host will be the only production process that opens live SQLite state, and local and remote `piw` modes will use `pi-workflows.client.v1` with no direct database fallback.
+
+The current Rust viewer (`tui/`) can read SQLite directly or connect to `piw serve`. Both current modes use the same bounded viewer projection. The current protocol ID is `pi-workflows.replay.v1`.
 
 The server reads SQLite and never writes it. It accepts loopback addresses only. Remote use goes through an SSH tunnel. The server rejects WebSocket handshakes with an `Origin` header so a web page cannot read workflow state from localhost.
 

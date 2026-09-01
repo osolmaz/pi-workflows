@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: implemented. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md) records the approved redesign. [Restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md) records the delivery, widget, and Escape-control repair.
+Status: the out-of-process host and session-delivery repair are implemented. The [unified live workflow client](2026-09-01-unified-workflow-client-plan.md) is the approved next hard cut and is not implemented yet. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md) records the host redesign. [Restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md) records the delivery, widget, and Escape-control repair.
 
 ## Purpose
 
@@ -22,6 +22,8 @@ The host solves two different failures:
 - **Durable boundary:** A committed node or lifecycle transition from which execution can resume.
 - **Interactive request:** A durable agent or assistant-message step that must run in the origin Pi session.
 - **Managed effect:** A side effect reserved and settled through an idempotent durable record.
+- **Live run view:** The host's versioned, bounded projection of one run, including its durable state, current origin-session activity, allowed controls, and page cursors.
+- **Renderer:** A Pi widget, status line, command-line view, Herdr adapter, or `piw` screen that displays or acts on a live run view without deriving workflow state.
 
 ## Boundaries
 
@@ -37,17 +39,20 @@ One host owns the global workflow database for one user installation.
 
 ```text
 Pi extension ─┐
-Pi extension ─┼── local socket ── workflow host ── SQLite
-CLI client ───┘                         │
-                                        ├── run worker A
-                                        ├── run worker B ── headless pi --mode rpc
-                                        ├── controller worker
-                                        └── source resolver
+CLI client ───┼── WorkflowClient v1 ── local socket ── workflow host ── SQLite
+piw ──────────┘                                              │
+                                                             ├── run worker A
+Remote piw ── SSH tunnel ── loopback WebSocket relay ────────┤
+                                                             ├── run worker B ── headless pi --mode rpc
+                                                             ├── controller worker
+                                                             └── source resolver
 ```
+
+The local socket and loopback WebSocket relay carry the same logical client protocol and live run view. The relay reads no state and translates no domain contract. The host is the only production process that opens the live SQLite database. The worker and source-resolver channels are private supervision protocols, not alternate client interfaces.
 
 The host may manage runs from more than one project. Each run keeps its canonical project path and source identity.
 
-The host process performs only bounded protocol handling, short SQLite transactions, timers, queue scheduling, and process supervision. It does not import or execute workflow definitions.
+The host process performs only bounded protocol handling, live-view projection, short SQLite transactions, timers, queue scheduling, and process supervision. It does not import or execute workflow definitions.
 
 A worker loads one workflow source and executes one run generation. It cannot receive a writable `WorkflowRunStore`. It proposes changes to the host over a private child channel. This is an architectural guard against accidental writes. It is not a security sandbox against code running as the same operating-system user.
 
@@ -185,17 +190,20 @@ The child protocol must apply backpressure. A child that exceeds message or outp
 
 The process registry includes a process start identity, not only a PID. The host accepts a worker registration only when the PID is a direct child of that active worker. A reused PID cannot let a new host kill an unrelated process.
 
-## Local client protocol
+## Live client protocol
 
-Clients connect through a user-only local socket. Unix socket mode is `0600`. Other platforms use their equivalent local transport and access control.
+Every production client uses one versioned `WorkflowClient` protocol. No extension, CLI command, Herdr adapter, or `piw` mode opens the live SQLite database. Clients connect through a user-only local socket. Unix socket mode is `0600`. Other platforms use their equivalent local transport and access control. Remote viewing uses a loopback-only WebSocket relay through an SSH tunnel. The relay carries the same messages and does not read SQLite.
 
-Messages use newline-delimited canonical JSON. One message is at most 1 MiB, matching the existing durable event limit. The receiver closes only the offending connection when framing or validation fails.
+The alpha hard cut replaces the existing host request and replay protocols in place with `pi-workflows.client.v1`. It adds no `v2`, compatibility path, fallback reader, or second live protocol. One neutral JSON schema is the wire-contract source for TypeScript and Rust. Shared conformance fixtures must pass in both languages.
 
-Every request uses this envelope:
+Messages use newline-delimited canonical JSON on the local socket and one canonical JSON object per WebSocket message. Both parsers reject unknown envelope fields and non-canonical framing. One message is at most 1 MiB, matching the existing durable event limit. The receiver closes only the offending connection when framing or validation fails.
+
+Each message uses one envelope:
 
 ```json
 {
-  "schema": "pi-workflows.host-request.v1",
+  "schema": "pi-workflows.client.v1",
+  "type": "request",
   "requestId": "opaque-id",
   "clientId": "opaque-id",
   "operation": "run.cancel",
@@ -206,57 +214,52 @@ Every request uses this envelope:
 }
 ```
 
-A response uses:
+The `type` is `hello`, `request`, `response`, or `event`. A response repeats the request ID and includes its outcome, revision, receipt, or bounded safe error. An event names its subscription and carries one revisioned run-list snapshot, run-view snapshot, patch, page, origin-session delivery change, or availability change. Valid command outcomes remain `accepted`, `adopted`, `rejected`, `conflict`, `notFound`, `claimLost`, and `unavailable`.
 
-```json
-{
-  "schema": "pi-workflows.host-response.v1",
-  "requestId": "opaque-id",
-  "outcome": "accepted",
-  "revision": 13,
-  "receipt": {}
-}
-```
+The host commits a command receipt before it acknowledges success. Repeating the same request ID and payload returns the stored receipt. Reusing an ID with another payload returns a conflict. An `interaction.submit` response stays pending while the supervised child validates the value and settles only after the durable outcome is `accepted`, `adopted`, or `rejected`. A reconnect with the same request ID and payload waits for and returns that same outcome. Clients do not poll SQLite for submission results.
 
-Valid outcomes are:
+Read requests do not create receipts. Reconnection restores desired subscriptions from the last accepted presentation revision. A retained revision receives patches. A stale revision or slow subscriber receives a bounded snapshot.
 
-- `accepted`
-- `adopted`
-- `rejected`
-- `conflict`
-- `notFound`
-- `claimLost`
-- `unavailable`
+The protocol owns four operation groups:
 
-The host commits a command receipt before it acknowledges success. Repeating the same request ID and payload returns the stored receipt. Reusing an ID with another payload returns a conflict.
-
-The first command set is:
-
-- `run.start`
-- `run.pause`
-- `run.resume`
-- `run.cancel`
-- `run.status`
-- `run.list`
-- `checkpoint.answer`
-- `decision.answer`
-- `interaction.submit`
-- `interaction.update`
-- `notification.claim`
-- `notification.deliver`
-- `turn.claim`
-- `turn.resolve`
-- `controller.list`
-- `controller.get`
-- `controller.apply`
-- `controller.reconcile`
-- `controller.delete`
-- `host.status`
-- `host.stop`
+- run and controller commands, including start, pause, resume, cancel, answers, updates, submissions, reconciliation, and host control;
+- live views, including run lists, one run snapshot, revision subscriptions, bounded pages, and one consistent origin-session response with its active run view and ordered pending delivery records;
+- origin-session activity reports for the exact workflow delivery being processed by Pi;
+- state maintenance, including status, verification, backup, and prune against the active database.
 
 `notification.claim` and `turn.claim` can create a claim or revalidate the exact retained claim before delivery. Revalidation checks the in-memory client claim and its durable lease without creating another claim.
 
-Read operations may use the existing read-only store directly in viewers. Mutating Pi and CLI paths use the host.
+### Live run view
+
+The host returns one canonical `pi-workflows.run-view.v1` document. It contains the existing bounded workflow projection and page cursors plus a `display` object. The `display` object contains the effective status, current activity kind, allowed controls, and a bounded reason when action is required. Renderers use this object directly. They must not combine separate queries or infer status from durable rows.
+
+The origin-session response contains this active run view or no active run plus the ordered pending delivery records for that session. The records include the request, delivery, contract, revision, presentation entry, and claim facts required by the shared delivery coordinator. The host returns them from one consistent read.
+
+The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
+
+The host computes effective status in this order:
+
+1. A durable ambiguous external effect that requires explicit review is `ambiguous`.
+2. Another durable terminal result keeps its terminal label.
+3. A durable pause is `paused`.
+4. A live supervised worker or an exact active origin-session workflow turn is `running`.
+5. A pending interaction, decision, or presentation with no exact active turn is `waiting`.
+6. Parked resumable work with no pending interaction is `queued`.
+7. Admitted work that has not started is `queued`.
+
+Host connection failure is the client condition `unavailable`, not a `display.status` value. `paused` is never inferred from a parked queue, pending interaction, stale cursor, or missing activity report.
+
+### Origin-session activity
+
+The Pi extension reports `started`, `settled`, and lease refreshes only for the exact workflow delivery that it can identify through documented Pi lifecycle events and its in-memory delivery map. Each report includes the origin session, run, request, delivery, client connection, and increasing activity sequence. The host validates these facts against the durable pending interactive request and its recorded delivery or presentation entry. Settlement of the presentation claim does not end activity while the model turn continues.
+
+Activity is ephemeral display state. It cannot grant workflow authority, settle a request, change a durable run state, or survive as a claim. A repeated report is idempotent. A stale sequence, replaced delivery, or wrong session is rejected. One shared client constants module defines the refresh period and lease duration. The refresh period is shorter than the lease duration, and the lease duration bounds stale `running` display after client loss. The host clears activity on the matching settled event, client disconnect, or lease expiry. Missing activity falls back to the durable `waiting` view and never creates a false `paused` or `running` state.
+
+### Renderers and controls
+
+The Pi widget, Pi status line, `/piw`, `Ctrl+Shift+R`, Herdr placement adapter, CLI status output, and every local or remote `piw` screen consume the same live run view. The Pi extension subscribes by origin session. The Herdr adapter receives the exact run target from that view and owns only pane placement and focus. The Rust TUI subscribes by run ID and uses protocol pages; it does not compile or validate the SQLite DDL digest.
+
+Local `piw` may start the host only by executing the installed `pi-workflows host start` command. It does not reimplement host lifecycle. `piw serve` becomes a loopback WebSocket relay for the same client protocol. It opens one host socket connection for each WebSocket connection and couples their lifecycles one to one. It never multiplexes clients, translates state, or opens the database. A client that cannot start or reach the matching host fails with one clear unavailable or package-version error. It must not fall back to direct SQLite access.
 
 ## Worker protocol
 
@@ -322,7 +325,7 @@ The extension finds pending requests during `session_start`, after `agent_settle
 
 The host grants one live presentation claim. The current presenter cannot claim the same request again before that claim expires. A poll that sees any live presentation claim treats it as unavailable, not as a tool failure. When the matching custom message appears in the active Pi branch, the coordinator records its public session entry ID through the host and clears the local queued state. If Pi becomes idle without exposing a matching entry after the confirmation interval, the coordinator reports the delivery as ambiguous and keeps it blocked. A failed durable receipt also keeps the visible message blocked. Neither case can send the message again. The normal `workflow` tool contract then submits updates and results.
 
-The extension projects the active origin-session run into Pi's widget and status APIs by reading host-owned durable state. This projection never runs workflow code and never writes run state. `Shift+Up` and `Shift+Down` scroll the widget.
+The extension subscribes to the active origin-session live run view and projects it into Pi's documented widget and status APIs. It never opens SQLite, runs workflow code, or derives a display status. `Shift+Up` and `Shift+Down` scroll the widget. When Herdr is available, the widget also shows `Ctrl+Shift+R piw`, and `/piw` remains the command fallback. Both actions open or focus the exact run from the same view.
 
 A tool update or submission goes to the host. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The host first checks this transport contract and records a provisional `validating` submission. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the host. The host settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the host rejects the provisional submission and leaves the request ready for a corrected retry.
 
@@ -437,7 +440,8 @@ When the installed state has the old digest, fail before mutation with the stand
 - **Session state:** Pi appends normal messages and tool results. Pi Workflows does not edit session files.
 - **Other persistent data:** The workflow SQLite shape changes in place and older alpha state requires reset.
 - **Pi internals:** None.
-- **Public API:** The extension uses documented command registration, tool registration, session lifecycle events, message sending, widgets, status, and session IDs.
+- **Public API:** The extension uses documented command and shortcut registration, tool registration, session lifecycle events, message sending, widgets, status, and session IDs.
+- **Client protocol:** The current version-1 host and replay wire contracts are replaced in place by one version-1 live client protocol. There is no compatibility transport or direct live-state fallback.
 
 ## Conformance
 
@@ -456,4 +460,9 @@ The implementation conforms when:
 - effects are deduplicated or marked ambiguous;
 - the extension and host run no workflow or controller code in their own event loops;
 - the production package contains no embedded execution fallback;
+- the host is the only production process that opens live SQLite state;
+- the widget, status line, Herdr actions, CLI, and `piw` render the same host-produced status and controls;
+- a busy origin session displays `running` only while its exact workflow turn is active, and `paused` appears only after a durable pause;
+- a TypeScript-created live database is viewable by the matching Rust `piw` through the client protocol without a duplicated SQLite digest;
+- no removed host, replay, or direct SQLite client path remains selectable;
 - real Pi end-to-end tests, repository checks, reviewer checks, and CI pass.
