@@ -2,7 +2,7 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
 import {
   encodeProtocolLine,
@@ -473,6 +473,36 @@ describe("global workflow host", () => {
     }
   });
 
+  it("waits for socket drain before publishing another snapshot", async () => {
+    const databasePath = path.join(await makeTempDir("host-view-backpressure"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const socket = new net.Socket();
+    const write = vi.spyOn(socket, "write").mockReturnValue(false);
+    const connection = {
+      id: "slow-viewer",
+      socket,
+      subscriptions: new Map([["runs", { id: "runs", kind: "runs" as const, revision: 0 }]]),
+      publishing: false,
+    };
+    const privateHost = host as unknown as {
+      publishConnection: (target: typeof connection) => Promise<void>;
+    };
+    try {
+      const publishing = privateHost.publishConnection(connection);
+      await waitUntil(() => write.mock.calls.length === 1, 5_000);
+      expect(connection.publishing).toBe(true);
+      await privateHost.publishConnection(connection);
+      expect(write).toHaveBeenCalledTimes(1);
+      socket.emit("drain");
+      await publishing;
+      expect(connection.publishing).toBe(false);
+    } finally {
+      socket.destroy();
+      await host.stop();
+    }
+  });
+
   it("closes idle client sockets before it waits for listener shutdown", async () => {
     const databasePath = path.join(await makeTempDir("host-idle-client"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
@@ -692,6 +722,89 @@ setInterval(() => {}, 1000);
       }, 30_000);
     } finally {
       await restarted.stop();
+    }
+  }, 60_000);
+
+  it("polls the adopted durable submission identity on an idempotent retry", async () => {
+    const cwd = await makeTempDir("host-adopted-submission-project");
+    const databasePath = path.join(
+      await makeTempDir("host-adopted-submission-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeInteractiveWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "adopted-submission-run",
+        executionMode: "interactive",
+      });
+      let interaction: InteractiveRequestRecord | undefined;
+      await waitUntil(() => {
+        const observed = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          interaction = observed.listPendingInteractions("host-test-session")[0];
+          return interaction !== undefined;
+        } finally {
+          observed.close();
+        }
+      }, 30_000);
+      if (interaction === undefined) throw new Error("interaction was not created");
+      const contract = interaction.contract as { contract?: { nodeId?: unknown } };
+      if (typeof contract.contract?.nodeId !== "string") {
+        throw new Error("interaction node is missing");
+      }
+      const payload = {
+        requestId: interaction.requestId,
+        step: contract.contract.nodeId,
+        attempt: interaction.attemptId,
+        value: { output: { answer: "done" } },
+      };
+      const first = await client.request({
+        operation: "interaction.submit",
+        requestId: "first-submit-request",
+        idempotencyKey: "same-durable-submission",
+        runId: interaction.runId,
+        expectedRevision: interaction.revision,
+        payload: { ...payload, submissionId: "first-submission" },
+      });
+      expect(first.outcome).toBe("accepted");
+      const second = await Promise.race([
+        client.request({
+          operation: "interaction.submit",
+          requestId: "retry-submit-request",
+          idempotencyKey: "same-durable-submission",
+          runId: interaction.runId,
+          expectedRevision: interaction.revision,
+          payload: { ...payload, submissionId: "retry-submission" },
+        }),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("adopted submission retry timed out")),
+            5_000,
+          );
+          timer.unref?.();
+        }),
+      ]);
+      expect(second.outcome).toBe("adopted");
+      const observed = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(
+          observed.interactionSubmission(interaction.requestId, "first-submission")?.outcome,
+        ).toBe("accepted");
+        expect(observed.interactionSubmission(interaction.requestId, "retry-submission")).toBe(
+          undefined,
+        );
+      } finally {
+        observed.close();
+      }
+    } finally {
+      await client.close();
+      await host.stop();
     }
   }, 60_000);
 

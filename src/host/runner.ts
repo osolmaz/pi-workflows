@@ -653,10 +653,10 @@ export class WorkflowHost {
   }
 
   private publishViews(): void {
-    for (const connection of this.connections.values()) this.publishConnection(connection);
+    for (const connection of this.connections.values()) void this.publishConnection(connection);
   }
 
-  private publishConnection(connection: ClientConnection): void {
+  private async publishConnection(connection: ClientConnection): Promise<void> {
     if (connection.publishing || connection.socket.destroyed) return;
     connection.publishing = true;
     try {
@@ -687,7 +687,10 @@ export class WorkflowHost {
             : {}),
           payload,
         };
-        connection.socket.write(encodeProtocolLine(event));
+        if (!connection.socket.write(encodeProtocolLine(event))) {
+          await waitForSocketDrain(connection.socket);
+          if (connection.socket.destroyed) return;
+        }
       }
     } catch (error) {
       this.log(`client view error: ${errorMessage(error)}`);
@@ -704,7 +707,8 @@ export class WorkflowHost {
     }
     const payload = requireRecord(request.payload, "interaction payload");
     const requestId = requireString(payload.requestId, "requestId");
-    const submissionId = requireString(payload.submissionId, "submissionId");
+    const startedReceipt = requireRecord(started.receipt, "interaction submission receipt");
+    const submissionId = requireString(startedReceipt.submissionId, "submissionId");
     for (;;) {
       if (this.stopping) {
         return clientResponse(
@@ -1616,6 +1620,9 @@ export class WorkflowHost {
       },
     });
     const interaction = submission.interaction;
+    const receipt = isObjectRecord(submission.receipt)
+      ? { ...submission.receipt, requestId, submissionId: submission.submissionId }
+      : { requestId, submissionId: submission.submissionId, receipt: submission.receipt };
     if (this.activeRuns.has(interaction.runId) || this.activationTasks.has(interaction.runId)) {
       this.pendingResumes.add(interaction.runId);
     } else {
@@ -1634,7 +1641,7 @@ export class WorkflowHost {
     return {
       outcome: submission.outcome,
       revision: interaction.revision,
-      receipt: submission.receipt,
+      receipt,
     };
   }
 
@@ -3291,6 +3298,33 @@ function controllerPathAllowed(
   return controllerSearchDirs({ cwd: projectPath }).some(
     ({ dir }) => path.dirname(controllerPath) === path.resolve(dir),
   );
+}
+
+function waitForSocketDrain(socket: Socket): Promise<void> {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      socket.off("drain", onDrain);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    const onDrain = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    socket.once("drain", onDrain);
+    socket.once("close", onClose);
+    socket.once("error", onError);
+    if (socket.destroyed) onClose();
+  });
 }
 
 function hostDelay(ms: number): Promise<void> {

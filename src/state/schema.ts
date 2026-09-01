@@ -137,6 +137,13 @@ CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
 
+CREATE TABLE run_view_content (
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  blob_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, blob_hash)
+) STRICT;
+
 CREATE TABLE viewer_runs (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   presentation_revision INTEGER NOT NULL CHECK (presentation_revision >= 1),

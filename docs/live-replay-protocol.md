@@ -8,11 +8,13 @@ The host is the only process that reads or writes the active SQLite database. A 
 
 ## Transports
 
-The local transport is a user-only Unix socket:
+The local transport is a user-only Unix socket on Unix systems:
 
 ```text
 ~/.pi/agent/workflows/host/host.sock
 ```
+
+On Windows, the same client uses the package-derived `\\.\pipe\pi-workflows-<state-directory-hash>` named pipe. Local `piw`, `piw serve`, and the TypeScript client derive the same endpoint from the workflow state directory.
 
 Each message is one canonical JSON object followed by a newline. A message can be at most 1 MiB. Unknown envelope fields, non-canonical JSON, and invalid framing close only the offending connection.
 
@@ -82,13 +84,13 @@ A snapshot page contains at most 256 items and also has a byte budget. `view.pag
 
 The host counts histories first and reads only the selected SQLite ranges. An unchanged subscription uses a lightweight revision check and reuses its prior view. It does not rebuild complete histories every 250 milliseconds.
 
-Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, SHA-256 digest, and an opaque marker for host-created references. Clients reassemble and verify all chunks before display. Opaque content is restored as user data without interpreting nested objects as host references. Other cursors and content references keep the complete logical history and result available.
+Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, SHA-256 digest, and an opaque marker for host-created references. The host saves generated view content in the content-addressed blob store and links it to the run before it advertises the reference. Memory-cache eviction therefore cannot make an advertised aggregate unavailable. Run pruning removes the durable link. Clients reassemble and verify all chunks before display. Opaque content is restored as user data without interpreting nested objects as host references. Other cursors and content references keep the complete logical history and result available.
 
 ## Subscriptions and reconnection
 
-A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. After reconnection, it sends those subscriptions again with its accepted run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches.
+A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. After reconnection, it sends those subscriptions again with its accepted run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches. Unsubscribing sends the subscription ID to the host for every subscription kind, so no unused snapshot work remains on a live connection.
 
-A slow or disconnected client cannot stop the host, another client, claim renewal, or workflow execution. When a connection closes, the host removes its subscriptions and exact origin-session activity immediately.
+A slow or disconnected client cannot stop the host, another client, claim renewal, or workflow execution. The host waits for socket drain before it publishes another snapshot to that connection. Polling coalesces while the connection is blocked, so the socket buffer cannot grow by one snapshot on every poll. When a connection closes, the host removes its subscriptions and exact origin-session activity immediately.
 
 ## Origin-session activity
 
@@ -100,7 +102,7 @@ The host accepts activity only when it matches the durable presented interaction
 
 Durable commands use stable idempotency keys. A retry with the same durable identity and payload adopts the stored receipt. Reusing that identity with another payload is a conflict. The request ID identifies one transport attempt. A retry after a local abort uses a new request ID and keeps the durable idempotency and submission IDs, so a late response from the aborted attempt cannot settle the retry.
 
-An `interaction.submit` response stays open while the supervised workflow child validates the value. The response settles only after the durable result is accepted, adopted, or rejected. A tool abort stops waiting immediately but does not undo an accepted host command. A later retry adopts the durable outcome. Clients do not poll SQLite.
+An `interaction.submit` response stays open while the supervised workflow child validates the value. The response settles only after the durable result is accepted, adopted, or rejected. A tool abort stops waiting immediately but does not undo an accepted host command. A later retry adopts the durable outcome. The host waits on the stored submission ID returned by adoption, not a different ID from the retry attempt. Clients do not poll SQLite.
 
 The protocol does not claim exactly-once behavior for an external system that cannot prove it. An uncertain non-idempotent effect becomes ambiguous and requires explicit recovery.
 

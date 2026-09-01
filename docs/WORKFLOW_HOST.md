@@ -218,7 +218,7 @@ The `type` is `hello`, `request`, `response`, or `event`. A response repeats the
 
 The host commits a command receipt before it acknowledges success. Repeating the same request ID and payload returns the stored receipt. Reusing an ID with another payload returns a conflict. An `interaction.submit` response stays pending while the supervised child validates the value and settles only after the durable outcome is `accepted`, `adopted`, or `rejected`. A reconnect with the same request ID and payload waits for and returns that same outcome. Clients do not poll SQLite for submission results.
 
-Read requests do not create receipts. Reconnection restores desired subscriptions from the last accepted presentation revision. A retained revision receives patches. A stale revision or slow subscriber receives a bounded snapshot.
+Read requests do not create receipts. Reconnection restores desired subscriptions from the last accepted presentation revision. A retained revision receives patches. A stale revision receives a bounded snapshot. A slow subscriber gets at most one socket-buffered snapshot at a time because the host waits for drain and coalesces later polls. Every explicit client unsubscribe removes the matching host subscription, including run-list and origin-session subscriptions.
 
 The protocol owns four operation groups:
 
@@ -235,7 +235,7 @@ The host returns one canonical `pi-workflows.run-view.v1` document. It contains 
 
 The origin-session response contains this active run view or no active run plus the ordered pending delivery records and read-only notification and turn availability for that session. The records include the request, delivery, contract, revision, presentation entry, and claim facts required by the shared delivery coordinator. The host returns them from one consistent read. The extension issues a claim command only when the matching availability fact is true. Polling an idle session creates no durable command.
 
-Each history page has both an item limit and an encoded byte budget. Oversized values become digest-bound content references. `view.content` returns bounded chunks until the client has the complete value. Session-event pages include the replay checkpoint immediately before the first event in the page. The run list reads only status facts and never loads complete run histories.
+Each history page has both an item limit and an encoded byte budget. Oversized values become digest-bound content references. Before the host advertises a generated reference, it saves the bytes in the content-addressed blob store and links them to the run. Memory-cache eviction cannot make a reference unavailable. `view.content` returns bounded chunks until the client has the complete value. Session-event pages include the replay checkpoint immediately before the first event in the page. The run list reads only status facts and never loads complete run histories.
 
 The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
 
@@ -261,7 +261,7 @@ Activity is ephemeral display state. It cannot grant workflow authority, settle 
 
 The Pi widget, Pi status line, `/piw`, `Ctrl+Shift+R`, Herdr placement adapter, CLI status output, and every local or remote `piw` screen consume the same live run view. The Pi extension subscribes by origin session. The Herdr adapter receives the exact run target from that view and owns only pane placement and focus. The Rust TUI subscribes by run ID and uses protocol pages; it does not compile or validate the SQLite DDL digest.
 
-Local `piw` may start the host only by executing the installed `pi-workflows host start` command. It does not reimplement host lifecycle. `piw serve` becomes a loopback WebSocket relay for the same client protocol. It opens one host socket connection for each WebSocket connection and couples their lifecycles one to one. It never multiplexes clients, translates state, or opens the database. A client that cannot start or reach the matching host fails with one clear unavailable or package-version error. It must not fall back to direct SQLite access.
+Local `piw` may start the host only by executing the installed `pi-workflows host start` command. It does not reimplement host lifecycle. It uses the package socket on Unix and the same package-derived named pipe as TypeScript on Windows. `piw serve` becomes a loopback WebSocket relay for the same client protocol. It opens one host socket connection for each WebSocket connection and couples their lifecycles one to one. It never multiplexes clients, translates state, or opens the database. A client that cannot start or reach the matching host fails with one clear unavailable or package-version error. It must not fall back to direct SQLite access.
 
 ## Worker protocol
 

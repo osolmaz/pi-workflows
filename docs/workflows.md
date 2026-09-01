@@ -126,12 +126,7 @@ pi-workflows host run
 `host run` stays attached. The other commands start, inspect, or stop the
 on-demand process. No command installs an operating-system service.
 
-The extension, CLI, and `piw` use the same version-1 client protocol. The host
-sends byte-bounded run-list and run-view pages. Clients collect a complete run
-list for one revision and reject stale run pages whose cursor or revision no
-longer matches. The host reads only the selected history ranges and reuses an
-unchanged subscribed view after a lightweight revision check. Large values stay
-available through verified content chunks.
+The extension, CLI, and `piw` use the same version-1 client protocol over a Unix socket or Windows named pipe. The host sends byte-bounded run-list and run-view pages. Clients collect a complete run list for one revision and reject stale run pages whose cursor or revision no longer matches. The host reads only the selected history ranges and reuses an unchanged subscribed view after a lightweight revision check. It waits for a slow socket to drain and removes every subscription when its client unsubscribes. Large values stay available through verified content chunks. Host-generated aggregate values are saved and linked to the run before the host advertises them.
 
 A worker verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes

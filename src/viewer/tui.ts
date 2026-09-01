@@ -53,14 +53,14 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     });
   };
 
-  if (options.runId === undefined) await watchRuns();
-  else await watchRun(options.runId);
-
   process.stdout.write(ALT_SCREEN_ON);
   const rawModeSupported = process.stdin.isTTY === true;
-  if (rawModeSupported) process.stdin.setRawMode(true);
-  process.stdin.resume();
   try {
+    if (options.runId === undefined) await watchRuns();
+    else await watchRun(options.runId);
+    draw();
+    if (rawModeSupported) process.stdin.setRawMode(true);
+    process.stdin.resume();
     await new Promise<void>((resolve) => {
       const onKey = (data: Buffer) => {
         const key = data.toString("utf8");

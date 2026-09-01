@@ -470,6 +470,8 @@ export class HostViewStore {
       "utf8",
     );
     const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const persistedDigest = this.runs.persistViewContent(runId, bytes, mediaType);
+    if (persistedDigest !== sha256) throw new Error("Workflow view content digest changed");
     const extension = mediaType === "text/plain" ? "txt" : "json";
     const contentPath = `artifacts/sha256/${sha256}.${extension}`;
     this.rememberContent({
