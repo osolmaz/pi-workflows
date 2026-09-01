@@ -80,10 +80,10 @@ All live workflow and controller state uses one local database:
 ```
 
 Runs, decisions, queues, claims, controllers, session capture, notifications,
-channel transport state, effects, and large text values all live there.
-Viewers open the database read-only, and every write checks its actor,
-expected revision, and owner lease when required. See
-[SQLite state](docs/SQLITE_STATE.md).
+channel transport state, effects, and large text values all live there. The
+package-owned host is the only production process that opens the active
+database. The extension, CLI, Herdr adapter, and `piw` use the same versioned
+local client protocol. See [SQLite state](docs/SQLITE_STATE.md).
 
 ## Quick start
 
@@ -254,8 +254,8 @@ Run the same command after a pi-workflows update. `pi-workflows herdr setup`
 remains an alias for existing installations.
 
 When Pi runs inside Herdr, the workflow widget shows a `Ctrl+Shift+R piw`
-shortcut. The shortcut opens the exact SQLite run state and lets you choose a
-split, tab, or new workspace. `/piw` opens the same menu, and `/piw right`,
+shortcut. The shortcut opens the exact host-owned run view and lets you choose
+a split, tab, or new workspace. `/piw` opens the same menu, and `/piw right`,
 `/piw below`, `/piw left`, `/piw above`, `/piw tab`, or `/piw workspace`
 selects a placement directly. If a viewer for that run already exists,
 pi-workflows focuses it instead of opening a duplicate.

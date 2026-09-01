@@ -9,11 +9,11 @@ a recorded Pi conversation, themes, and remote viewing.
 
 The viewer uses the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md).
 
-The run browser reads small metadata rows. It does not load trace, step, session, settings, or follow-up payloads. The local viewer checks SQLite `data_version` on its timer. When the value is unchanged, the timer does not scan runs or read payloads.
+The run browser subscribes to small host-owned metadata views. It does not load trace, step, session, settings, or follow-up payloads. The host publishes a new bounded view only when its content changes.
 
 The selected run contains bounded pages. Step, trace, session-entry, and session-event pages contain at most 256 rows. Replay can jump to any position. The viewer loads the page that contains that position and keeps only the current windows. A compact graph projection keeps the latest attempt for each node and the taken transitions up to the replay point.
 
-Local page reads run outside input and drawing through one overwrite-only request slot. A newer selection replaces pending work. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
+Page requests run outside input and drawing through the shared client protocol. A newer selection replaces pending work. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
 
 ## Install
 
@@ -26,17 +26,14 @@ cargo install pi-workflows
 
 ## Modes
 
-- `piw` browses `~/.pi/agent/workflows/state.sqlite` through a read-only SQLite connection.
-- `piw <runId>` opens one run from that database.
-- `piw serve [--bind 127.0.0.1:9377]` exposes database-backed run views over the
-  [live replay protocol](live-replay-protocol.md). Only
-  loopback addresses are accepted; use an SSH tunnel for remote viewing.
+- `piw` connects to the local package-owned workflow host. If the socket is absent, it runs the installed `pi-workflows host start` command.
+- `piw <runId>` opens one host-owned run view.
+- `piw serve [--bind 127.0.0.1:9377]` relays each WebSocket connection to one host socket over the [live client protocol](live-replay-protocol.md). Only loopback addresses are accepted; use an SSH tunnel for remote viewing.
 - `piw --connect ws://…` reads from another `piw serve` process.
 - `piw --theme <name>` selects a theme for this invocation.
 - `piw --list-themes` prints the built-in theme names.
 
-Direct database mode and connected mode use the same semantic run view.
-The protocol is the network form of that view.
+Local and remote modes use the same semantic run view and the same protocol. `piw` has no SQLite mode or database schema copy.
 
 ## Herdr
 
@@ -211,11 +208,9 @@ listing and selected-run subscription after the server returns. Cached content
 stays visible but is labeled reconnecting or disconnected, never current.
 Revision gaps force a bounded snapshot.
 
-`piw serve` keeps one loaded projection and one graph scene for each watched run. The first watcher loads it. Later watchers reuse it. The last unwatch or disconnect releases it. Clients keep separate revision and page cursors, so one client's replay jump does not move another client. A lagged client gets a bounded snapshot instead of an unbounded patch backlog.
+`piw serve` is a frame relay. It keeps no run projection or client activity after either side closes. Clients keep separate revision and page cursors, so one client's replay jump does not move another client. A lagged client gets a bounded snapshot instead of an unbounded patch backlog.
 
-Expanded prompt and output fields come from content-addressed SQLite blobs.
-The local reader uses query-only mode. Remote snapshots carry the same bounded
-semantic view and do not expose a filesystem path.
+The host resolves expanded prompt and output fields from durable content. Local and remote snapshots carry the same bounded semantic view and do not expose a database path.
 
 ## Interaction
 
