@@ -551,14 +551,14 @@ export class WorkflowHost {
       }
       case "run.resume": {
         const runId = requireRunId(request);
-        if (this.activeRuns.has(runId) || this.pendingStarts.has(runId)) {
-          return { outcome: "adopted", receipt: { runId, active: true } };
-        }
         if (this.queue.resumePausedInteraction({ runId })) {
           return {
             outcome: "accepted",
             receipt: { runId, status: "parked", paused: false, waitingForInteraction: true },
           };
+        }
+        if (this.activeRuns.has(runId) || this.pendingStarts.has(runId)) {
+          return { outcome: "adopted", receipt: { runId, active: true } };
         }
         const token = randomUUID();
         const claimed = this.queue.claimWorkflowRun({
