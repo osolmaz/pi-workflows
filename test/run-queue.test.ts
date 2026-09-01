@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
+import { HostStateStore } from "../src/host/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
@@ -301,12 +302,32 @@ describe("workflow run queue in canonical SQLite", () => {
     store.state.connection
       .prepare("UPDATE runs SET status = 'waiting', finished_at = ? WHERE run_id = ?")
       .run(Date.now(), "pause-run");
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(false);
+
+    const now = Date.now();
+    store.state.connection
+      .prepare(
+        `INSERT INTO node_attempts(
+           attempt_id, run_id, node_id, attempt_number, node_type, status, created_at, updated_at
+         ) VALUES (?, ?, ?, 1, 'agent', 'waiting', ?, ?)`,
+      )
+      .run("pause-attempt", "pause-run", "echo", now, now);
+    const hostState = new HostStateStore(store.filePath, { state: store.state });
+    hostState.createInteractiveRequest({
+      requestId: "pause-request",
+      runId: "pause-run",
+      attemptId: "pause-attempt",
+      targetSessionId: "session-1",
+      kind: "agent",
+      contract: {},
+    });
     expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
     expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
     expect(store.isWorkflowRunPaused("pause-run")).toBe(true);
     expect(store.isWorkflowRunPaused("missing")).toBe(false);
     expect(store.resumePausedInteraction({ runId: "missing" })).toBe(false);
-    expect(store.resumePausedInteraction({ runId: "pause-run" })).toBe(false);
+    expect(store.resumePausedInteraction({ runId: "pause-run" })).toBe(true);
+    expect(store.isWorkflowRunPaused("pause-run")).toBe(false);
     store.close();
   });
 
