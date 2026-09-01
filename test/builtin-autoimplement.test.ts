@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -306,7 +305,7 @@ function addRedesignResponses(executor: ScriptedExecutor, plans: unknown[]): Scr
 
 beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
-  commandDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-commands-"));
+  commandDir = await makeTempDir("pi-workflows-commands");
   repository = await makeTempDir("pi-workflows-autoimplement-repo");
   await git(repository, ["init", "-b", "main"]);
   await git(repository, ["config", "user.name", "Test"]);

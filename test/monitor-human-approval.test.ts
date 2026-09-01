@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -324,7 +323,7 @@ beforeEach(async () => {
   await execFileAsync("git", ["add", "README.md"], { cwd: repository });
   await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: repository });
   await execFileAsync("git", ["switch", "-c", "feat/repair"], { cwd: repository });
-  const commands = await fs.mkdtemp(path.join(os.tmpdir(), "monitor-approval-commands-"));
+  const commands = await makeTempDir("monitor-approval-commands");
   await fs.writeFile(path.join(commands, "pi-reviewer"), "#!/bin/sh\necho clean\n", {
     mode: 0o755,
   });

@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { canonicalJson } from "../src/state/json.js";
 import { resourceIdFor } from "../src/state/mutation.js";
@@ -13,9 +12,18 @@ import type {
   HumanDecisionPrompt,
   HumanDecisionRequest,
 } from "../src/workflows/types.js";
+import { TEST_TEMP_ROOT_ENV } from "./global-setup.js";
 
 export async function makeTempDir(prefix: string): Promise<string> {
-  return await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
+  const root = process.env[TEST_TEMP_ROOT_ENV];
+  if (root === undefined) {
+    throw new Error(`Test temporary root is not configured: ${TEST_TEMP_ROOT_ENV}`);
+  }
+  if (path.basename(prefix) !== prefix) {
+    throw new Error(`Test temporary directory prefix must be one path segment: ${prefix}`);
+  }
+  await fs.mkdir(root, { recursive: true });
+  return await fs.mkdtemp(path.join(root, `${prefix}-`));
 }
 
 export async function makeStateDatabasePath(prefix: string): Promise<string> {

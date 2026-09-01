@@ -14,6 +14,7 @@ export default defineConfig({
     ],
   },
   test: {
+    globalSetup: ["./test/global-setup.ts"],
     testTimeout: 15_000,
     include: ["test/**/*.test.ts"],
     exclude: ["test/e2e/**", "node_modules/**"],
