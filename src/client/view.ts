@@ -49,7 +49,11 @@ export type WorkflowRunView = {
   queue: WorkflowRunQueueView;
   updates: JsonValue[];
   graphSteps: JsonValue[];
+  graphStepStart: number;
+  graphStepTotal: number;
   takenTransitions: string[];
+  takenTransitionStart: number;
+  takenTransitionTotal: number;
   graphCursor: number;
   stepStart: number;
   stepTotal: number;
@@ -116,6 +120,8 @@ export type WorkflowSessionView = {
   sessionId: string;
   run: WorkflowRunView | null;
   pendingInteractions: JsonValue[];
+  pendingInteractionStart: number;
+  pendingInteractionTotal: number;
   deliveries: WorkflowDeliveryAvailability;
 };
 

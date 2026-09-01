@@ -271,6 +271,82 @@ describe("host workflow display reducer", () => {
     state.close();
   });
 
+  it("bounds large workflow topology and keeps the full definition reachable", async () => {
+    const projectPath = await makeTempDir("host-view-topology-project");
+    const databasePath = path.join(await makeTempDir("host-view-topology-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new SqliteControllerStore(databasePath, { state, projectPath });
+    const hostState = new HostStateStore(databasePath, { state });
+    const baseSnapshot = createDefinitionSnapshot(compileWorkflowDefinition(rawWorkflow));
+    const template = Object.values(baseSnapshot.nodes)[0];
+    if (template === undefined) throw new Error("node template missing");
+    const nodeCount = 20_000;
+    const nodes = Object.fromEntries(
+      Array.from({ length: nodeCount }, (_, index) => [`node-${index}`, template]),
+    );
+    const edges = Array.from({ length: nodeCount - 1 }, (_, index) => ({
+      from: `node-${index}`,
+      to: `node-${index + 1}`,
+    }));
+    const snapshot = {
+      ...baseSnapshot,
+      name: "large-topology",
+      startAt: "node-0",
+      nodes,
+      edges,
+    };
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    queue.enqueueWorkflowRun({
+      runId: "run-large-topology",
+      workflowName: snapshot.name,
+      workflowSourceRef: "builtin:large-topology",
+      workflowSource: {
+        root: { kind: "builtin", id: "large-topology", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "host-view",
+      claimToken: "claim-large-topology",
+      leaseMs: 60_000,
+      originSessionId: "session-large-topology",
+    });
+    const runs = new WorkflowRunStore(databasePath, { state });
+    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const view = views.run("run-large-topology");
+    if (view === null) throw new Error("large topology view missing");
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "large-topology",
+      event: "run_snapshot",
+      revision: 1,
+      runId: view.runId,
+      payload: view as unknown as never,
+    });
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_PROTOCOL_MESSAGE_BYTES + 1);
+    const workflow = view.workflow as {
+      nodes?: Record<string, unknown>;
+      nodeTotal?: number;
+      edges?: unknown[];
+      edgeTotal?: number;
+      content?: { $artifact?: { sha256?: string } };
+    };
+    expect(Object.keys(workflow.nodes ?? {})).toHaveLength(256);
+    expect(workflow.nodeTotal).toBe(nodeCount);
+    expect(workflow.edges).toHaveLength(256);
+    expect(workflow.edgeTotal).toBe(nodeCount - 1);
+    const digest = workflow.content?.$artifact?.sha256;
+    if (digest === undefined) throw new Error("full workflow content reference missing");
+    const blob = runs.readContentBlob(view.runId, digest);
+    expect(blob).toBeDefined();
+    expect(
+      Object.keys(JSON.parse(blob?.content.toString("utf8") ?? "null").nodes as object),
+    ).toHaveLength(nodeCount);
+    state.close();
+  });
+
   it("keeps a terminal queue result correct before a run state is available", () => {
     expect(
       display({

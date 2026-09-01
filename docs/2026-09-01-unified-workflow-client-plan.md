@@ -96,7 +96,7 @@ The protocol has one envelope with four message types:
 
 An `interaction.submit` request stays open while the supervised child validates the submitted value. Its one response settles only after the durable submission becomes `accepted`, `adopted`, or `rejected`. If the connection fails, repeating the same request ID and payload waits for and returns the same durable outcome. A local tool abort stops waiting without cancelling the host command. A later retry uses a new transport request ID with the same durable idempotency and submission IDs, so a late response cannot settle the retry. Clients do not poll SQLite for validation results.
 
-Use newline-delimited canonical JSON on the user-only local socket. Use one canonical JSON object per message on the loopback WebSocket transport. Both transports carry the same fields and semantics. Both parsers reject unknown envelope fields and non-canonical framing. A validation failure closes only the offending connection.
+Use newline-delimited canonical JSON on the user-only local socket. Use one canonical JSON object per message on the loopback WebSocket transport. Both transports carry the same fields and semantics. TypeScript and Rust use the same ECMAScript number formatting and UTF-16 object-key order. Both parsers reject unknown envelope fields and non-canonical framing. A validation failure closes only the offending connection.
 
 Create one neutral wire schema at `protocol/client.v1.schema.json`. TypeScript and Rust parsers must validate against that contract and the same accepted and rejected fixture corpus. Neither language owns a private variant.
 
@@ -131,9 +131,9 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 - live and interruption facts;
 - a `display` object with effective status, activity kind, allowed controls, and a bounded reason when action is required.
 
-The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus the ordered pending delivery records for that session. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
+The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of pending delivery records and their complete count. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
-Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. TypeScript and Rust viewers assemble every run-history page for one revision. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a non-interactive viewer emits the complete run. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus a durable reference to the complete definition. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
 
 The run list is also byte-bounded and revision-bound. It contains only lightweight status and source facts. TypeScript and Rust clients assemble every page for one revision before replacing the visible complete list. An unchanged subscription performs a lightweight revision check and reuses its prior result.
 
@@ -292,12 +292,13 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### Contract and unit tests
 
-- Shared TypeScript and Rust wire fixtures.
+- Shared TypeScript and Rust wire fixtures, including ECMAScript number formatting and UTF-16 key ordering.
 - Envelope size, framing, unknown field, malformed message, and safe-error tests.
 - Status precedence and allowed-control table tests.
 - Activity validation against the recorded delivery entry, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
-- Atomic origin-session view tests, including removal of a terminal run when its reservation ends.
-- Full TypeScript and Rust run-page assembly and content-hydration tests.
+- Atomic origin-session view tests, including bounded pending delivery records and removal of a terminal run when its reservation ends.
+- Large workflow-topology frame tests with complete durable definition recovery.
+- Full TypeScript run-page assembly, widget history, and content-hydration tests, plus Rust page and content retrieval tests.
 - Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
 - Durable generated-content recovery after memory-cache eviction.
 - Idempotent interaction retry with a different attempted submission ID.

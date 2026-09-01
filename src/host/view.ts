@@ -255,6 +255,11 @@ export class HostViewStore {
       loaded.followUpQueue === null
         ? null
         : projectFollowUpQueue(loaded.followUpQueue, followUpPage.items);
+    const graphSteps = byteBoundedForwardPage(loaded.graphSteps, (step) => toCompactStepJson(step));
+    const takenTransitions = byteBoundedForwardPage(
+      loaded.takenTransitions,
+      (transition) => transition,
+    ).filter((transition): transition is string => typeof transition === "string");
     const revision = this.presentationRevision(runId);
     const display = this.display(queue, loaded.state);
     return {
@@ -267,8 +272,12 @@ export class HostViewStore {
       workflow: this.projectWorkflow(runId, loaded.snapshot),
       queue: projectQueue(queue),
       updates: updatePage.items,
-      graphSteps: loaded.graphSteps.map(toCompactStepJson),
-      takenTransitions: loaded.takenTransitions,
+      graphSteps,
+      graphStepStart: 0,
+      graphStepTotal: loaded.graphSteps.length,
+      takenTransitions,
+      takenTransitionStart: 0,
+      takenTransitionTotal: loaded.takenTransitions.length,
       graphCursor,
       stepStart: stepPage.start,
       stepTotal: stepPage.total,
@@ -314,13 +323,16 @@ export class HostViewStore {
         return cached.view;
       }
       const pending = this.hostState.listPendingInteractions(sessionId);
+      const pendingInteractions = byteBoundedForwardPage(pending, (request) =>
+        this.projectRecordField(request.runId, request, "contract"),
+      );
       const view: WorkflowSessionView = {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
         run: queue === undefined ? null : this.run(queue.runId),
-        pendingInteractions: pending.map((request) =>
-          this.projectRecordField(request.runId, request, "contract"),
-        ),
+        pendingInteractions,
+        pendingInteractionStart: 0,
+        pendingInteractionTotal: pending.length,
         deliveries,
       };
       rememberCacheEntry(this.sessionCache, sessionId, { version, view });
@@ -417,33 +429,51 @@ export class HostViewStore {
     ) {
       return this.registerContent(runId, workflow, "application/json");
     }
+    const nodeEntries = Object.entries(workflow.nodes);
+    const boundedNodeEntries = byteBoundedForwardPage(nodeEntries, ([nodeId, node]) => [
+      nodeId,
+      this.projectWorkflowNode(runId, node),
+    ]);
     const nodes = Object.fromEntries(
-      Object.entries(workflow.nodes).map(([nodeId, node]) => {
-        if (!isJsonObject(node)) return [nodeId, node];
-        const projected = Object.fromEntries(
-          [
-            "nodeType",
-            "timeoutMs",
-            "statusDetail",
-            "actionExecution",
-            "settingsRoute",
-            "effect",
-            "mountPath",
-            "localNodeId",
-            "includeTransition",
-          ].flatMap((field) => (node[field] === undefined ? [] : [[field, node[field]]])),
-        );
-        return [nodeId, projected];
-      }),
+      boundedNodeEntries.flatMap((entry) =>
+        Array.isArray(entry) && typeof entry[0] === "string" && entry[1] !== undefined
+          ? [[entry[0], entry[1]]]
+          : [],
+      ),
     );
+    const edges = byteBoundedForwardPage(workflow.edges, (edge) => this.projectValue(runId, edge));
     return {
       schema: workflow.schema,
       name: workflow.name,
       startAt: workflow.startAt,
       nodes,
-      edges: workflow.edges,
+      nodeStart: 0,
+      nodeTotal: nodeEntries.length,
+      edges,
+      edgeStart: 0,
+      edgeTotal: workflow.edges.length,
       content: this.registerContent(runId, workflow, "application/json"),
     };
+  }
+
+  private projectWorkflowNode(runId: string, value: JsonValue): JsonValue {
+    if (!isJsonObject(value)) return this.projectValue(runId, value);
+    const projected: Record<string, JsonValue> = {};
+    for (const field of [
+      "nodeType",
+      "timeoutMs",
+      "statusDetail",
+      "actionExecution",
+      "settingsRoute",
+      "effect",
+      "mountPath",
+      "localNodeId",
+      "includeTransition",
+    ]) {
+      const fieldValue = value[field];
+      if (fieldValue !== undefined) projected[field] = this.projectValue(runId, fieldValue);
+    }
+    return projected;
   }
 
   private projectValue(runId: string, value: JsonValue): JsonValue {

@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
 import { ORIGIN_ACTIVITY_REFRESH_MS } from "../client/activity.js";
 import { WorkflowClient } from "../client/client.js";
+import { materializeSessionView } from "../client/materialize.js";
 import type { ClientResponse } from "../client/protocol.js";
 import type {
   ClientInteractiveRequest,
@@ -425,6 +426,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     sessionContext = ctx;
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
+    let snapshotGeneration = 0;
     const sessionClient = client;
     pollTimer = setInterval(() => {
       if (sessionContext !== null) void presentInOrder(sessionContext).catch(() => undefined);
@@ -436,15 +438,29 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         await sessionClient.ensureAvailable();
         const unsubscribe = await sessionClient.watchSession(sessionId, (event) => {
           if (generation !== sessionGeneration || sessionContext !== ctx) return;
+          const currentSnapshotGeneration = ++snapshotGeneration;
           if (event.event === "unavailable") {
             sessionSnapshots.delete(sessionId);
             sessionView.clear(ctx);
             return;
           }
           if (!isWorkflowSessionView(event.payload)) return;
-          sessionSnapshots.set(sessionId, event.payload);
-          sessionView.update(event.payload, ctx);
-          void presentInOrder(ctx).catch(() => undefined);
+          void materializeSessionView(sessionClient, event.payload)
+            .then((session) => {
+              if (
+                generation !== sessionGeneration ||
+                currentSnapshotGeneration !== snapshotGeneration ||
+                sessionContext !== ctx
+              ) {
+                return;
+              }
+              sessionSnapshots.set(sessionId, session);
+              sessionView.update(session, ctx);
+              void presentInOrder(ctx).catch(() => undefined);
+            })
+            .catch(() => {
+              // A newer session revision retries from its own stable snapshot.
+            });
         });
         if (generation !== sessionGeneration || sessionContext !== ctx) {
           await unsubscribe();
