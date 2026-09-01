@@ -191,6 +191,7 @@ type RunRow = {
   workflowName: string;
   workflowRef: string;
   runStatus: string;
+  paused: number;
   definitionDigest: Buffer;
   definitionHash: Buffer;
   inputHash: Buffer;
@@ -1559,6 +1560,97 @@ export class SqliteControllerStore implements ControllerStore {
 
   parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
     return this.releaseRunClaim(options.runId, options.claimToken, "parked", options.now);
+  }
+
+  pauseParkedWorkflowRun(options: { runId: string; now?: string }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (row === undefined || row.status !== "parked") return false;
+      const lease = this.requireLease(row.resourceId);
+      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+      if (row.paused === 1) return true;
+      if (!["running", "waiting"].includes(row.runStatus)) return false;
+      const changed = this.state.connection
+        .prepare(
+          `UPDATE runs SET paused = 1, status_detail = 'paused', updated_at = ?
+           WHERE run_id = ? AND paused = 0 AND status IN ('running', 'waiting')`,
+        )
+        .run(now, options.runId);
+      if (changed.changes !== 1) return false;
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.paused",
+        "control",
+        null,
+        { status: "parked" },
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
+  }
+
+  resumePausedInteraction(options: { runId: string; now?: string }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      const row = this.workflowRunRow(options.runId);
+      if (
+        row === undefined ||
+        row.status !== "parked" ||
+        row.runStatus !== "waiting" ||
+        row.paused !== 1
+      ) {
+        return false;
+      }
+      const lease = this.requireLease(row.resourceId);
+      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+      const pending = this.state.connection
+        .prepare(
+          `SELECT 1 FROM interactive_requests
+           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+        )
+        .get(options.runId);
+      if (pending === undefined) return false;
+      const changed = this.state.connection
+        .prepare(
+          `UPDATE runs
+           SET paused = 0, status_detail = 'waiting for origin-session input', updated_at = ?
+           WHERE run_id = ? AND status = 'waiting' AND paused = 1`,
+        )
+        .run(now, options.runId);
+      if (changed.changes !== 1) return false;
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.resumed",
+        "control",
+        null,
+        { status: "waiting" },
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
+  }
+
+  isWorkflowRunPaused(runId: string): boolean {
+    return this.workflowRunRow(runId)?.paused === 1;
   }
 
   parkWorkflowRunForSourceChange(options: {
@@ -3452,7 +3544,7 @@ function workflowSelect(clause: string): string {
 function workflowRunSelect(clause: string): string {
   return `SELECT r.run_id AS runId, r.resource_id AS resourceId,
     d.workflow_name AS workflowName, r.workflow_ref AS workflowRef, r.status AS runStatus,
-    r.definition_digest AS definitionDigest, d.definition_hash AS definitionHash,
+    r.paused, r.definition_digest AS definitionDigest, d.definition_hash AS definitionHash,
     r.input_hash AS inputHash,
     r.launch_options_hash AS launchOptionsHash,
     q.status, q.available_at AS availableAt, q.affinity_runner_id AS affinityRunnerId,

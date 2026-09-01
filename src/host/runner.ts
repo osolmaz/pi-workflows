@@ -526,16 +526,33 @@ export class WorkflowHost {
       case "run.pause": {
         const runId = requireRunId(request);
         const active = this.activeRuns.get(runId);
-        if (active === undefined) return { outcome: "rejected", error: "Run is not active" };
-        this.commitActivePause(active);
-        active.control = "pause";
-        afterCommit.push(() => void active.supervisor.stop("cancelled"));
-        return { outcome: "accepted", receipt: { runId, status: "parked", paused: true } };
+        if (active !== undefined) {
+          if (active.control === "pause") {
+            return { outcome: "adopted", receipt: { runId, status: "parked", paused: true } };
+          }
+          if (active.control !== undefined) {
+            return { outcome: "rejected", error: `Run is already handling ${active.control}` };
+          }
+          this.commitActivePause(active);
+          active.control = "pause";
+          afterCommit.push(() => void active.supervisor.stop("cancelled"));
+          return { outcome: "accepted", receipt: { runId, status: "parked", paused: true } };
+        }
+        const paused = this.queue.pauseParkedWorkflowRun({ runId });
+        return paused
+          ? { outcome: "accepted", receipt: { runId, status: "parked", paused: true } }
+          : { outcome: "rejected", error: "Run is not pausable" };
       }
       case "run.resume": {
         const runId = requireRunId(request);
         if (this.activeRuns.has(runId) || this.pendingStarts.has(runId)) {
           return { outcome: "adopted", receipt: { runId, active: true } };
+        }
+        if (this.queue.resumePausedInteraction({ runId })) {
+          return {
+            outcome: "accepted",
+            receipt: { runId, status: "parked", paused: false, waitingForInteraction: true },
+          };
         }
         const token = randomUUID();
         const claimed = this.queue.claimWorkflowRun({
@@ -570,20 +587,27 @@ export class WorkflowHost {
       case "interaction.update": {
         const payload = requireRecord(request.payload, "interaction update payload");
         if (payload.claimPresentation === true) {
-          const interaction = this.hostState.claimInteractionPresentation({
-            requestId: requireString(payload.requestId, "requestId"),
-            expectedRevision: requireNonNegativeInteger(
-              request.expectedRevision,
-              "expectedRevision",
-            ),
-            presenterId: request.clientId,
-            leaseMs: PRESENTATION_CLAIM_LEASE_MS,
-          });
-          return {
-            outcome: "accepted",
-            revision: interaction.revision,
-            receipt: interaction as unknown as JsonValue,
-          };
+          try {
+            const interaction = this.hostState.claimInteractionPresentation({
+              requestId: requireString(payload.requestId, "requestId"),
+              expectedRevision: requireNonNegativeInteger(
+                request.expectedRevision,
+                "expectedRevision",
+              ),
+              presenterId: request.clientId,
+              leaseMs: PRESENTATION_CLAIM_LEASE_MS,
+            });
+            return {
+              outcome: "accepted",
+              revision: interaction.revision,
+              receipt: interaction as unknown as JsonValue,
+            };
+          } catch (error) {
+            if (errorMessage(error) === "Interactive request presentation claim conflict") {
+              return { outcome: "conflict", error: errorMessage(error) };
+            }
+            throw error;
+          }
         }
         if (typeof payload.sessionEntryId === "string") {
           const interaction = this.hostState.markInteractionPresented({
@@ -722,17 +746,18 @@ export class WorkflowHost {
     };
   }
 
-  private rememberDeliveryClaim(options: Omit<DeliveryClaim, "expiresAt">): string {
+  private rememberDeliveryClaim(options: Omit<DeliveryClaim, "expiresAt">): {
+    claimId: string;
+    claimExpiresAt: string;
+  } {
     const now = Date.now();
     for (const [claimId, claim] of this.deliveryClaims) {
       if (claim.expiresAt <= now) this.deliveryClaims.delete(claimId);
     }
     const claimId = randomUUID();
-    this.deliveryClaims.set(claimId, {
-      ...options,
-      expiresAt: now + DELIVERY_CLAIM_LEASE_MS,
-    });
-    return claimId;
+    const expiresAt = now + DELIVERY_CLAIM_LEASE_MS;
+    this.deliveryClaims.set(claimId, { ...options, expiresAt });
+    return { claimId, claimExpiresAt: new Date(expiresAt).toISOString() };
   }
 
   private deliveryClaim(
@@ -770,7 +795,7 @@ export class WorkflowHost {
     if (notification === undefined) {
       return { outcome: "accepted", receipt: { notification: null } };
     }
-    const claimId = this.rememberDeliveryClaim({
+    const claim = this.rememberDeliveryClaim({
       clientId: command.clientId,
       token,
       targetSessionId,
@@ -779,7 +804,7 @@ export class WorkflowHost {
     });
     return {
       outcome: "accepted",
-      receipt: { claimId, notification } as unknown as JsonValue,
+      receipt: { ...claim, notification } as unknown as JsonValue,
     };
   }
 
@@ -822,7 +847,7 @@ export class WorkflowHost {
     if (intent === undefined) {
       return { outcome: "accepted", receipt: { turn: null } };
     }
-    const claimId = this.rememberDeliveryClaim({
+    const claim = this.rememberDeliveryClaim({
       clientId: command.clientId,
       token,
       targetSessionId,
@@ -831,7 +856,7 @@ export class WorkflowHost {
     });
     return {
       outcome: "accepted",
-      receipt: { claimId, turn: intent } as unknown as JsonValue,
+      receipt: { ...claim, turn: intent } as unknown as JsonValue,
     };
   }
 
@@ -1085,6 +1110,9 @@ export class WorkflowHost {
     if (interaction === undefined || interaction.runId !== runId) {
       return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
     }
+    if (this.queue.isWorkflowRunPaused(runId)) {
+      return { outcome: "conflict", error: "Workflow run is paused" };
+    }
     const attemptId = requireString(payload.attempt, "attempt");
     const nodeId = requireString(payload.step, "step");
     const storedContract = requireRecord(interaction.contract, "interactive contract");
@@ -1147,6 +1175,9 @@ export class WorkflowHost {
     const current = this.hostState.getInteraction(requestId);
     if (current === undefined || current.runId !== requireRunId(request)) {
       return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
+    }
+    if (this.queue.isWorkflowRunPaused(current.runId)) {
+      return { outcome: "conflict", error: "Workflow run is paused" };
     }
     const attemptId = requireString(payload.attempt, "attempt");
     const nodeId = requireString(payload.step, "step");

@@ -14,6 +14,7 @@ import { createRunId, WorkflowRunStore } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
 import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
 import { SessionDeliveryCoordinator, type ClaimedSessionDelivery } from "./session-delivery.js";
+import { SessionWorkflowView } from "./session-view.js";
 import {
   recoverAssistantStep,
   registerWorkflowAgentStepMessageRenderer,
@@ -133,6 +134,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
   const sessionDelivery = new SessionDeliveryCoordinator();
+  const sessionView = new SessionWorkflowView();
 
   const presentInOrder = async (ctx: ExtensionContext): Promise<void> => {
     const prior = presentationTail;
@@ -148,6 +150,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
         () => claimPendingTurnDelivery(pi, client, ctx),
       ]);
     } finally {
+      sessionView.refresh(ctx);
       release?.();
     }
   };
@@ -268,6 +271,16 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerShortcut("shift+up", {
+    description: "Scroll the workflow widget up",
+    handler: (ctx) => sessionView.scrollUp(ctx),
+  });
+
+  pi.registerShortcut("shift+down", {
+    description: "Scroll the workflow widget down",
+    handler: (ctx) => sessionView.scrollDown(ctx),
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     sessionContext = ctx;
     try {
@@ -282,6 +295,44 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     pollTimer.unref?.();
   });
 
+  pi.on("agent_end", async (event, ctx) => {
+    const interrupted =
+      ctx.signal?.aborted === true ||
+      event.messages.some(
+        (message) =>
+          isRecord(message) && "stopReason" in message && message.stopReason === "aborted",
+      );
+    if (!interrupted) return;
+    const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
+    if (
+      interaction === undefined ||
+      interaction.kind === "decision" ||
+      workflowRunPaused(interaction.runId)
+    ) {
+      return;
+    }
+    const branchHasPrompt = ctx.sessionManager
+      .getBranch()
+      .some((entry) => interactionRequestId(entry) === interaction.requestId);
+    if (interaction.presentationSessionEntryId === null && !branchHasPrompt) return;
+    try {
+      const pauseId = `escape-pause-${interaction.runId}-${randomUUID()}`;
+      await requestAccepted(client, {
+        operation: "run.pause",
+        requestId: pauseId,
+        idempotencyKey: pauseId,
+        runId: interaction.runId,
+      });
+      sessionView.refresh(ctx);
+      ctx.ui.notify(
+        `Workflow ${interaction.runId} paused because its model turn was interrupted. Use /workflow resume to continue.`,
+        "info",
+      );
+    } catch (error) {
+      ctx.ui.notify(`Could not pause interrupted workflow: ${errorMessage(error)}`, "warning");
+    }
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     try {
       await submitVisibleAssistantResponse(client, ctx);
@@ -291,9 +342,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     await presentInOrder(ctx).catch(() => undefined);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     sessionContext = null;
     sessionDelivery.clear();
+    sessionView.clear(ctx);
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
   });
@@ -530,8 +582,17 @@ async function claimPendingInteractionDelivery(
     entryIdentifier(entries.find((entry) => interactionRequestId(entry) === interaction.requestId));
   const existingEntryId = findSessionEntryId(ctx.sessionManager.getBranch());
   let presentationRevision = interaction.revision;
+  let claimExpiresAt = Number.POSITIVE_INFINITY;
   if (existingEntryId === undefined) {
-    const claim = await requestAccepted(client, {
+    if (workflowRunPaused(interaction.runId)) return undefined;
+    if (
+      interaction.presentationClaimExpiresAt !== null &&
+      Date.parse(interaction.presentationClaimExpiresAt) > Date.now()
+    ) {
+      return undefined;
+    }
+    await client.ensureRunning();
+    const claim = await client.request({
       operation: "interaction.update",
       requestId: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
       idempotencyKey: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
@@ -539,13 +600,20 @@ async function claimPendingInteractionDelivery(
       expectedRevision: interaction.revision,
       payload: { requestId: interaction.requestId, claimPresentation: true },
     });
+    if (claim.outcome === "conflict") return undefined;
+    if (claim.outcome !== "accepted" && claim.outcome !== "adopted") {
+      throw new Error(claim.error ?? "Workflow host rejected interaction.update");
+    }
     if (claim.revision === undefined) throw new Error("Presentation claim has no revision");
+    const receipt = isRecord(claim.receipt) ? claim.receipt : undefined;
     presentationRevision = claim.revision;
+    claimExpiresAt = claimExpiry(receipt?.presentationClaimExpiresAt, "presentation claim");
   }
 
   const contract = interactionContract(interaction);
   return {
     deliveryId: `interaction:${interaction.requestId}`,
+    claimExpiresAt,
     findSessionEntryId,
     send: () => {
       if (interaction.kind === "decision") {
@@ -617,9 +685,11 @@ async function claimPendingNotificationDelivery(
   const notification = isRecord(receipt?.notification) ? receipt.notification : undefined;
   if (notification === undefined) return undefined;
   const claimId = requireText(receipt?.claimId, "notification claimId");
+  const claimExpiresAt = claimExpiry(receipt?.claimExpiresAt, "notification claim");
   const notificationId = requireText(notification.notificationId, "notificationId");
   return {
     deliveryId: `notification:${notificationId}`,
+    claimExpiresAt,
     findSessionEntryId: (entries) =>
       entryIdentifier(
         entries.find(
@@ -678,12 +748,14 @@ async function claimPendingTurnDelivery(
   const turn = isRecord(receipt?.turn) ? receipt.turn : undefined;
   if (turn === undefined) return undefined;
   const claimId = requireText(receipt?.claimId, "turn claimId");
+  const claimExpiresAt = claimExpiry(receipt?.claimExpiresAt, "turn claim");
   const intentId = requireText(turn.intentId, "turn intentId");
   const runId = requireText(turn.runId, "turn runId");
   const state = terminalRunState(runId);
   if (state === undefined) return undefined;
   return {
     deliveryId: `turn:${intentId}`,
+    claimExpiresAt,
     findSessionEntryId: (entries) =>
       entryIdentifier(
         entries.find(
@@ -723,7 +795,13 @@ async function submitVisibleAssistantResponse(
   ctx: ExtensionContext,
 ): Promise<void> {
   const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
-  if (interaction === undefined || interaction.kind !== "assistant") return;
+  if (
+    interaction === undefined ||
+    interaction.kind !== "assistant" ||
+    workflowRunPaused(interaction.runId)
+  ) {
+    return;
+  }
   const contract = agentContract(interaction);
   if (contract === undefined) return;
   const submission = recoverAssistantStep(ctx.sessionManager.getBranch(), contract);
@@ -874,6 +952,10 @@ function terminalRunState(runId: string): Record<string, unknown> | undefined {
   }
 }
 
+function workflowRunPaused(runId: string): boolean {
+  return terminalRunState(runId)?.paused === true;
+}
+
 function presentationMessage(
   turn: Record<string, unknown>,
   state: Record<string, unknown>,
@@ -927,6 +1009,12 @@ function customMessageDetail(
 function requireText(value: unknown, name: string): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${name} must be text`);
   return value;
+}
+
+function claimExpiry(value: unknown, name: string): number {
+  const expiry = Date.parse(requireText(value, `${name} expiry`));
+  if (!Number.isFinite(expiry)) throw new Error(`${name} expiry must be a timestamp`);
+  return expiry;
 }
 
 function activeSessionRun(ctx: ExtensionContext): WorkflowRunQueueRecord | undefined {

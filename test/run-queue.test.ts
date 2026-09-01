@@ -281,6 +281,35 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
+  it("pauses only an unowned parked run and keeps interaction resume narrow", async () => {
+    const { store } = await setup();
+    reserve(store, "pause-run");
+    expect(store.pauseParkedWorkflowRun({ runId: "missing" })).toBe(false);
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(false);
+
+    const claimed = store.claimWorkflowRun({
+      runId: "pause-run",
+      runnerId: "host-one",
+      claimToken: "pause-token",
+      leaseMs: 30_000,
+    });
+    expect(claimed).toBeDefined();
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(false);
+    expect(store.parkWorkflowRun({ runId: "pause-run", claimToken: "pause-token" })).toBe(true);
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(false);
+
+    store.state.connection
+      .prepare("UPDATE runs SET status = 'waiting', finished_at = ? WHERE run_id = ?")
+      .run(Date.now(), "pause-run");
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
+    expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
+    expect(store.isWorkflowRunPaused("pause-run")).toBe(true);
+    expect(store.isWorkflowRunPaused("missing")).toBe(false);
+    expect(store.resumePausedInteraction({ runId: "missing" })).toBe(false);
+    expect(store.resumePausedInteraction({ runId: "pause-run" })).toBe(false);
+    store.close();
+  });
+
   it("claims one run and exposes generation-based write authority", async () => {
     const { store } = await setup();
     reserve(store);

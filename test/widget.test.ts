@@ -458,6 +458,15 @@ describe("buildWidgetLines", () => {
     expect(lines.split("\n").length).toBeLessThanOrEqual(10);
   });
 
+  it("renders the durable queued state before a worker starts", () => {
+    const queued = makeState({ status: "queued" as WorkflowRunState["status"] });
+    expect(
+      stripAnsi(
+        buildWidgetView(queued, snapshot, new Date(), null, false, 80, TEST_THEME).lines.join("\n"),
+      ),
+    ).toContain("workflow demo [queued]");
+  });
+
   it("uses the compact one-line node list at wide widths", () => {
     const state = makeState({
       currentNode: "second",

@@ -6,6 +6,7 @@ import piWorkflows from "../src/extension/index.js";
 import { WorkflowHostClient } from "../src/host/client.js";
 import { HostStateStore } from "../src/host/state.js";
 import { workflowStatePath } from "../src/state/database.js";
+import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 let testHome: string | undefined;
@@ -30,13 +31,18 @@ function makePi(options: {
   sessionId?: string;
   branch?: Record<string, unknown>[];
   idle?: boolean;
+  mode?: "tui" | "rpc";
   persistSentMessages?: boolean;
+  signal?: AbortSignal;
 }) {
   const branch = options.branch ?? [];
   const sent: Record<string, unknown>[] = [];
   const deferred: Record<string, unknown>[] = [];
   let idle = options.idle ?? true;
   const notifications: Array<{ message: string; level?: string }> = [];
+  const widgets: unknown[] = [];
+  const statuses: Array<string | undefined> = [];
+  const shortcuts = new Map<string, (ctx: unknown) => void>();
   const listeners = new Map<string, Array<(event: unknown, ctx: FakeContext) => Promise<void>>>();
   const commands = new Map<string, (args: string, ctx: FakeContext) => Promise<void>>();
   let tool:
@@ -50,10 +56,13 @@ function makePi(options: {
     | undefined;
   const ctx = {
     cwd: options.cwd,
-    mode: "tui",
+    mode: options.mode ?? "tui",
     hasUI: true,
     isIdle: () => idle,
     hasPendingMessages: () => false,
+    get signal() {
+      return options.signal;
+    },
     abort() {},
     sessionManager: {
       getSessionId: () => options.sessionId ?? "session-one",
@@ -65,8 +74,12 @@ function makePi(options: {
       notify(message: string, level?: string) {
         notifications.push({ message, ...(level === undefined ? {} : { level }) });
       },
-      setStatus() {},
-      setWidget() {},
+      setStatus(_key: string, text: string | undefined) {
+        statuses.push(text);
+      },
+      setWidget(_key: string, content: unknown) {
+        widgets.push(content);
+      },
     },
   } as never;
   const pi = {
@@ -79,6 +92,9 @@ function makePi(options: {
     },
     registerTool(spec: { execute: typeof tool }) {
       tool = spec.execute;
+    },
+    registerShortcut(shortcut: string, spec: { handler: (context: unknown) => void }) {
+      shortcuts.set(shortcut, spec.handler);
     },
     on(name: string, handler: (event: unknown, context: FakeContext) => Promise<void>) {
       const current = listeners.get(name) ?? [];
@@ -105,6 +121,9 @@ function makePi(options: {
     branch,
     sent,
     notifications,
+    widgets,
+    statuses,
+    shortcuts,
     setIdle(value: boolean) {
       idle = value;
     },
@@ -125,8 +144,8 @@ function makePi(options: {
       if (tool === undefined) throw new Error("workflow tool was not registered");
       return await tool(toolCallId, params, new AbortController().signal, () => {}, ctx);
     },
-    emit: async (name: string) => {
-      for (const listener of listeners.get(name) ?? []) await listener({}, ctx);
+    emit: async (name: string, event: unknown = {}) => {
+      for (const listener of listeners.get(name) ?? []) await listener(event, ctx);
     },
   };
 }
@@ -303,6 +322,126 @@ describe("pi-workflows hosted extension", () => {
     }
     expect(fake.sent).toHaveLength(1);
     await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("shows host state and pauses a waiting step when Escape aborts its turn", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const abort = new AbortController();
+    abort.abort();
+    const fake = makePi({ cwd, signal: abort.signal });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    await waitUntil(() => fake.widgets.some((widget) => typeof widget === "function"), 30_000);
+    expect([...fake.shortcuts.keys()]).toEqual(["shift+up", "shift+down"]);
+    const widget = fake.widgets.findLast((value) => typeof value === "function") as (
+      tui: unknown,
+      theme: { bold: (text: string) => string; fg: (_color: string, text: string) => string },
+    ) => { render: (width: number) => string[] };
+    const rendered = widget(undefined, {
+      bold: (text) => text,
+      fg: (_color, text) => text,
+    }).render(80);
+    expect(rendered.join("\n")).toContain("workflow hosted-interactive");
+    fake.shortcuts.get("shift+down")?.(fake.ctx);
+    fake.shortcuts.get("shift+up")?.(fake.ctx);
+
+    const contract = stepContract(fake.sent[0] as Record<string, unknown>);
+    await fake.emit("agent_end", {
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "This operation was aborted",
+        },
+      ],
+    });
+    await waitUntil(() => {
+      const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+      try {
+        return store.listRuns()[0]?.state.paused === true;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    expect(fake.statuses.at(-1)).toContain("[paused]");
+    expect(fake.notifications.at(-1)?.message).toContain(
+      "paused because its model turn was interrupted",
+    );
+
+    await expect(
+      fake.runTool("paused-submit", {
+        action: "submit",
+        step: contract.nodeId,
+        attempt: contract.attemptId,
+        output: { reply: "too early" },
+      }),
+    ).rejects.toThrow("Workflow run is paused");
+
+    await fake.runCommand("resume");
+    await waitUntil(() => {
+      const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+      try {
+        return store.listRuns()[0]?.state.paused !== true;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await expect(
+      fake.runTool("resumed-submit", {
+        action: "submit",
+        step: contract.nodeId,
+        attempt: contract.attemptId,
+        output: { reply: "continued" },
+      }),
+    ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("does not pause a waiting step after an ordinary provider error", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+
+    await fake.emit("agent_end", {
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "Provider unavailable",
+        },
+      ],
+    });
+
+    const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+    try {
+      expect(store.listRuns()[0]?.state.paused).not.toBe(true);
+    } finally {
+      store.close();
+    }
+    expect(
+      fake.notifications.some((notification) =>
+        notification.message.includes("paused because its model turn was interrupted"),
+      ),
+    ).toBe(false);
+
+    await fake.runCommand("cancel");
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("uses serializable widget lines outside TUI mode", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd, mode: "rpc" });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.widgets.some((widget) => Array.isArray(widget)), 30_000);
+    const widget = fake.widgets.findLast((value) => Array.isArray(value));
+    expect(widget).toEqual(expect.arrayContaining([expect.stringContaining("hosted-interactive")]));
+    await fake.runCommand("cancel");
+    await fake.emit("session_shutdown");
+    expect(fake.widgets.at(-1)).toBeUndefined();
   }, 60_000);
 
   it("does not repeat a step while Pi delays the queued session entry", async () => {

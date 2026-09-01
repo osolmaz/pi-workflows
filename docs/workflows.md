@@ -481,8 +481,10 @@ With no resumable run, the host rejects the request.
 
 The origin Pi session shows its active run in the workflow widget. `Shift+Up`
 and `Shift+Down` scroll it. If Escape aborts a model turn that belongs to a
-presented workflow interaction, the extension pauses that run through the
-host. The paused run does not accept updates or submissions until `resume`.
+presented workflow interaction, the extension detects the public context abort
+signal and pauses that run through the host. It also accepts Pi's public
+`aborted` stop reason. The paused run does not accept updates or submissions
+until `resume`.
 
 `status` reports the durable queue projection. A host command succeeds only
 after its transaction commits. The protocol stores request fingerprints and
