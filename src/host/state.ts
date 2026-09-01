@@ -733,6 +733,7 @@ export class HostStateStore {
     receipt?: JsonValue;
   }): {
     interaction: InteractiveRequestRecord;
+    submissionId: string;
     outcome: "accepted" | "adopted";
     receipt: JsonValue;
   } {
@@ -752,6 +753,7 @@ export class HostStateStore {
     receipt?: JsonValue;
   }): {
     interaction: InteractiveRequestRecord;
+    submissionId: string;
     outcome: "accepted" | "adopted";
     receipt: JsonValue;
   } {
@@ -773,6 +775,7 @@ export class HostStateStore {
     receipt?: JsonValue;
   }): {
     interaction: InteractiveRequestRecord;
+    submissionId: string;
     outcome: "accepted" | "adopted";
     receipt: JsonValue;
   } {
@@ -792,6 +795,7 @@ export class HostStateStore {
         }
         return {
           interaction: this.requireInteractiveRequest(options.requestId),
+          submissionId: existing.submissionId,
           outcome: "adopted",
           receipt:
             existing.receiptHash === null
@@ -850,6 +854,7 @@ export class HostStateStore {
       }
       return {
         interaction: this.requireInteractiveRequest(options.requestId),
+        submissionId: options.submissionId,
         outcome: "accepted",
         receipt: options.receipt ?? {
           requestId: options.requestId,

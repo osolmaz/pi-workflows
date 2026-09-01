@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ClientOptions;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -286,7 +289,20 @@ struct Shared {
 #[derive(Clone)]
 enum Endpoint {
     WebSocket(String),
-    Unix(PathBuf),
+    Local(PathBuf),
+}
+
+fn discard_run_state(shared: &mut Shared, run_id: &str) {
+    shared.raw_views.remove(run_id);
+    shared
+        .page_requests
+        .retain(|(candidate, _), _| candidate != run_id);
+    shared
+        .content_requests
+        .retain(|(candidate, _), _| candidate != run_id);
+    shared
+        .artifacts
+        .retain(|(candidate, _), _| candidate != run_id);
 }
 
 pub struct RemoteRuns {
@@ -302,7 +318,7 @@ impl RemoteRuns {
     }
 
     pub fn connect_local(path: &Path) -> Result<Self> {
-        Self::start(Endpoint::Unix(path.to_path_buf()))
+        Self::start(Endpoint::Local(path.to_path_buf()))
     }
 
     fn start(endpoint: Endpoint) -> Result<Self> {
@@ -358,7 +374,7 @@ impl RemoteRuns {
         let old: Vec<String> = shared.watched.drain().collect();
         for old_id in old {
             if old_id != run_id {
-                shared.raw_views.remove(&old_id);
+                discard_run_state(&mut shared, &old_id);
                 self.decoded.remove(&old_id);
             }
         }
@@ -462,7 +478,7 @@ async fn run_reconnecting(
         }
         let result = match &endpoint {
             Endpoint::WebSocket(url) => run_websocket(url, Arc::clone(&shared), &mut wake).await,
-            Endpoint::Unix(path) => run_unix(path, Arc::clone(&shared), &mut wake).await,
+            Endpoint::Local(path) => run_local(path, Arc::clone(&shared), &mut wake).await,
         };
         if wake.is_closed() {
             return;
@@ -520,15 +536,38 @@ async fn run_websocket(
     }
 }
 
-async fn run_unix(
+async fn run_local(
     path: &Path,
     shared: Arc<Mutex<Shared>>,
     wake: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<()> {
-    let socket = UnixStream::connect(path)
-        .await
-        .with_context(|| format!("connecting to workflow host {}", path.display()))?;
-    let (read, mut write) = socket.into_split();
+    #[cfg(unix)]
+    {
+        let socket = UnixStream::connect(path)
+            .await
+            .with_context(|| format!("connecting to workflow host {}", path.display()))?;
+        run_local_connection(socket, shared, wake).await
+    }
+    #[cfg(windows)]
+    {
+        let socket = ClientOptions::new()
+            .open(path)
+            .with_context(|| format!("connecting to workflow host {}", path.display()))?;
+        run_local_connection(socket, shared, wake).await
+    }
+    #[cfg(not(any(unix, windows)))]
+    anyhow::bail!("local workflow host transport is not supported on this platform");
+}
+
+async fn run_local_connection<S>(
+    socket: S,
+    shared: Arc<Mutex<Shared>>,
+    wake: &mut mpsc::UnboundedReceiver<()>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read, mut write) = tokio::io::split(socket);
     let mut lines = BufReader::new(read).lines();
     let mut sent = HashSet::new();
     let mut counter = 0u64;
@@ -643,6 +682,11 @@ fn reconcile_requests(
             ));
         }
     }
+    let desired_content_keys = contents
+        .iter()
+        .map(|((run_id, path), offset)| format!("content:{run_id}:{path}:{offset}"))
+        .collect::<HashSet<_>>();
+    sent.retain(|key| !key.starts_with("content:") || desired_content_keys.contains(key));
     for ((run_id, path), offset) in contents {
         let key = format!("content:{run_id}:{path}:{offset}");
         if sent.insert(key) {
@@ -1347,6 +1391,43 @@ mod tests {
         .unwrap();
         assert_eq!(state.summaries.len(), 3);
         assert!(state.run_list_request.is_none());
+    }
+
+    #[test]
+    fn switching_runs_discards_old_pages_content_and_artifacts() {
+        let mut state = Shared::default();
+        state
+            .raw_views
+            .insert("old".to_string(), (1, 1, 1, json!({})));
+        state
+            .page_requests
+            .insert(("old".to_string(), PageKind::Steps), 10);
+        state
+            .content_requests
+            .insert(("old".to_string(), "old.json".to_string()), 0);
+        state.artifacts.insert(
+            ("old".to_string(), "old.json".to_string()),
+            ArtifactEntry::Ready("old".to_string()),
+        );
+        state
+            .page_requests
+            .insert(("current".to_string(), PageKind::Steps), 20);
+
+        discard_run_state(&mut state, "old");
+
+        assert!(!state.raw_views.contains_key("old"));
+        assert!(state
+            .page_requests
+            .keys()
+            .all(|(run_id, _)| run_id != "old"));
+        assert!(state
+            .content_requests
+            .keys()
+            .all(|(run_id, _)| run_id != "old"));
+        assert!(state.artifacts.keys().all(|(run_id, _)| run_id != "old"));
+        assert!(state
+            .page_requests
+            .contains_key(&("current".to_string(), PageKind::Steps)));
     }
 
     #[test]

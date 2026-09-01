@@ -211,7 +211,10 @@ describe("host workflow display reducer", () => {
     });
     expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_PROTOCOL_MESSAGE_BYTES + 1);
 
-    const stateView = view.state as { steps?: Array<{ output?: unknown }> };
+    const stateView = view.state as {
+      steps?: Array<{ output?: unknown }>;
+      outputs?: unknown;
+    };
     const artifact = stateView.steps?.[0]?.output as {
       $artifact?: { path?: string; bytes?: number; sha256?: string };
     };
@@ -233,6 +236,31 @@ describe("host workflow display reducer", () => {
       if (chunk.complete) break;
     }
     expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual(largeOutput);
+
+    const outputsArtifact = stateView.outputs as {
+      $artifact?: { path?: string; sha256?: string };
+    };
+    const outputsPath = outputsArtifact.$artifact?.path;
+    const outputsDigest = outputsArtifact.$artifact?.sha256;
+    if (outputsPath === undefined || outputsDigest === undefined) {
+      throw new Error("large aggregate outputs were not externalized");
+    }
+    expect(runs.readContentBlob(view.runId, outputsDigest)).toMatchObject({
+      mediaType: "application/json",
+    });
+    const outputChunks: Buffer[] = [];
+    let outputsOffset = 0;
+    for (;;) {
+      const chunk = coldViews.content(view.runId, outputsPath, outputsOffset) as {
+        data: string;
+        nextOffset: number;
+        complete: boolean;
+      };
+      outputChunks.push(Buffer.from(chunk.data, "base64"));
+      outputsOffset = chunk.nextOffset;
+      if (chunk.complete) break;
+    }
+    expect(JSON.parse(Buffer.concat(outputChunks).toString("utf8"))).toEqual(result.state.outputs);
 
     const session = view.session as {
       eventPage?: { start?: number; items?: unknown[] };

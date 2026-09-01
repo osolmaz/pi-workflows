@@ -233,7 +233,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `src/host/`, `src/state/`, controller stores, and state maintenance commands.
 
-**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary.
+**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values before advertising their content references. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
 
 **Verification:** Concurrent run changes cannot produce a view for the wrong session or combine two revisions. A source-level dependency test fails if production extension, CLI, relay, or Rust code opens the active database path. It permits SQLite only in the named TypeScript module that verifies an explicit inactive backup.
 
@@ -265,7 +265,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `tui/src/client.rs`, `tui/src/source.rs`, `tui/src/source_loader.rs`, `tui/src/server.rs`, `tui/src/state/reader.rs`, and `tui/src/main.rs`.
 
-**Change:** Make the protocol client the only Rust source. Remove the default active database path, all Rust `ProjectionReader` and backup-reader paths, copied application version, copied DDL digest, and direct-reader command selection. Start the host only through the installed TypeScript CLI. Make `piw serve` map each loopback WebSocket connection to one host socket connection and relay the same client protocol.
+**Change:** Make the protocol client the only Rust source. Remove the default active database path, all Rust `ProjectionReader` and backup-reader paths, copied application version, copied DDL digest, and direct-reader command selection. Start the host only through the installed TypeScript CLI. Make `piw serve` map each loopback WebSocket connection to one host socket connection and relay the same client protocol. Use the Unix socket on Unix and the package-derived named pipe on Windows. Drop old run pages, content requests, and artifacts when selection moves to another run.
 
 **Verification:** A database created by the TypeScript package is visible in local and remote `piw` through the host. A protocol mismatch gives a package-version error. A valid live database never produces a Rust DDL mismatch. No `piw` live mode opens `state.sqlite`.
 
@@ -297,7 +297,10 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Status precedence and allowed-control table tests.
 - Activity validation against the recorded delivery entry, idempotency, sequence, refresh-before-expiry, disconnect, and bounded expiry tests.
 - Atomic origin-session view tests.
-- Slow subscriber, stale revision, reconnect, and bounded page tests.
+- Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
+- Durable generated-content recovery after memory-cache eviction.
+- Idempotent interaction retry with a different attempted submission ID.
+- Rust run-switch cleanup and cross-platform local transport compilation.
 - Herdr capability, command, shortcut, placement, reuse, and cleanup tests.
 
 ### Integration tests

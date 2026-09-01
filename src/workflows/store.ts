@@ -2525,6 +2525,20 @@ export class WorkflowRunStore {
     return isCountRow(index) ? Math.max(0, index.count) : 0;
   }
 
+  persistViewContent(runId: string, content: Buffer, mediaType: string): string {
+    if (this.readRunRow(runId) === undefined) throw new Error(`Workflow run not found: ${runId}`);
+    return this.state.transaction(() => {
+      const hash = this.state.putBlob(content, mediaType);
+      this.state.connection
+        .prepare(
+          `INSERT INTO run_view_content(run_id, blob_hash, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(run_id, blob_hash) DO NOTHING`,
+        )
+        .run(runId, hash, Date.now());
+      return hash.toString("hex");
+    });
+  }
+
   readContentBlob(
     runId: string,
     digest: string,

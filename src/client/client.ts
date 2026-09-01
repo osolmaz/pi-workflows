@@ -430,7 +430,7 @@ export class WorkflowClient {
     }
     return async () => {
       if (!this.subscriptions.delete(subscriptionId)) return;
-      if (operation === "view.run.watch" && this.socket !== null && !this.socket.destroyed) {
+      if (this.socket !== null && !this.socket.destroyed) {
         await this.request({
           operation: "view.run.unwatch",
           ...(runId === undefined ? {} : { runId }),

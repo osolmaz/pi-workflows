@@ -111,7 +111,7 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Area                | Tables                                                                                                                       |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Schema and projects | `schema_meta`, `projects`                                                                                                    |
-| Content             | `blobs`                                                                                                                      |
+| Content             | `blobs`, `run_view_content`                                                                                                  |
 | Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                       |
 | Host protocol       | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
 | Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
@@ -146,7 +146,7 @@ without inserting another visible message.
 
 ## Content-addressed values
 
-`blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes.
+`blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes. `run_view_content` keeps host-generated large view values reachable for the life of the run, including aggregate outputs that do not exist as one source record. The host creates this link before it sends a content reference. Deleting the run removes the link, and normal blob pruning can then remove unreferenced content.
 
 Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Opening the database never deletes blobs. The explicit prune command removes unreferenced blobs after it deletes safe old run trees.
 

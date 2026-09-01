@@ -115,6 +115,17 @@ describe("WorkflowClient", () => {
       await unwatchDefaultRun();
       const unwatchDefaultRuns = await client.watchRuns(() => undefined);
       await unwatchDefaultRuns();
+      await waitUntil(
+        () =>
+          [
+            ...(
+              host as unknown as {
+                connections: Map<string, { subscriptions: Map<string, unknown> }>;
+              }
+            ).connections.values(),
+          ].every((connection) => connection.subscriptions.size === 0),
+        5_000,
+      );
     } finally {
       await client.close();
       await client.close();

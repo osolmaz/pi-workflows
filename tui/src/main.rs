@@ -4,6 +4,8 @@ use piw::{server, ui};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ClientOptions;
 
 /// Terminal viewer and client relay for hosted pi-workflows state.
 #[derive(Parser)]
@@ -38,23 +40,43 @@ enum Command {
     },
 }
 
-fn default_socket() -> PathBuf {
+fn state_directory() -> PathBuf {
     std::env::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".pi")
         .join("agent")
         .join("workflows")
-        .join("host")
-        .join("host.sock")
+}
+
+fn default_socket() -> PathBuf {
+    let state_directory = state_directory();
+    #[cfg(unix)]
+    return state_directory.join("host").join("host.sock");
+    #[cfg(windows)]
+    {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(state_directory.to_string_lossy().as_bytes());
+        let suffix = digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        return PathBuf::from(format!(r"\\.\pipe\pi-workflows-{suffix}"));
+    }
+    #[cfg(not(any(unix, windows)))]
+    state_directory.join("host").join("host.sock")
+}
+
+fn host_available(socket_path: &PathBuf) -> bool {
+    #[cfg(unix)]
+    return std::os::unix::net::UnixStream::connect(socket_path).is_ok();
+    #[cfg(windows)]
+    return ClientOptions::new().open(socket_path).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    socket_path.exists()
 }
 
 fn ensure_host(socket_path: &PathBuf) -> Result<()> {
-    #[cfg(unix)]
-    if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-        return Ok(());
-    }
-    #[cfg(not(unix))]
-    if socket_path.exists() {
+    if host_available(socket_path) {
         return Ok(());
     }
     let status = ProcessCommand::new("pi-workflows")
@@ -64,13 +86,13 @@ fn ensure_host(socket_path: &PathBuf) -> Result<()> {
     anyhow::ensure!(status.success(), "pi-workflows host start failed");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if socket_path.exists() {
+        if host_available(socket_path) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!(
-        "workflow host socket did not appear at {}",
+        "workflow host endpoint did not become ready at {}",
         socket_path.display()
     )
 }
