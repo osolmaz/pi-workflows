@@ -1,5 +1,5 @@
+import { MAX_PROTOCOL_MESSAGE_BYTES } from "../client/protocol.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import { MAX_PROTOCOL_MESSAGE_BYTES } from "./protocol.js";
 
 export const WORKER_MESSAGE_SCHEMA = "pi-workflows.worker-message.v1" as const;
 export const WORKER_RESPONSE_SCHEMA = "pi-workflows.worker-response.v1" as const;

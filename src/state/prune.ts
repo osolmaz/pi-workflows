@@ -34,25 +34,26 @@ export type StatePruneReport = {
   applied: boolean;
 };
 
-export async function pruneState(
-  databasePath: string,
-  options: StatePruneOptions,
-): Promise<StatePruneReport> {
-  const cutoff = parseCutoff(options.before);
+export function validateStatePruneOptions(options: StatePruneOptions): void {
+  parseCutoff(options.before);
   if (options.apply && options.backupPath === undefined) {
     throw new Error("state prune --apply requires --backup <absolute-path>");
   }
   if (options.backupPath !== undefined && !path.isAbsolute(options.backupPath)) {
     throw new Error("state prune backup path must be absolute");
   }
+}
+
+export async function pruneState(
+  state: StateDatabase,
+  databasePath: string,
+  options: StatePruneOptions,
+): Promise<StatePruneReport> {
+  validateStatePruneOptions(options);
+  const cutoff = parseCutoff(options.before);
   const lockPath = `${databasePath}.maintenance.lock`;
   const lock = options.apply ? acquireMaintenanceLock(lockPath) : undefined;
-  let state: StateDatabase | undefined;
   try {
-    state = new StateDatabase({
-      filePath: databasePath,
-      mode: options.apply ? "read-write" : "read-only",
-    });
     const selection = selectRunTrees(state, cutoff);
     const sizeBefore = databaseBytes(databasePath);
     const base = {
@@ -136,7 +137,6 @@ export async function pruneState(
       applied: true,
     };
   } finally {
-    state?.close();
     if (lock !== undefined) releaseMaintenanceLock(lockPath, lock);
   }
 }

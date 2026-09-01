@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { WorkflowClient } from "../src/client/client.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import { WorkflowHostClient } from "../src/host/client.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
@@ -115,7 +115,7 @@ export default defineController({
     const host = new WorkflowHost({ databasePath, claimPollMs: 1_000_000 });
     await host.start();
     try {
-      const client = new WorkflowHostClient({ databasePath });
+      const client = new WorkflowClient({ databasePath });
       const resolved = await client.resolveControllerInitialization({
         cwd: projectPath,
         controllerName: "admin",

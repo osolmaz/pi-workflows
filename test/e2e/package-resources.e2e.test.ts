@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkflowHostClient } from "../../src/host/client.js";
-import { hostSocketPath } from "../../src/host/protocol.js";
+import { WorkflowClient } from "../../src/client/client.js";
+import { clientSocketPath } from "../../src/client/protocol.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const piBin = path.join(repoRoot, "node_modules", ".bin", "pi");
@@ -102,8 +102,8 @@ function command(commands: CommandInfo[], name: string): CommandInfo | undefined
 
 async function stopPackageHost(directory: string): Promise<void> {
   const databasePath = path.join(directory, ".pi", "agent", "workflows", "state.sqlite");
-  const endpoint = hostSocketPath(databasePath);
-  const client = new WorkflowHostClient({ databasePath });
+  const endpoint = clientSocketPath(databasePath);
+  const client = new WorkflowClient({ databasePath });
   try {
     await client.request({ operation: "host.stop" });
   } catch (error) {

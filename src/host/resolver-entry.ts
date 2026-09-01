@@ -3,6 +3,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { builtinWorkflowCatalog } from "../builtins/catalog.js";
+import { MAX_PROTOCOL_MESSAGE_BYTES } from "../client/protocol.js";
+import type {
+  ResolvedControllerInitialization,
+  ResolvedSettingsChange,
+  ResolvedWorkflowLaunch,
+} from "../client/resolver.js";
 import { discoverControllers, loadControllerFile } from "../controllers/loader.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import { compositionMetadata } from "../workflows/composition.js";
@@ -12,32 +18,11 @@ import { resolveWorkflowRef } from "../workflows/loader.js";
 import { applyWorkflowSettingsPatch } from "../workflows/settings.js";
 import { createDefinitionSnapshot } from "../workflows/store.js";
 import type { WorkflowDefinition, WorkflowSource } from "../workflows/types.js";
-import { MAX_PROTOCOL_MESSAGE_BYTES } from "./protocol.js";
-
-export type ResolvedWorkflowLaunch = {
-  schema: "pi-workflows.resolved-launch.v1";
-  workflowName: string;
-  workflowSourceRef: string;
-  workflowSource: JsonValue;
-  definitionDigest: string;
-  definitionSnapshot: JsonValue;
-};
-
-export type ResolvedControllerInitialization = {
-  schema: "pi-workflows.resolved-controller-initialization.v1";
-  controllerName: string;
-  controllerPath: string;
-  sourceHash: string;
-  initialStatus: JsonValue;
-};
-
-export type ResolvedSettingsChange = {
-  schema: "pi-workflows.resolved-settings-change.v1";
-  definitionDigest: string;
-  patch: JsonValue;
-  settings: JsonValue;
-  paths: JsonValue;
-};
+export type {
+  ResolvedControllerInitialization,
+  ResolvedSettingsChange,
+  ResolvedWorkflowLaunch,
+} from "../client/resolver.js";
 
 type ResolverRequest = {
   schema: "pi-workflows.resolve-request.v1";

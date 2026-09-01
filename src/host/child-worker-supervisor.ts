@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import { NdjsonFrameDecoder } from "../client/protocol.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HostProcessRegistry, type ProcessIdentity } from "./processes.js";
-import { NdjsonFrameDecoder } from "./protocol.js";
 import type { WorkerOutcome } from "./state.js";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;

@@ -1,5 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { WorkflowDisplayStatus } from "../client/view.js";
 import { formatDuration } from "../render/format.js";
 import { nodeTypeGlyph } from "../render/node-type.js";
 import {
@@ -14,17 +15,19 @@ import { sanitizeText } from "../workflows/text.js";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
-  WorkflowRunStatus,
   WorkflowUpdateRecord,
 } from "../workflows/types.js";
 
-const STATUS_GLYPHS: Record<WorkflowRunStatus, string> = {
+const STATUS_GLYPHS: Record<WorkflowDisplayStatus, string> = {
+  queued: "…",
   running: "◐",
-  waiting: "⏸",
+  waiting: "○",
+  paused: "⏸",
   completed: "✓",
   failed: "✗",
   timed_out: "✗",
   cancelled: "✗",
+  ambiguous: "!",
 };
 
 /**
@@ -79,26 +82,28 @@ export function buildWidgetView(
   theme?: WidgetTheme,
   updateHistory?: WorkflowUpdateRecord[],
   actionHint?: string,
+  displayStatus?: WorkflowDisplayStatus,
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
 
   // `held` covers pauses the state cannot see yet: an escape-interrupted
   // step or a pause requested while the current node is still finishing.
-  const paused = held || state.paused === true;
-  const glyph = paused ? "⏸" : (STATUS_GLYPHS[state.status] ?? "·");
-  const statusText = paused ? "paused" : state.status;
+  const status = displayStatus ?? (held || state.paused === true ? "paused" : state.status);
+  const paused = status === "paused";
+  const glyph = STATUS_GLYPHS[status];
+  const statusText = status;
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
   const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
-  const headerTone = statusTone(paused ? "waiting" : state.status);
+  const headerTone = statusTone(status);
   const header = `${paint(theme, headerTone, glyph)} workflow ${sanitizeText(state.workflowName)}${title} ${paint(theme, headerTone, `[${statusText}]`)}`;
 
   const footer: string[] = [];
   if (state.error) {
     footer.push(paint(theme, "error", `  error: ${truncate(sanitizeText(state.error), 120)}`));
   }
-  if (state.status === "waiting" && state.waitingOn) {
+  if (status === "waiting" && state.waitingOn) {
     footer.push(
       paint(theme, "warning", `  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`),
     );
@@ -407,7 +412,10 @@ function statusTone(status: string): ThemeColor {
     case "cancelled":
       return "error";
     case "waiting":
+    case "paused":
       return "warning";
+    case "ambiguous":
+      return "error";
     case "running":
     default:
       return "accent";

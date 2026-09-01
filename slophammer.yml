@@ -22,6 +22,10 @@ typescript:
     - from: src/workflows
       allow:
         - src/state
+    # The public local client owns transport envelopes and host startup.
+    - from: src/client
+      allow:
+        - src/state
     # Durable reconciliation may launch finite child workflows, never the reverse.
     - from: src/controllers
       allow:
@@ -46,10 +50,11 @@ typescript:
         - src/controllers
         - src/render
         - src/herdr
-        - src/host
+        - src/client
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
+        - src/client
         - src/state
         - src/workflows
         - src/builtins
@@ -65,5 +70,6 @@ typescript:
         - src/workflows
         - src/controllers
         - src/render
+        - src/client
         - src/host
         - src/herdr

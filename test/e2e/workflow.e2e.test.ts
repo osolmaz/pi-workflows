@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WorkflowClient } from "../../src/client/client.js";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
-import { WorkflowHostClient } from "../../src/host/client.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../../src/host/state.js";
 import { workflowStatePath } from "../../src/state/database.js";
 import { parseJson, type JsonValue } from "../../src/state/json.js";
@@ -443,7 +443,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
 
   afterAll(async () => {
     await pi?.stop();
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     try {
       await client.request({ operation: "host.stop" });
     } catch {
@@ -576,7 +576,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
     const contract = interaction.contract as {
       contract: { nodeId: string; attemptId: string };
     };
-    const client = new WorkflowHostClient({ databasePath, clientId: "e2e-replay-client" });
+    const client = new WorkflowClient({ databasePath, clientId: "e2e-replay-client" });
     const adopted = await client.request({
       operation: "interaction.submit",
       runId: interaction.runId,
@@ -664,7 +664,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
   }, 60_000);
 
   it("reports privacy-safe host state and renders a completed run", async () => {
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     const status = await client.request({ operation: "host.status" });
     expect(status.receipt).toMatchObject({
       state: "running",

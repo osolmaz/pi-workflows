@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/osolmaz/pi-workflows/blob/main/protocol/client.v1.schema.json",
+  "title": "Pi Workflows client protocol version 1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "type", "connectionId", "packageVersion"],
+      "properties": {
+        "schema": { "const": "pi-workflows.client.v1" },
+        "type": { "const": "hello" },
+        "connectionId": { "$ref": "#/$defs/opaqueId" },
+        "packageVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "type",
+        "requestId",
+        "clientId",
+        "operation",
+        "idempotencyKey",
+        "payload"
+      ],
+      "properties": {
+        "schema": { "const": "pi-workflows.client.v1" },
+        "type": { "const": "request" },
+        "requestId": { "$ref": "#/$defs/opaqueId" },
+        "clientId": { "$ref": "#/$defs/opaqueId" },
+        "operation": {
+          "enum": [
+            "run.start",
+            "run.pause",
+            "run.resume",
+            "run.cancel",
+            "run.status",
+            "run.list",
+            "checkpoint.answer",
+            "decision.answer",
+            "interaction.submit",
+            "interaction.update",
+            "notification.claim",
+            "notification.deliver",
+            "turn.claim",
+            "turn.resolve",
+            "controller.list",
+            "controller.get",
+            "controller.apply",
+            "controller.reconcile",
+            "controller.delete",
+            "host.status",
+            "host.stop",
+            "view.runs.watch",
+            "view.run.watch",
+            "view.run.unwatch",
+            "view.page",
+            "view.session.watch",
+            "activity.report",
+            "state.status",
+            "state.verify",
+            "state.backup",
+            "state.prune"
+          ]
+        },
+        "idempotencyKey": { "$ref": "#/$defs/opaqueId" },
+        "runId": { "$ref": "#/$defs/opaqueId" },
+        "expectedRevision": { "$ref": "#/$defs/revision" },
+        "payload": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "type", "requestId", "outcome"],
+      "properties": {
+        "schema": { "const": "pi-workflows.client.v1" },
+        "type": { "const": "response" },
+        "requestId": { "$ref": "#/$defs/opaqueId" },
+        "outcome": {
+          "enum": [
+            "accepted",
+            "adopted",
+            "rejected",
+            "conflict",
+            "notFound",
+            "claimLost",
+            "unavailable"
+          ]
+        },
+        "revision": { "$ref": "#/$defs/revision" },
+        "receipt": {},
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "type", "subscriptionId", "event", "payload"],
+      "properties": {
+        "schema": { "const": "pi-workflows.client.v1" },
+        "type": { "const": "event" },
+        "subscriptionId": { "$ref": "#/$defs/opaqueId" },
+        "event": {
+          "enum": [
+            "runs",
+            "run_snapshot",
+            "run_patch",
+            "run_page",
+            "session_snapshot",
+            "unavailable"
+          ]
+        },
+        "revision": { "$ref": "#/$defs/revision" },
+        "runId": { "$ref": "#/$defs/opaqueId" },
+        "payload": {}
+      }
+    }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

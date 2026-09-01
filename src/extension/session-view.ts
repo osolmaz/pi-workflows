@@ -1,32 +1,51 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SqliteControllerStore } from "../controllers/sqlite.js";
-import { workflowStatePath } from "../state/database.js";
-import { WorkflowRunStore, type LoadedWorkflowRun } from "../workflows/store.js";
+import type { WorkflowSessionView } from "../client/view.js";
+import type { WorkflowDefinitionSnapshot, WorkflowRunState } from "../workflows/types.js";
 import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
 const WIDGET_SCROLL_STEP = 3;
 
-/** Read-only projection of the host-owned run into the origin Pi session. */
+/** Client-backed projection of the host-owned run into the origin Pi session. */
 export class SessionWorkflowView {
-  private loaded: LoadedWorkflowRun | undefined;
+  private session: WorkflowSessionView | null = null;
   private scroll: number | null = null;
   private shownScroll = 0;
   private maxScroll = 0;
   private stepCount = 0;
   private visible = false;
+  private actionHint: string | undefined;
 
-  refresh(ctx: ExtensionContext): void {
-    const loaded = loadSessionRun(ctx.sessionManager.getSessionId());
-    if (loaded === undefined) {
-      this.clear(ctx);
+  update(session: WorkflowSessionView, ctx: ExtensionContext): void {
+    const run = session.run;
+    if (
+      run === null ||
+      !isWorkflowRunState(run.state) ||
+      !isWorkflowDefinitionSnapshot(run.snapshot)
+    ) {
+      this.session = session;
+      this.clearWidget(ctx);
       return;
     }
-    if (this.loaded?.runId !== loaded.runId || this.stepCount !== loaded.state.steps.length) {
+    const previousRun = this.session?.run;
+    if (previousRun?.runId !== run.runId || this.stepCount !== run.state.steps.length) {
       this.scroll = null;
-      this.stepCount = loaded.state.steps.length;
+      this.stepCount = run.state.steps.length;
     }
-    this.loaded = loaded;
+    this.session = session;
+    this.render(ctx);
+  }
+
+  setActionHint(hint: string | undefined, ctx: ExtensionContext): void {
+    this.actionHint = hint;
+    if (this.session?.run !== null) this.render(ctx);
+  }
+
+  refresh(ctx: ExtensionContext): void {
+    if (this.session?.run === null || this.session === null) {
+      this.clearWidget(ctx);
+      return;
+    }
     this.render(ctx);
   }
 
@@ -39,11 +58,22 @@ export class SessionWorkflowView {
   }
 
   clear(ctx: ExtensionContext): void {
-    this.loaded = undefined;
+    this.session = null;
     this.scroll = null;
     this.shownScroll = 0;
     this.maxScroll = 0;
     this.stepCount = 0;
+    this.clearWidget(ctx);
+  }
+
+  private scrollBy(ctx: ExtensionContext, delta: number): void {
+    if (this.session?.run === null || this.session === null) return;
+    const current = this.scroll ?? this.shownScroll;
+    this.scroll = Math.max(0, Math.min(this.maxScroll, current + delta));
+    this.render(ctx);
+  }
+
+  private clearWidget(ctx: ExtensionContext): void {
     if (!this.visible) return;
     this.visible = false;
     safelyUpdateUi(ctx, () => {
@@ -52,29 +82,27 @@ export class SessionWorkflowView {
     });
   }
 
-  private scrollBy(ctx: ExtensionContext, delta: number): void {
-    if (this.loaded === undefined) return;
-    const current = this.scroll ?? this.shownScroll;
-    this.scroll = Math.max(0, Math.min(this.maxScroll, current + delta));
-    this.render(ctx);
-  }
-
   private render(ctx: ExtensionContext): void {
-    const loaded = this.loaded;
-    if (loaded === undefined) return;
+    const run = this.session?.run;
+    if (run === null || run === undefined) return;
+    if (!isWorkflowRunState(run.state) || !isWorkflowDefinitionSnapshot(run.snapshot)) return;
+    const state = run.state;
+    const snapshot = run.snapshot;
     const render = (
       width = Number.POSITIVE_INFINITY,
       theme?: Parameters<typeof buildWidgetView>[6],
     ) => {
       const view = buildWidgetView(
-        loaded.state,
-        loaded.snapshot,
+        state,
+        snapshot,
         new Date(),
         this.scroll,
-        loaded.state.paused === true,
+        run.display.status === "paused",
         width,
         theme,
         undefined,
+        this.actionHint,
+        run.display.status,
       );
       this.shownScroll = view.scroll;
       this.maxScroll = view.maxScroll;
@@ -90,42 +118,37 @@ export class SessionWorkflowView {
       } else {
         ctx.ui.setWidget(WIDGET_KEY, render());
       }
-      const label = loaded.state.paused === true ? "paused" : loaded.state.status;
-      ctx.ui.setStatus(WIDGET_KEY, `${loaded.state.workflowName} [${label}]`);
+      ctx.ui.setStatus(WIDGET_KEY, `${state.workflowName} [${run.display.status}]`);
       this.visible = true;
     });
   }
 }
 
-function loadSessionRun(sessionId: string): LoadedWorkflowRun | undefined {
-  try {
-    const queue = new SqliteControllerStore(workflowStatePath(), {
-      readOnly: true,
-      global: true,
-    });
-    let runId: string | undefined;
-    try {
-      runId = queue.findSessionReservation(sessionId)?.runId;
-    } finally {
-      queue.close();
-    }
-    if (runId === undefined) return undefined;
+function isWorkflowRunState(value: unknown): value is WorkflowRunState {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { schema?: unknown }).schema === "pi-workflows.run-state.v1" &&
+    typeof (value as { workflowName?: unknown }).workflowName === "string" &&
+    Array.isArray((value as { steps?: unknown }).steps)
+  );
+}
 
-    const runs = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
-    try {
-      return runs.readRun(runId) ?? undefined;
-    } finally {
-      runs.close();
-    }
-  } catch {
-    return undefined;
-  }
+function isWorkflowDefinitionSnapshot(value: unknown): value is WorkflowDefinitionSnapshot {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { schema?: unknown }).schema === "pi-workflows.definition-snapshot.v1" &&
+    typeof (value as { nodes?: unknown }).nodes === "object"
+  );
 }
 
 function safelyUpdateUi(ctx: ExtensionContext, update: () => void): void {
   try {
     if (ctx.hasUI) update();
   } catch {
-    // A session replacement can make a captured context stale between polls.
+    // A session replacement can make a captured context stale between updates.
   }
 }

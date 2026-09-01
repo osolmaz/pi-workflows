@@ -3,15 +3,15 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import { WorkflowHostClient } from "../src/host/client.js";
-import { HostProcessRegistry } from "../src/host/processes.js";
+import { WorkflowClient } from "../src/client/client.js";
 import {
   encodeProtocolLine,
-  parseHostResponse,
-  type HostRequest,
-  type HostResponse,
-} from "../src/host/protocol.js";
+  parseClientMessage,
+  type ClientRequest,
+  type ClientResponse,
+} from "../src/client/protocol.js";
+import { SqliteControllerStore } from "../src/controllers/sqlite.js";
+import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../src/host/state.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
@@ -291,13 +291,13 @@ export default defineWorkflow({
 
 async function sendHostPipeline(
   endpoint: string,
-  requests: HostRequest[],
-): Promise<HostResponse[]> {
+  requests: ClientRequest[],
+): Promise<ClientResponse[]> {
   const socket = net.createConnection(endpoint);
   await once(socket, "connect");
-  const responses = await new Promise<HostResponse[]>((resolve, reject) => {
+  const responses = await new Promise<ClientResponse[]>((resolve, reject) => {
     let buffered = Buffer.alloc(0);
-    const values: HostResponse[] = [];
+    const values: ClientResponse[] = [];
     const onError = (error: Error) => {
       cleanup();
       reject(error);
@@ -310,7 +310,9 @@ async function sendHostPipeline(
         const frame = buffered.subarray(0, newline);
         buffered = buffered.subarray(newline + 1);
         if (frame.byteLength === 0) continue;
-        values.push(parseHostResponse(frame));
+        const message = parseClientMessage(frame);
+        if (message.type !== "response") continue;
+        values.push(message);
         if (values.length === requests.length) {
           cleanup();
           resolve(values);
@@ -331,7 +333,7 @@ async function sendHostPipeline(
 }
 
 async function startRun(options: {
-  client: WorkflowHostClient;
+  client: WorkflowClient;
   cwd: string;
   workflowPath: string;
   runId: string;
@@ -377,12 +379,107 @@ describe("global workflow host", () => {
     await host.stop();
   });
 
+  it("performs active state maintenance through the host-owned database", async () => {
+    const directory = await makeTempDir("host-state-maintenance");
+    const databasePath = path.join(directory, "state.sqlite");
+    const backupPath = path.join(directory, "backup.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const client = new WorkflowClient({ databasePath });
+    try {
+      const preview = await client.request({
+        operation: "state.prune",
+        payload: { before: new Date().toISOString(), apply: false },
+      });
+      expect(preview).toMatchObject({ outcome: "accepted", receipt: { applied: false } });
+      const applied = await client.request({
+        operation: "state.prune",
+        payload: { before: new Date().toISOString(), apply: true, backupPath },
+      });
+      expect(applied).toMatchObject({ outcome: "accepted", receipt: { applied: true } });
+      await expect(fs.stat(backupPath)).resolves.toBeDefined();
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  });
+
+  it("restores desired subscriptions after the host restarts", async () => {
+    const databasePath = path.join(await makeTempDir("host-reconnect"), "state.sqlite");
+    let host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const client = new WorkflowClient({ databasePath });
+    const events: string[] = [];
+    const unsubscribe = await client.watchRuns((event) => events.push(event.event));
+    await waitUntil(() => events.includes("runs"), 5_000);
+
+    await host.stop();
+    await waitUntil(() => events.includes("unavailable"), 5_000);
+    host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    try {
+      await waitUntil(() => events.filter((event) => event === "runs").length >= 2, 5_000);
+    } finally {
+      await unsubscribe();
+      await client.close();
+      await host.stop();
+    }
+  });
+
+  it("keeps one slow request from blocking other requests on the same client", async () => {
+    const databasePath = path.join(await makeTempDir("host-multiplex"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const mutableHost = host as unknown as {
+      submitInteractionAndWait: (request: ClientRequest) => Promise<ClientResponse>;
+    };
+    mutableHost.submitInteractionAndWait = async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return {
+        schema: "pi-workflows.client.v1",
+        type: "response",
+        requestId: request.requestId,
+        outcome: "accepted",
+      };
+    };
+    await host.start();
+    try {
+      const requests: ClientRequest[] = [
+        {
+          schema: "pi-workflows.client.v1",
+          type: "request",
+          requestId: "slow-request",
+          clientId: "multiplex-client",
+          operation: "interaction.submit",
+          idempotencyKey: "slow-request",
+          payload: {},
+        },
+        {
+          schema: "pi-workflows.client.v1",
+          type: "request",
+          requestId: "status-request",
+          clientId: "multiplex-client",
+          operation: "host.status",
+          idempotencyKey: "status-request",
+          payload: {},
+        },
+      ];
+      const responses = await sendHostPipeline(host.endpoint, requests);
+      expect(responses.map((response) => response.requestId)).toEqual([
+        "status-request",
+        "slow-request",
+      ]);
+    } finally {
+      await host.stop();
+    }
+  });
+
   it("closes idle client sockets before it waits for listener shutdown", async () => {
     const databasePath = path.join(await makeTempDir("host-idle-client"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
     await host.start();
     const socket = net.createConnection(host.endpoint);
     await once(socket, "connect");
+    socket.resume();
     const closed = once(socket, "close");
     await host.stop();
     await closed;
@@ -401,6 +498,7 @@ describe("global workflow host", () => {
     try {
       const socket = net.createConnection(host.endpoint);
       await once(socket, "connect");
+      socket.resume();
       await waitUntil(() => (host as unknown as { sockets: Set<net.Socket> }).sockets.size === 1);
       const acceptedSocket = [...(host as unknown as { sockets: Set<net.Socket> }).sockets][0];
       if (acceptedSocket === undefined) throw new Error("accepted socket was not tracked");
@@ -409,7 +507,7 @@ describe("global workflow host", () => {
       await closed;
       expect(logs).toContain("client socket error: test reset");
 
-      const client = new WorkflowHostClient({ databasePath });
+      const client = new WorkflowClient({ databasePath });
       await expect(client.request({ operation: "host.status" })).resolves.toMatchObject({
         outcome: "accepted",
         receipt: { state: "running" },
@@ -485,7 +583,7 @@ setInterval(() => {}, 1000);
           FAKE_PI_PIDS: pidFile,
         },
       });
-      const client = new WorkflowHostClient({ databasePath });
+      const client = new WorkflowClient({ databasePath });
       await host.start();
       try {
         await startRun({ client, cwd, workflowPath, runId: "headless-group-run" });
@@ -544,7 +642,7 @@ setInterval(() => {}, 1000);
     const first = new WorkflowHost({ databasePath, runnerId: "host-first", claimPollMs: 10 });
     await first.start();
     await startRun({
-      client: new WorkflowHostClient({ databasePath }),
+      client: new WorkflowClient({ databasePath }),
       cwd,
       workflowPath,
       runId: "validation-recovery-run",
@@ -608,7 +706,7 @@ setInterval(() => {}, 1000);
     await host.start();
     try {
       await startRun({
-        client: new WorkflowHostClient({ databasePath }),
+        client: new WorkflowClient({ databasePath }),
         cwd,
         workflowPath,
         runId: "decision-timeout-parent",
@@ -662,7 +760,7 @@ setInterval(() => {}, 1000);
     });
     await first.start();
     await startRun({
-      client: new WorkflowHostClient({ databasePath }),
+      client: new WorkflowClient({ databasePath }),
       cwd,
       workflowPath,
       runId: "interaction-timeout-run",
@@ -748,7 +846,7 @@ setInterval(() => {}, 1000);
     });
     await first.start();
     await startRun({
-      client: new WorkflowHostClient({ databasePath }),
+      client: new WorkflowClient({ databasePath }),
       cwd,
       workflowPath,
       runId: "mounted-source-run",
@@ -816,7 +914,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const workflowPath = await writeComputeWorkflow(cwd);
     const originalSource = await fs.readFile(workflowPath, "utf8");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
@@ -892,7 +990,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-cancel-state"), "state.sqlite");
     const workflowPath = await writeBlockingWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-client" });
+    const client = new WorkflowClient({ databasePath, clientId: "cancel-client" });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "cancel-run" });
@@ -938,14 +1036,15 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-cancel-pending-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       const resolved = await client.resolveWorkflow({ cwd, workflowRef: workflowPath });
       const runId = "cancel-pending-run";
       const responses = await sendHostPipeline(host.endpoint, [
         {
-          schema: "pi-workflows.host-request.v1",
+          schema: "pi-workflows.client.v1",
+          type: "request",
           requestId: "pending-start-request",
           clientId: "pending-cancel-client",
           operation: "run.start",
@@ -965,7 +1064,8 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           },
         },
         {
-          schema: "pi-workflows.host-request.v1",
+          schema: "pi-workflows.client.v1",
+          type: "request",
           requestId: "pending-cancel-request",
           clientId: "pending-cancel-client",
           operation: "run.cancel",
@@ -1007,7 +1107,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     );
     const workflowPath = await writeInteractiveWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-interaction-client" });
+    const client = new WorkflowClient({ databasePath, clientId: "cancel-interaction-client" });
     await host.start();
     try {
       await startRun({
@@ -1068,7 +1168,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-cancel-effect-state"), "state.sqlite");
     const workflowPath = await writeBlockingEffectWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath, clientId: "cancel-effect-client" });
+    const client = new WorkflowClient({ databasePath, clientId: "cancel-effect-client" });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "cancel-effect-run" });
@@ -1147,7 +1247,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-child-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "child-run" });
@@ -1178,7 +1278,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-delivery-state"), "state.sqlite");
     const workflowPath = await writeDeliveryWorkflow(cwd);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       await startRun({
@@ -1328,7 +1428,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       hostRenewMs: 40,
       runClaimLeaseMs: 200,
     });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "blocked-child-run" });
@@ -1371,7 +1471,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const markerPath = path.join(cwd, "effect-applied");
     const workflowPath = await writeCrashEffectWorkflow(cwd, "idempotent", markerPath);
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "idempotent-crash-run" });
@@ -1413,7 +1513,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const databasePath = path.join(await makeTempDir("host-manual-effect-state"), "state.sqlite");
     const workflowPath = await writeCrashEffectWorkflow(cwd, "manual");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       await startRun({ client, cwd, workflowPath, runId: "manual-crash-run" });
@@ -1456,7 +1556,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
   it("returns privacy-safe host status counts", async () => {
     const databasePath = path.join(await makeTempDir("host-status"), "state.sqlite");
     const host = new WorkflowHost({ databasePath });
-    const client = new WorkflowHostClient({ databasePath });
+    const client = new WorkflowClient({ databasePath });
     await host.start();
     try {
       const status = await client.request({ operation: "host.status" });

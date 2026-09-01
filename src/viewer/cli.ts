@@ -1,22 +1,12 @@
 #!/usr/bin/env node
-import fs, { realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { SqliteControllerStore } from "../controllers/sqlite.js";
+import { WorkflowClient } from "../client/client.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
-import { WorkflowHostClient } from "../host/client.js";
-import { sanitizeText } from "../render/ansi.js";
-import { StateDatabase } from "../state/database.js";
-import { pruneState } from "../state/prune.js";
-import { WorkflowRunStore, workflowStateDatabasePath } from "../workflows/store.js";
-import {
-  formatDuration,
-  renderRunDetailLines,
-  renderRunListLines,
-  runElapsedMs,
-  statusLabel,
-} from "./render.js";
-import { runViewer } from "./tui.js";
+import type { JsonValue } from "../state/json.js";
+import { verifyInactiveBackup } from "./backup.js";
+import { renderClientView, runViewer } from "./tui.js";
 
 const USAGE = `pi-workflows — workflow runs and controller resources
 
@@ -25,7 +15,8 @@ Usage:
   pi-workflows runs
   pi-workflows controllers
   pi-workflows controller <controller> <key>
-  pi-workflows state status|verify
+  pi-workflows state status
+  pi-workflows state verify [inactive-backup]
   pi-workflows state backup <destination>
   pi-workflows state prune --before <timestamp> --dry-run
   pi-workflows state prune --before <timestamp> --backup <absolute-path> --apply
@@ -36,7 +27,7 @@ Usage:
   pi-workflows herdr sync [--json]
   pi-workflows herdr setup [--json]
 
-All commands use ~/.pi/agent/workflows/state.sqlite.
+Active state is available only through the package-owned workflow host.
 `;
 
 export type CliArgs = {
@@ -48,6 +39,7 @@ export type CliArgs = {
   hostAction?: "start" | "status" | "stop" | "run";
   stateAction?: "status" | "verify" | "backup" | "prune";
   backupDestination?: string;
+  verifyBackup?: string;
   pruneBefore?: string;
   pruneApply?: boolean;
   once: boolean;
@@ -58,6 +50,13 @@ export type CliArgs = {
 export function parseCliArgs(argv: string[]): CliArgs {
   const args = [...argv];
   const command = args[0] && !args[0].startsWith("-") ? (args.shift() as string) : "view";
+  if (
+    !["view", "runs", "controllers", "controller", "state", "host", "herdr", "help"].includes(
+      command,
+    )
+  ) {
+    throw new Error(`Unknown command: ${command}`);
+  }
   let once = false;
   let json = false;
   let project: string | undefined;
@@ -143,12 +142,22 @@ export function parseCliArgs(argv: string[]): CliArgs {
         json,
       };
     }
+    if (action === "verify") {
+      if (positionals.length > 2) throw new Error("state verify accepts one inactive backup path");
+      return {
+        command,
+        stateAction: action,
+        ...(positionals[1] === undefined ? {} : { verifyBackup: positionals[1] }),
+        once,
+        json,
+      };
+    }
     if (positionals.length !== 1) throw new Error(`state ${action} accepts no other arguments`);
     return { command, stateAction: action, once, json };
   }
   if (command === "herdr") {
     if (positionals.length !== 1 || !["sync", "setup"].includes(positionals[0] as string)) {
-      throw new Error("herdr requires the sync action");
+      throw new Error("herdr requires the sync or setup action");
     }
     return { command, herdrAction: positionals[0] as string, once, json };
   }
@@ -161,101 +170,12 @@ export function parseCliArgs(argv: string[]): CliArgs {
   };
 }
 
-function printRuns(databasePath: string): void {
-  const store = new WorkflowRunStore(databasePath, { readOnly: true });
-  try {
-    const runs = store.listRuns();
-    if (runs.length === 0) {
-      process.stdout.write("No workflow runs found.\n");
-      return;
-    }
-    for (const run of runs) {
-      const state = run.state;
-      const title = state.runTitle ? ` — ${sanitizeText(state.runTitle)}` : "";
-      process.stdout.write(
-        `${statusLabel(state.status)}  ${sanitizeText(state.workflowName)}${title}  ${state.runId}  ${formatDuration(runElapsedMs(state))}\n`,
-      );
-    }
-  } finally {
-    store.close();
-  }
-}
-
-function printOnce(databasePath: string, runId: string | undefined): void {
-  const store = new WorkflowRunStore(databasePath, { readOnly: true });
-  try {
-    const size = { width: process.stdout.columns ?? 100, height: 1_000 };
-    if (runId === undefined) {
-      process.stdout.write(`${renderRunListLines(store.listRuns(), 0, size).join("\n")}\n`);
-      return;
-    }
-    const run = store.readRun(runId, { includeTrace: true });
-    if (run === null) throw new Error(`Run not found: ${runId}`);
-    process.stdout.write(`${renderRunDetailLines(run, size).join("\n")}\n`);
-  } finally {
-    store.close();
-  }
-}
-
-function printControllers(databasePath: string): void {
-  const store = openControllerStore(databasePath);
-  if (store === undefined) {
-    process.stdout.write("No controller resources found.\n");
-    return;
-  }
-  try {
-    const resources = store.listResources();
-    if (resources.length === 0) {
-      process.stdout.write("No controller resources found.\n");
-      return;
-    }
-    for (const resource of resources) {
-      const condition =
-        resource.status.conditions.find((item) => item.type === "Ready") ??
-        resource.status.conditions[0];
-      const conditionText =
-        condition === undefined
-          ? "unknown"
-          : `${String(condition.status)}:${sanitizeText(condition.reason)}`;
-      process.stdout.write(
-        `${sanitizeText(resource.metadata.controller)}  ${sanitizeText(resource.metadata.key)}  generation=${resource.metadata.generation}  ready=${conditionText}\n`,
-      );
-    }
-  } finally {
-    store.close();
-  }
-}
-
-function printController(databasePath: string, controller: string, key: string): void {
-  const store = openControllerStore(databasePath);
-  if (store === undefined) throw new Error("Controller state database not found");
-  try {
-    const resource = store.getResource({ controller, key });
-    if (resource === undefined)
-      throw new Error(`Controller resource not found: ${controller}/${key}`);
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          resource,
-          effects: store.listEffects(resource.metadata.uid),
-          workflows: store.listWorkflows(resource.metadata.uid),
-          events: store.listEvents({ controller, key, limit: 50 }),
-        },
-        null,
-        2,
-      )}\n`,
-    );
-  } finally {
-    store.close();
-  }
-}
-
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   let args: CliArgs;
   try {
     args = parseCliArgs(argv);
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
+    process.stderr.write(`${errorMessage(error)}\n\n${USAGE}`);
     return 2;
   }
   if (args.command === "help") {
@@ -263,24 +183,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
-  const databasePath = workflowStateDatabasePath();
   try {
-    if (args.command === "runs") {
-      printRuns(databasePath);
-      return 0;
-    }
-    if (args.command === "controllers") {
-      printControllers(databasePath);
-      return 0;
-    }
-    if (args.command === "controller") {
-      printController(databasePath, args.controllerName as string, args.resourceKey as string);
-      return 0;
-    }
-    if (args.command === "state") {
-      await runStateCommand(databasePath, args);
-      return 0;
-    }
     if (args.command === "host") {
       return await runHost(args.hostAction as "start" | "status" | "stop" | "run", args.piArgs);
     }
@@ -289,65 +192,100 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       process.stdout.write(args.json ? `${JSON.stringify(result)}\n` : `${result.message}\n`);
       return 0;
     }
-    if (args.command === "view") {
-      if (args.once || !process.stdout.isTTY) printOnce(databasePath, args.runId);
-      else await runViewer({ databasePath, runId: args.runId });
+    if (
+      args.command === "state" &&
+      args.stateAction === "verify" &&
+      args.verifyBackup !== undefined
+    ) {
+      verifyInactiveBackup(args.verifyBackup);
+      process.stdout.write(`Inactive SQLite backup is valid: ${path.resolve(args.verifyBackup)}\n`);
       return 0;
+    }
+
+    if (
+      args.command === "state" &&
+      args.stateAction === "prune" &&
+      args.backupDestination !== undefined &&
+      !path.isAbsolute(args.backupDestination)
+    ) {
+      throw new Error("state prune backup path must be absolute");
+    }
+
+    const client = new WorkflowClient();
+    try {
+      await client.ensureRunning();
+      if (args.command === "runs") {
+        const runs = await firstRunsView(client);
+        printJsonLines(runs);
+        return 0;
+      }
+      if (args.command === "controllers" || args.command === "controller") {
+        const response = await client.request({
+          operation: args.command === "controllers" ? "controller.list" : "controller.get",
+          payload: {
+            projectPath: process.cwd(),
+            ...(args.command === "controller"
+              ? { controller: args.controllerName as string, key: args.resourceKey as string }
+              : {}),
+          },
+        });
+        requireAccepted(response);
+        process.stdout.write(`${JSON.stringify(response.receipt ?? null, null, 2)}\n`);
+        return 0;
+      }
+      if (args.command === "state") {
+        await runStateCommand(client, args);
+        return 0;
+      }
+      if (args.command === "view") {
+        if (args.once || !process.stdout.isTTY) {
+          const view =
+            args.runId === undefined
+              ? await firstRunsView(client)
+              : await firstRunView(client, args.runId);
+          process.stdout.write(
+            `${renderClientView(view, process.stdout.columns ?? 100, Number.MAX_SAFE_INTEGER, 0, 0).join("\n")}\n`,
+          );
+        } else {
+          await runViewer({ client, runId: args.runId });
+        }
+        return 0;
+      }
+    } finally {
+      await client.close();
     }
     process.stderr.write(`Unknown command: ${args.command}\n\n${USAGE}`);
     return 2;
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${errorMessage(error)}\n`);
     return 1;
   }
 }
 
-async function runStateCommand(databasePath: string, args: CliArgs): Promise<void> {
-  if (args.stateAction === "prune") {
-    const report = await pruneState(databasePath, {
-      before: args.pruneBefore as string,
-      apply: args.pruneApply === true,
-      ...(args.backupDestination === undefined ? {} : { backupPath: args.backupDestination }),
-    });
-    process.stdout.write(`${JSON.stringify(report)}\n`);
-    return;
-  }
-  if (args.stateAction === "backup") {
-    const state = new StateDatabase({ filePath: databasePath });
-    try {
-      await state.backup(path.resolve(args.backupDestination as string));
-      process.stdout.write(`Backup verified: ${path.resolve(args.backupDestination as string)}\n`);
-    } finally {
-      state.close();
-    }
-    return;
-  }
-  const state = new StateDatabase({ filePath: databasePath, mode: "read-only" });
-  try {
-    state.integrityCheck();
-    if (args.stateAction === "verify") {
-      process.stdout.write("SQLite state is valid.\n");
-      return;
-    }
-    const counts = state.connection
-      .prepare(
-        `SELECT
-           (SELECT count(*) FROM runs) AS runs,
-           (SELECT count(*) FROM controller_resources) AS controllers,
-           (SELECT count(*) FROM human_decisions) AS decisions,
-           (SELECT count(*) FROM workflow_settings) AS settingsScopes,
-           (SELECT count(*) FROM workflow_follow_ups WHERE status IN ('queued', 'pending_presentation', 'ready')) AS pendingFollowUps,
-           (SELECT count(*) FROM effects WHERE status IN ('pending', 'applying', 'ambiguous')) AS unsettledEffects,
-           (SELECT count(*) FROM leases
-            WHERE owner_id IS NOT NULL AND expires_at > ?) AS activeLeases`,
-      )
-      .get(Date.now());
-    process.stdout.write(
-      `Database: ${databasePath}\nSize: ${fs.statSync(databasePath).size} bytes\n${JSON.stringify(counts)}\n`,
-    );
-  } finally {
-    state.close();
-  }
+async function runStateCommand(client: WorkflowClient, args: CliArgs): Promise<void> {
+  const operation =
+    args.stateAction === "status"
+      ? "state.status"
+      : args.stateAction === "verify"
+        ? "state.verify"
+        : args.stateAction === "backup"
+          ? "state.backup"
+          : "state.prune";
+  const payload: JsonValue =
+    args.stateAction === "backup"
+      ? { destination: path.resolve(args.backupDestination as string) }
+      : args.stateAction === "prune"
+        ? {
+            before: args.pruneBefore as string,
+            apply: args.pruneApply === true,
+            ...(args.backupDestination === undefined
+              ? {}
+              : { backupPath: path.resolve(args.backupDestination) }),
+          }
+        : {};
+  const response = await client.request({ operation, payload });
+  requireAccepted(response);
+  process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
 }
 
 async function runHost(
@@ -368,22 +306,54 @@ async function runHost(
     });
     return 0;
   }
-  const client = new WorkflowHostClient();
-  if (action === "start") {
-    const response = await client.ensureRunning();
+  const client = new WorkflowClient();
+  try {
+    const response =
+      action === "start"
+        ? await client.ensureRunning()
+        : await client.request({ operation: action === "status" ? "host.status" : "host.stop" });
     process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
     return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
+  } finally {
+    await client.close();
   }
-  const response = await client.request({
-    operation: action === "status" ? "host.status" : "host.stop",
-  });
-  process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
-  return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
 }
 
-function openControllerStore(databasePath: string): SqliteControllerStore | undefined {
-  if (!fs.existsSync(databasePath)) return undefined;
-  return new SqliteControllerStore(databasePath, { readOnly: true });
+async function firstRunsView(client: WorkflowClient): Promise<JsonValue> {
+  return await firstSubscriptionEvent((listener) => client.watchRuns(listener));
+}
+
+async function firstRunView(client: WorkflowClient, runId: string): Promise<JsonValue> {
+  return await firstSubscriptionEvent((listener) => client.watchRun(runId, listener));
+}
+
+async function firstSubscriptionEvent(
+  subscribe: (listener: (event: { payload: JsonValue }) => void) => Promise<() => Promise<void>>,
+): Promise<JsonValue> {
+  let resolveEvent!: (value: JsonValue) => void;
+  const event = new Promise<JsonValue>((resolve) => {
+    resolveEvent = resolve;
+  });
+  const unsubscribe = await subscribe((received) => resolveEvent(received.payload));
+  try {
+    return await event;
+  } finally {
+    await unsubscribe();
+  }
+}
+
+function printJsonLines(value: JsonValue): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    process.stdout.write("No workflow runs found.\n");
+    return;
+  }
+  for (const item of value) process.stdout.write(`${JSON.stringify(item)}\n`);
+}
+
+function requireAccepted(response: { outcome: string; error?: string }): void {
+  if (response.outcome !== "accepted" && response.outcome !== "adopted") {
+    throw new Error(response.error ?? `Workflow host returned ${response.outcome}`);
+  }
 }
 
 function packageRoot(): string {
@@ -394,6 +364,10 @@ function requiredValue(args: string[], option: string): string {
   const value = args.shift();
   if (!value) throw new Error(`${option} requires a path`);
   return value;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const entryPath = process.argv[1];

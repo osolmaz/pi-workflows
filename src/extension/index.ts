@@ -2,17 +2,24 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
-import { SqliteControllerStore, type WorkflowRunQueueRecord } from "../controllers/sqlite.js";
-import { WorkflowHostClient } from "../host/client.js";
-import type { HostResponse } from "../host/protocol.js";
-import { HostStateStore, type InteractiveRequestRecord } from "../host/state.js";
-import { workflowStatePath } from "../state/database.js";
+import { ORIGIN_ACTIVITY_REFRESH_MS } from "../client/activity.js";
+import { WorkflowClient } from "../client/client.js";
+import type { ClientResponse } from "../client/protocol.js";
+import type { ClientInteractiveRequest, WorkflowSessionView } from "../client/view.js";
+import type { WorkflowRunQueueRecord } from "../controllers/sqlite.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
-import { createRunId, WorkflowRunStore } from "../workflows/store.js";
+import { createRunId } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
 import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
+import {
+  HerdrWorkflowViewer,
+  PIW_SHORTCUT,
+  PIW_SHORTCUT_HINT,
+  VIEWER_PLACEMENTS,
+  type ViewerPlacement,
+} from "./herdr-viewer.js";
 import { SessionDeliveryCoordinator, type ClaimedSessionDelivery } from "./session-delivery.js";
 import { SessionWorkflowView } from "./session-view.js";
 import {
@@ -47,10 +54,18 @@ export {
 } from "./decision-channels.js";
 
 const INTERACTION_POLL_MS = 1_000;
-const SUBMISSION_POLL_MS = 50;
 const WORKFLOW_INTERACTION_MESSAGE_TYPE = "pi-workflows-interaction";
 const WORKFLOW_NOTIFICATION_MESSAGE_TYPE = "pi-workflows-notification";
 const WORKFLOW_PRESENTATION_MESSAGE_TYPE = "pi-workflows-presentation";
+const sessionSnapshots = new Map<string, WorkflowSessionView>();
+
+type PresentedOriginActivity = {
+  sessionId: string;
+  runId: string;
+  requestId: string;
+  deliveryId: string;
+  sessionEntryId: string;
+};
 
 export type ParsedWorkflowArgs =
   | { kind: "list" }
@@ -128,13 +143,54 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
 
 export default function piWorkflows(pi: ExtensionAPI): void {
   registerWorkflowAgentStepMessageRenderer(pi);
-  const client = new WorkflowHostClient({ clientId: `pi-extension-${randomUUID()}` });
+  let client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
+  const herdrViewer = new HerdrWorkflowViewer(pi.exec);
   let sessionContext: ExtensionContext | null = null;
+  let sessionGeneration = 0;
+  let sessionUnsubscribe: (() => Promise<void>) | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
+  let originActivity: (PresentedOriginActivity & { sequence: number }) | null = null;
+  let activityTimer: ReturnType<typeof setInterval> | null = null;
   const sessionDelivery = new SessionDeliveryCoordinator();
   const sessionView = new SessionWorkflowView();
+
+  const reportOriginActivity = async (
+    activity: PresentedOriginActivity & { sequence: number },
+    state: "started" | "refresh" | "settled",
+  ): Promise<void> => {
+    const response = await client.request({
+      operation: "activity.report",
+      runId: activity.runId,
+      payload: { ...activity, state },
+    });
+    if (response.outcome !== "accepted" && response.outcome !== "adopted") {
+      throw new Error(response.error ?? "Workflow host rejected origin activity");
+    }
+  };
+
+  const startOriginActivity = (presented: PresentedOriginActivity): void => {
+    if (activityTimer !== null) clearInterval(activityTimer);
+    originActivity = { ...presented, sequence: 0 };
+    void reportOriginActivity(originActivity, "started").catch(() => undefined);
+    activityTimer = setInterval(() => {
+      if (originActivity === null) return;
+      originActivity.sequence += 1;
+      void reportOriginActivity(originActivity, "refresh").catch(() => undefined);
+    }, ORIGIN_ACTIVITY_REFRESH_MS);
+    activityTimer.unref?.();
+  };
+
+  const settleOriginActivity = async (): Promise<void> => {
+    if (activityTimer !== null) clearInterval(activityTimer);
+    activityTimer = null;
+    const settled = originActivity;
+    originActivity = null;
+    if (settled === null) return;
+    settled.sequence += 1;
+    await reportOriginActivity(settled, "settled").catch(() => undefined);
+  };
 
   const presentInOrder = async (ctx: ExtensionContext): Promise<void> => {
     const prior = presentationTail;
@@ -145,7 +201,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     await prior;
     try {
       await sessionDelivery.synchronize(ctx, [
-        () => claimPendingInteractionDelivery(pi, client, ctx),
+        () => claimPendingInteractionDelivery(pi, client, ctx, startOriginActivity),
         () => claimPendingNotificationDelivery(pi, client, ctx),
         () => claimPendingTurnDelivery(pi, client, ctx),
       ]);
@@ -155,6 +211,39 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     }
   };
 
+  const openPiw = async (
+    ctx: ExtensionContext,
+    requestedPlacement?: ViewerPlacement,
+  ): Promise<void> => {
+    const run = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.run;
+    if (run === null || run === undefined || !isRecord(run.state)) {
+      ctx.ui.notify("No active workflow is available for piw.", "warning");
+      return;
+    }
+    const capability = await herdrViewer.probe();
+    if (!capability.available) {
+      ctx.ui.notify(capability.reason, "warning");
+      return;
+    }
+    const placement =
+      requestedPlacement ??
+      ((await ctx.ui.select("Open workflow viewer", [...VIEWER_PLACEMENTS])) as
+        | ViewerPlacement
+        | undefined);
+    if (placement === undefined) return;
+    const workflowName =
+      typeof run.state.workflowName === "string" ? run.state.workflowName : run.runId;
+    const opened = await herdrViewer.open(
+      { runId: run.runId, workflowName },
+      placement as ViewerPlacement,
+      ctx.cwd,
+    );
+    ctx.ui.notify(
+      opened.reused ? "Focused the existing piw view." : "Opened piw in Herdr.",
+      "info",
+    );
+  };
+
   const runToolInOrder = async <T>(operation: () => Promise<T>): Promise<T> => {
     const prior = toolTail;
     let release: (() => void) | undefined;
@@ -162,8 +251,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       release = resolve;
     });
     await prior;
-    await presentationTail;
     try {
+      await presentationTail;
+      const currentContext = sessionContext;
+      if (currentContext === null) throw new Error("Workflow session is unavailable");
+      await presentInOrder(currentContext);
       return await operation();
     } finally {
       release?.();
@@ -252,8 +344,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
                 params.action === "update" ? { update: params.update } : { output: params.output },
             }),
           });
-          if (params.action === "submit") {
-            await waitForInteractionSubmission(interaction.requestId, toolCallId, signal);
+          if (signal?.aborted === true) {
+            throw signal.reason ?? new Error("Workflow submission was cancelled");
           }
           await presentInOrder(ctx);
           return toolResult(
@@ -271,6 +363,32 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("piw", {
+    description: "Open the active workflow in Herdr",
+    handler: async (args, ctx) => {
+      try {
+        const requested = args.trim();
+        if (requested.length > 0 && !VIEWER_PLACEMENTS.includes(requested as ViewerPlacement)) {
+          throw new Error(`Unknown piw placement: ${requested}`);
+        }
+        await openPiw(ctx, requested.length === 0 ? undefined : (requested as ViewerPlacement));
+      } catch (error) {
+        ctx.ui.notify(`Could not open piw: ${errorMessage(error)}`, "warning");
+      }
+    },
+  });
+
+  pi.registerShortcut(PIW_SHORTCUT, {
+    description: "Open the active workflow in Herdr",
+    handler: async (ctx) => {
+      try {
+        await openPiw(ctx);
+      } catch (error) {
+        ctx.ui.notify(`Could not open piw: ${errorMessage(error)}`, "warning");
+      }
+    },
+  });
+
   pi.registerShortcut("shift+up", {
     description: "Scroll the workflow widget up",
     handler: (ctx) => sessionView.scrollUp(ctx),
@@ -281,18 +399,46 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     handler: (ctx) => sessionView.scrollDown(ctx),
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
-    try {
-      await client.ensureRunning();
-      await presentInOrder(ctx);
-    } catch (error) {
-      ctx.ui.notify(`Workflow host is unavailable: ${errorMessage(error)}`, "warning");
-    }
+    const sessionId = ctx.sessionManager.getSessionId();
+    const generation = ++sessionGeneration;
+    const sessionClient = client;
     pollTimer = setInterval(() => {
       if (sessionContext !== null) void presentInOrder(sessionContext).catch(() => undefined);
     }, INTERACTION_POLL_MS);
     pollTimer.unref?.();
+
+    void (async () => {
+      try {
+        await sessionClient.ensureRunning();
+        const unsubscribe = await sessionClient.watchSession(sessionId, (event) => {
+          if (generation !== sessionGeneration || sessionContext !== ctx) return;
+          if (event.event === "unavailable") {
+            sessionSnapshots.delete(sessionId);
+            sessionView.clear(ctx);
+            return;
+          }
+          if (!isWorkflowSessionView(event.payload)) return;
+          sessionSnapshots.set(sessionId, event.payload);
+          sessionView.update(event.payload, ctx);
+          void presentInOrder(ctx).catch(() => undefined);
+        });
+        if (generation !== sessionGeneration || sessionContext !== ctx) {
+          await unsubscribe();
+          return;
+        }
+        sessionUnsubscribe = unsubscribe;
+        const capability = await herdrViewer.probe();
+        if (generation !== sessionGeneration || sessionContext !== ctx) return;
+        sessionView.setActionHint(capability.available ? PIW_SHORTCUT_HINT : undefined, ctx);
+        await presentInOrder(ctx);
+      } catch (error) {
+        if (generation === sessionGeneration && sessionContext === ctx) {
+          ctx.ui.notify(`Workflow host is unavailable: ${errorMessage(error)}`, "warning");
+        }
+      }
+    })();
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -315,6 +461,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       (message) => interactionRequestId(message) === interaction.requestId,
     );
     if (!turnHasPrompt) return;
+    await settleOriginActivity();
     try {
       const pauseId = `escape-pause-${interaction.runId}-${randomUUID()}`;
       await requestAccepted(client, {
@@ -339,15 +486,25 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     } catch (error) {
       ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
     }
+    await settleOriginActivity();
     await presentInOrder(ctx).catch(() => undefined);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    sessionGeneration += 1;
     sessionContext = null;
     sessionDelivery.clear();
     sessionView.clear(ctx);
+    sessionSnapshots.delete(ctx.sessionManager.getSessionId());
+    if (activityTimer !== null) clearInterval(activityTimer);
+    activityTimer = null;
+    originActivity = null;
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
+    if (sessionUnsubscribe !== null) await sessionUnsubscribe().catch(() => undefined);
+    sessionUnsubscribe = null;
+    await client.close();
+    client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
   });
 }
 
@@ -358,7 +515,7 @@ type CommandResult = {
 };
 
 async function executeCommand(
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
   command: ParsedWorkflowArgs,
   idempotencyKey: string = randomUUID(),
@@ -504,7 +661,7 @@ async function executeCommand(
 }
 
 async function executeControllerCommand(
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
   command: ParsedControllerArgs,
 ): Promise<CommandResult> {
@@ -571,8 +728,9 @@ async function executeControllerCommand(
 
 async function claimPendingInteractionDelivery(
   pi: ExtensionAPI,
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
+  onPresented: (activity: PresentedOriginActivity) => void,
 ): Promise<ClaimedSessionDelivery | undefined> {
   const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
   if (interaction === undefined || interaction.presentationSessionEntryId !== null)
@@ -608,6 +766,7 @@ async function claimPendingInteractionDelivery(
     const receipt = isRecord(claim.receipt) ? claim.receipt : undefined;
     presentationRevision = claim.revision;
     claimExpiresAt = claimExpiry(receipt?.presentationClaimExpiresAt, "presentation claim");
+    rememberInteractiveRequest(ctx.sessionManager.getSessionId(), claim.receipt);
   }
 
   const contract = interactionContract(interaction);
@@ -616,7 +775,7 @@ async function claimPendingInteractionDelivery(
     claimExpiresAt,
     isStillDeliverable: () =>
       existingEntryId === undefined &&
-      interactionPresentationClaimIsLive({
+      interactionPresentationClaimIsLive(client, {
         requestId: interaction.requestId,
         runId: interaction.runId,
         presenterId: client.clientId,
@@ -664,7 +823,7 @@ async function claimPendingInteractionDelivery(
       );
     },
     settle: async (sessionEntryId) => {
-      await requestAccepted(client, {
+      const response = await requestAccepted(client, {
         operation: "interaction.update",
         requestId: `present-${interaction.requestId}-${sessionEntryId}`,
         idempotencyKey: `present-${interaction.requestId}-${sessionEntryId}`,
@@ -672,17 +831,26 @@ async function claimPendingInteractionDelivery(
         expectedRevision: presentationRevision,
         payload: { requestId: interaction.requestId, sessionEntryId },
       });
+      rememberInteractiveRequest(ctx.sessionManager.getSessionId(), response.receipt);
+      if (interaction.kind !== "decision") {
+        onPresented({
+          sessionId: ctx.sessionManager.getSessionId(),
+          runId: interaction.runId,
+          requestId: interaction.requestId,
+          deliveryId: `interaction:${interaction.requestId}`,
+          sessionEntryId,
+        });
+      }
     },
   };
 }
 
 async function claimPendingNotificationDelivery(
   pi: ExtensionAPI,
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
 ): Promise<ClaimedSessionDelivery | undefined> {
   const sessionId = ctx.sessionManager.getSessionId();
-  if (!hasClaimableNotification(sessionId)) return undefined;
   const claimRequestId = randomUUID();
   const claimed = await requestAccepted(client, {
     operation: "notification.claim",
@@ -746,13 +914,11 @@ async function claimPendingNotificationDelivery(
 
 async function claimPendingTurnDelivery(
   pi: ExtensionAPI,
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
 ): Promise<ClaimedSessionDelivery | undefined> {
   const sessionId = ctx.sessionManager.getSessionId();
-  if (pendingInteractionForSession(sessionId) !== undefined || !hasClaimableTurn(sessionId)) {
-    return undefined;
-  }
+  if (pendingInteractionForSession(sessionId) !== undefined) return undefined;
   const claimRequestId = randomUUID();
   const claimed = await requestAccepted(client, {
     operation: "turn.claim",
@@ -814,7 +980,7 @@ async function claimPendingTurnDelivery(
 }
 
 async function submitVisibleAssistantResponse(
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   ctx: ExtensionContext,
 ): Promise<void> {
   const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
@@ -845,171 +1011,85 @@ async function submitVisibleAssistantResponse(
       value: submission as unknown as JsonValue,
     },
   });
-  await waitForInteractionSubmission(interaction.requestId, `assistant-${responseId}`);
 }
 
-async function waitForInteractionSubmission(
-  requestId: string,
-  submissionId: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  const store = new HostStateStore(workflowStatePath(), { readOnly: true });
-  try {
-    for (;;) {
-      if (signal?.aborted === true) {
-        throw signal.reason ?? new Error("Workflow submission validation was cancelled");
-      }
-      const submission = store.interactionSubmission(requestId, submissionId);
-      if (submission?.outcome === "accepted" || submission?.outcome === "adopted") return;
-      if (submission?.outcome === "rejected") {
-        const receipt = isRecord(submission.receipt) ? submission.receipt : undefined;
-        throw new Error(
-          typeof receipt?.error === "string"
-            ? receipt.error
-            : "Workflow step output failed validation",
-        );
-      }
-      await waitForSubmissionPoll(signal);
-    }
-  } finally {
-    store.close();
-  }
-}
-
-async function waitForSubmissionPoll(signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted === true) {
-    throw signal.reason ?? new Error("Workflow submission was cancelled");
-  }
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(finish, SUBMISSION_POLL_MS);
-    const onAbort = () => finish(signal?.reason ?? new Error("Workflow submission was cancelled"));
-    function finish(error?: unknown) {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error === undefined) resolve();
-      else reject(error);
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
+function rememberInteractiveRequest(sessionId: string, value: unknown): void {
+  const current = parseInteractiveRequest(value);
+  const session = sessionSnapshots.get(sessionId);
+  if (current === undefined || session === undefined) return;
+  let found = false;
+  const pendingInteractions = session.pendingInteractions.map((item) => {
+    const stored = parseInteractiveRequest(item);
+    if (stored?.requestId !== current.requestId) return item;
+    found = true;
+    return current as unknown as JsonValue;
   });
+  if (found) sessionSnapshots.set(sessionId, { ...session, pendingInteractions });
 }
 
-function pendingInteractionForSession(sessionId: string): InteractiveRequestRecord | undefined {
-  try {
-    const store = new HostStateStore(workflowStatePath(), { readOnly: true });
-    try {
-      return store.listPendingInteractions(sessionId)[0];
-    } finally {
-      store.close();
-    }
-  } catch {
-    return undefined;
-  }
+function pendingInteractionForSession(sessionId: string): ClientInteractiveRequest | undefined {
+  return sessionSnapshots
+    .get(sessionId)
+    ?.pendingInteractions.map(parseInteractiveRequest)
+    .find((request): request is ClientInteractiveRequest => request !== undefined);
 }
 
-function pendingDecision(sessionId: string, runId?: string): InteractiveRequestRecord | undefined {
-  try {
-    const store = new HostStateStore(workflowStatePath(), { readOnly: true });
-    try {
-      return store
-        .listPendingInteractions(sessionId)
-        .find(
-          (request) =>
-            request.kind === "decision" && (runId === undefined || request.runId === runId),
-        );
-    } finally {
-      store.close();
-    }
-  } catch {
-    return undefined;
-  }
-}
-
-function hasClaimableNotification(sessionId: string): boolean {
-  try {
-    const store = new SqliteControllerStore(workflowStatePath(), { readOnly: true, global: true });
-    try {
-      return (
-        store.listPendingWorkflowNotifications({ targetSessionId: sessionId, limit: 1 }).length > 0
-      );
-    } finally {
-      store.close();
-    }
-  } catch {
-    return false;
-  }
-}
-
-function hasClaimableTurn(sessionId: string): boolean {
-  try {
-    const store = new SqliteControllerStore(workflowStatePath(), { readOnly: true, global: true });
-    try {
-      const now = Date.now();
-      return store
-        .listWorkflowTurnIntents({ targetSessionId: sessionId, unresolvedOnly: true, limit: 10 })
-        .some(
-          (intent) =>
-            intent.eligibleAt !== null &&
-            Date.parse(intent.eligibleAt) <= now &&
-            (intent.deliveryClaimExpiresAt === null ||
-              Date.parse(intent.deliveryClaimExpiresAt) <= now),
-        );
-    } finally {
-      store.close();
-    }
-  } catch {
-    return false;
-  }
+function pendingDecision(sessionId: string, runId?: string): ClientInteractiveRequest | undefined {
+  return sessionSnapshots
+    .get(sessionId)
+    ?.pendingInteractions.map(parseInteractiveRequest)
+    .find(
+      (request): request is ClientInteractiveRequest =>
+        request !== undefined &&
+        request.kind === "decision" &&
+        (runId === undefined || request.runId === runId),
+    );
 }
 
 function terminalRunState(runId: string): Record<string, unknown> | undefined {
-  try {
-    const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
-    try {
-      const loaded = store.readRun(runId);
-      return loaded === null ? undefined : (loaded.state as unknown as Record<string, unknown>);
-    } finally {
-      store.close();
-    }
-  } catch {
-    return undefined;
+  for (const session of sessionSnapshots.values()) {
+    if (session.run?.runId === runId && isRecord(session.run.state)) return session.run.state;
   }
+  return undefined;
 }
 
 function workflowRunPaused(runId: string): boolean {
-  return terminalRunState(runId)?.paused === true;
+  for (const session of sessionSnapshots.values()) {
+    if (session.run?.runId === runId) return session.run.display.status === "paused";
+  }
+  return false;
 }
 
-function interactionPresentationClaimIsLive(options: {
-  requestId: string;
-  runId: string;
-  presenterId: string;
-  revision: number;
-  claimExpiresAt: number;
-}): boolean {
+async function interactionPresentationClaimIsLive(
+  client: WorkflowClient,
+  options: {
+    requestId: string;
+    runId: string;
+    presenterId: string;
+    revision: number;
+    claimExpiresAt: number;
+  },
+): Promise<boolean> {
+  if (options.claimExpiresAt <= Date.now() || options.presenterId !== client.clientId) return false;
   try {
-    const store = new HostStateStore(workflowStatePath(), { readOnly: true });
-    try {
-      const interaction = store.getInteraction(options.requestId);
-      return (
-        interaction?.runId === options.runId &&
-        interaction.status === "presenting" &&
-        interaction.presenterId === options.presenterId &&
-        interaction.revision === options.revision &&
-        interaction.presentationSessionEntryId === null &&
-        interaction.presentationClaimExpiresAt !== null &&
-        Date.parse(interaction.presentationClaimExpiresAt) === options.claimExpiresAt &&
-        !workflowRunPaused(options.runId)
-      );
-    } finally {
-      store.close();
-    }
+    const response = await client.request({
+      operation: "interaction.update",
+      runId: options.runId,
+      expectedRevision: options.revision,
+      payload: { requestId: options.requestId, validatePresentation: true },
+    });
+    return (
+      (response.outcome === "accepted" || response.outcome === "adopted") &&
+      isRecord(response.receipt) &&
+      response.receipt.live === true
+    );
   } catch {
     return false;
   }
 }
 
 async function hostDeliveryClaimIsLive(
-  client: WorkflowHostClient,
+  client: WorkflowClient,
   options: {
     kind: "notification" | "turn";
     resourceId: string;
@@ -1100,20 +1180,13 @@ function activeSessionRun(ctx: ExtensionContext): WorkflowRunQueueRecord | undef
 }
 
 function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueRecord | undefined {
-  try {
-    const store = new SqliteControllerStore(workflowStatePath(), { readOnly: true, global: true });
-    try {
-      const run =
-        runId === undefined
-          ? store.findSessionReservation(ctx.sessionManager.getSessionId())
-          : store.getWorkflowRun(runId);
-      return run?.originSessionId === ctx.sessionManager.getSessionId() ? run : undefined;
-    } finally {
-      store.close();
-    }
-  } catch {
+  const session = sessionSnapshots.get(ctx.sessionManager.getSessionId());
+  if (session?.run === null || session?.run === undefined || !isRecord(session.run.queue)) {
     return undefined;
   }
+  if (runId !== undefined && session.run.runId !== runId) return undefined;
+  const queue = session.run.queue as unknown as WorkflowRunQueueRecord;
+  return queue.originSessionId === ctx.sessionManager.getSessionId() ? queue : undefined;
 }
 
 async function listWorkflowMetadata(cwd: string): Promise<Array<{ name: string; source: string }>> {
@@ -1157,9 +1230,9 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
 }
 
 async function requestAccepted(
-  client: WorkflowHostClient,
-  options: Parameters<WorkflowHostClient["request"]>[0],
-): Promise<HostResponse> {
+  client: WorkflowClient,
+  options: Parameters<WorkflowClient["request"]>[0],
+): Promise<ClientResponse> {
   await client.ensureRunning();
   const response = await client.request(options);
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
@@ -1168,12 +1241,12 @@ async function requestAccepted(
   return response;
 }
 
-function interactionContract(interaction: InteractiveRequestRecord): Record<string, unknown> {
+function interactionContract(interaction: ClientInteractiveRequest): Record<string, unknown> {
   if (!isRecord(interaction.contract)) throw new Error("Stored interaction contract is invalid");
   return interaction.contract;
 }
 
-function agentContract(interaction: InteractiveRequestRecord): AgentStepContract | undefined {
+function agentContract(interaction: ClientInteractiveRequest): AgentStepContract | undefined {
   const value = interactionContract(interaction).contract;
   if (
     !isRecord(value) ||
@@ -1294,6 +1367,30 @@ function toolResult(message: string, details: Record<string, unknown>) {
 
 function validRunId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value);
+}
+
+function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {
+  return (
+    isRecord(value) &&
+    value.schema === "pi-workflows.session-view.v1" &&
+    typeof value.sessionId === "string" &&
+    Array.isArray(value.pendingInteractions) &&
+    (value.run === null || isRecord(value.run))
+  );
+}
+
+function parseInteractiveRequest(value: unknown): ClientInteractiveRequest | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.requestId !== "string" ||
+    typeof value.runId !== "string" ||
+    typeof value.targetSessionId !== "string" ||
+    typeof value.revision !== "number" ||
+    (value.kind !== "agent" && value.kind !== "assistant" && value.kind !== "decision")
+  ) {
+    return undefined;
+  }
+  return value as unknown as ClientInteractiveRequest;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

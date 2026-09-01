@@ -1,160 +1,217 @@
-import { WorkflowRunStore, type LoadedWorkflowRun } from "../workflows/store.js";
-import {
-  maxDetailScroll,
-  renderRunDetailLines,
-  renderRunListLines,
-  type ViewportSize,
-} from "./render.js";
-import { watchStateDatabase } from "./watch.js";
+import type { WorkflowClient } from "../client/client.js";
+import { sanitizeText } from "../render/ansi.js";
+import type { JsonValue } from "../state/json.js";
 
 const ALT_SCREEN_ON = "\u001b[?1049h\u001b[?25l";
 const ALT_SCREEN_OFF = "\u001b[?25h\u001b[?1049l";
 const CLEAR = "\u001b[2J\u001b[H";
 
-type ViewerMode = { view: "list" } | { view: "detail"; runId: string };
-
 export type ViewerOptions = {
-  databasePath: string;
+  client: WorkflowClient;
   runId?: string | undefined;
-  /** Redraw interval for elapsed timers while a run is active. */
-  tickMs?: number;
 };
 
-function viewportSize(): ViewportSize {
-  return {
-    width: process.stdout.columns ?? 80,
-    height: process.stdout.rows ?? 24,
-  };
-}
-
-/**
- * Interactive live viewer. Watches the SQLite database and re-renders after
- * committed run changes. Returns when the user quits.
- */
+/** Interactive client view. All durable reads stay in the workflow host. */
 export async function runViewer(options: ViewerOptions): Promise<void> {
-  const store = new WorkflowRunStore(options.databasePath, { readOnly: true });
-  let mode: ViewerMode = { view: "list" };
-  let bundles: LoadedWorkflowRun[] = [];
-  let selectedIndex = 0;
-  let detailScroll = 0;
-  /** Replay position; null follows the latest step live. */
-  let selectedStep: number | null = null;
-  let detailStepCount = 0;
+  let value: JsonValue = options.runId === undefined ? [] : null;
+  let selected = 0;
+  let scroll = 0;
+  let mode: "runs" | "run" = options.runId === undefined ? "runs" : "run";
+  let unsubscribe: (() => Promise<void>) | undefined;
 
-  if (options.runId) {
-    bundles = store.listRuns();
-    const match = bundles.find((bundle) => bundle.state.runId === options.runId);
-    if (!match) {
-      throw new Error(`Run not found: ${options.runId}`);
-    }
-    mode = { view: "detail", runId: match.runId };
-  }
-
-  const draw = async () => {
-    bundles = store.listRuns();
-    selectedIndex = Math.min(selectedIndex, Math.max(0, bundles.length - 1));
-    const size = viewportSize();
-    const lines =
-      mode.view === "list"
-        ? renderRunListLines(bundles, selectedIndex, size)
-        : await renderDetail(mode.runId, size);
-    process.stdout.write(CLEAR + lines.join("\n"));
+  const draw = () => {
+    const width = process.stdout.columns ?? 100;
+    const height = Math.max(1, (process.stdout.rows ?? 24) - 1);
+    const lines = renderClientView(
+      value,
+      width,
+      height,
+      mode === "runs" ? selected : undefined,
+      scroll,
+    );
+    process.stdout.write(`${CLEAR}${lines.join("\n")}`);
   };
 
-  const renderDetail = async (runId: string, size: ViewportSize): Promise<string[]> => {
-    const bundle = store.readRun(runId, { includeTrace: true });
-    if (!bundle) {
-      return ["SQLite run state disappeared. Press q to go back."];
-    }
-    detailStepCount = bundle.state.steps.length;
-    if (selectedStep !== null && selectedStep >= detailStepCount - 1) {
-      // Scrubbed to (or past) the end: snap back to following live updates.
-      selectedStep = null;
-    }
-    detailScroll = Math.min(detailScroll, maxDetailScroll(bundle, size, selectedStep));
-    return renderRunDetailLines(bundle, size, new Date(), detailScroll, selectedStep);
+  const watchRuns = async () => {
+    await unsubscribe?.();
+    mode = "runs";
+    scroll = 0;
+    unsubscribe = await options.client.watchRuns((event) => {
+      value = event.payload;
+      selected = Math.min(selected, Math.max(0, arrayLength(value) - 1));
+      draw();
+    });
   };
+
+  const watchRun = async (runId: string) => {
+    await unsubscribe?.();
+    mode = "run";
+    scroll = 0;
+    unsubscribe = await options.client.watchRun(runId, (event) => {
+      value = event.payload;
+      draw();
+    });
+  };
+
+  if (options.runId === undefined) await watchRuns();
+  else await watchRun(options.runId);
 
   process.stdout.write(ALT_SCREEN_ON);
-  const stopWatching = watchStateDatabase(options.databasePath, () => {
-    void draw();
-  });
-  const ticker = setInterval(() => {
-    void draw();
-  }, options.tickMs ?? 1_000);
-
   const rawModeSupported = process.stdin.isTTY === true;
-  if (rawModeSupported) {
-    process.stdin.setRawMode(true);
-  }
+  if (rawModeSupported) process.stdin.setRawMode(true);
   process.stdin.resume();
-
   try {
     await new Promise<void>((resolve) => {
       const onKey = (data: Buffer) => {
         const key = data.toString("utf8");
-        if (key === "q" || key === "\u0003" || key === "\u001b") {
-          if (mode.view === "detail" && key === "q") {
-            mode = { view: "list" };
-            void draw();
-            return;
-          }
+        if (key === "\u0003" || key === "\u001b") {
           resolve();
           return;
         }
-        handleNavigationKey(key);
-      };
-
-      const handleNavigationKey = (key: string) => {
-        if (mode.view !== "list") {
-          if (key === "r") {
-            void draw();
-          } else if (key === "\u001b[A" || key === "k") {
-            detailScroll = Math.max(0, detailScroll - 1);
-            void draw();
-          } else if (key === "\u001b[B" || key === "j") {
-            // Clamped against the content height in renderDetail.
-            detailScroll += 1;
-            void draw();
-          } else if (key === "\u001b[D" || key === "h") {
-            const current = selectedStep ?? detailStepCount - 1;
-            selectedStep = Math.max(0, current - 1);
-            void draw();
-          } else if (key === "\u001b[C" || key === "l") {
-            // renderDetail snaps back to live once this reaches the end.
-            selectedStep = selectedStep === null ? null : selectedStep + 1;
-            void draw();
-          }
+        if (key === "q") {
+          if (mode === "run" && options.runId === undefined) void watchRuns();
+          else resolve();
           return;
         }
-        if (key === "\u001b[A" || key === "k") {
-          selectedIndex = Math.max(0, selectedIndex - 1);
-          void draw();
-        } else if (key === "\u001b[B" || key === "j") {
-          selectedIndex = Math.min(Math.max(0, bundles.length - 1), selectedIndex + 1);
-          void draw();
-        } else if (key === "\r" || key === "\n") {
-          const selected = bundles[selectedIndex];
-          if (selected) {
-            mode = { view: "detail", runId: selected.runId };
-            detailScroll = 0;
-            selectedStep = null;
-            void draw();
+        if (mode === "run") {
+          const page = Math.max(1, (process.stdout.rows ?? 24) - 2);
+          if (key === "\u001b[A" || key === "k") {
+            scroll = Math.max(0, scroll - 1);
+            draw();
+          } else if (key === "\u001b[B" || key === "j") {
+            scroll += 1;
+            draw();
+          } else if (key === "\u001b[5~") {
+            scroll = Math.max(0, scroll - page);
+            draw();
+          } else if (key === "\u001b[6~") {
+            scroll += page;
+            draw();
+          }
+        } else if (mode === "runs") {
+          if (key === "\u001b[A" || key === "k") {
+            selected = Math.max(0, selected - 1);
+            draw();
+          } else if (key === "\u001b[B" || key === "j") {
+            selected = Math.min(Math.max(0, arrayLength(value) - 1), selected + 1);
+            draw();
+          } else if (key === "\r" || key === "\n") {
+            const runId = selectedRunId(value, selected);
+            if (runId !== undefined) void watchRun(runId);
           }
         }
       };
-
       process.stdin.on("data", onKey);
-      void draw();
     });
   } finally {
-    clearInterval(ticker);
-    stopWatching();
-    store.close();
-    if (rawModeSupported) {
-      process.stdin.setRawMode(false);
-    }
+    await unsubscribe?.();
+    if (rawModeSupported) process.stdin.setRawMode(false);
     process.stdin.pause();
     process.stdout.write(ALT_SCREEN_OFF);
   }
+}
+
+export function renderClientView(
+  value: JsonValue,
+  width: number,
+  height: number,
+  selected: number | undefined,
+  scroll: number,
+): string[] {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return ["No workflow runs found."];
+    const selectedIndex = selected ?? 0;
+    const start = Math.min(
+      Math.max(0, selectedIndex - height + 1),
+      Math.max(0, value.length - height),
+    );
+    return value.slice(start, start + height).map((item, offset) => {
+      const index = start + offset;
+      const prefix = index === selected ? "> " : "  ";
+      return truncate(`${prefix}${summary(item)}`, width);
+    });
+  }
+  const lines = renderRun(value);
+  const start = Math.min(scroll, Math.max(0, lines.length - height));
+  return lines.slice(start, start + height).map((line) => truncate(line, width));
+}
+
+function renderRun(value: JsonValue): string[] {
+  if (!isRecord(value) || value.schema !== "pi-workflows.run-view.v1") {
+    return JSON.stringify(value, null, 2).split("\n");
+  }
+  const manifest = isRecord(value.manifest) ? value.manifest : {};
+  const state = isRecord(value.state) ? value.state : {};
+  const display = isRecord(value.display) ? value.display : {};
+  const workflowName =
+    typeof manifest.workflowName === "string"
+      ? sanitizeText(manifest.workflowName)
+      : typeof state.workflowName === "string"
+        ? sanitizeText(state.workflowName)
+        : "unknown";
+  const runId = typeof value.runId === "string" ? sanitizeText(value.runId) : "unknown";
+  const status = typeof display.status === "string" ? display.status : "unknown";
+  const lines = [
+    `workflow ${workflowName}`,
+    `${statusGlyph(status)} ${sanitizeText(status)} · run ${runId}`,
+  ];
+  if (typeof display.reason === "string") lines.push(`reason: ${sanitizeText(display.reason)}`);
+
+  const steps = Array.isArray(state.steps) ? state.steps : [];
+  if (steps.length > 0) {
+    lines.push("", "steps");
+    for (const step of steps) {
+      if (!isRecord(step)) continue;
+      const nodeId = typeof step.nodeId === "string" ? sanitizeText(step.nodeId) : "unknown";
+      const outcome = typeof step.outcome === "string" ? step.outcome : "unknown";
+      lines.push(`  ${stepGlyph(outcome)} ${nodeId} · ${sanitizeText(outcome)}`);
+    }
+  }
+  if (status === "completed" && Object.hasOwn(state, "finalOutput")) {
+    lines.push("", `output ${JSON.stringify(state.finalOutput)}`);
+  } else if (typeof state.error === "string") {
+    lines.push("", `error: ${sanitizeText(state.error)}`);
+  }
+  return lines;
+}
+
+function summary(value: JsonValue): string {
+  if (!isRecord(value)) return JSON.stringify(value);
+  const status = isRecord(value.display) ? value.display.status : undefined;
+  const name = typeof value.workflowName === "string" ? value.workflowName : "workflow";
+  const runId = typeof value.runId === "string" ? value.runId : "unknown";
+  return `${typeof status === "string" ? sanitizeText(status) : "unknown"}  ${sanitizeText(name)}  ${sanitizeText(runId)}`;
+}
+
+function statusGlyph(status: string): string {
+  if (status === "completed") return "✓";
+  if (status === "failed" || status === "timed_out" || status === "cancelled") return "✗";
+  if (status === "paused") return "‖";
+  if (status === "waiting") return "○";
+  if (status === "queued") return "…";
+  if (status === "ambiguous") return "!";
+  return "●";
+}
+
+function stepGlyph(outcome: string): string {
+  return outcome === "ok" ? "✓" : outcome === "failed" || outcome === "timed_out" ? "✗" : "○";
+}
+
+function selectedRunId(value: JsonValue, index: number): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const item = value[index];
+  return isRecord(item) && typeof item.runId === "string" ? item.runId : undefined;
+}
+
+function arrayLength(value: JsonValue): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function truncate(value: string, width: number): string {
+  if (value.length <= width) return value;
+  return width <= 1 ? value.slice(0, width) : `${value.slice(0, width - 1)}…`;
+}
+
+function isRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
