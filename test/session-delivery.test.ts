@@ -227,6 +227,40 @@ describe("SessionDeliveryCoordinator", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("does not adopt another presenter's entry through an expired retained claim", async () => {
+    vi.useFakeTimers();
+    const branch: Record<string, unknown>[] = [];
+    let idle = true;
+    const send = vi.fn();
+    const settle = vi.fn(async () => {});
+    const claim = vi
+      .fn<() => Promise<ClaimedSessionDelivery | undefined>>()
+      .mockImplementationOnce(async () => {
+        idle = false;
+        return {
+          deliveryId: "interaction:expired-adoption",
+          claimExpiresAt: Date.now() + 1_000,
+          isStillDeliverable: () => true,
+          findSessionEntryId: (entries) => (entries[0] as { id?: string } | undefined)?.id,
+          send,
+          settle,
+        };
+      })
+      .mockResolvedValue(undefined);
+    const coordinator = new SessionDeliveryCoordinator();
+    const ctx = context(branch, () => idle);
+
+    await coordinator.synchronize(ctx, [claim]);
+    await vi.advanceTimersByTimeAsync(1_001);
+    branch.push({ id: "entry-other-presenter" });
+    idle = true;
+    await coordinator.synchronize(ctx, [claim]);
+
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(send).not.toHaveBeenCalled();
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   it("reports an unproved send once without retrying it", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
