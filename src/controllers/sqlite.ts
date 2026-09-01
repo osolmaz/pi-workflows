@@ -1569,6 +1569,13 @@ export class SqliteControllerStore implements ControllerStore {
       if (row === undefined || row.status !== "parked") return false;
       const lease = this.requireLease(row.resourceId);
       if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
+      const pending = this.state.connection
+        .prepare(
+          `SELECT 1 FROM interactive_requests
+           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+        )
+        .get(options.runId);
+      if (pending === undefined) return false;
       if (row.paused === 1) return true;
       if (!["running", "waiting"].includes(row.runStatus)) return false;
       const changed = this.state.connection
