@@ -74,9 +74,11 @@ The closed display statuses are:
 
 Only the host computes this status. A parked queue is not a pause. `paused` requires the durable pause flag. An exact live worker or origin-session turn is `running`. An uncertain external effect that needs operator action is `ambiguous`. `unavailable` is a client connection condition, not a run status.
 
-The run list uses the same display object. An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view and ordered pending interaction records in one read.
+The run list uses the same display object. It reads only run status facts and does not load step, trace, or session history. An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view, ordered pending interaction records, and read-only notification and turn availability in one read. The Pi extension sends a durable claim command only when the matching availability fact is true. An idle session does not create empty claim or status commands.
 
-A snapshot contains at most 256 items for each large history. `view.page` returns another 256-item window centered on the requested cursor. Page responses use `pi-workflows.run-page.v1`. The client can request other cursors, so the complete logical history remains available.
+A snapshot page contains at most 256 items and also has a byte budget. `view.page` returns another byte-bounded window that contains the requested cursor. Page responses use `pi-workflows.run-page.v1`. A session-event page also carries the replay checkpoint for the exact sequence before its first item, so reducing the page does not lose earlier active messages or tool calls.
+
+Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, and SHA-256 digest. Clients reassemble and verify all chunks before display. A literal user object that looks like a content reference is escaped and restored as data. Other cursors and content references keep the complete logical history and result available.
 
 ## Subscriptions and reconnection
 

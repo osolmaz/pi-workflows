@@ -110,6 +110,12 @@ export type RunWriteAuthority = {
   leaseMs?: number;
 };
 
+export type WorkflowRunDisplayState = {
+  status: WorkflowRunState["status"];
+  paused: boolean;
+  error: string | null;
+};
+
 export type WorkflowRunStoreOptions = {
   authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
   /** Host-owned projection updates that must commit with each run snapshot. */
@@ -2287,6 +2293,44 @@ export class WorkflowRunStore {
       settingsScopes: this.settingsScopesForRunView(runId),
       followUpQueue: this.readFollowUpQueue(runId) ?? null,
     };
+  }
+
+  readDisplayState(runId: string): WorkflowRunDisplayState | null {
+    const row = this.readRunRow(runId);
+    if (row === undefined) return null;
+    return {
+      status: row.status as WorkflowRunState["status"],
+      paused: row.paused === 1,
+      error: row.errorHash === null ? null : this.readText(row.errorHash),
+    };
+  }
+
+  readSessionReplayCheckpoint(runId: string, throughSequence: number): JsonValue | null {
+    if (!Number.isSafeInteger(throughSequence) || throughSequence < 0) {
+      throw new Error("Session replay checkpoint sequence must be a non-negative integer");
+    }
+    if (throughSequence === 0) return null;
+    const row = this.state.connection
+      .prepare(
+        `SELECT event_seq AS eventSeq, state_hash AS stateHash
+         FROM viewer_session_checkpoints
+         WHERE run_id = ? AND event_seq <= ? ORDER BY event_seq DESC LIMIT 1`,
+      )
+      .get(runId, throughSequence);
+    let checkpoint = reduceSessionEvents([], [], 0);
+    if (isViewerSessionCheckpointRow(row)) {
+      const saved = this.state.readJson(row.stateHash);
+      if (!isTemporalSessionState(saved) || saved.throughSeq !== row.eventSeq) {
+        throw new Error(`Viewer session checkpoint is invalid for ${runId}`);
+      }
+      checkpoint = saved;
+    }
+    if (checkpoint.throughSeq < throughSequence) {
+      const events = this.sessionEventRecords(runId, checkpoint.throughSeq, throughSequence + 1);
+      checkpoint = reduceSessionEventsFromCheckpoint([], events, throughSequence, checkpoint);
+      checkpoint = boundedTemporalCheckpoint(checkpoint);
+    }
+    return parseJson(canonicalJson(checkpoint));
   }
 
   listRuns(options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun[] {

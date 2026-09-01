@@ -2198,6 +2198,24 @@ export class SqliteControllerStore implements ControllerStore {
     return claimed;
   }
 
+  hasClaimableWorkflowTurnIntent(options: { targetSessionId: string; now?: string }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    const row = this.state.connection
+      .prepare(
+        `SELECT 1 AS present
+         FROM turn_intents t
+         JOIN effects e ON e.effect_id = t.effect_id
+         JOIN leases l ON l.resource_id = e.resource_id
+         WHERE t.target_session_id = ? AND t.resolved_at IS NULL
+           AND t.eligible_at IS NOT NULL AND t.eligible_at <= ?
+           AND e.status = 'pending'
+           AND (l.owner_id IS NULL OR l.expires_at IS NULL OR l.expires_at <= ?)
+         LIMIT 1`,
+      )
+      .get(options.targetSessionId, now, now);
+    return row !== undefined;
+  }
+
   makeWorkflowTurnIntentEligible(options: {
     intentId: string;
     fallbackFacts: WorkflowTurnIntentFacts;
@@ -2352,6 +2370,22 @@ export class SqliteControllerStore implements ControllerStore {
       );
     });
     return this.requireNotification(options.runId, options.attemptId, options.notificationIndex);
+  }
+
+  hasClaimableWorkflowNotification(options: { targetSessionId: string; now?: string }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    const row = this.state.connection
+      .prepare(
+        `SELECT 1 AS present
+         FROM notifications n
+         JOIN effects e ON e.effect_id = n.effect_id
+         JOIN leases l ON l.resource_id = e.resource_id
+         WHERE n.target_session_id = ? AND e.status = 'pending'
+           AND (l.owner_id IS NULL OR l.expires_at IS NULL OR l.expires_at <= ?)
+         LIMIT 1`,
+      )
+      .get(options.targetSessionId, now);
+    return row !== undefined;
   }
 
   listPendingWorkflowNotifications(options: {

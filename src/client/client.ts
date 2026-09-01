@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -155,9 +155,9 @@ export class WorkflowClient {
     );
   }
 
-  async ensureRunning(): Promise<ClientResponse> {
+  async ensureAvailable(): Promise<ClientHello> {
     try {
-      return await this.request({ operation: "host.status" });
+      return await this.connect();
     } catch (error) {
       if (error instanceof WorkflowClientVersionError) throw error;
       this.resetConnection();
@@ -168,7 +168,7 @@ export class WorkflowClient {
     while (Date.now() < deadline) {
       await delay(50);
       try {
-        return await this.request({ operation: "host.status" });
+        return await this.connect();
       } catch (error) {
         lastError = error;
         this.resetConnection();
@@ -177,6 +177,132 @@ export class WorkflowClient {
     throw new Error(
       `Workflow host did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
     );
+  }
+
+  async ensureRunning(): Promise<ClientResponse> {
+    await this.ensureAvailable();
+    return await this.request({ operation: "host.status" });
+  }
+
+  async readContent(
+    runId: string,
+    contentPath: string,
+  ): Promise<{
+    mediaType: string;
+    content: Buffer;
+  }> {
+    await this.ensureAvailable();
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    let expectedBytes: number | undefined;
+    let expectedSha256: string | undefined;
+    let mediaType: string | undefined;
+    for (;;) {
+      const response = await this.request({
+        operation: "view.content",
+        runId,
+        payload: { path: contentPath, offset },
+      });
+      if (response.outcome !== "accepted" || !isRecord(response.receipt)) {
+        throw new Error(response.error ?? `Workflow content is unavailable: ${contentPath}`);
+      }
+      const receipt = response.receipt;
+      if (
+        receipt.path !== contentPath ||
+        receipt.offset !== offset ||
+        typeof receipt.data !== "string" ||
+        typeof receipt.mediaType !== "string" ||
+        typeof receipt.sha256 !== "string" ||
+        !Number.isSafeInteger(receipt.bytes) ||
+        (receipt.bytes as number) < 0 ||
+        !Number.isSafeInteger(receipt.nextOffset) ||
+        (receipt.nextOffset as number) < offset ||
+        typeof receipt.complete !== "boolean"
+      ) {
+        throw new Error("Workflow content receipt is invalid");
+      }
+      expectedBytes ??= receipt.bytes as number;
+      expectedSha256 ??= receipt.sha256;
+      mediaType ??= receipt.mediaType;
+      if (
+        expectedBytes !== receipt.bytes ||
+        expectedSha256 !== receipt.sha256 ||
+        mediaType !== receipt.mediaType
+      ) {
+        throw new Error("Workflow content identity changed during transfer");
+      }
+      const chunk = Buffer.from(receipt.data, "base64");
+      if (offset + chunk.byteLength !== receipt.nextOffset) {
+        throw new Error("Workflow content chunk offset is invalid");
+      }
+      chunks.push(chunk);
+      offset = receipt.nextOffset as number;
+      if (receipt.complete) break;
+    }
+    const content = Buffer.concat(chunks);
+    if (content.byteLength !== expectedBytes) throw new Error("Workflow content is incomplete");
+    const digest = createHash("sha256").update(content).digest("hex");
+    if (digest !== expectedSha256) throw new Error("Workflow content digest does not match");
+    return { mediaType: mediaType as string, content };
+  }
+
+  async hydrateContent(runId: string, value: JsonValue): Promise<JsonValue> {
+    return await this.hydrateContentValue(runId, value, new Map());
+  }
+
+  private async hydrateContentValue(
+    runId: string,
+    value: JsonValue,
+    reads: Map<string, Promise<{ mediaType: string; content: Buffer }>>,
+  ): Promise<JsonValue> {
+    if (isEscapedContent(value)) {
+      const escaped = value.$escaped;
+      if (isRecord(escaped)) {
+        const entries = await Promise.all(
+          Object.entries(escaped).map(
+            async ([key, item]) =>
+              [key, await this.hydrateContentValue(runId, item as JsonValue, reads)] as const,
+          ),
+        );
+        return Object.fromEntries(entries) as JsonValue;
+      }
+      return escaped;
+    }
+    if (isContentReference(value)) {
+      const contentPath = value.$artifact.path;
+      let read = reads.get(contentPath);
+      if (read === undefined) {
+        read = this.readContent(runId, contentPath);
+        reads.set(contentPath, read);
+      }
+      const loaded = await read;
+      if (
+        loaded.mediaType !== value.$artifact.mediaType ||
+        loaded.content.byteLength !== value.$artifact.bytes
+      ) {
+        throw new Error("Workflow content reference does not match its content");
+      }
+      const decoded =
+        loaded.mediaType === "application/json"
+          ? parseJson(loaded.content.toString("utf8"))
+          : loaded.content.toString("utf8");
+      return await this.hydrateContentValue(runId, decoded, reads);
+    }
+    if (Array.isArray(value)) {
+      return await Promise.all(
+        value.map(async (item) => await this.hydrateContentValue(runId, item, reads)),
+      );
+    }
+    if (isRecord(value)) {
+      const entries = await Promise.all(
+        Object.entries(value).map(
+          async ([key, item]) =>
+            [key, await this.hydrateContentValue(runId, item as JsonValue, reads)] as const,
+        ),
+      );
+      return Object.fromEntries(entries) as JsonValue;
+    }
+    return value;
   }
 
   async resolveWorkflow(options: {
@@ -581,6 +707,33 @@ function delay(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
+}
+
+type ContentReference = {
+  $artifact: {
+    path: string;
+    mediaType: string;
+    bytes: number;
+    sha256: string;
+  };
+};
+
+function isEscapedContent(value: JsonValue): value is JsonValue & { $escaped: JsonValue } {
+  return isRecord(value) && Object.keys(value).length === 1 && Object.hasOwn(value, "$escaped");
+}
+
+function isContentReference(value: JsonValue): value is ContentReference {
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value.$artifact)) {
+    return false;
+  }
+  const artifact = value.$artifact;
+  return (
+    typeof artifact.path === "string" &&
+    typeof artifact.mediaType === "string" &&
+    Number.isSafeInteger(artifact.bytes) &&
+    (artifact.bytes as number) >= 0 &&
+    typeof artifact.sha256 === "string"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

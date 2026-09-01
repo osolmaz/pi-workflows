@@ -5,7 +5,7 @@ import { WorkflowClient } from "../src/client/client.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import piWorkflows from "../src/extension/index.js";
 import { HostStateStore } from "../src/host/state.js";
-import { workflowStatePath } from "../src/state/database.js";
+import { StateDatabase, workflowStatePath } from "../src/state/database.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
@@ -284,6 +284,23 @@ function stepContract(entry: Record<string, unknown>): { nodeId: string; attempt
 }
 
 describe("pi-workflows hosted extension", () => {
+  it("does not write durable claim commands while an idle session has no delivery", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    await fake.emit("session_shutdown");
+
+    const state = new StateDatabase({ filePath: workflowStatePath(), mode: "read-only" });
+    try {
+      expect(state.connection.prepare("SELECT count(*) AS count FROM host_commands").get()).toEqual(
+        { count: 0 },
+      );
+    } finally {
+      state.close();
+    }
+  }, 30_000);
+
   it("starts, presents, updates, and completes an interactive hosted run", async () => {
     const { cwd, workflowPath } = await setupProject();
     const fake = makePi({ cwd });

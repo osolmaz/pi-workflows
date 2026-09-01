@@ -2245,6 +2245,11 @@ fn resolve_remote_artifacts(
 ) -> Value {
     if let Some(artifact) = crate::state::types::as_artifact_ref(value) {
         return match artifacts.get(&artifact.path) {
+            Some(Ok(content)) if artifact.media_type == "application/json" => {
+                serde_json::from_str(content).unwrap_or_else(|error| {
+                    Value::String(format!("«artifact error: invalid JSON: {error}»"))
+                })
+            }
             Some(Ok(content)) => Value::String(content.clone()),
             Some(Err(error)) => Value::String(format!("«artifact error: {error}»")),
             None => value.clone(),

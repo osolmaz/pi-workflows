@@ -2,7 +2,7 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkflowClient, WorkflowClientVersionError } from "../src/client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
@@ -83,6 +83,67 @@ describe("WorkflowClient", () => {
     await expect(client.request({ operation: "host.status" })).rejects.toThrow(
       "Workflow client is closed",
     );
+  });
+
+  it("hydrates repeated content references once and preserves escaped user values", async () => {
+    const client = new WorkflowClient();
+    const content = Buffer.from('{"answer":"complete"}', "utf8");
+    const read = vi
+      .spyOn(client, "readContent")
+      .mockImplementation(async (_runId, path) =>
+        path.endsWith(".txt")
+          ? { mediaType: "text/plain", content: Buffer.from("plain text", "utf8") }
+          : { mediaType: "application/json", content },
+      );
+    const reference = {
+      $artifact: {
+        path: "artifacts/sha256/content.json",
+        mediaType: "application/json",
+        bytes: content.byteLength,
+        sha256: "unused-by-hydration",
+      },
+    } as const;
+    const textReference = {
+      $artifact: {
+        path: "artifacts/sha256/content.txt",
+        mediaType: "text/plain",
+        bytes: 10,
+        sha256: "unused-by-hydration",
+      },
+    } as const;
+    await expect(
+      client.hydrateContent("run-content", {
+        first: reference,
+        second: reference,
+        array: [reference, "inline"],
+        text: textReference,
+        userValue: {
+          $escaped: {
+            $artifact: {
+              path: "user-path",
+              mediaType: "user-type",
+              bytes: 1,
+              sha256: "user-digest",
+            },
+          },
+        },
+      }),
+    ).resolves.toEqual({
+      first: { answer: "complete" },
+      second: { answer: "complete" },
+      array: [{ answer: "complete" }, "inline"],
+      text: "plain text",
+      userValue: {
+        $artifact: {
+          path: "user-path",
+          mediaType: "user-type",
+          bytes: 1,
+          sha256: "user-digest",
+        },
+      },
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    await client.close();
   });
 
   it("reports a package mismatch without trying to replace the live host", async () => {
