@@ -350,6 +350,11 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("agent_end", {
       messages: [
         {
+          role: "custom",
+          customType: fake.sent[0]?.customType,
+          details: fake.sent[0]?.details,
+        },
+        {
           role: "assistant",
           stopReason: "error",
           errorMessage: "This operation was aborted",
@@ -395,6 +400,42 @@ describe("pi-workflows hosted extension", () => {
         output: { reply: "continued" },
       }),
     ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
+  it("does not pause a waiting step for an unrelated interrupted turn", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const abort = new AbortController();
+    abort.abort();
+    const fake = makePi({ cwd, signal: abort.signal });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+
+    await fake.emit("agent_end", {
+      messages: [
+        { role: "user", content: "Unrelated request" },
+        {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "This operation was aborted",
+        },
+      ],
+    });
+
+    const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+    try {
+      expect(store.listRuns()[0]?.state.paused).not.toBe(true);
+    } finally {
+      store.close();
+    }
+    expect(
+      fake.notifications.some((notification) =>
+        notification.message.includes("paused because its model turn was interrupted"),
+      ),
+    ).toBe(false);
+
+    await fake.runCommand("cancel");
     await fake.emit("session_shutdown");
   }, 60_000);
 
@@ -630,6 +671,13 @@ describe("pi-workflows hosted extension", () => {
       }),
     ).rejects.toThrow(/Protected human decisions/);
 
+    await fake.runCommand("pause");
+    await fake.runCommand('answer {"choice":"approve"}');
+    expect(fake.notifications.at(-1)).toMatchObject({
+      message: expect.stringContaining("Workflow run is paused"),
+      level: "error",
+    });
+    await fake.runCommand("resume");
     await fake.runCommand('answer {"choice":"approve"}');
     expect(fake.notifications).toContainEqual(
       expect.objectContaining({ message: "Human decision answer accepted." }),

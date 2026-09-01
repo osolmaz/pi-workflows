@@ -311,10 +311,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     ) {
       return;
     }
-    const branchHasPrompt = ctx.sessionManager
-      .getBranch()
-      .some((entry) => interactionRequestId(entry) === interaction.requestId);
-    if (interaction.presentationSessionEntryId === null && !branchHasPrompt) return;
+    const turnHasPrompt = event.messages.some(
+      (message) => interactionRequestId(message) === interaction.requestId,
+    );
+    if (!turnHasPrompt) return;
     try {
       const pauseId = `escape-pause-${interaction.runId}-${randomUUID()}`;
       await requestAccepted(client, {
@@ -1111,7 +1111,11 @@ function agentContract(interaction: InteractiveRequestRecord): AgentStepContract
 }
 
 function interactionRequestId(value: unknown): string | undefined {
-  if (!isRecord(value) || value.type !== "custom_message" || !isRecord(value.details)) {
+  if (
+    !isRecord(value) ||
+    (value.type !== "custom_message" && value.role !== "custom") ||
+    !isRecord(value.details)
+  ) {
     return undefined;
   }
   return typeof value.details.requestId === "string" ? value.details.requestId : undefined;

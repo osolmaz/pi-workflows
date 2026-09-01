@@ -938,6 +938,9 @@ export class WorkflowHost {
     if (interaction === undefined || interaction.kind !== "decision") {
       return { outcome: "notFound", error: `Decision request not found: ${requestId}` };
     }
+    if (this.queue.isWorkflowRunPaused(interaction.runId)) {
+      return { outcome: "conflict", error: "Workflow run is paused" };
+    }
     const request = interaction.contract as unknown as HumanDecisionRequest;
     const response = payload.response as HumanDecisionResponse;
     const accepted = this.decisions.acceptSync(request, {

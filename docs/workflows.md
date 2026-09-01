@@ -480,11 +480,13 @@ worker. Other paused or parked work gets a new claim generation and worker.
 With no resumable run, the host rejects the request.
 
 The origin Pi session shows its active run in the workflow widget. `Shift+Up`
-and `Shift+Down` scroll it. If Escape aborts a model turn that belongs to a
+and `Shift+Down` scroll it. If Escape aborts the model turn started by a
 presented workflow interaction, the extension detects the public context abort
 signal and pauses that run through the host. It also accepts Pi's public
-`aborted` stop reason. The paused run does not accept updates or submissions
-until `resume`.
+`aborted` stop reason. The matching `agent_end` event must contain the workflow
+prompt, so an unrelated interrupted turn cannot pause old pending work. The
+paused run does not accept updates, submissions, or decision answers until
+`resume`.
 
 `status` reports the durable queue projection. A host command succeeds only
 after its transaction commits. The protocol stores request fingerprints and
