@@ -3,10 +3,11 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WorkflowClient } from "../client/client.js";
+import { materializeRunView } from "../client/materialize.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
 import type { JsonValue } from "../state/json.js";
 import { verifyInactiveBackup } from "./backup.js";
-import { materializeRunView, renderClientView, runViewer } from "./tui.js";
+import { renderClientView, runViewer } from "./tui.js";
 
 const USAGE = `pi-workflows — workflow runs and controller resources
 

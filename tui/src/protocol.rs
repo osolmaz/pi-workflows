@@ -1,7 +1,7 @@
 //! Strict version-1 client envelopes shared by local and remote piw transports.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub const PROTOCOL_ID: &str = "pi-workflows.client.v1";
 
@@ -222,23 +222,64 @@ pub fn encode_request(request: &ClientRequest) -> Result<String, String> {
 }
 
 pub fn canonical_json(value: &Value) -> Result<String, String> {
-    serde_json::to_string(&sorted_value(value)).map_err(|error| error.to_string())
+    let mut output = String::new();
+    write_canonical_json(value, &mut output)?;
+    Ok(output)
 }
 
-fn sorted_value(value: &Value) -> Value {
+fn write_canonical_json(value: &Value, output: &mut String) -> Result<(), String> {
     match value {
-        Value::Object(object) => {
-            let mut keys: Vec<&String> = object.keys().collect();
-            keys.sort();
-            let mut sorted = Map::new();
-            for key in keys {
-                sorted.insert(key.clone(), sorted_value(&object[key]));
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => output.push_str(&canonical_number(value)?),
+        Value::String(value) => output.push_str(
+            &serde_json::to_string(value)
+                .map_err(|error| format!("invalid JSON string: {error}"))?,
+        ),
+        Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_canonical_json(value, output)?;
             }
-            Value::Object(sorted)
+            output.push(']');
         }
-        Value::Array(array) => Value::Array(array.iter().map(sorted_value).collect()),
-        _ => value.clone(),
+        Value::Object(object) => {
+            output.push('{');
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(
+                    &serde_json::to_string(key)
+                        .map_err(|error| format!("invalid JSON key: {error}"))?,
+                );
+                output.push(':');
+                write_canonical_json(&object[key], output)?;
+            }
+            output.push('}');
+        }
     }
+    Ok(())
+}
+
+fn canonical_number(value: &serde_json::Number) -> Result<String, String> {
+    if let Some(value) = value.as_i64() {
+        return Ok(value.to_string());
+    }
+    if let Some(value) = value.as_u64() {
+        return Ok(value.to_string());
+    }
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "JSON number is not finite".to_string())?;
+    let mut buffer = ryu_js::Buffer::new();
+    Ok(buffer.format_finite(value).to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -398,6 +439,18 @@ fn remove_path(target: &mut Value, path: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn canonical_json_matches_ecmascript_numbers_and_utf16_key_order() {
+        let numbers: Value =
+            serde_json::from_str("[1e20,1e21,1e-6,1e-7,-0,333333333.33333329]").unwrap();
+        assert_eq!(
+            canonical_json(&numbers).unwrap(),
+            "[100000000000000000000,1e+21,0.000001,1e-7,0,333333333.3333333]"
+        );
+        let keys: Value = serde_json::from_str("{\"\":1,\"𐀀\":2}").unwrap();
+        assert_eq!(canonical_json(&keys).unwrap(), "{\"𐀀\":2,\"\":1}");
+    }
 
     #[test]
     fn applies_replace_append_and_remove() {

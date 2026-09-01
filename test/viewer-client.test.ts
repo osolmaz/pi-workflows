@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkflowClient } from "../src/client/client.js";
+import { materializeRunView } from "../src/client/materialize.js";
 import type { JsonValue } from "../src/state/json.js";
-import { materializeRunView, renderClientView } from "../src/viewer/tui.js";
+import { renderClientView } from "../src/viewer/tui.js";
 
 describe("host client renderer", () => {
   it("materializes paged history and referenced content", async () => {
@@ -9,6 +10,14 @@ describe("host client renderer", () => {
       const hydrated = structuredClone(value) as Record<string, JsonValue>;
       const state = hydrated.state as Record<string, JsonValue>;
       state.finalOutput = { ready: true };
+      const workflow = hydrated.workflow as Record<string, JsonValue>;
+      workflow.content = {
+        schema: "pi-workflows.definition-snapshot.v1",
+        name: "paged",
+        startAt: "one",
+        nodes: { one: { nodeType: "compute" }, two: { nodeType: "compute" } },
+        edges: [{ from: "one", to: "two" }],
+      };
       return hydrated;
     });
     const request = vi.fn(async () => ({
@@ -42,6 +51,17 @@ describe("host client renderer", () => {
       },
       stepStart: 2,
       stepTotal: 3,
+      graphCursor: 2,
+      graphSteps: [{ nodeId: "three", outcome: "ok" }],
+      takenTransitions: [],
+      workflow: {
+        schema: "pi-workflows.definition-snapshot.v1",
+        name: "paged",
+        startAt: "one",
+        nodes: {},
+        edges: [],
+        content: { $artifact: { path: "content/workflow.json" } },
+      },
       tracePage: { start: 0, total: 0, items: [] },
       session: {
         entryPage: { start: 0, total: 0, items: [] },
@@ -70,6 +90,16 @@ describe("host client renderer", () => {
       { nodeId: "three", outcome: "ok" },
     ]);
     expect((materialized.state as Record<string, JsonValue>).finalOutput).toEqual({ ready: true });
+    expect(materialized.graphSteps).toEqual([
+      { nodeId: "one", outcome: "ok" },
+      { nodeId: "two", outcome: "ok" },
+      { nodeId: "three", outcome: "ok" },
+    ]);
+    expect(materialized.takenTransitions).toEqual(["one->two", "two->three"]);
+    expect((materialized.workflow as Record<string, JsonValue>).nodes).toEqual({
+      one: { nodeType: "compute" },
+      two: { nodeType: "compute" },
+    });
     expect(hydrateContent).toHaveBeenCalledOnce();
   });
 
