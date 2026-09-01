@@ -508,6 +508,36 @@ export class WorkflowHost {
         case "view.runs.watch":
           this.addSubscription(connection, request, "runs");
           return clientResponse(request.requestId, "accepted", { subscribed: true });
+        case "view.runs.page": {
+          const payload = requireRecord(request.payload, "view.runs.page payload");
+          const revision = requireString(payload.revision, "revision");
+          const page = this.views.list(
+            requireNonNegativeInteger(payload.cursor, "cursor"),
+            payload.limit === undefined
+              ? undefined
+              : requirePositiveInteger(payload.limit, "limit"),
+          );
+          return page.revision === revision
+            ? clientResponse(request.requestId, "accepted", toJsonValue(page))
+            : clientResponse(
+                request.requestId,
+                "conflict",
+                toJsonValue(page),
+                "Workflow run list changed while paging",
+              );
+        }
+        case "view.run.get": {
+          const view = this.views.run(requireRunId(request));
+          return view === null
+            ? clientResponse(request.requestId, "notFound", undefined, "Workflow run not found")
+            : clientResponse(
+                request.requestId,
+                "accepted",
+                toJsonValue(view),
+                undefined,
+                view.revision,
+              );
+        }
         case "view.run.watch":
           this.addSubscription(connection, request, "run", requireRunId(request));
           return clientResponse(request.requestId, "accepted", { subscribed: true });
@@ -541,7 +571,11 @@ export class WorkflowHost {
             : clientResponse(
                 request.requestId,
                 "accepted",
-                runPageReceipt(view, kind as WorkflowPageKind),
+                runPageReceipt(
+                  view,
+                  kind as WorkflowPageKind,
+                  requireNonNegativeInteger(payload.cursor, "cursor"),
+                ),
                 undefined,
                 view.revision,
               );
@@ -564,7 +598,7 @@ export class WorkflowHost {
         case "interaction.submit":
           return await this.submitInteractionAndWait(request);
         case "state.status":
-          return clientResponse(request.requestId, "accepted", this.statusReceipt());
+          return clientResponse(request.requestId, "accepted", this.stateStatusReceipt());
         case "state.verify":
           this.state.integrityCheck();
           return clientResponse(request.requestId, "accepted", { valid: true });
@@ -629,7 +663,7 @@ export class WorkflowHost {
       for (const subscription of connection.subscriptions.values()) {
         const payload =
           subscription.kind === "runs"
-            ? toJsonValue(this.views.list(subscription.limit))
+            ? toJsonValue(this.views.list(0, subscription.limit))
             : subscription.kind === "run"
               ? toJsonValue(this.views.run(subscription.target ?? ""))
               : toJsonValue(this.views.session(subscription.target ?? ""));
@@ -917,6 +951,8 @@ export class WorkflowHost {
       case "decision.answer":
         return this.answerDecision(request, afterCommit);
       case "view.runs.watch":
+      case "view.runs.page":
+      case "view.run.get":
       case "view.run.watch":
       case "view.run.unwatch":
       case "view.page":
@@ -1041,6 +1077,39 @@ export class WorkflowHost {
            OR (r.status = 'cancelled' AND q.status = 'cancelled')
          )`,
       ),
+    };
+  }
+
+  private stateStatusReceipt(): JsonValue {
+    const count = (sql: string, ...params: unknown[]): number => {
+      const row = this.state.connection.prepare(sql).get(...params) as
+        | { count?: unknown }
+        | undefined;
+      return typeof row?.count === "number" ? row.count : 0;
+    };
+    const now = Date.now();
+    return {
+      sizeBytes: fs.statSync(this.databasePath).size,
+      counts: {
+        resources: count("SELECT COUNT(*) AS count FROM resources"),
+        runs: count("SELECT COUNT(*) AS count FROM runs"),
+        controllers: count("SELECT COUNT(*) AS count FROM controller_resources"),
+        decisions: count("SELECT COUNT(*) AS count FROM human_decisions"),
+        settingsScopes: count("SELECT COUNT(*) AS count FROM workflow_settings"),
+        pendingInteractions: count(
+          "SELECT COUNT(*) AS count FROM interactive_requests WHERE status IN ('pending', 'presenting')",
+        ),
+        pendingFollowUps: count(
+          "SELECT COUNT(*) AS count FROM workflow_follow_ups WHERE status IN ('queued', 'pending_presentation', 'ready')",
+        ),
+        activeLeases: count(
+          "SELECT COUNT(*) AS count FROM leases WHERE owner_id IS NOT NULL AND expires_at > ?",
+          now,
+        ),
+        unsettledEffects: count(
+          "SELECT COUNT(*) AS count FROM effects WHERE status IN ('pending', 'applying', 'ambiguous')",
+        ),
+      },
     };
   }
 
@@ -3228,12 +3297,13 @@ function hostDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind): JsonValue {
+function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind, cursor: number): JsonValue {
   const base = {
     schema: "pi-workflows.run-page.v1",
     runId: view.runId,
     revision: view.revision,
     kind,
+    cursor,
   };
   if (kind === "steps") {
     const state = requireRecord(view.state, "run state view");

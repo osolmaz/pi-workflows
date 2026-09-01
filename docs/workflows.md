@@ -126,6 +126,13 @@ pi-workflows host run
 `host run` stays attached. The other commands start, inspect, or stop the
 on-demand process. No command installs an operating-system service.
 
+The extension, CLI, and `piw` use the same version-1 client protocol. The host
+sends byte-bounded run-list and run-view pages. Clients collect a complete run
+list for one revision and reject stale run pages whose cursor or revision no
+longer matches. The host reads only the selected history ranges and reuses an
+unchanged subscribed view after a lightweight revision check. Large values stay
+available through verified content chunks.
+
 A worker verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes
 from committed state through a host-backed store. A source mismatch parks the
@@ -193,7 +200,10 @@ For submitted output, the engine appends the existing workflow-tool contract.
 The host checks the durable transport identifiers, stores a `validating`
 submission, and starts a supervised worker. In that worker, the output passes
 through tolerant JSON normalization and then `validate`. The tool reports
-success only after this check accepts the output. Rejected submissions return
+success only after this check accepts the output. If the tool turn is aborted,
+the client stops waiting but does not cancel the durable host command. A retry
+uses a new transport request ID with the same durable submission identity and
+adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
 without submitting, the durable request stays pending until it receives valid
 output, times out, or is cancelled. For assistant-message output, the engine appends a normal-response contract,

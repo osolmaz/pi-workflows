@@ -253,22 +253,55 @@ export default defineWorkflow({
   return workflowPath;
 }
 
-async function writeDeliveryWorkflow(cwd: string): Promise<string> {
-  const workflowPath = path.join(cwd, "delivery.workflow.ts");
+async function writeDeliveryWorkflow(
+  cwd: string,
+  options: {
+    stem?: string;
+    name?: string;
+    presentationPrompt?: string;
+    notification?: string;
+  } = {},
+): Promise<string> {
+  const workflowPath = path.join(cwd, `${options.stem ?? "delivery"}.workflow.ts`);
   await fs.writeFile(
     workflowPath,
     `import { compute, defineWorkflow, notify } from ${JSON.stringify(
       path.resolve("src/workflows/index.ts"),
     )};
 export default defineWorkflow({
-  name: "extension-delivery",
-  presentationPrompt: "Explain the completed delivery result.",
+  name: ${JSON.stringify(options.name ?? "extension-delivery")},
+  presentationPrompt: ${JSON.stringify(
+    options.presentationPrompt ?? "Explain the completed delivery result.",
+  )},
   startAt: "notify",
   nodes: {
-    notify: notify({ message: () => "Passive hosted update." }),
+    notify: notify({ message: () => ${JSON.stringify(
+      options.notification ?? "Passive hosted update.",
+    )} }),
     done: compute({ run: () => ({ complete: true }) }),
   },
   edges: [{ from: "notify", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeTerminalWorkflow(
+  cwd: string,
+  options: { stem: string; name: string; presentationPrompt: string },
+): Promise<string> {
+  const workflowPath = path.join(cwd, `${options.stem}.workflow.ts`);
+  await fs.writeFile(
+    workflowPath,
+    `import { compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: ${JSON.stringify(options.name)},
+  presentationPrompt: ${JSON.stringify(options.presentationPrompt)},
+  startAt: "done",
+  nodes: { done: compute({ run: () => ({ complete: true }) }) },
+  edges: [],
 });\n`,
   );
   return workflowPath;
@@ -762,6 +795,79 @@ describe("pi-workflows hosted extension", () => {
     });
     await fake.emit("session_shutdown");
   }, 60_000);
+
+  it("delivers each claimed terminal turn from its exact run", async () => {
+    const { cwd } = await setupProject();
+    const firstPath = await writeTerminalWorkflow(cwd, {
+      stem: "terminal-first",
+      name: "extension-terminal-first",
+      presentationPrompt: "Present the first completed run.",
+    });
+    const secondPath = await writeTerminalWorkflow(cwd, {
+      stem: "terminal-second",
+      name: "extension-terminal-second",
+      presentationPrompt: "Present the second completed run.",
+    });
+    const fake = makePi({ cwd, persistSentMessages: false });
+    await fake.emit("session_start");
+    await fake.runCommand(firstPath);
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store
+          .listWorkflowRuns()
+          .some((run) => run.workflowName === "extension-terminal-first" && run.status === "done");
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await fake.runCommand(secondPath);
+    await waitUntil(() => {
+      const store = new SqliteControllerStore(workflowStatePath(), {
+        readOnly: true,
+        global: true,
+      });
+      try {
+        return store.listWorkflowRuns().filter((run) => run.status === "done").length === 2;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await fake.emit("agent_settled");
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) =>
+            entry.customType === "pi-workflows-presentation" &&
+            typeof entry.content === "string" &&
+            entry.content.includes("Present the first completed run."),
+        ),
+      30_000,
+    );
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-presentation"),
+    ).toHaveLength(1);
+    fake.flushSentMessages();
+    await fake.emit("agent_settled");
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) =>
+            entry.customType === "pi-workflows-presentation" &&
+            typeof entry.content === "string" &&
+            entry.content.includes("Present the second completed run."),
+        ),
+      30_000,
+    );
+    expect(
+      fake.sent.filter((entry) => entry.customType === "pi-workflows-presentation"),
+    ).toHaveLength(2);
+    await fake.emit("session_shutdown");
+  }, 90_000);
 
   it("applies controller resources through the host and a source resolver child", async () => {
     const { cwd } = await setupProject();

@@ -260,6 +260,12 @@ enum ArtifactEntry {
     Error(String),
 }
 
+struct RunListAssembly {
+    revision: String,
+    total: u64,
+    items: Vec<Value>,
+}
+
 #[derive(Default)]
 struct Shared {
     connected: bool,
@@ -267,7 +273,9 @@ struct Shared {
     reconnect_attempt: u32,
     error: Option<String>,
     summaries: Vec<Value>,
-    raw_views: HashMap<String, (u64, u64, Value)>,
+    run_list: Option<RunListAssembly>,
+    run_list_request: Option<(String, u64)>,
+    raw_views: HashMap<String, (u64, u64, u64, Value)>,
     next_view_generation: u64,
     watched: HashSet<String>,
     page_requests: HashMap<(String, PageKind), u64>,
@@ -405,7 +413,7 @@ impl RemoteRuns {
 
     pub fn view(&mut self, run_id: &str) -> Option<&RemoteView> {
         let raw = self.shared.lock().unwrap().raw_views.get(run_id).cloned();
-        let Some((revision, generation, raw)) = raw else {
+        let Some((_, revision, generation, raw)) = raw else {
             self.decoded.remove(run_id);
             return None;
         };
@@ -549,7 +557,7 @@ fn reconcile_requests(
     sent: &mut HashSet<String>,
     counter: &mut u64,
 ) -> Vec<ClientRequest> {
-    let (watched, pages, contents, revisions) = {
+    let (watched, pages, contents, revisions, run_list_request) = {
         let state = shared.lock().unwrap();
         (
             state.watched.clone(),
@@ -558,8 +566,9 @@ fn reconcile_requests(
             state
                 .raw_views
                 .iter()
-                .map(|(run_id, (revision, _, _))| (run_id.clone(), *revision))
+                .map(|(run_id, (_, revision, _, _))| (run_id.clone(), *revision))
                 .collect::<HashMap<_, _>>(),
+            state.run_list_request.clone(),
         )
     };
     let mut requests = Vec::new();
@@ -571,6 +580,23 @@ fn reconcile_requests(
             json!({"subscriptionId":"runs"}),
         ));
         sent.insert("runs".to_string());
+    }
+    sent.retain(|key| {
+        !key.starts_with("runs-page:")
+            || run_list_request
+                .as_ref()
+                .is_some_and(|(revision, cursor)| key == &format!("runs-page:{revision}:{cursor}"))
+    });
+    if let Some((revision, cursor)) = run_list_request {
+        let key = format!("runs-page:{revision}:{cursor}");
+        if sent.insert(key) {
+            requests.push(request(
+                counter,
+                "view.runs.page",
+                None,
+                json!({"revision":revision,"cursor":cursor}),
+            ));
+        }
     }
     let removals: Vec<String> = sent
         .iter()
@@ -669,9 +695,7 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
         }
         ServerMessage::Event(event) => match event.event.as_str() {
             "runs" => {
-                if let Some(runs) = event.payload.as_array() {
-                    shared.lock().unwrap().summaries = runs.clone();
-                }
+                start_run_list(&mut shared.lock().unwrap(), &event.payload)?;
             }
             "run_snapshot" => {
                 let Some(run_id) = event.run_id else {
@@ -690,11 +714,17 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
                 };
                 let targets: Vec<TargetPatch> = serde_json::from_value(event.payload)?;
                 let mut state = shared.lock().unwrap();
-                if let Some((revision, generation, view)) = state.raw_views.get_mut(&run_id) {
-                    if event.revision == Some(*revision + 1)
+                if let Some((event_revision, view_revision, generation, view)) =
+                    state.raw_views.get_mut(&run_id)
+                {
+                    if event.revision == Some(*event_revision + 1)
                         && apply_target_patches(view, &targets).is_ok()
                     {
-                        *revision += 1;
+                        *event_revision += 1;
+                        *view_revision = view
+                            .get("revision")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(view_revision.saturating_add(1));
                         *generation = generation.wrapping_add(1);
                     }
                 }
@@ -706,8 +736,17 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
                 shared.lock().unwrap().error = response.error;
             } else if let Some(receipt) = response.receipt {
                 match receipt.get("schema").and_then(Value::as_str) {
+                    Some("pi-workflows.run-list-page.v1") => {
+                        if response.outcome == "accepted" {
+                            merge_run_list(&mut shared.lock().unwrap(), &receipt)?;
+                        } else {
+                            shared.lock().unwrap().run_list_request = None;
+                        }
+                    }
                     Some("pi-workflows.run-page.v1") => {
-                        merge_page(&mut shared.lock().unwrap(), &receipt)?;
+                        if response.outcome == "accepted" {
+                            merge_page(&mut shared.lock().unwrap(), &receipt)?;
+                        }
                     }
                     Some("pi-workflows.content-chunk.v1") => {
                         merge_content(&mut shared.lock().unwrap(), &receipt)?;
@@ -716,6 +755,96 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn start_run_list(state: &mut Shared, page: &Value) -> Result<()> {
+    let revision = page
+        .get("revision")
+        .and_then(Value::as_str)
+        .context("run list page has no revision")?
+        .to_string();
+    let start = page
+        .get("start")
+        .and_then(Value::as_u64)
+        .context("run list page has no start")?;
+    let total = page
+        .get("total")
+        .and_then(Value::as_u64)
+        .context("run list page has no total")?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .context("run list page items are not an array")?;
+    anyhow::ensure!(start == 0, "run list snapshot does not start at zero");
+    anyhow::ensure!(
+        items.len() as u64 <= total,
+        "run list page exceeds its total"
+    );
+    if items.len() as u64 == total {
+        state.summaries = items;
+        state.run_list = None;
+        state.run_list_request = None;
+    } else {
+        anyhow::ensure!(!items.is_empty(), "run list page made no progress");
+        let cursor = items.len() as u64;
+        state.run_list = Some(RunListAssembly {
+            revision: revision.clone(),
+            total,
+            items,
+        });
+        state.run_list_request = Some((revision, cursor));
+    }
+    Ok(())
+}
+
+fn merge_run_list(state: &mut Shared, page: &Value) -> Result<()> {
+    let revision = page
+        .get("revision")
+        .and_then(Value::as_str)
+        .context("run list page has no revision")?;
+    let start = page
+        .get("start")
+        .and_then(Value::as_u64)
+        .context("run list page has no start")?;
+    let total = page
+        .get("total")
+        .and_then(Value::as_u64)
+        .context("run list page has no total")?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .context("run list page items are not an array")?;
+    let Some(assembly) = state.run_list.as_mut() else {
+        return Ok(());
+    };
+    if assembly.revision != revision {
+        return Ok(());
+    }
+    let expected = assembly.items.len() as u64;
+    anyhow::ensure!(
+        start == expected,
+        "run list page does not continue the snapshot"
+    );
+    anyhow::ensure!(
+        total == assembly.total,
+        "run list total changed while paging"
+    );
+    anyhow::ensure!(!items.is_empty(), "run list page made no progress");
+    assembly.items.extend(items);
+    anyhow::ensure!(
+        assembly.items.len() as u64 <= assembly.total,
+        "run list page exceeds its total"
+    );
+    if assembly.items.len() as u64 == assembly.total {
+        state.summaries = std::mem::take(&mut assembly.items);
+        state.run_list = None;
+        state.run_list_request = None;
+    } else {
+        state.run_list_request = Some((revision.to_string(), assembly.items.len() as u64));
     }
     Ok(())
 }
@@ -829,9 +958,24 @@ fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .context("run page items are not an array")?;
-    let Some((_, generation, view)) = state.raw_views.get_mut(run_id) else {
+    let page_kind = page_kind(kind).context("run page kind is invalid")?;
+    let cursor = receipt
+        .get("cursor")
+        .and_then(Value::as_u64)
+        .context("run page has no cursor")?;
+    let revision = receipt
+        .get("revision")
+        .and_then(Value::as_u64)
+        .context("run page has no revision")?;
+    if state.page_requests.get(&(run_id.to_string(), page_kind)) != Some(&cursor) {
+        return Ok(());
+    }
+    let Some((_, view_revision, generation, view)) = state.raw_views.get_mut(run_id) else {
         return Ok(());
     };
+    if *view_revision != revision {
+        return Ok(());
+    }
 
     match kind {
         "steps" => {
@@ -905,12 +1049,30 @@ fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
     Ok(())
 }
 
-fn store_snapshot(state: &mut Shared, run_id: String, revision: u64, value: Value) {
+fn store_snapshot(state: &mut Shared, run_id: String, event_revision: u64, value: Value) {
     state.next_view_generation = state.next_view_generation.wrapping_add(1);
     let generation = state.next_view_generation;
+    let view_revision = value
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(event_revision);
     state
         .raw_views
-        .insert(run_id, (revision, generation, value));
+        .insert(run_id, (event_revision, view_revision, generation, value));
+}
+
+fn page_kind(value: &str) -> Option<PageKind> {
+    match value {
+        "steps" => Some(PageKind::Steps),
+        "trace" => Some(PageKind::Trace),
+        "trace_at_step" => Some(PageKind::TraceAtStep),
+        "session_entries" => Some(PageKind::SessionEntries),
+        "session_events" => Some(PageKind::SessionEvents),
+        "settings" => Some(PageKind::Settings),
+        "follow_ups" => Some(PageKind::FollowUps),
+        "updates" => Some(PageKind::Updates),
+        _ => None,
+    }
 }
 
 fn page_name(kind: PageKind) -> &'static str {
@@ -1007,6 +1169,7 @@ mod tests {
             "run-1".to_string(),
             (
                 3,
+                3,
                 1,
                 json!({
                     "state":{"steps":[],"updates":[]},
@@ -1017,6 +1180,18 @@ mod tests {
                 }),
             ),
         );
+        state
+            .page_requests
+            .insert(("run-1".to_string(), PageKind::Settings), 44);
+        state
+            .page_requests
+            .insert(("run-1".to_string(), PageKind::Steps), 0);
+        state
+            .page_requests
+            .insert(("run-1".to_string(), PageKind::FollowUps), 2);
+        state
+            .page_requests
+            .insert(("run-1".to_string(), PageKind::SessionEvents), 256);
         merge_page(
             &mut state,
             &json!({
@@ -1024,6 +1199,7 @@ mod tests {
                 "runId":"run-1",
                 "revision":3,
                 "kind":"settings",
+                "cursor":44,
                 "start":44,
                 "total":300,
                 "items":[{"change":299}]
@@ -1037,6 +1213,7 @@ mod tests {
                 "runId":"run-1",
                 "revision":3,
                 "kind":"steps",
+                "cursor":0,
                 "start":0,
                 "total":1,
                 "items":[{"step":0}],
@@ -1053,6 +1230,7 @@ mod tests {
                 "runId":"run-1",
                 "revision":3,
                 "kind":"follow_ups",
+                "cursor":2,
                 "start":2,
                 "total":3,
                 "items":[{"followUpId":"follow-3"}]
@@ -1066,6 +1244,7 @@ mod tests {
                 "runId":"run-1",
                 "revision":3,
                 "kind":"session_events",
+                "cursor":256,
                 "start":256,
                 "total":300,
                 "items":[{"seq":257}],
@@ -1073,7 +1252,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let (_, generation, view) = state.raw_views.get("run-1").unwrap();
+        let (_, _, generation, view) = state.raw_views.get("run-1").unwrap();
         assert_eq!(*generation, 5);
         assert_eq!(view["settingsStart"], 44);
         assert_eq!(view["settingsScopes"], json!([{"change":299}]));
@@ -1087,13 +1266,97 @@ mod tests {
     }
 
     #[test]
+    fn stale_run_pages_cannot_replace_the_requested_window() {
+        let mut state = Shared::default();
+        state.raw_views.insert(
+            "run-1".to_string(),
+            (
+                1,
+                3,
+                1,
+                json!({"state":{"steps":[]},"graphSteps":[],"takenTransitions":[]}),
+            ),
+        );
+        state
+            .page_requests
+            .insert(("run-1".to_string(), PageKind::Steps), 20);
+        let receipt = |cursor: u64, revision: u64, item: u64| {
+            json!({
+                "schema":"pi-workflows.run-page.v1",
+                "runId":"run-1",
+                "revision":revision,
+                "kind":"steps",
+                "cursor":cursor,
+                "start":cursor,
+                "total":100,
+                "items":[{"step":item}],
+                "graphSteps":[],
+                "graphCursor":cursor,
+                "takenTransitions":[]
+            })
+        };
+        merge_page(&mut state, &receipt(10, 3, 10)).unwrap();
+        merge_page(&mut state, &receipt(20, 2, 2)).unwrap();
+        assert_eq!(state.raw_views["run-1"].2, 1);
+        merge_page(&mut state, &receipt(20, 3, 20)).unwrap();
+        assert_eq!(state.raw_views["run-1"].2, 2);
+        assert_eq!(
+            state.raw_views["run-1"].3["state"]["steps"],
+            json!([{"step":20}])
+        );
+    }
+
+    #[test]
+    fn paged_run_lists_publish_only_complete_matching_revisions() {
+        let mut state = Shared::default();
+        start_run_list(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.run-list-page.v1",
+                "revision":"3:10:20",
+                "start":0,
+                "total":3,
+                "items":[{"runId":"run-1"},{"runId":"run-2"}]
+            }),
+        )
+        .unwrap();
+        assert!(state.summaries.is_empty());
+        assert_eq!(state.run_list_request, Some(("3:10:20".to_string(), 2)));
+        merge_run_list(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.run-list-page.v1",
+                "revision":"stale",
+                "start":2,
+                "total":3,
+                "items":[{"runId":"stale"}]
+            }),
+        )
+        .unwrap();
+        assert!(state.summaries.is_empty());
+        merge_run_list(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.run-list-page.v1",
+                "revision":"3:10:20",
+                "start":2,
+                "total":3,
+                "items":[{"runId":"run-3"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(state.summaries.len(), 3);
+        assert!(state.run_list_request.is_none());
+    }
+
+    #[test]
     fn page_requests_can_return_to_an_earlier_window() {
         let shared = Arc::new(Mutex::new(Shared::default()));
         shared
             .lock()
             .unwrap()
             .raw_views
-            .insert("run-1".to_string(), (7, 1, json!({})));
+            .insert("run-1".to_string(), (7, 7, 1, json!({})));
         let mut sent = HashSet::new();
         let mut counter = 0;
         let request_at = |cursor: u64,

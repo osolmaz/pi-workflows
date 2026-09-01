@@ -28,6 +28,8 @@ const OPERATIONS: &[&str] = &[
     "host.status",
     "host.stop",
     "view.runs.watch",
+    "view.runs.page",
+    "view.run.get",
     "view.run.watch",
     "view.run.unwatch",
     "view.page",
