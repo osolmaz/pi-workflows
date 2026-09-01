@@ -530,6 +530,12 @@ export class WorkflowHost {
           if (active.control === "pause") {
             return { outcome: "adopted", receipt: { runId, status: "parked", paused: true } };
           }
+          if (active.control === "handoff") {
+            const paused = this.queue.pauseParkedWorkflowRun({ runId });
+            return paused
+              ? { outcome: "accepted", receipt: { runId, status: "parked", paused: true } }
+              : { outcome: "rejected", error: "Run handoff is not pausable" };
+          }
           if (active.control !== undefined) {
             return { outcome: "rejected", error: `Run is already handling ${active.control}` };
           }
