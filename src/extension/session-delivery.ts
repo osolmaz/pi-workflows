@@ -48,6 +48,7 @@ export class SessionDeliveryCoordinator {
 
         const existingEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
         if (existingEntryId !== undefined) {
+          if (delivery.claimExpiresAt <= Date.now()) return;
           this.rememberQueued(delivery);
           await this.settleDelivery(ctx, delivery.deliveryId, existingEntryId);
           return;
@@ -75,6 +76,10 @@ export class SessionDeliveryCoordinator {
   ): Promise<boolean> {
     const delivery = this.claimed;
     if (delivery === undefined) return false;
+    if (delivery.claimExpiresAt <= Date.now()) {
+      this.claimed = undefined;
+      return false;
+    }
 
     const existingEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
     if (existingEntryId !== undefined) {
@@ -82,10 +87,6 @@ export class SessionDeliveryCoordinator {
       this.claimed = undefined;
       await this.settleDelivery(ctx, delivery.deliveryId, existingEntryId);
       return true;
-    }
-    if (delivery.claimExpiresAt <= Date.now()) {
-      this.claimed = undefined;
-      return false;
     }
     if (!ctx.isIdle() || ctx.hasPendingMessages()) return true;
     if (!(await delivery.isStillDeliverable())) {
