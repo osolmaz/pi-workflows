@@ -68,9 +68,9 @@ The widget will:
 
 ## Escape and pause
 
-The extension will use Pi's documented `agent_end` event. It will act only when:
+The extension will use Pi's documented `agent_end` event and public extension context abort signal. It will act only when:
 
-- the turn ended with stop reason `aborted`;
+- the active context signal is aborted, or an assistant message has stop reason `aborted`;
 - the origin session has a pending agent or assistant interaction;
 - the matching workflow prompt is recorded in durable state or present in the active Pi branch; and
 - the run is not already paused.

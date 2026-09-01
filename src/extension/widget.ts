@@ -86,7 +86,7 @@ export function buildWidgetView(
   // `held` covers pauses the state cannot see yet: an escape-interrupted
   // step or a pause requested while the current node is still finishing.
   const paused = held || state.paused === true;
-  const glyph = paused ? "⏸" : STATUS_GLYPHS[state.status];
+  const glyph = paused ? "⏸" : (STATUS_GLYPHS[state.status] ?? "·");
   const statusText = paused ? "paused" : state.status;
   // Titles, status details, and errors can carry model- or shell-controlled
   // text; never let escape sequences or newlines reach the terminal.
@@ -398,7 +398,7 @@ function elapsedSince(startedAt: string | undefined, now: Date): string | null {
   return formatDuration(Math.max(0, now.getTime() - started));
 }
 
-function statusTone(status: WorkflowRunStatus): ThemeColor {
+function statusTone(status: string): ThemeColor {
   switch (status) {
     case "completed":
       return "success";
@@ -409,6 +409,7 @@ function statusTone(status: WorkflowRunStatus): ThemeColor {
     case "waiting":
       return "warning";
     case "running":
+    default:
       return "accent";
   }
 }

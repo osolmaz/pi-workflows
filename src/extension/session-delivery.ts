@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type ClaimedSessionDelivery = {
   deliveryId: string;
+  claimExpiresAt: number;
   findSessionEntryId: (entries: readonly unknown[]) => string | undefined;
   send: () => void;
   settle: (sessionEntryId: string) => Promise<void>;
@@ -26,6 +27,7 @@ const SESSION_ENTRY_CONFIRMATION_MS = 10_000;
  */
 export class SessionDeliveryCoordinator {
   private readonly queued = new Map<string, QueuedSessionDelivery>();
+  private claimed: ClaimedSessionDelivery | undefined;
   private synchronizing = false;
 
   async synchronize(
@@ -36,6 +38,7 @@ export class SessionDeliveryCoordinator {
     this.synchronizing = true;
     try {
       if (await this.settleQueued(ctx)) return;
+      if (await this.sendClaimed(ctx)) return;
       if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 
       for (const claim of claimers) {
@@ -48,28 +51,11 @@ export class SessionDeliveryCoordinator {
           return;
         }
 
-        // The host claim is asynchronous. Pi can start another turn while that
-        // request is in flight, so check again immediately before the
-        // synchronous send. An unused claim expires and is never sent later.
-        if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
-
-        this.queued.set(delivery.deliveryId, {
-          delivery,
-          queuedAt: Date.now(),
-          ambiguityReported: false,
-        });
-        try {
-          delivery.send();
-        } catch (error) {
-          this.queued.delete(delivery.deliveryId);
-          throw error;
-        }
-
-        const insertedEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
-        if (insertedEntryId !== undefined) {
-          this.queued.delete(delivery.deliveryId);
-          await delivery.settle(insertedEntryId);
-        }
+        // Remember the host claim before the final idle check. If Pi starts a
+        // turn while the claim request is in flight, a later poll can use this
+        // exact still-live claim instead of making a conflicting second claim.
+        this.claimed = delivery;
+        await this.sendClaimed(ctx);
         return;
       }
     } finally {
@@ -78,7 +64,46 @@ export class SessionDeliveryCoordinator {
   }
 
   clear(): void {
+    this.claimed = undefined;
     this.queued.clear();
+  }
+
+  private async sendClaimed(
+    ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager" | "ui">,
+  ): Promise<boolean> {
+    const delivery = this.claimed;
+    if (delivery === undefined) return false;
+
+    const existingEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
+    if (existingEntryId !== undefined) {
+      this.claimed = undefined;
+      await delivery.settle(existingEntryId);
+      return true;
+    }
+    if (delivery.claimExpiresAt <= Date.now()) {
+      this.claimed = undefined;
+      return false;
+    }
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) return true;
+
+    this.queued.set(delivery.deliveryId, {
+      delivery,
+      queuedAt: Date.now(),
+      ambiguityReported: false,
+    });
+    this.claimed = undefined;
+    try {
+      delivery.send();
+    } catch (error) {
+      this.queued.delete(delivery.deliveryId);
+      throw error;
+    }
+
+    const insertedEntryId = delivery.findSessionEntryId(ctx.sessionManager.getBranch());
+    if (insertedEntryId !== undefined) {
+      await this.settleDelivery(ctx, delivery.deliveryId, insertedEntryId);
+    }
+    return true;
   }
 
   private async settleQueued(
@@ -103,9 +128,29 @@ export class SessionDeliveryCoordinator {
         }
         return true;
       }
-      this.queued.delete(deliveryId);
-      await queued.delivery.settle(sessionEntryId);
+      await this.settleDelivery(ctx, deliveryId, sessionEntryId);
     }
     return hadQueuedDelivery;
+  }
+
+  private async settleDelivery(
+    ctx: Pick<ExtensionContext, "ui">,
+    deliveryId: string,
+    sessionEntryId: string,
+  ): Promise<void> {
+    const queued = this.queued.get(deliveryId);
+    if (queued === undefined) return;
+    try {
+      await queued.delivery.settle(sessionEntryId);
+      this.queued.delete(deliveryId);
+    } catch (error) {
+      if (!queued.ambiguityReported) {
+        queued.ambiguityReported = true;
+        ctx.ui.notify(
+          `Workflow session delivery ${deliveryId} is visible but its durable receipt is ambiguous: ${String(error)}. Do not retry it until recovery checks the session history.`,
+          "warning",
+        );
+      }
+    }
   }
 }

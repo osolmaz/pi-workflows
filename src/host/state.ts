@@ -65,6 +65,8 @@ export type InteractiveRequestRecord = {
   contract: JsonValue;
   revision: number;
   status: "pending" | "presenting" | "settled" | "cancelled";
+  presenterId: string | null;
+  presentationClaimExpiresAt: string | null;
   presentationSessionEntryId: string | null;
   acceptedSubmissionId: string | null;
   createdAt: string;
@@ -886,7 +888,9 @@ export class HostStateStore {
       .prepare(
         `SELECT request_id AS requestId, run_id AS runId, attempt_id AS attemptId,
                 target_session_id AS targetSessionId, kind, contract_hash AS contractHash,
-                revision, status, presentation_session_entry_id AS presentationSessionEntryId,
+                revision, status, presenter_id AS presenterId,
+                presentation_claim_expires_at AS presentationClaimExpiresAt,
+                presentation_session_entry_id AS presentationSessionEntryId,
                 accepted_submission_id AS acceptedSubmissionId, created_at AS createdAt,
                 updated_at AS updatedAt, settled_at AS settledAt, consumed_at AS consumedAt
          FROM interactive_requests WHERE request_id = ?`,
@@ -902,6 +906,8 @@ export class HostStateStore {
       contract: this.state.readJson(row.contractHash),
       revision: row.revision,
       status: row.status,
+      presenterId: row.presenterId,
+      presentationClaimExpiresAt: iso(row.presentationClaimExpiresAt),
       presentationSessionEntryId: row.presentationSessionEntryId,
       acceptedSubmissionId: row.acceptedSubmissionId,
       createdAt: new Date(row.createdAt).toISOString(),
@@ -997,6 +1003,8 @@ type InteractiveRequestRow = {
   contractHash: Buffer;
   revision: number;
   status: InteractiveRequestRecord["status"];
+  presenterId: string | null;
+  presentationClaimExpiresAt: number | null;
   presentationSessionEntryId: string | null;
   acceptedSubmissionId: string | null;
   createdAt: number;
@@ -1115,6 +1123,8 @@ function isInteractiveRequestRow(value: unknown): value is InteractiveRequestRow
     Buffer.isBuffer(value.contractHash) &&
     typeof value.revision === "number" &&
     ["pending", "presenting", "settled", "cancelled"].includes(value.status as string) &&
+    nullableString(value.presenterId) &&
+    nullableNumber(value.presentationClaimExpiresAt) &&
     nullableString(value.presentationSessionEntryId) &&
     nullableString(value.acceptedSubmissionId) &&
     typeof value.createdAt === "number" &&
