@@ -9,8 +9,6 @@ pub mod protocol;
 pub mod render;
 pub mod server;
 pub mod session;
-pub mod source;
-mod source_loader;
 pub mod state;
 pub mod theme;
 pub mod ui;

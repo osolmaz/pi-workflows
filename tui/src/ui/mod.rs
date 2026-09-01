@@ -17,8 +17,6 @@ use crate::render::{
     render_graph, render_graph_with_layout, GraphNodeStyle, GraphView, NodeBounds, RenderedGraph,
 };
 use crate::session::{assess_capture, CaptureIntegrity};
-use crate::source::RunSource;
-use crate::state::reader::with_artifact_placeholders;
 use crate::state::types::{
     DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, SessionCapture,
     SessionEntryRecord, SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
@@ -39,7 +37,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const LOCAL_REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 const PLAY_STEP_INTERVAL: Duration = Duration::from_millis(700);
 const DEFAULT_NODE_STYLE: GraphNodeStyle = GraphNodeStyle::Box;
 const DEFAULT_SIDEBAR_WIDTH: u16 = 34;
@@ -101,10 +98,6 @@ pub struct RunData<'a> {
 }
 
 pub enum Provider {
-    Local {
-        source: Box<RunSource>,
-        last_refresh: Instant,
-    },
     Remote(RemoteRuns),
 }
 
@@ -137,128 +130,63 @@ fn parse_run_summary(summary: &Value) -> Option<RunSummary> {
 }
 
 impl Provider {
-    fn tick(&mut self) {
-        if let Provider::Local {
-            source,
-            last_refresh,
-        } = self
-        {
-            source.drain();
-            if last_refresh.elapsed() >= LOCAL_REFRESH_INTERVAL {
-                source.refresh_all();
-                *last_refresh = Instant::now();
-            }
-        }
-    }
+    fn tick(&mut self) {}
 
     fn ensure_watch(&mut self, run_id: &str) {
-        match self {
-            Provider::Local { source, .. } => {
-                let _ = source.select(run_id);
-            }
-            Provider::Remote(remote) => remote.watch(run_id),
-        }
+        let Provider::Remote(remote) = self;
+        remote.watch(run_id);
     }
 
     fn summaries(&self) -> Vec<RunSummary> {
-        match self {
-            Provider::Local { source, .. } => source
-                .summaries()
-                .iter()
-                .filter_map(parse_run_summary)
-                .collect(),
-            Provider::Remote(remote) => remote
-                .summaries()
-                .iter()
-                .filter_map(parse_run_summary)
-                .collect(),
-        }
+        let Provider::Remote(remote) = self;
+        remote
+            .summaries()
+            .iter()
+            .filter_map(parse_run_summary)
+            .collect()
     }
 
     fn data(&mut self, run_id: &str) -> Option<RunData<'_>> {
-        match self {
-            Provider::Local { source, .. } => {
-                let entry = source.get(run_id)?;
-                Some(RunData {
-                    graph_revision: entry.graph_revision,
-                    state: &entry.state,
-                    graph_steps: &entry.graph_steps,
-                    taken_transitions: &entry.taken_transitions,
-                    graph_cursor: entry.graph_cursor,
-                    step_start: entry.step_start,
-                    step_total: entry.step_total,
-                    snapshot: entry.snapshot.as_ref(),
-                    graph_layout: entry.graph_layout.as_ref(),
-                    events: &entry.events,
-                    trace_start: entry.trace_start,
-                    trace_total: entry.trace_total,
-                    session_bound: valid_session_binding(entry.session_binding.as_ref()),
-                    session_entries: &entry.session_entries,
-                    session_entry_start: entry.session_entry_start,
-                    session_entry_total: entry.session_entry_total,
-                    session_events: &entry.session_events,
-                    session_event_start: entry.session_event_start,
-                    session_event_total: entry.session_event_total,
-                    session_events_malformed: entry.session_events_malformed,
-                    session_events_torn_tail: entry.session_events_torn_tail,
-                    session_capture: entry.session_capture.as_ref(),
-                    session_replay_checkpoint: entry.session_replay_checkpoint.as_ref(),
-                    settings_scopes: &entry.settings_scopes,
-                    settings_start: entry.settings_start,
-                    settings_total: entry.settings_total,
-                    follow_up_queue: entry.follow_up_queue.as_ref(),
-                    follow_up_start: entry.follow_up_start,
-                    follow_up_total: entry.follow_up_total,
-                    update_start: entry.update_start,
-                    update_total: entry.update_total,
-                    live: entry.live,
-                    possibly_interrupted: entry.possibly_interrupted,
-                    run_dir: Some(&entry.dir),
-                    remote_artifacts: HashMap::new(),
-                })
-            }
-            Provider::Remote(remote) => {
-                let remote_artifacts = remote.artifact_snapshot(run_id);
-                let view = remote.view(run_id)?;
-                Some(RunData {
-                    graph_revision: view.graph_revision,
-                    state: &view.state,
-                    graph_steps: &view.graph_steps,
-                    taken_transitions: &view.taken_transitions,
-                    graph_cursor: view.graph_cursor,
-                    step_start: view.step_start,
-                    step_total: view.step_total,
-                    snapshot: view.snapshot.as_ref(),
-                    graph_layout: view.graph_layout.as_ref(),
-                    events: &view.events,
-                    trace_start: view.trace_start,
-                    trace_total: view.trace_total,
-                    session_bound: valid_session_binding(view.session_binding.as_ref()),
-                    session_entries: &view.session_entries,
-                    session_entry_start: view.session_entry_start,
-                    session_entry_total: view.session_entry_total,
-                    session_events: &view.session_events,
-                    session_event_start: view.session_event_start,
-                    session_event_total: view.session_event_total,
-                    session_events_malformed: view.session_events_malformed,
-                    session_events_torn_tail: view.session_events_torn_tail,
-                    session_capture: view.session_capture.as_ref(),
-                    session_replay_checkpoint: view.session_replay_checkpoint.as_ref(),
-                    settings_scopes: &view.settings_scopes,
-                    settings_start: view.settings_start,
-                    settings_total: view.settings_total,
-                    follow_up_queue: view.follow_up_queue.as_ref(),
-                    follow_up_start: view.follow_up_start,
-                    follow_up_total: view.follow_up_total,
-                    update_start: view.update_start,
-                    update_total: view.update_total,
-                    live: view.live,
-                    possibly_interrupted: view.possibly_interrupted,
-                    run_dir: None,
-                    remote_artifacts,
-                })
-            }
-        }
+        let Provider::Remote(remote) = self;
+        let remote_artifacts = remote.artifact_snapshot(run_id);
+        let view = remote.view(run_id)?;
+        Some(RunData {
+            graph_revision: view.graph_revision,
+            state: &view.state,
+            graph_steps: &view.graph_steps,
+            taken_transitions: &view.taken_transitions,
+            graph_cursor: view.graph_cursor,
+            step_start: view.step_start,
+            step_total: view.step_total,
+            snapshot: view.snapshot.as_ref(),
+            graph_layout: view.graph_layout.as_ref(),
+            events: &view.events,
+            trace_start: view.trace_start,
+            trace_total: view.trace_total,
+            session_bound: valid_session_binding(view.session_binding.as_ref()),
+            session_entries: &view.session_entries,
+            session_entry_start: view.session_entry_start,
+            session_entry_total: view.session_entry_total,
+            session_events: &view.session_events,
+            session_event_start: view.session_event_start,
+            session_event_total: view.session_event_total,
+            session_events_malformed: view.session_events_malformed,
+            session_events_torn_tail: view.session_events_torn_tail,
+            session_capture: view.session_capture.as_ref(),
+            session_replay_checkpoint: view.session_replay_checkpoint.as_ref(),
+            settings_scopes: &view.settings_scopes,
+            settings_start: view.settings_start,
+            settings_total: view.settings_total,
+            follow_up_queue: view.follow_up_queue.as_ref(),
+            follow_up_start: view.follow_up_start,
+            follow_up_total: view.follow_up_total,
+            update_start: view.update_start,
+            update_total: view.update_total,
+            live: view.live,
+            possibly_interrupted: view.possibly_interrupted,
+            run_dir: None,
+            remote_artifacts,
+        })
     }
 
     fn request_window(
@@ -269,40 +197,19 @@ impl Provider {
         session_entry: Option<u64>,
         session_event: Option<u64>,
     ) {
-        match self {
-            Provider::Local { source, .. } => {
-                let mut cursor = source.cursor(run_id);
-                if let Some(value) = step {
-                    cursor.step = Some(value);
-                    cursor.trace_step = Some(value);
-                }
-                if let Some(value) = trace {
-                    cursor.trace = Some(value);
-                    cursor.trace_step = None;
-                }
-                if let Some(value) = session_entry {
-                    cursor.session_entry = Some(value);
-                }
-                if let Some(value) = session_event {
-                    cursor.session_event = Some(value);
-                }
-                let _ = source.request_window(run_id, cursor);
-            }
-            Provider::Remote(remote) => {
-                if let Some(cursor) = step {
-                    remote.request_page(run_id, PageKind::Steps, cursor);
-                    remote.request_page(run_id, PageKind::TraceAtStep, cursor);
-                }
-                if let Some(cursor) = trace {
-                    remote.request_page(run_id, PageKind::Trace, cursor);
-                }
-                if let Some(cursor) = session_entry {
-                    remote.request_page(run_id, PageKind::SessionEntries, cursor);
-                }
-                if let Some(cursor) = session_event {
-                    remote.request_page(run_id, PageKind::SessionEvents, cursor);
-                }
-            }
+        let Provider::Remote(remote) = self;
+        if let Some(cursor) = step {
+            remote.request_page(run_id, PageKind::Steps, cursor);
+            remote.request_page(run_id, PageKind::TraceAtStep, cursor);
+        }
+        if let Some(cursor) = trace {
+            remote.request_page(run_id, PageKind::Trace, cursor);
+        }
+        if let Some(cursor) = session_entry {
+            remote.request_page(run_id, PageKind::SessionEntries, cursor);
+        }
+        if let Some(cursor) = session_event {
+            remote.request_page(run_id, PageKind::SessionEvents, cursor);
         }
     }
 
@@ -313,39 +220,22 @@ impl Provider {
         follow_ups: Option<u64>,
         updates: Option<u64>,
     ) {
-        match self {
-            Provider::Local { source, .. } => {
-                let mut cursor = source.cursor(run_id);
-                if let Some(value) = settings {
-                    cursor.settings = Some(value);
-                }
-                if let Some(value) = follow_ups {
-                    cursor.follow_ups = Some(value);
-                }
-                if let Some(value) = updates {
-                    cursor.updates = Some(value);
-                }
-                let _ = source.request_window(run_id, cursor);
-            }
-            Provider::Remote(remote) => {
-                if let Some(cursor) = settings {
-                    remote.request_page(run_id, PageKind::Settings, cursor);
-                }
-                if let Some(cursor) = follow_ups {
-                    remote.request_page(run_id, PageKind::FollowUps, cursor);
-                }
-                if let Some(cursor) = updates {
-                    remote.request_page(run_id, PageKind::Updates, cursor);
-                }
-            }
+        let Provider::Remote(remote) = self;
+        if let Some(cursor) = settings {
+            remote.request_page(run_id, PageKind::Settings, cursor);
+        }
+        if let Some(cursor) = follow_ups {
+            remote.request_page(run_id, PageKind::FollowUps, cursor);
+        }
+        if let Some(cursor) = updates {
+            remote.request_page(run_id, PageKind::Updates, cursor);
         }
     }
 
     fn request_artifacts(&mut self, run_id: &str, paths: &[String]) {
-        if let Provider::Remote(remote) = self {
-            for path in paths {
-                remote.request_artifact(run_id, path);
-            }
+        let Provider::Remote(remote) = self;
+        for path in paths {
+            remote.request_artifact(run_id, path);
         }
     }
 }
@@ -524,28 +414,15 @@ struct App {
     quit: bool,
 }
 
-pub fn run_local(database_path: &Path, cli_theme: Option<&str>) -> Result<()> {
-    let source = RunSource::new(database_path)?;
-    run_app(
-        Provider::Local {
-            source: Box::new(source),
-            last_refresh: Instant::now(),
-        },
-        true,
-        cli_theme,
-    )
+pub fn run_local(socket_path: &Path, cli_theme: Option<&str>) -> Result<()> {
+    let remote = RemoteRuns::connect_local(socket_path)?;
+    run_app(Provider::Remote(remote), true, cli_theme)
 }
 
-pub fn run_single(database_path: &Path, run_id: &str, cli_theme: Option<&str>) -> Result<()> {
-    let source = RunSource::single(database_path, run_id)?;
-    run_app(
-        Provider::Local {
-            source: Box::new(source),
-            last_refresh: Instant::now(),
-        },
-        false,
-        cli_theme,
-    )
+pub fn run_single(socket_path: &Path, run_id: &str, cli_theme: Option<&str>) -> Result<()> {
+    let mut remote = RemoteRuns::connect_local(socket_path)?;
+    remote.watch(run_id);
+    run_app(Provider::Remote(remote), false, cli_theme)
 }
 
 pub fn run_remote(url: &str, cli_theme: Option<&str>) -> Result<()> {
@@ -1611,11 +1488,12 @@ fn status_style(status: RunStatus, palette: &Palette) -> Style {
     let color = match status {
         RunStatus::Queued => palette.muted,
         RunStatus::Running => palette.running,
-        RunStatus::Waiting => palette.warning,
+        RunStatus::Waiting | RunStatus::Paused => palette.warning,
         RunStatus::Completed => palette.success,
         RunStatus::Failed => palette.error,
         RunStatus::TimedOut => palette.timed_out,
         RunStatus::Cancelled => palette.cancelled,
+        RunStatus::Ambiguous => palette.error,
     };
     Style::default().fg(color)
 }
@@ -1625,10 +1503,12 @@ fn status_glyph(status: RunStatus) -> &'static str {
         RunStatus::Queued => "·",
         RunStatus::Running => "◐",
         RunStatus::Waiting => "⏸",
+        RunStatus::Paused => "Ⅱ",
         RunStatus::Completed => "✓",
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",
         RunStatus::Cancelled => "~",
+        RunStatus::Ambiguous => "?",
     }
 }
 
@@ -1707,7 +1587,6 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
                 format!("{}…{detail}", remote.status_label())
             }
             Provider::Remote(_) => "No runs found.".to_string(),
-            _ => "No runs found.".to_string(),
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -1761,17 +1640,10 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     let playing = app.playing;
     // Captured before `data` takes the mutable borrow: a dead remote
     // connection must be visible while a cached run is still displayed.
-    let remote_status = match &app.provider {
-        Provider::Remote(remote) if !remote.connected() => Some(remote.status_label()),
-        _ => None,
-    };
-    let (local_load_error, local_stale) = match &app.provider {
-        Provider::Local { source, .. } => (
-            source.load_error(&run_id).map(str::to_string),
-            source.is_stale(&run_id),
-        ),
-        Provider::Remote(_) => (None, false),
-    };
+    let Provider::Remote(remote) = &app.provider;
+    let remote_status = (!remote.connected()).then(|| remote.status_label());
+    let local_load_error: Option<String> = None;
+    let local_stale = false;
 
     let Some(data) = app.provider.data(&run_id) else {
         frame.render_widget(
@@ -2338,11 +2210,7 @@ fn step_duration(step: &StepRecord) -> String {
     format_duration(duration)
 }
 
-/// Small artifacts are inlined into previews when reading the filesystem
-/// directly; expanded details use the live protocol's larger bounded limit.
-const PREVIEW_ARTIFACT_MAX_BYTES: u64 = 64 * 1024;
-const DETAIL_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
-
+/// Collect artifact references from the current host-owned run view.
 fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
     if let Some(artifact) = crate::state::types::as_artifact_ref(value) {
         paths.push(artifact.path);
@@ -2379,7 +2247,7 @@ fn resolve_remote_artifacts(
         return match artifacts.get(&artifact.path) {
             Some(Ok(content)) => Value::String(content.clone()),
             Some(Err(error)) => Value::String(format!("«artifact error: {error}»")),
-            None => with_artifact_placeholders(value),
+            None => value.clone(),
         };
     }
     if let Some(escaped) = crate::state::types::as_escaped(value) {
@@ -2412,13 +2280,10 @@ fn resolve_remote_artifacts(
 
 fn resolve_detail_value(
     value: &Value,
-    run_dir: Option<&std::path::Path>,
+    _run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> Value {
-    match run_dir {
-        Some(dir) => crate::state::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES),
-        None => resolve_remote_artifacts(value, remote_artifacts),
-    }
+    resolve_remote_artifacts(value, remote_artifacts)
 }
 
 /// Compact single-line preview of a persisted value. Artifact references use
@@ -2428,12 +2293,8 @@ fn preview_value(
     run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> String {
-    let decoded = match run_dir {
-        Some(dir) => {
-            crate::state::reader::resolve_artifacts(value, dir, PREVIEW_ARTIFACT_MAX_BYTES)
-        }
-        None => resolve_remote_artifacts(value, remote_artifacts),
-    };
+    let _ = run_dir;
+    let decoded = resolve_remote_artifacts(value, remote_artifacts);
     let text = match decoded {
         Value::String(text) => text,
         Value::Null => return "—".to_string(),
@@ -2482,13 +2343,10 @@ fn push_detail_line(
 
 fn resolved_detail_value(
     value: &Value,
-    run_dir: Option<&std::path::Path>,
+    _run_dir: Option<&std::path::Path>,
     remote_artifacts: &HashMap<String, std::result::Result<String, String>>,
 ) -> Value {
-    match run_dir {
-        Some(dir) => crate::state::reader::resolve_artifacts(value, dir, DETAIL_ARTIFACT_MAX_BYTES),
-        None => resolve_remote_artifacts(value, remote_artifacts),
-    }
+    resolve_remote_artifacts(value, remote_artifacts)
 }
 
 fn push_value_lines(

@@ -1,97 +1,241 @@
-//! Wire types for the live replay protocol (`pi-workflows.replay.v1`), plus
-//! the JSON Patch subset (with the `append` extension op) used for view
-//! synchronization. See `docs/live-replay-protocol.md`.
+//! Strict version-1 client envelopes shared by local and remote piw transports.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-pub const PROTOCOL_ID: &str = "pi-workflows.replay.v1";
+pub const PROTOCOL_ID: &str = "pi-workflows.client.v1";
+
+const OPERATIONS: &[&str] = &[
+    "run.start",
+    "run.pause",
+    "run.resume",
+    "run.cancel",
+    "run.status",
+    "run.list",
+    "checkpoint.answer",
+    "decision.answer",
+    "interaction.submit",
+    "interaction.update",
+    "notification.claim",
+    "notification.deliver",
+    "turn.claim",
+    "turn.resolve",
+    "controller.list",
+    "controller.get",
+    "controller.apply",
+    "controller.reconcile",
+    "controller.delete",
+    "host.status",
+    "host.stop",
+    "view.runs.watch",
+    "view.run.watch",
+    "view.run.unwatch",
+    "view.page",
+    "view.session.watch",
+    "activity.report",
+    "state.status",
+    "state.verify",
+    "state.backup",
+    "state.prune",
+];
+
+const OUTCOMES: &[&str] = &[
+    "accepted",
+    "adopted",
+    "rejected",
+    "conflict",
+    "notFound",
+    "claimLost",
+    "unavailable",
+];
+
+const EVENTS: &[&str] = &[
+    "runs",
+    "run_snapshot",
+    "run_patch",
+    "run_page",
+    "session_snapshot",
+    "unavailable",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMessage {
-    WatchRuns,
-    WatchRun {
-        #[serde(rename = "runId")]
-        run_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        revision: Option<u64>,
-        #[serde(rename = "stepCursor", skip_serializing_if = "Option::is_none")]
-        step_cursor: Option<u64>,
-        #[serde(rename = "traceCursor", skip_serializing_if = "Option::is_none")]
-        trace_cursor: Option<u64>,
-        #[serde(rename = "sessionEntryCursor", skip_serializing_if = "Option::is_none")]
-        session_entry_cursor: Option<u64>,
-        #[serde(rename = "sessionEventCursor", skip_serializing_if = "Option::is_none")]
-        session_event_cursor: Option<u64>,
-    },
-    UnwatchRun {
-        #[serde(rename = "runId")]
-        run_id: String,
-    },
-    FetchPage {
-        #[serde(rename = "runId")]
-        run_id: String,
-        kind: PageKind,
-        cursor: u64,
-    },
-    FetchArtifact {
-        #[serde(rename = "runId")]
-        run_id: String,
-        path: String,
-    },
+#[serde(deny_unknown_fields)]
+pub struct ClientRequest {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    pub operation: String,
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: String,
+    #[serde(rename = "runId", skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(rename = "expectedRevision", skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+    pub payload: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerHello {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    #[serde(rename = "connectionId")]
+    pub connection_id: String,
+    #[serde(rename = "packageVersion")]
+    pub package_version: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerResponse {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub outcome: String,
+    pub revision: Option<u64>,
+    pub receipt: Option<Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerEvent {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    #[serde(rename = "subscriptionId")]
+    pub subscription_id: String,
+    pub event: String,
+    pub revision: Option<u64>,
+    #[serde(rename = "runId")]
+    pub run_id: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
 pub enum ServerMessage {
-    Hello {
-        protocol: String,
-    },
-    Runs {
-        runs: Vec<Value>,
-    },
-    RunSnapshot {
-        #[serde(rename = "runId")]
-        run_id: String,
-        revision: u64,
-        view: Value,
-    },
-    RunPatch {
-        #[serde(rename = "runId")]
-        run_id: String,
-        revision: u64,
-        targets: Vec<TargetPatch>,
-    },
-    RunPage {
-        #[serde(rename = "runId")]
-        run_id: String,
-        revision: u64,
-        kind: PageKind,
-        cursor: u64,
-        start: u64,
-        total: u64,
-        items: Vec<Value>,
-        #[serde(rename = "graphCursor", skip_serializing_if = "Option::is_none")]
-        graph_cursor: Option<u64>,
-        #[serde(rename = "graphSteps", skip_serializing_if = "Option::is_none")]
-        graph_steps: Option<Vec<Value>>,
-        #[serde(rename = "takenTransitions", skip_serializing_if = "Option::is_none")]
-        taken_transitions: Option<Vec<String>>,
-        #[serde(rename = "replayCheckpoint", skip_serializing_if = "Option::is_none")]
-        replay_checkpoint: Option<Value>,
-    },
-    Artifact {
-        #[serde(rename = "runId")]
-        run_id: String,
-        path: String,
-        content: String,
-    },
-    Error {
-        message: String,
-        #[serde(rename = "runId", skip_serializing_if = "Option::is_none")]
-        run_id: Option<String>,
-    },
+    Hello(ServerHello),
+    Response(ServerResponse),
+    Event(ServerEvent),
+}
+
+pub fn parse_client_request(text: &str) -> Result<ClientRequest, String> {
+    let value = parse_canonical_value(text)?;
+    let request: ClientRequest =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    if request.schema != PROTOCOL_ID
+        || request.message_type != "request"
+        || !valid_id(&request.request_id)
+        || !valid_id(&request.client_id)
+        || !valid_id(&request.idempotency_key)
+        || request
+            .run_id
+            .as_deref()
+            .is_some_and(|value| !valid_id(value))
+        || !OPERATIONS.contains(&request.operation.as_str())
+    {
+        return Err("invalid client request".to_string());
+    }
+    Ok(request)
+}
+
+pub fn parse_server_message(text: &str) -> Result<ServerMessage, String> {
+    let value = parse_canonical_value(text)?;
+    let message_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "client message has no type".to_string())?;
+    let message = match message_type {
+        "hello" => {
+            ServerMessage::Hello(serde_json::from_value(value).map_err(|error| error.to_string())?)
+        }
+        "response" => ServerMessage::Response(
+            serde_json::from_value(value).map_err(|error| error.to_string())?,
+        ),
+        "event" => {
+            ServerMessage::Event(serde_json::from_value(value).map_err(|error| error.to_string())?)
+        }
+        _ => return Err("invalid client message type".to_string()),
+    };
+    match &message {
+        ServerMessage::Hello(value)
+            if value.schema != PROTOCOL_ID
+                || value.message_type != "hello"
+                || !valid_id(&value.connection_id)
+                || value.package_version.is_empty() =>
+        {
+            Err("invalid client hello".to_string())
+        }
+        ServerMessage::Response(value)
+            if value.schema != PROTOCOL_ID
+                || value.message_type != "response"
+                || !valid_id(&value.request_id)
+                || !OUTCOMES.contains(&value.outcome.as_str())
+                || value.error.as_deref().is_some_and(str::is_empty) =>
+        {
+            Err("invalid client response".to_string())
+        }
+        ServerMessage::Event(value)
+            if value.schema != PROTOCOL_ID
+                || value.message_type != "event"
+                || !valid_id(&value.subscription_id)
+                || value
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|value| !valid_id(value))
+                || !EVENTS.contains(&value.event.as_str()) =>
+        {
+            Err("invalid client event".to_string())
+        }
+        _ => Ok(message),
+    }
+}
+
+fn parse_canonical_value(text: &str) -> Result<Value, String> {
+    if text.len() > 1024 * 1024 {
+        return Err("client message exceeds 1 MiB".to_string());
+    }
+    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    if canonical_json(&value)? != text {
+        return Err("client message is not canonical JSON".to_string());
+    }
+    Ok(value)
+}
+
+fn valid_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256
+}
+
+pub fn encode_request(request: &ClientRequest) -> Result<String, String> {
+    let value = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    canonical_json(&value)
+}
+
+pub fn canonical_json(value: &Value) -> Result<String, String> {
+    serde_json::to_string(&sorted_value(value)).map_err(|error| error.to_string())
+}
+
+fn sorted_value(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys: Vec<&String> = object.keys().collect();
+            keys.sort();
+            let mut sorted = Map::new();
+            for key in keys {
+                sorted.insert(key.clone(), sorted_value(&object[key]));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(array) => Value::Array(array.iter().map(sorted_value).collect()),
+        _ => value.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

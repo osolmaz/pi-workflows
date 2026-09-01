@@ -328,10 +328,12 @@ fn status_glyph(status: RunStatus) -> &'static str {
         RunStatus::Queued => "·",
         RunStatus::Running => "◐",
         RunStatus::Waiting => "⏸",
+        RunStatus::Paused => "Ⅱ",
         RunStatus::Completed => "✓",
         RunStatus::Failed => "✗",
         RunStatus::TimedOut => "×",
         RunStatus::Cancelled => "~",
+        RunStatus::Ambiguous => "?",
     }
 }
 
@@ -339,11 +341,12 @@ fn status_color(status: RunStatus, palette: &Palette) -> ratatui::style::Color {
     match status {
         RunStatus::Queued => palette.muted,
         RunStatus::Running => palette.running,
-        RunStatus::Waiting => palette.warning,
+        RunStatus::Waiting | RunStatus::Paused => palette.warning,
         RunStatus::Completed => palette.success,
         RunStatus::Failed => palette.error,
         RunStatus::TimedOut => palette.timed_out,
         RunStatus::Cancelled => palette.cancelled,
+        RunStatus::Ambiguous => palette.error,
     }
 }
 
