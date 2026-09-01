@@ -72,10 +72,10 @@ The extension will use Pi's documented `agent_end` event and public extension co
 
 - the active context signal is aborted, or an assistant message has stop reason `aborted`;
 - the origin session has a pending agent or assistant interaction;
-- the matching workflow prompt is recorded in durable state or present in the active Pi branch; and
+- the same `agent_end` event contains that interaction's workflow prompt; and
 - the run is not already paused.
 
-The extension will send `run.pause` to the host. A live worker uses the existing exact-claim pause transaction. A waiting interaction has no worker and no live run claim, so the host will atomically set `paused = 1` on the parked run. The host will reject updates and submissions while paused.
+The extension will send `run.pause` to the host. A live worker uses the existing exact-claim pause transaction. A waiting interaction has no worker and no live run claim, so the host will atomically set `paused = 1` on the parked run. The host will reject updates, submissions, and decision answers while paused.
 
 Resume will clear the pause on the same pending interaction without creating a worker or a second prompt. Other paused work will keep the existing behavior: take a new claim generation and resume in a supervised child.
 
