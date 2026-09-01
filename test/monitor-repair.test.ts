@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -253,7 +252,7 @@ function repairExecutor(secondObservation: unknown): ScriptedExecutor {
 
 beforeEach(async () => {
   originalPath = process.env.PATH ?? "";
-  const commandDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-monitor-commands-"));
+  const commandDir = await makeTempDir("pi-workflows-monitor-commands");
   repository = await makeTempDir("pi-workflows-monitor-repo");
   await execFileAsync("git", ["init", "-b", "main"], { cwd: repository });
   await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repository });
