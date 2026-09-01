@@ -3,6 +3,19 @@ import { once } from "node:events";
 import fs from "node:fs";
 import net, { type Socket } from "node:net";
 import path from "node:path";
+import { WorkflowClient } from "../client/client.js";
+import {
+  CLIENT_PROTOCOL_SCHEMA,
+  encodeProtocolLine,
+  clientSocketPath,
+  NdjsonFrameDecoder,
+  parseClientRequest,
+  type ClientEvent,
+  type ClientOutcome,
+  type ClientRequest,
+  type ClientResponse,
+} from "../client/protocol.js";
+import type { WorkflowRunView } from "../client/view.js";
 import { applyStatusPatch } from "../controllers/conditions.js";
 import { ResourceConflictError } from "../controllers/errors.js";
 import {
@@ -31,6 +44,7 @@ import {
 } from "../controllers/workflows.js";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
+import { pruneState } from "../state/prune.js";
 import { recordViewerDeltas } from "../state/viewer.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
@@ -49,7 +63,6 @@ import type {
   WorkflowUpdateInput,
 } from "../workflows/types.js";
 import { validateWorkflowUpdate } from "../workflows/updates.js";
-import { WorkflowHostClient } from "./client.js";
 import type {
   ControllerWorkerLaunchEnvelope,
   ControllerWorkerMessage,
@@ -63,25 +76,24 @@ import {
   processStartIdentity,
 } from "./processes.js";
 import {
-  encodeProtocolLine,
-  hostSocketPath,
-  NdjsonFrameDecoder,
-  parseHostRequest,
-  type HostRequest,
-  type HostResponse,
-} from "./protocol.js";
-import {
   HostStateStore,
   type HostClaim,
   type InteractiveRequestRecord,
   type InteractiveSubmissionRecord,
   type WorkerLaunchEnvelope,
 } from "./state.js";
+import {
+  HostViewStore,
+  WORKFLOW_PAGE_KINDS,
+  type OriginActivityReport,
+  type WorkflowPageKind,
+} from "./view.js";
 import type { WorkerMessage, WorkerResponse } from "./worker-protocol.js";
 import { WorkflowWorkerSupervisor } from "./worker-supervisor.js";
 
 const HOST_LEASE_MS = 30_000;
 const HOST_RENEW_MS = 10_000;
+const PACKAGE_VERSION = runtimePackageVersion();
 const CLAIM_POLL_MS = 2_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const PRESENTATION_CLAIM_LEASE_MS = 10_000;
@@ -130,6 +142,22 @@ type DeliveryClaim = {
   expiresAt: number;
 };
 
+type ClientSubscription = {
+  id: string;
+  kind: "runs" | "run" | "session";
+  target?: string;
+  revision: number;
+  limit?: number;
+  digest?: string;
+};
+
+type ClientConnection = {
+  id: string;
+  socket: Socket;
+  subscriptions: Map<string, ClientSubscription>;
+  publishing: boolean;
+};
+
 type ActiveController = {
   key: string;
   projectPath: string;
@@ -156,6 +184,7 @@ export class WorkflowHost {
   private readonly queue: SqliteControllerStore;
   private readonly decisions: HumanDecisionStore;
   private readonly runStore: WorkflowRunStore;
+  private readonly views: HostViewStore;
   private readonly registry: HostProcessRegistry;
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly workerDescendants = new Map<string, Set<number>>();
@@ -168,10 +197,12 @@ export class WorkflowHost {
   private readonly blockedRuns = new Set<string>();
   private readonly deliveryClaims = new Map<string, DeliveryClaim>();
   private readonly sockets = new Set<Socket>();
+  private readonly connections = new Map<Socket, ClientConnection>();
   private server: net.Server | null = null;
   private claim: HostClaim | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private viewTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private started = false;
   private controllerPollActive = false;
@@ -182,7 +213,7 @@ export class WorkflowHost {
     this.hostId = options.runnerId ?? `host-${randomUUID()}`;
     this.databasePath = path.resolve(options.databasePath ?? workflowStatePath());
     this.stateDirectory = path.join(path.dirname(this.databasePath), "host");
-    this.socketPath = hostSocketPath(this.databasePath);
+    this.socketPath = clientSocketPath(this.databasePath);
     this.lockPath = path.join(this.stateDirectory, "host.lock.json");
     this.state = new StateDatabase({ filePath: this.databasePath });
     this.hostState = new HostStateStore(this.databasePath, { state: this.state });
@@ -202,6 +233,9 @@ export class WorkflowHost {
       },
       snapshotLifecycle: (context) => this.applyLifecycleProjection(context),
     });
+    this.views = new HostViewStore(this.state, this.queue, this.hostState, this.runStore, (runId) =>
+      this.activeRuns.has(runId),
+    );
     this.registry = options.registry ?? new HostProcessRegistry(this.stateDirectory);
   }
 
@@ -264,8 +298,10 @@ export class WorkflowHost {
     this.stopping = true;
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     if (this.pollTimer !== null) clearInterval(this.pollTimer);
+    if (this.viewTimer !== null) clearInterval(this.viewTimer);
     this.heartbeatTimer = null;
     this.pollTimer = null;
+    this.viewTimer = null;
     const server = this.server;
     this.server = null;
     await this.closeServer(server);
@@ -378,6 +414,11 @@ export class WorkflowHost {
       void this.claimControllerOne();
     }, this.options.claimPollMs ?? CLAIM_POLL_MS);
     this.pollTimer.unref?.();
+    this.viewTimer = setInterval(() => {
+      this.views.expireActivity();
+      this.publishViews();
+    }, 250);
+    this.viewTimer.unref?.();
   }
 
   private async listen(): Promise<void> {
@@ -412,8 +453,22 @@ export class WorkflowHost {
 
   private handleConnection(socket: Socket): void {
     this.sockets.add(socket);
+    const connection: ClientConnection = {
+      id: `connection-${randomUUID()}`,
+      socket,
+      subscriptions: new Map(),
+      publishing: false,
+    };
+    this.connections.set(socket, connection);
+    socket.write(
+      encodeProtocolLine({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "hello",
+        connectionId: connection.id,
+        packageVersion: PACKAGE_VERSION,
+      }),
+    );
     const decoder = new NdjsonFrameDecoder();
-    let processing = Promise.resolve();
     socket.on("data", (chunk: Buffer) => {
       let frames: Buffer[];
       try {
@@ -423,15 +478,14 @@ export class WorkflowHost {
         return;
       }
       for (const frame of frames) {
-        processing = processing
-          .then(async () => {
-            const request = parseHostRequest(frame);
-            const response = this.handleRequest(request);
-            if (!socket.write(encodeProtocolLine(response))) await once(socket, "drain");
-          })
-          .catch(() => {
-            socket.destroy();
-          });
+        void (async () => {
+          const request = parseClientRequest(frame);
+          const response = await this.handleClientRequest(connection, request);
+          if (!socket.write(encodeProtocolLine(response))) await once(socket, "drain");
+          this.publishConnection(connection);
+        })().catch(() => {
+          socket.destroy();
+        });
       }
     });
     socket.on("error", (error) => {
@@ -440,27 +494,221 @@ export class WorkflowHost {
     });
     socket.on("close", () => {
       this.sockets.delete(socket);
+      this.connections.delete(socket);
+      this.views.clearConnection(connection.id);
     });
   }
 
-  private handleRequest(request: HostRequest): HostResponse {
+  private async handleClientRequest(
+    connection: ClientConnection,
+    request: ClientRequest,
+  ): Promise<ClientResponse> {
+    try {
+      switch (request.operation) {
+        case "view.runs.watch":
+          this.addSubscription(connection, request, "runs");
+          return clientResponse(request.requestId, "accepted", { subscribed: true });
+        case "view.run.watch":
+          this.addSubscription(connection, request, "run", requireRunId(request));
+          return clientResponse(request.requestId, "accepted", { subscribed: true });
+        case "view.session.watch": {
+          const payload = requireRecord(request.payload, "view.session.watch payload");
+          this.addSubscription(
+            connection,
+            request,
+            "session",
+            requireString(payload.sessionId, "sessionId"),
+          );
+          return clientResponse(request.requestId, "accepted", { subscribed: true });
+        }
+        case "view.run.unwatch": {
+          const payload = requireRecord(request.payload, "view.run.unwatch payload");
+          connection.subscriptions.delete(requireString(payload.subscriptionId, "subscriptionId"));
+          return clientResponse(request.requestId, "accepted", { subscribed: false });
+        }
+        case "view.page": {
+          const payload = requireRecord(request.payload, "view.page payload");
+          const kind = requireString(payload.kind, "kind");
+          if (!WORKFLOW_PAGE_KINDS.includes(kind as WorkflowPageKind)) {
+            throw new Error("view.page kind is invalid");
+          }
+          const view = this.views.page(requireRunId(request), {
+            kind: kind as WorkflowPageKind,
+            cursor: requireNonNegativeInteger(payload.cursor, "cursor"),
+          });
+          return view === null
+            ? clientResponse(request.requestId, "notFound", undefined, "Workflow run not found")
+            : clientResponse(
+                request.requestId,
+                "accepted",
+                runPageReceipt(view, kind as WorkflowPageKind),
+                undefined,
+                view.revision,
+              );
+        }
+        case "activity.report": {
+          this.views.reportActivity(connection.id, parseActivityReport(request.payload));
+          return clientResponse(request.requestId, "accepted", { recorded: true });
+        }
+        case "interaction.submit":
+          return await this.submitInteractionAndWait(request);
+        case "state.status":
+          return clientResponse(request.requestId, "accepted", this.statusReceipt());
+        case "state.verify":
+          this.state.integrityCheck();
+          return clientResponse(request.requestId, "accepted", { valid: true });
+        case "state.backup": {
+          const payload = requireRecord(request.payload, "state.backup payload");
+          const destination = requireAbsolutePath(payload.destination, "destination");
+          await this.state.backup(destination);
+          return clientResponse(request.requestId, "accepted", { destination });
+        }
+        case "state.prune": {
+          const payload = requireRecord(request.payload, "state.prune payload");
+          const before = requireString(payload.before, "before");
+          const apply = requireBoolean(payload.apply, "apply");
+          const backupPath =
+            payload.backupPath === undefined
+              ? undefined
+              : requireAbsolutePath(payload.backupPath, "backupPath");
+          const report = await pruneState(this.state, this.databasePath, {
+            before,
+            apply,
+            ...(backupPath === undefined ? {} : { backupPath }),
+          });
+          return clientResponse(request.requestId, "accepted", toJsonValue(report));
+        }
+        default:
+          return this.handleRequest(request);
+      }
+    } catch (error) {
+      return clientResponse(request.requestId, "rejected", undefined, errorMessage(error));
+    }
+  }
+
+  private addSubscription(
+    connection: ClientConnection,
+    request: ClientRequest,
+    kind: ClientSubscription["kind"],
+    target?: string,
+  ): void {
+    const payload = requireRecord(request.payload, `${request.operation} payload`);
+    const id = requireString(payload.subscriptionId, "subscriptionId");
+    const limit =
+      kind === "runs" && payload.limit !== undefined
+        ? requirePositiveInteger(payload.limit, "limit")
+        : undefined;
+    connection.subscriptions.set(id, {
+      id,
+      kind,
+      ...(target === undefined ? {} : { target }),
+      ...(limit === undefined ? {} : { limit }),
+      revision: 0,
+    });
+  }
+
+  private publishViews(): void {
+    for (const connection of this.connections.values()) this.publishConnection(connection);
+  }
+
+  private publishConnection(connection: ClientConnection): void {
+    if (connection.publishing || connection.socket.destroyed) return;
+    connection.publishing = true;
+    try {
+      for (const subscription of connection.subscriptions.values()) {
+        const payload =
+          subscription.kind === "runs"
+            ? toJsonValue(this.views.list(subscription.limit))
+            : subscription.kind === "run"
+              ? toJsonValue(this.views.run(subscription.target ?? ""))
+              : toJsonValue(this.views.session(subscription.target ?? ""));
+        const digest = createHash("sha256").update(canonicalJson(payload)).digest("hex");
+        if (subscription.digest === digest) continue;
+        subscription.digest = digest;
+        subscription.revision += 1;
+        const event: ClientEvent = {
+          schema: CLIENT_PROTOCOL_SCHEMA,
+          type: "event",
+          subscriptionId: subscription.id,
+          event:
+            subscription.kind === "runs"
+              ? "runs"
+              : subscription.kind === "run"
+                ? "run_snapshot"
+                : "session_snapshot",
+          revision: subscription.revision,
+          ...(subscription.kind === "run" && subscription.target !== undefined
+            ? { runId: subscription.target }
+            : {}),
+          payload,
+        };
+        connection.socket.write(encodeProtocolLine(event));
+      }
+    } catch (error) {
+      this.log(`client view error: ${errorMessage(error)}`);
+      connection.socket.destroy();
+    } finally {
+      connection.publishing = false;
+    }
+  }
+
+  private async submitInteractionAndWait(request: ClientRequest): Promise<ClientResponse> {
+    const started = this.submitInteraction(request);
+    if (started.outcome !== "accepted" && started.outcome !== "adopted") {
+      return clientResponse(request.requestId, started.outcome, started.receipt, started.error);
+    }
+    const payload = requireRecord(request.payload, "interaction payload");
+    const requestId = requireString(payload.requestId, "requestId");
+    const submissionId = requireString(payload.submissionId, "submissionId");
+    for (;;) {
+      if (this.stopping) {
+        return clientResponse(
+          request.requestId,
+          "unavailable",
+          undefined,
+          "Workflow host stopped while validating the submission",
+        );
+      }
+      const submission = this.hostState.interactionSubmission(requestId, submissionId);
+      if (submission?.outcome === "accepted" || submission?.outcome === "adopted") {
+        return clientResponse(
+          request.requestId,
+          started.outcome,
+          submission.receipt ?? { requestId, submissionId },
+        );
+      }
+      if (submission?.outcome === "rejected") {
+        const receipt = submission.receipt ?? { requestId, submissionId };
+        const detail =
+          isObjectRecord(receipt) && typeof receipt.error === "string"
+            ? receipt.error
+            : "Workflow step output failed validation";
+        return clientResponse(request.requestId, "rejected", receipt, detail);
+      }
+      await hostDelay(25);
+    }
+  }
+
+  private handleRequest(request: ClientRequest): ClientResponse {
     if (this.claim === null || this.stopping) {
       return {
-        schema: "pi-workflows.host-response.v1",
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "response",
         requestId: request.requestId,
         outcome: "unavailable",
         error: "Workflow host is stopping",
       };
     }
     const afterCommit: Array<() => void> = [];
-    let response: HostResponse;
+    let response: ClientResponse;
     try {
       response = this.hostState.executeCommand(request, this.claim.epoch, () =>
         this.executeOperation(request, afterCommit),
       );
     } catch (error) {
       response = {
-        schema: "pi-workflows.host-response.v1",
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "response",
         requestId: request.requestId,
         outcome: "rejected",
         error: errorMessage(error),
@@ -471,9 +719,9 @@ export class WorkflowHost {
   }
 
   private executeOperation(
-    request: HostRequest,
+    request: ClientRequest,
     afterCommit: Array<() => void>,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     switch (request.operation) {
       case "host.status":
         return { outcome: "accepted", receipt: this.statusReceipt() };
@@ -592,6 +840,27 @@ export class WorkflowHost {
         return this.executeControllerOperation(request);
       case "interaction.update": {
         const payload = requireRecord(request.payload, "interaction update payload");
+        if (payload.validatePresentation === true) {
+          const interaction = this.hostState.getInteraction(
+            requireString(payload.requestId, "requestId"),
+          );
+          const expectedRevision = requireNonNegativeInteger(
+            request.expectedRevision,
+            "expectedRevision",
+          );
+          const expiresAt = interaction?.presentationClaimExpiresAt;
+          const live =
+            interaction !== undefined &&
+            interaction.runId === requireRunId(request) &&
+            interaction.status === "presenting" &&
+            interaction.presenterId === request.clientId &&
+            interaction.revision === expectedRevision &&
+            interaction.presentationSessionEntryId === null &&
+            typeof expiresAt === "string" &&
+            Date.parse(expiresAt) > Date.now() &&
+            !this.queue.isWorkflowRunPaused(interaction.runId);
+          return { outcome: "accepted", receipt: { live } };
+        }
         if (payload.claimPresentation === true) {
           try {
             const interaction = this.hostState.claimInteractionPresentation({
@@ -636,12 +905,23 @@ export class WorkflowHost {
         return this.submitInteraction(request);
       case "decision.answer":
         return this.answerDecision(request, afterCommit);
+      case "view.runs.watch":
+      case "view.run.watch":
+      case "view.run.unwatch":
+      case "view.page":
+      case "view.session.watch":
+      case "activity.report":
+      case "state.status":
+      case "state.verify":
+      case "state.backup":
+      case "state.prune":
+        throw new Error(`${request.operation} must use the live client connection`);
     }
   }
 
   private executeControllerOperation(
-    request: HostRequest,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+    request: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(request.payload, "controller payload");
     const projectPath = path.resolve(requireString(payload.projectPath, "projectPath"));
     if (payload.projectPath !== projectPath) {
@@ -789,10 +1069,10 @@ export class WorkflowHost {
   }
 
   private validateDelivery(
-    command: HostRequest,
+    command: ClientRequest,
     payload: Record<string, unknown>,
     kind: DeliveryClaim["kind"],
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const resourceId = requireString(payload.resourceId, "resourceId");
     const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
     const claimId = requireString(payload.claimId, "claimId");
@@ -816,7 +1096,9 @@ export class WorkflowHost {
     return { outcome: "accepted", receipt: { claimId, live } };
   }
 
-  private claimNotification(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+  private claimNotification(
+    command: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(command.payload, "notification claim payload");
     if (payload.validateClaim === true) {
       return this.validateDelivery(command, payload, "notification");
@@ -845,7 +1127,9 @@ export class WorkflowHost {
     };
   }
 
-  private deliverNotification(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+  private deliverNotification(
+    command: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(command.payload, "notification delivery payload");
     const notificationId = requireString(payload.notificationId, "notificationId");
     const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
@@ -871,7 +1155,7 @@ export class WorkflowHost {
       : { outcome: "conflict", error: "Notification delivery claim is stale" };
   }
 
-  private claimTurn(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+  private claimTurn(command: ClientRequest): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(command.payload, "turn claim payload");
     if (payload.validateClaim === true) {
       return this.validateDelivery(command, payload, "turn");
@@ -900,7 +1184,9 @@ export class WorkflowHost {
     };
   }
 
-  private resolveTurn(command: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+  private resolveTurn(
+    command: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(command.payload, "turn resolution payload");
     const intentId = requireString(payload.intentId, "intentId");
     const targetSessionId = requireString(payload.targetSessionId, "targetSessionId");
@@ -923,9 +1209,9 @@ export class WorkflowHost {
   }
 
   private answerCheckpoint(
-    command: HostRequest,
+    command: ClientRequest,
     afterCommit: Array<() => void>,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const parentRunId = requireRunId(command);
     const payload = requireRecord(command.payload, "checkpoint answer payload");
     const continuationRunId = requireString(payload.continuationRunId, "continuationRunId");
@@ -969,9 +1255,9 @@ export class WorkflowHost {
   }
 
   private answerDecision(
-    command: HostRequest,
+    command: ClientRequest,
     afterCommit: Array<() => void>,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(command.payload, "decision answer payload");
     const requestId = requireString(payload.requestId, "requestId");
     const interaction = this.hostState.getInteraction(requestId);
@@ -1096,9 +1382,9 @@ export class WorkflowHost {
   }
 
   private startRun(
-    request: HostRequest,
+    request: ClientRequest,
     afterCommit: Array<() => void>,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const runId = requireRunId(request);
     const payload = requireRecord(request.payload, "run.start payload");
     const projectPath = requireAbsolutePath(payload.projectPath, "projectPath");
@@ -1144,8 +1430,8 @@ export class WorkflowHost {
   }
 
   private publishInteractionUpdate(
-    request: HostRequest,
-  ): Omit<HostResponse, "schema" | "requestId"> {
+    request: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const runId = requireRunId(request);
     const payload = requireRecord(request.payload, "interaction update payload");
     const requestId = requireString(payload.requestId, "requestId");
@@ -1212,7 +1498,9 @@ export class WorkflowHost {
     }
   }
 
-  private submitInteraction(request: HostRequest): Omit<HostResponse, "schema" | "requestId"> {
+  private submitInteraction(
+    request: ClientRequest,
+  ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
     const payload = requireRecord(request.payload, "interaction payload");
     const requestId = requireString(payload.requestId, "requestId");
     const current = this.hostState.getInteraction(requestId);
@@ -1578,7 +1866,7 @@ export class WorkflowHost {
     }
     const projectPath = this.queue.workflowRunProjectPath(request.runId);
     if (projectPath === undefined) throw new Error("Workflow run project is missing");
-    const resolver = new WorkflowHostClient({
+    const resolver = new WorkflowClient({
       databasePath: this.databasePath,
       ...(this.options.env === undefined ? {} : { env: this.options.env }),
     });
@@ -1628,7 +1916,7 @@ export class WorkflowHost {
   ): Promise<WorkflowSchedulerResult> {
     const existing = this.queue.getWorkflowRun(request.runId);
     if (existing !== undefined) return controllerWorkflowResult(existing);
-    const resolver = new WorkflowHostClient({
+    const resolver = new WorkflowClient({
       databasePath: this.databasePath,
       ...(this.options.env === undefined ? {} : { env: this.options.env }),
     });
@@ -2924,15 +3212,123 @@ function controllerPathAllowed(
   );
 }
 
+function hostDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind): JsonValue {
+  const base = {
+    schema: "pi-workflows.run-page.v1",
+    runId: view.runId,
+    revision: view.revision,
+    kind,
+  };
+  if (kind === "steps") {
+    const state = requireRecord(view.state, "run state view");
+    return {
+      ...base,
+      start: view.stepStart,
+      total: view.stepTotal,
+      items: Array.isArray(state.steps) ? state.steps : [],
+      graphSteps: view.graphSteps,
+      graphCursor: view.graphCursor,
+      takenTransitions: view.takenTransitions,
+    };
+  }
+  if (kind === "trace" || kind === "trace_at_step") {
+    return { ...base, ...requireRecord(view.tracePage, "trace page") } as JsonValue;
+  }
+  if (kind === "session_entries" || kind === "session_events") {
+    const session = requireRecord(view.session, "session view");
+    const page = requireRecord(
+      kind === "session_entries" ? session.entryPage : session.eventPage,
+      "session page",
+    );
+    return { ...base, ...page } as JsonValue;
+  }
+  if (kind === "settings") {
+    return {
+      ...base,
+      start: view.settingsStart,
+      total: view.settingsTotal,
+      items: view.settingsScopes,
+    };
+  }
+  if (kind === "follow_ups") {
+    const queue = isObjectRecord(view.followUpQueue) ? view.followUpQueue : {};
+    return {
+      ...base,
+      start: view.followUpStart,
+      total: view.followUpTotal,
+      items: Array.isArray(queue.followUps) ? queue.followUps : [],
+    };
+  }
+  return {
+    ...base,
+    start: view.updateStart,
+    total: view.updateTotal,
+    items: view.updates,
+  };
+}
+
+function clientResponse(
+  requestId: string,
+  outcome: ClientOutcome,
+  receipt?: JsonValue,
+  error?: string,
+  revision?: number,
+): ClientResponse {
+  return {
+    schema: CLIENT_PROTOCOL_SCHEMA,
+    type: "response",
+    requestId,
+    outcome,
+    ...(revision === undefined ? {} : { revision }),
+    ...(receipt === undefined ? {} : { receipt }),
+    ...(error === undefined ? {} : { error: boundedClientError(error) }),
+  };
+}
+
+function boundedClientError(error: string): string {
+  const singleLine = error.replaceAll(/[\r\n\t]+/gu, " ").trim();
+  if (singleLine.length === 0) return "Workflow request failed";
+  return singleLine.length <= 1_000 ? singleLine : `${singleLine.slice(0, 997)}...`;
+}
+
+function parseActivityReport(payload: JsonValue): OriginActivityReport {
+  const value = requireRecord(payload, "activity.report payload");
+  const state = requireString(value.state, "state");
+  if (state !== "started" && state !== "refresh" && state !== "settled") {
+    throw new Error("activity state must be started, refresh, or settled");
+  }
+  return {
+    sessionId: requireString(value.sessionId, "sessionId"),
+    runId: requireString(value.runId, "runId"),
+    requestId: requireString(value.requestId, "requestId"),
+    deliveryId: requireString(value.deliveryId, "deliveryId"),
+    sessionEntryId: requireString(value.sessionEntryId, "sessionEntryId"),
+    sequence: requireNonNegativeInteger(value.sequence, "sequence"),
+    state,
+  };
+}
+
+function toJsonValue(value: unknown): JsonValue {
+  return JSON.parse(canonicalJson(value)) as JsonValue;
+}
+
 function payloadLimit(payload: JsonValue): number {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return 100;
   const limit = (payload as Record<string, unknown>).limit;
   return typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0 ? limit : 100;
 }
 
-function requireRunId(request: HostRequest): string {
+function requireRunId(request: ClientRequest): string {
   if (request.runId === undefined) throw new Error(`${request.operation} requires runId`);
   return request.runId;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requireRecord(value: unknown, name: string): Record<string, unknown> {
@@ -2955,6 +3351,18 @@ function requireAbsolutePath(value: unknown, name: string): string {
   return parsed;
 }
 
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value as number;
+}
+
 function requireNonNegativeInteger(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${name} must be a non-negative integer`);
@@ -2968,6 +3376,16 @@ function isRevisionRow(value: unknown): value is { revision: number } {
     value !== null &&
     typeof (value as { revision?: unknown }).revision === "number"
   );
+}
+
+function runtimePackageVersion(): string {
+  const parsed = JSON.parse(
+    fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+  ) as { version?: unknown };
+  if (typeof parsed.version !== "string" || parsed.version.length === 0) {
+    throw new Error("Package version is missing");
+  }
+  return parsed.version;
 }
 
 function isLockRecord(

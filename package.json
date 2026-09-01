@@ -24,6 +24,7 @@
     "examples",
     "docs",
     "schemas",
+    "protocol",
     "plugins/herdr",
     "herdr-plugin.toml",
     "README.md",
@@ -38,6 +39,10 @@
     "./extension": {
       "types": "./dist/extension/index.d.ts",
       "default": "./dist/extension/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
     },
     "./controllers": {
       "types": "./dist/controllers/index.d.ts",

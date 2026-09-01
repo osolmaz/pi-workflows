@@ -110,6 +110,19 @@ export class StateDatabase {
     this.connection.close();
   }
 
+  readTransaction<T>(operation: () => T): T {
+    if (this.connection.inTransaction) return operation();
+    this.connection.exec("BEGIN");
+    try {
+      const result = operation();
+      this.connection.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (this.connection.inTransaction) this.connection.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   transaction<T>(operation: () => T): T {
     if (this.mode === "read-only") {
       throw new Error("Cannot mutate a read-only Pi Workflows database");

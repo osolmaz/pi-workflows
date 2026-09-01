@@ -808,6 +808,72 @@ describe("buildWidgetLines", () => {
     expect(view.scroll).toBe(0);
   });
 
+  it("uses the host display status instead of stale durable state", () => {
+    const waitingState = makeState({ status: "waiting", waitingOn: "third" });
+    expect(buildWidgetView(waitingState, snapshot, undefined, null, false, 0)).toEqual({
+      lines: [],
+      scroll: 0,
+      maxScroll: 0,
+    });
+    const running = buildWidgetView(
+      waitingState,
+      snapshot,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      undefined,
+      "running",
+    ).lines;
+    expect(stripAnsi(running[0] ?? "")).toContain("◐ workflow demo [running]");
+    expect(stripAnsi(running.join("\n"))).not.toContain("waiting on checkpoint");
+
+    const waiting = buildWidgetView(
+      waitingState,
+      snapshot,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      undefined,
+      "waiting",
+    ).lines;
+    expect(stripAnsi(waiting[0] ?? "")).toContain("○ workflow demo [waiting]");
+
+    const paused = buildWidgetView(
+      waitingState,
+      snapshot,
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      undefined,
+      "paused",
+    ).lines;
+    expect(stripAnsi(paused[0] ?? "")).toContain("⏸ workflow demo [paused]");
+
+    const noNodes = buildWidgetView(
+      waitingState,
+      { ...snapshot, nodes: {} },
+      undefined,
+      null,
+      false,
+      80,
+      undefined,
+      undefined,
+      " ",
+      "ambiguous",
+    );
+    expect(stripAnsi(noNodes.lines[0] ?? "")).toContain("! workflow demo [ambiguous]");
+    expect(noNodes.maxScroll).toBe(0);
+  });
+
   it("shows waiting checkpoints and sanitizes external text", () => {
     const waiting = buildWidgetLines(
       makeState({

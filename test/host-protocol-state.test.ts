@@ -2,15 +2,15 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import {
   encodeProtocolLine,
-  HostProtocolError,
+  ClientProtocolError,
   MAX_PROTOCOL_MESSAGE_BYTES,
   NdjsonFrameDecoder,
-  parseHostRequest,
-  type HostRequest,
-} from "../src/host/protocol.js";
+  parseClientRequest,
+  type ClientRequest,
+} from "../src/client/protocol.js";
+import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostStateStore, type WorkerLaunchEnvelope } from "../src/host/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
@@ -22,9 +22,10 @@ const workflow = compileWorkflowDefinition(rawWorkflow);
 const snapshot = createDefinitionSnapshot(workflow);
 const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
 
-function request(overrides: Partial<HostRequest> = {}): HostRequest {
+function request(overrides: Partial<ClientRequest> = {}): ClientRequest {
   return {
-    schema: "pi-workflows.host-request.v1",
+    schema: "pi-workflows.client.v1",
+    type: "request",
     requestId: "request-1",
     clientId: "client-1",
     operation: "host.status",
@@ -61,10 +62,10 @@ describe("host protocol", () => {
   it("round-trips canonical NDJSON and rejects noncanonical input", () => {
     const encoded = encodeProtocolLine(request());
     expect(encoded.at(-1)).toBe(0x0a);
-    expect(parseHostRequest(encoded.subarray(0, -1))).toEqual(request());
+    expect(parseClientRequest(encoded.subarray(0, -1))).toEqual(request());
     expect(() =>
-      parseHostRequest('{"schema":"pi-workflows.host-request.v1", "requestId":"request-1"}'),
-    ).toThrow(HostProtocolError);
+      parseClientRequest('{"schema":"pi-workflows.client.v1", "requestId":"request-1"}'),
+    ).toThrow(ClientProtocolError);
   });
 
   it("bounds frames and keeps complete messages", () => {

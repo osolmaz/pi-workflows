@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkflowClient } from "../src/client/client.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import piWorkflows from "../src/extension/index.js";
-import { WorkflowHostClient } from "../src/host/client.js";
 import { HostStateStore } from "../src/host/state.js";
 import { workflowStatePath } from "../src/state/database.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
@@ -13,7 +13,7 @@ let testHome: string | undefined;
 
 afterEach(async () => {
   if (testHome !== undefined) {
-    const client = new WorkflowHostClient({ databasePath: workflowStatePath(testHome) });
+    const client = new WorkflowClient({ databasePath: workflowStatePath(testHome) });
     try {
       await client.request({ operation: "host.stop" });
     } catch {
@@ -333,7 +333,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.runCommand(workflowPath);
     await waitUntil(() => fake.sent.length === 1, 30_000);
     await waitUntil(() => fake.widgets.some((widget) => typeof widget === "function"), 30_000);
-    expect([...fake.shortcuts.keys()]).toEqual(["shift+up", "shift+down"]);
+    expect([...fake.shortcuts.keys()]).toEqual(["ctrl+shift+r", "shift+up", "shift+down"]);
     const widget = fake.widgets.findLast((value) => typeof value === "function") as (
       tui: unknown,
       theme: { bold: (text: string) => string; fg: (_color: string, text: string) => string },
@@ -369,7 +369,7 @@ describe("pi-workflows hosted extension", () => {
         store.close();
       }
     }, 30_000);
-    expect(fake.statuses.at(-1)).toContain("[paused]");
+    await waitUntil(() => fake.statuses.at(-1)?.includes("[paused]") === true, 30_000);
     expect(fake.notifications.at(-1)?.message).toContain(
       "paused because its model turn was interrupted",
     );

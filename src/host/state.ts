@@ -1,9 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
+import {
+  CLIENT_PROTOCOL_SCHEMA,
+  clientRequestFingerprint,
+  type ClientRequest,
+  type ClientResponse,
+} from "../client/protocol.js";
 import { StateDatabase } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
 import { tokenHash } from "../state/mutation.js";
-import type { HostRequest, HostResponse } from "./protocol.js";
-import { requestFingerprint } from "./protocol.js";
 import type { WorkerMessage, WorkerResponse } from "./worker-protocol.js";
 
 export type HostClaim = {
@@ -201,26 +205,26 @@ export class HostStateStore {
     };
   }
 
-  readCommand(request: HostRequest): HostResponse | undefined {
+  readCommand(request: ClientRequest): ClientResponse | undefined {
     const row = this.state.connection
       .prepare(
-        `SELECT request_fingerprint AS requestFingerprint, outcome, accepted_revision AS revision,
+        `SELECT request_fingerprint AS clientRequestFingerprint, outcome, accepted_revision AS revision,
                 receipt_hash AS receiptHash, error_hash AS errorHash
          FROM host_commands WHERE request_id = ?`,
       )
       .get(request.requestId);
     if (!isCommandRow(row)) return undefined;
-    if (!row.requestFingerprint.equals(requestFingerprint(request))) {
+    if (!row.clientRequestFingerprint.equals(clientRequestFingerprint(request))) {
       return conflictResponse(request.requestId, "Request ID was reused with another payload");
     }
     return this.commandResponse(request.requestId, row);
   }
 
   executeCommand(
-    request: HostRequest,
+    request: ClientRequest,
     hostEpoch: number,
-    operation: () => Omit<HostResponse, "schema" | "requestId">,
-  ): HostResponse {
+    operation: () => Omit<ClientResponse, "schema" | "type" | "requestId">,
+  ): ClientResponse {
     const existing = this.readCommand(request);
     if (existing !== undefined) {
       return existing.outcome === "conflict" ? existing : { ...existing, outcome: "adopted" };
@@ -228,14 +232,14 @@ export class HostStateStore {
     return this.state.transaction(() => {
       const idempotent = this.state.connection
         .prepare(
-          `SELECT request_id AS requestId, request_fingerprint AS requestFingerprint,
+          `SELECT request_id AS requestId, request_fingerprint AS clientRequestFingerprint,
                   outcome, accepted_revision AS revision, receipt_hash AS receiptHash,
                   error_hash AS errorHash
            FROM host_commands WHERE client_id = ? AND idempotency_key = ?`,
         )
         .get(request.clientId, request.idempotencyKey);
       if (isIdempotentCommandRow(idempotent)) {
-        if (!idempotent.requestFingerprint.equals(requestFingerprint(request))) {
+        if (!idempotent.clientRequestFingerprint.equals(clientRequestFingerprint(request))) {
           return conflictResponse(
             request.requestId,
             "Idempotency key was reused with another payload",
@@ -246,8 +250,9 @@ export class HostStateStore {
       }
 
       const result = operation();
-      const response: HostResponse = {
-        schema: "pi-workflows.host-response.v1",
+      const response: ClientResponse = {
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "response",
         requestId: request.requestId,
         ...result,
       };
@@ -269,7 +274,7 @@ export class HostStateStore {
           request.clientId,
           request.operation,
           request.idempotencyKey,
-          requestFingerprint(request),
+          clientRequestFingerprint(request),
           request.runId ?? null,
           response.revision ?? null,
           response.outcome,
@@ -352,13 +357,13 @@ export class HostStateStore {
   readWorkerMessage(message: WorkerMessage): WorkerResponse | undefined {
     const row = this.state.connection
       .prepare(
-        `SELECT request_fingerprint AS requestFingerprint, outcome,
+        `SELECT request_fingerprint AS clientRequestFingerprint, outcome,
                 accepted_revision AS revision, result_hash AS resultHash, error_hash AS errorHash
          FROM worker_messages WHERE worker_epoch = ? AND message_id = ?`,
       )
       .get(message.workerEpoch, message.messageId);
     if (!isWorkerMessageRow(row)) return undefined;
-    if (!row.requestFingerprint.equals(workerMessageFingerprint(message))) {
+    if (!row.clientRequestFingerprint.equals(workerMessageFingerprint(message))) {
       return {
         schema: "pi-workflows.worker-response.v1",
         messageId: message.messageId,
@@ -867,14 +872,15 @@ export class HostStateStore {
     return row;
   }
 
-  private commandResponse(requestId: string, row: CommandRow): HostResponse {
+  private commandResponse(requestId: string, row: CommandRow): ClientResponse {
     const receipt = row.receiptHash === null ? undefined : this.state.readJson(row.receiptHash);
     const error =
       row.errorHash === null
         ? undefined
         : this.state.readBlob(row.errorHash)?.content.toString("utf8");
     return {
-      schema: "pi-workflows.host-response.v1",
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "response",
       requestId,
       outcome: row.outcome,
       ...(row.revision === null ? {} : { revision: row.revision }),
@@ -924,8 +930,14 @@ export class HostStateStore {
   }
 }
 
-function conflictResponse(requestId: string, error: string): HostResponse {
-  return { schema: "pi-workflows.host-response.v1", requestId, outcome: "conflict", error };
+function conflictResponse(requestId: string, error: string): ClientResponse {
+  return {
+    schema: CLIENT_PROTOCOL_SCHEMA,
+    type: "response",
+    requestId,
+    outcome: "conflict",
+    error,
+  };
 }
 
 function requireLeaseMs(value: number): void {
@@ -949,8 +961,8 @@ type HostRow = {
 };
 
 type CommandRow = {
-  requestFingerprint: Buffer;
-  outcome: HostResponse["outcome"];
+  clientRequestFingerprint: Buffer;
+  outcome: ClientResponse["outcome"];
   revision: number | null;
   receiptHash: Buffer | null;
   errorHash: Buffer | null;
@@ -976,7 +988,7 @@ type SubmissionDetailRow = {
   submittedAt: number;
 };
 type WorkerMessageRow = {
-  requestFingerprint: Buffer;
+  clientRequestFingerprint: Buffer;
   outcome: WorkerResponse["outcome"];
   revision: number | null;
   resultHash: Buffer | null;
@@ -1030,7 +1042,7 @@ function isHostRow(value: unknown): value is HostRow {
 function isCommandRow(value: unknown): value is CommandRow {
   return (
     isRecord(value) &&
-    Buffer.isBuffer(value.requestFingerprint) &&
+    Buffer.isBuffer(value.clientRequestFingerprint) &&
     typeof value.outcome === "string" &&
     nullableNumber(value.revision) &&
     (value.receiptHash === null || Buffer.isBuffer(value.receiptHash)) &&
@@ -1057,7 +1069,7 @@ function isRunIdRow(value: unknown): value is RunIdRow {
 function isWorkerMessageRow(value: unknown): value is WorkerMessageRow {
   return (
     isRecord(value) &&
-    Buffer.isBuffer(value.requestFingerprint) &&
+    Buffer.isBuffer(value.clientRequestFingerprint) &&
     ["accepted", "adopted", "rejected", "claimLost"].includes(value.outcome as string) &&
     nullableNumber(value.revision) &&
     (value.resultHash === null || Buffer.isBuffer(value.resultHash)) &&

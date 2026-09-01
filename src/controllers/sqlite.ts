@@ -1270,11 +1270,11 @@ export class SqliteControllerStore implements ControllerStore {
       clauses.push(`r.run_id NOT IN (${options.excludeRunIds.map(() => "?").join(", ")})`);
       params.push(...options.excludeRunIds);
     }
-    params.push(options.limit ?? 100);
+    if (options.limit !== undefined) params.push(options.limit);
     const rows = this.state.connection
       .prepare(
         workflowRunSelect(
-          `${clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`} ORDER BY q.created_at DESC LIMIT ?`,
+          `${clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`} ORDER BY q.created_at DESC${options.limit === undefined ? "" : " LIMIT ?"}`,
         ),
       )
       .all(...params);

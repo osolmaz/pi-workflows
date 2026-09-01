@@ -2,11 +2,33 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import workflow from "../examples/workflows/echo.workflow.js";
+import { StateDatabase } from "../src/state/database.js";
 import { resourceIdFor } from "../src/state/mutation.js";
-import { pruneState } from "../src/state/prune.js";
+import {
+  pruneState as pruneStateWithDatabase,
+  type StatePruneOptions,
+  type StatePruneReport,
+  validateStatePruneOptions,
+} from "../src/state/prune.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeStateDatabasePath } from "./helpers.js";
+
+async function pruneState(
+  databasePath: string,
+  options: StatePruneOptions,
+): Promise<StatePruneReport> {
+  validateStatePruneOptions(options);
+  const state = new StateDatabase({
+    filePath: databasePath,
+    mode: options.apply ? "read-write" : "read-only",
+  });
+  try {
+    return await pruneStateWithDatabase(state, databasePath, options);
+  } finally {
+    state.close();
+  }
+}
 
 describe("state prune", () => {
   it("previews and deletes old terminal runs only after a verified backup", async () => {
