@@ -614,6 +614,15 @@ async function claimPendingInteractionDelivery(
   return {
     deliveryId: `interaction:${interaction.requestId}`,
     claimExpiresAt,
+    isStillDeliverable: () =>
+      existingEntryId === undefined &&
+      interactionPresentationClaimIsLive({
+        requestId: interaction.requestId,
+        runId: interaction.runId,
+        presenterId: client.clientId,
+        revision: presentationRevision,
+        claimExpiresAt,
+      }),
     findSessionEntryId,
     send: () => {
       if (interaction.kind === "decision") {
@@ -690,6 +699,13 @@ async function claimPendingNotificationDelivery(
   return {
     deliveryId: `notification:${notificationId}`,
     claimExpiresAt,
+    isStillDeliverable: () =>
+      hostDeliveryClaimIsLive(client, {
+        kind: "notification",
+        resourceId: notificationId,
+        targetSessionId: sessionId,
+        claimId,
+      }),
     findSessionEntryId: (entries) =>
       entryIdentifier(
         entries.find(
@@ -756,6 +772,13 @@ async function claimPendingTurnDelivery(
   return {
     deliveryId: `turn:${intentId}`,
     claimExpiresAt,
+    isStillDeliverable: () =>
+      hostDeliveryClaimIsLive(client, {
+        kind: "turn",
+        resourceId: intentId,
+        targetSessionId: sessionId,
+        claimId,
+      }),
     findSessionEntryId: (entries) =>
       entryIdentifier(
         entries.find(
@@ -954,6 +977,61 @@ function terminalRunState(runId: string): Record<string, unknown> | undefined {
 
 function workflowRunPaused(runId: string): boolean {
   return terminalRunState(runId)?.paused === true;
+}
+
+function interactionPresentationClaimIsLive(options: {
+  requestId: string;
+  runId: string;
+  presenterId: string;
+  revision: number;
+  claimExpiresAt: number;
+}): boolean {
+  try {
+    const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+    try {
+      const interaction = store.getInteraction(options.requestId);
+      return (
+        interaction?.runId === options.runId &&
+        interaction.status === "presenting" &&
+        interaction.presenterId === options.presenterId &&
+        interaction.revision === options.revision &&
+        interaction.presentationSessionEntryId === null &&
+        interaction.presentationClaimExpiresAt !== null &&
+        Date.parse(interaction.presentationClaimExpiresAt) === options.claimExpiresAt &&
+        !workflowRunPaused(options.runId)
+      );
+    } finally {
+      store.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function hostDeliveryClaimIsLive(
+  client: WorkflowHostClient,
+  options: {
+    kind: "notification" | "turn";
+    resourceId: string;
+    targetSessionId: string;
+    claimId: string;
+  },
+): Promise<boolean> {
+  try {
+    const validationId = randomUUID();
+    const response = await client.request({
+      operation: options.kind === "notification" ? "notification.claim" : "turn.claim",
+      requestId: `delivery-validate-${options.claimId}-${validationId}`,
+      idempotencyKey: validationId,
+      payload: { ...options, validateClaim: true },
+    });
+    const receipt = isRecord(response.receipt) ? response.receipt : undefined;
+    return (
+      (response.outcome === "accepted" || response.outcome === "adopted") && receipt?.live === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 function presentationMessage(

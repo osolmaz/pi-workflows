@@ -2137,6 +2137,21 @@ export class SqliteControllerStore implements ControllerStore {
     return isTurnIntentRow(row) ? this.mapTurnIntent(row) : undefined;
   }
 
+  isWorkflowTurnIntentClaimLive(options: {
+    intentId: string;
+    targetSessionId: string;
+    claimToken: string;
+    now?: string;
+  }): boolean {
+    const row = this.turnIntentRow(options.intentId);
+    return (
+      row !== undefined &&
+      row.targetSessionId === options.targetSessionId &&
+      row.resolvedAt === null &&
+      this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+    );
+  }
+
   claimWorkflowTurnIntent(options: {
     intentId: string;
     targetSessionId: string;
@@ -2376,6 +2391,20 @@ export class SqliteControllerStore implements ControllerStore {
       }
     }
     return result;
+  }
+
+  isWorkflowNotificationClaimLive(options: {
+    notificationId: string;
+    targetSessionId: string;
+    claimToken: string;
+    now?: string;
+  }): boolean {
+    const row = this.notificationRowById(options.notificationId);
+    return (
+      row !== undefined &&
+      row.targetSessionId === options.targetSessionId &&
+      this.verifyEffectToken(row.effectId, options.claimToken, options.now)
+    );
   }
 
   markWorkflowNotificationDelivered(options: {

@@ -3,6 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 export type ClaimedSessionDelivery = {
   deliveryId: string;
   claimExpiresAt: number;
+  isStillDeliverable: () => boolean | Promise<boolean>;
   findSessionEntryId: (entries: readonly unknown[]) => string | undefined;
   send: () => void;
   settle: (sessionEntryId: string) => Promise<void>;
@@ -81,6 +82,15 @@ export class SessionDeliveryCoordinator {
       this.claimed = undefined;
       await this.settleDelivery(ctx, delivery.deliveryId, existingEntryId);
       return true;
+    }
+    if (delivery.claimExpiresAt <= Date.now()) {
+      this.claimed = undefined;
+      return false;
+    }
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) return true;
+    if (!(await delivery.isStillDeliverable())) {
+      this.claimed = undefined;
+      return false;
     }
     if (delivery.claimExpiresAt <= Date.now()) {
       this.claimed = undefined;
