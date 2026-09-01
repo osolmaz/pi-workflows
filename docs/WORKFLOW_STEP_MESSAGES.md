@@ -1,6 +1,6 @@
 # Workflow step messages
 
-This specification defines how pi-workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded.
+This specification defines how pi-workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded. [Restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md) records the delivery and session-control repair.
 
 ## Goal
 
@@ -48,11 +48,11 @@ pi.sendMessage(
 
 ## Session delivery
 
-One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. It checks these conditions again after the asynchronous host claim and immediately before the synchronous send. If Pi became busy, the unused claim expires and is never sent later. Before it calls `pi.sendMessage()`, the coordinator records the stable delivery ID in a process-local queued map. The one-second poll can then look for the matching session entry, but it cannot send that ID again.
+One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. It checks these conditions again after the asynchronous host claim and immediately before the synchronous send. The coordinator remembers the stable delivery ID and exact claim expiry before that final check. If Pi became busy, a later poll can use that same claim while it remains live. An expired unused claim is discarded.
 
-The coordinator clears the queued ID only after it observes the custom message in the active branch and saves the public Pi session entry ID through the workflow host. If Pi becomes idle but does not expose that entry after the confirmation interval, the coordinator reports an ambiguous delivery and keeps it blocked. Reload and restart recovery first search the branch for that stable ID. An existing entry is adopted. A new message is sent only when no entry exists and the host grants a new claim.
+Before the coordinator calls `pi.sendMessage()`, it records the delivery in a process-local queued map. The one-second poll can look for the matching session entry, but it cannot send that ID again. The coordinator clears the queued ID only after it observes the custom message in the active branch and saves the public Pi session entry ID through the workflow host. If Pi does not expose that entry after the confirmation interval, or if saving its receipt fails, the coordinator reports an ambiguous delivery and keeps it blocked.
 
-The host does not grant another live presentation claim to the same extension client. Claim expiry permits recovery by a new claimant; it is not permission for the current process to resend a queued message.
+Reload and restart recovery first search the branch for that stable ID. An existing entry is adopted. A new message is sent only when no entry exists and the host grants a new claim. The host does not grant a second live presentation claim. Polling treats another live claim as unavailable work rather than a workflow error.
 
 ## Engine boundary
 
