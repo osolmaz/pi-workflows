@@ -6,7 +6,7 @@ import { WorkflowClient } from "../client/client.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
 import type { JsonValue } from "../state/json.js";
 import { verifyInactiveBackup } from "./backup.js";
-import { renderClientView, runViewer } from "./tui.js";
+import { materializeRunView, renderClientView, runViewer } from "./tui.js";
 
 const USAGE = `pi-workflows — workflow runs and controller resources
 
@@ -324,7 +324,8 @@ async function firstRunsView(client: WorkflowClient): Promise<JsonValue> {
 }
 
 async function firstRunView(client: WorkflowClient, runId: string): Promise<JsonValue> {
-  return await firstSubscriptionEvent((listener) => client.watchRun(runId, listener));
+  const view = await firstSubscriptionEvent((listener) => client.watchRun(runId, listener));
+  return await materializeRunView(client, view);
 }
 
 async function firstSubscriptionEvent(

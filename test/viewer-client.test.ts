@@ -1,7 +1,108 @@
-import { describe, expect, it } from "vitest";
-import { renderClientView } from "../src/viewer/tui.js";
+import { describe, expect, it, vi } from "vitest";
+import type { WorkflowClient } from "../src/client/client.js";
+import type { JsonValue } from "../src/state/json.js";
+import { materializeRunView, renderClientView } from "../src/viewer/tui.js";
 
 describe("host client renderer", () => {
+  it("materializes paged history and referenced content", async () => {
+    const hydrateContent = vi.fn(async (_runId: string, value: JsonValue) => {
+      const hydrated = structuredClone(value) as Record<string, JsonValue>;
+      const state = hydrated.state as Record<string, JsonValue>;
+      state.finalOutput = { ready: true };
+      return hydrated;
+    });
+    const request = vi.fn(async () => ({
+      schema: "pi-workflows.client.v1" as const,
+      type: "response" as const,
+      requestId: "page",
+      outcome: "accepted" as const,
+      receipt: {
+        schema: "pi-workflows.run-page.v1",
+        runId: "run-paged",
+        revision: 7,
+        kind: "steps",
+        cursor: 0,
+        start: 0,
+        total: 3,
+        items: [
+          { nodeId: "one", outcome: "ok" },
+          { nodeId: "two", outcome: "ok" },
+        ],
+      },
+    }));
+    const client = { request, hydrateContent } as unknown as WorkflowClient;
+
+    const materialized = (await materializeRunView(client, {
+      schema: "pi-workflows.run-view.v1",
+      runId: "run-paged",
+      revision: 7,
+      state: {
+        steps: [{ nodeId: "three", outcome: "ok" }],
+        finalOutput: { $artifact: { path: "content/final.json" } },
+      },
+      stepStart: 2,
+      stepTotal: 3,
+      tracePage: { start: 0, total: 0, items: [] },
+      session: {
+        entryPage: { start: 0, total: 0, items: [] },
+        eventPage: { start: 0, total: 0, items: [] },
+      },
+      settingsScopes: [],
+      settingsStart: 0,
+      settingsTotal: 0,
+      followUpQueue: { items: [] },
+      followUpStart: 0,
+      followUpTotal: 0,
+      updates: [],
+      updateStart: 0,
+      updateTotal: 0,
+    })) as Record<string, JsonValue>;
+
+    expect(request).toHaveBeenCalledWith({
+      operation: "view.page",
+      runId: "run-paged",
+      expectedRevision: 7,
+      payload: { kind: "steps", cursor: 0 },
+    });
+    expect((materialized.state as Record<string, JsonValue>).steps).toEqual([
+      { nodeId: "one", outcome: "ok" },
+      { nodeId: "two", outcome: "ok" },
+      { nodeId: "three", outcome: "ok" },
+    ]);
+    expect((materialized.state as Record<string, JsonValue>).finalOutput).toEqual({ ready: true });
+    expect(hydrateContent).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a page from another run revision", async () => {
+    const client = {
+      request: vi.fn(async () => ({
+        outcome: "accepted",
+        receipt: {
+          schema: "pi-workflows.run-page.v1",
+          runId: "run-paged",
+          revision: 8,
+          kind: "steps",
+          cursor: 0,
+          start: 0,
+          total: 1,
+          items: [{ nodeId: "one", outcome: "ok" }],
+        },
+      })),
+      hydrateContent: vi.fn(async (_runId: string, value: JsonValue) => value),
+    } as unknown as WorkflowClient;
+
+    await expect(
+      materializeRunView(client, {
+        schema: "pi-workflows.run-view.v1",
+        runId: "run-paged",
+        revision: 7,
+        state: { steps: [] },
+        stepStart: 0,
+        stepTotal: 1,
+      }),
+    ).rejects.toThrow("Workflow steps page changed while loading");
+  });
+
   it("renders a completed run without exposing raw protocol JSON", () => {
     const lines = renderClientView(
       {

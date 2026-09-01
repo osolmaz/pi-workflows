@@ -11,6 +11,104 @@ export type ViewerOptions = {
   runId?: string | undefined;
 };
 
+type ViewerPageKind =
+  | "steps"
+  | "trace"
+  | "session_entries"
+  | "session_events"
+  | "settings"
+  | "follow_ups"
+  | "updates";
+
+type ViewerPage = {
+  start: number;
+  total: number;
+  items: JsonValue[];
+};
+
+export async function materializeRunView(
+  client: WorkflowClient,
+  value: JsonValue,
+): Promise<JsonValue> {
+  if (
+    !isRecord(value) ||
+    value.schema !== "pi-workflows.run-view.v1" ||
+    typeof value.runId !== "string" ||
+    !Number.isSafeInteger(value.revision)
+  ) {
+    return value;
+  }
+  const view = structuredClone(value);
+  const runId = value.runId;
+  const revision = value.revision as number;
+  const state = isRecord(view.state) ? view.state : {};
+  view.state = state;
+  const initialSteps = Array.isArray(state.steps) ? state.steps : [];
+  const steps = await completePage(client, runId, revision, "steps", {
+    start: safeInteger(view.stepStart, 0),
+    total: safeInteger(view.stepTotal, initialSteps.length),
+    items: initialSteps,
+  });
+  state.steps = steps;
+  view.stepStart = 0;
+  view.stepTotal = steps.length;
+
+  const tracePage = pageValue(view.tracePage);
+  const trace = await completePage(client, runId, revision, "trace", tracePage);
+  view.tracePage = { ...(isRecord(view.tracePage) ? view.tracePage : {}), start: 0, items: trace };
+
+  const session = isRecord(view.session) ? view.session : {};
+  view.session = session;
+  const entryPage = pageValue(session.entryPage);
+  const entries = await completePage(client, runId, revision, "session_entries", entryPage);
+  session.entryPage = {
+    ...(isRecord(session.entryPage) ? session.entryPage : {}),
+    start: 0,
+    items: entries,
+  };
+  const eventPage = pageValue(session.eventPage);
+  const events = await completePage(client, runId, revision, "session_events", eventPage);
+  session.eventPage = {
+    ...(isRecord(session.eventPage) ? session.eventPage : {}),
+    start: 0,
+    items: events,
+  };
+
+  const initialSettings = Array.isArray(view.settingsScopes) ? view.settingsScopes : [];
+  const settings = await completePage(client, runId, revision, "settings", {
+    start: safeInteger(view.settingsStart, 0),
+    total: safeInteger(view.settingsTotal, initialSettings.length),
+    items: initialSettings,
+  });
+  view.settingsScopes = settings;
+  view.settingsStart = 0;
+  view.settingsTotal = settings.length;
+
+  const followUpQueue = isRecord(view.followUpQueue) ? view.followUpQueue : {};
+  const initialFollowUps = Array.isArray(followUpQueue.items) ? followUpQueue.items : [];
+  const followUps = await completePage(client, runId, revision, "follow_ups", {
+    start: safeInteger(view.followUpStart, 0),
+    total: safeInteger(view.followUpTotal, initialFollowUps.length),
+    items: initialFollowUps,
+  });
+  followUpQueue.items = followUps;
+  view.followUpQueue = followUpQueue;
+  view.followUpStart = 0;
+  view.followUpTotal = followUps.length;
+
+  const initialUpdates = Array.isArray(view.updates) ? view.updates : [];
+  const updates = await completePage(client, runId, revision, "updates", {
+    start: safeInteger(view.updateStart, 0),
+    total: safeInteger(view.updateTotal, initialUpdates.length),
+    items: initialUpdates,
+  });
+  view.updates = updates;
+  state.updates = updates;
+  view.updateStart = 0;
+  view.updateTotal = updates.length;
+  return await client.hydrateContent(runId, view);
+}
+
 /** Interactive client view. All durable reads stay in the workflow host. */
 export async function runViewer(options: ViewerOptions): Promise<void> {
   let value: JsonValue = options.runId === undefined ? [] : null;
@@ -18,6 +116,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   let scroll = 0;
   let mode: "runs" | "run" = options.runId === undefined ? "runs" : "run";
   let unsubscribe: (() => Promise<void>) | undefined;
+  let runMaterializationGeneration = 0;
 
   const draw = () => {
     const width = process.stdout.columns ?? 100;
@@ -33,6 +132,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   };
 
   const watchRuns = async () => {
+    runMaterializationGeneration += 1;
     await unsubscribe?.();
     mode = "runs";
     scroll = 0;
@@ -44,12 +144,23 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   };
 
   const watchRun = async (runId: string) => {
+    runMaterializationGeneration += 1;
     await unsubscribe?.();
     mode = "run";
     scroll = 0;
     unsubscribe = await options.client.watchRun(runId, (event) => {
+      const generation = ++runMaterializationGeneration;
       value = event.payload;
       draw();
+      void materializeRunView(options.client, event.payload)
+        .then((materialized) => {
+          if (generation !== runMaterializationGeneration || mode !== "run") return;
+          value = materialized;
+          draw();
+        })
+        .catch(() => {
+          // A newer revision event retries the complete view from its own stable snapshot.
+        });
     });
   };
 
@@ -104,11 +215,82 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
       process.stdin.on("data", onKey);
     });
   } finally {
+    runMaterializationGeneration += 1;
     await unsubscribe?.();
     if (rawModeSupported) process.stdin.setRawMode(false);
     process.stdin.pause();
     process.stdout.write(ALT_SCREEN_OFF);
   }
+}
+
+async function completePage(
+  client: WorkflowClient,
+  runId: string,
+  revision: number,
+  kind: ViewerPageKind,
+  initial: ViewerPage,
+): Promise<JsonValue[]> {
+  if (
+    initial.start < 0 ||
+    initial.total < 0 ||
+    initial.start + initial.items.length > initial.total
+  ) {
+    throw new Error(`Workflow ${kind} page is invalid`);
+  }
+  const items = Array<JsonValue | undefined>(initial.total).fill(undefined);
+  for (const [offset, item] of initial.items.entries()) items[initial.start + offset] = item;
+  for (;;) {
+    const cursor = items.findIndex((item) => item === undefined);
+    if (cursor < 0) return items as JsonValue[];
+    const response = await client.request({
+      operation: "view.page",
+      runId,
+      expectedRevision: revision,
+      payload: { kind, cursor },
+    });
+    if (response.outcome !== "accepted" || !isRecord(response.receipt)) {
+      throw new Error(response.error ?? `Workflow ${kind} page is unavailable`);
+    }
+    const page = response.receipt;
+    if (
+      page.schema !== "pi-workflows.run-page.v1" ||
+      page.runId !== runId ||
+      page.revision !== revision ||
+      page.kind !== kind ||
+      page.cursor !== cursor ||
+      !Number.isSafeInteger(page.start) ||
+      page.total !== initial.total ||
+      !Array.isArray(page.items)
+    ) {
+      throw new Error(`Workflow ${kind} page changed while loading`);
+    }
+    const start = page.start as number;
+    if (start < 0 || start + page.items.length > initial.total) {
+      throw new Error(`Workflow ${kind} page is outside its history`);
+    }
+    let added = 0;
+    for (const [offset, item] of page.items.entries()) {
+      const index = start + offset;
+      if (items[index] === undefined) added += 1;
+      items[index] = item;
+    }
+    if (added === 0) throw new Error(`Workflow ${kind} page made no progress`);
+  }
+}
+
+function pageValue(value: JsonValue | undefined): ViewerPage {
+  const record = isRecord(value) ? value : {};
+  const items = Array.isArray(record.items) ? record.items : [];
+  const start = safeInteger(record.start, 0);
+  return {
+    start,
+    total: safeInteger(record.total, start + items.length),
+    items,
+  };
+}
+
+function safeInteger(value: JsonValue | undefined, fallback: number): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : fallback;
 }
 
 export function renderClientView(

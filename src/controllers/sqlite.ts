@@ -1382,14 +1382,6 @@ export class SqliteControllerStore implements ControllerStore {
     return row === undefined ? undefined : workflowRunViewRecord(row);
   }
 
-  latestSessionWorkflowRunView(sessionId: string): WorkflowRunQueueViewRecord | undefined {
-    const row = this.workflowRunViewRows(
-      "WHERE b.origin_session_id = ? ORDER BY q.created_at DESC, r.run_id DESC LIMIT 1",
-      [sessionId],
-    )[0];
-    return row === undefined ? undefined : workflowRunViewRecord(row);
-  }
-
   claimWorkflowRun(options: {
     runId: string;
     runnerId: string;

@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import piWorkflows from "../src/extension/index.js";
+import piWorkflows, { activityStateForConnection } from "../src/extension/index.js";
 import { HostStateStore } from "../src/host/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
@@ -25,6 +25,20 @@ afterEach(async () => {
 });
 
 type FakeContext = ReturnType<typeof makePi>["ctx"];
+
+describe("origin activity connection state", () => {
+  it("starts the lease again on the first refresh after reconnect", () => {
+    expect(activityStateForConnection("refresh", "connection-one", "connection-two")).toBe(
+      "started",
+    );
+    expect(activityStateForConnection("refresh", "connection-two", "connection-two")).toBe(
+      "refresh",
+    );
+    expect(activityStateForConnection("settled", "connection-one", "connection-two")).toBe(
+      "settled",
+    );
+  });
+});
 
 function makePi(options: {
   cwd: string;

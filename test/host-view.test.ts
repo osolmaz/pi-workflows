@@ -129,7 +129,6 @@ describe("host workflow display reducer", () => {
     });
     expect(queue.getWorkflowRunView("missing-run")).toBeUndefined();
     expect(queue.findSessionReservationView("missing-session")).toBeUndefined();
-    expect(queue.latestSessionWorkflowRunView("missing-session")).toBeUndefined();
     expect(runs.readRunViewCounts("missing-run")).toBeNull();
     expect(
       runs.readRunView("missing-run", {
@@ -318,8 +317,34 @@ describe("host workflow display reducer", () => {
     const attemptId = result.state.steps[0]?.attemptId;
     if (attemptId === undefined) throw new Error("attempt missing");
     state.connection
-      .prepare("UPDATE runs SET status = 'waiting', paused = 0 WHERE run_id = ?")
+      .prepare("UPDATE runs SET status = 'running', finished_at = NULL WHERE run_id = ?")
       .run("run-view");
+    const effect = await runs.reserveEffect({
+      runId: "run-view",
+      attemptId,
+      effectType: "test.effect",
+      idempotencyKey: "applying-effect",
+      request: { value: 1 },
+      recovery: "idempotent",
+    });
+    const applyingViews = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      (runId) => runId === "run-view",
+    );
+    expect(applyingViews.run("run-view")?.display.status).toBe("running");
+    await runs.settleEffect({
+      runId: "run-view",
+      effectId: effect.effectId,
+      attemptNumber: effect.attemptNumber,
+      outcome: "applied",
+      result: { ok: true },
+    });
+    state.connection
+      .prepare("UPDATE runs SET status = 'waiting', paused = 0, finished_at = ? WHERE run_id = ?")
+      .run(Date.now(), "run-view");
     state.connection
       .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
       .run("run-view");
@@ -394,6 +419,15 @@ describe("host workflow display reducer", () => {
     state.connection.prepare("UPDATE runs SET paused = 1 WHERE run_id = ?").run("run-view");
     expect(views.run("run-view")?.display.status).toBe("paused");
     views.clearConnection("connection-one");
+    state.connection
+      .prepare("UPDATE run_queue SET status = 'done', finished_at = ? WHERE run_id = 'run-view'")
+      .run(Date.now());
+    state.connection
+      .prepare(
+        "UPDATE runs SET status = 'completed', paused = 0, finished_at = ? WHERE run_id = 'run-view'",
+      )
+      .run(Date.now());
+    expect(views.session("session-view").run).toBeNull();
     state.close();
   });
 });
