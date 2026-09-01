@@ -7,8 +7,10 @@ use crate::protocol::{
 };
 use crate::state::types::{DefinitionSnapshot, Manifest, RunState, StepRecord};
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -110,10 +112,15 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .cloned()
         .unwrap_or_default();
     let follow_up_queue = raw.get("followUpQueue").cloned().filter(|v| !v.is_null());
-    let update_total = state
-        .updates
-        .as_ref()
-        .map_or(0, |updates| updates.len() as u64);
+    let update_total = raw
+        .get("updateTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            state
+                .updates
+                .as_ref()
+                .map_or(0, |updates| updates.len() as u64)
+        });
     Some(RemoteView {
         revision,
         graph_revision,
@@ -248,6 +255,8 @@ fn is_tail_page(page: &Value) -> bool {
 
 #[derive(Debug, Clone)]
 enum ArtifactEntry {
+    Loading(Vec<u8>),
+    Ready(String),
     Error(String),
 }
 
@@ -262,6 +271,7 @@ struct Shared {
     next_view_generation: u64,
     watched: HashSet<String>,
     page_requests: HashMap<(String, PageKind), u64>,
+    content_requests: HashMap<(String, String), u64>,
     artifacts: HashMap<(String, String), ArtifactEntry>,
 }
 
@@ -359,10 +369,17 @@ impl RemoteRuns {
     }
 
     pub fn request_artifact(&self, run_id: &str, path: &str) {
-        self.shared.lock().unwrap().artifacts.insert(
-            (run_id.to_string(), path.to_string()),
-            ArtifactEntry::Error("artifact content is not available through piw".to_string()),
-        );
+        let key = (run_id.to_string(), path.to_string());
+        let mut shared = self.shared.lock().unwrap();
+        if shared.artifacts.contains_key(&key) {
+            return;
+        }
+        shared
+            .artifacts
+            .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
+        shared.content_requests.insert(key, 0);
+        drop(shared);
+        self.wake();
     }
 
     pub fn artifact_snapshot(
@@ -375,11 +392,13 @@ impl RemoteRuns {
             .artifacts
             .iter()
             .filter(|((candidate, _), _)| candidate == run_id)
-            .map(|((_, path), entry)| {
+            .filter_map(|((_, path), entry)| {
                 let value = match entry {
+                    ArtifactEntry::Loading(_) => return None,
+                    ArtifactEntry::Ready(content) => Ok(content.clone()),
                     ArtifactEntry::Error(error) => Err(error.clone()),
                 };
-                (path.clone(), value)
+                Some((path.clone(), value))
             })
             .collect()
     }
@@ -530,11 +549,12 @@ fn reconcile_requests(
     sent: &mut HashSet<String>,
     counter: &mut u64,
 ) -> Vec<ClientRequest> {
-    let (watched, pages, revisions) = {
+    let (watched, pages, contents, revisions) = {
         let state = shared.lock().unwrap();
         (
             state.watched.clone(),
             state.page_requests.clone(),
+            state.content_requests.clone(),
             state
                 .raw_views
                 .iter()
@@ -577,6 +597,14 @@ fn reconcile_requests(
             ));
         }
     }
+    let desired_page_keys = pages
+        .iter()
+        .map(|((run_id, kind), cursor)| {
+            let revision = revisions.get(run_id).copied().unwrap_or(0);
+            format!("page:{run_id}:{}:{cursor}:{revision}", page_name(*kind))
+        })
+        .collect::<HashSet<_>>();
+    sent.retain(|key| !key.starts_with("page:") || desired_page_keys.contains(key));
     for ((run_id, kind), cursor) in pages {
         let revision = revisions.get(&run_id).copied().unwrap_or(0);
         let key = format!("page:{run_id}:{}:{cursor}:{revision}", page_name(kind));
@@ -586,6 +614,17 @@ fn reconcile_requests(
                 "view.page",
                 Some(&run_id),
                 json!({"kind":page_name(kind),"cursor":cursor}),
+            ));
+        }
+    }
+    for ((run_id, path), offset) in contents {
+        let key = format!("content:{run_id}:{path}:{offset}");
+        if sent.insert(key) {
+            requests.push(request(
+                counter,
+                "view.content",
+                Some(&run_id),
+                json!({"path":path,"offset":offset}),
             ));
         }
     }
@@ -666,14 +705,112 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
             if response.outcome == "unavailable" || response.outcome == "rejected" {
                 shared.lock().unwrap().error = response.error;
             } else if let Some(receipt) = response.receipt {
-                if receipt.get("schema").and_then(Value::as_str) == Some("pi-workflows.run-page.v1")
-                {
-                    merge_page(&mut shared.lock().unwrap(), &receipt)?;
+                match receipt.get("schema").and_then(Value::as_str) {
+                    Some("pi-workflows.run-page.v1") => {
+                        merge_page(&mut shared.lock().unwrap(), &receipt)?;
+                    }
+                    Some("pi-workflows.content-chunk.v1") => {
+                        merge_content(&mut shared.lock().unwrap(), &receipt)?;
+                    }
+                    _ => {}
                 }
             }
         }
     }
     Ok(())
+}
+
+fn merge_content(state: &mut Shared, receipt: &Value) -> Result<()> {
+    let run_id = receipt
+        .get("runId")
+        .and_then(Value::as_str)
+        .context("content chunk has no runId")?;
+    let path = receipt
+        .get("path")
+        .and_then(Value::as_str)
+        .context("content chunk has no path")?;
+    let offset = receipt
+        .get("offset")
+        .and_then(Value::as_u64)
+        .context("content chunk has no offset")?;
+    let next_offset = receipt
+        .get("nextOffset")
+        .and_then(Value::as_u64)
+        .context("content chunk has no nextOffset")?;
+    let total = receipt
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .context("content chunk has no byte total")?;
+    let sha256 = receipt
+        .get("sha256")
+        .and_then(Value::as_str)
+        .context("content chunk has no digest")?;
+    let complete = receipt
+        .get("complete")
+        .and_then(Value::as_bool)
+        .context("content chunk has no completion marker")?;
+    let data = BASE64
+        .decode(
+            receipt
+                .get("data")
+                .and_then(Value::as_str)
+                .context("content chunk has no data")?,
+        )
+        .context("content chunk is not valid base64")?;
+    let key = (run_id.to_string(), path.to_string());
+    let Some(entry) = state.artifacts.remove(&key) else {
+        return Ok(());
+    };
+    let ArtifactEntry::Loading(mut bytes) = entry else {
+        state.artifacts.insert(key, entry);
+        return Ok(());
+    };
+    if bytes.len() as u64 != offset || offset.saturating_add(data.len() as u64) != next_offset {
+        state.artifacts.insert(
+            key.clone(),
+            ArtifactEntry::Error("workflow content chunk offset is invalid".to_string()),
+        );
+        state.content_requests.remove(&key);
+        return Ok(());
+    }
+    bytes.extend_from_slice(&data);
+    if complete {
+        let digest = hex_sha256(&bytes);
+        if bytes.len() as u64 != total || next_offset != total || digest != sha256 {
+            state.artifacts.insert(
+                key.clone(),
+                ArtifactEntry::Error("workflow content digest does not match".to_string()),
+            );
+        } else {
+            match String::from_utf8(bytes) {
+                Ok(content) => {
+                    state
+                        .artifacts
+                        .insert(key.clone(), ArtifactEntry::Ready(content));
+                }
+                Err(_) => {
+                    state.artifacts.insert(
+                        key.clone(),
+                        ArtifactEntry::Error("workflow content is not UTF-8".to_string()),
+                    );
+                }
+            }
+        }
+        state.content_requests.remove(&key);
+    } else {
+        state
+            .artifacts
+            .insert(key.clone(), ArtifactEntry::Loading(bytes));
+        state.content_requests.insert(key, next_offset);
+    }
+    Ok(())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
@@ -729,6 +866,15 @@ fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
                 },
                 json!({"start":start,"total":total,"items":items}),
             );
+            if kind == "session_events" {
+                session.insert(
+                    "replayCheckpoint".to_string(),
+                    receipt
+                        .get("replayCheckpoint")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
         }
         "settings" => {
             view["settingsScopes"] = Value::Array(items);
@@ -740,7 +886,7 @@ fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
                 view["followUpQueue"] = json!({});
             }
             if let Some(queue) = view.get_mut("followUpQueue").and_then(Value::as_object_mut) {
-                queue.insert("followUps".to_string(), Value::Array(items));
+                queue.insert("items".to_string(), Value::Array(items));
             }
             view["followUpStart"] = json!(start);
             view["followUpTotal"] = json!(total);
@@ -813,7 +959,8 @@ mod tests {
                 "input":{},
                 "outputs":{},
                 "results":{},
-                "steps":[]
+                "steps":[],
+                "updates":[{"seq":299}]
             },
             "workflow": {
                 "schema":"pi-workflows.definition-snapshot.v1",
@@ -841,8 +988,8 @@ mod tests {
             "followUpQueue":null,
             "followUpStart":0,
             "followUpTotal":0,
-            "updateStart":0,
-            "updateTotal":0,
+            "updateStart":299,
+            "updateTotal":300,
             "live":false,
             "possiblyInterrupted":false
         });
@@ -850,6 +997,7 @@ mod tests {
         let view = decode_view(4, 1, &raw).expect("host view should decode");
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
+        assert_eq!(view.update_total, 300);
     }
 
     #[test]
@@ -898,12 +1046,105 @@ mod tests {
             }),
         )
         .unwrap();
+        merge_page(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.run-page.v1",
+                "runId":"run-1",
+                "revision":3,
+                "kind":"follow_ups",
+                "start":2,
+                "total":3,
+                "items":[{"followUpId":"follow-3"}]
+            }),
+        )
+        .unwrap();
+        merge_page(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.run-page.v1",
+                "runId":"run-1",
+                "revision":3,
+                "kind":"session_events",
+                "start":256,
+                "total":300,
+                "items":[{"seq":257}],
+                "replayCheckpoint":{"throughSeq":256}
+            }),
+        )
+        .unwrap();
         let (_, generation, view) = state.raw_views.get("run-1").unwrap();
-        assert_eq!(*generation, 3);
+        assert_eq!(*generation, 5);
         assert_eq!(view["settingsStart"], 44);
         assert_eq!(view["settingsScopes"], json!([{"change":299}]));
         assert_eq!(view["graphSteps"], json!([{"node":"one"}]));
         assert_eq!(view["state"]["steps"], json!([{"step":0}]));
+        assert_eq!(
+            view["followUpQueue"]["items"],
+            json!([{"followUpId":"follow-3"}])
+        );
+        assert_eq!(view["session"]["replayCheckpoint"]["throughSeq"], 256);
+    }
+
+    #[test]
+    fn page_requests_can_return_to_an_earlier_window() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared
+            .lock()
+            .unwrap()
+            .raw_views
+            .insert("run-1".to_string(), (7, 1, json!({})));
+        let mut sent = HashSet::new();
+        let mut counter = 0;
+        let request_at = |cursor: u64,
+                          shared: &Arc<Mutex<Shared>>,
+                          sent: &mut HashSet<String>,
+                          counter: &mut u64| {
+            shared
+                .lock()
+                .unwrap()
+                .page_requests
+                .insert(("run-1".to_string(), PageKind::Steps), cursor);
+            reconcile_requests(shared, sent, counter)
+                .into_iter()
+                .filter(|request| request.operation == "view.page")
+                .count()
+        };
+        assert_eq!(request_at(10, &shared, &mut sent, &mut counter), 1);
+        assert_eq!(request_at(20, &shared, &mut sent, &mut counter), 1);
+        assert_eq!(request_at(10, &shared, &mut sent, &mut counter), 1);
+    }
+
+    #[test]
+    fn content_chunks_are_reassembled_and_verified() {
+        let content = br#"{"complete":true}"#.to_vec();
+        let path = "artifacts/sha256/content.json";
+        let key = ("run-1".to_string(), path.to_string());
+        let mut state = Shared::default();
+        state
+            .artifacts
+            .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
+        state.content_requests.insert(key.clone(), 0);
+        merge_content(
+            &mut state,
+            &json!({
+                "schema":"pi-workflows.content-chunk.v1",
+                "runId":"run-1",
+                "path":path,
+                "mediaType":"application/json",
+                "bytes":content.len(),
+                "sha256":hex_sha256(&content),
+                "offset":0,
+                "nextOffset":content.len(),
+                "complete":true,
+                "data":BASE64.encode(&content)
+            }),
+        )
+        .unwrap();
+        assert!(
+            matches!(state.artifacts.get(&key), Some(ArtifactEntry::Ready(value)) if value == "{\"complete\":true}")
+        );
+        assert!(!state.content_requests.contains_key(&key));
     }
 
     #[test]

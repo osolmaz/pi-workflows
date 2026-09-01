@@ -154,7 +154,7 @@ pub struct RunState {
     pub status: RunStatus,
     pub input: Value,
     pub outputs: BTreeMap<String, Value>,
-    pub results: BTreeMap<String, NodeResult>,
+    pub results: BTreeMap<String, Value>,
     pub steps: Vec<StepRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updates: Option<Vec<Value>>,

@@ -1179,6 +1179,7 @@ name = "pi-workflows"
 version = "0.15.3"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "crossterm",
@@ -1186,6 +1187,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

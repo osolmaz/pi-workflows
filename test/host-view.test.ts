@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
 import { ORIGIN_ACTIVITY_LEASE_MS } from "../src/client/activity.js";
+import {
+  CLIENT_PROTOCOL_SCHEMA,
+  MAX_PROTOCOL_MESSAGE_BYTES,
+  encodeProtocolLine,
+} from "../src/client/protocol.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostStateStore } from "../src/host/state.js";
 import {
@@ -16,6 +21,7 @@ import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
+import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const base: WorkflowDisplayFacts = {
@@ -91,6 +97,114 @@ describe("host workflow display reducer", () => {
     expect(workflowPageStart(300, 299)).toBe(44);
   });
 
+  it("keeps large content and replay history reachable through bounded host views", async () => {
+    const projectPath = await makeTempDir("host-view-large-project");
+    const databasePath = path.join(await makeTempDir("host-view-large-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new SqliteControllerStore(databasePath, { state, projectPath });
+    const hostState = new HostStateStore(databasePath, { state });
+    const workflow = compileWorkflowDefinition(rawWorkflow);
+    const snapshot = createDefinitionSnapshot(workflow);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    const largeInput = { task: "request ".repeat(300_000) };
+    queue.enqueueWorkflowRun({
+      runId: "run-large-view",
+      workflowName: workflow.name,
+      workflowSourceRef: "builtin:echo",
+      workflowSource: {
+        root: { kind: "builtin", id: "echo", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: largeInput,
+      runnerId: "host-view",
+      claimToken: "claim-large-view",
+      leaseMs: 60_000,
+      originSessionId: "session-large-view",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-large-view", "claim-large-view"),
+    });
+    const largeOutput = { text: "x".repeat(2 * 1024 * 1024) };
+    const result = await new WorkflowEngine({
+      store: runs,
+      executor: new ScriptedExecutor().respond("reply", { output: largeOutput }),
+    }).run(workflow, largeInput, { runId: "run-large-view" });
+    const attemptId = result.state.steps[0]?.attemptId;
+    if (attemptId === undefined) throw new Error("attempt missing");
+    await runs.writeSessionBinding("run-large-view", {
+      schema: "pi-workflows.session-binding.v1",
+      runId: "run-large-view",
+      piSessionId: "session-large-view",
+      cwd: projectPath,
+      boundAt: "2026-01-01T00:00:00.000Z",
+    });
+    const events: WorkflowSessionEventRecord[] = Array.from({ length: 300 }, (_, index) => {
+      const turn = Math.floor(index / 2);
+      const started = index % 2 === 0;
+      return {
+        seq: index + 1,
+        at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
+        nodeId: "reply",
+        attemptId,
+        turnId: `turn-${turn}`,
+        type: started ? "turn_started" : "turn_finished",
+        payload: started
+          ? { turnIndex: turn }
+          : { turnIndex: turn, messageId: `message-${turn}`, toolCallIds: [] },
+      };
+    });
+    await runs.appendSessionEventBatch("run-large-view", events);
+
+    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const view = views.run("run-large-view");
+    if (view === null) throw new Error("run view missing");
+    const encoded = encodeProtocolLine({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "event",
+      subscriptionId: "large-view",
+      event: "run_snapshot",
+      revision: 1,
+      runId: view.runId,
+      payload: view as unknown as never,
+    });
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(MAX_PROTOCOL_MESSAGE_BYTES + 1);
+
+    const stateView = view.state as { steps?: Array<{ output?: unknown }> };
+    const artifact = stateView.steps?.[0]?.output as {
+      $artifact?: { path?: string; bytes?: number; sha256?: string };
+    };
+    const contentPath = artifact.$artifact?.path;
+    if (contentPath === undefined) throw new Error("large output was not externalized");
+    expect(views.content(view.runId, "not-a-content-path", 0)).toBeNull();
+    expect(() => views.content(view.runId, contentPath, -1)).toThrow(/offset/);
+    const coldViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    for (;;) {
+      const chunk = coldViews.content(view.runId, contentPath, offset) as {
+        data: string;
+        nextOffset: number;
+        complete: boolean;
+      };
+      chunks.push(Buffer.from(chunk.data, "base64"));
+      offset = chunk.nextOffset;
+      if (chunk.complete) break;
+    }
+    expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual(largeOutput);
+
+    const session = view.session as {
+      eventPage?: { start?: number; items?: unknown[] };
+      replayCheckpoint?: { throughSeq?: number } | null;
+    };
+    expect(session.eventPage?.items).toHaveLength(256);
+    expect(session.eventPage?.start).toBeGreaterThan(0);
+    expect(session.replayCheckpoint?.throughSeq).toBe(session.eventPage?.start);
+    state.close();
+  });
+
   it("keeps a terminal queue result correct before a run state is available", () => {
     expect(
       display({
@@ -162,6 +276,10 @@ describe("host workflow display reducer", () => {
       sessionEntryId: "entry-view",
     });
     const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const readRun = vi.spyOn(runs, "readRun");
+    expect(views.list()).toHaveLength(1);
+    expect(readRun).not.toHaveBeenCalled();
+    readRun.mockRestore();
     const activity = {
       sessionId: "session-view",
       runId: "run-view",

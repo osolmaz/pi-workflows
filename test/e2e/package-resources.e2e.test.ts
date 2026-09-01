@@ -10,7 +10,7 @@ import { clientSocketPath } from "../../src/client/protocol.js";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const piBin = path.join(repoRoot, "node_modules", ".bin", "pi");
 const HOST_STOP_TIMEOUT_MS = 5_000;
-const tempDirs: string[] = [];
+const tempFixtures: Array<{ directory: string; hostExpected: boolean }> = [];
 
 type CommandInfo = {
   name: string;
@@ -19,7 +19,7 @@ type CommandInfo = {
 
 async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-package-"));
-  tempDirs.push(dir);
+  tempFixtures.push({ directory: dir, hostExpected: false });
   return dir;
 }
 
@@ -89,6 +89,10 @@ async function getCommands(args: string[], tempDir: string): Promise<CommandInfo
         reject(new Error(`Pi did not return get_commands.\n${stderr}\n${stdout}`));
         return;
       }
+      const fixture = tempFixtures.find(({ directory }) => directory === tempDir);
+      if (fixture !== undefined) {
+        fixture.hostExpected = response.data.commands.some(({ name }) => name === "workflow");
+      }
       resolve(response.data.commands);
     });
 
@@ -103,35 +107,47 @@ function command(commands: CommandInfo[], name: string): CommandInfo | undefined
 async function stopPackageHost(directory: string): Promise<void> {
   const databasePath = path.join(directory, ".pi", "agent", "workflows", "state.sqlite");
   const endpoint = clientSocketPath(databasePath);
+  const lockPath = path.join(path.dirname(endpoint), "host.lock.json");
+  const deadline = Date.now() + HOST_STOP_TIMEOUT_MS;
   const client = new WorkflowClient({ databasePath });
   try {
-    await client.request({ operation: "host.stop" });
-  } catch (error) {
-    try {
-      await fs.access(endpoint);
-    } catch {
-      return;
+    for (;;) {
+      try {
+        const response = await client.request({ operation: "host.stop" });
+        if (response.outcome !== "accepted") {
+          throw new Error(response.error ?? "Temporary workflow host rejected stop");
+        }
+        break;
+      } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
     }
-    throw error;
+  } finally {
+    await client.close();
   }
 
-  const deadline = Date.now() + HOST_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    try {
-      await fs.access(endpoint);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      return;
-    }
+    const active = await Promise.all(
+      [endpoint, lockPath].map(async (target) => {
+        try {
+          await fs.access(target);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    if (active.every((value) => !value)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Temporary workflow host did not stop: ${endpoint}`);
 }
 
 afterEach(async () => {
-  for (const directory of tempDirs.splice(0)) {
-    await stopPackageHost(directory);
-    await fs.rm(directory, { recursive: true, force: true });
+  for (const fixture of tempFixtures.splice(0)) {
+    if (fixture.hostExpected) await stopPackageHost(fixture.directory);
+    await fs.rm(fixture.directory, { recursive: true, force: true });
   }
 });
 

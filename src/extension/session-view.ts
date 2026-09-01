@@ -21,7 +21,7 @@ export class SessionWorkflowView {
     if (
       run === null ||
       !isWorkflowRunState(run.state) ||
-      !isWorkflowDefinitionSnapshot(run.snapshot)
+      !isWorkflowDefinitionSnapshot(run.workflow)
     ) {
       this.session = session;
       this.clearWidget(ctx);
@@ -85,9 +85,9 @@ export class SessionWorkflowView {
   private render(ctx: ExtensionContext): void {
     const run = this.session?.run;
     if (run === null || run === undefined) return;
-    if (!isWorkflowRunState(run.state) || !isWorkflowDefinitionSnapshot(run.snapshot)) return;
+    if (!isWorkflowRunState(run.state) || !isWorkflowDefinitionSnapshot(run.workflow)) return;
     const state = run.state;
-    const snapshot = run.snapshot;
+    const snapshot = run.workflow;
     const render = (
       width = Number.POSITIVE_INFINITY,
       theme?: Parameters<typeof buildWidgetView>[6],

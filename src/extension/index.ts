@@ -5,8 +5,11 @@ import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
 import { ORIGIN_ACTIVITY_REFRESH_MS } from "../client/activity.js";
 import { WorkflowClient } from "../client/client.js";
 import type { ClientResponse } from "../client/protocol.js";
-import type { ClientInteractiveRequest, WorkflowSessionView } from "../client/view.js";
-import type { WorkflowRunQueueRecord } from "../controllers/sqlite.js";
+import type {
+  ClientInteractiveRequest,
+  WorkflowRunQueueView,
+  WorkflowSessionView,
+} from "../client/view.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
@@ -200,10 +203,13 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
+      const deliveries = sessionSnapshots.get(ctx.sessionManager.getSessionId())?.deliveries;
       await sessionDelivery.synchronize(ctx, [
         () => claimPendingInteractionDelivery(pi, client, ctx, startOriginActivity),
-        () => claimPendingNotificationDelivery(pi, client, ctx),
-        () => claimPendingTurnDelivery(pi, client, ctx),
+        ...(deliveries?.notification === true
+          ? [() => claimPendingNotificationDelivery(pi, client, ctx)]
+          : []),
+        ...(deliveries?.turn === true ? [() => claimPendingTurnDelivery(pi, client, ctx)] : []),
       ]);
     } finally {
       sessionView.refresh(ctx);
@@ -411,7 +417,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
     void (async () => {
       try {
-        await sessionClient.ensureRunning();
+        await sessionClient.ensureAvailable();
         const unsubscribe = await sessionClient.watchSession(sessionId, (event) => {
           if (generation !== sessionGeneration || sessionContext !== ctx) return;
           if (event.event === "unavailable") {
@@ -534,7 +540,7 @@ async function executeCommand(
       };
     }
     case "run": {
-      await client.ensureRunning();
+      await client.ensureAvailable();
       const resolved = await client.resolveWorkflow({ cwd: ctx.cwd, workflowRef: command.ref });
       const runId = createRunId(resolved.workflowName);
       const response = await requestAccepted(client, {
@@ -732,9 +738,14 @@ async function claimPendingInteractionDelivery(
   ctx: ExtensionContext,
   onPresented: (activity: PresentedOriginActivity) => void,
 ): Promise<ClaimedSessionDelivery | undefined> {
-  const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
-  if (interaction === undefined || interaction.presentationSessionEntryId !== null)
+  const storedInteraction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
+  if (storedInteraction === undefined || storedInteraction.presentationSessionEntryId !== null)
     return undefined;
+  const interaction = {
+    ...storedInteraction,
+    contract: await client.hydrateContent(storedInteraction.runId, storedInteraction.contract),
+  };
+  rememberInteractiveRequest(ctx.sessionManager.getSessionId(), interaction);
 
   const findSessionEntryId = (entries: readonly unknown[]): string | undefined =>
     entryIdentifier(entries.find((entry) => interactionRequestId(entry) === interaction.requestId));
@@ -749,7 +760,7 @@ async function claimPendingInteractionDelivery(
     ) {
       return undefined;
     }
-    await client.ensureRunning();
+    await client.ensureAvailable();
     const claim = await client.request({
       operation: "interaction.update",
       requestId: `claim-presentation-${interaction.requestId}-${interaction.revision}-${client.clientId}`,
@@ -933,8 +944,10 @@ async function claimPendingTurnDelivery(
   const claimExpiresAt = claimExpiry(receipt?.claimExpiresAt, "turn claim");
   const intentId = requireText(turn.intentId, "turn intentId");
   const runId = requireText(turn.runId, "turn runId");
-  const state = terminalRunState(runId);
-  if (state === undefined) return undefined;
+  const storedState = terminalRunState(runId);
+  if (storedState === undefined) return undefined;
+  const state = await client.hydrateContent(runId, storedState as unknown as JsonValue);
+  if (!isRecord(state)) throw new Error("Workflow terminal state content is invalid");
   return {
     deliveryId: `turn:${intentId}`,
     claimExpiresAt,
@@ -1175,17 +1188,17 @@ function claimExpiry(value: unknown, name: string): number {
   return expiry;
 }
 
-function activeSessionRun(ctx: ExtensionContext): WorkflowRunQueueRecord | undefined {
+function activeSessionRun(ctx: ExtensionContext): WorkflowRunQueueView | undefined {
   return sessionRun(ctx);
 }
 
-function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueRecord | undefined {
+function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueView | undefined {
   const session = sessionSnapshots.get(ctx.sessionManager.getSessionId());
   if (session?.run === null || session?.run === undefined || !isRecord(session.run.queue)) {
     return undefined;
   }
   if (runId !== undefined && session.run.runId !== runId) return undefined;
-  const queue = session.run.queue as unknown as WorkflowRunQueueRecord;
+  const queue = session.run.queue;
   return queue.originSessionId === ctx.sessionManager.getSessionId() ? queue : undefined;
 }
 
@@ -1233,7 +1246,7 @@ async function requestAccepted(
   client: WorkflowClient,
   options: Parameters<WorkflowClient["request"]>[0],
 ): Promise<ClientResponse> {
-  await client.ensureRunning();
+  await client.ensureAvailable();
   const response = await client.request(options);
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
     throw new Error(response.error ?? `Workflow host rejected ${options.operation}`);
@@ -1375,6 +1388,9 @@ function isWorkflowSessionView(value: unknown): value is WorkflowSessionView {
     value.schema === "pi-workflows.session-view.v1" &&
     typeof value.sessionId === "string" &&
     Array.isArray(value.pendingInteractions) &&
+    isRecord(value.deliveries) &&
+    typeof value.deliveries.notification === "boolean" &&
+    typeof value.deliveries.turn === "boolean" &&
     (value.run === null || isRecord(value.run))
   );
 }

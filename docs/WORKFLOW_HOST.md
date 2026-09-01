@@ -223,7 +223,7 @@ Read requests do not create receipts. Reconnection restores desired subscription
 The protocol owns four operation groups:
 
 - run and controller commands, including start, pause, resume, cancel, answers, updates, submissions, reconciliation, and host control;
-- live views, including run lists, one run snapshot, revision subscriptions, bounded pages, and one consistent origin-session response with its active run view and ordered pending delivery records;
+- live views, including lightweight run lists, one run snapshot, revision subscriptions, byte-bounded pages, chunked referenced content, and one consistent origin-session response with its active run view, ordered pending delivery records, and read-only delivery availability;
 - origin-session activity reports for the exact workflow delivery being processed by Pi;
 - state maintenance, including status, verification, backup, and prune against the active database.
 
@@ -231,9 +231,11 @@ The protocol owns four operation groups:
 
 ### Live run view
 
-The host returns one canonical `pi-workflows.run-view.v1` document. It contains the existing bounded workflow projection and page cursors plus a `display` object. The `display` object contains the effective status, current activity kind, allowed controls, and a bounded reason when action is required. Renderers use this object directly. They must not combine separate queries or infer status from durable rows.
+The host returns one canonical `pi-workflows.run-view.v1` document. It contains the existing bounded workflow projection and page cursors plus a `display` object. The queue field contains display metadata only. It does not repeat the input, launch options, worker affinity, or claim capability; the complete input remains reachable through the state projection. The `display` object contains the effective status, current activity kind, allowed controls, and a bounded reason when action is required. Renderers use this object directly. They must not combine separate queries or infer status from durable rows.
 
-The origin-session response contains this active run view or no active run plus the ordered pending delivery records for that session. The records include the request, delivery, contract, revision, presentation entry, and claim facts required by the shared delivery coordinator. The host returns them from one consistent read.
+The origin-session response contains this active run view or no active run plus the ordered pending delivery records and read-only notification and turn availability for that session. The records include the request, delivery, contract, revision, presentation entry, and claim facts required by the shared delivery coordinator. The host returns them from one consistent read. The extension issues a claim command only when the matching availability fact is true. Polling an idle session creates no durable command.
+
+Each history page has both an item limit and an encoded byte budget. Oversized values become digest-bound content references. `view.content` returns bounded chunks until the client has the complete value. Session-event pages include the replay checkpoint immediately before the first event in the page. The run list reads only status facts and never loads complete run histories.
 
 The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `completed`, `failed`, `timed_out`, `cancelled`, and `ambiguous`.
 

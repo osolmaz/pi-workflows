@@ -3,6 +3,7 @@
     "{\"connectionId\":\"connection-1\",\"packageVersion\":\"0.15.3\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"hello\"}",
     "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-1\",\"operation\":\"host.status\",\"payload\":{},\"requestId\":\"request-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
     "{\"clientId\":\"client-1\",\"expectedRevision\":7,\"idempotencyKey\":\"key-page\",\"operation\":\"view.page\",\"payload\":{\"cursor\":299,\"kind\":\"steps\"},\"requestId\":\"request-page\",\"runId\":\"run-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
+    "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-content\",\"operation\":\"view.content\",\"payload\":{\"offset\":0,\"path\":\"artifacts/sha256/abc.json\"},\"requestId\":\"request-content\",\"runId\":\"run-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
     "{\"outcome\":\"accepted\",\"receipt\":{\"live\":true},\"requestId\":\"request-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"response\"}",
     "{\"event\":\"run_snapshot\",\"payload\":{\"revision\":7,\"runId\":\"run-1\",\"schema\":\"pi-workflows.run-view.v1\"},\"revision\":3,\"runId\":\"run-1\",\"schema\":\"pi-workflows.client.v1\",\"subscriptionId\":\"subscription-run\",\"type\":\"event\"}",
     "{\"event\":\"session_snapshot\",\"payload\":{\"run\":null,\"schema\":\"pi-workflows.session-view.v1\",\"sessionId\":\"session-1\"},\"revision\":1,\"schema\":\"pi-workflows.client.v1\",\"subscriptionId\":\"subscription-1\",\"type\":\"event\"}"

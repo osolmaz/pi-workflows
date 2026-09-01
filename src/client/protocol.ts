@@ -32,6 +32,7 @@ export const CLIENT_OPERATIONS = [
   "view.run.watch",
   "view.run.unwatch",
   "view.page",
+  "view.content",
   "view.session.watch",
   "activity.report",
   "state.status",

@@ -546,6 +546,17 @@ export class WorkflowHost {
                 view.revision,
               );
         }
+        case "view.content": {
+          const payload = requireRecord(request.payload, "view.content payload");
+          const content = this.views.content(
+            requireRunId(request),
+            requireString(payload.path, "path"),
+            requireNonNegativeInteger(payload.offset, "offset"),
+          );
+          return content === null
+            ? clientResponse(request.requestId, "notFound", undefined, "Workflow content not found")
+            : clientResponse(request.requestId, "accepted", content);
+        }
         case "activity.report": {
           this.views.reportActivity(connection.id, parseActivityReport(request.payload));
           return clientResponse(request.requestId, "accepted", { recorded: true });
@@ -909,6 +920,7 @@ export class WorkflowHost {
       case "view.run.watch":
       case "view.run.unwatch":
       case "view.page":
+      case "view.content":
       case "view.session.watch":
       case "activity.report":
       case "state.status":
@@ -3244,7 +3256,11 @@ function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind): JsonValu
       kind === "session_entries" ? session.entryPage : session.eventPage,
       "session page",
     );
-    return { ...base, ...page } as JsonValue;
+    return {
+      ...base,
+      ...page,
+      ...(kind === "session_events" ? { replayCheckpoint: session.replayCheckpoint } : {}),
+    } as JsonValue;
   }
   if (kind === "settings") {
     return {
@@ -3260,7 +3276,7 @@ function runPageReceipt(view: WorkflowRunView, kind: WorkflowPageKind): JsonValu
       ...base,
       start: view.followUpStart,
       total: view.followUpTotal,
-      items: Array.isArray(queue.followUps) ? queue.followUps : [],
+      items: Array.isArray(queue.items) ? queue.items : [],
     };
   }
   return {

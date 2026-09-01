@@ -31,6 +31,7 @@ const OPERATIONS: &[&str] = &[
     "view.run.watch",
     "view.run.unwatch",
     "view.page",
+    "view.content",
     "view.session.watch",
     "activity.report",
     "state.status",

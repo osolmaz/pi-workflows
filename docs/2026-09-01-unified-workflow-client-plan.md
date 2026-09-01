@@ -108,12 +108,15 @@ Move the public client boundary to `src/client/`.
 
 `WorkflowClient` owns:
 
-- on-demand host startup and connection;
+- on-demand host startup and connection without a durable status probe;
+- explicit status requests when a caller asks for host status;
+- verified chunk reads and content-reference hydration;
 - one persistent connection per client process;
 - request IDs, idempotency keys, and command receipts;
 - desired run-list, origin-session, and run subscriptions;
 - reconnect and revision resume;
 - bounded snapshot recovery when a cursor is stale or a client falls behind;
+- repeatable page navigation, including returning to a previously viewed cursor;
 - protocol and package-version rejection;
 - sanitized unavailable errors.
 
@@ -130,7 +133,9 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 
 The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus the ordered pending delivery records for that session. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
-Large history remains available through the existing bounded page contract. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+Large history remains available through byte-bounded pages. A page has an item limit and an encoded byte budget. Values that do not fit inline use digest-bound content references, and `view.content` returns the complete value in verified chunks. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+
+The origin-session response also contains read-only notification and turn availability. The shared delivery coordinator issues a claim only when the matching fact is true. Its idle poll does not write an empty claim or host-status command. The run list reads lightweight status facts and does not load complete histories.
 
 ### One status reducer
 

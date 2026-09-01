@@ -21,6 +21,23 @@ export type WorkflowDisplay = {
   reason: string | null;
 };
 
+export type WorkflowRunQueueView = {
+  runId: string;
+  workflowName: string;
+  workflowSourceRef: string;
+  initialized: boolean;
+  definitionDigest: string;
+  status: "queued" | "starting" | "running" | "parked" | "done" | "failed" | "cancelled";
+  originSessionId: string | null;
+  executionMode: "interactive" | "headless";
+  parentRunId: string | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
 export type WorkflowRunView = {
   schema: typeof RUN_VIEW_SCHEMA;
   runId: string;
@@ -28,9 +45,8 @@ export type WorkflowRunView = {
   display: WorkflowDisplay;
   manifest: JsonValue;
   state: JsonValue;
-  snapshot: JsonValue;
   workflow: JsonValue;
-  queue: JsonValue;
+  queue: WorkflowRunQueueView;
   updates: JsonValue[];
   graphSteps: JsonValue[];
   takenTransitions: string[];
@@ -82,11 +98,17 @@ export type ClientInteractiveRequest = {
   consumedAt: string | null;
 };
 
+export type WorkflowDeliveryAvailability = {
+  notification: boolean;
+  turn: boolean;
+};
+
 export type WorkflowSessionView = {
   schema: typeof SESSION_VIEW_SCHEMA;
   sessionId: string;
   run: WorkflowRunView | null;
   pendingInteractions: JsonValue[];
+  deliveries: WorkflowDeliveryAvailability;
 };
 
 export type OriginActivityReport = {
