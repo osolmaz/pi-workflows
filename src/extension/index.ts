@@ -337,7 +337,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
           }
           const response = await requestAccepted(client, {
             operation: params.action === "update" ? "interaction.update" : "interaction.submit",
-            requestId: `${params.action}-${toolCallId}`,
+            requestId: `${params.action}-${toolCallId}-${randomUUID()}`,
             idempotencyKey: toolCallId,
             runId: interaction.runId,
             expectedRevision: interaction.revision,
@@ -349,10 +349,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               value:
                 params.action === "update" ? { update: params.update } : { output: params.output },
             }),
+            ...(signal === undefined ? {} : { signal }),
           });
-          if (signal?.aborted === true) {
-            throw signal.reason ?? new Error("Workflow submission was cancelled");
-          }
           await presentInOrder(ctx);
           return toolResult(
             params.action === "update"
@@ -944,9 +942,9 @@ async function claimPendingTurnDelivery(
   const claimExpiresAt = claimExpiry(receipt?.claimExpiresAt, "turn claim");
   const intentId = requireText(turn.intentId, "turn intentId");
   const runId = requireText(turn.runId, "turn runId");
-  const storedState = terminalRunState(runId);
-  if (storedState === undefined) return undefined;
-  const state = await client.hydrateContent(runId, storedState as unknown as JsonValue);
+  const claimedRun = await client.getRun(runId);
+  if (claimedRun === null) throw new Error(`Claimed workflow turn run is missing: ${runId}`);
+  const state = await client.hydrateContent(runId, claimedRun.state);
   if (!isRecord(state)) throw new Error("Workflow terminal state content is invalid");
   return {
     deliveryId: `turn:${intentId}`,
@@ -1057,13 +1055,6 @@ function pendingDecision(sessionId: string, runId?: string): ClientInteractiveRe
         request.kind === "decision" &&
         (runId === undefined || request.runId === runId),
     );
-}
-
-function terminalRunState(runId: string): Record<string, unknown> | undefined {
-  for (const session of sessionSnapshots.values()) {
-    if (session.run?.runId === runId && isRecord(session.run.state)) return session.run.state;
-  }
-  return undefined;
 }
 
 function workflowRunPaused(runId: string): boolean {

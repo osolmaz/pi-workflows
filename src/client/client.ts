@@ -24,6 +24,7 @@ import type {
   ResolvedSettingsChange,
   ResolvedWorkflowLaunch,
 } from "./resolver.js";
+import type { WorkflowRunListPage, WorkflowRunSummary, WorkflowRunView } from "./view.js";
 
 const CONNECT_TIMEOUT_MS = 2_000;
 const START_TIMEOUT_MS = 10_000;
@@ -41,6 +42,7 @@ type Subscription = {
   runId?: string;
   payload: JsonValue;
   listener: (event: ClientEvent) => void;
+  runListGeneration: number;
 };
 
 export class WorkflowClientVersionError extends Error {
@@ -106,9 +108,19 @@ export class WorkflowClient {
     runId?: string;
     expectedRevision?: number;
     payload?: JsonValue;
+    signal?: AbortSignal;
   }): Promise<ClientResponse> {
     await this.connect();
     return await this.requestConnected(options);
+  }
+
+  async getRun(runId: string): Promise<WorkflowRunView | null> {
+    const response = await this.request({ operation: "view.run.get", runId });
+    if (response.outcome === "notFound") return null;
+    if (response.outcome !== "accepted" || !isWorkflowRunView(response.receipt, runId)) {
+      throw new Error(response.error ?? "Workflow host returned an invalid run view");
+    }
+    return response.receipt;
   }
 
   async watchRuns(
@@ -286,7 +298,9 @@ export class WorkflowClient {
         loaded.mediaType === "application/json"
           ? parseJson(loaded.content.toString("utf8"))
           : loaded.content.toString("utf8");
-      return await this.hydrateContentValue(runId, decoded, reads);
+      return value.$artifact.opaque === true
+        ? decoded
+        : await this.hydrateContentValue(runId, decoded, reads);
     }
     if (Array.isArray(value)) {
       return await Promise.all(
@@ -399,6 +413,7 @@ export class WorkflowClient {
       ...(runId === undefined ? {} : { runId }),
       payload,
       listener,
+      runListGeneration: 0,
     });
     try {
       const response = await this.requestConnected({
@@ -432,6 +447,7 @@ export class WorkflowClient {
     runId?: string;
     expectedRevision?: number;
     payload?: JsonValue;
+    signal?: AbortSignal;
   }): Promise<ClientResponse> {
     const request: ClientRequest = {
       schema: CLIENT_PROTOCOL_SCHEMA,
@@ -446,23 +462,41 @@ export class WorkflowClient {
         : { expectedRevision: options.expectedRevision }),
       payload: options.payload ?? {},
     };
-    return await this.send(request);
+    return await this.send(request, options.signal);
   }
 
-  private async send(request: ClientRequest): Promise<ClientResponse> {
+  private async send(request: ClientRequest, signal?: AbortSignal): Promise<ClientResponse> {
     const socket = this.socket;
     if (socket === null || socket.destroyed) throw new Error("Workflow host is unavailable");
+    if (signal?.aborted === true) throw abortReason(signal);
     if (this.pending.has(request.requestId)) {
       throw new Error(`Workflow request is already pending: ${request.requestId}`);
     }
     const response = new Promise<ClientResponse>((resolve, reject) => {
-      this.pending.set(request.requestId, { resolve, reject });
+      const removeAbort = (): void => signal?.removeEventListener("abort", onAbort);
+      const onAbort = (): void => {
+        if (!this.pending.delete(request.requestId)) return;
+        removeAbort();
+        reject(abortReason(signal as AbortSignal));
+      };
+      this.pending.set(request.requestId, {
+        resolve: (value) => {
+          removeAbort();
+          resolve(value);
+        },
+        reject: (error) => {
+          removeAbort();
+          reject(error);
+        },
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
       if (!socket.write(encodeProtocolLine(request))) await once(socket, "drain");
     } catch (error) {
+      const pending = this.pending.get(request.requestId);
       this.pending.delete(request.requestId);
-      throw error;
+      pending?.reject(toError(error));
     }
     return await response;
   }
@@ -514,7 +548,11 @@ export class WorkflowClient {
                 revision: message.payload.revision as number,
               };
             }
-            subscription?.listener(message);
+            if (subscription !== undefined) {
+              void this.deliverSubscriptionEvent(subscription, message).catch(() => {
+                // A stale paged list is replaced by the next subscription snapshot.
+              });
+            }
           } else {
             throw new Error(`Unexpected workflow client message: ${message.type}`);
           }
@@ -562,6 +600,62 @@ export class WorkflowClient {
     } finally {
       if (connectTimer !== undefined) clearTimeout(connectTimer);
     }
+  }
+
+  private async deliverSubscriptionEvent(
+    subscription: Subscription,
+    event: ClientEvent,
+  ): Promise<void> {
+    if (subscription.operation !== "view.runs.watch" || event.event !== "runs") {
+      subscription.listener(event);
+      return;
+    }
+    const first = parseWorkflowRunListPage(event.payload);
+    const subscriptionId = requireSubscriptionId(subscription.payload);
+    const generation = subscription.runListGeneration + 1;
+    subscription.runListGeneration = generation;
+    if (first.start !== 0) throw new Error("Workflow run list snapshot must start at zero");
+    const items: WorkflowRunSummary[] = [...first.items];
+    let cursor = first.start + first.items.length;
+    while (cursor < first.total) {
+      if (
+        subscription.runListGeneration !== generation ||
+        this.subscriptions.get(subscriptionId) !== subscription
+      )
+        return;
+      if (items.length === 0) throw new Error("Workflow run list page made no progress");
+      const response = await this.requestConnected({
+        operation: "view.runs.page",
+        payload: {
+          cursor,
+          revision: first.revision,
+          ...(isRecord(subscription.payload) && typeof subscription.payload.limit === "number"
+            ? { limit: subscription.payload.limit }
+            : {}),
+        },
+      });
+      if (response.outcome === "conflict") return;
+      if (response.outcome !== "accepted") {
+        throw new Error(response.error ?? `Workflow run list page was ${response.outcome}`);
+      }
+      const page = parseWorkflowRunListPage(response.receipt);
+      if (
+        page.revision !== first.revision ||
+        page.total !== first.total ||
+        page.start !== cursor ||
+        page.items.length === 0
+      ) {
+        throw new Error("Workflow run list page does not continue the snapshot");
+      }
+      items.push(...page.items);
+      cursor += page.items.length;
+    }
+    if (
+      subscription.runListGeneration !== generation ||
+      this.subscriptions.get(subscriptionId) !== subscription
+    )
+      return;
+    subscription.listener({ ...event, payload: items as unknown as JsonValue });
   }
 
   private async restoreSubscriptions(): Promise<void> {
@@ -682,6 +776,48 @@ export class WorkflowClient {
   }
 }
 
+function requireSubscriptionId(value: JsonValue): string {
+  if (!isRecord(value) || typeof value.subscriptionId !== "string") {
+    throw new Error("Workflow subscription requires a subscriptionId");
+  }
+  return value.subscriptionId;
+}
+
+function parseWorkflowRunListPage(value: unknown): WorkflowRunListPage {
+  if (
+    !isRecord(value) ||
+    value.schema !== "pi-workflows.run-list-page.v1" ||
+    typeof value.revision !== "string" ||
+    !Number.isSafeInteger(value.start) ||
+    !Number.isSafeInteger(value.total) ||
+    (value.start as number) < 0 ||
+    (value.total as number) < 0 ||
+    !Array.isArray(value.items) ||
+    !value.items.every(
+      (item) =>
+        isRecord(item) && typeof item.runId === "string" && typeof item.workflowName === "string",
+    )
+  ) {
+    throw new Error("Workflow host returned an invalid run list page");
+  }
+  return value as unknown as WorkflowRunListPage;
+}
+
+function isWorkflowRunView(value: unknown, runId: string): value is WorkflowRunView {
+  return (
+    isRecord(value) &&
+    value.schema === "pi-workflows.run-view.v1" &&
+    value.runId === runId &&
+    Number.isSafeInteger(value.revision)
+  );
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Workflow request was cancelled");
+}
+
 function runtimePackageVersion(): string {
   const parsed = JSON.parse(
     fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -715,6 +851,7 @@ type ContentReference = {
     mediaType: string;
     bytes: number;
     sha256: string;
+    opaque?: boolean;
   };
 };
 
@@ -732,7 +869,8 @@ function isContentReference(value: JsonValue): value is ContentReference {
     typeof artifact.mediaType === "string" &&
     Number.isSafeInteger(artifact.bytes) &&
     (artifact.bytes as number) >= 0 &&
-    typeof artifact.sha256 === "string"
+    typeof artifact.sha256 === "string" &&
+    (artifact.opaque === undefined || typeof artifact.opaque === "boolean")
   );
 }
 

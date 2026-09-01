@@ -74,11 +74,15 @@ The closed display statuses are:
 
 Only the host computes this status. A parked queue is not a pause. `paused` requires the durable pause flag. An exact live worker or origin-session turn is `running`. An uncertain external effect that needs operator action is `ambiguous`. `unavailable` is a client connection condition, not a run status.
 
-The run list uses the same display object. It reads only run status facts and does not load step, trace, or session history. An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view, ordered pending interaction records, and read-only notification and turn availability in one read. The Pi extension sends a durable claim command only when the matching availability fact is true. An idle session does not create empty claim or status commands.
+The run list uses the same display object. The host sends it as revision-bound `pi-workflows.run-list-page.v1` pages. Each page reads only lightweight run status and source facts. It does not load input, launch options, steps, trace, or session history. TypeScript and Rust clients collect all pages for one revision before they replace the visible list. If the revision changes, they discard the partial list and start from the next subscription event.
 
-A snapshot page contains at most 256 items and also has a byte budget. `view.page` returns another byte-bounded window that contains the requested cursor. Page responses use `pi-workflows.run-page.v1`. A session-event page also carries the replay checkpoint for the exact sequence before its first item, so reducing the page does not lose earlier active messages or tool calls.
+An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view, ordered pending interaction records, and read-only notification and turn availability in one read. The Pi extension sends a durable claim command only when the matching availability fact is true. After a turn claim, it reads the claimed run by its exact run ID. It does not use the latest run in the session. An idle session does not create empty claim or status commands.
 
-Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, and SHA-256 digest. Clients reassemble and verify all chunks before display. A literal user object that looks like a content reference is escaped and restored as data. Other cursors and content references keep the complete logical history and result available.
+A snapshot page contains at most 256 items and also has a byte budget. `view.page` returns another byte-bounded window that contains the requested cursor. Page responses use `pi-workflows.run-page.v1` and echo the requested cursor and run-view revision. A client applies a page only when both still match its current request and snapshot. A session-event page also carries the replay checkpoint for the exact sequence before its first item, so reducing the page does not lose earlier active messages or tool calls.
+
+The host counts histories first and reads only the selected SQLite ranges. An unchanged subscription uses a lightweight revision check and reuses its prior view. It does not rebuild complete histories every 250 milliseconds.
+
+Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, SHA-256 digest, and an opaque marker for host-created references. Clients reassemble and verify all chunks before display. Opaque content is restored as user data without interpreting nested objects as host references. Other cursors and content references keep the complete logical history and result available.
 
 ## Subscriptions and reconnection
 
@@ -94,14 +98,14 @@ The host accepts activity only when it matches the durable presented interaction
 
 ## Commands and uncertain results
 
-Durable commands use stable request IDs and idempotency keys. A retry with the same identity and payload adopts the stored receipt. Reusing an identity with another payload is a conflict.
+Durable commands use stable idempotency keys. A retry with the same durable identity and payload adopts the stored receipt. Reusing that identity with another payload is a conflict. The request ID identifies one transport attempt. A retry after a local abort uses a new request ID and keeps the durable idempotency and submission IDs, so a late response from the aborted attempt cannot settle the retry.
 
-An `interaction.submit` response stays open while the supervised workflow child validates the value. The response settles only after the durable result is accepted, adopted, or rejected. A reconnect repeats the same request identity and adopts the same durable result. Clients do not poll SQLite.
+An `interaction.submit` response stays open while the supervised workflow child validates the value. The response settles only after the durable result is accepted, adopted, or rejected. A tool abort stops waiting immediately but does not undo an accepted host command. A later retry adopts the durable outcome. Clients do not poll SQLite.
 
 The protocol does not claim exactly-once behavior for an external system that cannot prove it. An uncertain non-idempotent effect becomes ambiguous and requires explicit recovery.
 
 ## Maintenance
 
-Active `state.status`, `state.verify`, `state.backup`, and `state.prune` requests run in the host against its existing database connection.
+Active `state.status`, `state.verify`, `state.backup`, and `state.prune` requests run in the host against its existing database connection. `state.status` returns the database file size and safe counts for resources, runs, controllers, decisions, settings scopes, pending interactions, pending follow-ups, active leases, and unsettled effects.
 
 Only `pi-workflows state verify <inactive-backup>` opens SQLite outside the host. It uses a query-only TypeScript connection and rejects the active database, including another path to the same file.

@@ -62,6 +62,27 @@ export type WorkflowRunClaimOptions = WorkflowRunReservationOptions & {
   leaseMs: number;
 };
 
+export type WorkflowRunQueueViewRecord = {
+  runId: string;
+  workflowName: string;
+  workflowSourceRef: string;
+  workflowSource: unknown;
+  initialized: boolean;
+  definitionDigest: string;
+  runStateStatus: string;
+  paused: boolean;
+  status: WorkflowRunLaunchStatus;
+  originSessionId: string | null;
+  executionMode: "interactive" | "headless";
+  parentRunId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
 export type WorkflowRunQueueRecord = {
   runId: string;
   workflowName: string;
@@ -213,6 +234,33 @@ type RunRow = {
   ownerId: string | null;
   claimExpiresAt: number | null;
 };
+type WorkflowRunViewRow = {
+  runId: string;
+  workflowName: string;
+  workflowRef: string;
+  runStatus: string;
+  paused: number;
+  definitionDigest: Buffer;
+  status: WorkflowRunLaunchStatus;
+  originSessionId: string | null;
+  executionMode: "interactive" | "headless";
+  parentRunId: string | null;
+  errorCode: string | null;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  sourceType: "builtin" | "file";
+  sourceRef: string;
+  sourceRevision: string;
+};
+
+type RunListRevisionRow = {
+  count: number;
+  revisionSum: number;
+  updatedAt: number;
+};
+
 type RunSourceIdentityRow = {
   mountPath: string;
   sourceType: "builtin" | "file";
@@ -1239,6 +1287,40 @@ export class SqliteControllerStore implements ControllerStore {
     return row === undefined ? undefined : this.mapWorkflowRun(row);
   }
 
+  getWorkflowRunView(runId: string): WorkflowRunQueueViewRecord | undefined {
+    const row = this.workflowRunViewRows("WHERE r.run_id = ?", [runId])[0];
+    return row === undefined ? undefined : workflowRunViewRecord(row);
+  }
+
+  workflowRunListRevision(): { total: number; revision: string } {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(sum(res.revision), 0) AS revisionSum,
+                COALESCE(max(q.updated_at), 0) AS updatedAt
+         FROM runs r JOIN run_queue q ON q.run_id = r.run_id
+         JOIN resources res ON res.resource_id = r.resource_id`,
+      )
+      .get();
+    if (!isRunListRevisionRow(row)) throw new Error("Workflow run list revision is invalid");
+    return {
+      total: row.count,
+      revision: `${row.count}:${row.revisionSum}:${row.updatedAt}`,
+    };
+  }
+
+  listWorkflowRunViews(options: { offset: number; limit: number }): {
+    total: number;
+    revision: string;
+    runs: WorkflowRunQueueViewRecord[];
+  } {
+    const current = this.workflowRunListRevision();
+    const rows = this.workflowRunViewRows("ORDER BY q.created_at DESC LIMIT ? OFFSET ?", [
+      options.limit,
+      options.offset,
+    ]);
+    return { ...current, runs: rows.map(workflowRunViewRecord) };
+  }
+
   workflowRunProjectPath(runId: string): string | undefined {
     const row = this.state.connection
       .prepare(
@@ -1290,6 +1372,22 @@ export class SqliteControllerStore implements ControllerStore {
       )
       .get(sessionId);
     return isRunRow(row) ? this.mapWorkflowRun(row) : undefined;
+  }
+
+  findSessionReservationView(sessionId: string): WorkflowRunQueueViewRecord | undefined {
+    const row = this.workflowRunViewRows(
+      "WHERE b.origin_session_id = ? AND q.status NOT IN ('done', 'failed', 'cancelled') ORDER BY q.created_at DESC LIMIT 1",
+      [sessionId],
+    )[0];
+    return row === undefined ? undefined : workflowRunViewRecord(row);
+  }
+
+  latestSessionWorkflowRunView(sessionId: string): WorkflowRunQueueViewRecord | undefined {
+    const row = this.workflowRunViewRows(
+      "WHERE b.origin_session_id = ? ORDER BY q.created_at DESC, r.run_id DESC LIMIT 1",
+      [sessionId],
+    )[0];
+    return row === undefined ? undefined : workflowRunViewRecord(row);
   }
 
   claimWorkflowRun(options: {
@@ -2933,6 +3031,13 @@ export class SqliteControllerStore implements ControllerStore {
     }
   }
 
+  private workflowRunViewRows(clause: string, params: unknown[]): WorkflowRunViewRow[] {
+    return this.state.connection
+      .prepare(workflowRunViewSelect(clause))
+      .all(...params)
+      .filter(isWorkflowRunViewRow);
+  }
+
   /* istanbul ignore next -- pure projection covered by integration tests */
   private mapWorkflowRun(row: RunRow): WorkflowRunQueueRecord {
     return {
@@ -3630,6 +3735,22 @@ function workflowRunSelect(clause: string): string {
     JOIN leases l ON l.resource_id = r.resource_id ${clause}`;
 }
 
+function workflowRunViewSelect(clause: string): string {
+  return `SELECT r.run_id AS runId, d.workflow_name AS workflowName,
+    r.workflow_ref AS workflowRef, r.status AS runStatus, r.paused,
+    r.definition_digest AS definitionDigest, q.status,
+    b.origin_session_id AS originSessionId, b.execution_mode AS executionMode,
+    r.parent_run_id AS parentRunId, q.error_code AS errorCode,
+    q.created_at AS createdAt, q.updated_at AS updatedAt,
+    q.started_at AS startedAt, q.finished_at AS finishedAt,
+    source.source_type AS sourceType, source.source_ref AS sourceRef,
+    source.source_revision AS sourceRevision
+    FROM runs r JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
+    JOIN run_queue q ON q.run_id = r.run_id
+    LEFT JOIN run_bindings b ON b.run_id = r.run_id
+    LEFT JOIN run_sources source ON source.run_id = r.run_id AND source.mount_path = '' ${clause}`;
+}
+
 function turnIntentSelect(clause: string): string {
   return `SELECT t.turn_intent_id AS intentId, t.source_event_id AS sourceEventId,
     t.run_id AS runId, t.workflow_ref AS workflowRef,
@@ -3721,6 +3842,66 @@ function isControllerRow(value: unknown): value is ControllerRow {
 function isLeaseRow(value: unknown): value is LeaseRow {
   return isRecord(value);
 }
+function workflowRunViewRecord(row: WorkflowRunViewRow): WorkflowRunQueueViewRecord {
+  const root =
+    row.sourceType === "builtin"
+      ? { kind: "builtin", id: row.sourceRef, revision: row.sourceRevision }
+      : { kind: "file", path: row.sourceRef, hash: row.sourceRevision };
+  return {
+    runId: row.runId,
+    workflowName: row.workflowName,
+    workflowSourceRef: row.workflowRef,
+    workflowSource: { root, mounted: [] },
+    initialized: row.runStatus !== "queued",
+    definitionDigest: `sha256:${row.definitionDigest.toString("hex")}`,
+    runStateStatus: row.runStatus,
+    paused: row.paused === 1,
+    status: row.status,
+    originSessionId: row.executionMode === "headless" ? null : row.originSessionId,
+    executionMode: row.executionMode,
+    parentRunId: row.parentRunId,
+    errorCode: row.errorCode,
+    errorMessage: row.errorCode,
+    createdAt: new Date(row.createdAt).toISOString(),
+    updatedAt: new Date(row.updatedAt).toISOString(),
+    startedAt: row.startedAt === null ? null : new Date(row.startedAt).toISOString(),
+    finishedAt: row.finishedAt === null ? null : new Date(row.finishedAt).toISOString(),
+  };
+}
+
+function isWorkflowRunViewRow(value: unknown): value is WorkflowRunViewRow {
+  return (
+    isRecord(value) &&
+    typeof value.runId === "string" &&
+    typeof value.workflowName === "string" &&
+    typeof value.workflowRef === "string" &&
+    typeof value.runStatus === "string" &&
+    typeof value.paused === "number" &&
+    Buffer.isBuffer(value.definitionDigest) &&
+    typeof value.status === "string" &&
+    (value.originSessionId === null || typeof value.originSessionId === "string") &&
+    (value.executionMode === "interactive" || value.executionMode === "headless") &&
+    (value.parentRunId === null || typeof value.parentRunId === "string") &&
+    (value.errorCode === null || typeof value.errorCode === "string") &&
+    typeof value.createdAt === "number" &&
+    typeof value.updatedAt === "number" &&
+    (value.startedAt === null || typeof value.startedAt === "number") &&
+    (value.finishedAt === null || typeof value.finishedAt === "number") &&
+    (value.sourceType === "builtin" || value.sourceType === "file") &&
+    typeof value.sourceRef === "string" &&
+    typeof value.sourceRevision === "string"
+  );
+}
+
+function isRunListRevisionRow(value: unknown): value is RunListRevisionRow {
+  return (
+    isRecord(value) &&
+    typeof value.count === "number" &&
+    typeof value.revisionSum === "number" &&
+    typeof value.updatedAt === "number"
+  );
+}
+
 function isRunRow(value: unknown): value is RunRow {
   return isRecord(value);
 }

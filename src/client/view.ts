@@ -67,6 +67,14 @@ export type WorkflowRunView = {
   possiblyInterrupted: boolean;
 };
 
+export type WorkflowRunListPage = {
+  schema: "pi-workflows.run-list-page.v1";
+  revision: string;
+  start: number;
+  total: number;
+  items: WorkflowRunSummary[];
+};
+
 export type WorkflowRunSummary = {
   runId: string;
   workflowName: string;

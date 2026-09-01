@@ -127,7 +127,28 @@ describe("host workflow display reducer", () => {
       state,
       authorityProvider: () => queue.workflowRunAuthority("run-large-view", "claim-large-view"),
     });
-    const largeOutput = { text: "x".repeat(2 * 1024 * 1024) };
+    expect(queue.getWorkflowRunView("missing-run")).toBeUndefined();
+    expect(queue.findSessionReservationView("missing-session")).toBeUndefined();
+    expect(queue.latestSessionWorkflowRunView("missing-session")).toBeUndefined();
+    expect(runs.readRunViewCounts("missing-run")).toBeNull();
+    expect(
+      runs.readRunView("missing-run", {
+        steps: { start: 0, limit: 1 },
+        trace: { start: 0, limit: 1 },
+        sessionEntries: { start: 0, limit: 1 },
+        sessionEvents: { start: 0, limit: 1 },
+        settings: { start: 0, limit: 1 },
+        followUps: { start: 0, limit: 1 },
+        updates: { start: 0, limit: 1 },
+        graphCursor: 0,
+      }),
+    ).toBeNull();
+    expect(runs.readContentBlob("missing-run", "0".repeat(64))).toBeUndefined();
+    expect(runs.readContentBlob("run-large-view", "invalid")).toBeUndefined();
+    const largeOutput = {
+      text: "x".repeat(2 * 1024 * 1024),
+      userArtifact: { $artifact: { path: "user-data", note: "not a host reference" } },
+    };
     const result = await new WorkflowEngine({
       store: runs,
       executor: new ScriptedExecutor().respond("reply", { output: largeOutput }),
@@ -159,8 +180,26 @@ describe("host workflow display reducer", () => {
     await runs.appendSessionEventBatch("run-large-view", events);
 
     const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const legacyRead = vi.spyOn(runs, "readRun");
+    const boundedRead = vi.spyOn(runs, "readRunView");
     const view = views.run("run-large-view");
     if (view === null) throw new Error("run view missing");
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(boundedRead).toHaveBeenCalledTimes(1);
+    expect(boundedRead.mock.calls[0]?.[1]).toMatchObject({
+      steps: { limit: 1 },
+      sessionEvents: { limit: 256 },
+    });
+    expect(views.run("run-large-view")).toBe(view);
+    expect(boundedRead).toHaveBeenCalledTimes(1);
+    expect(
+      views.page("run-large-view", { kind: "trace_at_step", cursor: 0 })?.tracePage,
+    ).toMatchObject({ total: expect.any(Number), items: expect.any(Array) });
+    expect(runs.traceCursorForStep("run-large-view", 99, 10)).toBe(9);
+    const outputDigest = createHash("sha256").update(canonicalJson(largeOutput)).digest("hex");
+    expect(runs.readContentBlob("run-large-view", outputDigest)).toMatchObject({
+      mediaType: "application/json",
+    });
     const encoded = encodeProtocolLine({
       schema: CLIENT_PROTOCOL_SCHEMA,
       type: "event",
@@ -277,7 +316,8 @@ describe("host workflow display reducer", () => {
     });
     const views = new HostViewStore(state, queue, hostState, runs, () => false);
     const readRun = vi.spyOn(runs, "readRun");
-    expect(views.list()).toHaveLength(1);
+    const initialList = views.list();
+    expect(initialList.items).toHaveLength(1);
     expect(readRun).not.toHaveBeenCalled();
     readRun.mockRestore();
     const activity = {
@@ -304,6 +344,11 @@ describe("host workflow display reducer", () => {
       status: "running",
       activity: "origin_turn",
     });
+    const runningList = views.list();
+    expect(runningList.revision).not.toBe(initialList.revision);
+    expect(runningList.items).toMatchObject([
+      { display: { status: "running", activity: "origin_turn" } },
+    ]);
     expect(() => views.reportActivity("connection-one", activity)).toThrow(/sequence/);
     views.reportActivity("connection-one", {
       ...activity,

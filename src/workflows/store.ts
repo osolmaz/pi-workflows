@@ -78,6 +78,36 @@ export const SESSION_EVENT_SCHEMA = "pi-workflows.session-event.v1" as const;
 export const SESSION_CAPTURE_SCHEMA = "pi-workflows.session-capture.v1" as const;
 export const SESSION_EVENT_MAX_BYTES = 1024 * 1024;
 
+const STEP_ROW_SELECT = `
+  SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
+         a.node_type AS nodeType, a.status,
+         a.prompt_hash AS promptHash, a.output_hash AS outputHash,
+         s.output_override_hash AS outputOverrideHash,
+         a.receipt_hash AS receiptHash, a.error_hash AS errorHash,
+         prompt_entry.entry_hash AS promptEntryHash,
+         response_entry.entry_hash AS responseEntryHash,
+         first_link.entry_id AS firstEntryId, last_link.entry_id AS lastEntryId,
+         a.settings_scope_id AS settingsScopeId,
+         a.settings_change_number AS settingsChangeNumber,
+         a.settings_hash AS settingsHash,
+         a.started_at AS startedAt, a.finished_at AS finishedAt
+  FROM run_steps s
+  JOIN node_attempts a ON a.attempt_id = s.attempt_id
+  LEFT JOIN attempt_entries prompt_link
+    ON prompt_link.attempt_id = a.attempt_id AND prompt_link.role = 'prompt'
+  LEFT JOIN session_entries prompt_entry
+    ON prompt_entry.segment_id = prompt_link.segment_id
+   AND prompt_entry.entry_id = prompt_link.entry_id
+  LEFT JOIN attempt_entries response_link
+    ON response_link.attempt_id = a.attempt_id AND response_link.role = 'response'
+  LEFT JOIN session_entries response_entry
+    ON response_entry.segment_id = response_link.segment_id
+   AND response_entry.entry_id = response_link.entry_id
+  LEFT JOIN attempt_entries first_link
+    ON first_link.attempt_id = a.attempt_id AND first_link.role = 'first'
+  LEFT JOIN attempt_entries last_link
+    ON last_link.attempt_id = a.attempt_id AND last_link.role = 'last'`;
+
 const FOLLOW_UP_ROW_SELECT = `
   SELECT f.follow_up_id AS followUpId, f.resource_id AS resourceId,
          f.queue_resource_id AS queueResourceId, f.run_id AS runId,
@@ -414,6 +444,48 @@ export type LoadedWorkflowRun = {
   sessionSegments: SessionCaptureSegment[];
   settingsScopes?: WorkflowSettingsScopeRecord[];
   followUpQueue?: WorkflowFollowUpQueueRecord | null;
+};
+
+export type WorkflowRunViewCounts = {
+  steps: number;
+  trace: number;
+  sessionEntries: number;
+  sessionEvents: number;
+  settings: number;
+  followUps: number;
+  updates: number;
+};
+
+export type WorkflowRunViewRange = {
+  start: number;
+  limit: number;
+};
+
+export type WorkflowRunViewRead = {
+  runId: string;
+  state: WorkflowRunState;
+  snapshot: WorkflowDefinitionSnapshot;
+  traceEvents: WorkflowTraceEvent[];
+  sessionBinding: WorkflowSessionBinding | null;
+  sessionEntries: WorkflowSessionEntryRecord[];
+  sessionEvents: WorkflowSessionEventRecord[];
+  sessionCapture: WorkflowSessionCapture | null;
+  sessionIntegrity: SessionCaptureIntegrity;
+  settingsScopes: WorkflowSettingsScopeRecord[];
+  followUpQueue: WorkflowFollowUpQueueRecord | null;
+  graphSteps: WorkflowStepRecord[];
+  takenTransitions: string[];
+};
+
+export type WorkflowRunViewReadOptions = {
+  steps: WorkflowRunViewRange;
+  trace: WorkflowRunViewRange;
+  sessionEntries: WorkflowRunViewRange;
+  sessionEvents: WorkflowRunViewRange;
+  settings: WorkflowRunViewRange;
+  followUps: WorkflowRunViewRange;
+  updates: WorkflowRunViewRange;
+  graphCursor: number;
 };
 
 export type ReadWorkflowRunOptions = {
@@ -1039,6 +1111,28 @@ export class WorkflowRunStore {
       .map((row) => this.settingsScopeRecord(row));
   }
 
+  private readSettingsScopeRange(
+    runId: string,
+    range: WorkflowRunViewRange,
+  ): WorkflowSettingsScopeRecord[] {
+    const originRunId = this.logicalOriginRunId(runId);
+    return this.state.connection
+      .prepare(
+        `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
+                s.origin_run_id AS originRunId, s.active_run_id AS activeRunId,
+                s.mount_path AS mountPath, s.invocation,
+                s.current_hash AS currentHash, r.revision,
+                s.created_at AS createdAt, s.updated_at AS updatedAt
+         FROM workflow_settings s
+         JOIN resources r ON r.resource_id = s.resource_id
+         WHERE s.origin_run_id = ? OR s.active_run_id = ?
+         ORDER BY s.mount_path, s.invocation LIMIT ? OFFSET ?`,
+      )
+      .all(originRunId, runId, range.limit, range.start)
+      .filter(isSettingsScopeRow)
+      .map((row) => this.settingsScopeRecord(row));
+  }
+
   findSettingsScope(
     runId: string,
     mountPath: string,
@@ -1344,6 +1438,36 @@ export class WorkflowRunStore {
     const followUps = this.state.connection
       .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number`)
       .all(runId)
+      .filter(isFollowUpRow)
+      .map((row) => this.followUpRecord(row));
+    return {
+      runId,
+      ...(queue.originSessionId !== null ? { originSessionId: queue.originSessionId } : {}),
+      presentationState: assertPresentationState(queue.presentationState),
+      ...(queue.presentationEntryId !== null
+        ? { presentationEntryId: queue.presentationEntryId }
+        : {}),
+      ...(queue.presentationAssistantEntryId !== null
+        ? { presentationAssistantEntryId: queue.presentationAssistantEntryId }
+        : {}),
+      ...(queue.presentationReasonHash !== null
+        ? { presentationReason: this.readText(queue.presentationReasonHash) }
+        : {}),
+      followUps,
+    };
+  }
+
+  private readFollowUpQueueRange(
+    runId: string,
+    range: WorkflowRunViewRange,
+  ): WorkflowFollowUpQueueRecord | null {
+    const queue = this.followUpQueueRow(runId);
+    if (queue === undefined) return null;
+    const followUps = this.state.connection
+      .prepare(
+        `${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number LIMIT ? OFFSET ?`,
+      )
+      .all(runId, range.limit, range.start)
       .filter(isFollowUpRow)
       .map((row) => this.followUpRecord(row));
     return {
@@ -2293,6 +2417,120 @@ export class WorkflowRunStore {
       settingsScopes: this.settingsScopesForRunView(runId),
       followUpQueue: this.readFollowUpQueue(runId) ?? null,
     };
+  }
+
+  readRunViewCounts(runId: string): WorkflowRunViewCounts | null {
+    const row = this.readRunRow(runId);
+    if (row === undefined) return null;
+    const segment = this.segmentRow(segmentIdFor(runId));
+    const settingsOrigin = this.logicalOriginRunId(runId);
+    const scalar = (sql: string, ...params: unknown[]): number => {
+      const count = this.state.connection.prepare(sql).get(...params);
+      return isCountRow(count) ? count.count : 0;
+    };
+    return {
+      steps: scalar("SELECT count(*) AS count FROM run_steps WHERE run_id = ?", runId),
+      trace: scalar("SELECT count(*) AS count FROM events WHERE resource_id = ?", row.resourceId),
+      sessionEntries: segment?.entryCount ?? 0,
+      sessionEvents: segment?.eventCount ?? 0,
+      settings: scalar(
+        `SELECT count(*) AS count FROM workflow_settings
+         WHERE origin_run_id = ? OR active_run_id = ?`,
+        settingsOrigin,
+        runId,
+      ),
+      followUps: scalar(
+        "SELECT count(*) AS count FROM workflow_follow_ups WHERE run_id = ?",
+        runId,
+      ),
+      updates: scalar(
+        `SELECT count(*) AS count FROM (
+           SELECT 1 FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ? GROUP BY u.update_type, u.update_key
+         )`,
+        runId,
+      ),
+    };
+  }
+
+  readRunView(runId: string, options: WorkflowRunViewReadOptions): WorkflowRunViewRead | null {
+    const row = this.readRunRow(runId);
+    if (row === undefined) return null;
+    const snapshot = this.readDefinition(row.definitionHash);
+    const steps = this.readStepRange(runId, options.steps);
+    const visibleUpdates = this.readCurrentUpdates(runId, options.updates);
+    const state = this.buildRunState(
+      row,
+      snapshot,
+      this.readLatestSteps(runId),
+      steps,
+      visibleUpdates,
+    );
+    const segment = this.segmentRow(segmentIdFor(runId));
+    const loadedSegment =
+      segment === undefined
+        ? emptySegment()
+        : this.loadSegment(segment, state, {
+            entries: options.sessionEntries,
+            events: options.sessionEvents,
+          });
+    return {
+      runId,
+      state,
+      snapshot,
+      traceEvents: this.traceEvents(row, options.trace),
+      sessionBinding: loadedSegment.binding,
+      sessionEntries: loadedSegment.entries,
+      sessionEvents: loadedSegment.events,
+      sessionCapture: loadedSegment.capture,
+      sessionIntegrity: loadedSegment.integrity,
+      settingsScopes: this.readSettingsScopeRange(runId, options.settings),
+      followUpQueue: this.readFollowUpQueueRange(runId, options.followUps),
+      graphSteps: this.readLatestSteps(runId, options.graphCursor),
+      takenTransitions: this.readTakenTransitions(runId, options.graphCursor),
+    };
+  }
+
+  traceCursorForStep(runId: string, stepCursor: number, traceTotal: number): number {
+    const step = this.state.connection
+      .prepare(
+        `SELECT a.attempt_id AS attemptId, a.node_id AS nodeId
+         FROM run_steps s JOIN node_attempts a ON a.attempt_id = s.attempt_id
+         WHERE s.run_id = ? AND s.step_index = ?`,
+      )
+      .get(runId, stepCursor);
+    if (!isRecord(step) || typeof step.attemptId !== "string" || typeof step.nodeId !== "string") {
+      return Math.min(stepCursor, Math.max(0, traceTotal - 1));
+    }
+    const run = this.readRunRow(runId);
+    if (run === undefined) return 0;
+    const matched = this.state.connection
+      .prepare(
+        `SELECT e.resource_revision AS revision FROM events e
+         JOIN blobs b ON b.blob_hash = e.payload_hash
+         WHERE e.resource_id = ? AND (
+           json_extract(CAST(b.content AS TEXT), '$.attemptId') = ? OR
+           json_extract(CAST(b.content AS TEXT), '$.nodeId') = ?
+         ) ORDER BY e.resource_revision DESC LIMIT 1`,
+      )
+      .get(run.resourceId, step.attemptId, step.nodeId);
+    if (!isRevisionRow(matched)) return Math.min(stepCursor, Math.max(0, traceTotal - 1));
+    const index = this.state.connection
+      .prepare(
+        `SELECT count(*) - 1 AS count FROM events
+         WHERE resource_id = ? AND resource_revision <= ?`,
+      )
+      .get(run.resourceId, matched.revision);
+    return isCountRow(index) ? Math.max(0, index.count) : 0;
+  }
+
+  readContentBlob(
+    runId: string,
+    digest: string,
+  ): { mediaType: string; content: Buffer } | undefined {
+    if (!/^[0-9a-f]{64}$/u.test(digest) || this.readRunRow(runId) === undefined) return undefined;
+    return this.state.readBlob(Buffer.from(digest, "hex"));
   }
 
   readDisplayState(runId: string): WorkflowRunDisplayState | null {
@@ -3451,13 +3689,29 @@ export class WorkflowRunStore {
 
   private readRunState(row: RunRow, snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
     const steps = this.readSteps(row.runId);
+    return this.buildRunState(
+      row,
+      snapshot,
+      steps,
+      steps,
+      this.readUpdates(row.runId).updates ?? [],
+    );
+  }
+
+  private buildRunState(
+    row: RunRow,
+    snapshot: WorkflowDefinitionSnapshot,
+    projectionSteps: WorkflowStepRecord[],
+    visibleSteps: WorkflowStepRecord[],
+    visibleUpdates: WorkflowUpdateRecord[],
+  ): WorkflowRunState {
     const sources = this.readRunSources(row.runId, snapshot);
     const carriedStepCount = this.carriedStepCount(row.runId);
     const activeAttempt = row.status === "running" ? this.readActiveAttempt(row.runId) : undefined;
     const humanDecision = this.readHumanDecisionReceipt(row.runId);
     const outputs: Record<string, unknown> = {};
     const results: Record<string, WorkflowNodeResult> = {};
-    for (const step of steps) {
+    for (const step of projectionSteps) {
       const result = resultForStep(step);
       results[step.nodeId] = result;
       if (step.outcome === "ok") outputs[step.nodeId] = step.output;
@@ -3493,8 +3747,8 @@ export class WorkflowRunStore {
       input: this.state.readJson(row.inputHash),
       outputs,
       results,
-      steps,
-      ...this.readUpdates(row.runId),
+      steps: visibleSteps,
+      ...(visibleUpdates.length === 0 ? {} : { updates: visibleUpdates }),
       ...(activeAttempt === undefined ? {} : { currentNode: activeAttempt.nodeId }),
       ...(activeAttempt === undefined ? {} : { currentAttemptId: activeAttempt.attemptId }),
       ...(activeAttempt?.startedAt === null || activeAttempt === undefined
@@ -3516,8 +3770,8 @@ export class WorkflowRunStore {
       ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
       ...(humanDecision === undefined ? {} : { humanDecision }),
       ...(row.paused === 0 ? {} : { paused: true }),
-      ...(row.status === "waiting" && steps.at(-1) !== undefined
-        ? { waitingOn: steps.at(-1)?.nodeId as string }
+      ...(row.status === "waiting" && projectionSteps.at(-1) !== undefined
+        ? { waitingOn: projectionSteps.at(-1)?.nodeId as string }
         : {}),
       ...(row.finalOutputHash === null
         ? {}
@@ -3528,41 +3782,64 @@ export class WorkflowRunStore {
 
   private readSteps(runId: string): WorkflowStepRecord[] {
     const rows = this.state.connection
-      .prepare(
-        `SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
-                a.node_type AS nodeType, a.status,
-                a.prompt_hash AS promptHash, a.output_hash AS outputHash,
-                s.output_override_hash AS outputOverrideHash,
-                a.receipt_hash AS receiptHash, a.error_hash AS errorHash,
-                prompt_entry.entry_hash AS promptEntryHash,
-                response_entry.entry_hash AS responseEntryHash,
-                first_link.entry_id AS firstEntryId, last_link.entry_id AS lastEntryId,
-                a.settings_scope_id AS settingsScopeId,
-                a.settings_change_number AS settingsChangeNumber,
-                a.settings_hash AS settingsHash,
-                a.started_at AS startedAt, a.finished_at AS finishedAt
-         FROM run_steps s
-         JOIN node_attempts a ON a.attempt_id = s.attempt_id
-         LEFT JOIN attempt_entries prompt_link
-           ON prompt_link.attempt_id = a.attempt_id AND prompt_link.role = 'prompt'
-         LEFT JOIN session_entries prompt_entry
-           ON prompt_entry.segment_id = prompt_link.segment_id
-          AND prompt_entry.entry_id = prompt_link.entry_id
-         LEFT JOIN attempt_entries response_link
-           ON response_link.attempt_id = a.attempt_id AND response_link.role = 'response'
-         LEFT JOIN session_entries response_entry
-           ON response_entry.segment_id = response_link.segment_id
-          AND response_entry.entry_id = response_link.entry_id
-         LEFT JOIN attempt_entries first_link
-           ON first_link.attempt_id = a.attempt_id AND first_link.role = 'first'
-         LEFT JOIN attempt_entries last_link
-           ON last_link.attempt_id = a.attempt_id AND last_link.role = 'last'
-         WHERE s.run_id = ? ORDER BY s.step_index`,
-      )
+      .prepare(`${STEP_ROW_SELECT} WHERE s.run_id = ? ORDER BY s.step_index`)
       .all(runId)
       .filter(isStepRow);
+    return this.mapStepRows(runId, rows, 0);
+  }
+
+  private readStepRange(runId: string, range: WorkflowRunViewRange): WorkflowStepRecord[] {
+    const rows = this.state.connection
+      .prepare(`${STEP_ROW_SELECT} WHERE s.run_id = ? ORDER BY s.step_index LIMIT ? OFFSET ?`)
+      .all(runId, range.limit, range.start)
+      .filter(isStepRow);
+    return this.mapStepRows(runId, rows, range.start);
+  }
+
+  private readLatestSteps(runId: string, through?: number): WorkflowStepRecord[] {
+    const throughClause = through === undefined ? "" : " AND s2.step_index <= ?";
+    const params = through === undefined ? [runId, runId] : [runId, runId, through];
+    const rows = this.state.connection
+      .prepare(
+        `${STEP_ROW_SELECT}
+         WHERE s.run_id = ? AND s.step_index IN (
+           SELECT max(s2.step_index) FROM run_steps s2
+           JOIN node_attempts a2 ON a2.attempt_id = s2.attempt_id
+           WHERE s2.run_id = ?${throughClause} GROUP BY a2.node_id
+         ) ORDER BY s.step_index`,
+      )
+      .all(...params)
+      .filter(isStepRow);
+    return this.mapStepRows(runId, rows);
+  }
+
+  private readTakenTransitions(runId: string, through: number): string[] {
+    const rows = this.state.connection
+      .prepare(
+        `WITH ordered AS (
+           SELECT s.step_index, a.node_id AS nodeId,
+                  lag(a.node_id) OVER (ORDER BY s.step_index) AS previousNodeId
+           FROM run_steps s JOIN node_attempts a ON a.attempt_id = s.attempt_id
+           WHERE s.run_id = ? AND s.step_index <= ?
+         )
+         SELECT DISTINCT previousNodeId, nodeId FROM ordered
+         WHERE previousNodeId IS NOT NULL ORDER BY previousNodeId, nodeId`,
+      )
+      .all(runId, through);
+    return rows.flatMap((row) =>
+      isRecord(row) && typeof row.previousNodeId === "string" && typeof row.nodeId === "string"
+        ? [`${row.previousNodeId}->${row.nodeId}`]
+        : [],
+    );
+  }
+
+  private mapStepRows(
+    runId: string,
+    rows: StepRow[],
+    expectedStart?: number,
+  ): WorkflowStepRecord[] {
     return rows.map((row, index) => {
-      if (row.stepIndex !== index)
+      if (expectedStart !== undefined && row.stepIndex !== expectedStart + index)
         throw new Error(`Workflow run step sequence has a gap: ${runId}`);
       const receipt =
         row.receiptHash === null ? {} : this.readJsonAs<StoredAttemptReceipt>(row.receiptHash);
@@ -3750,6 +4027,41 @@ export class WorkflowRunStore {
     return updates === undefined ? {} : { updates };
   }
 
+  private readCurrentUpdates(runId: string, range?: WorkflowRunViewRange): WorkflowUpdateRecord[] {
+    const rangeClause = range === undefined ? "" : " LIMIT ? OFFSET ?";
+    const params = range === undefined ? [runId] : [runId, range.limit, range.start];
+    const rows = this.state.connection
+      .prepare(
+        `WITH ranked AS (
+           SELECT u.update_id AS updateId, u.run_revision AS runRevision,
+                  a.node_id AS nodeId, u.attempt_id AS attemptId,
+                  u.update_type AS updateType, u.update_key AS updateKey,
+                  u.data_hash AS dataHash, u.recorded_at AS recordedAt,
+                  row_number() OVER (
+                    PARTITION BY u.update_type, u.update_key ORDER BY u.run_revision DESC
+                  ) AS rank
+           FROM workflow_updates u
+           JOIN node_attempts a ON a.attempt_id = u.attempt_id
+           WHERE a.run_id = ?
+         )
+         SELECT updateId, runRevision, nodeId, attemptId, updateType, updateKey, dataHash, recordedAt
+         FROM ranked WHERE rank = 1 ORDER BY runRevision${rangeClause}`,
+      )
+      .all(...params)
+      .filter(isUpdateRow);
+    return rows.map((row) => ({
+      updateId: row.updateId,
+      seq: row.runRevision,
+      at: new Date(row.recordedAt).toISOString(),
+      runId,
+      nodeId: row.nodeId,
+      attemptId: row.attemptId,
+      type: row.updateType,
+      key: row.updateKey,
+      data: this.readJsonAs<Record<string, unknown>>(row.dataHash),
+    }));
+  }
+
   private readJsonAs<T>(hash: Buffer): T {
     return this.state.readJson(hash) as T;
   }
@@ -3770,14 +4082,17 @@ export class WorkflowRunStore {
     return value as WorkflowDefinitionSnapshot;
   }
 
-  private traceEvents(run: RunRow): WorkflowTraceEvent[] {
+  private traceEvents(run: RunRow, range?: WorkflowRunViewRange): WorkflowTraceEvent[] {
+    const rangeClause = range === undefined ? "" : " LIMIT ? OFFSET ?";
+    const params =
+      range === undefined ? [run.resourceId] : [run.resourceId, range.limit, range.start];
     const rows = this.state.connection
       .prepare(
         `SELECT resource_revision AS resourceRevision, event_type AS eventType,
                 payload_hash AS payloadHash, recorded_at AS recordedAt
-         FROM events WHERE resource_id = ? ORDER BY resource_revision`,
+         FROM events WHERE resource_id = ? ORDER BY resource_revision${rangeClause}`,
       )
-      .all(run.resourceId);
+      .all(...params);
     const events: WorkflowTraceEvent[] = [];
     for (const row of rows) {
       /* istanbul ignore if -- exact schema and internal query shape */
@@ -3831,7 +4146,11 @@ export class WorkflowRunStore {
     return row;
   }
 
-  private loadSegment(segment: SegmentRow, runState: WorkflowRunState): SessionCaptureSegment {
+  private loadSegment(
+    segment: SegmentRow,
+    runState: WorkflowRunState,
+    ranges?: { entries: WorkflowRunViewRange; events: WorkflowRunViewRange },
+  ): SessionCaptureSegment {
     const binding =
       segment.bindingHash === null
         ? null
@@ -3839,9 +4158,15 @@ export class WorkflowRunStore {
     const entries = this.state.connection
       .prepare(
         `SELECT entry_seq AS entrySeq, entry_hash AS entryHash, recorded_at AS recordedAt
-         FROM session_entries WHERE segment_id = ? ORDER BY entry_seq`,
+         FROM session_entries WHERE segment_id = ? ORDER BY entry_seq${
+           ranges === undefined ? "" : " LIMIT ? OFFSET ?"
+         }`,
       )
-      .all(segment.segmentId)
+      .all(
+        ...(ranges === undefined
+          ? [segment.segmentId]
+          : [segment.segmentId, ranges.entries.limit, ranges.entries.start]),
+      )
       .filter(isSessionEntryRow)
       .map((row) => ({
         seq: row.entrySeq,
@@ -3854,9 +4179,15 @@ export class WorkflowRunStore {
                 attempt_id AS attemptId, turn_id AS turnId, message_id AS messageId,
                 tool_call_id AS toolCallId, payload_hash AS payloadHash,
                 recorded_at AS recordedAt
-         FROM session_events WHERE segment_id = ? ORDER BY event_seq`,
+         FROM session_events WHERE segment_id = ? ORDER BY event_seq${
+           ranges === undefined ? "" : " LIMIT ? OFFSET ?"
+         }`,
       )
-      .all(segment.segmentId)
+      .all(
+        ...(ranges === undefined
+          ? [segment.segmentId]
+          : [segment.segmentId, ranges.events.limit, ranges.events.start]),
+      )
       .filter(isSessionEventRow)
       .map((row) => ({
         seq: row.eventSeq,
@@ -3883,7 +4214,17 @@ export class WorkflowRunStore {
       ...(failure === undefined ? {} : { failure }),
     };
     const diagnostics: string[] = [];
-    if (entries.length !== segment.entryCount || events.length !== segment.eventCount) {
+    const durableCounts =
+      ranges === undefined
+        ? { entries: entries.length, events: events.length }
+        : {
+            entries: sessionRecordCount(this.state, "session_entries", segment.segmentId),
+            events: sessionRecordCount(this.state, "session_events", segment.segmentId),
+          };
+    if (
+      durableCounts.entries !== segment.entryCount ||
+      durableCounts.events !== segment.eventCount
+    ) {
       diagnostics.push("session capture counts do not match durable rows");
     }
     if (runState.status !== "running" && segment.status === "recording") {
@@ -4261,6 +4602,17 @@ function workflowSourceFromRow(row: RunSourceRow): WorkflowSource {
   return row.sourceType === "builtin"
     ? { kind: "builtin", id: row.sourceRef, revision: row.sourceRevision }
     : { kind: "file", path: row.sourceRef, hash: row.sourceRevision };
+}
+
+function sessionRecordCount(
+  state: StateDatabase,
+  table: "session_entries" | "session_events",
+  segmentId: string,
+): number {
+  const row = state.connection
+    .prepare(`SELECT count(*) AS count FROM ${table} WHERE segment_id = ?`)
+    .get(segmentId);
+  return isCountRow(row) ? row.count : 0;
 }
 
 function segmentIdFor(runId: string, attemptId?: string): string {

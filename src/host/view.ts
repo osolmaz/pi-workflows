@@ -6,12 +6,17 @@ import {
   type OriginActivityReport,
   type WorkflowDisplay,
   type WorkflowDisplayStatus,
+  type WorkflowRunListPage,
   type WorkflowRunQueueView,
   type WorkflowRunSummary,
   type WorkflowRunView,
   type WorkflowSessionView,
 } from "../client/view.js";
-import type { SqliteControllerStore, WorkflowRunQueueRecord } from "../controllers/sqlite.js";
+import type {
+  SqliteControllerStore,
+  WorkflowRunQueueRecord,
+  WorkflowRunQueueViewRecord,
+} from "../controllers/sqlite.js";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import type { WorkflowRunDisplayState, WorkflowRunStore } from "../workflows/store.js";
@@ -63,11 +68,16 @@ const VIEW_PAGE_BYTES = 64 * 1024;
 const VIEW_PAGE_ITEMS = 256;
 const CONTENT_CHUNK_BYTES = 192 * 1024;
 const CONTENT_CACHE_BYTES = 64 * 1024 * 1024;
+const VIEW_CACHE_ITEMS = 64;
 
 export class HostViewStore {
   private readonly activity = new Map<string, OriginActivity>();
   private readonly contentRecords = new Map<string, ContentRecord>();
+  private readonly listCache = new Map<string, { revision: string; page: WorkflowRunListPage }>();
+  private readonly runCache = new Map<string, { version: string; view: WorkflowRunView | null }>();
+  private readonly sessionCache = new Map<string, { version: string; view: WorkflowSessionView }>();
   private contentBytes = 0;
+  private activityRevision = 0;
 
   constructor(
     private readonly state: StateDatabase,
@@ -77,11 +87,25 @@ export class HostViewStore {
     private readonly hasLiveWorker: (runId: string) => boolean,
   ) {}
 
-  list(limit?: number): WorkflowRunSummary[] {
+  list(cursor = 0, limit?: number): WorkflowRunListPage {
     this.expireActivity();
-    return this.state.readTransaction(() =>
-      this.queue.listWorkflowRuns(limit === undefined ? {} : { limit }).map((run) => {
-        const display = this.display(run, this.runs.readDisplayState(run.runId));
+    return this.state.readTransaction(() => {
+      const pageSize = Math.min(limit ?? VIEW_PAGE_ITEMS, VIEW_PAGE_ITEMS);
+      const current = this.queue.workflowRunListRevision();
+      const revision = `${current.revision}:${this.activityRevision}`;
+      const cacheKey = `${cursor}:${pageSize}`;
+      const cached = this.listCache.get(cacheKey);
+      if (cached?.revision === revision) {
+        refreshCacheEntry(this.listCache, cacheKey, cached);
+        return cached.page;
+      }
+      const loaded = this.queue.listWorkflowRunViews({ offset: cursor, limit: pageSize });
+      const summaries = loaded.runs.map((run) => {
+        const display = this.display(run, {
+          status: run.runStateStatus as WorkflowRunState["status"],
+          paused: run.paused,
+          error: run.errorMessage,
+        });
         return {
           runId: run.runId,
           workflowName: run.workflowName,
@@ -92,14 +116,36 @@ export class HostViewStore {
           manifest: manifest(run, display.status),
           live: display.status === "running" || display.status === "waiting",
           possiblyInterrupted: run.status === "parked" && display.status !== "paused",
-        };
-      }),
-    );
+        } satisfies WorkflowRunSummary;
+      });
+      const items = byteBoundedForwardPage(summaries, (summary) => toJson(summary)).map(
+        (item) => item as WorkflowRunSummary,
+      );
+      const page: WorkflowRunListPage = {
+        schema: "pi-workflows.run-list-page.v1",
+        revision,
+        start: cursor,
+        total: loaded.total,
+        items,
+      };
+      rememberCacheEntry(this.listCache, cacheKey, { revision, page });
+      return page;
+    });
   }
 
   run(runId: string): WorkflowRunView | null {
     this.expireActivity();
-    return this.state.readTransaction(() => this.readRun(runId));
+    return this.state.readTransaction(() => {
+      const version = this.runVersion(runId);
+      const cached = this.runCache.get(runId);
+      if (cached?.version === version) {
+        refreshCacheEntry(this.runCache, runId, cached);
+        return cached.view;
+      }
+      const view = this.readRun(runId);
+      rememberCacheEntry(this.runCache, runId, { version, view });
+      return view;
+    });
   }
 
   page(runId: string, request: RunPageRequest): WorkflowRunView | null {
@@ -108,91 +154,121 @@ export class HostViewStore {
   }
 
   private readRun(runId: string, page?: RunPageRequest): WorkflowRunView | null {
-    const queue = this.queue.getWorkflowRun(runId);
-    const loaded = this.runs.readRun(runId, { includeTrace: true });
-    if (queue === undefined || loaded === null) return null;
-    const revision = this.presentationRevision(runId);
-    const display = this.display(queue, loaded.state);
-    const steps = loaded.state.steps;
-    const updates = loaded.state.updates ?? [];
-    const trace = loaded.traceEvents ?? [];
-    const settings = loaded.settingsScopes ?? [];
-    const followUps = loaded.followUpQueue?.followUps ?? [];
+    const queue = this.queue.getWorkflowRunView(runId);
+    const counts = this.runs.readRunViewCounts(runId);
+    if (queue === undefined || counts === null) return null;
     const graphCursor =
       page?.kind === "steps"
-        ? clampCursor(page.cursor, steps.length)
-        : Math.max(0, steps.length - 1);
+        ? clampCursor(page.cursor, counts.steps)
+        : Math.max(0, counts.steps - 1);
     const traceCursor =
       page?.kind === "trace_at_step"
-        ? traceCursorForStep(trace, steps, page.cursor)
+        ? this.runs.traceCursorForStep(runId, page.cursor, counts.trace)
         : page?.kind === "trace"
           ? page.cursor
           : undefined;
-    const stepPage = byteBoundedPage(
-      steps,
+    const stepRange = viewRange(counts.steps, page?.kind === "steps" ? page.cursor : undefined);
+    const traceRange = viewRange(counts.trace, traceCursor);
+    const entryRange = viewRange(
+      counts.sessionEntries,
+      page?.kind === "session_entries" ? page.cursor : undefined,
+    );
+    const eventRange = viewRange(
+      counts.sessionEvents,
+      page?.kind === "session_events" ? page.cursor : undefined,
+    );
+    const settingsRange = viewRange(
+      counts.settings,
+      page?.kind === "settings" ? page.cursor : undefined,
+    );
+    const followUpRange = viewRange(
+      counts.followUps,
+      page?.kind === "follow_ups" ? page.cursor : undefined,
+    );
+    const updateRange = viewRange(
+      counts.updates,
+      page?.kind === "updates" ? page.cursor : undefined,
+    );
+    const loaded = this.runs.readRunView(runId, {
+      steps: stepRange,
+      trace: traceRange,
+      sessionEntries: entryRange,
+      sessionEvents: eventRange,
+      settings: settingsRange,
+      followUps: followUpRange,
+      updates: updateRange,
+      graphCursor,
+    });
+    if (loaded === null) return null;
+    const stepPage = byteBoundedCandidatePage(
+      loaded.state.steps,
+      stepRange.start,
+      counts.steps,
       page?.kind === "steps" ? page.cursor : undefined,
       (step) => this.projectStep(runId, step),
     );
-    const tracePage = byteBoundedPage(trace, traceCursor, (event) =>
-      this.projectTraceEvent(runId, event),
+    const tracePage = byteBoundedCandidatePage(
+      loaded.traceEvents,
+      traceRange.start,
+      counts.trace,
+      traceCursor,
+      (event) => this.projectTraceEvent(runId, event),
     );
-    const entryPage = byteBoundedPage(
+    const entryPage = byteBoundedCandidatePage(
       loaded.sessionEntries,
+      entryRange.start,
+      counts.sessionEntries,
       page?.kind === "session_entries" ? page.cursor : undefined,
       (entry) => this.projectSessionEntry(runId, entry),
     );
-    const eventPage = byteBoundedPage(
+    const eventPage = byteBoundedCandidatePage(
       loaded.sessionEvents,
+      eventRange.start,
+      counts.sessionEvents,
       page?.kind === "session_events" ? page.cursor : undefined,
       (event) => this.projectSessionEvent(runId, event),
     );
-    const settingsPage = byteBoundedPage(
-      settings,
+    const settingsPage = byteBoundedCandidatePage(
+      loaded.settingsScopes,
+      settingsRange.start,
+      counts.settings,
       page?.kind === "settings" ? page.cursor : undefined,
       (scope) => this.projectRecordField(runId, scope, "settings"),
     );
-    const followUpPage = byteBoundedPage(
+    const followUps = loaded.followUpQueue?.followUps ?? [];
+    const followUpPage = byteBoundedCandidatePage(
       followUps,
+      followUpRange.start,
+      counts.followUps,
       page?.kind === "follow_ups" ? page.cursor : undefined,
       (followUp) => this.projectRecordField(runId, followUp, "prompt"),
     );
-    const updatePage = byteBoundedPage(
+    const updates = loaded.state.updates ?? [];
+    const updatePage = byteBoundedCandidatePage(
       updates,
+      updateRange.start,
+      counts.updates,
       page?.kind === "updates" ? page.cursor : undefined,
       (update) => this.projectUpdate(runId, update),
     );
-    const stepsThroughCursor = steps.slice(0, steps.length === 0 ? 0 : graphCursor + 1);
-    const latestStepByNode = new Map(
-      stepsThroughCursor.map((step) => [step.nodeId, step] as const),
-    );
-    const graphSteps = stepsThroughCursor
-      .filter((step) => latestStepByNode.get(step.nodeId) === step)
-      .map(toCompactStepJson);
-    const takenTransitions = [
-      ...new Set(
-        stepsThroughCursor.slice(1).map((step, index) => {
-          const previous = stepsThroughCursor[index] as (typeof stepsThroughCursor)[number];
-          return `${previous.nodeId}->${step.nodeId}`;
-        }),
-      ),
-    ].sort();
     const followUpQueue =
-      loaded.followUpQueue === null || loaded.followUpQueue === undefined
+      loaded.followUpQueue === null
         ? null
         : projectFollowUpQueue(loaded.followUpQueue, followUpPage.items);
-    const state = this.projectState(runId, loaded.state, stepPage.items, updatePage.items);
+    const revision = this.presentationRevision(runId);
+    const display = this.display(queue, loaded.state);
     return {
       schema: RUN_VIEW_SCHEMA,
       runId,
       revision,
       display,
       manifest: manifest(queue, display.status),
-      state,
+      state: this.projectState(runId, loaded.state, stepPage.items, updatePage.items),
       workflow: this.projectWorkflow(runId, loaded.snapshot),
       queue: projectQueue(queue),
       updates: updatePage.items,
-      graphSteps,
-      takenTransitions,
+      graphSteps: loaded.graphSteps.map(toCompactStepJson),
+      takenTransitions: loaded.takenTransitions,
       graphCursor,
       stepStart: stepPage.start,
       stepTotal: stepPage.total,
@@ -222,22 +298,35 @@ export class HostViewStore {
     this.expireActivity();
     return this.state.readTransaction(() => {
       const queue =
-        this.queue.findSessionReservation(sessionId) ?? this.latestSessionRun(sessionId);
+        this.queue.findSessionReservationView(sessionId) ??
+        this.queue.latestSessionWorkflowRunView(sessionId);
+      const deliveries = {
+        notification: this.queue.hasClaimableWorkflowNotification({ targetSessionId: sessionId }),
+        turn: this.queue.hasClaimableWorkflowTurnIntent({ targetSessionId: sessionId }),
+      };
+      const version = [
+        queue === undefined ? "none" : this.runVersion(queue.runId),
+        this.pendingSessionRevision(sessionId),
+        deliveries.notification,
+        deliveries.turn,
+      ].join(":");
+      const cached = this.sessionCache.get(sessionId);
+      if (cached?.version === version) {
+        refreshCacheEntry(this.sessionCache, sessionId, cached);
+        return cached.view;
+      }
       const pending = this.hostState.listPendingInteractions(sessionId);
-      return {
+      const view: WorkflowSessionView = {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
-        run: queue === undefined ? null : this.readRun(queue.runId),
+        run: queue === undefined ? null : this.run(queue.runId),
         pendingInteractions: pending.map((request) =>
           this.projectRecordField(request.runId, request, "contract"),
         ),
-        deliveries: {
-          notification: this.queue.hasClaimableWorkflowNotification({
-            targetSessionId: sessionId,
-          }),
-          turn: this.queue.hasClaimableWorkflowTurnIntent({ targetSessionId: sessionId }),
-        },
+        deliveries,
       };
+      rememberCacheEntry(this.sessionCache, sessionId, { version, view });
+      return view;
     });
   }
 
@@ -361,14 +450,14 @@ export class HostViewStore {
 
   private projectValue(runId: string, value: JsonValue): JsonValue {
     const safeValue = escapeArtifactSentinels(value);
-    const mediaType = typeof safeValue === "string" ? "text/plain" : "application/json";
+    const mediaType = typeof value === "string" ? "text/plain" : "application/json";
     const bytes =
       mediaType === "text/plain"
-        ? Buffer.from(safeValue as string, "utf8")
-        : Buffer.from(canonicalJson(safeValue), "utf8");
+        ? Buffer.from(value as string, "utf8")
+        : Buffer.from(canonicalJson(value), "utf8");
     return bytes.byteLength <= INLINE_CONTENT_BYTES
       ? safeValue
-      : this.registerContent(runId, safeValue, mediaType);
+      : this.registerContent(runId, value, mediaType);
   }
 
   private registerContent(
@@ -396,6 +485,7 @@ export class HostViewStore {
         mediaType,
         bytes: bytes.byteLength,
         sha256,
+        opaque: true,
       },
     };
   }
@@ -421,46 +511,16 @@ export class HostViewStore {
   private recoverContent(runId: string, contentPath: string): ContentRecord | undefined {
     const match = /^artifacts\/sha256\/([0-9a-f]{64})\.(json|txt)$/u.exec(contentPath);
     if (match === null) return undefined;
-    const loaded = this.runs.readRun(runId, { includeTrace: true });
-    if (loaded === null) return undefined;
-    const candidates: JsonValue[] = [toJson(loaded.snapshot)];
-    for (const field of ["input", "outputs", "results", "humanDecision", "finalOutput"] as const) {
-      const value = loaded.state[field];
-      if (value !== undefined) candidates.push(toJson(value));
-    }
-    for (const step of loaded.state.steps) {
-      for (const value of [step.prompt, step.output, step.assistantMessage]) {
-        if (value !== undefined) candidates.push(toJson(value));
-      }
-    }
-    for (const update of loaded.state.updates ?? []) candidates.push(toJson(update.data));
-    for (const event of loaded.traceEvents ?? []) candidates.push(toJson(event.payload));
-    for (const entry of loaded.sessionEntries) candidates.push(toJson(entry.entry));
-    for (const event of loaded.sessionEvents) candidates.push(toJson(event.payload));
-    for (const scope of loaded.settingsScopes ?? []) candidates.push(toJson(scope.settings));
-    for (const followUp of loaded.followUpQueue?.followUps ?? []) {
-      candidates.push(toJson(followUp.prompt));
-    }
     const mediaType = match[2] === "txt" ? "text/plain" : "application/json";
-    for (const candidate of candidates) {
-      const safeCandidate = escapeArtifactSentinels(candidate);
-      if (mediaType === "text/plain" && typeof safeCandidate !== "string") continue;
-      const bytes = Buffer.from(
-        mediaType === "text/plain" ? (safeCandidate as string) : canonicalJson(safeCandidate),
-        "utf8",
-      );
-      const sha256 = createHash("sha256").update(bytes).digest("hex");
-      if (sha256 === match[1]) {
-        return this.rememberContent({
-          runId,
-          path: contentPath,
-          mediaType,
-          bytes,
-          sha256,
-        });
-      }
-    }
-    return undefined;
+    const blob = this.runs.readContentBlob(runId, match[1] as string);
+    if (blob === undefined || blob.mediaType !== mediaType) return undefined;
+    return this.rememberContent({
+      runId,
+      path: contentPath,
+      mediaType,
+      bytes: blob.content,
+      sha256: match[1] as string,
+    });
   }
 
   reportActivity(connectionId: string, report: OriginActivityReport): void {
@@ -480,6 +540,7 @@ export class HostViewStore {
         throw new Error("Origin activity sequence must increase");
       }
       this.activity.delete(key);
+      this.activityRevision += 1;
       return;
     }
     const request = this.hostState
@@ -506,22 +567,31 @@ export class HostViewStore {
       connectionId,
       expiresAt: Date.now() + ORIGIN_ACTIVITY_LEASE_MS,
     });
+    if (previous === undefined) this.activityRevision += 1;
   }
 
   clearConnection(connectionId: string): void {
+    let changed = false;
     for (const [key, value] of this.activity) {
-      if (value.connectionId === connectionId) this.activity.delete(key);
+      if (value.connectionId !== connectionId) continue;
+      this.activity.delete(key);
+      changed = true;
     }
+    if (changed) this.activityRevision += 1;
   }
 
   expireActivity(now = Date.now()): void {
+    let changed = false;
     for (const [key, value] of this.activity) {
-      if (value.expiresAt <= now) this.activity.delete(key);
+      if (value.expiresAt > now) continue;
+      this.activity.delete(key);
+      changed = true;
     }
+    if (changed) this.activityRevision += 1;
   }
 
   private display(
-    queue: WorkflowRunQueueRecord,
+    queue: WorkflowRunQueueRecord | WorkflowRunQueueViewRecord,
     state?: WorkflowRunDisplayState | WorkflowRunState | null,
   ): WorkflowDisplay {
     return reduceWorkflowDisplay({
@@ -563,17 +633,44 @@ export class HostViewStore {
     return row !== undefined;
   }
 
-  private latestSessionRun(sessionId: string): WorkflowRunQueueRecord | undefined {
+  private runVersion(runId: string): string {
     const row = this.state.connection
       .prepare(
-        `SELECT b.run_id AS runId FROM run_bindings b
-         JOIN run_queue q ON q.run_id = b.run_id
-         WHERE b.origin_session_id = ?
-         ORDER BY b.created_at DESC, b.run_id DESC LIMIT 1`,
+        `SELECT res.revision, r.status AS runStatus, r.paused,
+                q.updated_at AS updatedAt,
+                COALESCE(v.presentation_revision, 0) AS presentationRevision
+         FROM runs r JOIN resources res ON res.resource_id = r.resource_id
+         JOIN run_queue q ON q.run_id = r.run_id
+         LEFT JOIN viewer_runs v ON v.run_id = r.run_id
+         WHERE r.run_id = ?`,
+      )
+      .get(runId);
+    if (!isRunVersionRow(row)) return "missing";
+    return [
+      row.revision,
+      row.updatedAt,
+      row.presentationRevision,
+      row.runStatus,
+      row.paused,
+      this.activityRevision,
+      this.hasLiveWorker(runId),
+      this.hasActivity(runId),
+      this.hasPendingInteraction(runId),
+      this.hasAmbiguousEffect(runId),
+    ].join(":");
+  }
+
+  private pendingSessionRevision(sessionId: string): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT count(*) AS count, COALESCE(sum(revision), 0) AS revisionSum,
+                COALESCE(max(updated_at), 0) AS updatedAt
+         FROM interactive_requests
+         WHERE target_session_id = ? AND status IN ('pending', 'presenting')`,
       )
       .get(sessionId);
-    if (!isRunIdRow(row)) return undefined;
-    return this.queue.getWorkflowRun(row.runId);
+    if (!isSessionRevisionRow(row)) throw new Error("Session view revision is invalid");
+    return `${row.count}:${row.revisionSum}:${row.updatedAt}`;
   }
 
   private presentationRevision(runId: string): number {
@@ -644,7 +741,10 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
   return { status, activity, controls, reason };
 }
 
-function manifest(run: WorkflowRunQueueRecord, status: WorkflowDisplayStatus): JsonValue {
+function manifest(
+  run: WorkflowRunQueueRecord | WorkflowRunQueueViewRecord,
+  status: WorkflowDisplayStatus,
+): JsonValue {
   return {
     schema: "pi-workflows.run-manifest.v1",
     runId: run.runId,
@@ -662,7 +762,9 @@ function manifest(run: WorkflowRunQueueRecord, status: WorkflowDisplayStatus): J
   };
 }
 
-function projectQueue(run: WorkflowRunQueueRecord): WorkflowRunQueueView {
+function projectQueue(
+  run: WorkflowRunQueueRecord | WorkflowRunQueueViewRecord,
+): WorkflowRunQueueView {
   return {
     runId: run.runId,
     workflowName: run.workflowName,
@@ -733,6 +835,56 @@ function projectFollowUpQueue(value: unknown, items: JsonValue[]): JsonValue {
   delete queue.followUps;
   queue.items = items;
   return queue;
+}
+
+function refreshCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+}
+
+function rememberCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  refreshCacheEntry(cache, key, value);
+  while (cache.size > VIEW_CACHE_ITEMS) {
+    const oldest = cache.keys().next().value as K | undefined;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function viewRange(total: number, cursor?: number): { start: number; limit: number } {
+  const start = workflowPageStart(total, cursor);
+  return { start, limit: Math.min(VIEW_PAGE_ITEMS, Math.max(0, total - start)) };
+}
+
+function byteBoundedForwardPage<T>(
+  values: readonly T[],
+  project: (value: T) => JsonValue,
+): JsonValue[] {
+  const items: JsonValue[] = [];
+  let bytes = 0;
+  for (const value of values) {
+    if (items.length >= VIEW_PAGE_ITEMS) break;
+    const item = project(value);
+    const itemBytes = Buffer.byteLength(canonicalJson(item)) + (items.length === 0 ? 0 : 1);
+    if (items.length > 0 && bytes + itemBytes > VIEW_PAGE_BYTES) break;
+    items.push(item);
+    bytes += itemBytes;
+  }
+  return items;
+}
+
+function byteBoundedCandidatePage<T>(
+  values: readonly T[],
+  candidateStart: number,
+  total: number,
+  requestedCursor: number | undefined,
+  project: (value: T) => JsonValue,
+): { start: number; total: number; items: JsonValue[] } {
+  if (values.length === 0) return { start: candidateStart, total, items: [] };
+  const globalCursor = clampCursor(requestedCursor ?? Math.max(0, total - 1), total);
+  const localCursor = Math.min(Math.max(0, globalCursor - candidateStart), values.length - 1);
+  const page = byteBoundedPage(values, localCursor, project);
+  return { start: candidateStart + page.start, total, items: page.items };
 }
 
 function byteBoundedPage<T>(
@@ -814,19 +966,6 @@ function clampCursor(cursor: number, total: number): number {
   return total === 0 ? 0 : Math.min(cursor, total - 1);
 }
 
-function traceCursorForStep(
-  trace: readonly { attemptId?: string; nodeId?: string }[],
-  steps: readonly { attemptId: string; nodeId: string }[],
-  cursor: number,
-): number {
-  const step = steps[clampCursor(cursor, steps.length)];
-  if (step === undefined) return 0;
-  const traceIndex = trace.findLastIndex(
-    (event) => event.attemptId === step.attemptId || event.nodeId === step.nodeId,
-  );
-  return traceIndex === -1 ? clampCursor(cursor, trace.length) : traceIndex;
-}
-
 function boundedReason(value: string | null): string | null {
   if (value === null) return null;
   return value.length <= 240 ? value : `${value.slice(0, 237)}...`;
@@ -840,11 +979,35 @@ function isJsonObject(value: unknown): value is { [key: string]: JsonValue } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isRunIdRow(value: unknown): value is { runId: string } {
+function isRunVersionRow(value: unknown): value is {
+  revision: number;
+  updatedAt: number;
+  presentationRevision: number;
+  runStatus: string;
+  paused: number;
+} {
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as { runId?: unknown }).runId === "string"
+    typeof (value as { revision?: unknown }).revision === "number" &&
+    typeof (value as { updatedAt?: unknown }).updatedAt === "number" &&
+    typeof (value as { presentationRevision?: unknown }).presentationRevision === "number" &&
+    typeof (value as { runStatus?: unknown }).runStatus === "string" &&
+    typeof (value as { paused?: unknown }).paused === "number"
+  );
+}
+
+function isSessionRevisionRow(value: unknown): value is {
+  count: number;
+  revisionSum: number;
+  updatedAt: number;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { count?: unknown }).count === "number" &&
+    typeof (value as { revisionSum?: unknown }).revisionSum === "number" &&
+    typeof (value as { updatedAt?: unknown }).updatedAt === "number"
   );
 }
 
