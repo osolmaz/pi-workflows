@@ -297,9 +297,7 @@ export class HostViewStore {
   session(sessionId: string): WorkflowSessionView {
     this.expireActivity();
     return this.state.readTransaction(() => {
-      const queue =
-        this.queue.findSessionReservationView(sessionId) ??
-        this.queue.latestSessionWorkflowRunView(sessionId);
+      const queue = this.queue.findSessionReservationView(sessionId);
       const deliveries = {
         notification: this.queue.hasClaimableWorkflowNotification({ targetSessionId: sessionId }),
         turn: this.queue.hasClaimableWorkflowTurnIntent({ targetSessionId: sessionId }),
@@ -629,7 +627,7 @@ export class HostViewStore {
     const row = this.state.connection
       .prepare(
         `SELECT 1 AS present FROM effects e JOIN runs r ON r.resource_id = e.source_resource_id
-         WHERE r.run_id = ? AND e.status IN ('applying', 'ambiguous') LIMIT 1`,
+         WHERE r.run_id = ? AND e.status = 'ambiguous' LIMIT 1`,
       )
       .get(runId);
     return row !== undefined;

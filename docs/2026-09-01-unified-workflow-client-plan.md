@@ -2,7 +2,7 @@
 title: Unify live workflow clients
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-01
-status: planned
+status: implemented
 ---
 
 # Unify live workflow clients
@@ -131,9 +131,9 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 - live and interruption facts;
 - a `display` object with effective status, activity kind, allowed controls, and a bounded reason when action is required.
 
-The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus the ordered pending delivery records for that session. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
+The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus the ordered pending delivery records for that session. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
-Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. TypeScript and Rust viewers assemble every run-history page for one revision. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a non-interactive viewer emits the complete run. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
 
 The run list is also byte-bounded and revision-bound. It contains only lightweight status and source facts. TypeScript and Rust clients assemble every page for one revision before replacing the visible complete list. An unchanged subscription performs a lightweight revision check and reuses its prior result.
 
@@ -147,7 +147,7 @@ The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `co
 
 Use this precedence:
 
-1. A durable ambiguous external effect that requires explicit review is `ambiguous`.
+1. A durable ambiguous external effect that requires explicit review is `ambiguous`. An effect that is still applying under a live worker is not ambiguous.
 2. Another durable terminal result keeps its `completed`, `failed`, `timed_out`, or `cancelled` label.
 3. A durable pause is `paused`.
 4. A live supervised worker or an exact active origin-session workflow turn is `running`.
@@ -175,7 +175,7 @@ A report contains:
 
 The host accepts activity only when the durable pending interactive request and its recorded delivery or presentation entry match the session, run, request, and delivery. Presentation-claim settlement does not end the request, so valid activity can continue while the model turn runs. Repeated reports are idempotent. A stale sequence, replaced delivery, or wrong session is rejected.
 
-The host keeps activity in memory with a short renewable lease tied to the client connection. One constants module under `src/client/` owns both the refresh period and lease duration. The refresh period must be shorter than the lease duration, and the lease duration must bound how long a dead client can leave a false `running` display. The host clears activity on the matching settled event, connection loss, or lease expiry. A missing report falls back to durable `waiting`. It never creates a false `paused` or `running` state.
+The host keeps activity in memory with a short renewable lease tied to the client connection. The first report on each connection is `started`; only later reports on that same connection are refreshes. One constants module under `src/client/` owns both the refresh period and lease duration. The refresh period must be shorter than the lease duration, and the lease duration must bound how long a dead client can leave a false `running` display. The host clears activity on the matching settled event, connection loss, or lease expiry. A missing report falls back to durable `waiting`. It never creates a false `paused` or `running` state.
 
 Activity is display evidence only. It cannot renew a run claim, settle an interaction, change a workflow state, or authorize a control command. Durable workflow correctness does not depend on it.
 
@@ -295,8 +295,9 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Shared TypeScript and Rust wire fixtures.
 - Envelope size, framing, unknown field, malformed message, and safe-error tests.
 - Status precedence and allowed-control table tests.
-- Activity validation against the recorded delivery entry, idempotency, sequence, refresh-before-expiry, disconnect, and bounded expiry tests.
-- Atomic origin-session view tests.
+- Activity validation against the recorded delivery entry, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
+- Atomic origin-session view tests, including removal of a terminal run when its reservation ends.
+- Full TypeScript and Rust run-page assembly and content-hydration tests.
 - Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
 - Durable generated-content recovery after memory-cache eviction.
 - Idempotent interaction retry with a different attempted submission ID.

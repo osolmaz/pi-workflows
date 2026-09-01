@@ -74,13 +74,13 @@ The closed display statuses are:
 - `cancelled`
 - `ambiguous`
 
-Only the host computes this status. A parked queue is not a pause. `paused` requires the durable pause flag. An exact live worker or origin-session turn is `running`. An uncertain external effect that needs operator action is `ambiguous`. `unavailable` is a client connection condition, not a run status.
+Only the host computes this status. A parked queue is not a pause. `paused` requires the durable pause flag. An exact live worker or origin-session turn is `running`. An effect being applied by that live worker is still `running`; only a durable `ambiguous` effect that needs operator action is `ambiguous`. `unavailable` is a client connection condition, not a run status.
 
 The run list uses the same display object. The host sends it as revision-bound `pi-workflows.run-list-page.v1` pages. Each page reads only lightweight run status and source facts. It does not load input, launch options, steps, trace, or session history. TypeScript and Rust clients collect all pages for one revision before they replace the visible list. If the revision changes, they discard the partial list and start from the next subscription event.
 
-An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current run view, ordered pending interaction records, and read-only notification and turn availability in one read. The Pi extension sends a durable claim command only when the matching availability fact is true. After a turn claim, it reads the claimed run by its exact run ID. It does not use the latest run in the session. An idle session does not create empty claim or status commands.
+An origin-session subscription returns `pi-workflows.session-view.v1`, which contains the current active run view, ordered pending interaction records, and read-only notification and turn availability in one read. A session with no active reservation returns no run, even when that session has older terminal runs. The Pi extension sends a durable claim command only when the matching availability fact is true. After a turn claim, it reads the claimed run by its exact run ID. It does not use the latest run in the session. An idle session does not create empty claim or status commands.
 
-A snapshot page contains at most 256 items and also has a byte budget. `view.page` returns another byte-bounded window that contains the requested cursor. Page responses use `pi-workflows.run-page.v1` and echo the requested cursor and run-view revision. A client applies a page only when both still match its current request and snapshot. A session-event page also carries the replay checkpoint for the exact sequence before its first item, so reducing the page does not lose earlier active messages or tool calls.
+A snapshot page contains at most 256 items and also has a byte budget. `view.page` returns another byte-bounded window that contains the requested cursor. Page responses use `pi-workflows.run-page.v1` and echo the requested cursor and run-view revision. A client applies a page only when both still match its current request and snapshot. TypeScript and Rust viewers assemble every run-history page for that revision and hydrate all referenced content before they emit the complete non-interactive view. A session-event page also carries the replay checkpoint for the exact sequence before its first item, so reducing the page does not lose earlier active messages or tool calls.
 
 The host counts histories first and reads only the selected SQLite ranges. An unchanged subscription uses a lightweight revision check and reuses its prior view. It does not rebuild complete histories every 250 milliseconds.
 
@@ -94,7 +94,7 @@ A slow or disconnected client cannot stop the host, another client, claim renewa
 
 ## Origin-session activity
 
-The Pi extension reports `started`, `refresh`, and `settled` activity for the exact session, run, interaction request, delivery, and Pi session entry. Reports use a monotonic sequence. Refresh happens before the connection-scoped lease expires.
+The Pi extension reports `started`, `refresh`, and `settled` activity for the exact session, run, interaction request, delivery, and Pi session entry. Reports use a monotonic sequence. The first report on each protocol connection is `started`; only later reports on that same connection use `refresh`. Refresh happens before the connection-scoped lease expires.
 
 The host accepts activity only when it matches the durable presented interaction. Activity changes display only. It does not grant authority, renew a workflow claim, settle a step, or change durable pause state. A disconnect or expired activity lease removes the overlay.
 

@@ -70,6 +70,14 @@ type PresentedOriginActivity = {
   sessionEntryId: string;
 };
 
+export function activityStateForConnection(
+  state: "started" | "refresh" | "settled",
+  previousConnectionId: string | null,
+  connectionId: string,
+): "started" | "refresh" | "settled" {
+  return state === "refresh" && previousConnectionId !== connectionId ? "started" : state;
+}
+
 export type ParsedWorkflowArgs =
   | { kind: "list" }
   | { kind: "cancel"; runId?: string }
@@ -155,6 +163,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
   let originActivity: (PresentedOriginActivity & { sequence: number }) | null = null;
+  let originActivityConnectionId: string | null = null;
   let activityTimer: ReturnType<typeof setInterval> | null = null;
   const sessionDelivery = new SessionDeliveryCoordinator();
   const sessionView = new SessionWorkflowView();
@@ -163,18 +172,27 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     activity: PresentedOriginActivity & { sequence: number },
     state: "started" | "refresh" | "settled",
   ): Promise<void> => {
+    const connection = await client.connect();
+    const reportState = activityStateForConnection(
+      state,
+      originActivityConnectionId,
+      connection.connectionId,
+    );
     const response = await client.request({
       operation: "activity.report",
       runId: activity.runId,
-      payload: { ...activity, state },
+      payload: { ...activity, state: reportState },
     });
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
       throw new Error(response.error ?? "Workflow host rejected origin activity");
     }
+    originActivityConnectionId =
+      reportState === "settled" ? null : (client.connectionId ?? connection.connectionId);
   };
 
   const startOriginActivity = (presented: PresentedOriginActivity): void => {
     if (activityTimer !== null) clearInterval(activityTimer);
+    originActivityConnectionId = null;
     originActivity = { ...presented, sequence: 0 };
     void reportOriginActivity(originActivity, "started").catch(() => undefined);
     activityTimer = setInterval(() => {
