@@ -1,3 +1,5 @@
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+
 export type LiveE2eOptions = {
   help?: boolean;
   keep: boolean;
@@ -7,6 +9,11 @@ export type LiveE2eOptions = {
   provider?: string;
   runtimeOnly: boolean;
 };
+
+export class RpcSession {
+  constructor(child: ChildProcessWithoutNullStreams, context: { profile?: string; root: string });
+  assertNoExtensionError(): void;
+}
 
 export function parseArgs(argv: string[]): LiveE2eOptions;
 export function assertSafeTempRoot(root: string, temporaryDirectory?: string): string;
