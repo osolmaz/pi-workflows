@@ -70,6 +70,7 @@ fn decode_view(
     generation: u64,
     raw: &Value,
     definition_content: Option<&str>,
+    graph_history_content: Option<&str>,
 ) -> Option<RemoteView> {
     let graph_revision = raw
         .get("graphRevision")
@@ -77,13 +78,24 @@ fn decode_view(
         .unwrap_or(revision);
     let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
     let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
-    let graph_steps = raw
-        .get("graphSteps")
+    let graph_history = graph_history_value(raw, graph_history_content);
+    let graph_steps = graph_history
+        .as_ref()
+        .and_then(|value| value.get("steps"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| {
+            raw.get("graphSteps")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        })
         .unwrap_or_else(|| state.steps.clone());
-    let taken_transitions = raw
-        .get("takenTransitions")
+    let taken_transitions = graph_history
+        .as_ref()
+        .and_then(|value| value.get("transitions"))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| {
+            raw.get("takenTransitions")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        })
         .unwrap_or_default();
     let graph_cursor = raw
         .get("graphCursor")
@@ -221,6 +233,18 @@ fn workflow_definition_value(raw: &Value, content: Option<&str>) -> Option<Value
     Some(workflow.clone())
 }
 
+fn graph_history_artifact(raw: &Value) -> Option<ArtifactRef> {
+    raw.get("graphHistory").and_then(as_artifact_ref)
+}
+
+fn graph_history_value(raw: &Value, content: Option<&str>) -> Option<Value> {
+    let history = raw.get("graphHistory")?;
+    if graph_history_artifact(raw).is_some() {
+        return serde_json::from_str(content?).ok();
+    }
+    Some(history.clone())
+}
+
 fn workflow_definition_content(
     state: &mut Shared,
     run_id: &str,
@@ -229,6 +253,22 @@ fn workflow_definition_content(
     let Some(artifact) = workflow_definition_artifact(raw) else {
         return (None, false);
     };
+    referenced_json_content(state, run_id, artifact, "workflow definition")
+}
+
+fn graph_history_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Option<String>, bool) {
+    let Some(artifact) = graph_history_artifact(raw) else {
+        return (None, false);
+    };
+    referenced_json_content(state, run_id, artifact, "workflow graph history")
+}
+
+fn referenced_json_content(
+    state: &mut Shared,
+    run_id: &str,
+    artifact: ArtifactRef,
+    label: &str,
+) -> (Option<String>, bool) {
     let key = (run_id.to_string(), artifact.path.clone());
     match state.artifacts.get(&key).cloned() {
         Some(ArtifactEntry::Ready(content)) => {
@@ -238,7 +278,7 @@ fn workflow_definition_content(
             if valid {
                 return (Some(content), false);
             }
-            let error = "workflow definition content does not match its reference".to_string();
+            let error = format!("{label} content does not match its reference");
             state
                 .artifacts
                 .insert(key, ArtifactEntry::Error(error.clone()));
@@ -246,9 +286,7 @@ fn workflow_definition_content(
             (None, false)
         }
         Some(ArtifactEntry::Error(error)) => {
-            state.error = Some(format!(
-                "workflow definition content is unavailable: {error}"
-            ));
+            state.error = Some(format!("{label} content is unavailable: {error}"));
             (None, false)
         }
         Some(ArtifactEntry::Loading(_)) => (None, false),
@@ -493,9 +531,16 @@ impl RemoteRuns {
             self.decoded.remove(run_id);
             return None;
         };
-        let (definition_content, requested) = {
+        let (definition_content, graph_history_content, requested) = {
             let mut shared = self.shared.lock().unwrap();
-            workflow_definition_content(&mut shared, run_id, &raw)
+            let (definition, definition_requested) =
+                workflow_definition_content(&mut shared, run_id, &raw);
+            let (graph_history, graph_requested) = graph_history_content(&mut shared, run_id, &raw);
+            (
+                definition,
+                graph_history,
+                definition_requested || graph_requested,
+            )
         };
         if requested {
             self.wake();
@@ -505,9 +550,13 @@ impl RemoteRuns {
             .get(run_id)
             .is_none_or(|view| view.generation != generation);
         if stale {
-            if let Some(decoded) =
-                decode_view(revision, generation, &raw, definition_content.as_deref())
-            {
+            if let Some(decoded) = decode_view(
+                revision,
+                generation,
+                &raw,
+                definition_content.as_deref(),
+                graph_history_content.as_deref(),
+            ) {
                 self.decoded.insert(run_id.to_string(), decoded);
             } else {
                 self.decoded.remove(run_id);
@@ -1277,7 +1326,7 @@ mod tests {
             "possiblyInterrupted":false
         });
 
-        let view = decode_view(4, 1, &raw, None).expect("host view should decode");
+        let view = decode_view(4, 1, &raw, None, None).expect("host view should decode");
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
@@ -1346,6 +1395,41 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("does not match")));
+    }
+
+    #[test]
+    fn complete_graph_history_uses_the_shared_content_loader() {
+        let history = json!({
+            "steps":[],
+            "transitions":(0..300).map(|index| format!("node-{index}->node-{}", index + 1)).collect::<Vec<_>>()
+        });
+        let content = serde_json::to_string(&history).unwrap();
+        let path = "artifacts/sha256/graph-history.json";
+        let raw = json!({
+            "graphSteps":[],
+            "takenTransitions":["node-0->node-1"],
+            "graphHistory": {
+                "$artifact": {
+                    "path":path,
+                    "mediaType":"application/json",
+                    "bytes":content.len(),
+                    "sha256":hex_sha256(content.as_bytes()),
+                    "opaque":true
+                }
+            }
+        });
+        let mut state = Shared::default();
+        let (missing, requested) = graph_history_content(&mut state, "run-1", &raw);
+        assert!(missing.is_none());
+        assert!(requested);
+        state.artifacts.insert(
+            ("run-1".to_string(), path.to_string()),
+            ArtifactEntry::Ready(content),
+        );
+        let (loaded, requested) = graph_history_content(&mut state, "run-1", &raw);
+        assert!(!requested);
+        let complete = graph_history_value(&raw, loaded.as_deref()).unwrap();
+        assert_eq!(complete["transitions"].as_array().map(Vec::len), Some(300));
     }
 
     #[test]

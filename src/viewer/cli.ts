@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WorkflowClient } from "../client/client.js";
 import { materializeRunView } from "../client/materialize.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
-import { canonicalJson, type JsonValue } from "../state/json.js";
+import type { JsonValue } from "../state/json.js";
 import { verifyInactiveBackup } from "./backup.js";
 import { renderClientView, runViewer } from "./tui.js";
 
@@ -289,14 +289,11 @@ async function runStateCommand(client: WorkflowClient, args: CliArgs): Promise<v
         : {};
   const durable =
     args.stateAction === "backup" || (args.stateAction === "prune" && args.pruneApply === true);
-  const idempotencyKey = durable
-    ? `state-${createHash("sha256").update(canonicalJson({ operation, payload })).digest("hex")}`
-    : undefined;
-  const response = await client.request({
-    operation,
-    payload,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-  });
+  const idempotencyKey = durable ? `state-${randomUUID()}` : undefined;
+  const response =
+    idempotencyKey === undefined
+      ? await client.request({ operation, payload })
+      : await client.requestDurable({ operation, payload, idempotencyKey });
   requireAccepted(response);
   process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
 }
@@ -336,8 +333,9 @@ async function firstRunsView(client: WorkflowClient): Promise<JsonValue> {
   return await firstSubscriptionEvent((listener) => client.watchRuns(listener));
 }
 
-async function firstRunView(client: WorkflowClient, runId: string): Promise<JsonValue> {
-  const view = await firstSubscriptionEvent((listener) => client.watchRun(runId, listener));
+export async function firstRunView(client: WorkflowClient, runId: string): Promise<JsonValue> {
+  const view = await client.getRun(runId);
+  if (view === null) throw new Error(`Workflow run not found: ${runId}`);
   return await materializeRunView(client, view);
 }
 

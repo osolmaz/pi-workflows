@@ -187,22 +187,21 @@ async function completePage(
 }
 
 function materializeGraphHistory(view: Record<string, JsonValue>): void {
-  const state = isRecord(view.state) ? view.state : {};
-  const steps = Array.isArray(state.steps) ? state.steps : [];
-  const cursor = Math.min(safeInteger(view.graphCursor, steps.length - 1), steps.length - 1);
-  const latest = new Map<string, { index: number; step: JsonValue }>();
-  const transitions = new Set<string>();
-  let previousNodeId: string | undefined;
-  for (const [index, step] of steps.entries()) {
-    if (index > cursor || !isRecord(step) || typeof step.nodeId !== "string") continue;
-    latest.set(step.nodeId, { index, step });
-    if (previousNodeId !== undefined) transitions.add(`${previousNodeId}->${step.nodeId}`);
-    previousNodeId = step.nodeId;
+  const history = isRecord(view.graphHistory) ? view.graphHistory : undefined;
+  if (
+    history === undefined ||
+    !Array.isArray(history.steps) ||
+    !Array.isArray(history.transitions) ||
+    !history.transitions.every((transition) => typeof transition === "string")
+  ) {
+    throw new Error("Workflow graph history is invalid");
   }
-  view.graphSteps = [...latest.values()]
-    .sort((left, right) => left.index - right.index)
-    .map(({ step }) => step);
-  view.takenTransitions = [...transitions].sort();
+  view.graphSteps = history.steps;
+  view.graphStepStart = 0;
+  view.graphStepTotal = history.steps.length;
+  view.takenTransitions = history.transitions;
+  view.takenTransitionStart = 0;
+  view.takenTransitionTotal = history.transitions.length;
 }
 
 function pageValue(value: JsonValue | undefined): ViewerPage {
