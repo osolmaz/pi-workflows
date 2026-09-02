@@ -1,7 +1,5 @@
 # Terminal workflow messages
 
-> **Current version notice:** Version 0.16.0 does not send the terminal and recovery message on every path described here. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) implements this contract through `workflow_messages`.
-
 This specification defines the final Pi message for an interactive workflow. It replaces the separate deferred-turn and `workflow_turn_intents` design. Terminal messages use the same host state, client operations, and extension coordinator as all other [workflow messages](WORKFLOW_STEP_MESSAGES.md).
 
 The earlier [deferred-turn plan](plans/2026-08-21-deferred-turn-intents-plan.md) and [terminal restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md) remain historical design records. This document is the current contract.

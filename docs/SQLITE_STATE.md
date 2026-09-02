@@ -1,6 +1,6 @@
 # SQLite state
 
-Status: the single-host database is implemented. Version 0.16.0 still uses separate Pi send tables. The approved [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) replaces them in schema version 1 without a migration or compatibility path.
+Status: this is the implemented single-host database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior.
 
 Pi Workflows stores all live durable state in one database:
 
@@ -106,6 +106,8 @@ A domain row and its event are written in one transaction. Normal APIs never upd
 
 Local effects use deterministic transactions. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and controller-child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
 
+Telegram delivery and settlement use these shared effect records. The host records one numbered attempt before it tells the supervised adapter child to act. A confirmed result stores Telegram message references in the effect result. `channel_messages` stores the decision feature's delivery or settlement receipt; it does not copy effect state or external message references.
+
 ## Domain tables
 
 The shared records do not replace domain schemas. The following `STRICT` tables keep the state explicit:
@@ -124,9 +126,11 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
 | Effects             | `effects`, `effect_attempts`                                                                                                 |
 | Pi messages         | `workflow_messages`                                                                                                          |
-| Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`                                  |
+| Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                            |
 
 `workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial, reminder, and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
+
+`channels` stores configured channel resource identities. `channel_cursors` stores the last accepted external polling position. `channel_messages` stores immutable decision delivery and settlement records for audit and duplicate evidence. External application state and Telegram message references belong to `effects` and `effect_attempts`.
 
 Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per interaction request, one nonterminal interactive continuation-chain reservation per Pi session, one decision winner, and one deterministic effect key. A run waiting for a checkpoint or protected decision keeps that chain reservation. A parked waiting parent does not block its own continuation. Reserving that continuation transfers the reservation and settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
@@ -195,7 +199,7 @@ Reading or finding a row never gives write authority.
 - A run owner may advance the run, apply automatic decision policy, create its continuation, settle its parent, and complete its queue work.
 - A controller claim owner may update controller status, reserve effects, and start child workflows for that resource.
 - A verified human channel actor may submit one answer candidate for the named decision. It does not gain run ownership.
-- A channel lease owner may update only its channel cursor, inbox, delivery, and settlement records.
+- The host-owned channel adapter path may update only its channel cursor, decision delivery and settlement records, and exact managed effects.
 - Control commands have narrow explicit operations, such as requesting cancellation or deletion.
 - Model-originated workflow answers cannot resolve protected human decisions.
 

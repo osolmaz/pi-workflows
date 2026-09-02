@@ -6,8 +6,6 @@ date: 2026-08-25
 
 # Continue normal work after a workflow finishes
 
-> **Current version notice:** Version 0.16.0 does not provide the complete hosted queue, remove, and ordered-send behavior in this document. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores it through the shared `workflow_messages` path.
-
 A workflow can save several prompts for normal work while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its terminal message is sent, and its terminal model turn has ended. The completed workflow stays terminal and does not enter its start node again.
 
 Follow-up prompts are separate from workflow settings. JSON Patch changes future workflow behavior. Follow-up actions create later normal conversation turns.

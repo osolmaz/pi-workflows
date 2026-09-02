@@ -5,8 +5,6 @@ covers the file format, every node type, edge routing, the step contract the
 model sees, and how runs behave at runtime. For durable state, see
 [SQLITE_STATE.md](SQLITE_STATE.md).
 
-> **Version 0.16.0 notice:** The authoring contracts remain current, but some hosted session controls and messages are not available. See the approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) for reminders, resume prompts, terminal recovery, live settings controls, follow-ups, external decision channels, and conversation recording.
-
 ## Workflow files
 
 A workflow is a TypeScript module whose default export is `defineWorkflow(...)`.
