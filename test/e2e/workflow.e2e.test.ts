@@ -102,16 +102,22 @@ let rpcRequest = 0;
 function startPiRpc(options: {
   cwd: string;
   env: Record<string, string>;
-  sessionId: string;
+  sessionDir: string;
+  session: { id: string } | { file: string };
 }): RpcHandle {
+  const sessionArgs =
+    "id" in options.session
+      ? ["--session-id", options.session.id]
+      : ["--session", options.session.file];
   const child = spawn(
     process.execPath,
     [
       PI_BIN,
       "--mode",
       "rpc",
-      "--session-id",
-      options.sessionId,
+      ...sessionArgs,
+      "--session-dir",
+      options.sessionDir,
       "--no-skills",
       "--no-themes",
       "--no-prompt-templates",
@@ -150,12 +156,20 @@ function startPiRpc(options: {
     stderr: () => stderrText,
     send: (command) => child.stdin?.write(`${JSON.stringify(command)}\n`),
     stop: async () => {
-      if (child.exitCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
+      const waitForExit = (): Promise<boolean> =>
+        Promise.race([
+          exited,
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
+        ]);
+
       child.stdin?.end();
-      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      if (await waitForExit()) return;
       child.kill("SIGTERM");
-      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 3_000))]);
-      if (child.exitCode === null) child.kill("SIGKILL");
+      if (await waitForExit()) return;
+      child.kill("SIGKILL");
+      await waitForExit();
     },
   };
 }
@@ -287,9 +301,14 @@ async function waitForPendingInteraction(
   return found;
 }
 
-function requestEntryCount(entries: Array<Record<string, unknown>>, requestId: string): number {
-  return entries.filter((entry) => isRecord(entry.details) && entry.details.requestId === requestId)
-    .length;
+function requestEntryKeys(entries: Array<Record<string, unknown>>, requestId: string): string[] {
+  return entries.flatMap((entry) => {
+    if (!isRecord(entry.details) || entry.details.requestId !== requestId) return [];
+    if (typeof entry.id !== "string" || typeof entry.details.workflowMessageId !== "string") {
+      return [];
+    }
+    return [`${entry.id}:${entry.details.workflowMessageId}`];
+  });
 }
 
 function customEntriesForRun(
@@ -309,7 +328,22 @@ function customEntriesForRun(
 
 async function waitForRequestEntry(pi: RpcHandle, requestId: string): Promise<void> {
   await waitForCondition(
-    async () => requestEntryCount(await readRpcEntries(pi), requestId) === 1,
+    async () => requestEntryKeys(await readRpcEntries(pi), requestId).length > 0,
+    () => rpcDiagnostic(pi),
+    30_000,
+  );
+}
+
+async function waitForRequestEntries(
+  pi: RpcHandle,
+  requestId: string,
+  expected: string[],
+): Promise<void> {
+  await waitForCondition(
+    async () => {
+      const actual = requestEntryKeys(await readRpcEntries(pi), requestId);
+      return JSON.stringify(actual) === JSON.stringify(expected);
+    },
     () => rpcDiagnostic(pi),
     30_000,
   );
@@ -346,6 +380,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
   let projectDir: string;
   let agentDir: string;
   let databasePath: string;
+  let sessionDir: string;
   let sessionId: string;
   let holdRestartSubmission = true;
 
@@ -402,6 +437,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
     projectDir = await makeTempDir("pi-workflows-host-e2e-project");
     agentDir = await makeTempDir("pi-workflows-host-e2e-agent");
     databasePath = workflowStatePath(agentDir);
+    sessionDir = path.join(agentDir, "sessions");
     sessionId = randomUUID();
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
     await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
@@ -437,7 +473,12 @@ describe.sequential("out-of-process workflow host end to end", () => {
       ),
     );
     await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n");
-    pi = startPiRpc({ cwd: projectDir, env: piEnvironment(), sessionId });
+    pi = startPiRpc({
+      cwd: projectDir,
+      env: piEnvironment(),
+      sessionDir,
+      session: { id: sessionId },
+    });
     await waitForPiIdle(pi);
   }, 60_000);
 
@@ -475,12 +516,13 @@ describe.sequential("out-of-process workflow host end to end", () => {
       () => rpcDiagnostic(pi),
       30_000,
     );
+    await waitForPiIdle(pi);
     const entries = await readRpcEntries(pi);
     expect(
       entries.some((entry) => JSON.stringify(entry).includes("Visible assistant E2E response.")),
     ).toBe(true);
 
-    const stepEntries = customEntriesForRun(entries, "pi-workflows-agent-step", runId);
+    const stepEntries = customEntriesForRun(entries, "pi-workflows-step", runId);
     expect(stepEntries).toHaveLength(2);
     const stepRequestIds = stepEntries.map((entry) =>
       isRecord(entry.details) ? entry.details.requestId : undefined,
@@ -525,10 +567,23 @@ describe.sequential("out-of-process workflow host end to end", () => {
     );
     await waitForRequestEntry(pi, interaction.requestId);
     await waitForPiIdle(pi);
+    const requestEntriesBeforeRestart = requestEntryKeys(
+      await readRpcEntries(pi),
+      interaction.requestId,
+    );
+    expect(new Set(requestEntriesBeforeRestart)).toHaveLength(requestEntriesBeforeRestart.length);
 
     await pi.stop();
-    pi = startPiRpc({ cwd: projectDir, env: piEnvironment(), sessionId });
-    await waitForRequestEntry(pi, interaction.requestId);
+    const sessionFileName = (await fs.readdir(sessionDir)).find((name) => name.includes(sessionId));
+    if (sessionFileName === undefined)
+      throw new Error("Pi session was not persisted before restart");
+    pi = startPiRpc({
+      cwd: projectDir,
+      env: piEnvironment(),
+      sessionDir,
+      session: { file: path.join(sessionDir, sessionFileName) },
+    });
+    await waitForRequestEntries(pi, interaction.requestId, requestEntriesBeforeRestart);
     await waitForPiIdle(pi);
 
     holdRestartSubmission = false;
@@ -540,7 +595,9 @@ describe.sequential("out-of-process workflow host end to end", () => {
       () => rpcDiagnostic(pi),
     );
     expect(state.finalOutput).toEqual({ finished: true });
-    expect(requestEntryCount(await readRpcEntries(pi), interaction.requestId)).toBe(1);
+    expect(requestEntryKeys(await readRpcEntries(pi), interaction.requestId)).toEqual(
+      requestEntriesBeforeRestart,
+    );
 
     const hostState = new HostStateStore(databasePath, { readOnly: true });
     let submission:
