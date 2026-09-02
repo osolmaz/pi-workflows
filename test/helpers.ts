@@ -73,14 +73,15 @@ export async function seedHumanDecisionRequest(
       state.connection
         .prepare(
           `INSERT INTO runs(
-             run_id, resource_id, definition_digest, workflow_ref,
+             run_id, resource_id, root_run_id, definition_digest, workflow_ref,
              launch_options_hash, status, paused, input_hash, final_output_hash,
              created_at, updated_at, finished_at
-           ) VALUES (?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', 0, ?, ?, ?, ?, ?)`,
         )
         .run(
           request.runId,
           runResourceId,
+          request.runId,
           definitionDigest,
           request.workflowName,
           launchHash,

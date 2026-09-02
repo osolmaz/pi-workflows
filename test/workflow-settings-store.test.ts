@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { WorkflowMessageStore } from "../src/state/workflow-messages.js";
 import {
   agent,
   assistantMessage,
@@ -55,6 +56,16 @@ const liveWorkflow = defineWorkflow({
   },
   edges: [{ from: "hold", to: "read" }],
 });
+
+function bindOriginSession(store: WorkflowRunStore, runId: string): void {
+  store.state.connection
+    .prepare(
+      `INSERT INTO run_bindings(run_id, origin_session_id, execution_mode, created_at)
+       VALUES (?, 'session-1', 'interactive', ?)
+       ON CONFLICT(run_id) DO NOTHING`,
+    )
+    .run(runId, Date.now());
+}
 
 class HeldExecutor extends ScriptedExecutor {
   started = false;
@@ -376,6 +387,7 @@ describe("durable workflow settings", () => {
     await waitUntil(() => executor.started);
     const store = new WorkflowRunStore(databasePath);
     const runId = store.listRuns()[0]?.runId as string;
+    await bindOriginSession(store, runId);
 
     const first = store.queueFollowUp({
       runId,
@@ -432,8 +444,7 @@ describe("durable workflow settings", () => {
     executor.release?.();
     await running;
     expect(store.readFollowUpQueue(runId)).toMatchObject({
-      presentationState: "not-needed",
-      followUps: [{ state: "ready" }, { state: "ready" }],
+      followUps: [{ state: "queued" }, { state: "queued" }],
     });
     expect(() =>
       store.queueFollowUp({
@@ -446,14 +457,21 @@ describe("durable workflow settings", () => {
       }),
     ).toThrow(/does not accept changes/);
 
-    const claimed = store.claimNextFollowUp("session-1", "delivery-1");
-    expect(claimed?.followUp.followUpId).toBe(first.followUp.followUpId);
-    const sent = store.markFollowUpSent(
-      claimed?.followUp.followUpId as string,
-      claimed?.claim as NonNullable<typeof claimed>["claim"],
-      "entry-1",
-    );
-    expect(sent).toMatchObject({ state: "sent", sessionEntryId: "entry-1" });
+    const messages = new WorkflowMessageStore(store.state);
+    const followUps = messages.listRun(runId).filter((message) => message.kind === "followUp");
+    expect(followUps).toMatchObject([
+      { sourceId: first.followUp.followUpId, status: "pending" },
+      { sourceId: second.followUp.followUpId, status: "pending" },
+    ]);
+    const firstMessage = followUps[0];
+    if (firstMessage === undefined) throw new Error("follow-up workflow message missing");
+    expect(
+      messages.adoptBranch(
+        "session-1",
+        [{ workflowMessageId: firstMessage.workflowMessageId, piSessionEntryId: "entry-1" }],
+        new Set(followUps.map((message) => message.workflowMessageId)),
+      )[0],
+    ).toMatchObject({ status: "sent", piSessionEntryId: "entry-1" });
     store.close();
   });
 
@@ -519,6 +537,7 @@ describe("durable workflow settings", () => {
     await waitUntil(() => executor.started);
     const store = new WorkflowRunStore(databasePath);
     const runId = store.listRuns()[0]?.runId as string;
+    await bindOriginSession(store, runId);
     const queued = store.queueFollowUp({
       runId,
       requestId: "cancel-follow-up",
@@ -552,6 +571,7 @@ describe("durable workflow settings", () => {
     await waitUntil(() => executor.started);
     const store = new WorkflowRunStore(databasePath);
     const runId = store.listRuns()[0]?.runId as string;
+    await bindOriginSession(store, runId);
     expect(() =>
       store.queueFollowUp({
         runId,
@@ -597,72 +617,12 @@ describe("durable workflow settings", () => {
     ).toBe("removed");
     engine.cancel();
     await running;
-    expect(store.claimNextFollowUp("session-1", "nobody")).toBeUndefined();
-    store.close();
-  });
-
-  it("waits for durable presentation settlement", async () => {
-    const databasePath = await makeStateDatabasePath("workflow-presentation");
-    const workflow = defineWorkflow({
-      name: "presentation-settings-test",
-      settings,
-      presentationPrompt: "Present it.",
-      startAt: "done",
-      nodes: { done: compute({ run: () => ({ ok: true }) }) },
-      edges: [],
-    });
-    const store = new WorkflowRunStore(databasePath);
-    const engine = new WorkflowEngine({ databasePath, executor: new ScriptedExecutor() });
-    const result = await engine.run(workflow, {});
-    expect(store.readFollowUpQueue(result.runId)?.presentationState).toBe("pending");
-    expect(() =>
-      store.settleFollowUpPresentation({ runId: result.runId, state: "settled" }),
-    ).toThrow(/requires both/);
-    const settled = store.settleFollowUpPresentation({
-      runId: result.runId,
-      state: "settled",
-      presentationEntryId: "presentation-user",
-      assistantEntryId: "presentation-assistant",
-    });
-    expect(settled.presentationState).toBe("settled");
     expect(
-      store.settleFollowUpPresentation({
-        runId: result.runId,
-        state: "settled",
-        presentationEntryId: "presentation-user",
-        assistantEntryId: "presentation-assistant",
-      }).presentationState,
-    ).toBe("settled");
-    store.close();
-  });
-
-  it("records a final presentation as unavailable with a reason", async () => {
-    const databasePath = await makeStateDatabasePath("workflow-presentation-unavailable");
-    const workflow = defineWorkflow({
-      name: "presentation-unavailable-test",
-      presentationPrompt: "Present it.",
-      startAt: "done",
-      nodes: { done: compute({ run: () => ({ ok: true }) }) },
-      edges: [],
-    });
-    const result = await new WorkflowEngine({
-      databasePath,
-      executor: new ScriptedExecutor(),
-    }).run(workflow, {});
-    const store = new WorkflowRunStore(databasePath);
-    expect(() =>
-      store.settleFollowUpPresentation({ runId: result.runId, state: "unavailable" }),
-    ).toThrow(/requires a reason/);
-    expect(
-      store.settleFollowUpPresentation({
-        runId: result.runId,
-        state: "unavailable",
-        reason: "Pi closed before the final response settled",
-      }),
-    ).toMatchObject({
-      presentationState: "unavailable",
-      presentationReason: "Pi closed before the final response settled",
-    });
+      new WorkflowMessageStore(store.state).latestForSource(
+        "followUp",
+        queued.followUp.followUpId,
+      ),
+    ).toMatchObject({ status: "cancelled" });
     store.close();
   });
 
@@ -683,6 +643,7 @@ describe("durable workflow settings", () => {
     const engine = new WorkflowEngine({ databasePath, executor: new ScriptedExecutor() });
     const parent = await engine.run(workflow, {});
     const store = new WorkflowRunStore(databasePath);
+    await bindOriginSession(store, parent.runId);
     const scope = store.listSettingsScopes(parent.runId)[0] as NonNullable<
       ReturnType<typeof store.getSettingsScope>
     >;
@@ -713,10 +674,10 @@ describe("durable workflow settings", () => {
       activeRunId: child.runId,
       changeNumber: 1,
     });
-    expect(store.readFollowUpQueue(child.runId)?.followUps).toMatchObject([
-      { prompt: "Continue later", order: 1, state: "ready" },
+    expect(store.readFollowUpQueue(parent.runId)?.followUps).toMatchObject([
+      { prompt: "Continue later", order: 1, state: "queued" },
     ]);
-    expect(store.readFollowUpQueue(parent.runId)?.followUps).toEqual([]);
+    expect(store.readFollowUpQueue(child.runId)).toBeUndefined();
     store.close();
   });
 });

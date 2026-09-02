@@ -101,20 +101,7 @@ export type WorkflowSettingsChangeResult = {
   adopted: boolean;
 };
 
-export type WorkflowFollowUpState =
-  | "queued"
-  | "pending_presentation"
-  | "ready"
-  | "sent"
-  | "removed"
-  | "cancelled";
-
-export type WorkflowPresentationState =
-  | "none"
-  | "not-needed"
-  | "pending"
-  | "settled"
-  | "unavailable";
+export type WorkflowFollowUpState = "queued" | "removed" | "cancelled";
 
 export type WorkflowFollowUpRecord = {
   followUpId: string;
@@ -126,20 +113,14 @@ export type WorkflowFollowUpRecord = {
   source: string;
   prompt: string;
   state: WorkflowFollowUpState;
-  sessionEntryId?: string;
   reason?: string;
   createdAt: string;
   updatedAt: string;
-  sentAt?: string;
 };
 
 export type WorkflowFollowUpQueueRecord = {
   runId: string;
   originSessionId?: string;
-  presentationState: WorkflowPresentationState;
-  presentationEntryId?: string;
-  presentationAssistantEntryId?: string;
-  presentationReason?: string;
   followUps: WorkflowFollowUpRecord[];
 };
 

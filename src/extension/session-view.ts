@@ -1,6 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowSessionView } from "../client/view.js";
-import type { WorkflowDefinitionSnapshot, WorkflowRunState } from "../workflows/types.js";
+import type {
+  WorkflowDefinitionSnapshot,
+  WorkflowRunState,
+  WorkflowUpdateRecord,
+} from "../workflows/types.js";
 import { buildWidgetView } from "./widget.js";
 
 const WIDGET_KEY = "pi-workflows";
@@ -15,6 +19,7 @@ export class SessionWorkflowView {
   private stepCount = 0;
   private visible = false;
   private actionHint: string | undefined;
+  private lastNoticeKey: string | null = null;
 
   update(session: WorkflowSessionView, ctx: ExtensionContext): void {
     const run = session.run;
@@ -33,6 +38,7 @@ export class SessionWorkflowView {
       this.stepCount = run.state.steps.length;
     }
     this.session = session;
+    this.notifyTransition(previousRun, session, ctx);
     this.render(ctx);
   }
 
@@ -63,6 +69,7 @@ export class SessionWorkflowView {
     this.shownScroll = 0;
     this.maxScroll = 0;
     this.stepCount = 0;
+    this.lastNoticeKey = null;
     this.clearWidget(ctx);
   }
 
@@ -100,9 +107,11 @@ export class SessionWorkflowView {
         run.display.status === "paused",
         width,
         theme,
-        undefined,
+        workflowUpdates(run.updates),
         this.actionHint,
         run.display.status,
+        run.display.reason,
+        run.display.controls,
       );
       this.shownScroll = view.scroll;
       this.maxScroll = view.maxScroll;
@@ -118,8 +127,42 @@ export class SessionWorkflowView {
       } else {
         ctx.ui.setWidget(WIDGET_KEY, render());
       }
-      ctx.ui.setStatus(WIDGET_KEY, `${state.workflowName} [${run.display.status}]`);
+      const focus = state.currentNode ?? state.waitingOn;
+      ctx.ui.setStatus(
+        WIDGET_KEY,
+        `${state.workflowName} [${run.display.status}]${focus === undefined ? "" : ` ${focus}`}`,
+      );
       this.visible = true;
+    });
+  }
+
+  private notifyTransition(
+    previousRun: WorkflowSessionView["run"] | undefined,
+    session: WorkflowSessionView,
+    ctx: ExtensionContext,
+  ): void {
+    const run = session.run;
+    if (run === null || !isWorkflowRunState(run.state)) return;
+    const status = run.display.status;
+    const decision = session.pendingInteractions.some(
+      (value) => isRecord(value) && value.kind === "decision" && value.status === "pending",
+    );
+    const shouldNotify =
+      isTerminalStatus(status) ||
+      (status === "waiting" && (decision || previousRun?.display.status !== "waiting")) ||
+      (status === "paused" && previousRun?.display.status !== "paused");
+    if (!shouldNotify) return;
+    const key = `${run.runId}:${status}:${decision ? "decision" : "workflow"}`;
+    if (key === this.lastNoticeKey) return;
+    this.lastNoticeKey = key;
+    const reason = run.display.reason?.trim();
+    const message = decision
+      ? `Workflow ${run.state.workflowName} needs a human decision.`
+      : reason && reason.length > 0
+        ? reason
+        : `Workflow ${run.state.workflowName} ${status.replace("_", " ")}.`;
+    safelyUpdateUi(ctx, () => {
+      ctx.ui.notify(message, status === "failed" || status === "timed_out" || status === "ambiguous" ? "error" : status === "waiting" || status === "paused" ? "warning" : "info");
     });
   }
 }
@@ -135,6 +178,25 @@ function isWorkflowRunState(value: unknown): value is WorkflowRunState {
   );
 }
 
+function workflowUpdates(values: readonly unknown[]): WorkflowUpdateRecord[] {
+  return values.filter(isWorkflowUpdateRecord);
+}
+
+function isWorkflowUpdateRecord(value: unknown): value is WorkflowUpdateRecord {
+  return (
+    isRecord(value) &&
+    typeof value.updateId === "string" &&
+    typeof value.seq === "number" &&
+    typeof value.at === "string" &&
+    typeof value.runId === "string" &&
+    typeof value.nodeId === "string" &&
+    typeof value.attemptId === "string" &&
+    typeof value.type === "string" &&
+    typeof value.key === "string" &&
+    isRecord(value.data)
+  );
+}
+
 function isWorkflowDefinitionSnapshot(value: unknown): value is WorkflowDefinitionSnapshot {
   return (
     typeof value === "object" &&
@@ -143,6 +205,20 @@ function isWorkflowDefinitionSnapshot(value: unknown): value is WorkflowDefiniti
     (value as { schema?: unknown }).schema === "pi-workflows.definition-snapshot.v1" &&
     typeof (value as { nodes?: unknown }).nodes === "object"
   );
+}
+
+function isTerminalStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "cancelled" ||
+    status === "ambiguous"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function safelyUpdateUi(ctx: ExtensionContext, update: () => void): void {

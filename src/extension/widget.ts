@@ -83,6 +83,8 @@ export function buildWidgetView(
   updateHistory?: WorkflowUpdateRecord[],
   actionHint?: string,
   displayStatus?: WorkflowDisplayStatus,
+  displayReason?: string | null,
+  controls?: readonly string[],
 ): WidgetView {
   const availableWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : width;
   if (availableWidth === 0) return { lines: [], scroll: 0, maxScroll: 0 };
@@ -100,6 +102,12 @@ export function buildWidgetView(
   const header = `${paint(theme, headerTone, glyph)} workflow ${sanitizeText(state.workflowName)}${title} ${paint(theme, headerTone, `[${statusText}]`)}`;
 
   const footer: string[] = [];
+  if (displayReason) {
+    footer.push(paint(theme, "dim", `  ${sanitizeText(displayReason)}`));
+  }
+  if (controls !== undefined && controls.length > 0) {
+    footer.push(paint(theme, "dim", `  controls: ${controls.join(", ")}`));
+  }
   if (state.error) {
     footer.push(paint(theme, "error", `  error: ${truncate(sanitizeText(state.error), 120)}`));
   }

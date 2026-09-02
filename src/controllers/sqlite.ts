@@ -30,7 +30,6 @@ import type {
   JsonObject,
 } from "./types.js";
 
-const TURN_INTENT_FACTS_SCHEMA = "pi-workflows.deferred-turn-facts.v1";
 
 export type WorkflowRunLaunchStatus =
   | "queued"
@@ -54,6 +53,9 @@ export type WorkflowRunReservationOptions = {
   originSessionId: string;
   executionMode?: "interactive" | "headless";
   parentRunId?: string;
+  lineageKind?: "continuation" | "restart";
+  restartNumber?: number;
+  parentTerminalFingerprint?: string;
   now?: string;
 };
 
@@ -75,6 +77,10 @@ export type WorkflowRunQueueViewRecord = {
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
+  rootRunId: string;
+  lineageKind: "continuation" | "restart" | null;
+  restartNumber: number;
+  parentTerminalFingerprint: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -101,6 +107,10 @@ export type WorkflowRunQueueRecord = {
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
+  rootRunId: string;
+  lineageKind: "continuation" | "restart" | null;
+  restartNumber: number;
+  parentTerminalFingerprint: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -118,62 +128,6 @@ export type WorkflowRunPreparationResult =
       state: "adopted";
       run: WorkflowRunQueueRecord;
     };
-
-export type WorkflowNotificationRecord = {
-  notificationId: string;
-  runId: string;
-  nodeId: string;
-  attemptId: string;
-  notificationIndex: number;
-  targetSessionId: string;
-  kind: "progress" | "final";
-  content: string;
-  createdAt: string;
-  deliveryClaimExpiresAt: string | null;
-  deliveredAt: string | null;
-};
-
-export type WorkflowTurnIntentCause =
-  | "agentCancelled"
-  | "timedOut"
-  | "failed"
-  | "launchFailed"
-  | "controllerInterrupted"
-  | "claimLost"
-  | "terminal"
-  | "cancelled";
-
-export type WorkflowTurnIntentResolution = "workflowPrompt" | "presentation" | "fallback";
-
-export type WorkflowTurnIntentFacts = JsonObject & {
-  schema: typeof TURN_INTENT_FACTS_SCHEMA;
-  workflowName: string;
-  runId: string;
-  observedState: string;
-  cause: WorkflowTurnIntentCause;
-  nodeId: string | null;
-  attemptId: string | null;
-  reason: string | null;
-  handoff: boolean;
-};
-
-export type WorkflowTurnIntentRecord = {
-  intentId: string;
-  sourceEventId: string;
-  runId: string;
-  workflowRef: string;
-  targetSessionId: string;
-  cause: WorkflowTurnIntentCause;
-  nodeId: string | null;
-  attemptId: string | null;
-  fallbackFacts: WorkflowTurnIntentFacts;
-  requestedAt: string;
-  eligibleAt: string | null;
-  resolvedAt: string | null;
-  resolution: WorkflowTurnIntentResolution | null;
-  resolutionMessageId: string | null;
-  deliveryClaimExpiresAt: string | null;
-};
 
 export type RunEventRecord = {
   seq: number;
@@ -226,6 +180,10 @@ type RunRow = {
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
+  rootRunId: string;
+  lineageKind: "continuation" | "restart" | null;
+  restartNumber: number;
+  parentTerminalFingerprint: Buffer | null;
   createdAt: number;
   updatedAt: number;
   startedAt: number | null;
@@ -245,6 +203,10 @@ type WorkflowRunViewRow = {
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
+  rootRunId: string;
+  lineageKind: "continuation" | "restart" | null;
+  restartNumber: number;
+  parentTerminalFingerprint: Buffer | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: number;
@@ -1129,39 +1091,77 @@ export class SqliteControllerStore implements ControllerStore {
     if (this.getWorkflowRun(options.runId) !== undefined) {
       throw new Error(`Workflow run already reserved: ${options.runId}`);
     }
+    const lineageKind =
+      options.parentRunId === undefined ? null : (options.lineageKind ?? "continuation");
+    if (options.parentRunId === undefined && options.lineageKind !== undefined) {
+      throw new Error("A root workflow run cannot declare lineage");
+    }
+    let rootRunId = options.runId;
+    let restartNumber = 0;
+    let parentTerminalFingerprint: Buffer | null = null;
     if (options.parentRunId !== undefined) {
       const parent = this.requireWorkflowRunRow(options.parentRunId);
       if (parent.originSessionId !== options.originSessionId) {
-        throw new Error("Continuation parent belongs to another Pi session");
+        throw new Error("Workflow parent belongs to another Pi session");
       }
-      if (parent.status === "parked") {
-        const parentLease = this.requireLease(parent.resourceId);
-        if (parentLease.ownerId !== null) {
-          throw new Error("Continuation parent still has an active owner");
+      rootRunId = parent.rootRunId;
+      if (lineageKind === "restart") {
+        if (
+          !["completed", "failed", "timed_out", "cancelled"].includes(parent.runStatus) ||
+          !["done", "failed", "cancelled"].includes(parent.status)
+        ) {
+          throw new Error("Restart parent is not terminal");
         }
-        this.state.connection
-          .prepare(
-            `UPDATE run_queue
-               SET status = 'done', updated_at = ?, finished_at = ?
-               WHERE run_id = ? AND status = 'parked'`,
-          )
-          .run(now, now, parent.runId);
-        const parentRevision = this.resourceRevision(parent.resourceId);
-        this.bumpResource(parent.resourceId, parentRevision, now);
-        this.insertEvent(
-          parent.resourceId,
-          parentRevision + 1,
-          "run.queue_done_for_continuation",
-          "session",
-          options.originSessionId,
-          { continuationRunId: options.runId },
-          now,
-        );
-      } else if (parent.status === "done") {
-        throw new Error("Continuation parent already has a reserved continuation");
+        if (options.parentTerminalFingerprint === undefined) {
+          throw new Error("Restart requires the parent terminal fingerprint");
+        }
+        parentTerminalFingerprint = terminalFingerprintBuffer(options.parentTerminalFingerprint);
+        restartNumber = options.restartNumber ?? parent.restartNumber + 1;
+        if (restartNumber !== parent.restartNumber + 1) {
+          throw new Error("Restart number does not follow its parent");
+        }
       } else {
-        throw new Error(`Continuation parent queue is ${parent.status}`);
+        if (
+          options.parentTerminalFingerprint !== undefined ||
+          (options.restartNumber !== undefined && options.restartNumber !== parent.restartNumber)
+        ) {
+          throw new Error("Continuation lineage conflicts with restart metadata");
+        }
+        restartNumber = parent.restartNumber;
+        if (parent.status === "parked") {
+          const parentLease = this.requireLease(parent.resourceId);
+          if (parentLease.ownerId !== null) {
+            throw new Error("Continuation parent still has an active owner");
+          }
+          this.state.connection
+            .prepare(
+              `UPDATE run_queue
+                 SET status = 'done', updated_at = ?, finished_at = ?
+                 WHERE run_id = ? AND status = 'parked'`,
+            )
+            .run(now, now, parent.runId);
+          const parentRevision = this.resourceRevision(parent.resourceId);
+          this.bumpResource(parent.resourceId, parentRevision, now);
+          this.insertEvent(
+            parent.resourceId,
+            parentRevision + 1,
+            "run.queue_done_for_continuation",
+            "session",
+            options.originSessionId,
+            { continuationRunId: options.runId },
+            now,
+          );
+        } else if (parent.status === "done") {
+          throw new Error("Continuation parent already has a reserved continuation");
+        } else {
+          throw new Error(`Continuation parent queue is ${parent.status}`);
+        }
       }
+    } else if (
+      options.restartNumber !== undefined ||
+      options.parentTerminalFingerprint !== undefined
+    ) {
+      throw new Error("A root workflow run cannot declare restart metadata");
     }
     const resourceId = resourceIdFor("run", options.runId);
     const definitionHash = this.state.putJson(options.definitionSnapshot, now);
@@ -1188,16 +1188,21 @@ export class SqliteControllerStore implements ControllerStore {
     this.state.connection
       .prepare(
         `INSERT INTO runs(
-             run_id, resource_id, project_id, parent_run_id, definition_digest,
+             run_id, resource_id, project_id, parent_run_id, root_run_id, lineage_kind,
+             restart_number, parent_terminal_fingerprint, definition_digest,
              workflow_ref, launch_options_hash, status, paused,
              input_hash, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
       )
       .run(
         options.runId,
         resourceId,
         this.requireProjectId(),
         options.parentRunId ?? null,
+        rootRunId,
+        lineageKind,
+        restartNumber,
+        parentTerminalFingerprint,
         definitionDigest,
         options.workflowSourceRef,
         launchHash,
@@ -1267,6 +1272,11 @@ export class SqliteControllerStore implements ControllerStore {
         runnerId: options.runnerId,
         originSessionId: options.originSessionId,
         ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
+        ...(options.lineageKind === undefined ? {} : { lineageKind: options.lineageKind }),
+        ...(options.restartNumber === undefined ? {} : { restartNumber: options.restartNumber }),
+        ...(options.parentTerminalFingerprint === undefined
+          ? {}
+          : { parentTerminalFingerprint: options.parentTerminalFingerprint }),
         ...(options.now === undefined ? {} : { now: options.now }),
       });
     }
@@ -1456,7 +1466,7 @@ export class SqliteControllerStore implements ControllerStore {
           `SELECT i.request_id AS requestId, i.attempt_id AS attemptId
            FROM interactive_requests i
            JOIN node_attempts a ON a.attempt_id = i.attempt_id
-           WHERE i.run_id = ? AND i.status IN ('pending', 'presenting')
+           WHERE i.run_id = ? AND i.status = 'pending'
              AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
            ORDER BY a.deadline_at, i.request_id LIMIT 1`,
         )
@@ -1465,9 +1475,8 @@ export class SqliteControllerStore implements ControllerStore {
       const request = this.state.connection
         .prepare(
           `UPDATE interactive_requests
-           SET status = 'cancelled', presenter_id = NULL,
-               presentation_claim_expires_at = NULL, revision = revision + 1, updated_at = ?
-           WHERE request_id = ? AND run_id = ? AND status IN ('pending', 'presenting')`,
+           SET status = 'cancelled', revision = revision + 1, updated_at = ?
+           WHERE request_id = ? AND run_id = ? AND status = 'pending'`,
         )
         .run(now, interaction.requestId, options.runId);
       const run = this.state.connection
@@ -1539,7 +1548,7 @@ export class SqliteControllerStore implements ControllerStore {
       "(l.owner_id IS NULL OR l.expires_at <= ? OR l.owner_id = ?)",
       "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
       "NOT (q.status = 'parked' AND (r.status = 'waiting' OR r.paused = 1))",
-      "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status IN ('pending', 'presenting'))",
+      "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status = 'pending')",
       "(q.error_code IS NULL OR q.error_code <> 'workflowSourceChanged')",
     ];
     const params: unknown[] = [now, now, options.runnerId, options.runnerId];
@@ -1663,7 +1672,7 @@ export class SqliteControllerStore implements ControllerStore {
       const pending = this.state.connection
         .prepare(
           `SELECT 1 FROM interactive_requests
-           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+           WHERE run_id = ? AND status = 'pending' LIMIT 1`,
         )
         .get(options.runId);
       if (pending === undefined) return false;
@@ -1714,7 +1723,7 @@ export class SqliteControllerStore implements ControllerStore {
       const pending = this.state.connection
         .prepare(
           `SELECT 1 FROM interactive_requests
-           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+           WHERE run_id = ? AND status = 'pending' LIMIT 1`,
         )
         .get(options.runId);
       if (pending === undefined) return false;
@@ -2130,427 +2139,6 @@ export class SqliteControllerStore implements ControllerStore {
       runnerId: row.runnerId,
       payload: row.payloadHash === null ? {} : (this.state.readJson(row.payloadHash) as JsonObject),
     }));
-  }
-
-  ensureWorkflowTurnIntent(options: {
-    intentId: string;
-    sourceEventId: string;
-    runId: string;
-    workflowRef: string;
-    targetSessionId: string;
-    cause: WorkflowTurnIntentCause;
-    nodeId?: string | null;
-    attemptId?: string | null;
-    fallbackFacts: WorkflowTurnIntentFacts;
-    eligible: boolean;
-    requestedAt?: string;
-  }): WorkflowTurnIntentRecord {
-    const existing = this.turnIntentBySource(options.sourceEventId);
-    if (existing !== undefined) return existing;
-    const now = epoch(validTimestamp(options.requestedAt));
-    const run = this.requireWorkflowRunRow(options.runId);
-    const intentId = options.intentId;
-    const resourceId = resourceIdFor("turn_intent", intentId);
-    const effectId = `effect-${randomUUID()}`;
-    this.state.transaction(() => {
-      const factsHash = this.state.putJson(options.fallbackFacts, now);
-      this.insertEffectResource(
-        effectId,
-        resourceIdFor("effect", effectId),
-        run.resourceId,
-        this.resourceRevision(run.resourceId),
-        "turn.deliver",
-        intentId,
-        factsHash,
-        "run",
-        now,
-      );
-      this.state.connection
-        .prepare(
-          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'turn_intent', ?, 1, ?, ?)",
-        )
-        .run(resourceId, intentId, now, now);
-      this.state.connection
-        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
-        .run(resourceId);
-      this.state.connection
-        .prepare(
-          `INSERT INTO turn_intents(
-             turn_intent_id, resource_id, effect_id, source_event_id, run_id,
-             workflow_ref, target_session_id, cause, node_id, attempt_id,
-             facts_hash, requested_at, eligible_at, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          intentId,
-          resourceId,
-          effectId,
-          options.sourceEventId,
-          options.runId,
-          options.workflowRef,
-          options.targetSessionId,
-          options.cause,
-          options.nodeId ?? null,
-          options.attemptId ?? null,
-          factsHash,
-          now,
-          options.eligible ? now : null,
-          now,
-        );
-      this.insertEvent(
-        resourceId,
-        1,
-        "turn.requested",
-        "session",
-        options.targetSessionId,
-        {},
-        now,
-      );
-    });
-    return this.requireTurnIntent(intentId);
-  }
-
-  getWorkflowTurnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
-    return this.turnIntent(intentId);
-  }
-
-  findPendingWorkflowTurnIntent(options: {
-    runId: string;
-    targetSessionId: string;
-  }): WorkflowTurnIntentRecord | undefined {
-    const row = this.state.connection
-      .prepare(
-        turnIntentSelect(
-          "WHERE t.run_id = ? AND t.target_session_id = ? AND t.resolved_at IS NULL ORDER BY t.requested_at DESC LIMIT 1",
-        ),
-      )
-      .get(options.runId, options.targetSessionId);
-    return isTurnIntentRow(row) ? this.mapTurnIntent(row) : undefined;
-  }
-
-  isWorkflowTurnIntentClaimLive(options: {
-    intentId: string;
-    targetSessionId: string;
-    claimToken: string;
-    now?: string;
-  }): boolean {
-    const row = this.turnIntentRow(options.intentId);
-    return (
-      row !== undefined &&
-      row.targetSessionId === options.targetSessionId &&
-      row.resolvedAt === null &&
-      this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-    );
-  }
-
-  claimWorkflowTurnIntent(options: {
-    intentId: string;
-    targetSessionId: string;
-    claimToken: string;
-    leaseMs: number;
-    now?: string;
-  }): WorkflowTurnIntentRecord | undefined {
-    const intent = this.turnIntent(options.intentId);
-    if (intent?.targetSessionId !== options.targetSessionId) return undefined;
-    return this.claimEffectForTurn(
-      options.intentId,
-      options.claimToken,
-      options.leaseMs,
-      options.now,
-    )
-      ? this.requireTurnIntent(options.intentId)
-      : undefined;
-  }
-
-  claimEligibleWorkflowTurnIntents(options: {
-    targetSessionId: string;
-    claimToken: string;
-    leaseMs: number;
-    now?: string;
-    limit?: number;
-  }): WorkflowTurnIntentRecord[] {
-    const now = epoch(validTimestamp(options.now));
-    const rows = this.state.connection
-      .prepare(
-        turnIntentSelect(
-          "WHERE t.target_session_id = ? AND t.resolved_at IS NULL AND t.eligible_at IS NOT NULL AND t.eligible_at <= ? ORDER BY t.eligible_at LIMIT ?",
-        ),
-      )
-      .all(options.targetSessionId, now, options.limit ?? 10);
-    const claimed: WorkflowTurnIntentRecord[] = [];
-    for (const row of rows) {
-      if (
-        isTurnIntentRow(row) &&
-        this.claimEffectForTurn(row.intentId, options.claimToken, options.leaseMs, options.now)
-      ) {
-        claimed.push(this.requireTurnIntent(row.intentId));
-      }
-    }
-    return claimed;
-  }
-
-  hasClaimableWorkflowTurnIntent(options: { targetSessionId: string; now?: string }): boolean {
-    const now = epoch(validTimestamp(options.now));
-    const row = this.state.connection
-      .prepare(
-        `SELECT 1 AS present
-         FROM turn_intents t
-         JOIN effects e ON e.effect_id = t.effect_id
-         JOIN leases l ON l.resource_id = e.resource_id
-         WHERE t.target_session_id = ? AND t.resolved_at IS NULL
-           AND t.eligible_at IS NOT NULL AND t.eligible_at <= ?
-           AND e.status = 'pending'
-           AND (l.owner_id IS NULL OR l.expires_at IS NULL OR l.expires_at <= ?)
-         LIMIT 1`,
-      )
-      .get(options.targetSessionId, now, now);
-    return row !== undefined;
-  }
-
-  makeWorkflowTurnIntentEligible(options: {
-    intentId: string;
-    fallbackFacts: WorkflowTurnIntentFacts;
-    eligibleAt?: string;
-    now?: string;
-  }): boolean {
-    const eligibleAt = epoch(validTimestamp(options.eligibleAt ?? options.now));
-    const factsHash = this.state.putJson(options.fallbackFacts, eligibleAt);
-    return (
-      this.state.connection
-        .prepare(
-          "UPDATE turn_intents SET eligible_at = ?, facts_hash = ? WHERE turn_intent_id = ? AND resolved_at IS NULL",
-        )
-        .run(eligibleAt, factsHash, options.intentId).changes === 1
-    );
-  }
-
-  resolveWorkflowTurnIntent(options: {
-    intentId: string;
-    targetSessionId: string;
-    claimToken: string;
-    resolution: WorkflowTurnIntentResolution;
-    messageId?: string;
-    now?: string;
-  }): boolean {
-    const now = epoch(validTimestamp(options.now));
-    return this.state.transaction(() => {
-      const row = this.turnIntentRow(options.intentId);
-      if (
-        row === undefined ||
-        row.targetSessionId !== options.targetSessionId ||
-        !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-      ) {
-        return false;
-      }
-      const result = this.state.connection
-        .prepare(
-          `UPDATE turn_intents SET resolved_at = ?, resolution_type = ?, resolution_message_id = ?
-           WHERE turn_intent_id = ? AND resolved_at IS NULL`,
-        )
-        .run(now, options.resolution, options.messageId ?? null, options.intentId);
-      if (result.changes === 1) this.completeEffect(row.effectId, "applied", now);
-      return result.changes === 1;
-    });
-  }
-
-  releaseWorkflowTurnIntentClaim(options: {
-    intentId: string;
-    targetSessionId: string;
-    claimToken: string;
-  }): boolean {
-    const row = this.turnIntentRow(options.intentId);
-    return (
-      row !== undefined &&
-      row.targetSessionId === options.targetSessionId &&
-      this.releaseEffectLease(row.effectId, options.claimToken)
-    );
-  }
-
-  listWorkflowTurnIntents(
-    options: {
-      runId?: string;
-      targetSessionId?: string;
-      unresolvedOnly?: boolean;
-      limit?: number;
-    } = {},
-  ): WorkflowTurnIntentRecord[] {
-    const clauses = ["1 = 1"];
-    const params: unknown[] = [];
-    if (options.runId !== undefined) {
-      clauses.push("t.run_id = ?");
-      params.push(options.runId);
-    }
-    if (options.targetSessionId !== undefined) {
-      clauses.push("t.target_session_id = ?");
-      params.push(options.targetSessionId);
-    }
-    if (options.unresolvedOnly === true) clauses.push("t.resolved_at IS NULL");
-    params.push(options.limit ?? 100);
-    const rows = this.state.connection
-      .prepare(
-        turnIntentSelect(`WHERE ${clauses.join(" AND ")} ORDER BY t.requested_at DESC LIMIT ?`),
-      )
-      .all(...params);
-    return rows.filter(isTurnIntentRow).map((row) => this.mapTurnIntent(row));
-  }
-
-  enqueueWorkflowNotification(options: {
-    runId: string;
-    nodeId: string;
-    attemptId: string;
-    notificationIndex: number;
-    targetSessionId: string;
-    kind: "progress" | "final";
-    content: string;
-    now?: string;
-  }): WorkflowNotificationRecord {
-    const existing = this.notification(options.runId, options.attemptId, options.notificationIndex);
-    if (existing !== undefined) return existing;
-    const run = this.requireWorkflowRunRow(options.runId);
-    const now = epoch(validTimestamp(options.now));
-    const notificationId = `notification-${randomUUID()}`;
-    const resourceId = resourceIdFor("notification", notificationId);
-    const effectId = `effect-${randomUUID()}`;
-    this.state.transaction(() => {
-      const contentHash = this.state.putText(options.content, now);
-      this.insertEffectResource(
-        effectId,
-        resourceIdFor("effect", effectId),
-        run.resourceId,
-        this.resourceRevision(run.resourceId),
-        "notification.deliver",
-        notificationId,
-        contentHash,
-        "run",
-        now,
-      );
-      this.state.connection
-        .prepare(
-          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'notification', ?, 1, ?, ?)",
-        )
-        .run(resourceId, notificationId, now, now);
-      this.state.connection
-        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
-        .run(resourceId);
-      this.state.connection
-        .prepare(
-          `INSERT INTO notifications(
-             notification_id, effect_id, run_id, attempt_id, notification_index,
-             target_session_id, notification_type, content_hash, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          notificationId,
-          effectId,
-          options.runId,
-          options.attemptId,
-          options.notificationIndex,
-          options.targetSessionId,
-          options.kind,
-          contentHash,
-          now,
-        );
-      this.insertEvent(
-        resourceId,
-        1,
-        "notification.queued",
-        "session",
-        options.targetSessionId,
-        {},
-        now,
-      );
-    });
-    return this.requireNotification(options.runId, options.attemptId, options.notificationIndex);
-  }
-
-  hasClaimableWorkflowNotification(options: { targetSessionId: string; now?: string }): boolean {
-    const now = epoch(validTimestamp(options.now));
-    const row = this.state.connection
-      .prepare(
-        `SELECT 1 AS present
-         FROM notifications n
-         JOIN effects e ON e.effect_id = n.effect_id
-         JOIN leases l ON l.resource_id = e.resource_id
-         WHERE n.target_session_id = ? AND e.status = 'pending'
-           AND (l.owner_id IS NULL OR l.expires_at IS NULL OR l.expires_at <= ?)
-         LIMIT 1`,
-      )
-      .get(options.targetSessionId, now);
-    return row !== undefined;
-  }
-
-  listPendingWorkflowNotifications(options: {
-    targetSessionId: string;
-    limit?: number;
-  }): WorkflowNotificationRecord[] {
-    const now = Date.now();
-    return this.notificationRows(options.targetSessionId, options.limit ?? 20)
-      .map((row) => this.mapNotification(row))
-      .filter(
-        (notification) =>
-          notification.deliveryClaimExpiresAt === null ||
-          Date.parse(notification.deliveryClaimExpiresAt) <= now,
-      );
-  }
-
-  claimPendingWorkflowNotifications(options: {
-    targetSessionId: string;
-    claimToken: string;
-    leaseMs: number;
-    now?: string;
-    limit?: number;
-  }): WorkflowNotificationRecord[] {
-    const rows = this.notificationRows(options.targetSessionId, options.limit ?? 20);
-    const result: WorkflowNotificationRecord[] = [];
-    for (const row of rows) {
-      if (
-        this.claimEffect(
-          row.effectId,
-          options.targetSessionId,
-          options.claimToken,
-          options.leaseMs,
-          options.now,
-        )
-      ) {
-        result.push(this.mapNotification(row));
-      }
-    }
-    return result;
-  }
-
-  isWorkflowNotificationClaimLive(options: {
-    notificationId: string;
-    targetSessionId: string;
-    claimToken: string;
-    now?: string;
-  }): boolean {
-    const row = this.notificationRowById(options.notificationId);
-    return (
-      row !== undefined &&
-      row.targetSessionId === options.targetSessionId &&
-      this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-    );
-  }
-
-  markWorkflowNotificationDelivered(options: {
-    notificationId: string;
-    targetSessionId: string;
-    claimToken: string;
-    now?: string;
-  }): boolean {
-    const now = epoch(validTimestamp(options.now));
-    return this.state.transaction(() => {
-      const row = this.notificationRowById(options.notificationId);
-      if (
-        row === undefined ||
-        row.targetSessionId !== options.targetSessionId ||
-        !this.verifyEffectToken(row.effectId, options.claimToken, options.now)
-      ) {
-        return false;
-      }
-      this.completeEffect(row.effectId, "applied", now);
-      return true;
-    });
   }
 
   settleRunEffect(runId: string, effectType: "run.park_queue" | "run.settle_queue"): void {
@@ -3007,6 +2595,19 @@ export class SqliteControllerStore implements ControllerStore {
     options: WorkflowRunReservationOptions,
     definitionDigest: Buffer,
   ): void {
+    const expectedLineageKind =
+      options.parentRunId === undefined ? null : (options.lineageKind ?? "continuation");
+    const parent =
+      options.parentRunId === undefined ? undefined : this.requireWorkflowRunRow(options.parentRunId);
+    const expectedRootRunId = parent?.rootRunId ?? options.runId;
+    const expectedRestartNumber =
+      expectedLineageKind === "restart"
+        ? (options.restartNumber ?? (parent?.restartNumber ?? -1) + 1)
+        : (parent?.restartNumber ?? 0);
+    const expectedParentTerminalFingerprint =
+      options.parentTerminalFingerprint === undefined
+        ? null
+        : terminalFingerprintBuffer(options.parentTerminalFingerprint);
     const compatible =
       row.workflowName === options.workflowName &&
       row.workflowRef === options.workflowSourceRef &&
@@ -3018,7 +2619,14 @@ export class SqliteControllerStore implements ControllerStore {
         canonicalJson(options.launchOptions ?? {}) &&
       row.originSessionId === options.originSessionId &&
       row.executionMode === (options.executionMode ?? "interactive") &&
-      row.parentRunId === (options.parentRunId ?? null);
+      row.parentRunId === (options.parentRunId ?? null) &&
+      row.rootRunId === expectedRootRunId &&
+      row.lineageKind === expectedLineageKind &&
+      row.restartNumber === expectedRestartNumber &&
+      ((row.parentTerminalFingerprint === null && expectedParentTerminalFingerprint === null) ||
+        (row.parentTerminalFingerprint !== null &&
+          expectedParentTerminalFingerprint !== null &&
+          row.parentTerminalFingerprint.equals(expectedParentTerminalFingerprint)));
     if (!compatible) {
       throw new Error(`Workflow run preparation conflicts: ${options.runId}`);
     }
@@ -3052,6 +2660,10 @@ export class SqliteControllerStore implements ControllerStore {
       originSessionId: row.executionMode === "headless" ? null : row.originSessionId,
       executionMode: row.executionMode,
       parentRunId: row.parentRunId,
+      rootRunId: row.rootRunId,
+      lineageKind: row.lineageKind,
+      restartNumber: row.restartNumber,
+      parentTerminalFingerprint: row.parentTerminalFingerprint?.toString("hex") ?? null,
       errorCode: row.errorCode,
       errorMessage:
         row.errorHash === null
@@ -3092,7 +2704,7 @@ export class SqliteControllerStore implements ControllerStore {
       this.state.connection
         .prepare(
           `SELECT 1 FROM interactive_requests
-           WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+           WHERE run_id = ? AND status = 'pending' LIMIT 1`,
         )
         .get(runId) !== undefined
     ) {
@@ -3419,260 +3031,10 @@ export class SqliteControllerStore implements ControllerStore {
     this.state.connection
       .prepare(
         `UPDATE interactive_requests
-         SET status = 'cancelled', presenter_id = NULL,
-             presentation_claim_expires_at = NULL, revision = revision + 1, updated_at = ?
-         WHERE run_id = ? AND status IN ('pending', 'presenting')`,
+         SET status = 'cancelled', revision = revision + 1, updated_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
       )
       .run(now, runId);
-  }
-
-  private turnIntent(intentId: string): WorkflowTurnIntentRecord | undefined {
-    const row = this.turnIntentRow(intentId);
-    return row === undefined ? undefined : this.mapTurnIntent(row);
-  }
-
-  private requireTurnIntent(intentId: string): WorkflowTurnIntentRecord {
-    const row = this.turnIntent(intentId);
-    if (row === undefined) throw new Error(`Workflow turn intent not found: ${intentId}`);
-    return row;
-  }
-
-  private turnIntentRow(intentId: string): TurnIntentRow | undefined {
-    const row = this.state.connection
-      .prepare(turnIntentSelect("WHERE t.turn_intent_id = ?"))
-      .get(intentId);
-    return isTurnIntentRow(row) ? row : undefined;
-  }
-
-  private turnIntentBySource(sourceEventId: string): WorkflowTurnIntentRecord | undefined {
-    const row = this.state.connection
-      .prepare(turnIntentSelect("WHERE t.source_event_id = ?"))
-      .get(sourceEventId);
-    return isTurnIntentRow(row) ? this.mapTurnIntent(row) : undefined;
-  }
-
-  /* istanbul ignore next -- pure projection covered by integration tests */
-  private mapTurnIntent(row: TurnIntentRow): WorkflowTurnIntentRecord {
-    return {
-      intentId: row.intentId,
-      sourceEventId: row.sourceEventId,
-      runId: row.runId,
-      workflowRef: row.workflowRef,
-      targetSessionId: row.targetSessionId,
-      cause: row.cause,
-      nodeId: row.nodeId,
-      attemptId: row.attemptId,
-      fallbackFacts: this.state.readJson(row.factsHash) as WorkflowTurnIntentFacts,
-      requestedAt: new Date(row.requestedAt).toISOString(),
-      eligibleAt: row.eligibleAt === null ? null : new Date(row.eligibleAt).toISOString(),
-      resolvedAt: row.resolvedAt === null ? null : new Date(row.resolvedAt).toISOString(),
-      resolution: row.resolution,
-      resolutionMessageId: row.resolutionMessageId,
-      deliveryClaimExpiresAt:
-        row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
-    };
-  }
-
-  private claimEffectForTurn(
-    intentId: string,
-    token: string,
-    leaseMs: number,
-    nowValue?: string,
-  ): boolean {
-    const row = this.turnIntentRow(intentId);
-    return (
-      row !== undefined &&
-      this.claimEffect(row.effectId, row.targetSessionId, token, leaseMs, nowValue)
-    );
-  }
-
-  private claimEffect(
-    effectId: string,
-    ownerId: string,
-    token: string,
-    leaseMs: number,
-    nowValue?: string,
-  ): boolean {
-    const now = epoch(validTimestamp(nowValue));
-    return this.state.transaction(() => {
-      const row = this.state.connection
-        .prepare(
-          "SELECT resource_id AS resourceId FROM effects WHERE effect_id = ? AND status = 'pending'",
-        )
-        .get(effectId);
-      /* istanbul ignore if -- impossible after exact schema and transaction checks */
-      if (!isResourceIdRow(row)) return false;
-      const lease = this.requireLease(row.resourceId);
-      if (lease.ownerId !== null && lease.expiresAt !== null && lease.expiresAt > now) return false;
-      return (
-        this.state.connection
-          .prepare(
-            `UPDATE leases SET generation = ?, owner_type = 'session', owner_id = ?, token_hash = ?,
-                  acquired_at = ?, heartbeat_at = ?, expires_at = ?
-           WHERE resource_id = ? AND generation = ?`,
-          )
-          .run(
-            lease.generation + 1,
-            ownerId,
-            tokenHash(token),
-            now,
-            now,
-            now + leaseMs,
-            row.resourceId,
-            lease.generation,
-          ).changes === 1
-      );
-    });
-  }
-
-  private verifyEffectToken(effectId: string, token: string, nowValue?: string): boolean {
-    const now = epoch(validTimestamp(nowValue));
-    const row = this.state.connection
-      .prepare(
-        `SELECT l.token_hash AS tokenHash, l.expires_at AS expiresAt
-         FROM effects e JOIN leases l ON l.resource_id = e.resource_id
-         WHERE e.effect_id = ?`,
-      )
-      .get(effectId);
-    return (
-      isEffectTokenRow(row) &&
-      row.tokenHash !== null &&
-      row.tokenHash.equals(tokenHash(token)) &&
-      row.expiresAt !== null &&
-      row.expiresAt > now
-    );
-  }
-
-  private releaseEffectLease(effectId: string, token: string): boolean {
-    return (
-      this.state.connection
-        .prepare(
-          `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
-                acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
-         WHERE resource_id = (SELECT resource_id FROM effects WHERE effect_id = ?)
-           AND token_hash = ?`,
-        )
-        .run(effectId, tokenHash(token)).changes === 1
-    );
-  }
-
-  private completeEffect(
-    effectId: string,
-    status: "applied" | "rejected" | "ambiguous",
-    now: number,
-  ): void {
-    this.state.connection
-      .prepare("UPDATE effects SET status = ?, updated_at = ?, settled_at = ? WHERE effect_id = ?")
-      .run(status, now, now, effectId);
-    this.state.connection
-      .prepare(
-        `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
-                acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
-         WHERE resource_id = (SELECT resource_id FROM effects WHERE effect_id = ?)`,
-      )
-      .run(effectId);
-  }
-
-  private insertEffectResource(
-    effectId: string,
-    resourceId: string,
-    sourceResourceId: string,
-    sourceRevision: number,
-    type: string,
-    key: string,
-    payloadHash: Buffer,
-    scope: "run" | "controller" | "channel" | "system",
-    now: number,
-  ): void {
-    this.state.connection
-      .prepare(
-        "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'effect', ?, 1, ?, ?)",
-      )
-      .run(resourceId, effectId, now, now);
-    this.state.connection
-      .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
-      .run(resourceId);
-    this.state.connection
-      .prepare(
-        `INSERT INTO effects(
-           effect_id, resource_id, source_resource_id, source_revision, effect_type,
-           idempotency_key, payload_hash, owner_scope, status, attempt_count,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
-      )
-      .run(
-        effectId,
-        resourceId,
-        sourceResourceId,
-        sourceRevision,
-        type,
-        key,
-        payloadHash,
-        scope,
-        now,
-        now,
-      );
-    this.insertEvent(resourceId, 1, "effect.created", "system", null, {}, now);
-  }
-
-  private notification(
-    runId: string,
-    attemptId: string,
-    index: number,
-  ): WorkflowNotificationRecord | undefined {
-    const row = this.state.connection
-      .prepare(
-        notificationSelect("WHERE n.run_id = ? AND n.attempt_id = ? AND n.notification_index = ?"),
-      )
-      .get(runId, attemptId, index);
-    return isNotificationRow(row) ? this.mapNotification(row) : undefined;
-  }
-
-  private requireNotification(
-    runId: string,
-    attemptId: string,
-    index: number,
-  ): WorkflowNotificationRecord {
-    const record = this.notification(runId, attemptId, index);
-    /* istanbul ignore if -- impossible after exact schema and transaction checks */
-    if (record === undefined) throw new Error("Workflow notification was not stored");
-    return record;
-  }
-
-  private notificationRows(sessionId: string, limit: number): NotificationRow[] {
-    return this.state.connection
-      .prepare(
-        notificationSelect(
-          "WHERE n.target_session_id = ? AND e.status = 'pending' ORDER BY n.created_at LIMIT ?",
-        ),
-      )
-      .all(sessionId, limit)
-      .filter(isNotificationRow);
-  }
-
-  private notificationRowById(id: string): NotificationRow | undefined {
-    const row = this.state.connection
-      .prepare(notificationSelect("WHERE n.notification_id = ?"))
-      .get(id);
-    return isNotificationRow(row) ? row : undefined;
-  }
-
-  /* istanbul ignore next -- pure projection covered by integration tests */
-  private mapNotification(row: NotificationRow): WorkflowNotificationRecord {
-    return {
-      notificationId: row.notificationId,
-      runId: row.runId,
-      nodeId: row.nodeId,
-      attemptId: row.attemptId,
-      notificationIndex: row.notificationIndex,
-      targetSessionId: row.targetSessionId,
-      kind: row.kind,
-      content: this.state.readBlob(row.contentHash)?.content.toString("utf8") ?? "",
-      createdAt: new Date(row.createdAt).toISOString(),
-      deliveryClaimExpiresAt:
-        row.claimExpiresAt === null ? null : new Date(row.claimExpiresAt).toISOString(),
-      deliveredAt: row.deliveredAt === null ? null : new Date(row.deliveredAt).toISOString(),
-    };
   }
 
   private assertWritable(): void {
@@ -3719,6 +3081,9 @@ function workflowRunSelect(clause: string): string {
     q.consecutive_errors AS consecutiveErrors, q.error_code AS errorCode,
     q.error_hash AS errorHash, b.origin_session_id AS originSessionId,
     b.execution_mode AS executionMode, r.parent_run_id AS parentRunId,
+    r.root_run_id AS rootRunId, r.lineage_kind AS lineageKind,
+    r.restart_number AS restartNumber,
+    r.parent_terminal_fingerprint AS parentTerminalFingerprint,
     q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
     l.generation AS leaseGeneration, l.owner_id AS ownerId, l.expires_at AS claimExpiresAt
@@ -3733,8 +3098,10 @@ function workflowRunViewSelect(clause: string): string {
     r.workflow_ref AS workflowRef, r.status AS runStatus, r.paused,
     r.definition_digest AS definitionDigest, q.status,
     b.origin_session_id AS originSessionId, b.execution_mode AS executionMode,
-    r.parent_run_id AS parentRunId, q.error_code AS errorCode,
-    CAST(error.content AS TEXT) AS errorMessage,
+    r.parent_run_id AS parentRunId, r.root_run_id AS rootRunId,
+    r.lineage_kind AS lineageKind, r.restart_number AS restartNumber,
+    r.parent_terminal_fingerprint AS parentTerminalFingerprint,
+    q.error_code AS errorCode, CAST(error.content AS TEXT) AS errorMessage,
     q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
     source.source_type AS sourceType, source.source_ref AS sourceRef,
@@ -3744,31 +3111,6 @@ function workflowRunViewSelect(clause: string): string {
     LEFT JOIN run_bindings b ON b.run_id = r.run_id
     LEFT JOIN run_sources source ON source.run_id = r.run_id AND source.mount_path = ''
     LEFT JOIN blobs error ON error.blob_hash = q.error_hash ${clause}`;
-}
-
-function turnIntentSelect(clause: string): string {
-  return `SELECT t.turn_intent_id AS intentId, t.source_event_id AS sourceEventId,
-    t.run_id AS runId, t.workflow_ref AS workflowRef,
-    t.target_session_id AS targetSessionId, t.cause,
-    t.node_id AS nodeId, t.attempt_id AS attemptId, t.facts_hash AS factsHash,
-    t.requested_at AS requestedAt, t.eligible_at AS eligibleAt,
-    t.resolved_at AS resolvedAt, t.resolution_type AS resolution,
-    t.resolution_message_id AS resolutionMessageId, l.expires_at AS claimExpiresAt,
-    t.effect_id AS effectId
-    FROM turn_intents t JOIN effects e ON e.effect_id = t.effect_id
-    JOIN leases l ON l.resource_id = e.resource_id ${clause}`;
-}
-
-function notificationSelect(clause: string): string {
-  return `SELECT n.notification_id AS notificationId, n.effect_id AS effectId,
-    n.run_id AS runId, a.node_id AS nodeId, n.attempt_id AS attemptId,
-    n.notification_index AS notificationIndex, n.target_session_id AS targetSessionId,
-    n.notification_type AS kind, n.content_hash AS contentHash,
-    n.created_at AS createdAt, l.expires_at AS claimExpiresAt,
-    e.settled_at AS deliveredAt
-    FROM notifications n JOIN effects e ON e.effect_id = n.effect_id
-    JOIN leases l ON l.resource_id = e.resource_id
-    JOIN node_attempts a ON a.attempt_id = n.attempt_id ${clause}`;
 }
 
 type QueueListRow = {
@@ -3795,39 +3137,6 @@ type RunEventRow = {
   runnerId: string | null;
   payloadHash: Buffer | null;
 };
-type TurnIntentRow = {
-  intentId: string;
-  sourceEventId: string;
-  runId: string;
-  workflowRef: string;
-  targetSessionId: string;
-  cause: WorkflowTurnIntentCause;
-  nodeId: string | null;
-  attemptId: string | null;
-  factsHash: Buffer;
-  requestedAt: number;
-  eligibleAt: number | null;
-  resolvedAt: number | null;
-  resolution: WorkflowTurnIntentResolution | null;
-  resolutionMessageId: string | null;
-  claimExpiresAt: number | null;
-  effectId: string;
-};
-type NotificationRow = {
-  notificationId: string;
-  effectId: string;
-  runId: string;
-  nodeId: string;
-  attemptId: string;
-  notificationIndex: number;
-  targetSessionId: string;
-  kind: "progress" | "final";
-  contentHash: Buffer;
-  createdAt: number;
-  claimExpiresAt: number | null;
-  deliveredAt: number | null;
-};
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3855,6 +3164,10 @@ function workflowRunViewRecord(row: WorkflowRunViewRow): WorkflowRunQueueViewRec
     originSessionId: row.executionMode === "headless" ? null : row.originSessionId,
     executionMode: row.executionMode,
     parentRunId: row.parentRunId,
+    rootRunId: row.rootRunId,
+    lineageKind: row.lineageKind,
+    restartNumber: row.restartNumber,
+    parentTerminalFingerprint: row.parentTerminalFingerprint?.toString("hex") ?? null,
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     createdAt: new Date(row.createdAt).toISOString(),
@@ -3877,6 +3190,13 @@ function isWorkflowRunViewRow(value: unknown): value is WorkflowRunViewRow {
     (value.originSessionId === null || typeof value.originSessionId === "string") &&
     (value.executionMode === "interactive" || value.executionMode === "headless") &&
     (value.parentRunId === null || typeof value.parentRunId === "string") &&
+    typeof value.rootRunId === "string" &&
+    (value.lineageKind === null ||
+      value.lineageKind === "continuation" ||
+      value.lineageKind === "restart") &&
+    typeof value.restartNumber === "number" &&
+    (value.parentTerminalFingerprint === null ||
+      Buffer.isBuffer(value.parentTerminalFingerprint)) &&
     (value.errorCode === null || typeof value.errorCode === "string") &&
     (value.errorMessage === null || typeof value.errorMessage === "string") &&
     typeof value.createdAt === "number" &&
@@ -3933,12 +3253,6 @@ function isControllerEventRow(value: unknown): value is ControllerEventRow {
 function isRunEventRow(value: unknown): value is RunEventRow {
   return isRecord(value);
 }
-function isTurnIntentRow(value: unknown): value is TurnIntentRow {
-  return isRecord(value);
-}
-function isNotificationRow(value: unknown): value is NotificationRow {
-  return isRecord(value);
-}
 function isProjectRow(value: unknown): value is { projectId: string } {
   return isRecord(value);
 }
@@ -3991,6 +3305,11 @@ function canonicalProjectPath(value: string): string {
 function digestBuffer(value: string): Buffer {
   const hex = value.startsWith("sha256:") ? value.slice(7) : value;
   if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
+  return Buffer.from(hex, "hex");
+}
+function terminalFingerprintBuffer(value: string): Buffer {
+  const hex = value.startsWith("sha256:") ? value.slice(7) : value;
+  if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a terminal fingerprint");
   return Buffer.from(hex, "hex");
 }
 type QueuedSource = {

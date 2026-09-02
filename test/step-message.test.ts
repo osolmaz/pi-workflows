@@ -20,6 +20,9 @@ const theme = {
 const details: WorkflowAgentStepMessageDetails = {
   schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
   kind: "step",
+  reason: "initial",
+  requestId: "request-1",
+  workflowMessageId: "message-1",
   contract: {
     runId: "run-1",
     workflowName: "monitor",
@@ -52,7 +55,7 @@ describe("workflow agent-step messages", () => {
     const view = buildWorkflowAgentStepView(
       {
         content: "First line\nSecond \u001b[31mline\u001b[0m",
-        details: { ...details, kind: "reminder" },
+        details: { ...details, reason: "reminder" },
       },
       true,
     );
@@ -95,6 +98,9 @@ describe("workflow agent-step messages", () => {
     const assistantDetails: WorkflowAgentStepMessageDetails = {
       schema: WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA,
       kind: "step",
+      reason: "initial",
+      requestId: "request-2",
+      workflowMessageId: "message-2",
       contract: {
         runId: "run-1",
         workflowName: "monitor",

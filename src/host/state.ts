@@ -8,6 +8,15 @@ import {
 import { StateDatabase } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
 import { tokenHash } from "../state/mutation.js";
+import {
+  WorkflowMessageStore,
+  workflowMessageIdFor,
+  type WorkflowStepReason,
+} from "../state/workflow-messages.js";
+import {
+  decisionWorkflowMessageContent,
+  stepWorkflowMessageContent,
+} from "../workflows/workflow-message-content.js";
 import type { WorkerMessage, WorkerResponse } from "./worker-protocol.js";
 
 export type HostClaim = {
@@ -68,10 +77,8 @@ export type InteractiveRequestRecord = {
   kind: "agent" | "assistant" | "decision";
   contract: JsonValue;
   revision: number;
-  status: "pending" | "presenting" | "settled" | "cancelled";
-  presenterId: string | null;
-  presentationClaimExpiresAt: string | null;
-  presentationSessionEntryId: string | null;
+  status: "pending" | "settled" | "cancelled";
+  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -82,6 +89,7 @@ export type InteractiveRequestRecord = {
 export class HostStateStore {
   readonly state: StateDatabase;
   private readonly ownsState: boolean;
+  readonly workflowMessages: WorkflowMessageStore;
 
   constructor(databasePath: string, options: { state?: StateDatabase; readOnly?: boolean } = {}) {
     this.ownsState = options.state === undefined;
@@ -91,6 +99,7 @@ export class HostStateStore {
         filePath: databasePath,
         mode: options.readOnly === true ? "read-only" : "read-write",
       });
+    this.workflowMessages = new WorkflowMessageStore(this.state);
   }
 
   close(): void {
@@ -438,15 +447,16 @@ export class HostStateStore {
           this.state.connection
             .prepare(
               `UPDATE interactive_requests
-               SET status = 'pending', presenter_id = NULL,
-                   presentation_claim_expires_at = NULL, presentation_session_entry_id = NULL,
-                   accepted_submission_id = NULL, settled_at = NULL, consumed_at = NULL,
-                   revision = revision + 1, updated_at = ?
+               SET status = 'pending', accepted_submission_id = NULL,
+                   settled_at = NULL, consumed_at = NULL, revision = revision + 1, updated_at = ?
                WHERE request_id = ? AND status = 'settled' AND consumed_at IS NULL`,
             )
             .run(now, options.requestId);
-          return this.requireInteractiveRequest(options.requestId);
+          const reopened = this.requireInteractiveRequest(options.requestId);
+          this.ensureInteractionMessage(reopened, "resumed", now);
+          return reopened;
         }
+        if (existing.status === "pending") this.ensureInteractionMessage(existing, "initial", now);
         return existing;
       }
       const contractHash = this.state.putJson(options.contract, now);
@@ -467,7 +477,43 @@ export class HostStateStore {
           now,
           now,
         );
-      return this.requireInteractiveRequest(options.requestId);
+      const created = this.requireInteractiveRequest(options.requestId);
+      this.ensureInteractionMessage(created, "initial", now);
+      return created;
+    });
+  }
+
+  ensureInteractionMessage(
+    request: InteractiveRequestRecord,
+    reason: WorkflowStepReason,
+    now: number = Date.now(),
+  ) {
+    const kind = request.kind === "decision" ? "decision" : "step";
+    const idempotencyKey = `${request.revision}:${reason}`;
+    const workflowMessageId = workflowMessageIdFor(kind, request.requestId, idempotencyKey);
+    const content =
+      kind === "decision"
+        ? decisionWorkflowMessageContent({
+            workflowMessageId,
+            requestId: request.requestId,
+            runId: request.runId,
+            contract: request.contract,
+          })
+        : stepWorkflowMessageContent({
+            workflowMessageId,
+            requestId: request.requestId,
+            contract: request.contract,
+            reason,
+          });
+    return this.workflowMessages.create({
+      workflowMessageId,
+      runId: request.runId,
+      targetSessionId: request.targetSessionId,
+      kind,
+      sourceId: request.requestId,
+      idempotencyKey,
+      content,
+      now,
     });
   }
 
@@ -521,7 +567,7 @@ export class HostStateStore {
          FROM interactive_requests i
          JOIN node_attempts a ON a.attempt_id = i.attempt_id
          JOIN interactive_submissions s ON s.request_id = i.request_id
-         WHERE i.run_id = ? AND i.status IN ('pending', 'presenting')
+         WHERE i.run_id = ? AND i.status = 'pending'
            AND s.outcome = 'validating'
          ORDER BY s.submitted_at DESC LIMIT 1`,
       )
@@ -543,7 +589,7 @@ export class HostStateStore {
          FROM interactive_requests i
          JOIN interactive_submissions s ON s.request_id = i.request_id
          JOIN run_queue q ON q.run_id = i.run_id
-         WHERE i.status IN ('pending', 'presenting') AND s.outcome = 'validating'
+         WHERE i.status = 'pending' AND s.outcome = 'validating'
            AND q.status NOT IN ('done', 'failed', 'cancelled')
          GROUP BY i.run_id
          ORDER BY MIN(s.submitted_at), i.run_id`,
@@ -559,7 +605,7 @@ export class HostStateStore {
          FROM interactive_requests i
          JOIN node_attempts a ON a.attempt_id = i.attempt_id
          JOIN run_queue q ON q.run_id = i.run_id
-         WHERE i.status IN ('pending', 'presenting')
+         WHERE i.status = 'pending'
            AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
            AND q.status NOT IN ('done', 'failed', 'cancelled')
          GROUP BY i.run_id
@@ -578,7 +624,7 @@ export class HostStateStore {
          JOIN runs r ON r.run_id = i.run_id
          WHERE i.run_id = ? AND i.status = 'cancelled' AND r.status = 'running'
            AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
-           AND a.status IN ('pending', 'running', 'waiting', 'interrupted')
+           AND a.status IN ('pending', 'running', 'waiting', 'interrupted', 'timed_out')
          ORDER BY a.deadline_at, i.request_id LIMIT 1`,
       )
       .get(runId, Date.now());
@@ -640,13 +686,14 @@ export class HostStateStore {
         const changed = this.state.connection
           .prepare(
             `UPDATE interactive_requests
-             SET status = 'settled', presenter_id = NULL,
-                 presentation_claim_expires_at = NULL, accepted_submission_id = ?,
+             SET status = 'settled', accepted_submission_id = ?,
                  revision = revision + 1, updated_at = ?, settled_at = ?
-             WHERE request_id = ? AND revision = ? AND status IN ('pending', 'presenting')`,
+             WHERE request_id = ? AND revision = ? AND status = 'pending'`,
           )
           .run(options.submissionId, now, now, options.requestId, request.revision);
         if (changed.changes !== 1) throw new Error("Interactive request validation is stale");
+        this.workflowMessages.cancelPendingForSource(options.requestId, "step", now);
+        this.workflowMessages.cancelPendingForSource(options.requestId, "decision", now);
       }
       const settled = this.interactionSubmission(options.requestId, options.submissionId);
       if (settled === undefined) throw new Error("Interactive submission result is missing");
@@ -669,69 +716,13 @@ export class HostStateStore {
     return this.state.connection
       .prepare(
         `SELECT request_id AS requestId FROM interactive_requests
-         WHERE target_session_id = ? AND status IN ('pending', 'presenting')
+         WHERE target_session_id = ? AND status = 'pending'
          ORDER BY created_at, request_id`,
       )
       .all(sessionId)
       .flatMap((row) =>
         isRequestIdRow(row) ? [this.requireInteractiveRequest(row.requestId)] : [],
       );
-  }
-
-  claimInteractionPresentation(options: {
-    requestId: string;
-    expectedRevision: number;
-    presenterId: string;
-    leaseMs: number;
-  }): InteractiveRequestRecord {
-    requireLeaseMs(options.leaseMs);
-    const now = Date.now();
-    const changed = this.state.connection
-      .prepare(
-        `UPDATE interactive_requests
-         SET status = 'presenting', presenter_id = ?, presentation_claim_expires_at = ?,
-             revision = revision + 1, updated_at = ?
-         WHERE request_id = ? AND revision = ? AND presentation_session_entry_id IS NULL
-           AND (
-             status = 'pending'
-             OR (status = 'presenting' AND presentation_claim_expires_at <= ?)
-           )`,
-      )
-      .run(
-        options.presenterId,
-        now + options.leaseMs,
-        now,
-        options.requestId,
-        options.expectedRevision,
-        now,
-      );
-    if (changed.changes !== 1) throw new Error("Interactive request presentation claim conflict");
-    return this.requireInteractiveRequest(options.requestId);
-  }
-
-  markInteractionPresented(options: {
-    requestId: string;
-    expectedRevision: number;
-    sessionEntryId: string;
-  }): InteractiveRequestRecord {
-    const now = Date.now();
-    const changed = this.state.connection
-      .prepare(
-        `UPDATE interactive_requests
-         SET status = 'presenting', presenter_id = NULL, presentation_claim_expires_at = NULL,
-             presentation_session_entry_id = ?, revision = revision + 1, updated_at = ?
-         WHERE request_id = ? AND revision = ? AND status IN ('pending', 'presenting')
-           AND (presentation_session_entry_id IS NULL OR presentation_session_entry_id = ?)`,
-      )
-      .run(
-        options.sessionEntryId,
-        now,
-        options.requestId,
-        options.expectedRevision,
-        options.sessionEntryId,
-      );
-    if (changed.changes !== 1) throw new Error("Interactive request presentation conflict");
-    return this.requireInteractiveRequest(options.requestId);
   }
 
   submitInteraction(options: {
@@ -828,7 +819,7 @@ export class HostStateStore {
       const request = this.requireInteractiveRequest(options.requestId);
       if (
         request.revision !== options.expectedRevision ||
-        !["pending", "presenting"].includes(request.status)
+        request.status !== "pending"
       ) {
         throw new Error("Interactive request revision conflict");
       }
@@ -856,12 +847,13 @@ export class HostStateStore {
         this.state.connection
           .prepare(
             `UPDATE interactive_requests
-             SET status = 'settled', presenter_id = NULL, presentation_claim_expires_at = NULL,
-                 accepted_submission_id = ?, revision = revision + 1,
+             SET status = 'settled', accepted_submission_id = ?, revision = revision + 1,
                  updated_at = ?, settled_at = ?
-             WHERE request_id = ? AND revision = ? AND status IN ('pending', 'presenting')`,
+             WHERE request_id = ? AND revision = ? AND status = 'pending'`,
           )
           .run(options.submissionId, now, now, options.requestId, options.expectedRevision);
+        this.workflowMessages.cancelPendingForSource(options.requestId, "step", now);
+        this.workflowMessages.cancelPendingForSource(options.requestId, "decision", now);
       }
       return {
         interaction: this.requireInteractiveRequest(options.requestId),
@@ -910,9 +902,7 @@ export class HostStateStore {
       .prepare(
         `SELECT request_id AS requestId, run_id AS runId, attempt_id AS attemptId,
                 target_session_id AS targetSessionId, kind, contract_hash AS contractHash,
-                revision, status, presenter_id AS presenterId,
-                presentation_claim_expires_at AS presentationClaimExpiresAt,
-                presentation_session_entry_id AS presentationSessionEntryId,
+                revision, status, unproductive_turn_ends AS unproductiveTurnEnds,
                 accepted_submission_id AS acceptedSubmissionId, created_at AS createdAt,
                 updated_at AS updatedAt, settled_at AS settledAt, consumed_at AS consumedAt
          FROM interactive_requests WHERE request_id = ?`,
@@ -928,9 +918,7 @@ export class HostStateStore {
       contract: this.state.readJson(row.contractHash),
       revision: row.revision,
       status: row.status,
-      presenterId: row.presenterId,
-      presentationClaimExpiresAt: iso(row.presentationClaimExpiresAt),
-      presentationSessionEntryId: row.presentationSessionEntryId,
+      unproductiveTurnEnds: row.unproductiveTurnEnds,
       acceptedSubmissionId: row.acceptedSubmissionId,
       createdAt: new Date(row.createdAt).toISOString(),
       updatedAt: new Date(row.updatedAt).toISOString(),
@@ -1031,9 +1019,7 @@ type InteractiveRequestRow = {
   contractHash: Buffer;
   revision: number;
   status: InteractiveRequestRecord["status"];
-  presenterId: string | null;
-  presentationClaimExpiresAt: number | null;
-  presentationSessionEntryId: string | null;
+  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -1150,10 +1136,8 @@ function isInteractiveRequestRow(value: unknown): value is InteractiveRequestRow
     ["agent", "assistant", "decision"].includes(value.kind as string) &&
     Buffer.isBuffer(value.contractHash) &&
     typeof value.revision === "number" &&
-    ["pending", "presenting", "settled", "cancelled"].includes(value.status as string) &&
-    nullableString(value.presenterId) &&
-    nullableNumber(value.presentationClaimExpiresAt) &&
-    nullableString(value.presentationSessionEntryId) &&
+    ["pending", "settled", "cancelled"].includes(value.status as string) &&
+    typeof value.unproductiveTurnEnds === "number" &&
     nullableString(value.acceptedSubmissionId) &&
     typeof value.createdAt === "number" &&
     typeof value.updatedAt === "number" &&

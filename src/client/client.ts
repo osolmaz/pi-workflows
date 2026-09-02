@@ -182,12 +182,16 @@ export class WorkflowClient {
   async watchSession(
     sessionId: string,
     listener: (event: ClientEvent) => void,
-    options: { subscriptionId?: string } = {},
+    options: { subscriptionId?: string; coordinator?: boolean } = {},
   ): Promise<() => Promise<void>> {
     return await this.subscribe(
       "view.session.watch",
       undefined,
-      { subscriptionId: options.subscriptionId ?? randomUUID(), sessionId },
+      {
+        subscriptionId: options.subscriptionId ?? randomUUID(),
+        sessionId,
+        ...(options.coordinator === undefined ? {} : { coordinator: options.coordinator }),
+      },
       listener,
     );
   }

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { ORIGIN_ACTIVITY_LEASE_MS } from "../src/client/activity.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
   MAX_PROTOCOL_MESSAGE_BYTES,
@@ -51,9 +50,9 @@ describe("host workflow display reducer", () => {
       }).status,
     ).toBe("ambiguous");
     expect(display({ durableStatus: "failed", paused: true, workerActive: true }).status).toBe(
-      "failed",
+      "running",
     );
-    expect(display({ paused: true, workerActive: true }).status).toBe("paused");
+    expect(display({ paused: true, workerActive: true }).status).toBe("running");
     expect(display({ workerActive: true }).status).toBe("running");
     expect(display({ originTurnActive: true }).status).toBe("running");
     expect(display({}).status).toBe("waiting");
@@ -623,18 +622,16 @@ describe("host workflow display reducer", () => {
       attemptId,
       targetSessionId: "session-view",
       kind: "agent",
-      contract: { prompt: "Continue" },
-    });
-    const claim = hostState.claimInteractionPresentation({
-      requestId: request.requestId,
-      expectedRevision: request.revision,
-      presenterId: "extension-view",
-      leaseMs: 60_000,
-    });
-    hostState.markInteractionPresented({
-      requestId: request.requestId,
-      expectedRevision: claim.revision,
-      sessionEntryId: "entry-view",
+      contract: {
+        prompt: "Continue",
+        contract: {
+          runId: "run-view",
+          workflowName: "echo",
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
     });
     const views = new HostViewStore(state, queue, hostState, runs, () => false);
     const readRun = vi.spyOn(runs, "readRun");
@@ -642,15 +639,6 @@ describe("host workflow display reducer", () => {
     expect(initialList.items).toHaveLength(1);
     expect(readRun).not.toHaveBeenCalled();
     readRun.mockRestore();
-    const activity = {
-      sessionId: "session-view",
-      runId: "run-view",
-      requestId: "request-view",
-      deliveryId: "interaction:request-view",
-      sessionEntryId: "entry-view",
-      sequence: 0,
-      state: "started" as const,
-    };
 
     expect(views.run("run-view")).toMatchObject({
       display: { status: "waiting" },
@@ -661,20 +649,20 @@ describe("host workflow display reducer", () => {
         workflowSource: { kind: "builtin", id: "echo", revision: "test" },
       },
     });
-    expect(() =>
-      views.reportActivity("connection-one", {
-        ...activity,
-        deliveryId: "interaction:another-request",
-      }),
-    ).toThrow(/delivery/);
-    views.reportActivity("connection-one", activity);
-    expect(() =>
-      views.reportActivity("connection-one", {
-        ...activity,
-        deliveryId: "interaction:another-request",
-        sequence: 1,
-      }),
-    ).toThrow(/delivery/);
+    const message = hostState.workflowMessages.listSession("session-view")[0];
+    if (message === undefined) throw new Error("workflow message missing");
+    hostState.workflowMessages.adoptBranch(
+      "session-view",
+      [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "entry-view" }],
+      new Set([message.workflowMessageId]),
+    );
+    hostState.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "turn-view",
+      runId: "run-view",
+      targetSessionId: "session-view",
+      now: Date.now() - 11_000,
+    });
     expect(views.run("run-view")?.display).toMatchObject({
       status: "running",
       activity: "origin_turn",
@@ -684,31 +672,19 @@ describe("host workflow display reducer", () => {
     expect(runningList.items).toMatchObject([
       { display: { status: "running", activity: "origin_turn" } },
     ]);
-    expect(() => views.reportActivity("connection-one", activity)).toThrow(/sequence/);
-    views.reportActivity("connection-one", {
-      ...activity,
-      sequence: 1,
-      state: "refresh",
-    });
-    expect(() =>
-      views.reportActivity("connection-one", {
-        ...activity,
-        deliveryId: "interaction:another-request",
-        sequence: 2,
-        state: "settled",
-      }),
-    ).toThrow(/delivery/);
-    views.clearConnection("connection-two");
     expect(views.run("run-view")?.display.status).toBe("running");
-    views.expireActivity(Date.now() + ORIGIN_ACTIVITY_LEASE_MS / 2);
-    expect(views.run("run-view")?.display.status).toBe("running");
-    views.expireActivity(Date.now() + ORIGIN_ACTIVITY_LEASE_MS + 1);
-    expect(views.run("run-view")?.display.status).toBe("waiting");
 
-    views.reportActivity("connection-one", activity);
     state.connection.prepare("UPDATE runs SET paused = 1 WHERE run_id = ?").run("run-view");
+    expect(views.run("run-view")?.display.status).toBe("running");
+    hostState.workflowMessages.endTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "turn-view",
+      runId: "run-view",
+      targetSessionId: "session-view",
+      stopReason: "aborted",
+      responseSessionEntryId: null,
+    });
     expect(views.run("run-view")?.display.status).toBe("paused");
-    views.clearConnection("connection-one");
     state.connection
       .prepare("UPDATE run_queue SET status = 'done', finished_at = ? WHERE run_id = 'run-view'")
       .run(Date.now());

@@ -47,7 +47,7 @@ describe("WorkflowRunStore SQLite", () => {
         .get(),
     ).toEqual({ hasPrompt: 1 });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM events").get()).toEqual({
-      count: 7,
+      count: 6,
     });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
       count: 0,

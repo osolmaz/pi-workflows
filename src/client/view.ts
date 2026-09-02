@@ -1,4 +1,5 @@
 import type { JsonValue } from "../state/json.js";
+import type { WorkflowMessage, WorkflowTurn } from "../state/workflow-messages.js";
 
 export const RUN_VIEW_SCHEMA = "pi-workflows.run-view.v1" as const;
 export const SESSION_VIEW_SCHEMA = "pi-workflows.session-view.v1" as const;
@@ -32,6 +33,10 @@ export type WorkflowRunQueueView = {
   originSessionId: string | null;
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
+  rootRunId: string;
+  lineageKind: "continuation" | "restart" | null;
+  restartNumber: number;
+  parentTerminalFingerprint: string | null;
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
@@ -101,20 +106,13 @@ export type ClientInteractiveRequest = {
   kind: "agent" | "assistant" | "decision";
   contract: JsonValue;
   revision: number;
-  status: "pending" | "presenting" | "settled" | "cancelled";
-  presenterId: string | null;
-  presentationClaimExpiresAt: string | null;
-  presentationSessionEntryId: string | null;
+  status: "pending" | "settled" | "cancelled";
+  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: string;
   updatedAt: string;
   settledAt: string | null;
   consumedAt: string | null;
-};
-
-export type WorkflowDeliveryAvailability = {
-  notification: boolean;
-  turn: boolean;
 };
 
 export type WorkflowSessionView = {
@@ -124,15 +122,42 @@ export type WorkflowSessionView = {
   pendingInteractions: JsonValue[];
   pendingInteractionStart: number;
   pendingInteractionTotal: number;
-  deliveries: WorkflowDeliveryAvailability;
+  workflowMessages: WorkflowMessage[];
+  workflowMessageStart: number;
+  workflowMessageTotal: number;
+  workflowMessageWindowComplete: boolean;
+  nextWorkflowMessageId: string | null;
+  openWorkflowMessageId: string | null;
+  openWorkflowTurn: WorkflowTurn | null;
+  coordinatorEpoch: string | null;
+  coordinatorActive: boolean;
+  branchReportRequired: boolean;
 };
 
-export type OriginActivityReport = {
-  sessionId: string;
-  runId: string;
-  requestId: string;
-  deliveryId: string;
-  sessionEntryId: string;
-  sequence: number;
-  state: "started" | "refresh" | "settled";
+export type WorkflowBranchReport = {
+  targetSessionId: string;
+  coordinatorEpoch: string;
+  entries: Array<{ workflowMessageId: string; piSessionEntryId: string }>;
+  isIdle: boolean;
+  hasPendingMessages: boolean;
 };
+
+export type WorkflowTurnReport =
+  | {
+      state: "started";
+      workflowMessageId: string;
+      workflowTurnId: string;
+      runId: string;
+      targetSessionId: string;
+      coordinatorEpoch: string;
+    }
+  | {
+      state: "ended";
+      workflowMessageId: string;
+      workflowTurnId: string;
+      runId: string;
+      targetSessionId: string;
+      coordinatorEpoch: string;
+      stopReason: "completed" | "aborted" | "error" | "lost";
+      responseSessionEntryId: string | null;
+    };

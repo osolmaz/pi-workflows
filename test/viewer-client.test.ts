@@ -172,7 +172,7 @@ describe("host client renderer", () => {
 
     expect(lines).toContain("workflow smoke");
     expect(lines).toContain("✓ completed · run run-1");
-    expect(lines).toContain("  ✓ prepare · ok");
+    expect(lines).toContain("> ✓ prepare · ok");
     expect(lines).toContain('output {"ready":true}');
   });
 

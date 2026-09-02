@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { WORKFLOW_STEP_MESSAGE_TYPE } from "../workflows/workflow-message-content.js";
 import type {
   AgentStepContract,
   AgentStepPresentation,
@@ -15,17 +16,19 @@ import {
   type MessageCardView,
 } from "./message-card.js";
 
-export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = "pi-workflows-agent-step";
+export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = WORKFLOW_STEP_MESSAGE_TYPE;
 export const WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA = "pi-workflows.agent-step-message.v1";
 
-type PromptDeliveryKind = "step" | "reminder" | "resume";
+type PromptDeliveryReason = "initial" | "reminder" | "resumed";
 
 export type WorkflowAgentStepMessageDetails = {
   schema: typeof WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA;
-  kind: PromptDeliveryKind;
+  kind: "step";
+  reason: PromptDeliveryReason;
   contract: AgentStepContract;
   presentation?: AgentStepPresentation;
-  turnIntentId?: string;
+  requestId: string;
+  workflowMessageId: string;
 };
 
 type WorkflowAgentStepMessage = {
@@ -51,14 +54,14 @@ export function buildWorkflowAgentStepView(
 ): WorkflowAgentStepView {
   const details = parseDetails(message.details);
   const contract = details?.contract;
-  const kind = details?.kind ?? "step";
+  const reason = details?.reason ?? "initial";
   const workflowName = cleanSingleLine(contract?.workflowName ?? "Workflow");
   const nodeId = cleanSingleLine(contract?.nodeId ?? "step");
   const runTitle = cleanOptionalSingleLine(details?.presentation?.runTitle);
   const statusDetail = cleanOptionalSingleLine(details?.presentation?.statusDetail);
   const label = runTitle ?? workflowName;
-  const suffix = kind === "step" ? "" : ` · ${kind}`;
-  const glyph = kind === "step" ? "▶" : "↻";
+  const suffix = reason === "initial" ? "" : ` · ${reason}`;
+  const glyph = reason === "initial" ? "▶" : "↻";
   const title = paintMessageCard(theme, "accent", `${glyph} ${label} › ${nodeId}${suffix}`);
 
   if (!expanded) {
@@ -80,7 +83,7 @@ export function buildWorkflowAgentStepView(
     `Run id: ${cleanSingleLine(contract?.runId ?? "unknown")}`,
     `Node id: ${nodeId}`,
     `Attempt id: ${cleanSingleLine(contract?.attemptId ?? "unknown")}`,
-    `Delivery: ${kind}`,
+    `Reason: ${reason}`,
     `Completion: ${assistant ? "assistant response" : "workflow submission"}`,
     `Expected output: ${cleanSingleLine(expectedOutput)}`,
   ];
@@ -220,7 +223,14 @@ function parseDetails(value: unknown): WorkflowAgentStepMessageDetails | undefin
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Partial<WorkflowAgentStepMessageDetails>;
   if (candidate.schema !== WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA) return undefined;
-  if (candidate.kind !== "step" && candidate.kind !== "reminder" && candidate.kind !== "resume") {
+  if (
+    candidate.kind !== "step" ||
+    (candidate.reason !== "initial" &&
+      candidate.reason !== "reminder" &&
+      candidate.reason !== "resumed") ||
+    typeof candidate.requestId !== "string" ||
+    typeof candidate.workflowMessageId !== "string"
+  ) {
     return undefined;
   }
   const contract = candidate.contract;

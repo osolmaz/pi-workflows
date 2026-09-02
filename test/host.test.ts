@@ -1106,7 +1106,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 60_000);
 
-  it("parks a workflow load failure until an explicit resume", async () => {
+  it("fails a workflow load error without starting a replacement worker", async () => {
     const cwd = await makeTempDir("host-source-load-project");
     const databasePath = path.join(await makeTempDir("host-source-load-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
@@ -1130,54 +1130,41 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           input: { value: 1 },
           launchOptions: {},
           originSessionId: "host-test-session",
-          executionMode: "headless",
+          executionMode: "interactive",
         },
       });
       expect(response.outcome).toBe("accepted");
       await waitUntil(() => {
         const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
         try {
-          return store.getWorkflowRun("source-load-run")?.errorCode === "workflowSourceChanged";
+          return store.getWorkflowRun("source-load-run")?.errorCode === "workflowLoadFailed";
         } finally {
           store.close();
         }
       }, 30_000);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      const parked = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      const failed = new SqliteControllerStore(databasePath, {
+        readOnly: true,
+        global: true,
+      });
       try {
-        const workers = parked.state.connection
+        const workers = failed.state.connection
           .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
           .get("source-load-run") as { count: number };
         expect(workers.count).toBe(1);
+        const terminalMessages = failed.state.connection
+          .prepare(
+            "SELECT COUNT(*) AS count FROM workflow_messages WHERE run_id = ? AND kind = 'terminal'",
+          )
+          .get("source-load-run") as { count: number };
+        expect(terminalMessages.count).toBe(1);
       } finally {
-        parked.close();
+        failed.close();
       }
 
       await fs.writeFile(workflowPath, originalSource);
       await expect(
         client.request({ operation: "run.resume", runId: "source-load-run" }),
-      ).resolves.toMatchObject({ outcome: "accepted" });
-      await waitUntil(() => {
-        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
-        try {
-          return store.getWorkflowRun("source-load-run")?.status === "done";
-        } finally {
-          store.close();
-        }
-      }, 30_000);
-      const completed = new SqliteControllerStore(databasePath, {
-        readOnly: true,
-        global: true,
-      });
-      try {
-        expect(completed.getWorkflowRun("source-load-run")?.errorCode).toBeNull();
-        const workers = completed.state.connection
-          .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
-          .get("source-load-run") as { count: number };
-        expect(workers.count).toBe(2);
-      } finally {
-        completed.close();
-      }
+      ).resolves.toMatchObject({ outcome: "rejected" });
     } finally {
       await host.stop();
     }
@@ -1471,7 +1458,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
-  it("stores and serves hosted notifications and completion presentations", async () => {
+  it("stores and serves hosted notifications and terminal workflow messages", async () => {
     const cwd = await makeTempDir("host-delivery-project");
     const databasePath = path.join(await makeTempDir("host-delivery-state"), "state.sqlite");
     const workflowPath = await writeDeliveryWorkflow(cwd);
@@ -1495,122 +1482,76 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
 
-      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
-      try {
-        expect(
-          store.listPendingWorkflowNotifications({ targetSessionId: "host-test-session" }),
-        ).toMatchObject([{ content: "Hosted progress.", kind: "progress" }]);
-        expect(
-          store.listWorkflowTurnIntents({
-            targetSessionId: "host-test-session",
-            unresolvedOnly: true,
-          }),
-        ).toMatchObject([
-          {
-            runId: "delivery-run",
-            cause: "terminal",
-            fallbackFacts: { presentationPrompt: 'Present {"delivered":true}.' },
-          },
-        ]);
-      } finally {
-        store.close();
-      }
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      const messages = state.workflowMessages.listSession("host-test-session");
+      state.close();
+      expect(messages.map((message) => message.kind)).toEqual(["notification", "terminal"]);
+      expect(messages[0]?.content.content).toBe("Hosted progress.");
+      expect(messages[1]?.content.content).toContain('Present {"delivered":true}.');
 
-      const notificationClaim = "notification-claim";
-      const notification = await client.request({
-        operation: "notification.claim",
-        idempotencyKey: notificationClaim,
-        payload: { targetSessionId: "host-test-session" },
+      const subscribed = await client.request({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "delivery-session",
+          sessionId: "host-test-session",
+          coordinator: true,
+        },
       });
-      expect(notification.receipt).toMatchObject({
-        notification: { content: "Hosted progress." },
-      });
-      const notificationReceipt = notification.receipt as {
-        claimId: string;
-        notification: { notificationId: string };
-      };
-      const notificationRecord = notificationReceipt.notification;
+      const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
+        ?.coordinatorEpoch;
+      if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
       expect(
         await client.request({
-          operation: "notification.claim",
+          operation: "workflowMessage.reportBranch",
           payload: {
-            validateClaim: true,
-            resourceId: notificationRecord.notificationId,
             targetSessionId: "host-test-session",
-            claimId: notificationReceipt.claimId,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted", receipt: { live: true } });
-      expect(
-        await client.request({
-          operation: "notification.deliver",
-          payload: {
-            notificationId: notificationRecord.notificationId,
-            targetSessionId: "host-test-session",
-            claimId: notificationReceipt.claimId,
+            coordinatorEpoch,
+            entries: messages.map((message, index) => ({
+              workflowMessageId: message.workflowMessageId,
+              piSessionEntryId: `entry-${index + 1}`,
+            })),
+            isIdle: true,
+            hasPendingMessages: false,
           },
         }),
       ).toMatchObject({ outcome: "accepted" });
-      expect(
-        await client.request({
-          operation: "notification.claim",
-          payload: {
-            validateClaim: true,
-            resourceId: notificationRecord.notificationId,
-            targetSessionId: "host-test-session",
-            claimId: notificationReceipt.claimId,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted", receipt: { live: false } });
 
-      const turnClaim = "turn-claim";
-      const turn = await client.request({
-        operation: "turn.claim",
-        idempotencyKey: turnClaim,
-        payload: { targetSessionId: "host-test-session" },
-      });
-      expect(turn.receipt).toMatchObject({
-        turn: { runId: "delivery-run" },
-      });
-      expect(turn.receipt).not.toHaveProperty("state");
-      const turnReceipt = turn.receipt as {
-        claimId: string;
-        turn: { intentId: string };
+      const terminal = messages[1];
+      if (terminal === undefined) throw new Error("terminal workflow message missing");
+      const started = {
+        state: "started" as const,
+        workflowMessageId: terminal.workflowMessageId,
+        workflowTurnId: "terminal-turn-1",
+        runId: terminal.runId,
+        targetSessionId: terminal.targetSessionId,
+        coordinatorEpoch,
       };
-      const turnRecord = turnReceipt.turn;
       expect(
         await client.request({
-          operation: "turn.claim",
-          payload: {
-            validateClaim: true,
-            resourceId: turnRecord.intentId,
-            targetSessionId: "host-test-session",
-            claimId: turnReceipt.claimId,
-          },
+          operation: "workflowTurn.report",
+          runId: terminal.runId,
+          payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { live: true } });
+      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
       expect(
         await client.request({
-          operation: "turn.resolve",
-          payload: {
-            intentId: turnRecord.intentId,
-            targetSessionId: "host-test-session",
-            claimId: turnReceipt.claimId,
-            messageId: "entry-one",
-          },
+          operation: "workflowTurn.report",
+          runId: terminal.runId,
+          payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted" });
+      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
       expect(
         await client.request({
-          operation: "turn.claim",
+          operation: "workflowTurn.report",
+          runId: terminal.runId,
           payload: {
-            validateClaim: true,
-            resourceId: turnRecord.intentId,
-            targetSessionId: "host-test-session",
-            claimId: turnReceipt.claimId,
+            ...started,
+            state: "ended",
+            stopReason: "completed",
+            responseSessionEntryId: "assistant-entry-1",
           },
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { live: false } });
+      ).toMatchObject({ outcome: "accepted", receipt: { state: "ended" } });
     } finally {
       await host.stop();
     }
