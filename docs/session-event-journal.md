@@ -1,7 +1,5 @@
 # Session event journal
 
-> **Current version notice:** Version 0.16.0 contains the journal tables, but the extension does not record the complete workflow-linked Pi conversation described here. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores batched recording through the host client.
-
 Pi Workflows records the Pi conversation events associated with a workflow run. The journal supports live viewing, replay, and exact links from workflow steps to settled Pi entries.
 
 All records live in the canonical [SQLite state](SQLITE_STATE.md) database.

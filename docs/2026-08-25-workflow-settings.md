@@ -6,8 +6,6 @@ date: 2026-08-25
 
 # Change workflow settings during a run
 
-> **Current version notice:** Version 0.16.0 does not expose all live settings commands and workflow-tool actions described here. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores those controls without changing the settings data contract.
-
 A workflow can expose a JSON settings value that authorized actors can change while the workflow runs. A change affects only future node attempts and future settings routes. It does not change the workflow definition, immutable input, completed work, or a running node.
 
 ## Declare settings

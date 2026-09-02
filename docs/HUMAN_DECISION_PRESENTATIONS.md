@@ -1,7 +1,5 @@
 # Human decision presentations
 
-> **Current version notice:** The presentation value contract is implemented, but version 0.16.0 does not provide the complete hosted Pi and Telegram send path. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores that path without changing this version-1 presentation contract.
-
 Human decision requests separate their canonical
 subject from the complete readable message shown to an operator. Human decisions use
 one v1 contract with no legacy body form or parallel schema version.

@@ -16,8 +16,6 @@ assistant step writes a normal visible response that becomes the node
 output. The [design philosophy](docs/DESIGN_PHILOSOPHY.md) explains the
 principles behind the engine and its public parts.
 
-> **Version 0.16.0 notice:** The hosted runtime has known session gaps. An active Pi model turn can show `waiting`, and terminal results can clear at once. Reminders, resumed prompts, terminal recovery, live settings controls, follow-ups, external decision channels, and complete conversation recording are not all available. The approved [workflow-message restoration plan](docs/2026-09-02-unify-workflow-messages-plan.md) fixes these items through one host-owned message path.
-
 ## Install
 
 ```bash
@@ -87,6 +85,12 @@ package-owned host is the only production process that opens the active
 database. The extension, CLI, Herdr adapter, and `piw` use the same versioned
 local client protocol. See [SQLite state](docs/SQLITE_STATE.md).
 
+One host-owned workflow-message path handles steps, reminders, resumed work,
+human decisions, notifications, terminal results, and follow-up prompts. The
+shared extension coordinator reports exact Pi branches and model turns, so an
+active workflow turn stays `running`, repeated polling cannot send the same
+message twice, and a terminal result remains visible for 60 seconds.
+
 ## Quick start
 
 Put a workflow file in `.pi/workflows/` (project) or `~/.pi/agent/workflows/`
@@ -129,6 +133,15 @@ and `status` are reserved and rejected as workflow names.
 A workflow can also expose [settings that change during a
 run](docs/2026-08-25-workflow-settings.md) and queue [normal follow-up work
 after completion](docs/2026-08-25-workflow-follow-ups.md).
+
+Protected human decisions always appear in Pi. To add a private Telegram
+channel, run `/workflow-channel setup` in Pi. Use `/workflow-channel status`
+to inspect configured profiles and uncertain operations, and
+`/workflow-channel reload` after a private configuration change. If an
+external send has an uncertain result, check Telegram first, then use
+`/workflow-channel recover <message-id> confirm|retry`. A retry can duplicate
+a message when Telegram cannot prove the first result. See
+[Human decisions](docs/HUMAN_DECISIONS.md).
 
 Use `expectedOutput: assistantMessage()` when a normal assistant response must
 be a node inside the graph rather than a presentation after the run. Its exact

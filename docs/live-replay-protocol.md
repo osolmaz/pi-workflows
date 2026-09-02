@@ -1,7 +1,5 @@
 # Live client protocol
 
-> **Current version notice:** The single host and client protocol are implemented, but version 0.16.0 still uses the superseded activity lease and origin-session availability fields. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) changes this version-1 protocol in place to use workflow messages, branch reports, and exact model-turn reports.
-
 Pi Workflows uses one live client protocol for the Pi extension, the TypeScript CLI, local `piw`, and remote `piw` through the loopback relay.
 
 The protocol ID is `pi-workflows.client.v1`. Its schema is [`protocol/client.v1.schema.json`](../protocol/client.v1.schema.json). TypeScript and Rust use the same valid and invalid fixture corpus.

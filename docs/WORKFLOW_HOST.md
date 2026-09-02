@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: the out-of-process host and unified live client are implemented. Version 0.16.0 does not yet implement the workflow-message contract or all restored session behavior in this specification. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md) is the approved implementation plan. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier redesigns.
+Status: the out-of-process host, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the design and implementation plans.
 
 ## Purpose
 
@@ -229,7 +229,7 @@ The protocol owns four operation groups:
 - run and controller commands, including start, pause, resume, cancel, restart, decisions, updates, submissions, settings, follow-ups, reconciliation, and host control;
 - live views and recording, including run lists, snapshots, subscriptions, pages, referenced content, origin-session workflow messages, terminal-view clear, and batched session events;
 - active-branch and model-turn reports;
-- state and channel maintenance, including status, verification, backup, prune, channel setup, channel reload, and channel shutdown against the active database. Backup and applied prune use one fresh CLI idempotency key per user invocation. An automatic reconnect retry keeps that key and uses a new request ID. A later invocation gets a new key. The host finishes an in-flight operation after a disconnect, stores its accepted or rejected receipt before response, waits for it during shutdown, and adopts an exact retry.
+- state and channel maintenance, including status, verification, backup, prune, channel status, channel reload, and explicit channel recovery against the active database. Backup and applied prune use one fresh CLI idempotency key per user invocation. An automatic reconnect retry keeps that key and uses a new request ID. A later invocation gets a new key. The host finishes an in-flight operation after a disconnect, stores its accepted or rejected receipt before response, waits for it during shutdown, and adopts an exact retry.
 
 `workflowMessage.reportBranch` reports workflow message IDs and Pi entry IDs from the complete origin-session view window together with `isIdle` and `hasPendingMessages`. The host adopts matching entries, changes a matching pending or cancelled message to `sent`, closes proved-lost turns, and creates one missing message of the source's own kind after a branch change. `workflowTurn.report` records exact model-turn starts and ends. The host keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one. Only the active epoch receives the next eligible pending message or can report branch and turn state. Polling alone creates no durable command.
 
@@ -301,6 +301,24 @@ The private worker channel accepts these message kinds:
 Every worker message includes the worker launch schema, run ID, generation, worker epoch, attempt ID when applicable, expected revision, and a stable message ID. Headless workers use `process.register` and `process.unregister` operations under `worker.progress` to attach their Pi child group to host supervision. Registration requires the live run claim. Unregistration remains valid after a terminal state releases that claim so cleanup can finish.
 
 The host checks the generation and epoch before it reads the payload. A stale worker gets one claim-loss response and must exit. The host stores receipts for accepted state-changing messages so a retry receives the same answer.
+
+## Supervised channel adapters
+
+The host launches one transport-only child for each configured Telegram profile. The child receives only the complete operator presentation, allowed Telegram identities, and the one profile credential that it needs. It does not receive the canonical decision subject, open SQLite, load workflow code, or change run state.
+
+The private version-1 channel protocol has these message kinds:
+
+- `channel.ready`;
+- `channel.present`;
+- `channel.answer`;
+- `channel.settle`; and
+- `channel.exiting`.
+
+Each message includes the adapter epoch, profile, sequence, expected channel revision, and stable attempt ID. The host validates these values before it accepts a result or answer. A stale adapter or stale attempt cannot settle newer work.
+
+Before the child sends or edits an external message, the host records a managed effect in `effects` and `effect_attempts`. A confirmed result stores its Telegram message references in the effect result. A known rejection can start a bounded new attempt. If the host or adapter stops while an exact attempt is applying, only that in-flight attempt becomes `ambiguous`; the host does not send it again automatically.
+
+The operator checks Telegram before resolving an ambiguous attempt. `/workflow-channel recover <message-id> confirm` records that the external work happened. `/workflow-channel recover <message-id> retry` starts a new numbered attempt and warns that a duplicate is possible. `channel_messages` remains the decision feature record for delivery and settlement; it does not duplicate the external-effect state or Telegram references.
 
 ## Durable protocol records
 
@@ -494,6 +512,11 @@ The implementation conforms when:
 - follow-ups wait for the final continuation outcome, its terminal turn, earlier follow-ups, and release of the origin-session reservation;
 - only the final leaf in a checkpoint continuation chain receives a terminal workflow message;
 - effects are deduplicated or marked ambiguous;
+- external channel delivery and settlement use the same managed-effect and attempt records;
+- a channel child is transport-only and cannot open SQLite, load workflow code, or change run state;
+- a stale adapter epoch or attempt cannot settle newer channel work;
+- an interrupted exact in-flight channel attempt becomes ambiguous and is never retried without explicit recovery;
+- explicit confirmation records observed success, while explicit retry creates a new attempt and warns about possible duplication;
 - the extension and host run no workflow or controller code in their own event loops;
 - the production package contains no embedded execution fallback;
 - the host is the only production process that opens live SQLite state;

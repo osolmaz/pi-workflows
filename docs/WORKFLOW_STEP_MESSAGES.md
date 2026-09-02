@@ -1,6 +1,6 @@
 # Workflow messages in Pi
 
-Status: this document defines the approved target. Version 0.16.0 still uses separate send records for steps, decisions, notifications, and terminal turns. It does not yet restore all behavior described here. See [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md).
+Status: this is the implemented workflow-message contract. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md) records the approved design and implementation plan.
 
 ## Goal
 

@@ -1,7 +1,5 @@
 # Human decisions
 
-> **Current version notice:** Version 0.16.0 does not provide the complete hosted Pi and Telegram presentation path described here. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores presentation through one workflow-message path and supervised channel children. The decision and answer records remain separate from message sending.
-
 pi-workflows needs a reusable way to stop at a proposal and wait for a person. The same decision must appear in Pi and Telegram, and either channel must be able to continue the run. Workflows must be able to offer plain choices, choices that collect text, and choices that route back to planning.
 
 This document defines that behavior. The implementation is tracked in the [human decision gates plan](plans/2026-08-19-human-decision-gates-plan.md).
@@ -216,7 +214,9 @@ pi-workflows keeps credential references in a separate private file. A Telegram 
 }
 ```
 
-Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect whether profiles are active, and `/workflow-channel reload` after a private configuration change. Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, SQLite runs, logs, child environments, or model-visible tool results.
+Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect active profiles and uncertain operations, and `/workflow-channel reload` after a private configuration change. When status reports an uncertain operation, inspect Telegram before you run `/workflow-channel recover <message-id> confirm|retry`. `confirm` records that the operation happened. `retry` starts a new attempt and can duplicate the Telegram operation when the first result cannot be proved.
+
+Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, SQLite runs, logs, child environments, or model-visible tool results.
 
 The same Unix account can read a local credential file. This design prevents accidental propagation, not a hostile same-account process. A separately owned connector can implement the same channel-child protocol later if stronger isolation becomes necessary.
 
@@ -230,7 +230,7 @@ The host owns decision state and launches each external channel adapter as a sup
 - `channel.settle`; and
 - `channel.exiting`.
 
-Each message names the channel profile, saved request or settlement record, expected revision, and stable message ID. The host validates and saves every state change. The child never opens SQLite, loads workflow code, changes a run directly, or receives another channel's credentials.
+Each message names the adapter epoch, channel profile, saved request or settlement record, expected revision, and stable attempt ID. The host validates and saves every state change. The child never opens SQLite, loads workflow code, changes a run directly, receives the canonical decision subject, or receives another channel's credentials.
 
 Channel handling is independent from workflow routing. A failed Telegram send leaves the decision available in Pi. Audience policy decides whether one successful channel is enough or whether all configured channels must receive the request.
 
@@ -256,7 +256,7 @@ The adapter does not infer a choice from ordinary chat text. Callback payloads c
 
 Telegram permits one long-polling consumer for a bot profile. The global host starts at most one adapter child for that profile and keeps the package-owned on-demand host process alive while an external decision is pending. No Pi process or adapter child owns a SQLite lease. If the host stops, the next Pi, CLI, or `piw` client starts it and the host recovers the saved channel state before it starts another adapter child. This design installs no operating-system service.
 
-The Bot API does not provide an idempotency key for `sendMessage`. The host saves the channel message before it tells the adapter to send. A confirmed Telegram message ID settles the send. A timed-out or disconnected send with no proof becomes `ambiguous` and is not retried automatically. Pi remains available, and a verified operator can inspect and resolve the channel message. This prevents blind duplicate sends without claiming exactly-once Telegram behavior.
+The Bot API does not provide an idempotency key for `sendMessage`. Before it tells the adapter to send or settle a message, the host records the exact attempt in `effects` and `effect_attempts`. A confirmed Telegram message ID settles the effect and remains in its result. A timed-out, disconnected, or interrupted exact attempt with no proof becomes `ambiguous` and is not retried automatically. Pi remains available while the operator checks Telegram and explicitly confirms or retries the operation. This prevents blind duplicate sends without claiming exactly-once Telegram behavior.
 
 ## Durable decision records
 
@@ -266,8 +266,8 @@ Human decisions use the canonical [SQLite state](SQLITE_STATE.md) database:
 - `human_decision_submissions` records human, policy, channel, and control candidates;
 - `human_decision_resolutions` stores the one accepted-or-cancelled winner;
 - `continuations` links the parent and continuation runs;
-- `effects` records parent settlement, continuation, and presentation settlement work; and
-- channel tables store delivery and settlement receipts.
+- `effects` and `effect_attempts` record parent settlement, continuation, external delivery, and external settlement work; and
+- `channels`, `channel_cursors`, and `channel_messages` store channel identity, polling position, and decision delivery or settlement receipts.
 
 A valid human answer, eligible timeout policy, explicit cancellation, or no-default expiry competes for the same resolution primary key. The winning transaction records the immutable resolution, audit event, and required effects together. A retry adopts the existing matching result. A conflicting or late answer receives the durable winner.
 
@@ -333,7 +333,7 @@ The engine remains independent from Pi and Telegram. Core code owns decision con
 ## Contract impact
 
 - **Session state:** Pi records normal workflow messages and interactive decision results.
-- **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. Continuation startup uses existing run, queue, source, binding, lease, event, continuation, and decision-effect records. It adds no new persistent shape. The private channel index remains rebuildable.
+- **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. Continuation startup uses existing run, queue, source, binding, lease, event, continuation, and decision-effect records. External channel attempts use the shared effect records, and channel delivery and settlement records remain separate feature evidence.
 - **Pi internals:** none.
 - **Public Pi API:** documented extension lifecycle, message, command, session, and status APIs only.
 - **Public pi-workflows API:** typed human choices, `humanDecision().onTimeout`, `humanDecisionEdge()`, channel profile configuration, the plan approval policy, the shared plan-change workflow, and the additive queue prepare-or-adopt operation.
