@@ -537,7 +537,20 @@ describe("host workflow display reducer", () => {
         workflowSource: { kind: "builtin", id: "echo", revision: "test" },
       },
     });
+    expect(() =>
+      views.reportActivity("connection-one", {
+        ...activity,
+        deliveryId: "interaction:another-request",
+      }),
+    ).toThrow(/delivery/);
     views.reportActivity("connection-one", activity);
+    expect(() =>
+      views.reportActivity("connection-one", {
+        ...activity,
+        deliveryId: "interaction:another-request",
+        sequence: 1,
+      }),
+    ).toThrow(/delivery/);
     expect(views.run("run-view")?.display).toMatchObject({
       status: "running",
       activity: "origin_turn",
@@ -553,6 +566,14 @@ describe("host workflow display reducer", () => {
       sequence: 1,
       state: "refresh",
     });
+    expect(() =>
+      views.reportActivity("connection-one", {
+        ...activity,
+        deliveryId: "interaction:another-request",
+        sequence: 2,
+        state: "settled",
+      }),
+    ).toThrow(/delivery/);
     views.clearConnection("connection-two");
     expect(views.run("run-view")?.display.status).toBe("running");
     views.expireActivity(Date.now() + ORIGIN_ACTIVITY_LEASE_MS / 2);

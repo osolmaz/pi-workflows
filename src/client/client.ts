@@ -839,10 +839,7 @@ function stopProcessGroup(pid: number | undefined): void {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 type ContentReference = {

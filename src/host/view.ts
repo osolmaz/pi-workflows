@@ -562,7 +562,10 @@ export class HostViewStore {
   }
 
   reportActivity(connectionId: string, report: OriginActivityReport): void {
-    const key = activityKey(connectionId, report.deliveryId);
+    if (report.deliveryId !== `interaction:${report.requestId}`) {
+      throw new Error("Origin activity delivery does not match the interactive request");
+    }
+    const key = activityKey(connectionId, report.requestId);
     const previous = this.activity.get(key);
     if (report.state === "settled") {
       if (previous === undefined) return;
@@ -570,6 +573,7 @@ export class HostViewStore {
         previous.sessionId !== report.sessionId ||
         previous.runId !== report.runId ||
         previous.requestId !== report.requestId ||
+        previous.deliveryId !== report.deliveryId ||
         previous.sessionEntryId !== report.sessionEntryId
       ) {
         throw new Error("Origin activity identity changed");
@@ -590,6 +594,7 @@ export class HostViewStore {
         previous.sessionId !== report.sessionId ||
         previous.runId !== report.runId ||
         previous.requestId !== report.requestId ||
+        previous.deliveryId !== report.deliveryId ||
         previous.sessionEntryId !== report.sessionEntryId
       ) {
         throw new Error("Origin activity identity changed");
@@ -847,8 +852,8 @@ function validateActivityRequest(
   }
 }
 
-function activityKey(connectionId: string, deliveryId: string): string {
-  return `${connectionId}\u0000${deliveryId}`;
+function activityKey(connectionId: string, requestId: string): string {
+  return `${connectionId}\u0000${requestId}`;
 }
 
 function contentKey(runId: string, contentPath: string): string {

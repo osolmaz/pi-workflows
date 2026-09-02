@@ -18,6 +18,37 @@ import type { JsonValue } from "../src/state/json.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("WorkflowClient", () => {
+  it("keeps the cold-start retry wait referenced", async () => {
+    const databasePath = path.join(await makeTempDir("client-cold-start"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    const connect = vi
+      .spyOn(client, "connect")
+      .mockRejectedValueOnce(new Error("not ready"))
+      .mockResolvedValue({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "hello",
+        connectionId: "cold-start",
+        packageVersion: "0.15.3",
+      });
+    const start = vi
+      .spyOn(client as unknown as { startDetached: () => void }, "startDetached")
+      .mockImplementation(() => undefined);
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    try {
+      await expect(client.ensureAvailable()).resolves.toMatchObject({
+        connectionId: "cold-start",
+      });
+      const timerIndex = timers.mock.calls.findIndex((call) => call[1] === 50);
+      const timer = timers.mock.results[timerIndex]?.value as NodeJS.Timeout | undefined;
+      expect(timer?.hasRef()).toBe(true);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      timers.mockRestore();
+      await client.close();
+    }
+  });
+
   it("uses one connection for requests and all live view subscriptions", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });

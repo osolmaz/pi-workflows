@@ -133,7 +133,7 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 
 The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of pending delivery records and their complete count. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
-Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus a durable reference to the complete original definition. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. Session-event pages include the replay checkpoint immediately before their first event. A large checkpoint uses the same content protocol. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus a durable reference to the complete original definition. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. Rust automatically requests and verifies the complete referenced workflow definition, decodes only the complete value, and then builds the graph layout. Session-event pages include the replay checkpoint immediately before their first event. A large checkpoint uses the same content protocol. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
 
 The run list is also byte-bounded and revision-bound. It contains only lightweight status and source facts. TypeScript and Rust clients assemble every page for one revision before replacing the visible complete list. An unchanged subscription performs a lightweight revision check and reuses its prior result.
 
@@ -177,7 +177,7 @@ The host accepts activity only when the durable pending interactive request and 
 
 The host keeps activity in memory with a short renewable lease tied to the client connection. The first report on each connection is `started`; only later reports on that same connection are refreshes. One constants module under `src/client/` owns both the refresh period and lease duration. The refresh period must be shorter than the lease duration, and the lease duration must bound how long a dead client can leave a false `running` display. The host clears activity on the matching settled event, connection loss, or lease expiry. A missing report falls back to durable `waiting`. It never creates a false `paused` or `running` state.
 
-Activity is display evidence only. It cannot renew a run claim, settle an interaction, change a workflow state, or authorize a control command. Durable workflow correctness does not depend on it.
+Activity is display evidence only. The host requires the deterministic `interaction:<request-id>` delivery ID and keys one overlay by connection and request. A caller-supplied alternate label cannot create a second overlay. Activity cannot renew a run claim, settle an interaction, change a workflow state, or authorize a control command. Durable workflow correctness does not depend on it.
 
 ### One renderer input
 
@@ -227,7 +227,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `protocol/client.v1.schema.json`, shared protocol fixtures, `src/client/protocol.ts`, and `tui/src/protocol.rs`.
 
-**Change:** Define the one envelope, operation names, outcomes, subscriptions, run-view snapshots, patches, pages, activity reports, maintenance requests, safe errors, and protocol handshake. Replace the host and replay schema identifiers. Add one accepted and rejected fixture corpus used by TypeScript and Rust.
+**Change:** Define the one envelope, operation names, outcomes, subscriptions, run-view snapshots, patches, pages, activity reports, maintenance requests, safe errors, and protocol handshake. Keep foreground host-start retry timers referenced until success or timeout; unreference only background reconnect timers. Replace the host and replay schema identifiers. Add one accepted and rejected fixture corpus used by TypeScript and Rust.
 
 **Verification:** TypeScript and Rust accept every valid fixture, reject every invalid fixture, and serialize the same canonical messages. No old live protocol identifier remains in production code.
 
@@ -297,7 +297,9 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Shared TypeScript and Rust wire fixtures, including ECMAScript number formatting and UTF-16 key ordering.
 - Envelope size, framing, unknown field, malformed message, and safe-error tests.
 - Status precedence and allowed-control table tests.
-- Activity validation against the recorded delivery entry, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
+- Activity validation against the recorded deterministic delivery ID and entry, duplicate alternate-ID rejection, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
+- Foreground cold-start timer reference tests.
+- Rust complete-definition request, digest verification, decode, and graph-layout tests.
 - Atomic origin-session view tests, including bounded pending delivery records and removal of a terminal run when its reservation ends.
 - Large workflow-topology frame tests with exact complete durable definition recovery, including user data that looks like an artifact sentinel.
 - Large replay-checkpoint frame tests with TypeScript hydration and Rust artifact resolution.

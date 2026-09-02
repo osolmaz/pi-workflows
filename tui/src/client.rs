@@ -5,7 +5,9 @@ use crate::protocol::{
     apply_patch, encode_request, parse_server_message, ClientRequest, PageKind, ServerMessage,
     TargetPatch, PROTOCOL_ID,
 };
-use crate::state::types::{DefinitionSnapshot, Manifest, RunState, StepRecord};
+use crate::state::types::{
+    as_artifact_ref, ArtifactRef, DefinitionSnapshot, Manifest, RunState, StepRecord,
+};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
@@ -63,7 +65,12 @@ pub struct RemoteView {
     pub possibly_interrupted: bool,
 }
 
-fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView> {
+fn decode_view(
+    revision: u64,
+    generation: u64,
+    raw: &Value,
+    definition_content: Option<&str>,
+) -> Option<RemoteView> {
     let graph_revision = raw
         .get("graphRevision")
         .and_then(Value::as_u64)
@@ -87,9 +94,8 @@ fn decode_view(revision: u64, generation: u64, raw: &Value) -> Option<RemoteView
         .get("stepTotal")
         .and_then(Value::as_u64)
         .unwrap_or(state.steps.len() as u64);
-    let snapshot: Option<DefinitionSnapshot> = raw
-        .get("workflow")
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let snapshot: Option<DefinitionSnapshot> = workflow_definition_value(raw, definition_content)
+        .and_then(|value| serde_json::from_value(value).ok());
     let graph_layout = raw
         .get("graphScene")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -200,6 +206,60 @@ fn page_items(raw: &Value, pointer: &str) -> Vec<Value> {
 
 fn pointer_u64(raw: &Value, pointer: &str) -> u64 {
     raw.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn workflow_definition_artifact(raw: &Value) -> Option<ArtifactRef> {
+    let workflow = raw.get("workflow")?;
+    as_artifact_ref(workflow).or_else(|| workflow.get("content").and_then(as_artifact_ref))
+}
+
+fn workflow_definition_value(raw: &Value, content: Option<&str>) -> Option<Value> {
+    let workflow = raw.get("workflow")?;
+    if workflow_definition_artifact(raw).is_some() {
+        return serde_json::from_str(content?).ok();
+    }
+    Some(workflow.clone())
+}
+
+fn workflow_definition_content(
+    state: &mut Shared,
+    run_id: &str,
+    raw: &Value,
+) -> (Option<String>, bool) {
+    let Some(artifact) = workflow_definition_artifact(raw) else {
+        return (None, false);
+    };
+    let key = (run_id.to_string(), artifact.path.clone());
+    match state.artifacts.get(&key).cloned() {
+        Some(ArtifactEntry::Ready(content)) => {
+            let valid = artifact.media_type == "application/json"
+                && content.len() as u64 == artifact.bytes
+                && hex_sha256(content.as_bytes()) == artifact.sha256;
+            if valid {
+                return (Some(content), false);
+            }
+            let error = "workflow definition content does not match its reference".to_string();
+            state
+                .artifacts
+                .insert(key, ArtifactEntry::Error(error.clone()));
+            state.error = Some(error);
+            (None, false)
+        }
+        Some(ArtifactEntry::Error(error)) => {
+            state.error = Some(format!(
+                "workflow definition content is unavailable: {error}"
+            ));
+            (None, false)
+        }
+        Some(ArtifactEntry::Loading(_)) => (None, false),
+        None => {
+            state
+                .artifacts
+                .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
+            state.content_requests.insert(key, 0);
+            (None, true)
+        }
+    }
 }
 
 fn apply_target_patches(view: &mut Value, targets: &[TargetPatch]) -> Result<()> {
@@ -433,12 +493,21 @@ impl RemoteRuns {
             self.decoded.remove(run_id);
             return None;
         };
+        let (definition_content, requested) = {
+            let mut shared = self.shared.lock().unwrap();
+            workflow_definition_content(&mut shared, run_id, &raw)
+        };
+        if requested {
+            self.wake();
+        }
         let stale = self
             .decoded
             .get(run_id)
             .is_none_or(|view| view.generation != generation);
         if stale {
-            if let Some(decoded) = decode_view(revision, generation, &raw) {
+            if let Some(decoded) =
+                decode_view(revision, generation, &raw, definition_content.as_deref())
+            {
                 self.decoded.insert(run_id.to_string(), decoded);
             } else {
                 self.decoded.remove(run_id);
@@ -944,6 +1013,7 @@ fn merge_content(state: &mut Shared, receipt: &Value) -> Result<()> {
             ArtifactEntry::Error("workflow content chunk offset is invalid".to_string()),
         );
         state.content_requests.remove(&key);
+        bump_view_generation(state, run_id);
         return Ok(());
     }
     bytes.extend_from_slice(&data);
@@ -970,6 +1040,7 @@ fn merge_content(state: &mut Shared, receipt: &Value) -> Result<()> {
             }
         }
         state.content_requests.remove(&key);
+        bump_view_generation(state, run_id);
     } else {
         state
             .artifacts
@@ -1093,6 +1164,12 @@ fn merge_page(state: &mut Shared, receipt: &Value) -> Result<()> {
     Ok(())
 }
 
+fn bump_view_generation(state: &mut Shared, run_id: &str) {
+    if let Some((_, _, generation, _)) = state.raw_views.get_mut(run_id) {
+        *generation = generation.wrapping_add(1);
+    }
+}
+
 fn store_snapshot(state: &mut Shared, run_id: String, event_revision: u64, value: Value) {
     state.next_view_generation = state.next_view_generation.wrapping_add(1);
     let generation = state.next_view_generation;
@@ -1200,10 +1277,75 @@ mod tests {
             "possiblyInterrupted":false
         });
 
-        let view = decode_view(4, 1, &raw).expect("host view should decode");
+        let view = decode_view(4, 1, &raw, None).expect("host view should decode");
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
+    }
+
+    #[test]
+    fn large_workflow_definitions_load_before_layout() {
+        let nodes = (0..300)
+            .map(|index| (format!("node-{index}"), json!({"nodeType":"compute"})))
+            .collect::<serde_json::Map<_, _>>();
+        let full = json!({
+            "schema":"pi-workflows.definition-snapshot.v1",
+            "name":"large",
+            "startAt":"node-0",
+            "nodes":nodes,
+            "edges":[]
+        });
+        let content = serde_json::to_string(&full).unwrap();
+        let path = "artifacts/sha256/definition.json";
+        let raw = json!({
+            "workflow": {
+                "schema":"pi-workflows.definition-snapshot.v1",
+                "name":"large",
+                "startAt":"node-0",
+                "nodes":{"node-0":{"nodeType":"compute"}},
+                "edges":[],
+                "content": {
+                    "$artifact": {
+                        "path":path,
+                        "mediaType":"application/json",
+                        "bytes":content.len(),
+                        "sha256":hex_sha256(content.as_bytes()),
+                        "opaque":true
+                    }
+                }
+            }
+        });
+        let mut state = Shared::default();
+        let (missing, requested) = workflow_definition_content(&mut state, "run-1", &raw);
+        assert!(missing.is_none());
+        assert!(requested);
+        assert_eq!(
+            state
+                .content_requests
+                .get(&("run-1".to_string(), path.to_string())),
+            Some(&0)
+        );
+        state.artifacts.insert(
+            ("run-1".to_string(), path.to_string()),
+            ArtifactEntry::Ready(content),
+        );
+        let (loaded, requested) = workflow_definition_content(&mut state, "run-1", &raw);
+        assert!(!requested);
+        let snapshot: DefinitionSnapshot =
+            serde_json::from_value(workflow_definition_value(&raw, loaded.as_deref()).unwrap())
+                .unwrap();
+        assert_eq!(snapshot.nodes.len(), 300);
+        assert_eq!(layout_graph(&snapshot).rank_of_node.len(), 300);
+
+        let mut invalid = raw;
+        invalid["workflow"]["content"]["$artifact"]["sha256"] = json!("0".repeat(64));
+        let (loaded, requested) = workflow_definition_content(&mut state, "run-1", &invalid);
+        assert!(loaded.is_none());
+        assert!(!requested);
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("does not match")));
     }
 
     #[test]
@@ -1466,6 +1608,9 @@ mod tests {
         let key = ("run-1".to_string(), path.to_string());
         let mut state = Shared::default();
         state
+            .raw_views
+            .insert("run-1".to_string(), (1, 1, 1, json!({"workflow":null})));
+        state
             .artifacts
             .insert(key.clone(), ArtifactEntry::Loading(Vec::new()));
         state.content_requests.insert(key.clone(), 0);
@@ -1489,6 +1634,7 @@ mod tests {
             matches!(state.artifacts.get(&key), Some(ArtifactEntry::Ready(value)) if value == "{\"complete\":true}")
         );
         assert!(!state.content_requests.contains_key(&key));
+        assert_eq!(state.raw_views["run-1"].2, 2);
     }
 
     #[test]
