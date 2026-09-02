@@ -22,6 +22,14 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
 
+    /// Render one complete view as plain text and exit.
+    #[arg(
+        long,
+        requires = "run_id",
+        conflicts_with_all = ["connect", "list_themes"]
+    )]
+    once: bool,
+
     /// Print built-in viewer theme names and exit.
     #[arg(long)]
     list_themes: bool,
@@ -99,6 +107,10 @@ async fn ensure_host(socket_path: &PathBuf) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    anyhow::ensure!(
+        !(cli.once && cli.command.is_some()),
+        "--once cannot be used with a subcommand"
+    );
     if cli.list_themes {
         for name in piw::theme::THEME_NAMES {
             println!("{name}");
@@ -121,6 +133,13 @@ fn main() -> Result<()> {
         None => {
             drop(runtime);
             match cli.run_id {
+                Some(run_id) if cli.once => {
+                    println!(
+                        "{}",
+                        ui::render_single_once(&socket_path, &run_id, cli_theme.as_deref())?
+                    );
+                    Ok(())
+                }
                 Some(run_id) => ui::run_single(&socket_path, &run_id, cli_theme.as_deref()),
                 None => ui::run_local(&socket_path, cli_theme.as_deref()),
             }

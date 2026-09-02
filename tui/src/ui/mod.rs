@@ -27,14 +27,16 @@ use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const PLAY_STEP_INTERVAL: Duration = Duration::from_millis(700);
@@ -44,6 +46,9 @@ const MIN_SIDEBAR_WIDTH: u16 = 12;
 const MIN_MAIN_WIDTH: u16 = 24;
 const MIN_GRAPH_HEIGHT: u16 = 5;
 const MIN_INSPECTOR_HEIGHT: u16 = 5;
+const ONCE_WIDTH: u16 = 120;
+const ONCE_HEIGHT: u16 = 40;
+const ONCE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RunSummary {
     pub run_id: String,
@@ -430,6 +435,38 @@ pub fn run_single(socket_path: &Path, run_id: &str, cli_theme: Option<&str>) -> 
     )
 }
 
+/// Render one complete run view without taking over the terminal.
+pub fn render_single_once(
+    socket_path: &Path,
+    run_id: &str,
+    cli_theme: Option<&str>,
+) -> Result<String> {
+    let mut remote = RemoteRuns::connect_local(socket_path)?;
+    remote.watch(run_id);
+    let deadline = Instant::now() + ONCE_TIMEOUT;
+    loop {
+        if remote.view(run_id).is_some() {
+            break;
+        }
+        if let Some(error) = remote.error() {
+            anyhow::bail!(error);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for workflow run {run_id}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let resolved_theme = theme::resolve(cli_theme);
+    let app = create_app(
+        Provider::Remote(remote),
+        false,
+        Some(run_id.to_owned()),
+        resolved_theme,
+    );
+    render_app_once(app, ONCE_WIDTH, ONCE_HEIGHT)
+}
+
 pub fn run_remote(url: &str, cli_theme: Option<&str>) -> Result<()> {
     let remote = RemoteRuns::connect(url)?;
     run_app(Provider::Remote(remote), true, None, cli_theme)
@@ -466,12 +503,53 @@ fn event_loop(
     initial_run: Option<String>,
     resolved_theme: theme::ResolvedTheme,
 ) -> Result<()> {
+    let mut app = create_app(provider, show_sidebar, initial_run, resolved_theme);
+
+    while !app.quit {
+        app.provider.tick();
+        let summaries = app.provider.summaries();
+        let selected_available = summaries
+            .iter()
+            .any(|summary| Some(&summary.run_id) == app.selected_run.as_ref());
+        app.selected_run = reconcile_selected_run(
+            app.selected_run.take(),
+            summaries.first().map(|summary| summary.run_id.as_str()),
+            selected_available,
+            app.show_sidebar,
+        );
+        if let Some(run_id) = app.selected_run.clone() {
+            app.provider.ensure_watch(&run_id);
+        }
+        app.ensure_step_window();
+        app.ensure_replay_window();
+        app.advance_playback();
+        terminal.draw(|frame| draw(frame, &mut app, &summaries))?;
+
+        if crossterm::event::poll(Duration::from_millis(120))? {
+            match crossterm::event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    handle_key(&mut app, &summaries, key);
+                }
+                Event::Mouse(mouse) => handle_mouse(&mut app, &summaries, mouse),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_app(
+    provider: Provider,
+    show_sidebar: bool,
+    initial_run: Option<String>,
+    resolved_theme: theme::ResolvedTheme,
+) -> App {
     let sidebar_width = resolved_theme
         .ui
         .sidebar_width
         .unwrap_or(DEFAULT_SIDEBAR_WIDTH);
     let inspector_height = resolved_theme.ui.inspector_height;
-    let mut app = App {
+    App {
         provider,
         show_sidebar,
         sidebar_collapsed: false,
@@ -519,39 +597,35 @@ fn event_loop(
         inspector_rect: Rect::default(),
         inspector_tab_hits: Vec::new(),
         quit: false,
-    };
-
-    while !app.quit {
-        app.provider.tick();
-        let summaries = app.provider.summaries();
-        let selected_available = summaries
-            .iter()
-            .any(|summary| Some(&summary.run_id) == app.selected_run.as_ref());
-        app.selected_run = reconcile_selected_run(
-            app.selected_run.take(),
-            summaries.first().map(|summary| summary.run_id.as_str()),
-            selected_available,
-            app.show_sidebar,
-        );
-        if let Some(run_id) = app.selected_run.clone() {
-            app.provider.ensure_watch(&run_id);
-        }
-        app.ensure_step_window();
-        app.ensure_replay_window();
-        app.advance_playback();
-        terminal.draw(|frame| draw(frame, &mut app, &summaries))?;
-
-        if crossterm::event::poll(Duration::from_millis(120))? {
-            match crossterm::event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    handle_key(&mut app, &summaries, key);
-                }
-                Event::Mouse(mouse) => handle_mouse(&mut app, &summaries, mouse),
-                _ => {}
-            }
-        }
     }
-    Ok(())
+}
+
+fn render_app_once(mut app: App, width: u16, height: u16) -> Result<String> {
+    app.provider.tick();
+    let summaries = app.provider.summaries();
+    if let Some(run_id) = app.selected_run.clone() {
+        app.provider.ensure_watch(&run_id);
+    }
+    app.ensure_step_window();
+    app.ensure_replay_window();
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| draw(frame, &mut app, &summaries))?;
+    let lines = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    Ok(lines.join("\n").trim_end().to_owned())
 }
 
 fn reconcile_selected_run(

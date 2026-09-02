@@ -28,6 +28,7 @@ cargo install pi-workflows
 
 - `piw` connects to the local package-owned workflow host. If the socket is absent, it runs the installed `pi-workflows host start` command.
 - `piw <runId>` opens one host-owned run view.
+- `piw <runId> --once` waits for that run, renders one complete 120 × 40 plain-text frame, and exits. It returns a nonzero status for host, protocol, missing-run, or snapshot-timeout failures.
 - `piw serve [--bind 127.0.0.1:9377]` relays each WebSocket connection to one host socket over the [live client protocol](live-replay-protocol.md). Only loopback addresses are accepted; use an SSH tunnel for remote viewing.
 - `piw --connect ws://…` reads from another `piw serve` process.
 - `piw --theme <name>` selects a theme for this invocation.
