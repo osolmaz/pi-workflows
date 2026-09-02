@@ -355,6 +355,35 @@ describe("host workflow display reducer", () => {
     };
     expect(checkpoint.throughSeq).toBe(session.eventPage?.start);
     expect(checkpoint.messages?.[0]?.blocks?.[0]?.text).toBe(largeStreamingTexts[0]);
+
+    const selectedTraceCursor = runs.traceCursorForStep("run-large-view", 0, 10_000);
+    const runRow = state.connection
+      .prepare("SELECT resource_id AS resourceId FROM runs WHERE run_id = ?")
+      .get("run-large-view") as { resourceId: string };
+    const revisionRow = state.connection
+      .prepare("SELECT max(resource_revision) AS revision FROM events WHERE resource_id = ?")
+      .get(runRow.resourceId) as { revision: number };
+    const laterPayload = state.putJson({
+      scope: "node",
+      nodeId: "reply",
+      attemptId: "later-repeated-attempt",
+      payload: {},
+    });
+    state.connection
+      .prepare(
+        `INSERT INTO events(
+           event_id, resource_id, resource_revision, event_type,
+           actor_type, payload_hash, recorded_at
+         ) VALUES (?, ?, ?, 'node_started', 'system', ?, ?)`,
+      )
+      .run(
+        "later-repeated-attempt-event",
+        runRow.resourceId,
+        revisionRow.revision + 1,
+        laterPayload,
+        Date.now(),
+      );
+    expect(runs.traceCursorForStep("run-large-view", 0, 10_000)).toBe(selectedTraceCursor);
     state.close();
   });
 

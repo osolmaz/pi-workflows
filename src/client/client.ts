@@ -517,7 +517,7 @@ export class WorkflowClient {
       signal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
-      if (!socket.write(encodeProtocolLine(request))) await once(socket, "drain");
+      if (!socket.write(encodeProtocolLine(request))) await waitForSocketDrain(socket, signal);
     } catch (error) {
       const pending = this.pending.get(request.requestId);
       this.pending.delete(request.requestId);
@@ -841,6 +841,34 @@ function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new Error("Workflow request was cancelled");
+}
+
+function waitForSocketDrain(socket: Socket, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(abortReason(signal));
+  if (socket.destroyed) return Promise.reject(new Error("Workflow host connection closed"));
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      socket.off("drain", onDrain);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settle = (error?: Error): void => {
+      cleanup();
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const onDrain = (): void => settle();
+    const onClose = (): void => settle(new Error("Workflow host connection closed"));
+    const onError = (error: Error): void => settle(error);
+    const onAbort = (): void => settle(abortReason(signal as AbortSignal));
+    socket.once("drain", onDrain);
+    socket.once("close", onClose);
+    socket.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
+    else if (socket.destroyed) onClose();
+  });
 }
 
 function runtimePackageVersion(): string {

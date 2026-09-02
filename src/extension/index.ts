@@ -1272,7 +1272,10 @@ async function requestAccepted(
   options: Parameters<WorkflowClient["request"]>[0],
 ): Promise<ClientResponse> {
   await client.ensureAvailable();
-  const response = await client.request(options);
+  const response =
+    options.idempotencyKey === undefined
+      ? await client.request(options)
+      : await client.requestDurable({ ...options, idempotencyKey: options.idempotencyKey });
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
     throw new Error(response.error ?? `Workflow host rejected ${options.operation}`);
   }

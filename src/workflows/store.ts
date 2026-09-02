@@ -2505,16 +2505,26 @@ export class WorkflowRunStore {
     }
     const run = this.readRunRow(runId);
     if (run === undefined) return 0;
-    const matched = this.state.connection
+    const exactAttempt = this.state.connection
       .prepare(
         `SELECT e.resource_revision AS revision FROM events e
          JOIN blobs b ON b.blob_hash = e.payload_hash
-         WHERE e.resource_id = ? AND (
-           json_extract(CAST(b.content AS TEXT), '$.attemptId') = ? OR
-           json_extract(CAST(b.content AS TEXT), '$.nodeId') = ?
-         ) ORDER BY e.resource_revision DESC LIMIT 1`,
+         WHERE e.resource_id = ?
+           AND json_extract(CAST(b.content AS TEXT), '$.attemptId') = ?
+         ORDER BY e.resource_revision DESC LIMIT 1`,
       )
-      .get(run.resourceId, step.attemptId, step.nodeId);
+      .get(run.resourceId, step.attemptId);
+    const matched = isRevisionRow(exactAttempt)
+      ? exactAttempt
+      : this.state.connection
+          .prepare(
+            `SELECT e.resource_revision AS revision FROM events e
+             JOIN blobs b ON b.blob_hash = e.payload_hash
+             WHERE e.resource_id = ?
+               AND json_extract(CAST(b.content AS TEXT), '$.nodeId') = ?
+             ORDER BY e.resource_revision DESC LIMIT 1`,
+          )
+          .get(run.resourceId, step.nodeId);
     if (!isRevisionRow(matched)) return Math.min(stepCursor, Math.max(0, traceTotal - 1));
     const index = this.state.connection
       .prepare(

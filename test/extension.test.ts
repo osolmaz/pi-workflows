@@ -22,6 +22,7 @@ afterEach(async () => {
   }
   testHome = undefined;
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 type FakeContext = ReturnType<typeof makePi>["ctx"];
@@ -350,6 +351,7 @@ describe("pi-workflows hosted extension", () => {
 
   it("starts, presents, updates, and completes an interactive hosted run", async () => {
     const { cwd, workflowPath } = await setupProject();
+    const durableRequests = vi.spyOn(WorkflowClient.prototype, "requestDurable");
     const fake = makePi({ cwd });
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
@@ -385,7 +387,11 @@ describe("pi-workflows hosted extension", () => {
       store.close();
     }
     expect(fake.sent).toHaveLength(1);
+    expect(durableRequests.mock.calls.map(([options]) => options.operation)).toEqual(
+      expect.arrayContaining(["run.start", "interaction.update", "interaction.submit"]),
+    );
     await fake.emit("session_shutdown");
+    durableRequests.mockRestore();
   }, 60_000);
 
   it("shows host state and pauses a waiting step when Escape aborts its turn", async () => {
