@@ -49,6 +49,48 @@ describe("WorkflowClient", () => {
     }
   });
 
+  it("retries one durable invocation with the same idempotency key", async () => {
+    const databasePath = path.join(await makeTempDir("client-durable-retry"), "state.sqlite");
+    const client = new WorkflowClient({ databasePath });
+    const request = vi
+      .spyOn(client, "request")
+      .mockRejectedValueOnce(new Error("connection lost"))
+      .mockResolvedValue({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "response",
+        requestId: "retry",
+        outcome: "adopted",
+      });
+    const available = vi.spyOn(client, "ensureAvailable").mockResolvedValue({
+      schema: CLIENT_PROTOCOL_SCHEMA,
+      type: "hello",
+      connectionId: "reconnected",
+      packageVersion: "0.15.3",
+    });
+    try {
+      await expect(
+        client.requestDurable({
+          operation: "state.backup",
+          requestId: "first",
+          idempotencyKey: "one-invocation",
+          payload: { destination: "/tmp/backup.sqlite" },
+        }),
+      ).resolves.toMatchObject({ outcome: "adopted" });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(request.mock.calls[0]?.[0]).toMatchObject({
+        requestId: "first",
+        idempotencyKey: "one-invocation",
+      });
+      expect(request.mock.calls[1]?.[0]).toMatchObject({
+        idempotencyKey: "one-invocation",
+      });
+      expect(request.mock.calls[1]?.[0].requestId).not.toBe("first");
+      expect(available).toHaveBeenCalledOnce();
+    } finally {
+      await client.close();
+    }
+  });
+
   it("uses one connection for requests and all live view subscriptions", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });

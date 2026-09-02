@@ -19,6 +19,7 @@ import {
 import { StateDatabase } from "../src/state/database.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
+import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
@@ -335,6 +336,78 @@ describe("host workflow display reducer", () => {
     expect(checkpoint.messages?.[0]?.blocks?.[0]?.text).toBe(largeStreamingTexts[0]);
     state.close();
   });
+
+  it("keeps complete graph history reachable outside the bounded snapshot", async () => {
+    const projectPath = await makeTempDir("host-view-graph-project");
+    const databasePath = path.join(await makeTempDir("host-view-graph-state"), "state.sqlite");
+    const state = new StateDatabase({ filePath: databasePath });
+    const queue = new SqliteControllerStore(databasePath, { state, projectPath });
+    const hostState = new HostStateStore(databasePath, { state });
+    const nodeCount = 257;
+    const workflow = defineWorkflow({
+      name: "large-graph-history",
+      startAt: "node-0",
+      maxSteps: nodeCount + 1,
+      nodes: Object.fromEntries(
+        Array.from({ length: nodeCount }, (_, index) => [
+          `node-${index}`,
+          compute({ run: () => index }),
+        ]),
+      ),
+      edges: Array.from({ length: nodeCount - 1 }, (_, index) => ({
+        from: `node-${index}`,
+        to: `node-${index + 1}`,
+      })),
+    });
+    const compiled = compileWorkflowDefinition(workflow);
+    const snapshot = createDefinitionSnapshot(compiled);
+    const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
+    queue.enqueueWorkflowRun({
+      runId: "run-large-graph",
+      workflowName: compiled.name,
+      workflowSourceRef: "builtin:large-graph",
+      workflowSource: {
+        root: { kind: "builtin", id: "large-graph", revision: "test" },
+        mounted: [],
+      },
+      definitionDigest,
+      definitionSnapshot: snapshot,
+      input: {},
+      runnerId: "host-view",
+      claimToken: "claim-large-graph",
+      leaseMs: 60_000,
+      originSessionId: "session-large-graph",
+    });
+    const runs = new WorkflowRunStore(databasePath, {
+      state,
+      authorityProvider: () => queue.workflowRunAuthority("run-large-graph", "claim-large-graph"),
+    });
+    await new WorkflowEngine({ store: runs, executor: new ScriptedExecutor() }).run(
+      compiled,
+      {},
+      { runId: "run-large-graph" },
+    );
+    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const view = views.run("run-large-graph");
+    if (view === null) throw new Error("large graph view missing");
+    expect(view.graphStepTotal).toBe(nodeCount);
+    expect(view.graphSteps.length).toBeLessThan(nodeCount);
+    expect(view.takenTransitionTotal).toBe(nodeCount - 1);
+    const historyReference = view.graphHistory as {
+      $artifact?: { sha256?: string };
+    };
+    const digest = historyReference.$artifact?.sha256;
+    if (digest === undefined) throw new Error("complete graph history reference missing");
+    const history = JSON.parse(
+      runs.readContentBlob(view.runId, digest)?.content.toString("utf8") ?? "null",
+    ) as {
+      steps?: unknown[];
+      transitions?: unknown[];
+    };
+    expect(history.steps).toHaveLength(nodeCount);
+    expect(history.transitions).toHaveLength(nodeCount - 1);
+    state.close();
+  }, 30_000);
 
   it("bounds large workflow topology and keeps the full definition reachable", async () => {
     const projectPath = await makeTempDir("host-view-topology-project");

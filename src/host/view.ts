@@ -255,11 +255,19 @@ export class HostViewStore {
       loaded.followUpQueue === null
         ? null
         : projectFollowUpQueue(loaded.followUpQueue, followUpPage.items);
-    const graphSteps = byteBoundedForwardPage(loaded.graphSteps, (step) => toCompactStepJson(step));
+    const completeGraphSteps = loaded.graphSteps.map((step) => toCompactStepJson(step));
+    const completeTakenTransitions = loaded.takenTransitions.map((transition) =>
+      toJson(transition),
+    );
+    const graphSteps = byteBoundedForwardPage(completeGraphSteps, (step) => step);
     const takenTransitions = byteBoundedForwardPage(
-      loaded.takenTransitions,
+      completeTakenTransitions,
       (transition) => transition,
     ).filter((transition): transition is string => typeof transition === "string");
+    const graphHistory = this.projectValue(runId, {
+      steps: completeGraphSteps,
+      transitions: completeTakenTransitions,
+    });
     const revision = this.presentationRevision(runId);
     const display = this.display(queue, loaded.state);
     return {
@@ -276,6 +284,7 @@ export class HostViewStore {
       graphStepStart: 0,
       graphStepTotal: loaded.graphSteps.length,
       takenTransitions,
+      graphHistory,
       takenTransitionStart: 0,
       takenTransitionTotal: loaded.takenTransitions.length,
       graphCursor,

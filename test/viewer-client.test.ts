@@ -2,9 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkflowClient } from "../src/client/client.js";
 import { materializeRunView } from "../src/client/materialize.js";
 import type { JsonValue } from "../src/state/json.js";
+import { firstRunView } from "../src/viewer/cli.js";
 import { renderClientView } from "../src/viewer/tui.js";
 
 describe("host client renderer", () => {
+  it("rejects a missing one-shot run", async () => {
+    const client = { getRun: vi.fn(async () => null) } as unknown as WorkflowClient;
+    await expect(firstRunView(client, "missing-run")).rejects.toThrow(
+      "Workflow run not found: missing-run",
+    );
+  });
+
   it("materializes paged history and referenced content", async () => {
     const hydrateContent = vi.fn(async (_runId: string, value: JsonValue) => {
       const hydrated = structuredClone(value) as Record<string, JsonValue>;
@@ -17,6 +25,14 @@ describe("host client renderer", () => {
         startAt: "one",
         nodes: { one: { nodeType: "compute" }, two: { nodeType: "compute" } },
         edges: [{ from: "one", to: "two" }],
+      };
+      hydrated.graphHistory = {
+        steps: [
+          { nodeId: "one", outcome: "ok" },
+          { nodeId: "two", outcome: "ok" },
+          { nodeId: "three", outcome: "ok" },
+        ],
+        transitions: ["one->two", "two->three"],
       };
       return hydrated;
     });
@@ -54,6 +70,7 @@ describe("host client renderer", () => {
       graphCursor: 2,
       graphSteps: [{ nodeId: "three", outcome: "ok" }],
       takenTransitions: [],
+      graphHistory: { $artifact: { path: "content/graph-history.json" } },
       workflow: {
         schema: "pi-workflows.definition-snapshot.v1",
         name: "paged",

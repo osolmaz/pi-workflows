@@ -52,6 +52,7 @@ export type WorkflowRunView = {
   graphStepStart: number;
   graphStepTotal: number;
   takenTransitions: string[];
+  graphHistory: JsonValue;
   takenTransitionStart: number;
   takenTransitionTotal: number;
   graphCursor: number;

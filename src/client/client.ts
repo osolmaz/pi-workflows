@@ -114,6 +114,31 @@ export class WorkflowClient {
     return await this.requestConnected(options);
   }
 
+  async requestDurable(options: {
+    operation: ClientOperation;
+    requestId?: string;
+    idempotencyKey: string;
+    runId?: string;
+    expectedRevision?: number;
+    payload?: JsonValue;
+    signal?: AbortSignal;
+  }): Promise<ClientResponse> {
+    try {
+      return await this.request(options);
+    } catch (error) {
+      if (
+        this.closed ||
+        options.signal?.aborted === true ||
+        error instanceof WorkflowClientVersionError
+      ) {
+        throw error;
+      }
+      this.resetConnection();
+      await this.ensureAvailable();
+      return await this.request({ ...options, requestId: randomUUID() });
+    }
+  }
+
   async getRun(runId: string): Promise<WorkflowRunView | null> {
     const response = await this.request({ operation: "view.run.get", runId });
     if (response.outcome === "notFound") return null;
