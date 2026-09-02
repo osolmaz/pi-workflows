@@ -4,9 +4,14 @@ import { describe, expect, it } from "vitest";
 import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
+import { WorkflowMessageStore, workflowMessageIdFor } from "../src/state/workflow-messages.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
+import {
+  notificationWorkflowMessageContent,
+  terminalWorkflowMessageContent,
+} from "../src/workflows/workflow-message-content.js";
 import { ScriptedExecutor, makeTempDir } from "./helpers.js";
 
 async function databaseFixture() {
@@ -129,194 +134,123 @@ describe("SQLite delivery lifecycle", () => {
     store.close();
   });
 
-  it("claims and settles notifications exactly once", async () => {
+  it("persists workflow messages and model turns without send claims", async () => {
     const { store, databasePath } = await databaseFixture();
-    reserve(store, "notification-run", "session-a");
+    reserve(store, "message-run", "session-a");
     const token = "run-token";
     store.claimWorkflowRun({
-      runId: "notification-run",
+      runId: "message-run",
       runnerId: "session-a",
       claimToken: token,
       leaseMs: 60_000,
     });
     const runStore = new WorkflowRunStore(databasePath, {
       state: store.state,
-      authorityProvider: () => store.workflowRunAuthority("notification-run", token),
+      authorityProvider: () => store.workflowRunAuthority("message-run", token),
     });
     const run = await new WorkflowEngine({
       store: runStore,
       executor: new ScriptedExecutor().respond("reply", { output: { reply: "ok" } }),
-    }).run(echoWorkflow, {}, { runId: "notification-run" });
-    const attemptId = run.state.steps[0]?.attemptId;
-    if (attemptId === undefined) throw new Error("attempt missing");
-    const first = store.enqueueWorkflowNotification({
+    }).run(echoWorkflow, {}, { runId: "message-run" });
+    const messages = new WorkflowMessageStore(store.state);
+    const notificationId = "notification-1";
+    const notificationMessageId = workflowMessageIdFor("notification", notificationId, "1");
+    const notificationContent = notificationWorkflowMessageContent({
+      workflowMessageId: notificationMessageId,
+      notificationId,
       runId: run.runId,
-      nodeId: "reply",
-      attemptId,
-      notificationIndex: 1,
-      targetSessionId: "session-a",
       kind: "final",
       content: "done",
     });
-    const adopted = store.enqueueWorkflowNotification({
+    const first = messages.create({
+      workflowMessageId: notificationMessageId,
       runId: run.runId,
-      nodeId: "reply",
-      attemptId,
-      notificationIndex: 1,
       targetSessionId: "session-a",
-      kind: "final",
-      content: "done",
+      kind: "notification",
+      sourceId: notificationId,
+      idempotencyKey: "1",
+      content: notificationContent,
     });
-    expect(adopted.notificationId).toBe(first.notificationId);
     expect(
-      store.claimPendingWorkflowNotifications({
-        targetSessionId: "session-b",
-        claimToken: "wrong",
-        leaseMs: 10_000,
-      }),
-    ).toEqual([]);
-    const now = Date.now();
-    const claimed = store.claimPendingWorkflowNotifications({
-      targetSessionId: "session-a",
-      claimToken: "delivery-token",
-      leaseMs: 1_000,
-      now: new Date(now).toISOString(),
-    });
-    expect(claimed).toHaveLength(1);
-    const reclaimed = store.claimPendingWorkflowNotifications({
-      targetSessionId: "session-a",
-      claimToken: "replacement-token",
-      leaseMs: 10_000,
-      now: new Date(now + 2_000).toISOString(),
-    });
-    expect(reclaimed).toHaveLength(1);
-    expect(
-      store.markWorkflowNotificationDelivered({
-        notificationId: first.notificationId,
-        targetSessionId: "session-b",
-        claimToken: "replacement-token",
-        now: new Date(now + 2_000).toISOString(),
-      }),
-    ).toBe(false);
-    expect(
-      store.markWorkflowNotificationDelivered({
-        notificationId: first.notificationId,
+      messages.create({
+        workflowMessageId: notificationMessageId,
+        runId: run.runId,
         targetSessionId: "session-a",
-        claimToken: "delivery-token",
-        now: new Date(now + 2_000).toISOString(),
+        kind: "notification",
+        sourceId: notificationId,
+        idempotencyKey: "1",
+        content: notificationContent,
       }),
-    ).toBe(false);
+    ).toEqual(first);
+    expect(() =>
+      messages.adoptBranch(
+        "session-b",
+        [{ workflowMessageId: notificationMessageId, piSessionEntryId: "entry-wrong" }],
+        new Set([notificationMessageId]),
+      ),
+    ).toThrow(/wrong origin session/);
     expect(
-      store.markWorkflowNotificationDelivered({
-        notificationId: first.notificationId,
-        targetSessionId: "session-a",
-        claimToken: "replacement-token",
-        now: new Date(now + 2_000).toISOString(),
-      }),
-    ).toBe(true);
-    expect(
-      store.claimPendingWorkflowNotifications({
-        targetSessionId: "session-a",
-        claimToken: "later",
-        leaseMs: 10_000,
-      }),
-    ).toEqual([]);
-    store.close();
-  });
+      messages.adoptBranch(
+        "session-a",
+        [{ workflowMessageId: notificationMessageId, piSessionEntryId: "entry-1" }],
+        new Set([notificationMessageId]),
+      )[0],
+    ).toMatchObject({ status: "sent", piSessionEntryId: "entry-1" });
 
-  it("claims, releases, makes eligible, and resolves deferred turns", async () => {
-    const { store } = await databaseFixture();
-    reserve(store, "run-1", "session-a");
-    const facts = {
-      schema: "pi-workflows.deferred-turn-facts.v1" as const,
-      workflowName: "echo",
-      runId: "run-1",
-      observedState: "failed",
-      cause: "failed" as const,
-      nodeId: null,
-      attemptId: null,
-      reason: "boom",
-      handoff: false,
-    };
-    const intent = store.ensureWorkflowTurnIntent({
-      intentId: "intent-1",
-      sourceEventId: "source-1",
-      runId: "run-1",
-      workflowRef: "echo",
+    const terminalMessageId = workflowMessageIdFor("terminal", run.runId, "terminal");
+    messages.create({
+      workflowMessageId: terminalMessageId,
+      runId: run.runId,
       targetSessionId: "session-a",
-      cause: "failed",
-      fallbackFacts: facts,
-      eligible: false,
+      kind: "terminal",
+      sourceId: run.runId,
+      idempotencyKey: "terminal",
+      content: terminalWorkflowMessageContent({
+        workflowMessageId: terminalMessageId,
+        runId: run.runId,
+        content: "Present the result.",
+        details: { status: "completed" },
+      }),
+    });
+    messages.adoptBranch(
+      "session-a",
+      [{ workflowMessageId: terminalMessageId, piSessionEntryId: "entry-2" }],
+      new Set([terminalMessageId]),
+    );
+    const turn = messages.startTurn({
+      workflowMessageId: terminalMessageId,
+      workflowTurnId: "turn-1",
+      runId: run.runId,
+      targetSessionId: "session-a",
     });
     expect(
-      store.ensureWorkflowTurnIntent({
-        intentId: "intent-other",
-        sourceEventId: "source-1",
-        runId: "run-1",
-        workflowRef: "echo",
+      messages.startTurn({
+        workflowMessageId: terminalMessageId,
+        workflowTurnId: "turn-1",
+        runId: run.runId,
         targetSessionId: "session-a",
-        cause: "failed",
-        fallbackFacts: facts,
-        eligible: false,
-      }).intentId,
-    ).toBe(intent.intentId);
-    expect(
-      store.claimWorkflowTurnIntent({
-        intentId: intent.intentId,
-        targetSessionId: "session-b",
-        claimToken: "token",
-        leaseMs: 10_000,
       }),
-    ).toBeUndefined();
+    ).toEqual(turn);
     expect(
-      store.claimWorkflowTurnIntent({
-        intentId: intent.intentId,
+      messages.endTurn({
+        workflowMessageId: terminalMessageId,
+        workflowTurnId: "turn-1",
+        runId: run.runId,
         targetSessionId: "session-a",
-        claimToken: "token",
-        leaseMs: 10_000,
+        stopReason: "completed",
+        responseSessionEntryId: "assistant-1",
       }),
-    ).toBeDefined();
-    expect(
-      store.releaseWorkflowTurnIntentClaim({
-        intentId: intent.intentId,
-        targetSessionId: "session-b",
-        claimToken: "token",
-      }),
-    ).toBe(false);
-    expect(
-      store.releaseWorkflowTurnIntentClaim({
-        intentId: intent.intentId,
+    ).toMatchObject({ state: "ended", stopReason: "completed" });
+    expect(() =>
+      messages.endTurn({
+        workflowMessageId: terminalMessageId,
+        workflowTurnId: "turn-1",
+        runId: run.runId,
         targetSessionId: "session-a",
-        claimToken: "token",
+        stopReason: "error",
       }),
-    ).toBe(true);
-    expect(
-      store.makeWorkflowTurnIntentEligible({ intentId: intent.intentId, fallbackFacts: facts }),
-    ).toBe(true);
-    const [eligible] = store.claimEligibleWorkflowTurnIntents({
-      targetSessionId: "session-a",
-      claimToken: "fallback",
-      leaseMs: 10_000,
-    });
-    expect(eligible?.intentId).toBe(intent.intentId);
-    expect(
-      store.resolveWorkflowTurnIntent({
-        intentId: intent.intentId,
-        targetSessionId: "session-b",
-        claimToken: "fallback",
-        resolution: "fallback",
-      }),
-    ).toBe(false);
-    expect(
-      store.resolveWorkflowTurnIntent({
-        intentId: intent.intentId,
-        targetSessionId: "session-a",
-        claimToken: "fallback",
-        resolution: "fallback",
-        messageId: "message-1",
-      }),
-    ).toBe(true);
-    expect(store.listWorkflowTurnIntents({ runId: "run-1", unresolvedOnly: true })).toEqual([]);
+    ).toThrow(/conflicts/);
+    runStore.close();
     store.close();
   });
 

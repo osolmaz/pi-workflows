@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
 import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import piWorkflows, { activityStateForConnection } from "../src/extension/index.js";
+import piWorkflows from "../src/extension/index.js";
 import { HostStateStore } from "../src/host/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
@@ -26,20 +26,6 @@ afterEach(async () => {
 });
 
 type FakeContext = ReturnType<typeof makePi>["ctx"];
-
-describe("origin activity connection state", () => {
-  it("starts the lease again on the first refresh after reconnect", () => {
-    expect(activityStateForConnection("refresh", "connection-one", "connection-two")).toBe(
-      "started",
-    );
-    expect(activityStateForConnection("refresh", "connection-two", "connection-two")).toBe(
-      "refresh",
-    );
-    expect(activityStateForConnection("settled", "connection-one", "connection-two")).toBe(
-      "settled",
-    );
-  });
-});
 
 function makePi(options: {
   cwd: string;
@@ -417,6 +403,7 @@ describe("pi-workflows hosted extension", () => {
     fake.shortcuts.get("shift+up")?.(fake.ctx);
 
     const contract = stepContract(fake.sent[0] as Record<string, unknown>);
+    await fake.emit("agent_start");
     await fake.emit("agent_end", {
       messages: [
         {
@@ -440,9 +427,7 @@ describe("pi-workflows hosted extension", () => {
       }
     }, 30_000);
     await waitUntil(() => fake.statuses.at(-1)?.includes("[paused]") === true, 30_000);
-    expect(fake.notifications.at(-1)?.message).toContain(
-      "paused because its model turn was interrupted",
-    );
+    expect(fake.notifications.at(-1)?.message).toContain("durably paused");
 
     await expect(
       fake.runTool("paused-submit", {
@@ -473,7 +458,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
-  it("does not pause a waiting step for an unrelated interrupted turn", async () => {
+  it("does not bind an unrelated interrupted turn while a workflow is paused", async () => {
     const { cwd, workflowPath } = await setupProject();
     const abort = new AbortController();
     abort.abort();
@@ -481,7 +466,17 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(() => fake.sent.length === 1, 30_000);
+    await fake.runCommand("pause");
+    await waitUntil(() => {
+      const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
+      try {
+        return store.listRuns()[0]?.state.paused === true;
+      } finally {
+        store.close();
+      }
+    }, 30_000);
 
+    await fake.emit("agent_start");
     await fake.emit("agent_end", {
       messages: [
         { role: "user", content: "Unrelated request" },
@@ -495,15 +490,10 @@ describe("pi-workflows hosted extension", () => {
 
     const store = new WorkflowRunStore(workflowStatePath(), { readOnly: true });
     try {
-      expect(store.listRuns()[0]?.state.paused).not.toBe(true);
+      expect(store.listRuns()[0]?.state.paused).toBe(true);
     } finally {
       store.close();
     }
-    expect(
-      fake.notifications.some((notification) =>
-        notification.message.includes("paused because its model turn was interrupted"),
-      ),
-    ).toBe(false);
 
     await fake.runCommand("cancel");
     await fake.emit("session_shutdown");
@@ -516,6 +506,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.runCommand(workflowPath);
     await waitUntil(() => fake.sent.length === 1, 30_000);
 
+    await fake.emit("agent_start");
     await fake.emit("agent_end", {
       messages: [
         {
@@ -570,9 +561,7 @@ describe("pi-workflows hosted extension", () => {
     await waitUntil(() => {
       const store = new HostStateStore(workflowStatePath(), { readOnly: true });
       try {
-        return (
-          store.listPendingInteractions("session-one")[0]?.presentationSessionEntryId === "entry-1"
-        );
+        return store.workflowMessages.listSession("session-one")[0]?.piSessionEntryId === "entry-1";
       } finally {
         store.close();
       }

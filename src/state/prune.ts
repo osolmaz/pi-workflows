@@ -215,13 +215,7 @@ function treeHasBlocker(database: Database.Database, runIds: string[]): boolean 
     hasRow(
       database,
       `SELECT 1 FROM workflow_follow_ups
-       WHERE run_id IN (${values}) AND status IN ('queued', 'pending_presentation', 'ready')`,
-      runIds,
-    ) ||
-    hasRow(
-      database,
-      `SELECT 1 FROM workflow_follow_up_queues
-       WHERE run_id IN (${values}) AND presentation_state = 'pending'`,
+       WHERE run_id IN (${values}) AND status = 'queued'`,
       runIds,
     ) ||
     hasRow(
@@ -294,15 +288,8 @@ function deleteRunAggregates(database: Database.Database, runIds: string[]): voi
   const effectIds = effectRows.map((row) => row.effectId);
   if (effectIds.length !== 0) {
     const effectValues = placeholders(effectIds);
-    database
-      .prepare(`DELETE FROM notifications WHERE effect_id IN (${effectValues})`)
-      .run(...effectIds);
-    database
-      .prepare(`DELETE FROM turn_intents WHERE effect_id IN (${effectValues})`)
-      .run(...effectIds);
     database.prepare(`DELETE FROM effects WHERE effect_id IN (${effectValues})`).run(...effectIds);
   }
-  database.prepare(`DELETE FROM turn_intents WHERE run_id IN (${values})`).run(...runIds);
   database
     .prepare(
       `DELETE FROM continuations
@@ -331,13 +318,11 @@ function relatedResourceIds(database: Database.Database, runIds: string[]): stri
       `SELECT resource_id AS resourceId FROM runs WHERE run_id IN (${values})
        UNION SELECT resource_id FROM session_segments WHERE run_id IN (${values})
        UNION SELECT resource_id FROM human_decisions WHERE run_id IN (${values})
-       UNION SELECT resource_id FROM turn_intents WHERE run_id IN (${values})
        UNION SELECT resource_id FROM workflow_settings
          WHERE origin_run_id IN (${values}) OR active_run_id IN (${values})
-       UNION SELECT resource_id FROM workflow_follow_up_queues WHERE run_id IN (${values})
        UNION SELECT resource_id FROM workflow_follow_ups WHERE run_id IN (${values})`,
     )
-    .all(...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds)
+    .all(...runIds, ...runIds, ...runIds, ...runIds, ...runIds, ...runIds)
     .filter(isResourceRow);
   const resources = rows.map((row) => row.resourceId);
   if (resources.length === 0) return [];
@@ -349,20 +334,7 @@ function relatedResourceIds(database: Database.Database, runIds: string[]): stri
     .all(...resources)
     .filter(isResourceRow)
     .map((row) => row.resourceId);
-  const notificationResources = database
-    .prepare(
-      `SELECT resource.resource_id AS resourceId
-       FROM notifications notification
-       JOIN effects effect ON effect.effect_id = notification.effect_id
-       JOIN resources resource
-         ON resource.resource_type = 'notification'
-        AND resource.aggregate_key = notification.notification_id
-       WHERE effect.source_resource_id IN (${placeholders(resources)})`,
-    )
-    .all(...resources)
-    .filter(isResourceRow)
-    .map((row) => row.resourceId);
-  return [...new Set([...resources, ...effectResources, ...notificationResources])];
+  return [...new Set([...resources, ...effectResources])];
 }
 
 function selectionSignature(database: Database.Database, runIds: string[]): string {

@@ -300,11 +300,7 @@ export function renderRunDetailLines(
 
   if ((bundle.followUpQueue?.followUps.length ?? 0) > 0) {
     lines.push("");
-    lines.push(
-      ansi.bold(
-        `follow-ups · presentation ${bundle.followUpQueue?.presentationState ?? "unknown"}`,
-      ),
-    );
+    lines.push(ansi.bold("follow-ups"));
     for (const followUp of bundle.followUpQueue?.followUps ?? []) {
       lines.push(
         fitWidth(

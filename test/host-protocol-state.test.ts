@@ -204,46 +204,70 @@ describe("host durable state", () => {
       attemptId,
       targetSessionId: "session-1",
       kind: "agent",
-      contract: { prompt: "Continue" },
+      contract: {
+        prompt: "Continue",
+        contract: {
+          runId: "run-1",
+          workflowName: "echo",
+          nodeId: "reply",
+          attemptId,
+          completion: "submit",
+        },
+      },
     });
     expect(host.listPendingInteractions("session-1")).toHaveLength(1);
-    const presentationClaim = host.claimInteractionPresentation({
-      requestId: interaction.requestId,
-      expectedRevision: interaction.revision,
-      presenterId: "pi-client-one",
-      leaseMs: 1_000,
+    const message = host.workflowMessages.listSession("session-1")[0];
+    if (message === undefined) throw new Error("workflow message missing");
+    expect(message).toMatchObject({
+      kind: "step",
+      sourceId: interaction.requestId,
+      status: "pending",
     });
-    for (const presenterId of ["pi-client-one", "pi-client-two"]) {
-      expect(() =>
-        host.claimInteractionPresentation({
-          requestId: interaction.requestId,
-          expectedRevision: presentationClaim.revision,
-          presenterId,
-          leaseMs: 1_000,
-        }),
-      ).toThrow(/conflict/);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_100));
-    const adoptedPresentation = host.claimInteractionPresentation({
-      requestId: interaction.requestId,
-      expectedRevision: presentationClaim.revision,
-      presenterId: "pi-client-two",
-      leaseMs: 10,
+    expect(
+      host.workflowMessages.adoptBranch(
+        "session-1",
+        [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "entry-1" }],
+        new Set([message.workflowMessageId]),
+      )[0],
+    ).toMatchObject({ status: "sent", piSessionEntryId: "entry-1" });
+    expect(() =>
+      host.workflowMessages.adoptBranch(
+        "session-1",
+        [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "entry-other" }],
+        new Set([message.workflowMessageId]),
+      ),
+    ).toThrow(/conflicting Pi session entry evidence/);
+    const turn = host.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "turn-1",
+      runId: interaction.runId,
+      targetSessionId: interaction.targetSessionId,
     });
-    const presenting = host.markInteractionPresented({
-      requestId: interaction.requestId,
-      expectedRevision: adoptedPresentation.revision,
-      sessionEntryId: "entry-1",
+    expect(
+      host.workflowMessages.startTurn({
+        workflowMessageId: message.workflowMessageId,
+        workflowTurnId: "turn-1",
+        runId: interaction.runId,
+        targetSessionId: interaction.targetSessionId,
+      }),
+    ).toEqual(turn);
+    host.workflowMessages.endTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: turn.workflowTurnId,
+      runId: interaction.runId,
+      targetSessionId: interaction.targetSessionId,
+      stopReason: "completed",
+      responseSessionEntryId: "assistant-entry-1",
     });
     const validating = host.beginInteractionValidation({
       requestId: interaction.requestId,
       submissionId: "submission-rejected",
       idempotencyKey: "tool-1",
-      expectedRevision: presenting.revision,
+      expectedRevision: interaction.revision,
       payload: { invalid: true },
       receipt: { status: "validating" },
     });
-    expect(validating.interaction.status).toBe("presenting");
+    expect(validating.interaction.status).toBe("pending");
     expect(host.validatingInteraction("run-1")).toMatchObject({
       requestId: interaction.requestId,
       submissionId: "submission-rejected",
@@ -253,7 +277,7 @@ describe("host durable state", () => {
         requestId: interaction.requestId,
         submissionId: "submission-conflict",
         idempotencyKey: "tool-conflict",
-        expectedRevision: presenting.revision,
+        expectedRevision: interaction.revision,
         payload: { invalid: false },
       }),
     ).toThrow(/validation is already active/);
@@ -271,7 +295,7 @@ describe("host durable state", () => {
       requestId: interaction.requestId,
       submissionId: "submission-accepted",
       idempotencyKey: "tool-2",
-      expectedRevision: presenting.revision,
+      expectedRevision: interaction.revision,
       payload: { result: "done" },
       receipt: { status: "validating" },
     });

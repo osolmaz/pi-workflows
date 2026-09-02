@@ -15,10 +15,11 @@ export {
   type ClientResponse,
 } from "./protocol.js";
 export type {
-  OriginActivityReport,
+  WorkflowBranchReport,
   WorkflowDisplay,
   WorkflowDisplayStatus,
   WorkflowRunSummary,
   WorkflowRunView,
   WorkflowSessionView,
+  WorkflowTurnReport,
 } from "./view.js";

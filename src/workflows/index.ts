@@ -92,7 +92,6 @@ export {
   type WorkflowFollowUpQueueRecord,
   type WorkflowFollowUpRecord,
   type WorkflowFollowUpState,
-  type WorkflowPresentationState,
   type WorkflowQueueFollowUpRequest,
   type WorkflowRemoveFollowUpRequest,
   type WorkflowSettingsChangeContext,

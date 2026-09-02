@@ -56,8 +56,7 @@ CREATE TABLE blobs (
 CREATE TABLE resources (
   resource_id TEXT PRIMARY KEY,
   resource_type TEXT NOT NULL CHECK (resource_type IN (
-    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'notification', 'turn_intent',
-    'settings', 'follow_up_queue', 'follow_up'
+    'run', 'session', 'decision', 'controller', 'effect', 'channel', 'settings', 'follow_up'
   )),
   aggregate_key TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
@@ -115,6 +114,12 @@ CREATE TABLE runs (
   resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
   project_id TEXT REFERENCES projects(project_id),
   parent_run_id TEXT REFERENCES runs(run_id),
+  root_run_id TEXT NOT NULL REFERENCES runs(run_id),
+  lineage_kind TEXT CHECK (lineage_kind IS NULL OR lineage_kind IN ('continuation', 'restart')),
+  restart_number INTEGER NOT NULL DEFAULT 0 CHECK (restart_number >= 0),
+  parent_terminal_fingerprint BLOB CHECK (
+    parent_terminal_fingerprint IS NULL OR length(parent_terminal_fingerprint) = 32
+  ),
   definition_digest BLOB NOT NULL REFERENCES workflow_definitions(definition_digest),
   workflow_ref TEXT NOT NULL,
   launch_options_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
@@ -127,15 +132,24 @@ CREATE TABLE runs (
   input_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   final_output_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
+  presentation_prompt_hash BLOB REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
-  CHECK ((status IN ('waiting', 'completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL))
+  CHECK ((status IN ('waiting', 'completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
+  CHECK ((parent_run_id IS NULL) = (lineage_kind IS NULL)),
+  CHECK (
+    (lineage_kind = 'restart' AND parent_terminal_fingerprint IS NOT NULL) OR
+    (lineage_kind IS NOT 'restart' AND parent_terminal_fingerprint IS NULL)
+  ),
+  CHECK (parent_run_id IS NOT NULL OR restart_number = 0)
 ) STRICT;
 
 CREATE INDEX runs_project_idx ON runs(project_id, created_at DESC);
 CREATE INDEX runs_status_idx ON runs(status, updated_at DESC);
 CREATE INDEX runs_parent_idx ON runs(parent_run_id);
+CREATE UNIQUE INDEX runs_restart_parent_idx ON runs(parent_run_id)
+  WHERE lineage_kind = 'restart';
 
 CREATE TABLE run_view_content (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -233,33 +247,10 @@ CREATE TABLE workflow_setting_changes (
   UNIQUE (scope_id, change_number)
 ) STRICT;
 
-CREATE TABLE workflow_follow_up_queues (
-  run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
-  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
-  origin_session_id TEXT,
-  presentation_state TEXT NOT NULL DEFAULT 'none' CHECK (presentation_state IN (
-    'none', 'not-needed', 'pending', 'settled', 'unavailable'
-  )),
-  presentation_entry_id TEXT,
-  presentation_assistant_entry_id TEXT,
-  presentation_reason_hash BLOB REFERENCES blobs(blob_hash),
-  presentation_updated_at INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  CHECK (
-    (presentation_state IN ('none', 'not-needed', 'pending') AND presentation_assistant_entry_id IS NULL AND presentation_reason_hash IS NULL)
-    OR
-    (presentation_state = 'unavailable' AND presentation_assistant_entry_id IS NULL AND presentation_reason_hash IS NOT NULL)
-    OR
-    (presentation_state = 'settled' AND presentation_entry_id IS NOT NULL AND presentation_assistant_entry_id IS NOT NULL AND presentation_reason_hash IS NULL)
-  )
-) STRICT;
-
 CREATE TABLE workflow_follow_ups (
   follow_up_id TEXT PRIMARY KEY,
   resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id) ON DELETE CASCADE,
-  queue_resource_id TEXT NOT NULL REFERENCES resources(resource_id),
-  run_id TEXT NOT NULL REFERENCES workflow_follow_up_queues(run_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
   order_number INTEGER NOT NULL CHECK (order_number > 0),
   target_session_id TEXT NOT NULL,
@@ -269,21 +260,17 @@ CREATE TABLE workflow_follow_ups (
   actor_id TEXT,
   source_type TEXT NOT NULL,
   prompt_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  status TEXT NOT NULL CHECK (status IN (
-    'queued', 'pending_presentation', 'ready', 'sent', 'removed', 'cancelled'
-  )),
-  session_entry_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'removed', 'cancelled')),
   reason_hash BLOB REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  sent_at INTEGER,
   UNIQUE (run_id, request_id),
   UNIQUE (run_id, order_number),
-  CHECK ((status = 'sent') = (session_entry_id IS NOT NULL AND sent_at IS NOT NULL)),
   CHECK ((status IN ('removed', 'cancelled')) = (reason_hash IS NOT NULL))
 ) STRICT;
 
-CREATE INDEX workflow_follow_ups_delivery_idx ON workflow_follow_ups(target_session_id, status, order_number);
+CREATE INDEX workflow_follow_ups_order_idx
+  ON workflow_follow_ups(target_session_id, run_id, order_number);
 
 CREATE TABLE run_queue (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -312,7 +299,8 @@ CREATE TABLE host_commands (
   operation TEXT NOT NULL CHECK (operation IN (
     'run.start', 'run.pause', 'run.resume', 'run.cancel', 'run.status', 'run.list',
     'checkpoint.answer', 'decision.answer', 'interaction.submit', 'interaction.update',
-    'notification.claim', 'notification.deliver', 'turn.claim', 'turn.resolve',
+    'workflowMessage.reportBranch', 'workflowTurn.report', 'sessionView.clearTerminal',
+    'run.restart', 'run.changeSettings', 'followUp.queue', 'followUp.remove', 'session.record',
     'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
     'host.status', 'host.stop', 'state.backup', 'state.prune'
   )),
@@ -518,23 +506,69 @@ CREATE TABLE interactive_requests (
   kind TEXT NOT NULL CHECK (kind IN ('agent', 'assistant', 'decision')),
   contract_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
-  status TEXT NOT NULL CHECK (status IN ('pending', 'presenting', 'settled', 'cancelled')),
-  presenter_id TEXT,
-  presentation_claim_expires_at INTEGER,
-  presentation_session_entry_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'settled', 'cancelled')),
+  unproductive_turn_ends INTEGER NOT NULL DEFAULT 0 CHECK (unproductive_turn_ends >= 0),
   accepted_submission_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   settled_at INTEGER,
   consumed_at INTEGER,
   CHECK ((status = 'settled') = (accepted_submission_id IS NOT NULL AND settled_at IS NOT NULL)),
-  CHECK ((presenter_id IS NULL) = (presentation_claim_expires_at IS NULL)),
-  CHECK (presenter_id IS NULL OR status = 'presenting'),
   CHECK (consumed_at IS NULL OR status = 'settled')
 ) STRICT;
 
 CREATE INDEX interactive_requests_session_idx
   ON interactive_requests(target_session_id, status, created_at);
+
+CREATE TABLE workflow_messages (
+  workflow_message_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  target_session_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('step', 'decision', 'notification', 'terminal', 'followUp')),
+  source_id TEXT NOT NULL,
+  content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  order_number INTEGER NOT NULL CHECK (order_number > 0),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'cancelled')),
+  pi_session_entry_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (target_session_id, order_number),
+  CHECK ((status = 'sent') = (pi_session_entry_id IS NOT NULL))
+) STRICT;
+
+CREATE INDEX workflow_messages_session_idx
+  ON workflow_messages(target_session_id, status, order_number);
+CREATE INDEX workflow_messages_run_idx ON workflow_messages(run_id, order_number);
+CREATE INDEX workflow_messages_source_idx ON workflow_messages(kind, source_id, order_number);
+CREATE UNIQUE INDEX workflow_messages_pending_step_source_idx
+  ON workflow_messages(source_id) WHERE kind = 'step' AND status = 'pending';
+
+CREATE TABLE workflow_turns (
+  workflow_turn_id TEXT PRIMARY KEY,
+  workflow_message_id TEXT NOT NULL REFERENCES workflow_messages(workflow_message_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  target_session_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('started', 'ended')),
+  stop_reason TEXT CHECK (stop_reason IS NULL OR stop_reason IN ('completed', 'aborted', 'error', 'lost')),
+  response_session_entry_id TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  CHECK (
+    (state = 'started' AND stop_reason IS NULL AND ended_at IS NULL)
+    OR
+    (state = 'ended' AND stop_reason IS NOT NULL AND ended_at IS NOT NULL)
+  )
+) STRICT;
+
+CREATE UNIQUE INDEX workflow_turns_open_message_idx
+  ON workflow_turns(workflow_message_id) WHERE state = 'started';
+CREATE INDEX workflow_turns_session_idx ON workflow_turns(target_session_id, state, started_at);
+
+CREATE TABLE session_terminal_views (
+  target_session_id TEXT PRIMARY KEY,
+  cleared_run_id TEXT REFERENCES runs(run_id) ON DELETE SET NULL,
+  cleared_at INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE interactive_submissions (
   submission_id TEXT PRIMARY KEY,
@@ -679,39 +713,6 @@ CREATE TABLE effect_attempts (
   result_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
   PRIMARY KEY (effect_id, attempt_number)
-) STRICT;
-
-CREATE TABLE notifications (
-  notification_id TEXT PRIMARY KEY,
-  effect_id TEXT NOT NULL UNIQUE REFERENCES effects(effect_id),
-  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id),
-  notification_index INTEGER NOT NULL CHECK (notification_index >= 0),
-  target_session_id TEXT NOT NULL,
-  notification_type TEXT NOT NULL CHECK (notification_type IN ('progress', 'final')),
-  content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  created_at INTEGER NOT NULL,
-  UNIQUE (run_id, attempt_id, notification_index)
-) STRICT;
-
-CREATE TABLE turn_intents (
-  turn_intent_id TEXT PRIMARY KEY,
-  resource_id TEXT NOT NULL UNIQUE REFERENCES resources(resource_id),
-  effect_id TEXT NOT NULL UNIQUE REFERENCES effects(effect_id),
-  source_event_id TEXT NOT NULL UNIQUE,
-  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  workflow_ref TEXT NOT NULL,
-  target_session_id TEXT NOT NULL,
-  cause TEXT NOT NULL,
-  node_id TEXT,
-  attempt_id TEXT,
-  resolution_type TEXT,
-  resolution_message_id TEXT,
-  facts_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  requested_at INTEGER NOT NULL,
-  eligible_at INTEGER,
-  resolved_at INTEGER,
-  created_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE channels (

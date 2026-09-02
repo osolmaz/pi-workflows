@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
-import { ORIGIN_ACTIVITY_LEASE_MS } from "../client/activity.js";
 import {
   RUN_VIEW_SCHEMA,
   SESSION_VIEW_SCHEMA,
-  type OriginActivityReport,
   type WorkflowDisplay,
   type WorkflowDisplayStatus,
   type WorkflowRunListPage,
@@ -19,6 +17,7 @@ import type {
 } from "../controllers/sqlite.js";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
+import { WorkflowMessageStore, type WorkflowMessage } from "../state/workflow-messages.js";
 import type { WorkflowRunDisplayState, WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowRunState,
@@ -28,14 +27,7 @@ import type {
   WorkflowTraceEvent,
   WorkflowUpdateRecord,
 } from "../workflows/types.js";
-import type { HostStateStore, InteractiveRequestRecord } from "./state.js";
-
-export type { OriginActivityReport } from "../client/view.js";
-
-type OriginActivity = OriginActivityReport & {
-  connectionId: string;
-  expiresAt: number;
-};
+import type { HostStateStore } from "./state.js";
 
 export const WORKFLOW_PAGE_KINDS = [
   "steps",
@@ -69,15 +61,15 @@ const VIEW_PAGE_ITEMS = 256;
 const CONTENT_CHUNK_BYTES = 192 * 1024;
 const CONTENT_CACHE_BYTES = 64 * 1024 * 1024;
 const VIEW_CACHE_ITEMS = 64;
+const TERMINAL_VIEW_RETENTION_MS = 60_000;
 
 export class HostViewStore {
-  private readonly activity = new Map<string, OriginActivity>();
   private readonly contentRecords = new Map<string, ContentRecord>();
   private readonly listCache = new Map<string, { revision: string; page: WorkflowRunListPage }>();
   private readonly runCache = new Map<string, { version: string; view: WorkflowRunView | null }>();
   private readonly sessionCache = new Map<string, { version: string; view: WorkflowSessionView }>();
   private contentBytes = 0;
-  private activityRevision = 0;
+  private readonly workflowMessages: WorkflowMessageStore;
 
   constructor(
     private readonly state: StateDatabase,
@@ -85,14 +77,15 @@ export class HostViewStore {
     private readonly hostState: HostStateStore,
     private readonly runs: WorkflowRunStore,
     private readonly hasLiveWorker: (runId: string) => boolean,
-  ) {}
+  ) {
+    this.workflowMessages = hostState.workflowMessages;
+  }
 
   list(cursor = 0, limit?: number): WorkflowRunListPage {
-    this.expireActivity();
     return this.state.readTransaction(() => {
       const pageSize = Math.min(limit ?? VIEW_PAGE_ITEMS, VIEW_PAGE_ITEMS);
       const current = this.queue.workflowRunListRevision();
-      const revision = `${current.revision}:${this.activityRevision}`;
+      const revision = `${current.revision}:${this.workflowActivityRevision()}`;
       const cacheKey = `${cursor}:${pageSize}`;
       const cached = this.listCache.get(cacheKey);
       if (cached?.revision === revision) {
@@ -137,7 +130,6 @@ export class HostViewStore {
   }
 
   run(runId: string): WorkflowRunView | null {
-    this.expireActivity();
     return this.state.readTransaction(() => {
       const version = this.runVersion(runId);
       const cached = this.runCache.get(runId);
@@ -152,7 +144,6 @@ export class HostViewStore {
   }
 
   page(runId: string, request: RunPageRequest): WorkflowRunView | null {
-    this.expireActivity();
     return this.state.readTransaction(() => this.readRun(runId, request));
   }
 
@@ -318,40 +309,65 @@ export class HostViewStore {
     };
   }
 
-  session(sessionId: string): WorkflowSessionView {
-    this.expireActivity();
+  session(
+    sessionId: string,
+    coordinator: { epoch: string; active: boolean; branchReportRequired: boolean } | null = null,
+  ): WorkflowSessionView {
     return this.state.readTransaction(() => {
-      const queue = this.queue.findSessionReservationView(sessionId);
-      const deliveries = {
-        notification: this.queue.hasClaimableWorkflowNotification({ targetSessionId: sessionId }),
-        turn: this.queue.hasClaimableWorkflowTurnIntent({ targetSessionId: sessionId }),
-      };
-      const version = [
-        queue === undefined ? "none" : this.runVersion(queue.runId),
-        this.pendingSessionRevision(sessionId),
-        deliveries.notification,
-        deliveries.turn,
-      ].join(":");
-      const cached = this.sessionCache.get(sessionId);
-      if (cached?.version === version) {
-        refreshCacheEntry(this.sessionCache, sessionId, cached);
-        return cached.view;
-      }
+      const activeQueue = this.queue.findSessionReservationView(sessionId);
+      const retainedRunId =
+        activeQueue === undefined ? this.retainedTerminalRunId(sessionId) : undefined;
+      const runId = activeQueue?.runId ?? retainedRunId;
       const pending = this.hostState.listPendingInteractions(sessionId);
       const pendingInteractions = byteBoundedForwardPage(pending, (request) =>
         this.projectRecordField(request.runId, request, "contract"),
       );
-      const view: WorkflowSessionView = {
+      const workflowMessages = this.workflowMessages.listSession(sessionId);
+      const eligible = workflowMessages.find((message) => this.isMessageEligible(message));
+      const next =
+        coordinator === null || (coordinator.active && !coordinator.branchReportRequired)
+          ? eligible
+          : undefined;
+      const open = this.openWorkflowMessage(workflowMessages);
+      const openTurn = open === undefined ? undefined : this.workflowMessages.openTurnForMessage(open.workflowMessageId);
+      return {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
-        run: queue === undefined ? null : this.run(queue.runId),
+        run: runId === undefined ? null : this.run(runId),
         pendingInteractions,
         pendingInteractionStart: 0,
         pendingInteractionTotal: pending.length,
-        deliveries,
+        workflowMessages,
+        workflowMessageStart: 0,
+        workflowMessageTotal: workflowMessages.length,
+        workflowMessageWindowComplete: true,
+        nextWorkflowMessageId: next?.workflowMessageId ?? null,
+        openWorkflowMessageId: open?.workflowMessageId ?? null,
+        openWorkflowTurn: openTurn ?? null,
+        coordinatorEpoch: coordinator?.epoch ?? null,
+        coordinatorActive: coordinator?.active ?? false,
+        branchReportRequired: coordinator?.branchReportRequired ?? false,
       };
-      rememberCacheEntry(this.sessionCache, sessionId, { version, view });
-      return view;
+    });
+  }
+
+  clearTerminal(sessionId: string, runId?: string, now: number = Date.now()): string | null {
+    return this.state.transaction(() => {
+      const retained = this.retainedTerminalRunId(sessionId, now);
+      if (retained === undefined) return null;
+      if (runId !== undefined && retained !== runId) {
+        throw new Error(`Retained terminal workflow does not match run ${runId}`);
+      }
+      this.state.connection
+        .prepare(
+          `INSERT INTO session_terminal_views(target_session_id, cleared_run_id, cleared_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(target_session_id) DO UPDATE SET
+             cleared_run_id = excluded.cleared_run_id, cleared_at = excluded.cleared_at`,
+        )
+        .run(sessionId, retained, now);
+      this.sessionCache.delete(sessionId);
+      return retained;
     });
   }
 
@@ -587,76 +603,174 @@ export class HostViewStore {
     });
   }
 
-  reportActivity(connectionId: string, report: OriginActivityReport): void {
-    if (report.deliveryId !== `interaction:${report.requestId}`) {
-      throw new Error("Origin activity delivery does not match the interactive request");
-    }
-    const key = activityKey(connectionId, report.requestId);
-    const previous = this.activity.get(key);
-    if (report.state === "settled") {
-      if (previous === undefined) return;
-      if (
-        previous.sessionId !== report.sessionId ||
-        previous.runId !== report.runId ||
-        previous.requestId !== report.requestId ||
-        previous.deliveryId !== report.deliveryId ||
-        previous.sessionEntryId !== report.sessionEntryId
-      ) {
-        throw new Error("Origin activity identity changed");
-      }
-      if (report.sequence <= previous.sequence) {
-        throw new Error("Origin activity sequence must increase");
-      }
-      this.activity.delete(key);
-      this.activityRevision += 1;
-      return;
-    }
-    const request = this.hostState
-      .listPendingInteractions(report.sessionId)
-      .find((candidate) => candidate.requestId === report.requestId);
-    validateActivityRequest(request, report);
-    if (previous !== undefined) {
-      if (
-        previous.sessionId !== report.sessionId ||
-        previous.runId !== report.runId ||
-        previous.requestId !== report.requestId ||
-        previous.deliveryId !== report.deliveryId ||
-        previous.sessionEntryId !== report.sessionEntryId
-      ) {
-        throw new Error("Origin activity identity changed");
-      }
-      if (report.sequence <= previous.sequence) {
-        throw new Error("Origin activity sequence must increase");
-      }
-    } else if (report.state !== "started") {
-      throw new Error("Origin activity must start before refresh");
-    }
-    this.activity.set(key, {
-      ...report,
-      connectionId,
-      expiresAt: Date.now() + ORIGIN_ACTIVITY_LEASE_MS,
-    });
-    if (previous === undefined) this.activityRevision += 1;
+  clearConnection(_connectionId: string): void {
+    // Coordinator fencing is process-local in the host. Durable turn state is
+    // reconciled from the Pi branch after the next coordinator connects.
   }
 
-  clearConnection(connectionId: string): void {
-    let changed = false;
-    for (const [key, value] of this.activity) {
-      if (value.connectionId !== connectionId) continue;
-      this.activity.delete(key);
-      changed = true;
+  private retainedTerminalRunId(sessionId: string, now: number = Date.now()): string | undefined {
+    const messages = this.workflowMessages
+      .listSession(sessionId)
+      .filter((message) => message.kind === "terminal")
+      .reverse();
+    for (const message of messages) {
+      const run = this.state.connection
+        .prepare("SELECT status FROM runs WHERE run_id = ?")
+        .get(message.runId);
+      if (!isObjectRecord(run) || !isTerminalStatus(run.status)) continue;
+      const clear = this.state.connection
+        .prepare(
+          `SELECT cleared_run_id AS clearedRunId, cleared_at AS clearedAt
+           FROM session_terminal_views WHERE target_session_id = ?`,
+        )
+        .get(sessionId);
+      if (
+        isObjectRecord(clear) &&
+        clear.clearedRunId === message.runId &&
+        typeof clear.clearedAt === "number" &&
+        clear.clearedAt >= Date.parse(message.createdAt)
+      ) {
+        continue;
+      }
+      if (message.status === "pending") return message.runId;
+      if (message.status !== "sent") continue;
+      const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
+      if (turn === undefined || turn.state === "started") return message.runId;
+      if (turn.endedAt !== null && Date.parse(turn.endedAt) + TERMINAL_VIEW_RETENTION_MS > now) {
+        return message.runId;
+      }
     }
-    if (changed) this.activityRevision += 1;
+    return undefined;
   }
 
-  expireActivity(now = Date.now()): void {
-    let changed = false;
-    for (const [key, value] of this.activity) {
-      if (value.expiresAt > now) continue;
-      this.activity.delete(key);
-      changed = true;
+  private isMessageEligible(message: WorkflowMessage): boolean {
+    if (message.status !== "pending") return false;
+    if (message.kind === "step" || message.kind === "decision") {
+      const request = this.state.connection
+        .prepare(
+          `SELECT i.status, r.paused FROM interactive_requests i
+           JOIN runs r ON r.run_id = i.run_id
+           WHERE i.request_id = ? AND i.run_id = ?`,
+        )
+        .get(message.sourceId, message.runId);
+      if (!isObjectRecord(request) || request.status !== "pending") return false;
+      return message.kind === "decision" || request.paused === 0;
     }
-    if (changed) this.activityRevision += 1;
+    if (message.kind === "notification") return true;
+    if (message.kind === "terminal") {
+      const run = this.state.connection
+        .prepare("SELECT status FROM runs WHERE run_id = ?")
+        .get(message.runId);
+      return isObjectRecord(run) && isTerminalStatus(run.status);
+    }
+    const source = this.state.connection
+      .prepare(
+        `SELECT f.run_id AS runId, f.order_number AS orderNumber, f.status
+         FROM workflow_follow_ups f WHERE f.follow_up_id = ?`,
+      )
+      .get(message.sourceId);
+    if (
+      !isObjectRecord(source) ||
+      source.status !== "queued" ||
+      typeof source.orderNumber !== "number" ||
+      typeof source.runId !== "string"
+    ) {
+      return false;
+    }
+    const leaf = this.terminalChainLeaf(source.runId);
+    if (leaf === undefined || leaf.status !== "completed") return false;
+    const terminal = this.workflowMessages
+      .listRun(leaf.runId)
+      .filter((candidate) => candidate.kind === "terminal" && candidate.status === "sent")
+      .at(-1);
+    if (terminal === undefined) return false;
+    const terminalTurn = this.workflowMessages.latestTurnForMessage(terminal.workflowMessageId);
+    if (terminalTurn?.state !== "ended") return false;
+    const prior = this.state.connection
+      .prepare(
+        `SELECT follow_up_id AS followUpId, status FROM workflow_follow_ups
+         WHERE run_id = ? AND order_number < ? ORDER BY order_number`,
+      )
+      .all(source.runId, source.orderNumber);
+    for (const item of prior) {
+      if (
+        !isObjectRecord(item) ||
+        typeof item.followUpId !== "string" ||
+        typeof item.status !== "string"
+      ) {
+        return false;
+      }
+      if (item.status === "removed" || item.status === "cancelled") continue;
+      const priorMessage = this.workflowMessages.latestForSource("followUp", item.followUpId);
+      if (
+        priorMessage === undefined ||
+        this.workflowMessages.latestTurnForMessage(priorMessage.workflowMessageId)?.state !== "ended"
+      ) {
+        return false;
+      }
+    }
+    const reservation = this.state.connection
+      .prepare(
+        `SELECT 1 AS present FROM run_bindings b JOIN runs r ON r.run_id = b.run_id
+         WHERE b.origin_session_id = ? AND r.run_id <> ?
+           AND r.status IN ('queued', 'running', 'waiting') LIMIT 1`,
+      )
+      .get(message.targetSessionId, message.runId);
+    return reservation === undefined;
+  }
+
+  private terminalChainLeaf(runId: string): { runId: string; status: string } | undefined {
+    const row = this.state.connection
+      .prepare(
+        `WITH RECURSIVE chain(run_id, status, depth, created_at) AS (
+           SELECT run_id, status, 0, created_at FROM runs WHERE run_id = ?
+           UNION ALL
+           SELECT child.run_id, child.status, chain.depth + 1, child.created_at
+           FROM runs child JOIN chain ON child.parent_run_id = chain.run_id
+         )
+         SELECT run_id AS runId, status FROM chain
+         ORDER BY depth DESC, created_at DESC LIMIT 1`,
+      )
+      .get(runId);
+    return isObjectRecord(row) && typeof row.runId === "string" && typeof row.status === "string"
+      ? { runId: row.runId, status: row.status }
+      : undefined;
+  }
+
+  private openWorkflowMessage(messages: readonly WorkflowMessage[]): WorkflowMessage | undefined {
+    for (const message of [...messages].reverse()) {
+      if (message.status !== "sent") continue;
+      if (message.kind === "step") {
+        const request = this.state.connection
+          .prepare(
+            `SELECT i.status, r.paused FROM interactive_requests i
+             JOIN runs r ON r.run_id = i.run_id WHERE i.request_id = ?`,
+          )
+          .get(message.sourceId);
+        if (isObjectRecord(request) && request.status === "pending" && request.paused === 0) {
+          return message;
+        }
+      } else if (message.kind === "terminal" || message.kind === "followUp") {
+        const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
+        if (turn === undefined || turn.state === "started") return message;
+      }
+    }
+    return undefined;
+  }
+
+  private workflowActivityRevision(): string {
+    const row = this.state.connection
+      .prepare(
+        `SELECT
+           COALESCE((SELECT max(updated_at) FROM workflow_messages), 0) AS messageUpdatedAt,
+           COALESCE((SELECT max(COALESCE(ended_at, started_at)) FROM workflow_turns), 0) AS turnUpdatedAt`,
+      )
+      .get();
+    return isObjectRecord(row) &&
+      typeof row.messageUpdatedAt === "number" &&
+      typeof row.turnUpdatedAt === "number"
+      ? `${row.messageUpdatedAt}:${row.turnUpdatedAt}`
+      : "0:0";
   }
 
   private display(
@@ -676,17 +790,21 @@ export class HostViewStore {
   }
 
   private hasActivity(runId: string): boolean {
-    for (const activity of this.activity.values()) {
-      if (activity.runId === runId) return true;
-    }
-    return false;
+    const row = this.state.connection
+      .prepare(
+        `SELECT 1 AS present FROM workflow_turns t
+         JOIN workflow_messages m ON m.workflow_message_id = t.workflow_message_id
+         WHERE t.run_id = ? AND t.state = 'started' AND m.kind IN ('step', 'terminal') LIMIT 1`,
+      )
+      .get(runId);
+    return row !== undefined;
   }
 
   private hasPendingInteraction(runId: string): boolean {
     const row = this.state.connection
       .prepare(
         `SELECT 1 AS present FROM interactive_requests
-         WHERE run_id = ? AND status IN ('pending', 'presenting') LIMIT 1`,
+         WHERE run_id = ? AND status = 'pending' LIMIT 1`,
       )
       .get(runId);
     return row !== undefined;
@@ -721,7 +839,7 @@ export class HostViewStore {
       row.presentationRevision,
       row.runStatus,
       row.paused,
-      this.activityRevision,
+      this.workflowActivityRevision(),
       this.hasLiveWorker(runId),
       this.hasActivity(runId),
       this.hasPendingInteraction(runId),
@@ -735,7 +853,7 @@ export class HostViewStore {
         `SELECT count(*) AS count, COALESCE(sum(revision), 0) AS revisionSum,
                 COALESCE(max(updated_at), 0) AS updatedAt
          FROM interactive_requests
-         WHERE target_session_id = ? AND status IN ('pending', 'presenting')`,
+         WHERE target_session_id = ? AND status = 'pending'`,
       )
       .get(sessionId);
     if (!isSessionRevisionRow(row)) throw new Error("Session view revision is invalid");
@@ -769,6 +887,9 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
   if (facts.ambiguous) {
     status = "ambiguous";
     reason = "An external effect needs explicit recovery.";
+  } else if (facts.workerActive || facts.originTurnActive) {
+    status = "running";
+    activity = facts.workerActive ? "supervised_worker" : "origin_turn";
   } else if (
     facts.durableStatus === "completed" ||
     facts.durableStatus === "failed" ||
@@ -780,9 +901,6 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
   } else if (facts.paused) {
     status = "paused";
     reason = "The workflow is durably paused.";
-  } else if (facts.workerActive || facts.originTurnActive) {
-    status = "running";
-    activity = facts.workerActive ? "supervised_worker" : "origin_turn";
   } else if (facts.pendingInteraction || facts.durableStatus === "waiting") {
     status = "waiting";
     reason = "The workflow is waiting for origin-session input.";
@@ -844,6 +962,10 @@ function projectQueue(
     originSessionId: run.originSessionId,
     executionMode: run.executionMode,
     parentRunId: run.parentRunId,
+    rootRunId: run.rootRunId,
+    lineageKind: run.lineageKind,
+    restartNumber: run.restartNumber,
+    parentTerminalFingerprint: run.parentTerminalFingerprint,
     errorCode: run.errorCode,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
@@ -862,24 +984,12 @@ function workflowRootSource(value: unknown): JsonValue {
   return root;
 }
 
-function validateActivityRequest(
-  request: InteractiveRequestRecord | undefined,
-  report: OriginActivityReport,
-): asserts request is InteractiveRequestRecord {
-  if (request === undefined) throw new Error("Origin activity request is not pending");
-  if (request.runId !== report.runId || request.targetSessionId !== report.sessionId) {
-    throw new Error("Origin activity target does not match the interactive request");
-  }
-  if (request.presentationSessionEntryId !== report.sessionEntryId) {
-    throw new Error("Origin activity session entry was not durably presented");
-  }
-  if (!Number.isSafeInteger(report.sequence) || report.sequence < 0) {
-    throw new Error("Origin activity sequence must be a non-negative integer");
-  }
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function activityKey(connectionId: string, requestId: string): string {
-  return `${connectionId}\u0000${requestId}`;
+function isTerminalStatus(value: unknown): value is "completed" | "failed" | "timed_out" | "cancelled" {
+  return value === "completed" || value === "failed" || value === "timed_out" || value === "cancelled";
 }
 
 function contentKey(runId: string, contentPath: string): string {

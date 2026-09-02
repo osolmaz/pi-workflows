@@ -12,7 +12,7 @@ const inputSchema = Type.Unknown({
     "Ordinary checkpoint answer for answer; protected human decisions require a human channel; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
-  description: "Run id; optional for status, cancel, and answer",
+  description: "Run id; required for restart and optional for status, cancel, answer, settings, and follow-ups",
 });
 const stepSchema = Type.String({
   description: "Workflow step id; required when action is update or submit",
@@ -41,6 +41,36 @@ export const WorkflowActionSchemas = {
       action: Type.Literal("start"),
       workflow: workflowSchema,
       input: Type.Optional(inputSchema),
+    },
+    noExtraProperties,
+  ),
+  restart: Type.Object(
+    { action: Type.Literal("restart"), runId: runIdSchema },
+    noExtraProperties,
+  ),
+  "change-settings": Type.Object(
+    {
+      action: Type.Literal("change-settings"),
+      runId: Type.Optional(runIdSchema),
+      scopeId: Type.Optional(Type.String()),
+      expectedChangeNumber: Type.Optional(Type.Integer({ minimum: 0 })),
+      patch: Type.Unknown(),
+    },
+    noExtraProperties,
+  ),
+  "queue-follow-up": Type.Object(
+    {
+      action: Type.Literal("queue-follow-up"),
+      runId: Type.Optional(runIdSchema),
+      prompt: Type.String({ minLength: 1 }),
+    },
+    noExtraProperties,
+  ),
+  "remove-follow-up": Type.Object(
+    {
+      action: Type.Literal("remove-follow-up"),
+      runId: Type.Optional(runIdSchema),
+      followUpId: Type.String(),
     },
     noExtraProperties,
   ),
@@ -102,6 +132,13 @@ type ToolInputParser<Output> = (value: unknown) => Output;
 const workflowInputParsers = {
   list: (value) => parseToolInput(WorkflowActionSchemas.list, value, "workflow"),
   start: (value) => parseToolInput(WorkflowActionSchemas.start, value, "workflow"),
+  restart: (value) => parseToolInput(WorkflowActionSchemas.restart, value, "workflow"),
+  "change-settings": (value) =>
+    parseToolInput(WorkflowActionSchemas["change-settings"], value, "workflow"),
+  "queue-follow-up": (value) =>
+    parseToolInput(WorkflowActionSchemas["queue-follow-up"], value, "workflow"),
+  "remove-follow-up": (value) =>
+    parseToolInput(WorkflowActionSchemas["remove-follow-up"], value, "workflow"),
   status: (value) => parseToolInput(WorkflowActionSchemas.status, value, "workflow"),
   pause: (value) => parseToolInput(WorkflowActionSchemas.pause, value, "workflow"),
   resume: (value) => parseToolInput(WorkflowActionSchemas.resume, value, "workflow"),

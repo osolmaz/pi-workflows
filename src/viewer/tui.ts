@@ -1,6 +1,7 @@
 import type { WorkflowClient } from "../client/client.js";
 import { materializeRunView } from "../client/materialize.js";
 import { sanitizeText } from "../render/ansi.js";
+import { formatDuration } from "../render/format.js";
 import type { JsonValue } from "../state/json.js";
 
 const ALT_SCREEN_ON = "\u001b[?1049h\u001b[?25l";
@@ -17,6 +18,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
   let value: JsonValue = options.runId === undefined ? [] : null;
   let selected = 0;
   let scroll = 0;
+  let selectedStepIndex: number | null = null;
   let mode: "runs" | "run" = options.runId === undefined ? "runs" : "run";
   let unsubscribe: (() => Promise<void>) | undefined;
   let runMaterializationGeneration = 0;
@@ -30,6 +32,8 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
       height,
       mode === "runs" ? selected : undefined,
       scroll,
+      new Date(),
+      selectedStepIndex,
     );
     process.stdout.write(`${CLEAR}${lines.join("\n")}`);
   };
@@ -39,6 +43,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     await unsubscribe?.();
     mode = "runs";
     scroll = 0;
+    selectedStepIndex = null;
     unsubscribe = await options.client.watchRuns((event) => {
       value = event.payload;
       selected = Math.min(selected, Math.max(0, arrayLength(value) - 1));
@@ -51,6 +56,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     await unsubscribe?.();
     mode = "run";
     scroll = 0;
+    selectedStepIndex = null;
     unsubscribe = await options.client.watchRun(runId, (event) => {
       const generation = ++runMaterializationGeneration;
       value = event.payload;
@@ -75,6 +81,8 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
     draw();
     if (rawModeSupported) process.stdin.setRawMode(true);
     process.stdin.resume();
+    const redrawTimer = setInterval(draw, 1_000);
+    redrawTimer.unref?.();
     await new Promise<void>((resolve) => {
       const onKey = (data: Buffer) => {
         const key = data.toString("utf8");
@@ -101,6 +109,29 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
           } else if (key === "\u001b[6~") {
             scroll += page;
             draw();
+          } else if (key === "[") {
+            const total = runStepCount(value);
+            if (total > 0) {
+              selectedStepIndex = Math.max(0, (selectedStepIndex ?? total - 1) - 1);
+              scroll = 0;
+              draw();
+            }
+          } else if (key === "]") {
+            const total = runStepCount(value);
+            if (total > 0) {
+              const next = (selectedStepIndex ?? total - 1) + 1;
+              selectedStepIndex = next >= total - 1 ? null : next;
+              scroll = 0;
+              draw();
+            }
+          } else if (key === "\u001b[F" || key === "G" || key === "L") {
+            selectedStepIndex = null;
+            scroll = 0;
+            draw();
+          } else if (key === "\u001b[H" || key === "g") {
+            selectedStepIndex = runStepCount(value) > 0 ? 0 : null;
+            scroll = 0;
+            draw();
           }
         } else if (mode === "runs") {
           if (key === "\u001b[A" || key === "k") {
@@ -117,6 +148,7 @@ export async function runViewer(options: ViewerOptions): Promise<void> {
       };
       process.stdin.on("data", onKey);
     });
+    clearInterval(redrawTimer);
   } finally {
     runMaterializationGeneration += 1;
     await unsubscribe?.();
@@ -132,6 +164,8 @@ export function renderClientView(
   height: number,
   selected: number | undefined,
   scroll: number,
+  now: Date = new Date(),
+  selectedStepIndex: number | null = null,
 ): string[] {
   if (Array.isArray(value)) {
     if (value.length === 0) return ["No workflow runs found."];
@@ -146,12 +180,16 @@ export function renderClientView(
       return truncate(`${prefix}${summary(item)}`, width);
     });
   }
-  const lines = renderRun(value);
+  const lines = renderRun(value, now, selectedStepIndex);
   const start = Math.min(scroll, Math.max(0, lines.length - height));
   return lines.slice(start, start + height).map((line) => truncate(line, width));
 }
 
-function renderRun(value: JsonValue): string[] {
+function renderRun(
+  value: JsonValue,
+  now: Date,
+  selectedStepIndex: number | null,
+): string[] {
   if (!isRecord(value) || value.schema !== "pi-workflows.run-view.v1") {
     return JSON.stringify(value, null, 2).split("\n");
   }
@@ -166,20 +204,37 @@ function renderRun(value: JsonValue): string[] {
         : "unknown";
   const runId = typeof value.runId === "string" ? sanitizeText(value.runId) : "unknown";
   const status = typeof display.status === "string" ? display.status : "unknown";
+  const steps = Array.isArray(state.steps) ? state.steps : [];
+  const selected =
+    steps.length === 0
+      ? -1
+      : Math.min(Math.max(0, selectedStepIndex ?? steps.length - 1), steps.length - 1);
+  const startedAt = typeof manifest.startedAt === "string" ? Date.parse(manifest.startedAt) : NaN;
+  const finishedAt = typeof manifest.finishedAt === "string" ? Date.parse(manifest.finishedAt) : NaN;
+  const elapsed = Number.isFinite(startedAt)
+    ? ` · elapsed ${formatDuration(Math.max(0, (Number.isFinite(finishedAt) ? finishedAt : now.getTime()) - startedAt))}`
+    : "";
+  const position = selectedStepIndex === null || selected < 0 ? "" : ` · step ${selected + 1}/${steps.length}`;
   const lines = [
     `workflow ${workflowName}`,
-    `${statusGlyph(status)} ${sanitizeText(status)} · run ${runId}`,
+    `${statusGlyph(status)} ${sanitizeText(status)} · run ${runId}${elapsed}${position}`,
   ];
   if (typeof display.reason === "string") lines.push(`reason: ${sanitizeText(display.reason)}`);
 
-  const steps = Array.isArray(state.steps) ? state.steps : [];
   if (steps.length > 0) {
     lines.push("", "steps");
-    for (const step of steps) {
+    for (const [index, step] of steps.entries()) {
       if (!isRecord(step)) continue;
       const nodeId = typeof step.nodeId === "string" ? sanitizeText(step.nodeId) : "unknown";
       const outcome = typeof step.outcome === "string" ? step.outcome : "unknown";
-      lines.push(`  ${stepGlyph(outcome)} ${nodeId} · ${sanitizeText(outcome)}`);
+      lines.push(`${index === selected ? ">" : " "} ${stepGlyph(outcome)} ${nodeId} · ${sanitizeText(outcome)}`);
+    }
+    const inspected = steps[selected];
+    if (isRecord(inspected)) {
+      const nodeId = typeof inspected.nodeId === "string" ? sanitizeText(inspected.nodeId) : "unknown";
+      const output = Object.hasOwn(inspected, "error") ? inspected.error : inspected.output;
+      lines.push("", `step output — ${nodeId}`);
+      lines.push(...JSON.stringify(output ?? null, null, 2).split("\n").map((line) => `  ${sanitizeText(line)}`));
     }
   }
   if (status === "completed" && Object.hasOwn(state, "finalOutput")) {
@@ -216,6 +271,11 @@ function selectedRunId(value: JsonValue, index: number): string | undefined {
   if (!Array.isArray(value)) return undefined;
   const item = value[index];
   return isRecord(item) && typeof item.runId === "string" ? item.runId : undefined;
+}
+
+function runStepCount(value: JsonValue): number {
+  if (!isRecord(value) || !isRecord(value.state) || !Array.isArray(value.state.steps)) return 0;
+  return value.state.steps.length;
 }
 
 function arrayLength(value: JsonValue): number {

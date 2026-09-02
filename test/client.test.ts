@@ -157,7 +157,7 @@ describe("WorkflowClient", () => {
       await expect(
         client.request({
           operation: "view.runs.page",
-          payload: { cursor: 0, revision: "0:0:0:0" },
+          payload: { cursor: 0, revision: "0:0:0:0:0" },
         }),
       ).resolves.toMatchObject({
         outcome: "accepted",

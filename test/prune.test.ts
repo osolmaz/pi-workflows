@@ -45,15 +45,10 @@ describe("state prune", () => {
     }).run(workflow, {});
     const setup = new WorkflowRunStore(databasePath);
     setup.state.connection
-      .prepare("UPDATE runs SET parent_run_id = ? WHERE run_id = ?")
-      .run(result.runId, child.runId);
-    setup.state.connection
       .prepare(
-        "UPDATE workflow_follow_up_queues SET presentation_state = 'not-needed' WHERE run_id IN (?, ?)",
+        "UPDATE runs SET parent_run_id = ?, root_run_id = ?, lineage_kind = 'continuation' WHERE run_id = ?",
       )
-      .run(result.runId, child.runId);
-    const attemptId = result.state.steps[0]?.attemptId;
-    if (attemptId === undefined) throw new Error("attempt missing");
+      .run(result.runId, result.runId, child.runId);
     const runResource = setup.state.connection
       .prepare(
         "SELECT resource_id AS resourceId, revision FROM runs JOIN resources USING (resource_id) WHERE run_id = ?",
@@ -61,35 +56,22 @@ describe("state prune", () => {
       .get(result.runId) as { resourceId: string; revision: number };
     const now = Date.now();
     const notificationId = "notification-prune";
-    const notificationResourceId = resourceIdFor("notification", notificationId);
     const effectId = "effect-prune";
     const effectResourceId = resourceIdFor("effect", effectId);
     const contentHash = setup.state.putText("done", now);
     const settingsResourceId = resourceIdFor("settings", "settings-prune");
     const followUpId = "follow-up-prune";
     const followUpResourceId = resourceIdFor("follow_up", followUpId);
-    const followUpQueue = setup.state.connection
-      .prepare("SELECT resource_id AS resourceId FROM workflow_follow_up_queues WHERE run_id = ?")
-      .get(result.runId) as { resourceId: string };
     const settingsHash = setup.state.putJson({ mode: "test" }, now);
     setup.state.transaction(() => {
       setup.state.connection
         .prepare(
-          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'effect', ?, 1, ?, ?), (?, 'notification', ?, 1, ?, ?)",
+          "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'effect', ?, 1, ?, ?)",
         )
-        .run(
-          effectResourceId,
-          effectId,
-          now,
-          now,
-          notificationResourceId,
-          notificationId,
-          now,
-          now,
-        );
+        .run(effectResourceId, effectId, now, now);
       setup.state.connection
-        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0), (?, 0)")
-        .run(effectResourceId, notificationResourceId);
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(effectResourceId);
       setup.state.connection
         .prepare(
           "INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at) VALUES (?, 'settings', 'settings-prune', 1, ?, ?), (?, 'follow_up', ?, 1, ?, ?)",
@@ -105,12 +87,11 @@ describe("state prune", () => {
         .run(settingsResourceId, result.runId, result.runId, settingsHash, settingsHash, now, now);
       setup.state.connection
         .prepare(
-          "INSERT INTO workflow_follow_ups(follow_up_id, resource_id, queue_resource_id, run_id, request_id, order_number, target_session_id, actor_type, source_type, prompt_hash, status, reason_hash, created_at, updated_at) VALUES (?, ?, ?, ?, 'request-prune', 1, 'session-a', 'system', 'test', ?, 'removed', ?, ?, ?)",
+          "INSERT INTO workflow_follow_ups(follow_up_id, resource_id, run_id, request_id, order_number, target_session_id, actor_type, source_type, prompt_hash, status, reason_hash, created_at, updated_at) VALUES (?, ?, ?, 'request-prune', 1, 'session-a', 'system', 'test', ?, 'removed', ?, ?, ?)",
         )
         .run(
           followUpId,
           followUpResourceId,
-          followUpQueue.resourceId,
           result.runId,
           contentHash,
           contentHash,
@@ -132,16 +113,6 @@ describe("state prune", () => {
           now,
           now,
         );
-      setup.state.connection
-        .prepare(
-          "INSERT INTO notifications(notification_id, effect_id, run_id, attempt_id, notification_index, target_session_id, notification_type, content_hash, created_at) VALUES (?, ?, ?, ?, 0, 'session-a', 'final', ?, ?)",
-        )
-        .run(notificationId, effectId, result.runId, attemptId, contentHash, now);
-      setup.state.connection
-        .prepare(
-          "INSERT INTO events(event_id, resource_id, resource_revision, event_type, actor_type, recorded_at) VALUES ('notification-prune-event', ?, 1, 'notification.queued', 'system', ?)",
-        )
-        .run(notificationResourceId, now);
       setup.state.connection
         .prepare(
           "INSERT INTO events(event_id, resource_id, resource_revision, event_type, actor_type, recorded_at) VALUES ('settings-prune-event', ?, 1, 'settings.created', 'system', ?), ('follow-up-prune-event', ?, 1, 'follow-up.created', 'system', ?)",
@@ -171,7 +142,7 @@ describe("state prune", () => {
     expect(
       store.state.connection
         .prepare(
-          "SELECT count(*) AS count FROM resources WHERE resource_type IN ('effect', 'notification', 'settings', 'follow_up', 'follow_up_queue')",
+          "SELECT count(*) AS count FROM resources WHERE resource_type IN ('effect', 'settings', 'follow_up')",
         )
         .get(),
     ).toEqual({ count: 0 });
@@ -247,11 +218,29 @@ describe("state prune", () => {
       executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
     }).run(workflow, {});
     const store = new WorkflowRunStore(databasePath);
-    store.state.connection
-      .prepare(
-        "UPDATE workflow_follow_up_queues SET presentation_state = 'pending' WHERE run_id = ?",
-      )
-      .run(result.runId);
+    const now = Date.now();
+    const followUpId = "pending-follow-up";
+    const resourceId = resourceIdFor("follow_up", followUpId);
+    const promptHash = store.state.putText("Continue later", now);
+    store.state.transaction(() => {
+      store.state.connection
+        .prepare(
+          `INSERT INTO resources(resource_id, resource_type, aggregate_key, revision, created_at, updated_at)
+           VALUES (?, 'follow_up', ?, 1, ?, ?)`,
+        )
+        .run(resourceId, followUpId, now, now);
+      store.state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(resourceId);
+      store.state.connection
+        .prepare(
+          `INSERT INTO workflow_follow_ups(
+             follow_up_id, resource_id, run_id, request_id, order_number, target_session_id,
+             actor_type, source_type, prompt_hash, status, created_at, updated_at
+           ) VALUES (?, ?, ?, 'pending-request', 1, 'session-a', 'system', 'test', ?, 'queued', ?, ?)`,
+        )
+        .run(followUpId, resourceId, result.runId, promptHash, now, now);
+    });
     store.close();
 
     const preview = await pruneState(databasePath, {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
+import { WorkflowMessageStore, workflowMessageIdFor } from "../state/workflow-messages.js";
 import {
   StateMutationStore,
   StaleResourceError,
@@ -34,7 +35,6 @@ import {
   type WorkflowFollowUpQueueRecord,
   type WorkflowFollowUpRecord,
   type WorkflowFollowUpState,
-  type WorkflowPresentationState,
   type WorkflowQueueFollowUpRequest,
   type WorkflowRemoveFollowUpRequest,
   type WorkflowSettingsChangeRecord,
@@ -43,6 +43,7 @@ import {
   type WorkflowSettingsDefinition,
   type WorkflowSettingsScopeRecord,
 } from "./settings.js";
+import { followUpWorkflowMessageContent } from "./workflow-message-content.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -110,14 +111,11 @@ const STEP_ROW_SELECT = `
 
 const FOLLOW_UP_ROW_SELECT = `
   SELECT f.follow_up_id AS followUpId, f.resource_id AS resourceId,
-         f.queue_resource_id AS queueResourceId, f.run_id AS runId,
-         f.request_id AS requestId, f.order_number AS orderNumber,
+         f.run_id AS runId, f.request_id AS requestId, f.order_number AS orderNumber,
          f.target_session_id AS targetSessionId, f.actor_type AS actorType,
          f.actor_id AS actorId, f.source_type AS sourceType,
-         f.prompt_hash AS promptHash, f.status,
-         f.session_entry_id AS sessionEntryId, f.reason_hash AS reasonHash,
-         f.created_at AS createdAt, f.updated_at AS updatedAt, f.sent_at AS sentAt,
-         r.revision
+         f.prompt_hash AS promptHash, f.status, f.reason_hash AS reasonHash,
+         f.created_at AS createdAt, f.updated_at AS updatedAt, r.revision
   FROM workflow_follow_ups f
   JOIN resources r ON r.resource_id = f.resource_id`;
 
@@ -156,6 +154,8 @@ export type WorkflowRunStoreOptions = {
     database: StateDatabase;
     now: number;
   }) => void;
+  /** The global host may record an attested Pi session after the worker lease ends. */
+  allowHostSessionRecording?: boolean;
   state?: StateDatabase;
   readOnly?: boolean;
 };
@@ -352,21 +352,9 @@ type SettingsChangeRow = {
   acceptedAt: number;
 };
 
-type FollowUpQueueRow = {
-  runId: string;
-  resourceId: string;
-  originSessionId: string | null;
-  presentationState: string;
-  presentationEntryId: string | null;
-  presentationAssistantEntryId: string | null;
-  presentationReasonHash: Buffer | null;
-  revision: number;
-};
-
 type FollowUpRow = {
   followUpId: string;
   resourceId: string;
-  queueResourceId: string;
   runId: string;
   requestId: string;
   orderNumber: number;
@@ -376,11 +364,9 @@ type FollowUpRow = {
   sourceType: string;
   promptHash: Buffer;
   status: string;
-  sessionEntryId: string | null;
   reasonHash: Buffer | null;
   createdAt: number;
   updatedAt: number;
-  sentAt: number | null;
   revision: number;
 };
 
@@ -503,13 +489,16 @@ export class WorkflowRunStore {
     | ((runId: string) => RunWriteAuthority | undefined)
     | undefined;
   private readonly snapshotLifecycle: WorkflowRunStoreOptions["snapshotLifecycle"];
+  private readonly allowHostSessionRecording: boolean;
   private readonly contexts = new Map<string, RunContext>();
   private readonly ownsState: boolean;
   private readonly mutations: StateMutationStore;
+  private readonly workflowMessages: WorkflowMessageStore;
 
   constructor(databasePath: string = workflowStatePath(), options: WorkflowRunStoreOptions = {}) {
     this.authorityProvider = options.authorityProvider;
     this.snapshotLifecycle = options.snapshotLifecycle;
+    this.allowHostSessionRecording = options.allowHostSessionRecording === true;
     this.ownsState = options.state === undefined;
     this.state =
       options.state ??
@@ -520,6 +509,7 @@ export class WorkflowRunStore {
       });
     this.databasePath = this.state.filePath;
     this.mutations = new StateMutationStore(this.state);
+    this.workflowMessages = new WorkflowMessageStore(this.state);
   }
 
   close(): void {
@@ -912,6 +902,18 @@ export class WorkflowRunStore {
           return;
         }
         const definitionHash = this.state.putJson(snapshot, now);
+        const parentLineage =
+          state.parentRunId === undefined
+            ? undefined
+            : this.state.connection
+                .prepare(
+                  `SELECT root_run_id AS rootRunId, restart_number AS restartNumber
+                   FROM runs WHERE run_id = ?`,
+                )
+                .get(state.parentRunId);
+        if (state.parentRunId !== undefined && !isRunLineageRow(parentLineage)) {
+          throw new Error(`Workflow parent run is missing: ${state.parentRunId}`);
+        }
         this.state.connection
           .prepare(
             `INSERT INTO workflow_definitions(
@@ -940,16 +942,20 @@ export class WorkflowRunStore {
         this.state.connection
           .prepare(
             `INSERT INTO runs(
-               run_id, resource_id, project_id, parent_run_id, definition_digest,
+               run_id, resource_id, project_id, parent_run_id, root_run_id, lineage_kind,
+               restart_number, parent_terminal_fingerprint, definition_digest,
                workflow_ref, launch_options_hash, title, status, paused,
                status_detail, input_hash, final_output_hash, error_hash,
                created_at, updated_at, finished_at
-             ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             state.runId,
             resourceId,
             state.parentRunId ?? null,
+            isRunLineageRow(parentLineage) ? parentLineage.rootRunId : state.runId,
+            state.parentRunId === undefined ? null : "continuation",
+            isRunLineageRow(parentLineage) ? parentLineage.restartNumber : 0,
             definitionDigest,
             state.workflowName,
             launchOptionsHash,
@@ -1287,87 +1293,78 @@ export class WorkflowRunStore {
     if (Buffer.byteLength(request.prompt, "utf8") > 64 * 1024) {
       throw new Error("Workflow follow-up prompt cannot exceed 65536 bytes");
     }
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    return this.state.transaction(() => {
       const prior = this.followUpRowByRequest(request.runId, request.requestId);
       if (prior !== undefined) {
         this.assertSameFollowUp(prior, request);
         return { followUp: this.followUpRecord(prior), adopted: true };
       }
       this.requireRunAcceptsSettings(request.runId, true);
-      const queue = this.requireFollowUpQueueRow(request.runId);
-      try {
-        const result = this.mutations.mutate(
-          {
-            resourceId: queue.resourceId,
-            operation: "follow-up.queue",
-            actor: request.actor,
-            expectedRevision: queue.revision,
-          },
-          "follow-up.queued",
-          ({ database, now }) => {
-            this.requireRunAcceptsSettings(request.runId, true);
-            const currentQueue = this.requireFollowUpQueueRow(request.runId);
-            if (
-              currentQueue.originSessionId !== null &&
-              currentQueue.originSessionId !== request.targetSessionId
-            ) {
-              throw new Error("Workflow follow-ups must target the run's origin Pi session");
-            }
-            if (currentQueue.originSessionId === null) {
-              database.connection
-                .prepare(
-                  `UPDATE workflow_follow_up_queues
-                   SET origin_session_id = ?, updated_at = ? WHERE run_id = ?`,
-                )
-                .run(request.targetSessionId, now, request.runId);
-            }
-            const order = this.nextFollowUpOrder(request.runId);
-            const followUpId = followUpIdFor(request.runId, request.requestId);
-            const resourceId = this.mutations.ensureResource("follow_up", followUpId, now);
-            const promptHash = database.putText(request.prompt, now);
-            database.connection
-              .prepare(
-                `INSERT INTO workflow_follow_ups(
-                   follow_up_id, resource_id, queue_resource_id, run_id,
-                   request_id, order_number, target_session_id,
-                   actor_type, actor_id, source_type, prompt_hash, status,
-                   created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
-              )
-              .run(
-                followUpId,
-                resourceId,
-                queue.resourceId,
-                request.runId,
-                request.requestId,
-                order,
-                request.targetSessionId,
-                request.actor.type,
-                request.actor.id ?? null,
-                request.source,
-                promptHash,
-                now,
-                now,
-              );
-            recordViewerDeltas(
-              this.state,
-              request.runId,
-              this.viewerInspectorTargets(request.runId),
-              now,
-            );
-            return followUpId;
-          },
-          { payload: { runId: request.runId, requestId: request.requestId } },
-        );
-        return {
-          followUp: this.followUpRecord(this.requireFollowUpRow(result.value)),
-          adopted: false,
-        };
-      } catch (error) {
-        if (!(error instanceof StaleResourceError)) throw error;
+      if (this.originSessionId(request.runId) !== request.targetSessionId) {
+        throw new Error("Workflow follow-ups must target the run's origin Pi session");
       }
-    }
-    throw new StaleResourceError("Workflow follow-up queue kept changing; retry the request");
+      const now = Date.now();
+      const order = this.nextFollowUpOrder(request.runId);
+      const followUpId = followUpIdFor(request.runId, request.requestId);
+      const resourceId = this.mutations.ensureResource("follow_up", followUpId, now);
+      const promptHash = this.state.putText(request.prompt, now);
+      this.state.connection
+        .prepare(
+          `INSERT INTO workflow_follow_ups(
+             follow_up_id, resource_id, run_id, request_id, order_number,
+             target_session_id, actor_type, actor_id, source_type, prompt_hash,
+             status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+        )
+        .run(
+          followUpId,
+          resourceId,
+          request.runId,
+          request.requestId,
+          order,
+          request.targetSessionId,
+          request.actor.type,
+          request.actor.id ?? null,
+          request.source,
+          promptHash,
+          now,
+          now,
+        );
+      const workflowMessageId = workflowMessageIdFor("followUp", followUpId, "initial");
+      this.workflowMessages.create({
+        workflowMessageId,
+        runId: request.runId,
+        targetSessionId: request.targetSessionId,
+        kind: "followUp",
+        sourceId: followUpId,
+        idempotencyKey: "initial",
+        content: followUpWorkflowMessageContent({
+          workflowMessageId,
+          followUpId,
+          runId: request.runId,
+          prompt: request.prompt,
+        }),
+        now,
+      });
+      this.bumpResource(resourceId, 0, now);
+      insertGenericEvent(
+        this.state,
+        resourceId,
+        1,
+        "follow-up.queued",
+        request.actor.type,
+        request.actor.id ?? null,
+        this.state.putJson({ runId: request.runId, requestId: request.requestId }, now),
+        now,
+      );
+      recordViewerDeltas(
+        this.state,
+        request.runId,
+        this.viewerInspectorTargets(request.runId),
+        now,
+      );
+      return { followUp: this.followUpRecord(this.requireFollowUpRow(followUpId)), adopted: false };
+    });
   }
 
   removeFollowUp(request: WorkflowRemoveFollowUpRequest): WorkflowFollowUpRecord {
@@ -1377,12 +1374,13 @@ export class WorkflowRunStore {
       throw new Error(`Workflow follow-up is not part of run ${request.runId}`);
     }
     if (row.status === "removed") return this.followUpRecord(row);
-    if (row.status === "sent" || row.status === "cancelled") {
-      throw new Error(`Workflow follow-up cannot be removed after it is ${row.status}`);
+    if (row.status === "cancelled") {
+      throw new Error("A cancelled workflow follow-up cannot be removed");
     }
     this.assertFollowUpRemovalAuthority(row, request.actor, request.source);
-    if (this.hasLiveLease(row.resourceId)) {
-      throw new Error("Workflow follow-up is being delivered and cannot be removed");
+    const message = this.workflowMessages.latestForSource("followUp", request.followUpId);
+    if (message?.status === "sent") {
+      throw new Error("A sent workflow follow-up cannot be removed");
     }
     const reason = "Removed before delivery";
     this.mutations.mutate(
@@ -1399,12 +1397,13 @@ export class WorkflowRunStore {
           .prepare(
             `UPDATE workflow_follow_ups
              SET status = 'removed', reason_hash = ?, updated_at = ?
-             WHERE follow_up_id = ? AND status IN ('queued', 'pending_presentation', 'ready')`,
+             WHERE follow_up_id = ? AND status = 'queued'`,
           )
           .run(reasonHash, now, request.followUpId);
         if (update.changes !== 1) {
           throw new StaleResourceError("Workflow follow-up changed before removal");
         }
+        this.workflowMessages.cancelPendingForSource(request.followUpId, "followUp", now);
         recordViewerDeltas(
           this.state,
           request.runId,
@@ -1420,10 +1419,8 @@ export class WorkflowRunStore {
   originSessionId(runId: string): string | undefined {
     const row = this.state.connection
       .prepare(
-        `SELECT COALESCE(q.origin_session_id, b.origin_session_id) AS originSessionId
-         FROM runs r
-         LEFT JOIN workflow_follow_up_queues q ON q.run_id = r.run_id
-         LEFT JOIN run_bindings b ON b.run_id = r.run_id
+        `SELECT b.origin_session_id AS originSessionId
+         FROM runs r LEFT JOIN run_bindings b ON b.run_id = r.run_id
          WHERE r.run_id = ?`,
       )
       .get(runId);
@@ -1433,36 +1430,22 @@ export class WorkflowRunStore {
   }
 
   readFollowUpQueue(runId: string): WorkflowFollowUpQueueRecord | undefined {
-    const queue = this.followUpQueueRow(runId);
-    if (queue === undefined) return undefined;
+    const originSessionId = this.originSessionId(runId);
+    if (originSessionId === undefined) return undefined;
     const followUps = this.state.connection
       .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number`)
       .all(runId)
       .filter(isFollowUpRow)
       .map((row) => this.followUpRecord(row));
-    return {
-      runId,
-      ...(queue.originSessionId !== null ? { originSessionId: queue.originSessionId } : {}),
-      presentationState: assertPresentationState(queue.presentationState),
-      ...(queue.presentationEntryId !== null
-        ? { presentationEntryId: queue.presentationEntryId }
-        : {}),
-      ...(queue.presentationAssistantEntryId !== null
-        ? { presentationAssistantEntryId: queue.presentationAssistantEntryId }
-        : {}),
-      ...(queue.presentationReasonHash !== null
-        ? { presentationReason: this.readText(queue.presentationReasonHash) }
-        : {}),
-      followUps,
-    };
+    return { runId, originSessionId, followUps };
   }
 
   private readFollowUpQueueRange(
     runId: string,
     range: WorkflowRunViewRange,
   ): WorkflowFollowUpQueueRecord | null {
-    const queue = this.followUpQueueRow(runId);
-    if (queue === undefined) return null;
+    const originSessionId = this.originSessionId(runId);
+    if (originSessionId === undefined) return null;
     const followUps = this.state.connection
       .prepare(
         `${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? ORDER BY f.order_number LIMIT ? OFFSET ?`,
@@ -1470,195 +1453,7 @@ export class WorkflowRunStore {
       .all(runId, range.limit, range.start)
       .filter(isFollowUpRow)
       .map((row) => this.followUpRecord(row));
-    return {
-      runId,
-      ...(queue.originSessionId !== null ? { originSessionId: queue.originSessionId } : {}),
-      presentationState: assertPresentationState(queue.presentationState),
-      ...(queue.presentationEntryId !== null
-        ? { presentationEntryId: queue.presentationEntryId }
-        : {}),
-      ...(queue.presentationAssistantEntryId !== null
-        ? { presentationAssistantEntryId: queue.presentationAssistantEntryId }
-        : {}),
-      ...(queue.presentationReasonHash !== null
-        ? { presentationReason: this.readText(queue.presentationReasonHash) }
-        : {}),
-      followUps,
-    };
-  }
-
-  listPendingPresentations(targetSessionId: string): string[] {
-    return this.state.connection
-      .prepare(
-        `SELECT run_id AS runId FROM workflow_follow_up_queues
-         WHERE origin_session_id = ? AND presentation_state = 'pending'
-         ORDER BY created_at`,
-      )
-      .all(targetSessionId)
-      .flatMap((row) => (isRecord(row) && typeof row.runId === "string" ? [row.runId] : []));
-  }
-
-  settleFollowUpPresentation(options: {
-    runId: string;
-    state: "settled" | "unavailable";
-    presentationEntryId?: string;
-    assistantEntryId?: string;
-    reason?: string;
-  }): WorkflowFollowUpQueueRecord {
-    const queue = this.requireFollowUpQueueRow(options.runId);
-    if (queue.presentationState === options.state) {
-      return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
-    }
-    if (queue.presentationState !== "pending") {
-      throw new Error(
-        `Workflow presentation is ${queue.presentationState}, not pending for ${options.runId}`,
-      );
-    }
-    if (
-      options.state === "settled" &&
-      (options.presentationEntryId === undefined || options.assistantEntryId === undefined)
-    ) {
-      throw new Error("Settled workflow presentation requires both session entry IDs");
-    }
-    if (options.state === "unavailable" && !options.reason?.trim()) {
-      throw new Error("Unavailable workflow presentation requires a reason");
-    }
-    try {
-      this.mutations.mutate(
-        {
-          resourceId: queue.resourceId,
-          operation: "follow-up.presentation",
-          actor: {
-            type: "session",
-            ...(queue.originSessionId !== null ? { id: queue.originSessionId } : {}),
-          },
-          expectedRevision: queue.revision,
-        },
-        `follow-up.presentation-${options.state}`,
-        ({ database, now }) => {
-          const reasonHash =
-            options.state === "unavailable"
-              ? database.putText(options.reason as string, now)
-              : null;
-          database.connection
-            .prepare(
-              `UPDATE workflow_follow_up_queues
-             SET presentation_state = ?, presentation_entry_id = ?,
-                 presentation_assistant_entry_id = ?, presentation_reason_hash = ?,
-                 presentation_updated_at = ?, updated_at = ?
-             WHERE run_id = ? AND presentation_state = 'pending'`,
-            )
-            .run(
-              options.state,
-              options.presentationEntryId ?? null,
-              options.assistantEntryId ?? null,
-              reasonHash,
-              now,
-              now,
-              options.runId,
-            );
-          database.connection
-            .prepare(
-              `UPDATE workflow_follow_ups SET status = 'ready', updated_at = ?
-             WHERE run_id = ? AND status = 'pending_presentation'`,
-            )
-            .run(now, options.runId);
-          recordViewerDeltas(
-            this.state,
-            options.runId,
-            this.viewerInspectorTargets(options.runId),
-            now,
-          );
-        },
-        { payload: { runId: options.runId, state: options.state } },
-      );
-    } catch (error) {
-      if (error instanceof StaleResourceError) {
-        const current = this.requireFollowUpQueueRow(options.runId);
-        if (current.presentationState === options.state) {
-          return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
-        }
-      }
-      throw error;
-    }
-    return this.readFollowUpQueue(options.runId) as WorkflowFollowUpQueueRecord;
-  }
-
-  claimNextFollowUp(
-    targetSessionId: string,
-    ownerId: string,
-    leaseMs = 30_000,
-  ): { followUp: WorkflowFollowUpRecord; claim: LeaseClaim } | undefined {
-    const rows = this.state.connection
-      .prepare(
-        `${FOLLOW_UP_ROW_SELECT}
-         WHERE f.target_session_id = ? AND f.status = 'ready'
-         ORDER BY f.created_at, f.order_number LIMIT 16`,
-      )
-      .all(targetSessionId)
-      .filter(isFollowUpRow);
-    for (const row of rows) {
-      let claim: LeaseClaim | undefined;
-      try {
-        claim = this.mutations.claim({
-          resourceId: row.resourceId,
-          ownerType: "session",
-          ownerId,
-          expectedRevision: row.revision,
-          leaseMs,
-        });
-      } catch (error) {
-        if (error instanceof StaleResourceError) continue;
-        throw error;
-      }
-      if (claim === undefined) continue;
-      const current = this.requireFollowUpRow(row.followUpId);
-      if (current.status !== "ready") {
-        this.mutations.release(claim, claim.resourceRevision);
-        continue;
-      }
-      return { followUp: this.followUpRecord(current), claim };
-    }
-    return undefined;
-  }
-
-  markFollowUpSent(
-    followUpId: string,
-    claim: LeaseClaim,
-    sessionEntryId: string,
-  ): WorkflowFollowUpRecord {
-    const row = this.requireFollowUpRow(followUpId);
-    if (row.status === "sent") return this.followUpRecord(row);
-    this.mutations.mutate(
-      {
-        resourceId: row.resourceId,
-        operation: "follow-up.sent",
-        actor: { type: "session", id: claim.ownerId },
-        expectedRevision: claim.resourceRevision,
-        lease: claim,
-      },
-      "follow-up.sent",
-      ({ database, now }) => {
-        const update = database.connection
-          .prepare(
-            `UPDATE workflow_follow_ups
-             SET status = 'sent', session_entry_id = ?, sent_at = ?, updated_at = ?
-             WHERE follow_up_id = ? AND status = 'ready'`,
-          )
-          .run(sessionEntryId, now, now, followUpId);
-        if (update.changes !== 1) {
-          throw new StaleResourceError("Workflow follow-up changed before delivery completed");
-        }
-        recordViewerDeltas(this.state, row.runId, this.viewerInspectorTargets(row.runId), now);
-      },
-      { payload: { followUpId, sessionEntryId } },
-    );
-    return this.followUpRecord(this.requireFollowUpRow(followUpId));
-  }
-
-  releaseFollowUpClaim(claim: LeaseClaim): void {
-    const revision = this.requireResourceRevision(claim.resourceId);
-    this.mutations.release(claim, revision);
+    return { runId, originSessionId, followUps };
   }
 
   async prepareRunResume(runId: string): Promise<LoadedWorkflowRun> {
@@ -1900,7 +1695,7 @@ export class WorkflowRunStore {
       this.state.transaction(() => {
         const run = this.requireRunRow(runId);
         const context = this.contextFor(runId);
-        this.assertWriteAuthority(run, context.revision);
+        this.assertSessionWriteAuthority(runId);
         const now = Date.parse(binding.boundAt);
         const resourceId = resourceIdFor("session", segmentId);
         const bindingHash = this.state.putJson(binding, now);
@@ -1947,13 +1742,6 @@ export class WorkflowRunStore {
              ON CONFLICT(run_id) DO NOTHING`,
           )
           .run(runId, binding.piSessionId, now);
-        this.state.connection
-          .prepare(
-            `UPDATE workflow_follow_up_queues
-             SET origin_session_id = COALESCE(origin_session_id, ?), updated_at = ?
-             WHERE run_id = ?`,
-          )
-          .run(binding.piSessionId, now, runId);
         const revision = context.revision + 1;
         const at = new Date(now).toISOString();
         const traceEvent: WorkflowTraceEvent = {
@@ -2679,6 +2467,7 @@ export class WorkflowRunStore {
 
   private assertSessionWriteAuthority(runId: string): void {
     const run = this.requireRunRow(runId);
+    if (this.allowHostSessionRecording) return;
     this.assertWriteAuthority(run, this.contextFor(runId).revision);
   }
 
@@ -2902,10 +2691,8 @@ export class WorkflowRunStore {
         order: row.orderNumber,
         state: row.status,
         source: row.sourceType,
-        sessionEntryId: row.sessionEntryId,
       }));
     const followUpStart = Math.max(0, followUps.length - VIEWER_PAGE_SIZE);
-    const queue = this.requireFollowUpQueueRow(runId);
     return [
       {
         targetType: "inspector",
@@ -2927,12 +2714,7 @@ export class WorkflowRunStore {
           {
             op: "replace",
             path: "/followUpQueue",
-            value: parseJson(
-              canonicalJson({
-                presentationState: queue.presentationState,
-                items: followUps.slice(followUpStart),
-              }),
-            ),
+            value: parseJson(canonicalJson({ items: followUps.slice(followUpStart) })),
           },
           { op: "replace", path: "/followUpStart", value: followUpStart },
           { op: "replace", path: "/followUpTotal", value: followUps.length },
@@ -2946,25 +2728,7 @@ export class WorkflowRunStore {
     initialSettings: InitialWorkflowSettingsScope[],
     now: number,
   ): void {
-    const childQueueResourceId = this.ensureFollowUpQueue(state.runId, now);
     if (state.parentRunId !== undefined) {
-      const parentQueue = this.followUpQueueRow(state.parentRunId);
-      if (parentQueue !== undefined) {
-        this.state.connection
-          .prepare(
-            `UPDATE workflow_follow_up_queues
-             SET origin_session_id = COALESCE(origin_session_id, ?), updated_at = ?
-             WHERE run_id = ?`,
-          )
-          .run(parentQueue.originSessionId, now, state.runId);
-        this.state.connection
-          .prepare(
-            `UPDATE workflow_follow_ups
-             SET run_id = ?, queue_resource_id = ?, updated_at = ?
-             WHERE run_id = ? AND status = 'queued'`,
-          )
-          .run(state.runId, childQueueResourceId, now, state.parentRunId);
-      }
       this.state.connection
         .prepare(
           `UPDATE workflow_settings SET active_run_id = ?, updated_at = ? WHERE active_run_id = ?`,
@@ -3002,19 +2766,6 @@ export class WorkflowRunStore {
           now,
         );
     }
-  }
-
-  private ensureFollowUpQueue(runId: string, now: number): string {
-    const resourceId = this.mutations.ensureResource("follow_up_queue", runId, now);
-    this.state.connection
-      .prepare(
-        `INSERT INTO workflow_follow_up_queues(
-           run_id, resource_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?)
-         ON CONFLICT(run_id) DO NOTHING`,
-      )
-      .run(runId, resourceId, now, now);
-    return resourceId;
   }
 
   private logicalOriginRunId(runId: string): string {
@@ -3174,30 +2925,6 @@ export class WorkflowRunStore {
     }
   }
 
-  private followUpQueueRow(runId: string): FollowUpQueueRow | undefined {
-    const row = this.state.connection
-      .prepare(
-        `SELECT q.run_id AS runId, q.resource_id AS resourceId,
-                q.origin_session_id AS originSessionId,
-                q.presentation_state AS presentationState,
-                q.presentation_entry_id AS presentationEntryId,
-                q.presentation_assistant_entry_id AS presentationAssistantEntryId,
-                q.presentation_reason_hash AS presentationReasonHash,
-                r.revision
-         FROM workflow_follow_up_queues q
-         JOIN resources r ON r.resource_id = q.resource_id
-         WHERE q.run_id = ?`,
-      )
-      .get(runId);
-    return isFollowUpQueueRow(row) ? row : undefined;
-  }
-
-  private requireFollowUpQueueRow(runId: string): FollowUpQueueRow {
-    const row = this.followUpQueueRow(runId);
-    if (row === undefined) throw new Error(`Workflow follow-up queue not found: ${runId}`);
-    return row;
-  }
-
   private followUpRowByRequest(runId: string, requestId: string): FollowUpRow | undefined {
     const row = this.state.connection
       .prepare(`${FOLLOW_UP_ROW_SELECT} WHERE f.run_id = ? AND f.request_id = ?`)
@@ -3232,11 +2959,9 @@ export class WorkflowRunStore {
       source: row.sourceType,
       prompt: this.readText(row.promptHash),
       state: assertFollowUpState(row.status),
-      ...(row.sessionEntryId !== null ? { sessionEntryId: row.sessionEntryId } : {}),
       ...(row.reasonHash !== null ? { reason: this.readText(row.reasonHash) } : {}),
       createdAt: new Date(row.createdAt).toISOString(),
       updatedAt: new Date(row.updatedAt).toISOString(),
-      ...(row.sentAt !== null ? { sentAt: new Date(row.sentAt).toISOString() } : {}),
     };
   }
 
@@ -3268,13 +2993,6 @@ export class WorkflowRunStore {
       return;
     }
     throw new Error("Workflow follow-up can be removed only by its source or a verified human");
-  }
-
-  private hasLiveLease(resourceId: string): boolean {
-    const row = this.state.connection
-      .prepare("SELECT expires_at AS expiresAt FROM leases WHERE resource_id = ?")
-      .get(resourceId);
-    return isLeaseExpiryRow(row) && row.expiresAt !== null && row.expiresAt > Date.now();
   }
 
   private nextFollowUpOrder(runId: string): number {
@@ -3309,55 +3027,51 @@ export class WorkflowRunStore {
 
   private transitionFollowUpsForRunState(
     state: WorkflowRunState,
-    event: WorkflowTraceEventDraft,
+    _event: WorkflowTraceEventDraft,
     now: number,
   ): void {
-    if (state.status === "running" || state.status === "waiting") return;
-    const queue = this.followUpQueueRow(state.runId);
-    if (queue === undefined || queue.presentationState !== "none") return;
-    let presentationState: WorkflowPresentationState = "not-needed";
-    let followUpState: WorkflowFollowUpState = "cancelled";
-    let reasonHash: Buffer | null = null;
-    if (state.status === "completed") {
-      const required = event.payload.presentationRequired === true;
-      presentationState = required ? "pending" : "not-needed";
-      followUpState = required ? "pending_presentation" : "ready";
-    } else {
-      reasonHash = this.state.putText(
-        state.error ?? `Workflow ended with status ${state.status}`,
+    if (state.status === "running" || state.status === "waiting" || state.status === "completed") {
+      return;
+    }
+    const rows = this.state.connection
+      .prepare(
+        `${FOLLOW_UP_ROW_SELECT}
+         WHERE f.run_id IN (
+           WITH RECURSIVE ancestors(run_id, parent_run_id) AS (
+             SELECT run_id, parent_run_id FROM runs WHERE run_id = ?
+             UNION ALL
+             SELECT parent.run_id, parent.parent_run_id
+             FROM runs parent JOIN ancestors ON ancestors.parent_run_id = parent.run_id
+           )
+           SELECT run_id FROM ancestors
+         ) AND f.status = 'queued'`,
+      )
+      .all(state.runId)
+      .filter(isFollowUpRow);
+    for (const row of rows) {
+      const reason = state.error ?? `Workflow ended with status ${state.status}`;
+      const reasonHash = this.state.putText(reason, now);
+      const update = this.state.connection
+        .prepare(
+          `UPDATE workflow_follow_ups
+           SET status = 'cancelled', reason_hash = ?, updated_at = ?
+           WHERE follow_up_id = ? AND status = 'queued'`,
+        )
+        .run(reasonHash, now, row.followUpId);
+      if (update.changes !== 1) continue;
+      this.workflowMessages.cancelPendingForSource(row.followUpId, "followUp", now);
+      this.bumpResource(row.resourceId, row.revision, now);
+      insertGenericEvent(
+        this.state,
+        row.resourceId,
+        row.revision + 1,
+        "follow-up.cancelled",
+        "system",
+        null,
+        this.state.putJson({ runId: state.runId, status: state.status, reason }, now),
         now,
       );
     }
-    this.state.connection
-      .prepare(
-        `UPDATE workflow_follow_up_queues
-         SET presentation_state = ?, presentation_updated_at = ?, updated_at = ?
-         WHERE run_id = ? AND presentation_state = 'none'`,
-      )
-      .run(presentationState, now, now, state.runId);
-    this.state.connection
-      .prepare(
-        `UPDATE workflow_follow_ups
-         SET status = ?, reason_hash = ?, updated_at = ?
-         WHERE run_id = ? AND status IN ('queued', 'pending_presentation', 'ready')`,
-      )
-      .run(followUpState, reasonHash, now, state.runId);
-    const revision = this.requireResourceRevision(queue.resourceId);
-    this.bumpResource(queue.resourceId, revision, now);
-    const payloadHash = this.state.putJson(
-      { runId: state.runId, state: presentationState, followUps: followUpState },
-      now,
-    );
-    insertGenericEvent(
-      this.state,
-      queue.resourceId,
-      revision + 1,
-      "follow-up.run-finished",
-      "system",
-      null,
-      payloadHash,
-      now,
-    );
   }
 
   private syncNodeAttempts(
@@ -4876,28 +4590,8 @@ function assertActorType(value: string): ActorType {
 }
 
 function assertFollowUpState(value: string): WorkflowFollowUpState {
-  if (
-    value !== "queued" &&
-    value !== "pending_presentation" &&
-    value !== "ready" &&
-    value !== "sent" &&
-    value !== "removed" &&
-    value !== "cancelled"
-  ) {
+  if (value !== "queued" && value !== "removed" && value !== "cancelled") {
     throw new Error(`Unknown workflow follow-up state: ${value}`);
-  }
-  return value;
-}
-
-function assertPresentationState(value: string): WorkflowPresentationState {
-  if (
-    value !== "none" &&
-    value !== "not-needed" &&
-    value !== "pending" &&
-    value !== "settled" &&
-    value !== "unavailable"
-  ) {
-    throw new Error(`Unknown workflow presentation state: ${value}`);
   }
   return value;
 }
@@ -4955,27 +4649,11 @@ function isSettingsChangeRow(value: unknown): value is SettingsChangeRow {
   );
 }
 
-function isFollowUpQueueRow(value: unknown): value is FollowUpQueueRow {
-  return (
-    isRecord(value) &&
-    typeof value.runId === "string" &&
-    typeof value.resourceId === "string" &&
-    (typeof value.originSessionId === "string" || value.originSessionId === null) &&
-    typeof value.presentationState === "string" &&
-    (typeof value.presentationEntryId === "string" || value.presentationEntryId === null) &&
-    (typeof value.presentationAssistantEntryId === "string" ||
-      value.presentationAssistantEntryId === null) &&
-    (Buffer.isBuffer(value.presentationReasonHash) || value.presentationReasonHash === null) &&
-    typeof value.revision === "number"
-  );
-}
-
 function isFollowUpRow(value: unknown): value is FollowUpRow {
   return (
     isRecord(value) &&
     typeof value.followUpId === "string" &&
     typeof value.resourceId === "string" &&
-    typeof value.queueResourceId === "string" &&
     typeof value.runId === "string" &&
     typeof value.requestId === "string" &&
     typeof value.orderNumber === "number" &&
@@ -4985,17 +4663,23 @@ function isFollowUpRow(value: unknown): value is FollowUpRow {
     typeof value.sourceType === "string" &&
     Buffer.isBuffer(value.promptHash) &&
     typeof value.status === "string" &&
-    (typeof value.sessionEntryId === "string" || value.sessionEntryId === null) &&
     (Buffer.isBuffer(value.reasonHash) || value.reasonHash === null) &&
     typeof value.createdAt === "number" &&
     typeof value.updatedAt === "number" &&
-    (typeof value.sentAt === "number" || value.sentAt === null) &&
     typeof value.revision === "number"
   );
 }
 
 function isParentRunRow(value: unknown): value is { parentRunId: string | null } {
   return isRecord(value) && (typeof value.parentRunId === "string" || value.parentRunId === null);
+}
+
+function isRunLineageRow(value: unknown): value is { rootRunId: string; restartNumber: number } {
+  return (
+    isRecord(value) &&
+    typeof value.rootRunId === "string" &&
+    typeof value.restartNumber === "number"
+  );
 }
 
 function isStatusRow(value: unknown): value is { status: string } {

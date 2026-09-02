@@ -178,6 +178,15 @@ describe("workflow run queue in canonical SQLite", () => {
     });
     expect(parent).toBeDefined();
     expect(store.parkWorkflowRun({ runId: "parent-1", claimToken: "parent-token" })).toBe(true);
+    reserve(store, "parent-2");
+    const secondParent = store.claimWorkflowRun({
+      runId: "parent-2",
+      runnerId: "runner-1",
+      claimToken: "parent-2-token",
+      leaseMs: 30_000,
+    });
+    expect(secondParent).toBeDefined();
+    expect(store.parkWorkflowRun({ runId: "parent-2", claimToken: "parent-2-token" })).toBe(true);
     const options = continuationPreparation();
     store.prepareOrAdoptWorkflowRun(options);
     const before = store.getWorkflowRun("continuation-1");
@@ -319,7 +328,16 @@ describe("workflow run queue in canonical SQLite", () => {
       attemptId: "pause-attempt",
       targetSessionId: "session-1",
       kind: "agent",
-      contract: {},
+      contract: {
+        prompt: "Continue",
+        contract: {
+          runId: "pause-run",
+          workflowName: "echo",
+          nodeId: "echo",
+          attemptId: "pause-attempt",
+          completion: "submit",
+        },
+      },
     });
     expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
     expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(true);
