@@ -6,9 +6,11 @@ date: 2026-08-25
 
 # Continue normal work after a workflow finishes
 
-A workflow can save several normal user prompts while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its one terminal decision intent is resolved, and its final-response barrier has settled. The completed workflow stays terminal and does not enter its start node again.
+> **Current version notice:** Version 0.16.0 does not provide the complete hosted queue, remove, and ordered-send behavior in this document. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores it through the shared `workflow_messages` path.
 
-Follow-up prompts are separate from workflow settings. JSON Patch changes future workflow behavior. Follow-up actions create later normal user turns.
+A workflow can save several prompts for normal work while it runs. Pi Workflows sends them in order only after the workflow is officially terminal, its terminal message is sent, and its terminal model turn has ended. The completed workflow stays terminal and does not enter its start node again.
+
+Follow-up prompts are separate from workflow settings. JSON Patch changes future workflow behavior. Follow-up actions create later normal conversation turns.
 
 ## Queue and remove prompts
 
@@ -61,74 +63,50 @@ The host creates the actor and stable request identity. Prompt data cannot claim
 
 ## Ordering and run states
 
-Prompts keep database acceptance order. Several user messages can therefore add several prompts while one workflow response is in progress.
+Prompts keep database acceptance order. Several requests can add several prompts while one workflow response is in progress.
 
 - Running, paused, parked, and waiting workflows accept new prompts.
 - Pause and park keep prompts queued.
-- A checkpoint continuation takes the queued prompts with it in the same transaction that creates the new run.
-- Successful completion records the terminal run and terminal decision intent before prompts can be delivered.
+- A checkpoint continuation keeps queued prompt rows attached to the chain member that accepted them. The host walks the continuation chain to determine their final source outcome; it does not rewrite the rows.
+- Successful completion records the terminal run and terminal workflow message before a follow-up can send.
 - Failed, timed-out, and cancelled workflows cancel every unsent prompt.
 - A terminal workflow rejects new prompts. Repeating an earlier request ID can still return its first result.
 
 A repeated request ID with the same prompt returns the first result. Reusing that ID with different content fails.
 
-## Final response barrier
+Each accepted prompt creates its `workflow_follow_ups` source record and one `followUp` workflow message in one transaction. The message points to its source through `sourceId`; the source row stores no message pointer. The host derives eligibility from saved domain facts. A follow-up is eligible only after the source continuation chain completes successfully, its terminal message turn ends, every earlier accepted follow-up is settled or cancelled, and no nonterminal run, including one waiting for a checkpoint or protected decision, reserves the origin session.
 
-Each run saves one final-response state:
+## One message path
 
-- `not-needed`: the workflow has no final presentation;
-- `pending`: the terminal run has a final response that has not settled;
-- `settled`: the active session branch contains the presentation message and its completed assistant response;
-- `unavailable`: the extension recorded a definite timeout, failure, or restart gap.
+The shared `WorkflowMessageCoordinator` handles follow-ups. There is no follow-up sender.
 
-Successful completion changes queued prompts to `pending_presentation` when a presentation prompt is present. It changes them directly to `ready` when no presentation prompt is present. A settled or unavailable presentation changes pending prompts to ready. Ready prompts still wait while the run's terminal decision intent is unresolved.
+1. Wait for the terminal outcome, sent terminal workflow message, and matching model-turn end.
+2. After every host connection, wait for the complete origin-session view and report the active branch.
+3. Wait until the host view names this `followUp` as the next eligible pending message, Pi is idle, and no earlier workflow message is active.
+4. Keep its ID in the coordinator's in-memory queued map and report a matching active-branch entry when one already exists.
+5. Otherwise, recheck synchronously that Pi is idle, has no pending input, the message is absent, and the connection still owns the active coordinator epoch. Call documented `pi.sendMessage()` with the follow-up prompt and `triggerTurn: true` without an `await` between the check and call.
+6. Report the active branch so the host saves the observed Pi entry ID and marks the message `sent`.
+7. Wait for that turn and any workflow it starts to finish before the next follow-up becomes eligible.
 
-The extension includes the run ID in documented presentation-message details. On restart, it scans the active durable branch for the presentation message and completed assistant response. It also recovers the terminal intent before follow-up delivery. It saves observed entry IDs and does not treat an in-memory event alone as proof.
-
-## Delivery
-
-The follow-up coordinator handles one prompt at a time:
-
-1. Wait for terminal workflow state, a resolved terminal decision intent, and a completed final-response barrier.
-2. Wait for the target session to be idle and have no active workflow.
-3. Claim the first ready prompt with a lease.
-4. Scan the active session branch for its stable follow-up ID.
-5. If the message already exists, save its session entry ID without sending it again.
-6. Otherwise, call documented `pi.sendUserMessage` with the prompt and a short nonsecret ID in a Markdown comment.
-7. After Pi saves the normal user message, scan the branch and save its entry ID and send time.
-8. Wait for that user turn and any workflow it starts to finish before taking the next prompt.
-
-`pi.sendUserMessage` returns no message ID. Branch evidence is required after a new send and after restart.
-
-The follow-up message is a normal user message. It can start normal work or a different workflow. It cannot resume or reactivate the completed workflow. A `restart` selected from the terminal decision is a separate immutable workflow run, not a follow-up prompt.
+The follow-up custom message starts normal conversation work and can use a user-style renderer. Its internal workflow message ID stays in custom details and does not enter provider-facing content. It can ask the model to start another workflow, but it cannot resume or reactivate the completed workflow. Text that starts with `/` remains plain model input; a custom message cannot dispatch a Pi slash command or expand a prompt template. A `restart` chosen from the terminal turn creates a separate immutable workflow run.
 
 Follow-up storage contains only prompts explicitly queued through this feature. Terminal restart does not find, copy, hash, or store an original user message. Conversation history remains owned by Pi.
 
 ## Failure handling
 
-- A crash before claim leaves the prompt ready.
-- A crash after claim lets another process continue after the lease expires.
-- A crash before message append leaves no branch evidence and permits a retry.
-- A crash after append but before the database update is resolved by finding the follow-up ID in the active branch.
-- A definite send failure releases the claim.
-- An unavailable session leaves the prompt pending.
-- Branching follows the active Pi branch. A message on another branch does not count as delivered on the active branch.
+- A crash before send leaves the workflow message `pending`.
+- A crash after send but before the branch report also leaves it `pending`; reconnect reports the active branch before another send.
+- A matching hidden workflow message ID changes a pending or cancelled message to `sent` because the Pi entry already exists.
+- An unavailable session leaves the workflow message `pending`.
+- An entry on another Pi branch does not confirm the send on the active branch.
+- A stale coordinator epoch cannot send or report message state.
 
-Current documented Pi APIs cannot guarantee exactly-once model execution. Pi Workflows can guarantee only its saved order, claim, active-branch evidence, and local delivery state. Delivery also needs a later live Pi process, database, target session, and provider. This feature adds no external service.
+Documented Pi APIs do not prove cross-branch absence or exactly-once model execution. Pi Workflows guarantees only its saved order, message state, active-branch evidence, and local state. Sending also needs a later live Pi process, target session, and provider. This feature adds no external service.
 
 ## Saved states
 
-A follow-up is in one of these states:
+`workflow_follow_ups` stores each prompt, source, queue order, and whether the source was removed or cancelled. It does not copy a workflow message ID, message state, or Pi entry ID. `workflow_messages` owns `pending`, `sent`, and `cancelled` state and points back to the source row.
 
-- `queued`;
-- `pending_presentation`;
-- `ready`;
-- `sent`;
-- `removed`;
-- `cancelled`.
+Prompt text stays in the existing content-addressed value store. Normal status views show IDs, order, source type, and state without printing full prompts.
 
-A lease is temporary claim data, not another follow-up state.
-
-`workflow_follow_up_queues` stores presentation state and per-run order. `workflow_follow_ups` stores each prompt, source, state, session entry ID, and times. Prompt text stays in the existing content-addressed value store. Normal status views show IDs, order, source type, and state without printing full prompts.
-
-This is part of the same alpha hard change as workflow settings. It adds no Pi core change, private Pi API, external queue, compatibility reader, dual write, alias, fallback, or second schema.
+This is an alpha hard change. It keeps schema version 1 and adds no Pi core change, private Pi API, external queue, compatibility reader, dual write, alias, fallback, or second schema.

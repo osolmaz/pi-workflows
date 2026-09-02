@@ -1,5 +1,7 @@
 # Rust TUI viewer (piw)
 
+> **Current version notice:** Version 0.16.0 keeps the host client, run view, `/piw`, `Ctrl+Shift+R`, Herdr placement, and widget scrolling. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores complete conversation data, step scrubbing, one-second elapsed-time redraw, richer status details, and 60-second terminal result retention.
+
 `tui/` contains `piw`, a Rust terminal viewer for workflow runs. It renders
 the same graph as the bundled TypeScript viewer, pinned by the golden fixtures
 under `fixtures/layout/`, and adds live following, replay, detailed inspection,

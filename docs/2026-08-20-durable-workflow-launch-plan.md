@@ -6,7 +6,7 @@ date: 2026-08-20
 
 # Make deferred workflow launches durable
 
-The launch queue and activation contract in this plan remain current. [Deferred workflow turns](DEFERRED_TURNS.md) replaces the launch-specific failure-notification mechanism with the general successor-turn intent contract.
+The launch queue and activation contract in this plan remain current. The send-specific parts are historical. [Terminal workflow messages](DEFERRED_TURNS.md) and the approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) replace every deferred-turn intent and launch-failure sender in this plan with the shared `workflow_messages` path.
 
 ## Goal
 

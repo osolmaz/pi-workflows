@@ -7,6 +7,10 @@ status: implemented
 
 # Unify live workflow clients
 
+## Follow-up
+
+The single host, client protocol, and run view remain the correct base. Version 0.16.0 still uses a short activity lease, clears terminal session display too soon, and did not preserve all session features during the cut. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md) is the approved follow-up. It replaces the activity lease with Pi turn events and gives all Pi-bound workflow content one shared message path.
+
 ## Goal
 
 Give every live Pi Workflows interface one source of truth.
@@ -131,7 +135,7 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 - live and interruption facts;
 - a `display` object with effective status, activity kind, allowed controls, and either the complete inline reason or a small notice plus a digest-bound `reasonContent` reference.
 
-The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of pending delivery records and their complete count. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
+The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of workflow messages and their complete count. The approved follow-up also retains the newest terminal run for its bounded display period. Message records include the source, content reference, order, send state, and Pi entry needed by the shared coordinator. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect message tables in separate reads.
 
 Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus durable references to the complete original definition and complete graph history. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. TypeScript and Rust load the complete graph steps and transitions through the same verified content interface. Rust also requests and verifies the complete referenced workflow definition, decodes only the complete value, and then builds the graph layout. Session-event pages include the replay checkpoint immediately before their first event. A large checkpoint uses the same content protocol. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
 

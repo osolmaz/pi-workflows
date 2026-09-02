@@ -1,5 +1,7 @@
 # SQLite state
 
+Status: the single-host database is implemented. Version 0.16.0 still uses separate Pi send tables. The approved [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) replaces them in schema version 1 without a migration or compatibility path.
+
 Pi Workflows stores all live durable state in one database:
 
 ```text
@@ -31,7 +33,7 @@ The database stores:
 - run and controller queues, claims, retries, and continuations
 - human-decision requests, submissions, resolutions, and cancellations
 - controller resources, finalizers, effects, and child workflows
-- notifications and deferred turns
+- workflow messages that Pi must add to origin conversations
 - workflow settings, accepted JSON Patch changes, and post-completion follow-up prompts
 - nonsecret channel cursors, inbox records, messages, and settlement receipts
 - canonical JSON, text, and large text values
@@ -72,7 +74,7 @@ Four record groups provide the common lifecycle rules.
 
 ### Resources
 
-`resources` identifies each mutable aggregate and holds its current revision. Runs, settings scopes, follow-up queues and items, decisions, controller resources, effects, channels, notifications, deferred turns, and session segments have stable resource identities.
+`resources` identifies each mutable aggregate and holds its current revision. Runs, settings scopes, follow-up items, decisions, controller resources, effects, channels, workflow messages, and session segments have stable resource identities.
 
 Every accepted domain command compares its expected revision and increments it once.
 
@@ -116,15 +118,17 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Host protocol       | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
 | Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
 | Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                              |
-| Post-run follow-ups | `workflow_follow_up_queues`, `workflow_follow_ups`                                                                           |
+| Post-run follow-ups | `workflow_follow_ups`                                                                                                        |
 | Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                   |
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                               |
 | Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
 | Effects             | `effects`, `effect_attempts`                                                                                                 |
-| Pi delivery         | `notifications`, `turn_intents`                                                                                              |
+| Pi messages         | `workflow_messages`                                                                                                          |
 | Channels            | `channels`, `channel_cursors`, `channel_inbox`, `channel_messages`, `channel_message_parts`                                  |
 
-Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one queued or running reservation per Pi session, one decision winner, and one deterministic effect key. A parked waiting parent does not block its continuation. Reserving that continuation settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
+`workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial, reminder, and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
+
+Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per interaction request, one nonterminal interactive continuation-chain reservation per Pi session, one decision winner, and one deterministic effect key. A run waiting for a checkpoint or protected decision keeps that chain reservation. A parked waiting parent does not block its own continuation. Reserving that continuation transfers the reservation and settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
 ### Hosted commands and interactions
 
@@ -138,11 +142,7 @@ conflict.
 process identity and terminal outcome. `worker_messages` deduplicates accepted
 state-changing child messages.
 
-`interactive_requests` owns durable origin-session work. It stores the run,
-node attempt, target session, contract, presentation claim, accepted
-submission, and revision. `interactive_submissions` stores the idempotency key,
-payload, outcome, and receipt. Pi reload can adopt the saved presentation entry
-without inserting another visible message.
+`interactive_requests` owns the durable request contract and workflow state for origin-session work. It stores the run, node attempt, target session, contract, request status, accepted submission, `unproductiveTurnEnds`, and revision. Pause is stored once on the run and derived for its one pending interaction. `interactive_submissions` stores the idempotency key, payload, outcome, and receipt. It stores no Pi presentation claim or Pi session entry. `workflow_messages` owns those facts, and the extension reports the active Pi branch after reload.
 
 ## Content-addressed values
 
@@ -215,13 +215,13 @@ The same rule applies to run terminal outcomes, continuation admission, queue se
 
 ## Read contract
 
-Durable status is a pure projection of domain rows, immutable facts, current leases, and effect results. The host combines that projection with validated ephemeral origin-session activity to produce one live run view. Ephemeral activity can change display status only. It cannot change durable workflow state or authority. Every renderer consumes the host-produced display status and allowed controls without running another status reducer.
+Durable status is a pure projection of domain rows, immutable facts, current leases, effect results, and exact workflow-turn start and end reports. The host uses these facts to produce one live run view. An open workflow turn can change display status only. It cannot change workflow authority. Every renderer consumes the host-produced display status and allowed controls without running another status reducer.
 
 A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
 
-A follow-up queue records acceptance order and settlement state. Failure, timeout, and cancellation cancel unsent items.
+`workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the continuation-chain member that accepted them; rows are not rewritten when the chain continues. The host walks the chain to find its final outcome. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
 
-- A terminal run fact overrides stale delivery state.
+- A terminal run fact overrides stale message state.
 - An accepted decision is accepted even if its continuation effect is still pending.
 - A cancelled decision is cancelled even if parent cleanup is still pending.
 - A stale owner is not shown as current.

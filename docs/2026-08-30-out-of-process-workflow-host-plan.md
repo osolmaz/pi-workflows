@@ -6,7 +6,7 @@ date: 2026-08-30
 
 # Run workflows outside Pi
 
-Status: implemented on the `feat/out-of-process-workflow-host` branch. The implementation keeps schema version 1, uses one global on-demand host, and has no embedded production fallback.
+Status: implemented. The implementation keeps schema version 1, uses one global on-demand host, and has no embedded production fallback. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) fixes the later model-turn status bug and restores session features that the hard cut removed.
 
 A live workflow lost its lease while it was still working. The workflow engine kept the Node.js event loop busy, so its renewal timer did not run before the 30-second lease expired. The next state write used a generic error, the extension treated the error as a crash, and durable state was left with a running queue row, a running attempt, an expired lease, and a separate failed audit event.
 
@@ -209,7 +209,7 @@ Keep one active interactive request per Pi session. Other requests remain ordere
 
 A protected human decision is displayed without starting a model turn. The model-facing workflow tool rejects it. A person answers it through the origin Pi session, while an ordinary checkpoint keeps its model-facing answer path.
 
-Notify nodes use the durable notification outbox. A root presentation prompt creates a durable terminal turn intent before completion and becomes eligible in the terminal transaction. The origin Pi session claims and adopts both message types through the host.
+Notify nodes and terminal results create `workflow_messages` records in the same transaction as their source facts. The origin Pi session claims and adopts both message kinds through the one shared coordinator. There is no notification outbox or terminal-turn intent send path.
 
 Detached workflows can use host-managed `pi --mode rpc` children. Their execution mode and origin are durable provenance.
 
@@ -236,7 +236,7 @@ The new state shape will add the minimum durable records needed for:
 - child process epochs and exits;
 - uncertain effects when existing effect rows cannot express the state.
 
-Reuse current notifications, turn intents, attempts, and effects when they already provide the required contract. Add no parallel record for the same fact.
+Reuse attempts, effects, and feature-specific source records when they already provide the required contract. `workflow_messages` is the only record for content that Pi must add to an origin session. Add no parallel send record for the same fact.
 
 ## Part 10: Hard cutover
 
