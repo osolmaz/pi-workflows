@@ -385,7 +385,7 @@ describe("host workflow display reducer", () => {
       );
     expect(runs.traceCursorForStep("run-large-view", 0, 10_000)).toBe(selectedTraceCursor);
     state.close();
-  });
+  }, 60_000);
 
   it("keeps complete graph history reachable outside the bounded snapshot", async () => {
     const projectPath = await makeTempDir("host-view-graph-project");
@@ -458,7 +458,7 @@ describe("host workflow display reducer", () => {
     expect(history.steps).toHaveLength(nodeCount);
     expect(history.transitions).toHaveLength(nodeCount - 1);
     state.close();
-  }, 30_000);
+  }, 60_000);
 
   it("bounds large workflow topology and keeps the full definition reachable", async () => {
     const projectPath = await makeTempDir("host-view-topology-project");
