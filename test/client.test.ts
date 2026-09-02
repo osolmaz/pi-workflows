@@ -91,6 +91,27 @@ describe("WorkflowClient", () => {
     }
   });
 
+  it("rejects a backpressured request when its connection closes", async () => {
+    const databasePath = path.join(await makeTempDir("client-drain-close"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const client = new WorkflowClient({ databasePath, clientId: "client-drain-close" });
+    await client.connect();
+    const socket = (client as unknown as { socket: net.Socket | null }).socket;
+    if (socket === null) throw new Error("client socket missing");
+    const write = vi.spyOn(socket, "write").mockReturnValue(false);
+    try {
+      const request = client.request({ operation: "host.status" });
+      await waitUntil(() => write.mock.calls.length === 1, 5_000);
+      socket.emit("close");
+      await expect(request).rejects.toThrow("Workflow host connection closed");
+    } finally {
+      socket.destroy();
+      await client.close();
+      await host.stop();
+    }
+  });
+
   it("uses one connection and rejects watches for missing runs", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });

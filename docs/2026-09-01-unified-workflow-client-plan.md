@@ -227,7 +227,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `protocol/client.v1.schema.json`, shared protocol fixtures, `src/client/protocol.ts`, and `tui/src/protocol.rs`.
 
-**Change:** Define the one envelope, operation names, outcomes, subscriptions, run-view snapshots, patches, pages, activity reports, maintenance requests, safe errors, and protocol handshake. Keep foreground host-start retry timers referenced until success or timeout; unreference only background reconnect timers. Replace the host and replay schema identifiers. Add one accepted and rejected fixture corpus used by TypeScript and Rust.
+**Change:** Define the one envelope, operation names, outcomes, subscriptions, run-view snapshots, patches, pages, activity reports, maintenance requests, safe errors, and protocol handshake. Keep foreground host-start retry timers referenced until success or timeout; unreference only background reconnect timers. End a backpressured write wait on connection close, socket error, or request cancellation. Replace the host and replay schema identifiers. Add one accepted and rejected fixture corpus used by TypeScript and Rust.
 
 **Verification:** TypeScript and Rust accept every valid fixture, reject every invalid fixture, and serialize the same canonical messages. No old live protocol identifier remains in production code.
 
@@ -235,7 +235,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `src/host/`, `src/state/`, controller stores, and state maintenance commands.
 
-**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values in the run-scoped content table under their digest and media type before advertising their references. Do not reuse general state blobs or allow another run to read the content. Store the complete original workflow definition, not its escaped projection. Externalize large replay checkpoints and make both clients resolve them. Give the CLI one stable client identity and one fresh key for each backup or applied prune invocation. Reuse that key only for the invocation's automatic reconnect retry, with a new request ID. Keep an in-flight maintenance operation alive after disconnect, store its accepted or rejected command receipt before response, wait for it during host shutdown, and adopt an exact retry. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
+**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values in the run-scoped content table under their digest and media type before advertising their references. Do not reuse general state blobs or allow another run to read the content. Store the complete original workflow definition, not its escaped projection. Externalize large replay checkpoints and make both clients resolve them. Route state-changing Pi extension commands through the durable retry path. Give the CLI one stable client identity and one fresh key for each backup or applied prune invocation. Reuse that key only for the invocation's automatic reconnect retry, with a new request ID. Keep an in-flight maintenance operation alive after disconnect, store its accepted or rejected command receipt before response, wait for it during host shutdown, and adopt an exact retry. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
 
 **Verification:** Concurrent run changes cannot produce a view for the wrong session or combine two revisions. A source-level dependency test fails if production extension, CLI, relay, or Rust code opens the active database path. It permits SQLite only in the named TypeScript module that verifies an explicit inactive backup.
 
@@ -298,7 +298,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Envelope size, framing, unknown field, malformed message, and safe-error tests.
 - Status precedence and allowed-control table tests.
 - Activity validation against the recorded deterministic delivery ID and entry, duplicate alternate-ID rejection, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
-- Foreground cold-start timer reference tests.
+- Foreground cold-start timer reference tests and backpressured-write close and cancellation tests.
 - Rust complete-definition request, digest verification, decode, and graph-layout tests.
 - Atomic origin-session view tests, including bounded pending delivery records and removal of a terminal run when its reservation ends.
 - Large workflow-topology frame tests with exact complete durable definition recovery, including user data that looks like an artifact sentinel.
@@ -306,7 +306,8 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Large replay-checkpoint frame tests with TypeScript hydration and Rust artifact resolution.
 - Durable backup and applied-prune retry tests with a new transport request ID and one stored receipt, plus separate-invocation key tests that prevent stale receipt reuse.
 - One-shot missing-run tests that return a not-found error instead of rendering `null`.
-- Full TypeScript run-page assembly, widget history, and content-hydration tests, plus Rust page and content retrieval tests.
+- Full TypeScript run-page assembly, exact-attempt step-trace selection, widget history, and content-hydration tests, plus Rust page and content retrieval tests.
+- Extension mutation tests that prove the durable client path is used for starts, updates, and submissions.
 - Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
 - Durable generated-content recovery after memory-cache eviction, same-byte media collision tests, and run-scoped read tests.
 - Run-list and full-view failure tests that preserve the complete stored diagnostic instead of the machine error code.
