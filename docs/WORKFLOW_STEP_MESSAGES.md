@@ -55,7 +55,7 @@ Workflow message IDs and internal send state are not included in provider-facing
 
 ## Agent step card
 
-Every step message uses the custom type `pi-workflows-agent-step`:
+Every step message uses the custom type `pi-workflows-step`:
 
 ```ts
 export type WorkflowAgentStepMessageDetails = {
@@ -71,7 +71,7 @@ export type WorkflowAgentStepMessageDetails = {
 
 pi.sendMessage(
   {
-    customType: "pi-workflows-agent-step",
+    customType: "pi-workflows-step",
     content: completeModelPrompt,
     display: true,
     details,

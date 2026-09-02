@@ -150,7 +150,7 @@ describe("WorkflowRunStore SQLite", () => {
           await store.appendSessionEntry(request.contract.runId, {
             id: promptId,
             type: "custom_message",
-            customType: "pi-workflows-agent-step",
+            customType: "pi-workflows-step",
             content: request.prompt,
             details: { contract: { attemptId: request.contract.attemptId } },
           });

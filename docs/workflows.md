@@ -689,7 +689,7 @@ is pending, the step id is wrong, the attempt id belongs to an earlier attempt
 of the same node (loops revisit node ids, so each attempt gets a fresh id), or
 `validate` throws.
 Acceptance resolves the step and the engine advances. In an interactive Pi
-session, each agent prompt arrives as a `pi-workflows-agent-step` custom message
+session, each agent prompt arrives as a `pi-workflows-step` custom message
 with `triggerTurn: true`. The model receives the complete prompt, while the
 conversation shows a compact workflow and node card. Expanding tool output with
 Ctrl+O shows the exact contract and full prompt. Step messages with reason `reminder` or `resumed` use the same card and keep the active attempt ID.
