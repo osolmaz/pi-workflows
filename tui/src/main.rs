@@ -66,17 +66,17 @@ fn default_socket() -> PathBuf {
     state_directory.join("host").join("host.sock")
 }
 
-fn host_available(socket_path: &PathBuf) -> bool {
+async fn host_available(socket_path: &PathBuf) -> bool {
     #[cfg(unix)]
-    return std::os::unix::net::UnixStream::connect(socket_path).is_ok();
+    return tokio::net::UnixStream::connect(socket_path).await.is_ok();
     #[cfg(windows)]
     return ClientOptions::new().open(socket_path).is_ok();
     #[cfg(not(any(unix, windows)))]
     socket_path.exists()
 }
 
-fn ensure_host(socket_path: &PathBuf) -> Result<()> {
-    if host_available(socket_path) {
+async fn ensure_host(socket_path: &PathBuf) -> Result<()> {
+    if host_available(socket_path).await {
         return Ok(());
     }
     let status = ProcessCommand::new("pi-workflows")
@@ -86,10 +86,10 @@ fn ensure_host(socket_path: &PathBuf) -> Result<()> {
     anyhow::ensure!(status.success(), "pi-workflows host start failed");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if host_available(socket_path) {
+        if host_available(socket_path).await {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!(
         "workflow host endpoint did not become ready at {}",
@@ -112,15 +112,18 @@ fn main() -> Result<()> {
         }
     }
     let socket_path = default_socket();
-    ensure_host(&socket_path)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(ensure_host(&socket_path))?;
     match cli.command {
         Some(Command::Serve { bind }) => {
-            let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(server::serve(server::ServeOptions { socket_path, bind }))
         }
-        None => match cli.run_id {
-            Some(run_id) => ui::run_single(&socket_path, &run_id, cli_theme.as_deref()),
-            None => ui::run_local(&socket_path, cli_theme.as_deref()),
-        },
+        None => {
+            drop(runtime);
+            match cli.run_id {
+                Some(run_id) => ui::run_single(&socket_path, &run_id, cli_theme.as_deref()),
+                None => ui::run_local(&socket_path, cli_theme.as_deref()),
+            }
+        }
     }
 }

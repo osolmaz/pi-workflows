@@ -379,6 +379,21 @@ describe("global workflow host", () => {
     await host.stop();
   });
 
+  it("rejects a watch for a missing run", async () => {
+    const databasePath = path.join(await makeTempDir("host-missing-watch"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const client = new WorkflowClient({ databasePath, clientId: "missing-watch-test" });
+    try {
+      await expect(client.watchRun("missing-run", () => undefined)).rejects.toThrow(
+        "Workflow run not found",
+      );
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  });
+
   it("performs active state maintenance through the host-owned database", async () => {
     const directory = await makeTempDir("host-state-maintenance");
     const databasePath = path.join(directory, "state.sqlite");

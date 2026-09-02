@@ -91,16 +91,14 @@ describe("WorkflowClient", () => {
     }
   });
 
-  it("uses one connection for requests and all live view subscriptions", async () => {
+  it("uses one connection and rejects watches for missing runs", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
     await host.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-live" });
     const events: string[] = [];
     let unwatchRuns: (() => Promise<void>) | undefined;
-    let unwatchRun: (() => Promise<void>) | undefined;
     let unwatchSession: (() => Promise<void>) | undefined;
-    let unwatchDefaultRun: (() => Promise<void>) | undefined;
     try {
       expect(client.connectionId).toBeUndefined();
       expect(client.packageVersion).toBeUndefined();
@@ -156,36 +154,31 @@ describe("WorkflowClient", () => {
         subscriptionId: "runs-subscription",
         limit: 1,
       });
-      unwatchRun = await client.watchRun(
-        "missing-run",
-        (event) => events.push(event.subscriptionId),
-        {
+      await expect(
+        client.watchRun("missing-run", (event) => events.push(event.subscriptionId), {
           subscriptionId: "run-subscription",
           revision: 0,
-        },
-      );
+        }),
+      ).rejects.toThrow("Workflow run not found");
       unwatchSession = await client.watchSession(
         "session-live",
         (event) => events.push(event.subscriptionId),
         { subscriptionId: "session-subscription" },
       );
-      unwatchDefaultRun = await client.watchRun("missing-default-run", () => {
-        events.push("default-run-subscription");
-      });
+      await expect(
+        client.watchRun("missing-default-run", () => {
+          events.push("default-run-subscription");
+        }),
+      ).rejects.toThrow("Workflow run not found");
       await waitUntil(
-        () =>
-          events.includes("runs-subscription") &&
-          events.includes("run-subscription") &&
-          events.includes("session-subscription") &&
-          events.includes("default-run-subscription"),
+        () => events.includes("runs-subscription") && events.includes("session-subscription"),
         5_000,
       );
+      expect(events).not.toContain("run-subscription");
+      expect(events).not.toContain("default-run-subscription");
 
-      await unwatchRun();
-      await unwatchRun();
       await unwatchRuns();
       await unwatchSession();
-      await unwatchDefaultRun();
       const unwatchDefaultRuns = await client.watchRuns(() => undefined);
       await unwatchDefaultRuns();
       await waitUntil(

@@ -88,7 +88,7 @@ Large prompt, output, event, settings, follow-up, and update values use a conten
 
 ## Subscriptions and reconnection
 
-A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. After reconnection, it sends those subscriptions again with its accepted run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches. Unsubscribing sends the subscription ID to the host for every subscription kind, so no unused snapshot work remains on a live connection.
+A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. A request to watch a run that does not exist returns `notFound` and does not install a subscription. After reconnection, the client sends accepted subscriptions again with its run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches. Unsubscribing sends the subscription ID to the host for every subscription kind, so no unused snapshot work remains on a live connection.
 
 A slow or disconnected client cannot stop the host, another client, claim renewal, or workflow execution. The host waits for socket drain before it publishes another snapshot to that connection. Polling coalesces while the connection is blocked, so the socket buffer cannot grow by one snapshot on every poll. When a connection closes, the host removes its subscriptions and exact origin-session activity immediately.
 
