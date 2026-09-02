@@ -721,7 +721,7 @@ async function runModelWorkflow(context, rpc, client, api) {
   const deliveries = entriesData.entries.filter(
     (entry) =>
       entry.type === "custom_message" &&
-      entry.customType === "pi-workflows-agent-step" &&
+      entry.customType === "pi-workflows-step" &&
       entry.details?.contract?.runId === run.runId,
   );
   if (deliveries.length !== 1) {

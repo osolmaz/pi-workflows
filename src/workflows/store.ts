@@ -3267,7 +3267,7 @@ export class WorkflowRunStore {
          JOIN session_segments s ON s.segment_id = e.segment_id
          JOIN blobs b ON b.blob_hash = e.entry_hash
          WHERE s.run_id = ?
-           AND json_extract(CAST(b.content AS TEXT), '$.customType') = 'pi-workflows-agent-step'
+           AND json_extract(CAST(b.content AS TEXT), '$.customType') = 'pi-workflows-step'
            AND json_extract(CAST(b.content AS TEXT), '$.details.contract.attemptId') = ?
          ORDER BY e.recorded_at DESC LIMIT 1`,
       )
