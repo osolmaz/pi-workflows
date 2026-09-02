@@ -89,15 +89,7 @@ describe("state prune", () => {
         .prepare(
           "INSERT INTO workflow_follow_ups(follow_up_id, resource_id, run_id, request_id, order_number, target_session_id, actor_type, source_type, prompt_hash, status, reason_hash, created_at, updated_at) VALUES (?, ?, ?, 'request-prune', 1, 'session-a', 'system', 'test', ?, 'removed', ?, ?, ?)",
         )
-        .run(
-          followUpId,
-          followUpResourceId,
-          result.runId,
-          contentHash,
-          contentHash,
-          now,
-          now,
-        );
+        .run(followUpId, followUpResourceId, result.runId, contentHash, contentHash, now, now);
       setup.state.connection
         .prepare(
           "INSERT INTO effects(effect_id, resource_id, source_resource_id, source_revision, effect_type, idempotency_key, payload_hash, owner_scope, status, attempt_count, created_at, updated_at, settled_at) VALUES (?, ?, ?, ?, 'notification.deliver', ?, ?, 'run', 'applied', 0, ?, ?, ?)",

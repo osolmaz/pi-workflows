@@ -725,6 +725,19 @@ export class HostStateStore {
       );
   }
 
+  listPendingDecisionInteractions(): InteractiveRequestRecord[] {
+    return this.state.connection
+      .prepare(
+        `SELECT request_id AS requestId FROM interactive_requests
+         WHERE kind = 'decision' AND status = 'pending'
+         ORDER BY created_at, request_id`,
+      )
+      .all()
+      .flatMap((row) =>
+        isRequestIdRow(row) ? [this.requireInteractiveRequest(row.requestId)] : [],
+      );
+  }
+
   submitInteraction(options: {
     requestId: string;
     submissionId: string;
@@ -817,10 +830,7 @@ export class HostStateStore {
         }
       }
       const request = this.requireInteractiveRequest(options.requestId);
-      if (
-        request.revision !== options.expectedRevision ||
-        request.status !== "pending"
-      ) {
+      if (request.revision !== options.expectedRevision || request.status !== "pending") {
         throw new Error("Interactive request revision conflict");
       }
       const savedPayloadHash = this.state.putJson(options.payload, now);

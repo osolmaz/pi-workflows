@@ -329,7 +329,10 @@ export class HostViewStore {
           ? eligible
           : undefined;
       const open = this.openWorkflowMessage(workflowMessages);
-      const openTurn = open === undefined ? undefined : this.workflowMessages.openTurnForMessage(open.workflowMessageId);
+      const openTurn =
+        open === undefined
+          ? undefined
+          : this.workflowMessages.openTurnForMessage(open.workflowMessageId);
       return {
         schema: SESSION_VIEW_SCHEMA,
         sessionId,
@@ -704,7 +707,8 @@ export class HostViewStore {
       const priorMessage = this.workflowMessages.latestForSource("followUp", item.followUpId);
       if (
         priorMessage === undefined ||
-        this.workflowMessages.latestTurnForMessage(priorMessage.workflowMessageId)?.state !== "ended"
+        this.workflowMessages.latestTurnForMessage(priorMessage.workflowMessageId)?.state !==
+          "ended"
       ) {
         return false;
       }
@@ -988,8 +992,12 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isTerminalStatus(value: unknown): value is "completed" | "failed" | "timed_out" | "cancelled" {
-  return value === "completed" || value === "failed" || value === "timed_out" || value === "cancelled";
+function isTerminalStatus(
+  value: unknown,
+): value is "completed" | "failed" | "timed_out" | "cancelled" {
+  return (
+    value === "completed" || value === "failed" || value === "timed_out" || value === "cancelled"
+  );
 }
 
 function contentKey(runId: string, contentPath: string): string {

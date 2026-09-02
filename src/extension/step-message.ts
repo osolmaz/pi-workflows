@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { WORKFLOW_STEP_MESSAGE_TYPE } from "../workflows/workflow-message-content.js";
 import type {
   AgentStepContract,
   AgentStepPresentation,
   AgentStepSubmission,
 } from "../workflows/types.js";
+import { WORKFLOW_STEP_MESSAGE_TYPE } from "../workflows/workflow-message-content.js";
 import {
   cleanOptionalSingleLine,
   cleanSingleLine,

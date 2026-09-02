@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_WORKFLOW_METADATA } from "../builtins/metadata.js";
+import { verifyTelegramTokenFile, writeDecisionChannelProfile } from "../channels/config.js";
 import { WorkflowClient } from "../client/client.js";
 import { materializeSessionView } from "../client/materialize.js";
 import type { ClientResponse } from "../client/protocol.js";
@@ -17,8 +18,6 @@ import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
 import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
-import { SessionRecorder } from "./recorder.js";
-import { RemoteSessionRecordingStore } from "./remote-recorder-store.js";
 import {
   HerdrWorkflowViewer,
   PIW_SHORTCUT,
@@ -26,38 +25,27 @@ import {
   VIEWER_PLACEMENTS,
   type ViewerPlacement,
 } from "./herdr-viewer.js";
-import {
-  responseEntryId,
-  WorkflowMessageCoordinator,
-} from "./workflow-message-coordinator.js";
+import { SessionRecorder } from "./recorder.js";
+import { RemoteSessionRecordingStore } from "./remote-recorder-store.js";
 import { SessionWorkflowView } from "./session-view.js";
-import {
-  recoverAssistantStep,
-  registerWorkflowAgentStepMessageRenderer,
-} from "./step-message.js";
+import { recoverAssistantStep, registerWorkflowAgentStepMessageRenderer } from "./step-message.js";
+import { responseEntryId, WorkflowMessageCoordinator } from "./workflow-message-coordinator.js";
 import { parseWorkflowToolInput, WorkflowToolParameters } from "./workflow-tool.js";
 
 export { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
 
 export {
-  PiDecisionChannel,
-  TelegramDecisionChannel,
   audienceChannels,
-  createTelegramChannels,
   decisionConfigDir,
   loadDecisionChannelConfig,
   verifyTelegramTokenFile,
   writeDecisionChannelProfile,
   type DecisionChannelConfig,
   type DecisionCredentialConfig,
-  type HumanDecisionChannel,
-  type HumanDecisionChannelAnswer,
-  type HumanDecisionDeliveryResult,
   type LoadedDecisionChannelConfig,
-  type PiDecisionUi,
-  type SettledHumanDecision,
   type TelegramFetch,
-} from "./decision-channels.js";
+} from "../channels/config.js";
+export { renderDecisionText, renderTelegramParts } from "../channels/telegram.js";
 
 const INTERACTION_POLL_MS = 1_000;
 // Keep one model-facing tool result comfortably below Pi provider message limits.
@@ -116,9 +104,7 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
     try {
       return { kind: "change-settings", patch: JSON.parse(text) as unknown };
     } catch (error) {
-      throw new Error(
-        `change-settings requires a JSON Patch array: ${errorMessage(error)}`,
-      );
+      throw new Error(`change-settings requires a JSON Patch array: ${errorMessage(error)}`);
     }
   }
   if (trimmed.startsWith("queue-follow-up ")) {
@@ -319,6 +305,129 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("workflow-channel", {
+    description: "Configure, inspect, or reload private human decision channels",
+    handler: async (args, ctx) => {
+      const words = args.trim().split(/\s+/u).filter(Boolean);
+      const action = words[0] ?? "status";
+      try {
+        if (action === "status") {
+          const response = await requestAccepted(client, {
+            operation: "channel.status",
+            requestId: `channel-status-${randomUUID()}`,
+          });
+          const receipt = isRecord(response.receipt) ? response.receipt : {};
+          const profiles = Array.isArray(receipt.profiles) ? receipt.profiles : [];
+          const ambiguous = Array.isArray(receipt.ambiguous) ? receipt.ambiguous : [];
+          const channelError = typeof receipt.error === "string" ? receipt.error : null;
+          const ambiguousIds = ambiguous.flatMap((item) => {
+            if (!isRecord(item) || typeof item.messageId !== "string") return [];
+            return [item.messageId];
+          });
+          const summary =
+            profiles.length === 0
+              ? "Human decisions use the Pi channel only."
+              : `${profiles.length} Telegram profile(s) configured; ${ambiguous.length} ambiguous channel operation(s).`;
+          ctx.ui.notify(
+            channelError !== null
+              ? `${summary}\nChannel configuration error: ${channelError}`
+              : ambiguousIds.length === 0
+                ? summary
+                : `${summary}\nRecover after checking Telegram: /workflow-channel recover <message-id> confirm|retry\n${ambiguousIds.join("\n")}`,
+            channelError === null && ambiguousIds.length === 0 ? "info" : "warning",
+          );
+          return;
+        }
+        if (action === "reload") {
+          await requestAccepted(client, {
+            operation: "channel.reload",
+            requestId: `channel-reload-${randomUUID()}`,
+            idempotencyKey: `channel-reload-${randomUUID()}`,
+            payload: sessionCommandPayload(ctx),
+          });
+          ctx.ui.notify("Human decision channels reloaded.");
+          return;
+        }
+        if (action === "recover") {
+          const messageId = words[1];
+          const recoveryAction = words[2];
+          if (
+            messageId === undefined ||
+            (recoveryAction !== "confirm" && recoveryAction !== "retry") ||
+            words.length !== 3
+          ) {
+            throw new Error(
+              "Use /workflow-channel recover <message-id> confirm|retry after checking Telegram.",
+            );
+          }
+          const recoveryId = `channel-recover-${randomUUID()}`;
+          await requestAccepted(client, {
+            operation: "channel.recover",
+            requestId: recoveryId,
+            idempotencyKey: recoveryId,
+            payload: {
+              ...sessionCommandPayload(ctx),
+              messageId,
+              action: recoveryAction,
+            },
+          });
+          ctx.ui.notify(
+            recoveryAction === "confirm"
+              ? "The channel operation is marked confirmed."
+              : "A new channel attempt is now allowed. It can duplicate an earlier uncertain effect.",
+            recoveryAction === "confirm" ? "info" : "warning",
+          );
+          return;
+        }
+        if (action !== "setup") {
+          throw new Error("Use /workflow-channel status, setup, reload, or recover.");
+        }
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          throw new Error("Channel setup requires interactive Pi TUI mode.");
+        }
+        const tokenFile = await ctx.ui.input(
+          "Absolute path to the mode-0600 Telegram token file",
+          "",
+        );
+        if (tokenFile === undefined) return;
+        const audience = await ctx.ui.input("Logical audience", "operator");
+        if (audience === undefined) return;
+        const profile = await ctx.ui.input("Private Telegram profile name", "default");
+        if (profile === undefined) return;
+        const credential = await ctx.ui.input("Private credential reference name", "telegram");
+        if (credential === undefined) return;
+        const users = await ctx.ui.input("Allowed numeric Telegram user IDs, comma separated", "");
+        if (users === undefined) return;
+        const chats = await ctx.ui.input("Allowed numeric Telegram chat IDs, comma separated", "");
+        if (chats === undefined) return;
+        await verifyTelegramTokenFile(tokenFile.trim());
+        await writeDecisionChannelProfile({
+          audience: audience.trim(),
+          profile: profile.trim(),
+          credential: credential.trim(),
+          tokenFile: tokenFile.trim(),
+          allowedUserIds: users
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+          allowedChatIds: chats
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        });
+        await requestAccepted(client, {
+          operation: "channel.reload",
+          requestId: `channel-reload-${randomUUID()}`,
+          idempotencyKey: `channel-reload-${randomUUID()}`,
+          payload: sessionCommandPayload(ctx),
+        });
+        ctx.ui.notify("The private human decision channel profile was verified and installed.");
+      } catch (error) {
+        ctx.ui.notify(`Human decision channel setup failed: ${errorMessage(error)}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("controller", {
     description: "Manage hosted controller resources: list, get, apply, reconcile, or delete",
     getArgumentCompletions: (prefix: string) => {
@@ -450,44 +559,49 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     void (async () => {
       try {
         await sessionClient.ensureAvailable();
-        const unsubscribe = await sessionClient.watchSession(sessionId, (event) => {
-          if (generation !== sessionGeneration || sessionContext !== ctx) return;
-          const currentSnapshotGeneration = ++snapshotGeneration;
-          if (event.event === "unavailable") {
-            sessionSnapshots.delete(sessionId);
-            sessionView.clear(ctx);
-            return;
-          }
-          if (!isWorkflowSessionView(event.payload)) return;
-          void materializeSessionView(sessionClient, event.payload)
-            .then((session) => {
-              if (
-                generation !== sessionGeneration ||
-                currentSnapshotGeneration !== snapshotGeneration ||
-                sessionContext !== ctx
-              ) {
-                return;
-              }
-              sessionSnapshots.set(sessionId, session);
-              workflowMessages.updateView(session);
-              sessionView.update(session, ctx);
-              const ownedMessageId = session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
-              const ownedMessage = session.workflowMessages.find(
-                (message) => message.workflowMessageId === ownedMessageId,
-              );
-              const prepare =
-                ownedMessage !== undefined &&
-                (ownedMessage.kind === "step" ||
-                  ownedMessage.kind === "terminal" ||
-                  ownedMessage.kind === "followUp")
-                  ? ensureRecorder(ownedMessage, ctx)
-                  : Promise.resolve();
-              void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
-            })
-            .catch(() => {
-              // A newer session revision retries from its own stable snapshot.
-            });
-        }, { coordinator: true });
+        const unsubscribe = await sessionClient.watchSession(
+          sessionId,
+          (event) => {
+            if (generation !== sessionGeneration || sessionContext !== ctx) return;
+            const currentSnapshotGeneration = ++snapshotGeneration;
+            if (event.event === "unavailable") {
+              sessionSnapshots.delete(sessionId);
+              sessionView.clear(ctx);
+              return;
+            }
+            if (!isWorkflowSessionView(event.payload)) return;
+            void materializeSessionView(sessionClient, event.payload)
+              .then((session) => {
+                if (
+                  generation !== sessionGeneration ||
+                  currentSnapshotGeneration !== snapshotGeneration ||
+                  sessionContext !== ctx
+                ) {
+                  return;
+                }
+                sessionSnapshots.set(sessionId, session);
+                workflowMessages.updateView(session);
+                sessionView.update(session, ctx);
+                const ownedMessageId =
+                  session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
+                const ownedMessage = session.workflowMessages.find(
+                  (message) => message.workflowMessageId === ownedMessageId,
+                );
+                const prepare =
+                  ownedMessage !== undefined &&
+                  (ownedMessage.kind === "step" ||
+                    ownedMessage.kind === "terminal" ||
+                    ownedMessage.kind === "followUp")
+                    ? ensureRecorder(ownedMessage, ctx)
+                    : Promise.resolve();
+                void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
+              })
+              .catch(() => {
+                // A newer session revision retries from its own stable snapshot.
+              });
+          },
+          { coordinator: true },
+        );
         if (generation !== sessionGeneration || sessionContext !== ctx) {
           await unsubscribe();
           return;
@@ -524,7 +638,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     }
     const recorder = await ensureRecorder(message, ctx);
     if (contract === undefined) {
-      recorder.beginWorkflowMessage(message.workflowMessageId, message.kind as "terminal" | "followUp");
+      recorder.beginWorkflowMessage(
+        message.workflowMessageId,
+        message.kind as "terminal" | "followUp",
+      );
     } else {
       recorder.beginAttempt(contract);
     }
@@ -587,7 +704,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     sessionGeneration += 1;
     sessionContext = null;
     activeRecorder = null;
-    await Promise.allSettled([...sessionRecorders.values()].map(async (recorder) => recorder.stop()));
+    await Promise.allSettled(
+      [...sessionRecorders.values()].map(async (recorder) => recorder.stop()),
+    );
     sessionRecorders.clear();
     workflowMessages.clear();
     sessionView.clear(ctx);
@@ -619,7 +738,9 @@ async function executeCommand(
       const workflows = await listWorkflowMetadata(ctx.cwd);
       const offset = command.offset ?? 0;
       if (!Number.isInteger(offset) || offset < 0 || offset > workflows.length) {
-        throw new Error(`Workflow list offset must be an integer from 0 through ${workflows.length}`);
+        throw new Error(
+          `Workflow list offset must be an integer from 0 through ${workflows.length}`,
+        );
       }
       if (workflows.length === 0) {
         return {
@@ -722,7 +843,8 @@ async function executeCommand(
     }
     case "restart": {
       const runId = command.runId ?? activeSessionRun(ctx)?.runId;
-      if (runId === undefined) throw new Error("No workflow terminal result is available to restart");
+      if (runId === undefined)
+        throw new Error("No workflow terminal result is available to restart");
       const session = sessionCommandPayload(ctx);
       const marker = terminalMessageForSession(ctx, runId);
       const response = await requestAccepted(client, {
@@ -733,9 +855,7 @@ async function executeCommand(
         payload: {
           ...session,
           workflowMessageId: marker.workflowMessageId,
-          ...(marker.workflowTurnId === undefined
-            ? {}
-            : { workflowTurnId: marker.workflowTurnId }),
+          ...(marker.workflowTurnId === undefined ? {} : { workflowTurnId: marker.workflowTurnId }),
         },
       });
       return {
@@ -999,20 +1119,6 @@ async function submitVisibleAssistantResponse(
   });
 }
 
-function rememberInteractiveRequest(sessionId: string, value: unknown): void {
-  const current = parseInteractiveRequest(value);
-  const session = sessionSnapshots.get(sessionId);
-  if (current === undefined || session === undefined) return;
-  let found = false;
-  const pendingInteractions = session.pendingInteractions.map((item) => {
-    const stored = parseInteractiveRequest(item);
-    if (stored?.requestId !== current.requestId) return item;
-    found = true;
-    return current as unknown as JsonValue;
-  });
-  if (found) sessionSnapshots.set(sessionId, { ...session, pendingInteractions });
-}
-
 function pendingInteractionForSession(sessionId: string): ClientInteractiveRequest | undefined {
   return sessionSnapshots
     .get(sessionId)
@@ -1068,7 +1174,8 @@ function terminalMessageForSession(
   const message = session?.workflowMessages
     .filter((item) => item.kind === "terminal" && item.runId === runId && item.status === "sent")
     .sort((left, right) => right.order - left.order)[0];
-  if (message === undefined) throw new Error(`Workflow run ${runId} has no current terminal result`);
+  if (message === undefined)
+    throw new Error(`Workflow run ${runId} has no current terminal result`);
   const turn = session?.openWorkflowTurn;
   return {
     workflowMessageId: message.workflowMessageId,
@@ -1201,69 +1308,6 @@ function agentContractForWorkflowMessage(message: WorkflowMessage): AgentStepCon
     return undefined;
   }
   return value as unknown as AgentStepContract;
-}
-
-function interactionRequestId(value: unknown): string | undefined {
-  if (
-    !isRecord(value) ||
-    (value.type !== "custom_message" && value.role !== "custom") ||
-    !isRecord(value.details)
-  ) {
-    return undefined;
-  }
-  return typeof value.details.requestId === "string" ? value.details.requestId : undefined;
-}
-
-function entryIdentifier(value: unknown): string | undefined {
-  return isRecord(value) && typeof value.id === "string" ? value.id : undefined;
-}
-
-function decisionPrompt(contract: Record<string, unknown>): string {
-  const title = typeof contract.title === "string" ? contract.title : "Workflow decision";
-  const presentation = isRecord(contract.presentation) ? contract.presentation : {};
-  const blocks = Array.isArray(presentation.blocks)
-    ? presentation.blocks.flatMap((block) => decisionBlockText(block))
-    : [];
-  const choices = isRecord(contract.choices)
-    ? Object.entries(contract.choices).map(([key, value]) => {
-        const choice = isRecord(value) ? value : {};
-        const label = typeof choice.label === "string" ? choice.label : key;
-        const input = isRecord(choice.input) ? choice.input : undefined;
-        const prompt = input === undefined ? "" : `; input: ${String(input.prompt ?? "text")}`;
-        return `- ${key}: ${label}${prompt}`;
-      })
-    : [];
-  return [
-    title,
-    typeof presentation.summary === "string" ? presentation.summary : "",
-    ...blocks,
-    choices.length === 0 ? "" : `Choices:\n${choices.join("\n")}`,
-    "A human must answer this protected decision with `/workflow answer`.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function decisionBlockText(value: unknown): string[] {
-  if (!isRecord(value)) return [];
-  if (value.kind === "paragraph" && typeof value.text === "string") return [value.text];
-  if (value.kind === "section" && typeof value.title === "string") return [value.title];
-  if (value.kind === "preformatted" && typeof value.text === "string") return [value.text];
-  if (value.kind === "bullets" && Array.isArray(value.items)) {
-    return [value.items.map((item) => `- ${String(item)}`).join("\n")];
-  }
-  if (value.kind === "fields" && Array.isArray(value.items)) {
-    return [
-      value.items
-        .flatMap((item) =>
-          isRecord(item) && typeof item.label === "string" && typeof item.value === "string"
-            ? [`${item.label}: ${item.value}`]
-            : [],
-        )
-        .join("\n"),
-    ];
-  }
-  return [];
 }
 
 function decisionResponse(value: unknown): HumanDecisionResponse {

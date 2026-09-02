@@ -616,7 +616,7 @@ describe("host workflow display reducer", () => {
     state.connection
       .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
       .run("run-view");
-    const request = hostState.createInteractiveRequest({
+    hostState.createInteractiveRequest({
       requestId: "request-view",
       runId: "run-view",
       attemptId,

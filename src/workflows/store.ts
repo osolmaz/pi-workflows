@@ -1,14 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
-import { WorkflowMessageStore, workflowMessageIdFor } from "../state/workflow-messages.js";
 import {
   StateMutationStore,
   StaleResourceError,
   resourceIdFor,
   tokenHash,
   type ActorType,
-  type LeaseClaim,
   type MutationActor,
   type OwnerType,
 } from "../state/mutation.js";
@@ -19,6 +17,7 @@ import {
   VIEWER_PAGE_SIZE,
   type ViewerDeltaDraft,
 } from "../state/viewer.js";
+import { WorkflowMessageStore, workflowMessageIdFor } from "../state/workflow-messages.js";
 import { compositionMetadata } from "./composition.js";
 import { ClaimLostError } from "./errors.js";
 import { HumanDecisionStore } from "./human-decision.js";
@@ -43,7 +42,6 @@ import {
   type WorkflowSettingsDefinition,
   type WorkflowSettingsScopeRecord,
 } from "./settings.js";
-import { followUpWorkflowMessageContent } from "./workflow-message-content.js";
 import type {
   WorkflowDefinition,
   WorkflowDefinitionSnapshot,
@@ -71,6 +69,7 @@ import type {
   WorkflowUpdateRecord,
 } from "./types.js";
 import { MAX_CURRENT_UPDATES, createUpdateId, updateProjection } from "./updates.js";
+import { followUpWorkflowMessageContent } from "./workflow-message-content.js";
 
 export const RUN_STATE_SCHEMA = "pi-workflows.run-state.v1" as const;
 export const DEFINITION_SNAPSHOT_SCHEMA = "pi-workflows.definition-snapshot.v1" as const;
@@ -4692,10 +4691,6 @@ function isCountRow(value: unknown): value is { count: number } {
 
 function isStepIndexRow(value: unknown): value is { stepIndex: number } {
   return isRecord(value) && typeof value.stepIndex === "number";
-}
-
-function isLeaseExpiryRow(value: unknown): value is { expiresAt: number | null } {
-  return isRecord(value) && (typeof value.expiresAt === "number" || value.expiresAt === null);
 }
 
 function isNextOrderRow(value: unknown): value is { nextOrder: number } {

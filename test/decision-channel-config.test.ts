@@ -4,16 +4,14 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   audienceChannels,
-  createTelegramChannels,
   decisionConfigDir,
   loadDecisionChannelConfig,
   verifyTelegramTokenFile,
   writeDecisionChannelProfile,
   type DecisionChannelConfig,
   type TelegramFetch,
-} from "../src/extension/decision-channels.js";
-import { HumanDecisionStore } from "../src/workflows/human-decision.js";
-import { makeStateDatabasePath, makeTempDir } from "./helpers.js";
+} from "../src/channels/config.js";
+import { makeTempDir } from "./helpers.js";
 
 async function privateJson(filePath: string, value: unknown, mode = 0o600) {
   await fs.writeFile(filePath, `${JSON.stringify(value)}\n`, { mode });
@@ -242,34 +240,6 @@ describe("decision channel configuration", () => {
     ).rejects.toThrow(/rejected/);
   });
 
-  it("constructs configured Telegram channels through the shared interface", async () => {
-    const configDir = await makeTempDir("decision-create-channels");
-    vi.stubEnv("PI_WORKFLOWS_CONFIG_DIR", configDir);
-    const channels = createTelegramChannels({
-      config: {
-        schema: "pi-workflows.channels.v1",
-        audiences: {
-          operator: {
-            channels: ["pi", "telegram:approval"],
-            accept: "first-valid-answer",
-          },
-        },
-        telegramProfiles: {
-          approval: {
-            credential: "approval",
-            allowedUserIds: ["100"],
-            allowedChatIds: ["-200"],
-          },
-        },
-      },
-      credentials: { approval: "fixture" },
-      store: new HumanDecisionStore(await makeStateDatabasePath("decision-create-channel-runs")),
-      onAnswer: async () => {},
-    });
-    expect([...channels.keys()]).toEqual(["telegram:approval"]);
-    await Promise.all([...channels.values()].map(async (channel) => channel.stop()));
-  });
-
   it("writes a first private channel and credential profile", async () => {
     const configDir = await makeTempDir("decision-setup-first");
     const tokenFile = path.join(configDir, "token");
@@ -288,7 +258,7 @@ describe("decision channel configuration", () => {
     expect(loaded?.credentials.approval).toBe("fixture");
   });
 
-  it("rejects invalid setup values and missing resolved credentials", async () => {
+  it("rejects invalid setup values", async () => {
     const configDir = await makeTempDir("decision-setup-invalid");
     const tokenFile = path.join(configDir, "token");
     await fs.writeFile(tokenFile, "fixture", { mode: 0o600 });
@@ -314,24 +284,6 @@ describe("decision channel configuration", () => {
         allowedChatIds: ["-200"],
       }),
     ).rejects.toThrow(/absolute/);
-    expect(() =>
-      createTelegramChannels({
-        config: {
-          schema: "pi-workflows.channels.v1",
-          audiences: {},
-          telegramProfiles: {
-            approval: {
-              credential: "missing",
-              allowedUserIds: ["100"],
-              allowedChatIds: ["-200"],
-            },
-          },
-        },
-        credentials: {},
-        store: new HumanDecisionStore(path.join(configDir, "state.sqlite")),
-        onAnswer: async () => {},
-      }),
-    ).toThrow(/missing credential/);
   });
 });
 

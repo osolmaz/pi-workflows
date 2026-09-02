@@ -436,7 +436,7 @@ export type HumanDecisionSettlementRecord = {
   decisionId: string;
   requestDigest: string;
   channel: string;
-  state: "confirmed" | "failed";
+  state: "confirmed" | "failed" | "unknown";
   createdAt: string;
   finishedAt: string;
   errorCode?: string;

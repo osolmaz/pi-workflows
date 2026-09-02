@@ -301,6 +301,7 @@ CREATE TABLE host_commands (
     'checkpoint.answer', 'decision.answer', 'interaction.submit', 'interaction.update',
     'workflowMessage.reportBranch', 'workflowTurn.report', 'sessionView.clearTerminal',
     'run.restart', 'run.changeSettings', 'followUp.queue', 'followUp.remove', 'session.record',
+    'channel.reload', 'channel.recover',
     'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
     'host.status', 'host.stop', 'state.backup', 'state.prune'
   )),
@@ -732,41 +733,18 @@ CREATE TABLE channel_cursors (
   PRIMARY KEY (channel_id, cursor_key)
 ) STRICT;
 
-CREATE TABLE channel_inbox (
-  channel_id TEXT NOT NULL REFERENCES channels(channel_id) ON DELETE CASCADE,
-  external_event_id TEXT NOT NULL,
-  event_type TEXT NOT NULL CHECK (event_type IN ('callback', 'reply')),
-  payload_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  received_at INTEGER NOT NULL,
-  processed_at INTEGER,
-  result_hash BLOB REFERENCES blobs(blob_hash),
-  PRIMARY KEY (channel_id, external_event_id)
-) STRICT;
-
 CREATE TABLE channel_messages (
   message_id TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL REFERENCES channels(channel_id) ON DELETE CASCADE,
   decision_id TEXT REFERENCES human_decisions(decision_id),
   purpose TEXT NOT NULL CHECK (purpose IN ('delivery', 'settlement')),
   content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  external_conversation_ref TEXT,
-  external_message_ref TEXT,
   status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'failed', 'ambiguous')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX channel_messages_decision_idx ON channel_messages(decision_id, purpose, created_at);
-
-CREATE TABLE channel_message_parts (
-  message_id TEXT NOT NULL REFERENCES channel_messages(message_id) ON DELETE CASCADE,
-  recipient_index INTEGER NOT NULL CHECK (recipient_index >= 0),
-  part_index INTEGER NOT NULL CHECK (part_index >= 0),
-  content_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
-  external_conversation_ref TEXT NOT NULL,
-  external_message_ref TEXT NOT NULL,
-  PRIMARY KEY (message_id, recipient_index, part_index)
-) STRICT;
 `;
 
 export const STATE_SCHEMA_DIGEST = createHash("sha256").update(STATE_SCHEMA_SQL).digest();

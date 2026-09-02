@@ -141,6 +141,11 @@ function makePi(options: {
       if (command === undefined) throw new Error("controller command was not registered");
       await command(args, ctx);
     },
+    runChannelCommand: async (args: string) => {
+      const command = commands.get("workflow-channel");
+      if (command === undefined) throw new Error("workflow-channel command was not registered");
+      await command(args, ctx);
+    },
     runTool: async (toolCallId: string, params: Record<string, unknown>) => {
       if (tool === undefined) throw new Error("workflow tool was not registered");
       return await tool(toolCallId, params, new AbortController().signal, () => {}, ctx);
@@ -318,6 +323,18 @@ function stepContract(entry: Record<string, unknown>): { nodeId: string; attempt
 }
 
 describe("pi-workflows hosted extension", () => {
+  it("reports channel status through the hosted client", async () => {
+    const { cwd } = await setupProject();
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runChannelCommand("status");
+    expect(fake.notifications.at(-1)).toEqual({
+      message: "Human decisions use the Pi channel only.",
+      level: "info",
+    });
+    await fake.emit("session_shutdown");
+  }, 30_000);
+
   it("does not write durable claim commands while an idle session has no delivery", async () => {
     const { cwd } = await setupProject();
     const fake = makePi({ cwd });

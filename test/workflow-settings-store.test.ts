@@ -618,10 +618,7 @@ describe("durable workflow settings", () => {
     engine.cancel();
     await running;
     expect(
-      new WorkflowMessageStore(store.state).latestForSource(
-        "followUp",
-        queued.followUp.followUpId,
-      ),
+      new WorkflowMessageStore(store.state).latestForSource("followUp", queued.followUp.followUpId),
     ).toMatchObject({ status: "cancelled" });
     store.close();
   });

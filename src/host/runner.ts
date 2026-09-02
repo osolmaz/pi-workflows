@@ -2,6 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net, { type Socket } from "node:net";
 import path from "node:path";
+import {
+  audienceChannels,
+  loadDecisionChannelConfig,
+  type DecisionChannelConfig,
+} from "../channels/config.js";
+import {
+  channelResponse,
+  type ChannelAdapterCommand,
+  type ChannelAdapterLaunch,
+  type ChannelAdapterMessage,
+  type ChannelAdapterResponse,
+  type TelegramMessageReference,
+} from "../channels/protocol.js";
 import { WorkflowClient } from "../client/client.js";
 import {
   CLIENT_PROTOCOL_SCHEMA,
@@ -14,11 +27,7 @@ import {
   type ClientRequest,
   type ClientResponse,
 } from "../client/protocol.js";
-import type {
-  WorkflowBranchReport,
-  WorkflowRunView,
-  WorkflowTurnReport,
-} from "../client/view.js";
+import type { WorkflowBranchReport, WorkflowRunView, WorkflowTurnReport } from "../client/view.js";
 import { applyStatusPatch } from "../controllers/conditions.js";
 import { ResourceConflictError } from "../controllers/errors.js";
 import {
@@ -43,9 +52,11 @@ import {
 } from "../controllers/workflows.js";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
-import { workflowMessageIdFor } from "../state/workflow-messages.js";
+import { resourceIdFor } from "../state/mutation.js";
 import { pruneState } from "../state/prune.js";
 import { recordViewerDeltas } from "../state/viewer.js";
+import { workflowMessageIdFor } from "../state/workflow-messages.js";
+import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
 import {
@@ -54,8 +65,13 @@ import {
 } from "../workflows/settings.js";
 import { WorkflowRunStore } from "../workflows/store.js";
 import type {
+  HumanDecisionAnswerSource,
+  HumanDecisionCancellationRecord,
+  HumanDecisionChannelRequest,
+  HumanDecisionDeliveryRecord,
   HumanDecisionRequest,
   HumanDecisionResponse,
+  HumanDecisionSettlementRecord,
   ResolvedHumanDecision,
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -70,6 +86,13 @@ import {
   notificationWorkflowMessageContent,
   terminalWorkflowMessageContent,
 } from "../workflows/workflow-message-content.js";
+import {
+  ChannelEffectStore,
+  channelEffectAttemptId,
+  channelEffectId,
+  type ChannelEffectRecord,
+} from "./channel-effects.js";
+import { ChannelAdapterSupervisor } from "./channel-supervisor.js";
 import type {
   ControllerWorkerLaunchEnvelope,
   ControllerWorkerMessage,
@@ -118,6 +141,7 @@ export type WorkflowHostOptions = {
   workerEntryPath?: string;
   workerStartupTimeoutMs?: number;
   controllerWorkerEntryPath?: string;
+  channelAdapterEntryPath?: string;
   onLog?: (message: string) => void;
 };
 
@@ -155,6 +179,16 @@ type SessionCoordinator = {
   branchReported: boolean;
 };
 
+type ActiveChannel = {
+  profile: string;
+  channelId: string;
+  resourceId: string;
+  launch: ChannelAdapterLaunch;
+  supervisor: ChannelAdapterSupervisor;
+  inFlight: Set<string>;
+  stopping: boolean;
+};
+
 type ActiveController = {
   key: string;
   projectPath: string;
@@ -180,12 +214,14 @@ export class WorkflowHost {
   private readonly hostState: HostStateStore;
   private readonly queue: SqliteControllerStore;
   private readonly decisions: HumanDecisionStore;
+  private readonly channelEffects: ChannelEffectStore;
   private readonly runStore: WorkflowRunStore;
   private readonly views: HostViewStore;
   private readonly registry: HostProcessRegistry;
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly workerDescendants = new Map<string, Set<number>>();
   private readonly activeControllers = new Map<string, ActiveController>();
+  private readonly activeChannels = new Map<string, ActiveChannel>();
   private readonly controlClaims = new Map<string, string>();
   private readonly activationTasks = new Map<string, Promise<void>>();
   private readonly maintenanceCommands = new Map<string, Promise<ClientResponse>>();
@@ -205,6 +241,9 @@ export class WorkflowHost {
   private started = false;
   private controllerPollActive = false;
   private decisionTimeoutActive = false;
+  private decisionChannelConfig: DecisionChannelConfig | null = null;
+  private decisionChannelError: string | null = null;
+  private channelReloading = false;
 
   constructor(options: WorkflowHostOptions = {}) {
     this.options = options;
@@ -223,6 +262,7 @@ export class WorkflowHost {
         return token === undefined ? undefined : this.queue.workflowRunAuthority(runId, token);
       },
     });
+    this.channelEffects = new ChannelEffectStore(this.state);
     this.runStore = new WorkflowRunStore(this.databasePath, {
       state: this.state,
       authorityProvider: (runId) => {
@@ -274,6 +314,9 @@ export class WorkflowHost {
       void this.expireTimedOutDecision();
       void this.claimOne();
       void this.claimControllerOne();
+      void this.reloadDecisionChannels().catch((error) => {
+        this.log(`decision channel startup failed: ${errorMessage(error)}`);
+      });
     } catch (error) {
       const server = this.server;
       this.server = null;
@@ -329,6 +372,13 @@ export class WorkflowHost {
         }
       }),
     );
+    await Promise.allSettled(
+      [...this.activeChannels.values()].map(async (active) => {
+        active.stopping = true;
+        await active.supervisor.stop("orphaned");
+      }),
+    );
+    this.activeChannels.clear();
     await Promise.allSettled(this.activationTasks.values());
     await Promise.allSettled(this.maintenanceCommands.values());
     this.registry.killAll();
@@ -629,6 +679,19 @@ export class WorkflowHost {
           return await this.executeMaintenanceCommand(request, async () =>
             toJsonValue(await this.recordSessionBatch(request)),
           );
+        case "channel.status":
+          return clientResponse(request.requestId, "accepted", this.decisionChannelStatus());
+        case "channel.reload":
+          this.requireSessionCommand(connection, request);
+          return await this.executeMaintenanceCommand(request, async () =>
+            toJsonValue(await this.reloadDecisionChannels()),
+          );
+        case "channel.recover": {
+          const session = this.requireSessionCommand(connection, request);
+          return await this.executeMaintenanceCommand(request, async () =>
+            this.recoverDecisionChannel(request, session.targetSessionId),
+          );
+        }
         case "interaction.submit":
           return await this.submitInteractionAndWait(request);
         case "state.status":
@@ -800,11 +863,7 @@ export class WorkflowHost {
     const messages = this.hostState.workflowMessages.listSession(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
     this.state.transaction(() => {
-      this.hostState.workflowMessages.adoptBranch(
-        report.targetSessionId,
-        report.entries,
-        allowed,
-      );
+      this.hostState.workflowMessages.adoptBranch(report.targetSessionId, report.entries, allowed);
       if (report.isIdle && !report.hasPendingMessages) {
         for (const turn of this.hostState.workflowMessages.openTurnsForSession(
           report.targetSessionId,
@@ -847,10 +906,7 @@ export class WorkflowHost {
     });
   }
 
-  private reportWorkflowTurn(
-    connection: ClientConnection,
-    request: ClientRequest,
-  ): ClientResponse {
+  private reportWorkflowTurn(connection: ClientConnection, request: ClientRequest): ClientResponse {
     const report = parseWorkflowTurnReport(request.payload);
     const coordinator = this.requireSessionCoordinator(
       connection,
@@ -1226,26 +1282,21 @@ export class WorkflowHost {
       }
       case "sessionView.clearTerminal": {
         const session = this.requireSessionCommand(connection, request);
-        const retained = this.views.clearTerminal(
-          session.targetSessionId,
-          request.runId,
-        );
+        const retained = this.views.clearTerminal(session.targetSessionId, request.runId);
         return retained === null
           ? { outcome: "adopted", receipt: { cleared: false } }
           : { outcome: "accepted", receipt: { cleared: true, runId: retained } };
       }
       case "run.restart":
-        return this.restartRun(request, afterCommit, this.requireSessionCommand(connection, request));
+        return this.restartRun(
+          request,
+          afterCommit,
+          this.requireSessionCommand(connection, request),
+        );
       case "followUp.queue":
-        return this.queueSessionFollowUp(
-          request,
-          this.requireSessionCommand(connection, request),
-        );
+        return this.queueSessionFollowUp(request, this.requireSessionCommand(connection, request));
       case "followUp.remove":
-        return this.removeSessionFollowUp(
-          request,
-          this.requireSessionCommand(connection, request),
-        );
+        return this.removeSessionFollowUp(request, this.requireSessionCommand(connection, request));
       case "run.start":
         return this.startRun(request, afterCommit);
       case "checkpoint.answer":
@@ -1274,6 +1325,9 @@ export class WorkflowHost {
       case "workflowTurn.report":
       case "run.changeSettings":
       case "session.record":
+      case "channel.status":
+      case "channel.reload":
+      case "channel.recover":
       case "state.status":
       case "state.verify":
       case "state.backup":
@@ -1292,7 +1346,10 @@ export class WorkflowHost {
     if (source === undefined) {
       return { outcome: "notFound", error: `Workflow run not found: ${sourceRunId}` };
     }
-    if (source.originSessionId !== session.targetSessionId || source.executionMode !== "interactive") {
+    if (
+      source.originSessionId !== session.targetSessionId ||
+      source.executionMode !== "interactive"
+    ) {
       return { outcome: "rejected", error: "Workflow run belongs to another Pi session" };
     }
     if (source.status === "cancelled") {
@@ -1353,7 +1410,9 @@ export class WorkflowHost {
       };
     }
     const existingRestart = this.state.connection
-      .prepare("SELECT run_id AS runId FROM runs WHERE parent_run_id = ? AND lineage_kind = 'restart'")
+      .prepare(
+        "SELECT run_id AS runId FROM runs WHERE parent_run_id = ? AND lineage_kind = 'restart'",
+      )
       .get(sourceRunId) as { runId?: unknown } | undefined;
     if (typeof existingRestart?.runId === "string") {
       return {
@@ -1577,7 +1636,9 @@ export class WorkflowHost {
       if (!Array.isArray(payload.events)) throw new Error("Session events must be an array");
       await this.runStore.appendSessionEventBatch(
         runId,
-        payload.events.map((event) => requireRecord(event, "session event")) as WorkflowSessionEventRecord[],
+        payload.events.map((event) =>
+          requireRecord(event, "session event"),
+        ) as WorkflowSessionEventRecord[],
         attemptId,
       );
     } else if (action === "capture") {
@@ -1822,41 +1883,62 @@ export class WorkflowHost {
     }
     const request = interaction.contract as unknown as HumanDecisionRequest;
     const response = payload.response as HumanDecisionResponse;
-    const accepted = this.decisions.acceptSync(request, {
-      ...response,
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
+    return this.acceptDecisionAnswer({
+      interaction,
+      request,
+      response,
       source: {
         channel: "pi",
         actorId: interaction.targetSessionId,
         eventId: command.idempotencyKey,
       },
       idempotencyKey: command.idempotencyKey,
+      submissionId: requireString(payload.submissionId, "submissionId"),
+      expectedRevision: requireNonNegativeInteger(command.expectedRevision, "expectedRevision"),
+      afterCommit,
+    });
+  }
+
+  private acceptDecisionAnswer(options: {
+    interaction: InteractiveRequestRecord;
+    request: HumanDecisionRequest;
+    response: HumanDecisionResponse;
+    source: HumanDecisionAnswerSource;
+    idempotencyKey: string;
+    submissionId: string;
+    expectedRevision: number;
+    afterCommit: Array<() => void>;
+  }): Omit<ClientResponse, "schema" | "type" | "requestId"> {
+    const accepted = this.decisions.acceptSync(options.request, {
+      ...options.response,
+      decisionId: options.request.decisionId,
+      requestDigest: options.request.requestDigest,
+      source: options.source,
+      idempotencyKey: options.idempotencyKey,
     });
     if (accepted.status === "conflict") {
       return { outcome: "conflict", error: "Another human decision answer already won" };
     }
     this.hostState.submitInteraction({
-      requestId,
-      submissionId: requireString(payload.submissionId, "submissionId"),
-      idempotencyKey: command.idempotencyKey,
-      expectedRevision: requireNonNegativeInteger(command.expectedRevision, "expectedRevision"),
-      payload: response as JsonValue,
+      requestId: options.interaction.requestId,
+      submissionId: options.submissionId,
+      idempotencyKey: options.idempotencyKey,
+      expectedRevision: options.expectedRevision,
+      payload: options.response as JsonValue,
       accepted: true,
       receipt: accepted.decision as unknown as JsonValue,
     });
-
     const continuationRunId = this.prepareDecisionContinuation(
-      interaction,
-      request,
+      options.interaction,
+      options.request,
       accepted.decision,
-      afterCommit,
+      options.afterCommit,
     );
     return {
       outcome: accepted.status === "adopted" ? "adopted" : "accepted",
       receipt: {
-        requestId,
-        parentRunId: interaction.runId,
+        requestId: options.interaction.requestId,
+        parentRunId: options.interaction.runId,
         runId: continuationRunId,
         decision: accepted.decision,
       } as JsonValue,
@@ -2111,6 +2193,650 @@ export class WorkflowHost {
       revision: interaction.revision,
       receipt,
     };
+  }
+
+  private decisionChannelStatus(): JsonValue {
+    const configuredProfiles = Object.keys(this.decisionChannelConfig?.telegramProfiles ?? {});
+    const ambiguous = this.channelEffects.listAmbiguous().map((effect) => ({
+      profile: effect.payload.profile,
+      messageId: channelEffectAttemptId(effect.effectId, effect.attemptNumber),
+      purpose: effect.payload.purpose,
+    }));
+    return {
+      configured: this.decisionChannelConfig !== null,
+      profiles: configuredProfiles.map((profile) => ({
+        profile,
+        running: this.activeChannels.has(profile),
+      })),
+      ambiguous,
+      error: this.decisionChannelError,
+    } as JsonValue;
+  }
+
+  private markApplyingChannelEffectsAmbiguous(
+    sourceResourceId: string | undefined,
+    errorCode: string,
+    stableMessageIds?: readonly string[],
+  ): void {
+    this.state.transaction(() => {
+      const effects = this.channelEffects.markApplyingAmbiguous({
+        ...(sourceResourceId === undefined ? {} : { sourceResourceId }),
+        ...(stableMessageIds === undefined ? {} : { stableMessageIds }),
+        error: errorCode,
+        actorId: this.hostId,
+      });
+      for (const effect of effects) {
+        this.recordChannelEffectResult(effect, "unknown", errorCode);
+      }
+    });
+  }
+
+  private recoverDecisionChannel(request: ClientRequest, actorId: string): JsonValue {
+    const payload = requireRecord(request.payload, "channel.recover payload");
+    const messageId = requireString(payload.messageId, "messageId");
+    const action = requireString(payload.action, "action");
+    if (action !== "confirm" && action !== "retry") {
+      throw new Error("Channel recovery action must be confirm or retry");
+    }
+    if (this.claim === null) throw new Error("Workflow host claim is unavailable");
+    const effect = this.state.transaction(() => {
+      const recovered = this.channelEffects.recover({
+        stableMessageId: messageId,
+        action,
+        actorId,
+        ownerId: this.hostId,
+        leaseGeneration: this.claim?.epoch ?? 0,
+      });
+      const attemptId = channelEffectAttemptId(recovered.effectId, recovered.attemptNumber);
+      if (action === "confirm") {
+        this.recordChannelEffectResult(recovered, "confirmed", undefined, `${attemptId}-confirmed`);
+      } else if (recovered.payload.purpose === "delivery") {
+        this.decisions.recordDeliverySync(
+          recovered.payload.request,
+          recovered.payload.channelId,
+          channelDeliveryRecord(
+            recovered.payload.request,
+            recovered.payload.channelId,
+            attemptId,
+            "intent",
+            "intent",
+            {},
+            { createdAt: recovered.attemptStartedAt },
+          ),
+        );
+      }
+      return recovered;
+    });
+    return {
+      messageId,
+      nextMessageId:
+        action === "retry"
+          ? channelEffectAttemptId(effect.effectId, effect.attemptNumber)
+          : messageId,
+      action,
+      recovered: true,
+    };
+  }
+
+  private async reloadDecisionChannels(): Promise<JsonValue> {
+    if (this.channelReloading) throw new Error("Decision channels are already reloading");
+    this.channelReloading = true;
+    try {
+      const prior = [...this.activeChannels.values()];
+      for (const active of prior) active.stopping = true;
+      await Promise.allSettled(
+        prior.map(async (active) => await active.supervisor.stop("cancelled")),
+      );
+      this.activeChannels.clear();
+
+      this.markApplyingChannelEffectsAmbiguous(undefined, "host_restarted_without_receipt");
+      const configuredDir = this.options.env?.PI_WORKFLOWS_CONFIG_DIR;
+      const loaded = await loadDecisionChannelConfig(configuredDir);
+      this.decisionChannelConfig = loaded?.channels ?? null;
+      this.decisionChannelError = null;
+      if (loaded === null) return this.decisionChannelStatus();
+      for (const [profile, config] of Object.entries(loaded.channels.telegramProfiles ?? {})) {
+        const token = loaded.credentials[config.credential];
+        if (token === undefined)
+          throw new Error(`Telegram credential ${config.credential} is missing`);
+        await this.startDecisionChannel({
+          schema: "pi-workflows.channel-adapter-launch.v1",
+          adapterEpoch: `channel-adapter-${randomUUID()}`,
+          profile,
+          token,
+          allowedUserIds: config.allowedUserIds,
+          allowedChatIds: config.allowedChatIds,
+          ...(this.options.env?.PI_WORKFLOWS_TELEGRAM_API_BASE === undefined
+            ? {}
+            : { apiBase: this.options.env.PI_WORKFLOWS_TELEGRAM_API_BASE }),
+        });
+      }
+      return this.decisionChannelStatus();
+    } catch (error) {
+      this.decisionChannelConfig = null;
+      this.decisionChannelError = errorMessage(error);
+      throw error;
+    } finally {
+      this.channelReloading = false;
+    }
+  }
+
+  private async startDecisionChannel(launch: ChannelAdapterLaunch): Promise<void> {
+    if (this.stopping || this.activeChannels.has(launch.profile)) return;
+    const channelId = `telegram:${launch.profile}`;
+    const resourceId = resourceIdFor("channel", channelId);
+    this.ensureChannelResource(channelId, launch.profile, resourceId);
+    const supervisor = new ChannelAdapterSupervisor(launch, {
+      registry: this.registry,
+      onMessage: async (message) => await this.handleChannelMessage(launch.profile, message),
+      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+      ...(this.options.channelAdapterEntryPath === undefined
+        ? {}
+        : { adapterEntryPath: this.options.channelAdapterEntryPath }),
+      onDiagnostic: (message) => this.log(`channel ${launch.profile}: ${message}`),
+    });
+    const active: ActiveChannel = {
+      profile: launch.profile,
+      channelId,
+      resourceId,
+      launch,
+      supervisor,
+      inFlight: new Set(),
+      stopping: false,
+    };
+    this.activeChannels.set(launch.profile, active);
+    try {
+      await supervisor.start();
+    } catch (error) {
+      this.activeChannels.delete(launch.profile);
+      throw error;
+    }
+    void supervisor.wait().then(async (result) => {
+      await this.handleChannelExit(active, result.diagnostic);
+    });
+  }
+
+  private ensureChannelResource(channelId: string, profile: string, resourceId: string): void {
+    this.state.transaction(() => {
+      const now = Date.now();
+      this.state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'channel', ?, 1, ?, ?)
+           ON CONFLICT(resource_type, aggregate_key) DO NOTHING`,
+        )
+        .run(resourceId, channelId, now, now);
+      this.state.connection
+        .prepare(
+          "INSERT INTO leases(resource_id, generation) VALUES (?, 0) ON CONFLICT(resource_id) DO NOTHING",
+        )
+        .run(resourceId);
+      this.state.connection
+        .prepare(
+          `INSERT INTO channels(channel_id, resource_id, adapter_type, profile_key, created_at)
+           VALUES (?, ?, 'telegram', ?, ?) ON CONFLICT(channel_id) DO NOTHING`,
+        )
+        .run(channelId, resourceId, profile, now);
+    });
+  }
+
+  private async handleChannelExit(active: ActiveChannel, diagnostic?: string): Promise<void> {
+    if (this.activeChannels.get(active.profile) !== active) return;
+    this.activeChannels.delete(active.profile);
+    this.markApplyingChannelEffectsAmbiguous(active.resourceId, "adapter_exited_without_receipt", [
+      ...active.inFlight,
+    ]);
+    if (diagnostic !== undefined) this.log(`channel ${active.profile} exited: ${diagnostic}`);
+    if (
+      active.stopping ||
+      this.stopping ||
+      this.decisionChannelConfig?.telegramProfiles?.[active.profile] === undefined
+    ) {
+      return;
+    }
+    const replacement: ChannelAdapterLaunch = {
+      ...active.launch,
+      adapterEpoch: `channel-adapter-${randomUUID()}`,
+    };
+    setTimeout(() => {
+      void this.startDecisionChannel(replacement).catch((error) => {
+        this.log(`channel ${active.profile} restart failed: ${errorMessage(error)}`);
+      });
+    }, 1_000).unref?.();
+  }
+
+  private async handleChannelMessage(
+    profile: string,
+    message: ChannelAdapterMessage,
+  ): Promise<ChannelAdapterResponse> {
+    const active = this.activeChannels.get(profile);
+    if (
+      active === undefined ||
+      active.launch.adapterEpoch !== message.adapterEpoch ||
+      message.profile !== profile
+    ) {
+      return channelResponse(message, "rejected", 0, null, "Channel adapter epoch is stale");
+    }
+    try {
+      const adopted = this.channelEventExists(active, message);
+      if (!adopted) {
+        const revision = this.channelRevision(active.resourceId);
+        if (
+          message.expectedRevision !== revision &&
+          !(
+            message.kind === "channel.ready" &&
+            message.sequence === 1 &&
+            message.expectedRevision === 0
+          )
+        ) {
+          throw new Error("Channel adapter revision is stale");
+        }
+        await this.applyChannelMessage(active, message);
+        this.recordChannelEvent(active, message);
+      }
+      const command =
+        message.kind === "channel.answer" || message.kind === "channel.exiting"
+          ? null
+          : await this.nextChannelCommand(active);
+      return channelResponse(message, "accepted", this.channelRevision(active.resourceId), command);
+    } catch (error) {
+      return channelResponse(
+        message,
+        "rejected",
+        this.channelRevision(active.resourceId),
+        null,
+        errorMessage(error),
+      );
+    }
+  }
+
+  private async applyChannelMessage(
+    active: ActiveChannel,
+    message: ChannelAdapterMessage,
+  ): Promise<void> {
+    if (message.kind === "channel.ready" || message.kind === "channel.exiting") {
+      this.saveChannelCursor(active.channelId, message.cursor);
+      return;
+    }
+    if (message.kind === "channel.present" || message.kind === "channel.settle") {
+      const purpose = message.kind === "channel.present" ? "delivery" : "settlement";
+      const effectId = channelEffectId(
+        active.channelId,
+        message.decisionId,
+        message.requestDigest,
+        purpose,
+      );
+      const effect = this.channelEffects.read(effectId);
+      if (
+        effect === undefined ||
+        effect.status !== "applying" ||
+        effect.payload.profile !== active.profile ||
+        effect.payload.decisionId !== message.decisionId ||
+        effect.payload.request.requestDigest !== message.requestDigest ||
+        message.stableMessageId !== channelEffectAttemptId(effect.effectId, effect.attemptNumber) ||
+        message.attemptId !== message.stableMessageId
+      ) {
+        throw new Error("Channel effect receipt is stale or does not match its request");
+      }
+      if (message.kind === "channel.present") {
+        message.messages.forEach(validateTelegramMessageReference);
+      }
+      const outcome =
+        message.state === "confirmed"
+          ? "applied"
+          : message.state === "failed"
+            ? "rejected"
+            : "ambiguous";
+      this.state.transaction(() => {
+        const settled = this.channelEffects.settle({
+          effectId,
+          attemptNumber: effect.attemptNumber,
+          outcome,
+          ...(message.kind === "channel.present" ? { result: { messages: message.messages } } : {}),
+          ...(message.errorCode === undefined ? {} : { error: message.errorCode }),
+          actorType: "channel",
+          actorId: active.profile,
+        });
+        this.recordChannelEffectResult(settled, message.state, message.errorCode);
+        active.inFlight.delete(message.stableMessageId);
+      });
+      return;
+    }
+
+    this.saveChannelCursor(active.channelId, message.cursor);
+    const config = this.decisionChannelConfig?.telegramProfiles?.[active.profile];
+    if (
+      config === undefined ||
+      !config.allowedUserIds.includes(message.actorId) ||
+      !config.allowedChatIds.includes(message.chatId)
+    ) {
+      throw new Error("Telegram answer source is not authorized by the host profile");
+    }
+    const interaction = this.hostState.listPendingDecisionInteractions().find((candidate) => {
+      const request = candidate.contract as unknown as HumanDecisionRequest;
+      return request.decisionId === message.decisionId;
+    });
+    if (interaction === undefined) return;
+    const request = interaction.contract as unknown as HumanDecisionRequest;
+    if (request.requestDigest !== message.requestDigest) {
+      throw new Error("Telegram answer request digest is stale");
+    }
+    const afterCommit: Array<() => void> = [];
+    const result = this.state.transaction(() =>
+      this.acceptDecisionAnswer({
+        interaction,
+        request,
+        response: message.response,
+        source: {
+          channel: active.channelId,
+          actorId: message.actorId,
+          eventId: message.eventId,
+        },
+        idempotencyKey: message.idempotencyKey,
+        submissionId: message.stableMessageId,
+        expectedRevision: interaction.revision,
+        afterCommit,
+      }),
+    );
+    if (
+      result.outcome !== "accepted" &&
+      result.outcome !== "adopted" &&
+      result.outcome !== "conflict"
+    ) {
+      throw new Error(result.error ?? "Telegram answer was rejected");
+    }
+    for (const effect of afterCommit) setImmediate(effect);
+  }
+
+  private async nextChannelCommand(active: ActiveChannel): Promise<ChannelAdapterCommand> {
+    const interactions = this.hostState.listPendingDecisionInteractions();
+    for (const interaction of interactions) {
+      const request = interaction.contract as unknown as HumanDecisionRequest;
+      if (
+        !audienceChannels(this.decisionChannelConfig, request.audience).includes(active.channelId)
+      ) {
+        continue;
+      }
+      const deliveries = await this.decisions.listDeliveries(request.decisionId, active.channelId);
+      if (deliveries.some(isConfirmedChannelDelivery)) continue;
+      const redacted = humanDecisionChannelRequest(request);
+      const effect = this.ensureApplyingChannelEffect(active, redacted, "delivery");
+      if (effect.status !== "applying") continue;
+      const stableMessageId = channelEffectAttemptId(effect.effectId, effect.attemptNumber);
+      active.inFlight.add(stableMessageId);
+      return {
+        kind: "channel.present",
+        stableMessageId,
+        attemptId: stableMessageId,
+        request: redacted,
+      };
+    }
+
+    const requests = await this.decisions.listRequests();
+    for (const request of requests) {
+      if (
+        !audienceChannels(this.decisionChannelConfig, request.audience).includes(active.channelId)
+      ) {
+        continue;
+      }
+      const deliveries = await this.decisions.listDeliveries(request.decisionId, active.channelId);
+      if (!deliveries.some(isConfirmedChannelDelivery)) continue;
+      const resolution = await this.decisions.readResolved(request.decisionId);
+      const cancellation = await this.decisions.readCancellation(request.decisionId);
+      if (resolution === null && cancellation === null) continue;
+      const settlements = await this.decisions.listSettlements(
+        request.decisionId,
+        active.channelId,
+      );
+      if (settlements.some((item) => item.state === "confirmed")) continue;
+      const redacted = humanDecisionChannelRequest(request);
+      const effect = this.ensureApplyingChannelEffect(active, redacted, "settlement");
+      if (effect.status !== "applying") continue;
+      const stableMessageId = channelEffectAttemptId(effect.effectId, effect.attemptNumber);
+      active.inFlight.add(stableMessageId);
+      return {
+        kind: "channel.settle",
+        stableMessageId,
+        attemptId: stableMessageId,
+        request: redacted,
+        outcome:
+          resolution !== null
+            ? "accepted"
+            : (cancellation as HumanDecisionCancellationRecord).reason === "expired"
+              ? "expired"
+              : "cancelled",
+        ...(resolution === null ? {} : { response: resolution.response }),
+        messages: this.confirmedChannelMessageReferences(
+          request.decisionId,
+          request.requestDigest,
+          active.channelId,
+        ),
+      };
+    }
+
+    const pollRequests: HumanDecisionChannelRequest[] = [];
+    for (const interaction of interactions) {
+      const request = interaction.contract as unknown as HumanDecisionRequest;
+      if (
+        !audienceChannels(this.decisionChannelConfig, request.audience).includes(active.channelId)
+      ) {
+        continue;
+      }
+      const deliveries = await this.decisions.listDeliveries(request.decisionId, active.channelId);
+      if (deliveries.some(isConfirmedChannelDelivery)) {
+        pollRequests.push(humanDecisionChannelRequest(request));
+      }
+    }
+    return {
+      kind: "channel.poll",
+      cursor: this.channelCursor(active.channelId),
+      requests: pollRequests,
+    };
+  }
+
+  private ensureApplyingChannelEffect(
+    active: ActiveChannel,
+    request: HumanDecisionChannelRequest,
+    purpose: "delivery" | "settlement",
+  ): ChannelEffectRecord {
+    if (this.claim === null) throw new Error("Workflow host claim is unavailable");
+    return this.state.transaction(() => {
+      const effect = this.channelEffects.ensureApplying({
+        channelResourceId: active.resourceId,
+        channelId: active.channelId,
+        profile: active.profile,
+        decisionId: request.decisionId,
+        purpose,
+        request,
+        ownerId: this.hostId,
+        leaseGeneration: this.claim?.epoch ?? 0,
+        maxAutomaticAttempts: 3,
+      });
+      if (purpose === "delivery" && effect.status === "applying") {
+        const attemptId = channelEffectAttemptId(effect.effectId, effect.attemptNumber);
+        this.decisions.recordDeliverySync(
+          request,
+          active.channelId,
+          channelDeliveryRecord(
+            request,
+            active.channelId,
+            attemptId,
+            "intent",
+            "intent",
+            {},
+            { createdAt: effect.attemptStartedAt },
+          ),
+        );
+      }
+      return effect;
+    });
+  }
+
+  private recordChannelEffectResult(
+    effect: ChannelEffectRecord,
+    state: "confirmed" | "failed" | "unknown",
+    errorCode?: string,
+    recoveredAttemptId?: string,
+  ): void {
+    const request = effect.payload.request;
+    const attemptId =
+      recoveredAttemptId ?? channelEffectAttemptId(effect.effectId, effect.attemptNumber);
+    if (effect.payload.purpose === "delivery") {
+      const messages = channelEffectMessageReferences(effect.result);
+      this.decisions.recordDeliverySync(
+        request,
+        effect.payload.channelId,
+        channelDeliveryRecord(
+          request,
+          effect.payload.channelId,
+          attemptId,
+          "complete",
+          state,
+          {
+            messageCount: messages.length,
+            ...(errorCode === undefined ? {} : { errorCode }),
+          },
+          {
+            createdAt: effect.attemptStartedAt,
+            finishedAt: effect.settledAt ?? effect.attemptStartedAt,
+          },
+        ),
+      );
+      return;
+    }
+    this.decisions.recordSettlementSync(
+      request.decisionId,
+      effect.payload.channelId,
+      channelSettlementRecord(request, effect.payload.channelId, attemptId, state, errorCode, {
+        createdAt: effect.attemptStartedAt,
+        finishedAt: effect.settledAt ?? effect.attemptStartedAt,
+      }),
+    );
+  }
+
+  private confirmedChannelMessageReferences(
+    decisionId: string,
+    requestDigest: string,
+    channelId: string,
+  ): TelegramMessageReference[] {
+    const effect = this.channelEffects.read(
+      channelEffectId(channelId, decisionId, requestDigest, "delivery"),
+    );
+    return effect?.status === "applied" ? channelEffectMessageReferences(effect.result) : [];
+  }
+
+  private saveChannelCursor(channelId: string, cursor: number): void {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Channel cursor is invalid");
+    this.state.connection
+      .prepare(
+        `INSERT INTO channel_cursors(channel_id, cursor_key, cursor_value, updated_at)
+         VALUES (?, 'telegram_update', ?, ?)
+         ON CONFLICT(channel_id, cursor_key) DO UPDATE SET
+           cursor_value = CAST(MAX(
+             CAST(channel_cursors.cursor_value AS INTEGER),
+             CAST(excluded.cursor_value AS INTEGER)
+           ) AS TEXT),
+           updated_at = excluded.updated_at`,
+      )
+      .run(channelId, String(cursor), Date.now());
+  }
+
+  private channelCursor(channelId: string): number {
+    const row = this.state.connection
+      .prepare(
+        "SELECT cursor_value AS cursorValue FROM channel_cursors WHERE channel_id = ? AND cursor_key = 'telegram_update'",
+      )
+      .get(channelId);
+    return isObjectRecord(row) && typeof row.cursorValue === "string"
+      ? Number.parseInt(row.cursorValue, 10) || 0
+      : 0;
+  }
+
+  private channelEventExists(active: ActiveChannel, message: ChannelAdapterMessage): boolean {
+    const row = this.state.connection
+      .prepare(
+        "SELECT payload_hash AS payloadHash FROM events WHERE event_id = ? AND resource_id = ?",
+      )
+      .get(message.stableMessageId, active.resourceId);
+    if (!isEventPayloadRow(row)) return false;
+    const expected = this.state.putJson(channelEventPayload(message));
+    if (!row.payloadHash.equals(expected)) {
+      throw new Error("Channel stable message ID was reused with different content");
+    }
+    return true;
+  }
+
+  private recordChannelEvent(active: ActiveChannel, message: ChannelAdapterMessage): void {
+    this.recordChannelMutation(
+      active,
+      message.stableMessageId,
+      message.kind,
+      channelEventPayload(message),
+    );
+  }
+
+  private recordChannelMutation(
+    active: ActiveChannel,
+    eventId: string,
+    eventType: string,
+    payload: JsonValue,
+  ): void {
+    this.recordChannelResourceMutation(
+      active.resourceId,
+      eventId,
+      eventType,
+      payload,
+      "channel",
+      active.profile,
+    );
+  }
+
+  private recordChannelResourceMutation(
+    resourceId: string,
+    eventId: string,
+    eventType: string,
+    payload: JsonValue,
+    actorType: "channel" | "human",
+    actorId: string,
+  ): void {
+    this.state.transaction(() => {
+      const revision = this.channelRevision(resourceId);
+      const now = Date.now();
+      const changed = this.state.connection
+        .prepare(
+          "UPDATE resources SET revision = revision + 1, updated_at = ? WHERE resource_id = ? AND revision = ?",
+        )
+        .run(now, resourceId, revision);
+      if (changed.changes !== 1) throw new Error("Channel resource revision changed");
+      this.state.connection
+        .prepare(
+          `INSERT INTO events(
+             event_id, resource_id, resource_revision, event_type,
+             actor_type, actor_id, payload_hash, recorded_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          eventId,
+          resourceId,
+          revision + 1,
+          eventType,
+          actorType,
+          actorId,
+          this.state.putJson(payload),
+          now,
+        );
+    });
+  }
+
+  private channelRevision(resourceId: string): number {
+    const row = this.state.connection
+      .prepare("SELECT revision FROM resources WHERE resource_id = ?")
+      .get(resourceId);
+    if (!isObjectRecord(row) || typeof row.revision !== "number") {
+      throw new Error("Channel resource is unavailable");
+    }
+    return row.revision;
   }
 
   private async claimControllerOne(): Promise<void> {
@@ -3306,7 +4032,7 @@ export class WorkflowHost {
       throw new Error("Workflow notification kind is invalid");
     }
     const attemptId = requireString(request.attemptId, "notification.attemptId");
-    const nodeId = requireString(request.nodeId, "notification.nodeId");
+    requireString(request.nodeId, "notification.nodeId");
     const content = requireString(request.content, "notification.content");
     const notificationId = `notification-${message.runId}-${attemptId}-${notificationIndex}`;
     const workflowMessageId = workflowMessageIdFor("notification", notificationId, "initial");
@@ -3357,7 +4083,8 @@ export class WorkflowHost {
           "UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ? AND presentation_prompt_hash IS NULL",
         )
         .run(promptHash, message.runId);
-      if (updated.changes !== 1) throw new Error("Workflow presentation instructions were not stored");
+      if (updated.changes !== 1)
+        throw new Error("Workflow presentation instructions were not stored");
       return { runId: message.runId, presentationStored: true };
     });
   }
@@ -3547,8 +4274,8 @@ export class WorkflowHost {
     const presentationInstructions =
       row.presentationPromptHash === null || row.presentationPromptHash === undefined
         ? "Explain the final workflow result to the user in a normal response."
-        : context.database.readBlob(row.presentationPromptHash)?.content.toString("utf8") ??
-          "Explain the final workflow result to the user in a normal response.";
+        : (context.database.readBlob(row.presentationPromptHash)?.content.toString("utf8") ??
+          "Explain the final workflow result to the user in a normal response.");
     const earlierOutcomes = this.terminalAncestorOutcomes(context.runId);
     const terminalFacts = {
       schema: "pi-workflows.terminal-result.v1",
@@ -3659,8 +4386,8 @@ export class WorkflowHost {
     const presentationInstructions =
       row.presentationPromptHash === null || row.presentationPromptHash === undefined
         ? "Explain the final workflow result to the user in a normal response."
-        : this.state.readBlob(row.presentationPromptHash)?.content.toString("utf8") ??
-          "Explain the final workflow result to the user in a normal response.";
+        : (this.state.readBlob(row.presentationPromptHash)?.content.toString("utf8") ??
+          "Explain the final workflow result to the user in a normal response.");
     const terminalFacts = {
       schema: "pi-workflows.terminal-result.v1",
       runId,
@@ -3880,6 +4607,97 @@ export class WorkflowHost {
   private log(message: string): void {
     this.options.onLog?.(message);
   }
+}
+
+type EventPayloadRow = { payloadHash: Buffer };
+
+function isEventPayloadRow(value: unknown): value is EventPayloadRow {
+  return isObjectRecord(value) && Buffer.isBuffer(value.payloadHash);
+}
+
+function isConfirmedChannelDelivery(value: HumanDecisionDeliveryRecord): boolean {
+  return value.phase === "complete" && value.state === "confirmed";
+}
+
+function channelDeliveryRecord(
+  request: HumanDecisionChannelRequest,
+  channel: string,
+  attemptId: string,
+  phase: HumanDecisionDeliveryRecord["phase"],
+  state: HumanDecisionDeliveryRecord["state"],
+  extra: Partial<Pick<HumanDecisionDeliveryRecord, "messageCount" | "errorCode">> = {},
+  timing: { createdAt: number; finishedAt?: number } | undefined = undefined,
+): HumanDecisionDeliveryRecord {
+  const createdAt = new Date(timing?.createdAt ?? Date.now()).toISOString();
+  return {
+    schema: "pi-workflows.human-decision-delivery.v1",
+    attemptId,
+    decisionId: request.decisionId,
+    requestDigest: request.requestDigest,
+    presentationDigest: request.presentationDigest,
+    channel,
+    phase,
+    state,
+    createdAt,
+    ...(state === "intent"
+      ? {}
+      : {
+          finishedAt: new Date(timing?.finishedAt ?? timing?.createdAt ?? Date.now()).toISOString(),
+        }),
+    ...extra,
+  };
+}
+
+function channelSettlementRecord(
+  request: HumanDecisionChannelRequest,
+  channel: string,
+  attemptId: string,
+  state: HumanDecisionSettlementRecord["state"],
+  errorCode?: string,
+  timing: { createdAt: number; finishedAt: number } | undefined = undefined,
+): HumanDecisionSettlementRecord {
+  const createdAt = new Date(timing?.createdAt ?? Date.now()).toISOString();
+  const finishedAt = new Date(timing?.finishedAt ?? Date.now()).toISOString();
+  return {
+    schema: "pi-workflows.human-decision-settlement.v1",
+    attemptId,
+    decisionId: request.decisionId,
+    requestDigest: request.requestDigest,
+    channel,
+    state,
+    createdAt,
+    finishedAt,
+    ...(errorCode === undefined ? {} : { errorCode }),
+  };
+}
+
+function validateTelegramMessageReference(reference: TelegramMessageReference): void {
+  if (
+    typeof reference.chatId !== "string" ||
+    typeof reference.messageId !== "string" ||
+    !Number.isSafeInteger(reference.recipientIndex) ||
+    reference.recipientIndex < 0 ||
+    !Number.isSafeInteger(reference.partIndex) ||
+    reference.partIndex < 0 ||
+    typeof reference.contentDigest !== "string"
+  ) {
+    throw new Error("Telegram message reference is invalid");
+  }
+}
+
+function channelEffectMessageReferences(value: JsonValue | undefined): TelegramMessageReference[] {
+  if (!isObjectRecord(value) || !Array.isArray(value.messages)) return [];
+  return value.messages.map((item) => {
+    if (!isObjectRecord(item)) throw new Error("Telegram message reference is invalid");
+    const reference = item as unknown as TelegramMessageReference;
+    validateTelegramMessageReference(reference);
+    return reference;
+  });
+}
+
+function channelEventPayload(message: ChannelAdapterMessage): JsonValue {
+  const { expectedRevision: _expectedRevision, sequence: _sequence, ...payload } = message;
+  return payload as unknown as JsonValue;
 }
 
 function readStoredText(state: StateDatabase, hash: Buffer, label: string): string {
@@ -4122,7 +4940,8 @@ function parseWorkflowBranchReport(payload: JsonValue): WorkflowBranchReport {
   const entries = value.entries.map((item) => {
     const entry = requireRecord(item as JsonValue, "workflow branch entry");
     const workflowMessageId = requireString(entry.workflowMessageId, "workflowMessageId");
-    if (seen.has(workflowMessageId)) throw new Error("Workflow branch report has duplicate messages");
+    if (seen.has(workflowMessageId))
+      throw new Error("Workflow branch report has duplicate messages");
     seen.add(workflowMessageId);
     return {
       workflowMessageId,
