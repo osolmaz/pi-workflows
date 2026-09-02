@@ -540,9 +540,19 @@ export class WorkflowHost {
                 view.revision,
               );
         }
-        case "view.run.watch":
-          this.addSubscription(connection, request, "run", requireRunId(request));
+        case "view.run.watch": {
+          const runId = requireRunId(request);
+          if (this.views.run(runId) === null) {
+            return clientResponse(
+              request.requestId,
+              "notFound",
+              undefined,
+              "Workflow run not found",
+            );
+          }
+          this.addSubscription(connection, request, "run", runId);
           return clientResponse(request.requestId, "accepted", { subscribed: true });
+        }
         case "view.session.watch": {
           const payload = requireRecord(request.payload, "view.session.watch payload");
           this.addSubscription(
