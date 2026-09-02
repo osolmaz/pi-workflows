@@ -16,6 +16,8 @@ assistant step writes a normal visible response that becomes the node
 output. The [design philosophy](docs/DESIGN_PHILOSOPHY.md) explains the
 principles behind the engine and its public parts.
 
+> **Version 0.16.0 notice:** The hosted runtime has known session gaps. An active Pi model turn can show `waiting`, and terminal results can clear at once. Reminders, resumed prompts, terminal recovery, live settings controls, follow-ups, external decision channels, and complete conversation recording are not all available. The approved [workflow-message restoration plan](docs/2026-09-02-unify-workflow-messages-plan.md) fixes these items through one host-owned message path.
+
 ## Install
 
 ```bash
@@ -218,8 +220,9 @@ earlier `autodevise` name, and the old command and export are not retained.
 
 ## Viewers
 
-Runs persist in `~/.pi/agent/workflows/state.sqlite` as they execute. The
-viewer reads that database and re-renders on every state change:
+Runs persist in `~/.pi/agent/workflows/state.sqlite` as they execute. The global
+host is the only process that opens this database. Viewers use the shared client
+protocol and re-render from the host's run view on every state change:
 
 ```bash
 pi-workflows view          # interactive picker, live updates

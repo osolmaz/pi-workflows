@@ -1,25 +1,67 @@
-# Workflow step messages
+# Workflow messages in Pi
 
-This specification defines how pi-workflows shows agent-step instructions in an interactive Pi session. The model receives the complete step prompt, while the user sees a small workflow card that can be expanded. [Restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md) records the delivery and session-control repair.
+Status: this document defines the approved target. Version 0.16.0 still uses separate send records for steps, decisions, notifications, and terminal turns. It does not yet restore all behavior described here. See [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md).
 
 ## Goal
 
-Agent-step prompts contain the task, workflow identity, attempt identity, output form, and completion rules. Submitted steps call the workflow tool. Assistant-message steps reply normally. This information is required by the model, but showing it as a large user message makes the conversation hard to read.
+Pi Workflows must add several kinds of content to an origin Pi conversation. These include interactive step prompts, protected human decisions, passive notifications, terminal results, and follow-up prompts. Initial, reminder, and resumed prompts are one step-message kind with different display reasons.
 
-pi-workflows sends the same prompt as a custom Pi message. A custom renderer shows a compact summary by default and the full content when expanded.
+The host saves all of them as workflow messages. One extension component sends them through documented Pi APIs. Feature records continue to own workflow results, answers, settings, and timeouts.
 
-Both output forms use the existing `agent` node. The completion form changes through `expectedOutput`; no new node type is added.
+The model receives complete instructions when a workflow message starts a turn. The user sees a compact card for structured workflow content and can expand it.
 
-## Message contract
+## Workflow message contract
 
-Interactive agent-step messages use the custom type `pi-workflows-agent-step`.
+A workflow message is content that Pi Workflows requires Pi to add to one conversation. It does not mean every message in that conversation.
 
-The message has this shape:
+The message kinds are:
+
+| Kind           | Pi behavior                                     | Purpose                                          |
+| -------------- | ----------------------------------------------- | ------------------------------------------------ |
+| `step`         | Custom message that starts a model turn         | Initial, reminder, or resumed interactive prompt |
+| `decision`     | Custom message that does not start a model turn | Protected choice for a person                    |
+| `notification` | Custom message that does not start a model turn | Passive workflow notice                          |
+| `terminal`     | Custom message that starts a model turn         | Final result and safe recovery choice            |
+| `followUp`     | Custom message that starts normal work          | Work saved for after successful completion       |
+
+The host stores one `WorkflowMessage` record before Pi can send it:
+
+```ts
+type WorkflowMessage = {
+  schema: "pi-workflows.workflow-message.v1";
+  workflowMessageId: string;
+  runId: string;
+  targetSessionId: string;
+  kind: "step" | "decision" | "notification" | "terminal" | "followUp";
+  sourceId: string;
+  contentDigest: string;
+  order: number;
+  status: "pending" | "sent" | "cancelled";
+  piSessionEntryId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+```
+
+The exact Pi content and custom display details remain in the content-addressed value store. `contentDigest` binds the record to those bytes. `sourceId` links the message to the feature record that created it.
+
+`kind` determines the custom renderer, whether a model turn starts, and the host eligibility rule. The host does not store duplicate flags or message-to-message pointers for those facts.
+
+`order` is the acceptance order for one origin session. The host marks one pending item as next in the origin-session view. An earlier ineligible or cancelled item does not block unrelated eligible work.
+
+A source lifecycle transaction can change `pending` to `cancelled`. Active-branch evidence changes `pending` or `cancelled` to `sent`; evidence wins because Pi already contains the entry. `sent` is terminal. A pending message can be new or uncertain after a process stopped, so the coordinator always checks the active branch before sending it.
+
+Workflow message IDs and internal send state are not included in provider-facing prompt content. The hidden custom-message details contain only the stable workflow message ID needed for branch recovery.
+
+## Agent step card
+
+Every step message uses the custom type `pi-workflows-agent-step`:
 
 ```ts
 export type WorkflowAgentStepMessageDetails = {
   schema: "pi-workflows.agent-step-message.v1";
-  kind: "step" | "reminder" | "resume";
+  workflowMessageId: string;
+  reason: "initial" | "reminder" | "resumed";
   contract: AgentStepContract;
   presentation?: {
     runTitle?: string;
@@ -34,119 +76,165 @@ pi.sendMessage(
     display: true,
     details,
   },
-  {
-    triggerTurn: true,
-  },
+  { triggerTurn: true },
 );
 ```
 
-`content` is the complete prompt that the existing executor would send as a user message. It remains available to the model and in session history.
+`content` is the complete provider-facing prompt. It includes the task, workflow identity, attempt identity, output form, and completion rules.
 
-`details` contains structured display data. The renderer reads this object directly and never parses the prompt text. `AgentStepContract` remains the source of every identity field, the completion form, the submitted output description, and any explicit assistant character limit.
+The renderer reads `details` and does not parse the prompt. It shows a compact summary by default and the complete prompt when expanded. If the renderer is unavailable, Pi still retains the custom message and its content.
 
-`kind` distinguishes the first delivery from a reminder or a resume that must repeat the instructions. An ordinary resume that can continue without another prompt does not create a message.
-
-## Session delivery
-
-One shared coordinator delivers step prompts, protected decisions, notifications, and final workflow results. It does not claim or send a new message while Pi is busy or another message is pending. It checks these conditions again after the asynchronous host claim and immediately before the synchronous send. The coordinator remembers the stable delivery ID and exact claim expiry before that final check. If Pi became busy, a later poll can use that same claim while it remains live. Before it sends retained work, it revalidates the exact claim and durable resource through the host, then checks Pi and the lease again. Cancelled, paused, or replaced work is discarded. An expired unused claim is also discarded.
-
-Before the coordinator calls `pi.sendMessage()`, it records the delivery in a process-local queued map. The one-second poll can look for the matching session entry, but it cannot send that ID again. The coordinator clears the queued ID only after it observes the custom message in the active branch and saves the public Pi session entry ID through the workflow host. If Pi does not expose that entry after the confirmation interval, or if saving its receipt fails, the coordinator reports an ambiguous delivery and keeps it blocked.
-
-Reload and restart recovery first search the branch for that stable ID. An existing entry is adopted. A new message is sent only when no entry exists and the host grants a new claim. The host does not grant a second live presentation claim. Polling treats another live claim as unavailable work rather than a workflow error.
+Submitted agent steps call the `workflow` tool. Assistant-message steps reply normally. Both forms keep the existing `agent` node and use `expectedOutput` to select the completion form.
 
 ## Engine boundary
 
-The workflow engine remains independent of Pi. It continues to produce an `AgentStepRequest` with a complete prompt and structured contract.
+The workflow engine remains independent of Pi. It produces an `AgentStepRequest` with a complete prompt and structured contract. One pure formatter builds the same provider-facing prompt for interactive and RPC execution. The extension does not shorten or rebuild it from display fields.
 
-The request carries optional presentation data for the run title and node status detail. The workflow host stores the prompt, contract, presentation data, and delivery kind for the origin Pi extension. The RPC executor handles submitted steps. An assistant-message step parks for the origin Pi session; a detached run with no origin session fails before prompting.
+When a workflow has live settings, the formatter adds the settings scope, change number, bounded current value, allowed model paths, and exact `change-settings` action. It also adds the `queue-follow-up` and `remove-follow-up` actions. Actor identity is not model input. The extension derives it from the documented tool call.
 
-One pure formatter remains responsible for the model prompt used by both executors. Interactive delivery must not shorten, summarize, or rebuild the model prompt from display fields.
-
-Before the step contract, the formatter adds the active settings scope, change number, bounded current value, allowed model paths, and exact `change-settings` action when that scope declares settings. It also shows the `queue-follow-up` and `remove-follow-up` actions. Actor identity is never part of model input. The extension derives it from the documented tool call.
+An assistant-message step parks for its origin Pi session. A detached run without an approved origin session fails before it creates that message.
 
 ## Compact display
 
-The collapsed card shows only useful workflow identity and current work. For example:
+A collapsed step card shows only the workflow identity and current work. For example:
 
 ```text
 ▶ monitor › check
 Checking the monitored target
 ```
 
-A reminder or resumed delivery adds a short label:
+A reminder or resumed prompt adds a short label:
 
 ```text
 ↻ monitor › check · reminder
 Checking the monitored target
 ```
 
-The card uses the run title when it is more useful than the workflow name. It omits missing status detail instead of inventing one. Long fields are clipped or wrapped to the available terminal width.
+The card uses the run title when it is more useful than the workflow name. It omits missing detail and clips or wraps long text to the terminal width.
 
-The expanded card shows:
+The expanded card shows the workflow name, run title, run ID, node ID, attempt ID, step reason, completion form, expected output, optional character limit, and complete model prompt. Expansion uses Pi's standard custom-message state and keys. Pi Workflows does not store another expansion setting.
 
-- workflow name and run title
-- run id
-- node id
-- attempt id
-- delivery kind
-- completion form
-- expected output and optional character limit
-- full model prompt
+Notifications keep the custom type `pi-workflows-notification` and use `triggerTurn: false`. Decisions and terminal results use their approved structured renderers. The message kind fixes each send policy; the coordinator cannot change it at run time.
 
-Expansion uses Pi's existing custom-message expansion state and keys. pi-workflows does not add another toggle or store separate expansion state.
+## One sender
 
-## Reminders and resumes
+The extension has one `WorkflowMessageCoordinator` for all message kinds. The host keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one, so two Pi processes cannot send for the same session.
 
-The existing bounded reminder behavior stays in place for submitted steps. A reminder uses the same custom message type and renderer. It keeps the contract and sets `kind: "reminder"`. Assistant-message steps do not nudge or retry after a visible response.
+The coordinator follows this sequence:
 
-A resumed step uses `kind: "resume"` only when the executor must send the instructions again. An interrupted assistant-message step keeps its attempt id. If its matching prompt already has a completed assistant child on the active branch, the executor adopts that exact response instead of displaying it again. Stale attempts and responses from another branch remain invalid.
+1. After every host connection, wait for the complete origin-session view and report the active branch before any send or turn report.
+2. Wait until the host view names the next eligible pending message, Pi is idle, and Pi has no queued user input.
+3. Save the message ID in the coordinator's queued map.
+4. Search the active Pi branch for the same hidden message ID and report a matching entry.
+5. Recheck synchronously that Pi is idle, has no pending input, the message is absent, and this connection still owns the active session epoch.
+6. Call `pi.sendMessage()` with no `await` between that final check and call.
+7. Wait until the new Pi entry is visible.
+8. Report the active branch so the host saves its Pi entry ID and marks the message `sent`.
 
-## Notifications
+The coordinator sends only one workflow message at a time. A poll can find work, but it cannot send an ID already in its queued map.
 
-Workflow notifications keep the separate custom type `pi-workflows-notification`.
+Pi can emit `agent_start` before the host saves the new Pi entry ID. The coordinator keeps that start and any matching end in its in-memory session map. It first marks the workflow message `sent`, then reports the saved turn events in order. It does not drop a turn event while host confirmation is in progress.
 
-Agent-step messages use `triggerTurn: true` because they ask the model to work. Notifications use `triggerTurn: false` because they report state to the user without asking for an assistant response.
+A visible active-branch entry with the hidden ID is `sent`, even if the source lifecycle cancelled the message before the evidence arrived. Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages in the same observation. If Pi or the extension disappears after the send call, the message stays `pending`; reconnect reports the branch before another send. These rules do not prove cross-branch absence or exactly-once model execution.
 
-The two message types use the same delivery coordinator but keep separate send policies. The coordinator never changes whether a message starts a model turn.
+After Pi, the extension, or the host restarts, branch reporting runs before any new send. It re-creates a message of the source's own kind only when the active branch has no entry for that source. A pending interaction gets one `step` with reason `resumed`; a pending decision gets one `decision`. Old incompatible workflow state is not reinterpreted.
 
-## Session and persistence impact
+## Model-turn status
 
-Interactive step deliveries use `sendMessage` instead of `sendUserMessage`. Existing session entries remain readable and are not rewritten.
+`agent_start` has no message payload. The extension binds it through the current origin-session view. Turn binding ignores branch membership; only branch reporting and re-presentation inspect the active branch:
 
-The custom prompt and visible assistant response are normal documented Pi session messages. pi-workflows adds no Pi session schema, private entry type, or separate persistent store. SQLite stores each settled Pi entry once. Small relational links connect the workflow attempt to its prompt, response, first, and last entries. The attempt keeps only the assistant digest receipt. It does not copy the prompt or visible response into another blob.
+- the latest sent step is open while its interaction remains pending and its run is not paused;
+- a terminal or follow-up message is open only until its first turn ends;
+- decisions and notifications never open a turn.
 
-If the renderer is unavailable, Pi still retains the custom message content. pi-workflows does not add a fallback path that sends a duplicate user message.
+A start against a closed message is rejected. Follow-up turns are reported for ordering but do not show the completed workflow as `running`.
+
+The extension creates one workflow turn ID at `agent_start` and keeps it through the matching `agent_end` and host reconnect. It buffers starts and ends until the session view and message receipt are ready.
+
+At `agent_end`, it derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host saves one immutable end result. A repeated report adopts it, and a stale turn ID cannot clear newer activity.
+
+The host applies the end and its workflow consequence in one transaction. An aborted turn sets the run pause and cancels the request's pending step messages; the interaction derives its paused state from the run. A completed, recoverably failed, or proved-lost turn increments `unproductiveTurnEnds` only when the submitted-output step is pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. A partial unique index enforces at most one pending step message for the request, regardless of reason. Acceptance, pause, cancel, timeout, and branch re-presentation cancel all pending step messages. A cancelled message did not start a turn and does not increment the counter.
+
+There is no activity heartbeat, refresh lease, or sequence counter. The host shows `running` from the matching start until the matching end. Host startup never marks a Pi turn lost. On `session_start`, only an idle-session branch report can close an open sent message with synthetic stop reason `lost`. Polling and time alone cannot create a reminder.
+
+## Feature ownership
+
+The workflow message stores only Pi send facts. Other records remain authoritative:
+
+- interactive requests own step contracts, attempts, deadlines, validation, model submissions, and `unproductiveTurnEnds`;
+- human decisions own choices, verified answers, expiry, and continuation;
+- terminal runs own outcomes, reasons, restart lineage, and results;
+- notification nodes own their node results;
+- follow-up records own prompt source and authority;
+- settings records own current values and accepted changes.
+
+Submitted-output steps can use reminders. Assistant-message steps do not send a reminder after a visible response. An interrupted assistant-message step keeps its attempt ID and adopts a matching completed response from the active branch. A stale attempt or another branch remains invalid.
+
+Each source event creates its workflow message in the same SQLite transaction. The message cannot exist without its source fact, and a source fact cannot require a Pi message without the matching record.
+
+## Restored behavior
+
+The shared contract supports these features without separate send paths:
+
+- at most two reminder-reason step messages after model turns end without a valid submission;
+- one resumed-reason step message after a presented paused step resumes;
+- one terminal result and recovery turn for the final outcome of each interactive continuation chain;
+- safe restart with lineage, a limit of three, and repeated-failure protection;
+- ordered follow-up prompts after successful completion, terminal turn end, and release of later workflow reservations;
+- protected decisions in Pi and approved external channels;
+- passive notifications that do not start model turns;
+- terminal result retention while its message is pending or its first turn is open, and then for 60 seconds after that turn ends, in the widget and `piw`;
+- conversation recording linked to workflow attempts.
+
+A terminal or follow-up message does not reopen the completed workflow. A slash-looking follow-up remains plain model input because `pi.sendMessage()` does not dispatch extension commands or expand prompt templates. External effects remain idempotent or explicitly ambiguous.
+
+## Session recording
+
+The extension records workflow-related Pi events through a batched host client operation. It uses documented Pi events and does not read or edit Pi session files.
+
+The host deduplicates settled entries by Pi entry ID. It links attempts to their prompt, response, first, and last entries. A recording failure does not fail workflow execution.
 
 ## Public API boundary
 
-This design uses the documented `pi.sendMessage()` and `pi.registerMessageRenderer()` APIs. The renderer uses Pi's standard `expanded` state.
+The extension uses documented `pi.sendMessage()`, `pi.registerMessageRenderer()`, session lifecycle events, agent lifecycle events, widgets, status, commands, shortcuts, and session IDs.
 
-It does not require a Pi core change or private Pi API.
-
-The workflow package adds `assistantMessage()` as an `expectedOutput` value for the existing `agent` node. It adds no node type, graph action, Pi tool, private API, or message-rendering option.
+This design does not change Pi core, use private Pi APIs, or change Pi session schemas. It does not add another database or runtime.
 
 ## Validation and tests
 
-Tests verify:
+Tests must prove:
 
-- interactive and RPC executors give the model the same complete prompt
-- one step message starts one model turn, even when Pi stays busy longer than the poll interval and delivery claim lease
-- collapsed rendering does not show the full prompt
-- expanded rendering shows the full prompt, settings scope and change number, allowed paths, and exact contract ids
-- long and missing display fields render safely
-- reminders and resumed deliveries keep the active attempt id
-- submitted steps still reject stale attempts after timeout or cancellation
-- assistant steps wait for `agent_settled` and capture only visible text
-- empty, failed, aborted, tool-only, and explicitly over-limit responses fail once
-- session replay restores the same custom prompt and adopts an existing response once
-- detached execution parks for the origin session or fails clearly when none exists
-- notifications still enter context without starting a model turn
-- no duplicate prompt or assistant response is sent
+- every message kind uses the one coordinator;
+- one workflow message ID creates at most one confirmed Pi entry and one automatic model turn;
+- a later manual turn uses a new workflow turn ID without creating another Pi entry;
+- two Pi processes that open one session cannot both send because one process-local coordinator epoch is active;
+- restart recovery reports the branch and adopts an existing entry before it sends;
+- branch absence is usable only when Pi is idle and has no pending input;
+- a crash after send leaves the message pending and cannot cause a resend before branch reporting;
+- messages remain in saved order without message-pointer deadlocks;
+- an early `agent_start` and `agent_end` wait for the message receipt and session view, then apply in order;
+- every matching model turn shows `running` for its full duration;
+- stale turn-end reports and starts against closed messages are rejected;
+- a manual turn cancels pending step messages that it supersedes;
+- a turn cannot bind to an interaction whose run is paused;
+- aborted turns pause without incrementing the unproductive-turn counter;
+- host restart does not close a live Pi turn, while an idle-session branch report can close an unended turn as lost;
+- two reminder-reason steps are sent at most once and the next unproductive turn fails;
+- initial, reminder, and resumed prompts use the same step kind and differ only by reason;
+- terminal and follow-up messages each start only at their durable boundary;
+- a branch switch creates one resumed-reason step only when that branch has no entry for the interaction;
+- a missing protected decision creates another decision message, not a step;
+- branch evidence changes a cancelled message to sent;
+- a follow-up-started workflow blocks the next follow-up through its session reservation;
+- notifications and protected decisions do not start model turns;
+- the provider receives the complete step prompt but no workflow message ID or internal send state;
+- collapsed and expanded cards remain safe and complete;
+- session recording adopts each settled Pi entry once.
 
-The end-to-end test inspects the provider-facing prompt as well as the TUI message record. A correct card with missing model instructions is a failure.
+The real Pi end-to-end test must use a clean Pi home with only the packed pi-workflows extension. It must accept any provider and model supported by base Pi. `openai` and `openai-codex` are separate providers.
 
 ## Security
 
-Workflow prompts and expected-output descriptions may contain untrusted text. The renderer treats them as text, applies terminal-safe wrapping, and does not interpret control sequences or markup from workflow data.
+Workflow prompts and expected-output descriptions can contain untrusted text. Renderers treat them as text, wrap them safely, and do not interpret workflow control sequences or markup.
 
-Collapsed cards avoid showing full prompts in the normal conversation view. Expanded content and session files still contain the complete prompt, so existing session privacy rules continue to apply.
+Collapsed cards hide full prompts from the normal conversation view. Expanded cards and Pi session files still contain the full content, so normal session privacy rules apply. Credentials, internal send state, and internal message IDs do not enter provider-facing content.

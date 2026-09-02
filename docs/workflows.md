@@ -5,6 +5,8 @@ covers the file format, every node type, edge routing, the step contract the
 model sees, and how runs behave at runtime. For durable state, see
 [SQLITE_STATE.md](SQLITE_STATE.md).
 
+> **Version 0.16.0 notice:** The authoring contracts remain current, but some hosted session controls and messages are not available. See the approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) for reminders, resume prompts, terminal recovery, live settings controls, follow-ups, external decision channels, and conversation recording.
+
 ## Workflow files
 
 A workflow is a TypeScript module whose default export is `defineWorkflow(...)`.
@@ -147,9 +149,11 @@ provisional. A new supervised worker loads the workflow and runs its `validate`
 function before the host accepts the submission. A validation error leaves the
 same request pending and returns the error to the model. Closing Pi leaves that
 request pending; reopening the same session adopts the existing session entry
-or presents it once. Notifications use the durable session outbox. A root
-`presentationPrompt` creates a durable terminal turn only after completion is
-committed. A controller child without an origin session can use a supervised
+or presents it once. Step prompts, protected decisions, notifications, terminal
+results, and follow-ups use the host-owned `workflow_messages` table and one
+extension sender. Initial, reminder, and resumed prompts are the same step-message
+kind with different display reasons. A terminal workflow message becomes eligible only after
+the terminal outcome is committed. A controller child without an origin session can use a supervised
 headless `pi --mode rpc` child for structured agent steps.
 
 Pause stops the worker and parks at the last durable boundary. Resume takes a
@@ -200,8 +204,10 @@ the client stops waiting but does not cancel the durable host command. A retry
 uses a new transport request ID with the same durable submission identity and
 adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
-without submitting, the durable request stays pending until it receives valid
-output, times out, or is cancelled. For assistant-message output, the engine appends a normal-response contract,
+without submitting, the host increments the request's unproductive-turn counter
+and can create at most two step messages with reason `reminder`. The next
+unproductive turn fails the step. Timeout and
+cancellation remain active during this process. For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
 form's active Pi turn.
@@ -373,7 +379,7 @@ humanDecision({
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the host takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. Existing `body` requests remain a legacy compatibility form and use deterministic readable formatting.
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the host takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. The removed `body` request form is invalid under the alpha hard cut.
 
 The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the host-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
@@ -480,18 +486,19 @@ The model sees one `workflow` tool. Its `action` field supports:
 A direct user request to continue or resume the active workflow maps to
 `resume` immediately. The model does not call `status` instead of `resume` or
 use it as a prerequisite. An already active run adopts the resume request. A
-paused interaction remains the same durable request and resumes without a
-worker. Other paused or parked work gets a new claim generation and worker.
+pending interaction on a paused run remains the same durable request and resumes
+without a worker. Other paused or parked work gets a new claim generation and worker.
 With no resumable run, the host rejects the request.
 
 The origin Pi session shows its active run in the workflow widget. `Shift+Up`
-and `Shift+Down` scroll it. If Escape aborts the model turn started by a
-presented workflow interaction, the extension detects the public context abort
-signal and pauses that run through the host. It also accepts Pi's public
-`aborted` stop reason. The matching `agent_end` event must contain the workflow
-prompt, so an unrelated interrupted turn cannot pause old pending work. The
-paused run does not accept updates, submissions, or decision answers until
-`resume`.
+and `Shift+Down` scroll it. A sent step message is open only while its
+interaction is pending and its run is not paused. Because public `agent_start`
+has no message payload, any model turn that starts in that state is workflow
+work. If Escape ends that turn with Pi's public `aborted` stop reason, one
+turn-end report atomically sets the run pause and cancels the interaction's
+pending step messages. A turn that starts while the run is paused does not bind
+to the workflow. The paused run does not accept updates, submissions, or
+decision answers until `resume`.
 
 `status` reports the durable queue projection. A host command succeeds only
 after its transaction commits. The protocol stores request fingerprints and
@@ -687,15 +694,13 @@ Acceptance resolves the step and the engine advances. In an interactive Pi
 session, each agent prompt arrives as a `pi-workflows-agent-step` custom message
 with `triggerTurn: true`. The model receives the complete prompt, while the
 conversation shows a compact workflow and node card. Expanding tool output with
-Ctrl+O shows the exact contract and full prompt. Reminders and resumed prompts
-use the same card and keep the active attempt id.
+Ctrl+O shows the exact contract and full prompt. Step messages with reason `reminder` or `resumed` use the same card and keep the active attempt ID.
 
 Headless RPC execution receives the same complete prompt without TUI metadata.
-Workflow notifications use a separate message type with `triggerTurn: false`,
-so a notification does not start an assistant response. Deferred successor turns
-use an internal turn-intent contract instead of the notification outbox. See
-[WORKFLOW_STEP_MESSAGES.md](WORKFLOW_STEP_MESSAGES.md) for the step-message contract
-and [Deferred workflow turns](DEFERRED_TURNS.md) for the successor-turn contract.
+Workflow notifications use a custom message with `triggerTurn: false`, so a
+notification does not start an assistant response. Step prompts, decisions, notifications, terminal results, and follow-ups use the same saved workflow-message contract and extension coordinator. Initial, reminder, and resumed prompts use the same step kind. See
+[Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) and the approved
+[workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md).
 
 ## Visible responses
 
@@ -712,7 +717,7 @@ returns its stored receipt.
 
 A headless controller child cannot produce a visible assistant message without
 an approved origin-session binding. Use structured agent output for detached
-work. Terminal run state does not create an extra model turn.
+work. A final continuation-chain outcome creates its own terminal workflow message through the shared coordinator only after the outcome is durable.
 
 ## Runtime behavior
 

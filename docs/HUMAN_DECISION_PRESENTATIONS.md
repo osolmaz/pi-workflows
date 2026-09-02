@@ -1,6 +1,8 @@
 # Human decision presentations
 
-This contract is implemented. Human decision requests separate their canonical
+> **Current version notice:** The presentation value contract is implemented, but version 0.16.0 does not provide the complete hosted Pi and Telegram send path. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores that path without changing this version-1 presentation contract.
+
+Human decision requests separate their canonical
 subject from the complete readable message shown to an operator. Human decisions use
 one v1 contract with no legacy body form or parallel schema version.
 The implementation plan is in
@@ -216,20 +218,13 @@ The renderer:
 
 The renderer never adds an ellipsis in place of omitted decision content.
 
-The channel records intent before sending. It records each part after an
-unambiguous response. If a send result is ambiguous, it marks delivery unknown
-and does not retry that part or later parts automatically. Another configured
-channel can still answer the decision.
+The host saves each channel message before the adapter sends it. It records each part after an unambiguous response. If a send result is uncertain, the host marks that channel message `ambiguous` and does not retry that part or later parts automatically. Another configured channel can still answer the decision.
 
 ### Pi
 
-Pi uses the documented extension TUI API. A custom decision component shows the
-complete presentation and fingerprint together with the choices and optional
-text prompt. It wraps and scrolls while responding to resize, theme, cancellation,
-and `AbortSignal` events.
+The host creates one `decision` workflow message. The shared extension coordinator sends it through documented `pi.sendMessage()` without starting a model turn. Its custom renderer shows the complete presentation and fingerprint with the choices, input rules, request ID, and deadline. It wraps and scrolls with normal Pi custom-message behavior.
 
-When Telegram or another channel accepts the decision, the signal closes the Pi
-dialog. pi-workflows does not modify Pi core or use undocumented TUI state.
+A verified operator answers through `/workflow answer` or the matching `piw` control. When Telegram or another channel accepts the decision, the host cancels an unsent Pi decision message. A sent card remains normal conversation history, while later answer controls return the saved winner. Pi Workflows does not open a blocking dialog, modify Pi core, or use undocumented TUI state.
 
 ### Other channels
 

@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: implemented. The out-of-process host, unified live workflow client, session delivery, widget, Herdr controls, and client-only `piw` viewer are one production path. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the approved redesigns.
+Status: the out-of-process host and unified live client are implemented. Version 0.16.0 does not yet implement the workflow-message contract or all restored session behavior in this specification. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md) is the approved implementation plan. [Run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier redesigns.
 
 ## Purpose
 
@@ -21,6 +21,7 @@ The host solves two different failures:
 - **Generation:** A number increased each time a new owner claims a run. It fences older owners.
 - **Durable boundary:** A committed node or lifecycle transition from which execution can resume.
 - **Interactive request:** A durable agent or assistant-message step that must run in the origin Pi session.
+- **Workflow message:** Host-owned content that Pi must add to an origin conversation, such as a step, reminder, decision, notification, terminal result, or follow-up.
 - **Managed effect:** A side effect reserved and settled through an idempotent durable record.
 - **Live run view:** The host's versioned, bounded projection of one run, including its durable state, current origin-session activity, allowed controls, and page cursors.
 - **Renderer:** A Pi widget, status line, command-line view, Herdr adapter, or `piw` screen that displays or acts on a live run view without deriving workflow state.
@@ -45,16 +46,19 @@ piw ──────────┘                                           
 Remote piw ── SSH tunnel ── loopback WebSocket relay ────────┤
                                                              ├── run worker B ── headless pi --mode rpc
                                                              ├── controller worker
+                                                             ├── channel adapter child
                                                              └── source resolver
 ```
 
-The local socket and loopback WebSocket relay carry the same logical client protocol and live run view. The relay reads no state and translates no domain contract. The host is the only production process that opens the live SQLite database. The worker and source-resolver channels are private supervision protocols, not alternate client interfaces.
+The local socket and loopback WebSocket relay carry the same logical client protocol and live run view. The relay reads no state and translates no domain contract. The host is the only production process that opens the live SQLite database. Worker, channel-adapter, and source-resolver channels are private supervision protocols, not alternate client interfaces.
 
 The host may manage runs from more than one project. Each run keeps its canonical project path and source identity.
 
 The host process performs only bounded protocol handling, live-view projection, short SQLite transactions, timers, queue scheduling, and process supervision. It does not import or execute workflow definitions.
 
 A worker loads one workflow source and executes one run generation. It cannot receive a writable `WorkflowRunStore`. It proposes changes to the host over a private child channel. This is an architectural guard against accidental writes. It is not a security sandbox against code running as the same operating-system user.
+
+A channel adapter child handles one approved external presentation channel. It receives only the rendered presentation and the private channel configuration needed for its work. It does not open SQLite or receive the decision subject. The host owns claims, answer verification, settlement, and process supervision.
 
 ## Host lifecycle
 
@@ -71,7 +75,7 @@ pi-workflows host run
 
 The host uses one global lock and one host epoch. Socket creation and the SQLite host claim must agree before the host accepts commands. A second live host refuses to start. After the old host lease expires, a new host increases the epoch before it handles work. Messages from an older epoch are rejected.
 
-The host stays alive while it has a connected client, an active worker, a scheduled wake, a pending controller, or unsettled work. An idle host may exit after a documented idle period. A later client can start it again.
+The host stays alive while it has a connected client, an active worker, a scheduled wake, a pending controller, a pending external-channel decision, or other unsettled work. An idle host may exit after a documented idle period. A later client can start it again.
 
 ## Claim rules
 
@@ -214,7 +218,7 @@ Each message uses one envelope:
 }
 ```
 
-The `type` is `hello`, `request`, `response`, or `event`. A response repeats the request ID and includes its outcome, revision, receipt, or bounded safe error. An event names its subscription and carries one revisioned run-list snapshot, run-view snapshot, patch, page, origin-session delivery change, or availability change. Valid command outcomes remain `accepted`, `adopted`, `rejected`, `conflict`, `notFound`, `claimLost`, and `unavailable`.
+The `type` is `hello`, `request`, `response`, or `event`. A response repeats the request ID and includes its outcome, revision, receipt, or bounded safe error. An event names its subscription and carries one revisioned run-list snapshot, run-view snapshot, patch, page, origin-session workflow-message change, or availability change. Valid command outcomes remain `accepted`, `adopted`, `rejected`, `conflict`, `notFound`, `claimLost`, and `unavailable`.
 
 The host commits a command receipt before it acknowledges success. The request ID identifies one transport attempt and is excluded from the durable fingerprint. The Pi extension sends state-changing commands through the durable client path. If a connection closes after commit but before response, a retry uses a new request ID with the same client ID, idempotency key, operation, and payload, then adopts the stored receipt. Reusing a request ID or idempotency key with another durable payload returns a conflict. An `interaction.submit` response stays pending while the supervised child validates the value and settles only after the durable outcome is `accepted`, `adopted`, or `rejected`. A reconnect with the same durable identity and payload waits for and returns that same outcome. Clients do not poll SQLite for submission results.
 
@@ -222,12 +226,12 @@ View and subscription reads do not create receipts. Reconnection restores desire
 
 The protocol owns four operation groups:
 
-- run and controller commands, including start, pause, resume, cancel, answers, updates, submissions, reconciliation, and host control;
-- live views, including lightweight run lists, one run snapshot, revision subscriptions, byte-bounded pages, chunked referenced content, and one consistent origin-session response with its active run view, ordered pending delivery records, and read-only delivery availability;
-- origin-session activity reports for the exact workflow delivery being processed by Pi;
-- state maintenance, including status, verification, backup, and prune against the active database. Backup and applied prune use one fresh CLI idempotency key per user invocation. An automatic reconnect retry keeps that key and uses a new request ID. A later invocation gets a new key. The host finishes an in-flight operation after a disconnect, stores its accepted or rejected receipt before response, waits for it during shutdown, and adopts an exact retry.
+- run and controller commands, including start, pause, resume, cancel, restart, decisions, updates, submissions, settings, follow-ups, reconciliation, and host control;
+- live views and recording, including run lists, snapshots, subscriptions, pages, referenced content, origin-session workflow messages, terminal-view clear, and batched session events;
+- active-branch and model-turn reports;
+- state and channel maintenance, including status, verification, backup, prune, channel setup, channel reload, and channel shutdown against the active database. Backup and applied prune use one fresh CLI idempotency key per user invocation. An automatic reconnect retry keeps that key and uses a new request ID. A later invocation gets a new key. The host finishes an in-flight operation after a disconnect, stores its accepted or rejected receipt before response, waits for it during shutdown, and adopts an exact retry.
 
-`notification.claim` and `turn.claim` can create a claim or revalidate the exact retained claim before delivery. Revalidation checks the in-memory client claim and its durable lease without creating another claim.
+`workflowMessage.reportBranch` reports workflow message IDs and Pi entry IDs from the complete origin-session view window together with `isIdle` and `hasPendingMessages`. The host adopts matching entries, changes a matching pending or cancelled message to `sent`, closes proved-lost turns, and creates one missing message of the source's own kind after a branch change. `workflowTurn.report` records exact model-turn starts and ends. The host keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one. Only the active epoch receives the next eligible pending message or can report branch and turn state. Polling alone creates no durable command.
 
 ### Live run view
 
@@ -235,7 +239,9 @@ The host returns one canonical `pi-workflows.run-view.v1` document. It contains 
 
 Generated referenced content is stored directly in `run_view_content` under its exact run ID, content digest, and media type. It does not share general state-blob media metadata. A content read must match all three values, so a reference from another run or another media representation is unavailable.
 
-The origin-session response contains this active run view or no active run plus an ordered byte-bounded window of pending delivery records, their complete count, and read-only notification and turn availability for that session. It does not retain an older terminal run after the session reservation ends. The records include the request, delivery, contract, revision, presentation entry, and claim facts required by the shared delivery coordinator. The host returns them from one consistent read. The extension materializes the complete active run revision and hydrates the definition and delivery contracts before it updates the widget or delivery coordinator. It issues a claim command only when the matching availability fact is true. Polling an idle session creates no durable command.
+The origin-session response contains the active run view. When no run is active, it keeps the most recent terminal run visible while its terminal workflow message is pending or its first model turn is open, and then for 60 seconds after that turn ends. A newer run or `sessionView.clearTerminal` removes the retained terminal view. `/workflow clear` and the matching `piw` action call that control without changing workflow state.
+
+The response also contains an ordered byte-bounded window of all nonterminal workflow messages and open sent messages needed for recovery, their complete count, and the next eligible pending message ID only for the active coordinator epoch. Message records include the source, content reference, order, state, and Pi entry needed by the shared coordinator. A branch report can name only IDs from this complete window. The host returns all these facts from one consistent read. The extension materializes the complete run revision and message content before it updates the widget or coordinator. After every host connection, it reports the active branch before it sends a workflow message or reports a model turn. Polling an idle session creates no durable command.
 
 Each history page has both an item limit and an encoded byte budget. Oversized values become digest-bound content references. Large workflow topology uses bounded node, edge, graph-step, and transition projections plus references for the complete original definition and complete graph history. Before the host advertises a generated reference, it stores the bytes under the exact run ID, content digest, and media type in `run_view_content`. It does not share media metadata with general state blobs. Memory-cache eviction cannot make a reference unavailable. `view.content` returns bounded chunks until the client has the complete value. The client verifies the assembled bytes against both the response digest and the digest in the advertised reference. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition, complete graph history, and all referenced content before they emit a complete non-interactive view or update the Pi widget. Rust automatically requests and verifies the complete referenced definition and graph history, decodes the complete values, and then builds its graph layout. Session-event pages include the replay checkpoint immediately before the first event in the page. A large checkpoint is also a referenced value. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. A step-centered trace page selects the exact stored attempt first and uses the node ID only if that attempt has no trace event. The run list reads only status facts and never loads complete run histories.
 
@@ -244,9 +250,9 @@ The closed `display.status` set is `queued`, `running`, `waiting`, `paused`, `co
 The host computes effective status in this order:
 
 1. A durable ambiguous external effect that requires explicit review is `ambiguous`. An effect that is still applying under a live worker is not ambiguous.
-2. Another durable terminal result keeps its terminal label.
-3. A durable pause is `paused`.
-4. A live supervised worker or an exact active origin-session workflow turn is `running`.
+2. A live supervised worker or an exact active origin-session workflow turn is `running`.
+3. A durable terminal result keeps its terminal label after its presentation turn ends.
+4. A durable pause is `paused` after its active Pi turn ends.
 5. A pending interaction, decision, or presentation with no exact active turn is `waiting`.
 6. Parked resumable work with no pending interaction is `queued`.
 7. Admitted work that has not started is `queued`.
@@ -255,9 +261,15 @@ Host connection failure is the client condition `unavailable`, not a `display.st
 
 ### Origin-session activity
 
-The Pi extension reports `started`, `settled`, and lease refreshes only for the exact workflow delivery that it can identify through documented Pi lifecycle events and its in-memory delivery map. The host requires the deterministic `interaction:<request-id>` delivery identity and keys activity by connection and request, not by an unchecked caller label. The first activity report on each client connection is `started`; only later reports on that connection are refreshes. Each report includes the origin session, run, request, delivery, client connection, and increasing activity sequence. The host validates these facts against the durable pending interactive request and its recorded delivery or presentation entry. Settlement of the presentation claim does not end activity while the model turn continues.
+`agent_start` has no message payload. The extension binds it through the current origin-session view. The latest sent step is open while its interaction remains pending and its run is not paused. Any turn that starts in that state is workflow work. A terminal or follow-up message is open only until its first turn ends. Decisions and notifications never open a turn. The host rejects a start against a closed message.
 
-Activity is ephemeral display state. It cannot grant workflow authority, settle a request, change a durable run state, or survive as a claim. A repeated report is idempotent. A stale sequence, replaced delivery, or wrong session is rejected. One shared client constants module defines the refresh period and lease duration. The refresh period is shorter than the lease duration, and the lease duration bounds stale `running` display after client loss. The host clears activity on the matching settled event, client disconnect, or lease expiry. Missing activity falls back to the durable `waiting` view and never creates a false `paused` or `running` state.
+Each report names the sent workflow message, workflow turn ID, run, and origin session. The extension creates the turn ID at start and keeps it through the matching end and host reconnect. If the session view or message receipt is still loading, it buffers start and end and reports them in order when the message becomes available.
+
+At `agent_end`, the extension derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host applies the end, activity update, pause, unproductive-turn counter, and pending step-message cancellation in one transaction. A repeated report adopts that result. A stale turn ID cannot clear newer activity.
+
+An aborted turn sets the run pause, cancels pending step messages, and does not increment `unproductiveTurnEnds`. The interaction derives its paused state from the run. A completed, recoverably failed, or proved-lost turn increments the counter only when the submitted-output step remains pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. At most one pending reminder-reason step exists. Acceptance, pause, cancellation, timeout, and branch re-presentation cancel pending step messages.
+
+The process-local coordinator epoch ends on client disconnect, but an open reported workflow turn does not end. Host startup does not close Pi turns. On `session_start`, `workflowMessage.reportBranch` closes an unended open message as `lost` only when Pi is idle. A busy Pi session re-reports the same started turn. A lost step follows the unproductive-turn rule. A lost terminal or follow-up closes after its first turn. Follow-up activity controls ordering but does not show the completed workflow as `running`. Activity cannot grant workflow authority or settle a workflow request.
 
 ### Renderers and controls
 
@@ -298,8 +310,10 @@ Reuse current rows when they already own a fact:
 - `node_attempts` owns node execution state and resolved wall-clock deadlines.
 - `human_decisions` and resolution tables own checkpoints.
 - `effects` and `effect_attempts` own side effects and ambiguous outcomes.
-- `notifications` and `turn_intents` own passive and terminal Pi messages.
+- `workflow_messages` owns all content that Pi must add to an origin conversation.
 - `run_bindings` owns origin session and execution mode.
+
+`workflow_messages` contains the target session, message kind, source record, content digest, session order, state, confirmed Pi entry ID, and timestamps. Its states are `pending`, `sent`, and `cancelled`; it has no separate sent timestamp. Active-branch evidence changes a matching pending or cancelled message to `sent`. Message kind determines its renderer, turn behavior, and host eligibility rule. A partial unique index allows at most one pending step message for one interactive request. The table stores no sender, send lease, duplicate flag, or message-to-message pointer.
 
 Add only these records if implementation proves the current rows cannot hold the contract:
 
@@ -309,7 +323,7 @@ Add only these records if implementation proves the current rows cannot hold the
 
 ### Interactive requests
 
-`interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, and timestamps. One attempt has at most one request. The linked node attempt stores its resolved wall-clock deadline.
+`interactive_requests` stores request ID, run ID, attempt ID, target session ID, kind, contract hash, pending or settled status, accepted submission ID, `unproductiveTurnEnds`, and timestamps. Pause is stored once on the run and derived for its interaction. One attempt has at most one request. The linked node attempt stores its resolved wall-clock deadline.
 
 `interactive_submissions` stores request ID, submission ID, idempotency key, payload hash, validating, accepted, or rejected outcome, receipt hash, and submission time. Repeated keys return the same receipt.
 
@@ -325,9 +339,13 @@ Agent and assistant-message steps for an interactive run execute in the origin P
 
 The worker commits the node's resolved wall-clock deadline before it proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits. The host continues to enforce the durable deadline while no worker exists. If the deadline passes, one control claim atomically closes the stale request and schedules a supervised timeout-resume child. The child preserves the same attempt and deadline, records `timed_out`, and follows any `$result.outcome` edge. A run with no timeout recovery edge becomes terminal and releases its session reservation. Restart recovery starts this timeout path before it schedules other work.
 
-The extension finds pending requests during `session_start`, after `agent_settled`, and once per second while the session is open. One shared session-delivery coordinator handles step prompts, protected decisions, notifications, and terminal presentation turns. It waits until Pi is idle and has no pending messages before it claims new work. Because the host claim is asynchronous, it checks those conditions again immediately before the synchronous call to the documented `pi.sendMessage()` API. The coordinator remembers the claimed delivery before that final check. If Pi became busy, a later poll can send with that exact claim while its lease remains live. An expired unused claim is discarded. Polling cannot acquire a second claim or send a delivery that is already queued.
+The extension finds eligible workflow messages during `session_start`, after model turns settle, and once per second while the session is open. One `WorkflowMessageCoordinator` handles every message kind. After every host connection, it waits for the complete origin-session view and reports the active branch before it sends a workflow message or reports a model turn. The host view names the next eligible pending message only to the active coordinator epoch.
 
-The host grants one live presentation claim. The current presenter cannot claim the same request again before that claim expires. A poll that sees any live presentation claim treats it as unavailable, not as a tool failure. When the matching custom message appears in the active Pi branch, the coordinator records its public session entry ID through the host and clears the local queued state. If Pi becomes idle without exposing a matching entry after the confirmation interval, the coordinator reports the delivery as ambiguous and keeps it blocked. A failed durable receipt also keeps the visible message blocked. Neither case can send the message again. The normal `workflow` tool contract then submits updates and results.
+The coordinator waits until Pi is idle and has no queued user input, keeps the message ID in its in-memory queued map, and searches the active branch for that hidden ID. It reports a matching entry before any send. Otherwise, it rechecks synchronously that Pi is idle, has no pending input, the message is absent, and its connection still owns the active epoch. It calls documented `pi.sendMessage()` with no `await` between the final check and call. A poll can discover work, but it cannot send an ID already in the queued map.
+
+After a send, the coordinator waits for the matching Pi entry and reports the active branch so the host records its entry ID and marks the message `sent`. Branch evidence marks a matching message `sent` even if its source cancelled it after the send. If Pi emits `agent_start` before that report or before the session view loads, the coordinator buffers the start and matching end, records the message first, and then reports the turn events in order.
+
+Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages. If Pi or the extension disappears after the send call but before inspection, the message stays `pending`. A replacement extension reports the branch before another send. Documented Pi APIs do not prove cross-branch absence or exactly-once model execution.
 
 The extension subscribes to the active origin-session live run view and projects it into Pi's documented widget and status APIs. It never opens SQLite, runs workflow code, or derives a display status. `Shift+Up` and `Shift+Down` scroll the widget. When Herdr is available, the widget also shows `Ctrl+Shift+R piw`, and `/piw` remains the command fallback. Both actions open or focus the exact run from the same view.
 
@@ -337,9 +355,9 @@ An ordinary checkpoint accepts the model-facing `answer` action and starts a con
 
 The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
 
-One session delivers one host-owned message at a time. Other requests remain ordered by creation time. A reload or restart clears only the process-local queued state. The new extension instance scans the active Pi branch first, adopts an existing entry, and sends only when no matching entry exists and a new claim is available. It never retries only because a poll interval or claim lease elapsed.
+One session sends one workflow message at a time. Messages keep acceptance order, but an earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility. A reload clears only process-local queued state. `workflowMessage.reportBranch` adopts existing entries and closes lost turns. When a pending source has no entry on the active branch, it creates one message of that source's own kind: a step with reason `resumed` for an interaction, or a decision for a protected decision. Repeating a report or returning to a branch that already contains that source creates no new message.
 
-Notify nodes enqueue passive messages in the existing `notifications` outbox. The shared coordinator claims a message through the host, adopts an existing session entry after a crash, and marks delivery through the host. A completed run with a root `presentationPrompt` creates an ineligible `turn_intent` before the terminal commit. The same terminal transaction makes that intent eligible. The coordinator claims it, starts one normal Pi turn while Pi is idle, and records the public session entry ID. No completion turn starts before the completed state is durable.
+A notify node creates a passive `notification` message in the same transaction as its node result. The final leaf of an interactive checkpoint-continuation chain creates one terminal message with its terminal outcome; parent runs settled by continuation do not. Initial, reminder, and resumed prompts are one `step` kind. Protected decisions and follow-ups use the same table and coordinator. Their feature records keep validation, authority, timeout, counters, and result state.
 
 ## Detached execution
 
@@ -351,7 +369,7 @@ The run binding records `interactive` or `headless` execution mode. Viewers show
 
 ## Pause and cancellation
 
-Pause atomically commits `paused = 1`, parks the queue, releases the exact claim, and stores the command receipt. The fenced worker process group then stops. If a Pi model turn ends while the public extension context signal is aborted, or with public stop reason `aborted`, the extension sends this same host pause command only when that `agent_end` event contains the pending interaction's workflow prompt. A parked interaction has no worker or live run claim, so the host marks it paused in place. While paused, updates, submissions, and decision answers are rejected. Resume clears the pause on that same pending interaction; other paused work takes a new generation and starts another worker from the last durable boundary. An uncommitted pure node can run again after resume.
+An explicit pause command atomically commits `paused = 1` on the run, parks the queue, releases the exact claim, cancels pending step messages, and stores the command receipt. The fenced worker process group then stops. When Escape aborts an origin-session turn, the extension sends one `workflowTurn.report` end message with `stopReason: "aborted"`. The host atomically ends that exact activity, sets the run pause, derives the pending interaction as paused, and cancels its pending step messages. The extension does not send a second pause command. A parked interaction has no worker or live run claim. While its run is paused, updates, submissions, and decision answers are rejected. Resume clears the run pause; work for the same pending interaction continues in place, while other paused work takes a new generation and starts another worker from the last durable boundary. An uncommitted pure node can run again after resume.
 
 Cancellation against a live worker atomically commits terminal cancellation, cancels pending attempt and interaction state, settles effect recovery state, releases the exact claim, and stores the command receipt. A pending effect becomes cancelled. An applying effect becomes ambiguous because the host cannot prove its external outcome. The host then stops the fenced worker process group. A host crash after the receipt cannot resume the cancelled run or retry the ambiguous effect. If the child does not stop by the deadline, the host kills its process group.
 
@@ -369,10 +387,11 @@ At startup the host:
 4. Reads managed effect state before deciding whether work can repeat.
 5. Parks uncertain effects for manual review.
 6. Makes pure and fully settled work claimable.
-7. Restores pending interactive requests and scheduled controller work.
+7. Restores pending interactive requests, workflow messages, external-channel decisions, and scheduled controller work without changing Pi message or turn state.
 8. Starts supervised timeout recovery for pending interactive requests whose durable node deadlines expired.
 9. Resumes any remaining provisional `validating` submission in a new supervised child.
-10. Starts no model turn until a matching Pi session connects or headless mode is declared.
+10. Waits for the extension's active-branch report before it confirms pending entries as sent, closes a turn as `lost`, or creates a branch-specific replacement. The extension sends this report after every host connection.
+11. Starts no model turn until a matching Pi session connects or headless mode is declared.
 
 Recovery resumes from the last committed boundary. An uncommitted compute node may run again because compute is pure. An action with a stored effect receipt adopts that receipt. An effect in `ambiguous` state requires explicit recovery.
 
@@ -460,13 +479,28 @@ The implementation conforms when:
 - an expired running row can be resumed or cancelled safely;
 - duplicate commands and submissions return stored receipts;
 - an interactive request appears once in the origin session and survives reload;
-- a busy Pi session held longer than both delivery leases does not queue duplicate messages or model turns;
+- every workflow-message kind uses one active coordinator epoch, active-branch report, and turn-report contract;
+- initial, reminder, and resumed prompts use one step-message kind and one request counter;
+- a busy Pi session with a pending message does not queue duplicate messages or model turns;
+- two Pi processes cannot send for one origin session because only one coordinator epoch is active;
+- active-branch absence requires no hidden message ID, an idle Pi session, and no pending Pi messages;
+- every host connection reports the active branch before any workflow-message send or turn report;
+- a crash after send leaves the message pending until branch evidence adopts it;
+- active-branch evidence changes a matching pending or cancelled message to sent;
+- host restart alone never closes an active Pi turn as `lost`;
+- a branch change creates at most one source-kind message when that source has no entry on the active branch;
+- a partial unique index allows at most one pending step message for each interactive request;
+- pause is stored once on the run and derived for its interaction;
+- follow-ups wait for the final continuation outcome, its terminal turn, earlier follow-ups, and release of the origin-session reservation;
+- only the final leaf in a checkpoint continuation chain receives a terminal workflow message;
 - effects are deduplicated or marked ambiguous;
 - the extension and host run no workflow or controller code in their own event loops;
 - the production package contains no embedded execution fallback;
 - the host is the only production process that opens live SQLite state;
 - the widget, status line, Herdr actions, CLI, and `piw` render the same host-produced status and controls;
-- a busy origin session displays `running` only while its exact workflow turn is active, and `paused` appears only after a durable pause;
+- a busy origin session displays `running` for the full exact workflow turn, including a terminal or pausing turn, and a stale turn-end report cannot clear newer activity;
+- `paused` appears only after a durable pause and matching turn end;
+- a terminal run remains in the origin-session view while its terminal message is pending or its first turn is open, and then for 60 seconds after that turn ends, without retaining execution authority;
 - a TypeScript-created live database is viewable by the matching Rust `piw` through the client protocol without a duplicated SQLite digest;
 - no removed host, replay, or direct SQLite client path remains selectable;
 - real Pi end-to-end tests, repository checks, reviewer checks, and CI pass.

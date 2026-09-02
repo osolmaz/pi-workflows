@@ -1,5 +1,7 @@
 # Human decisions
 
+> **Current version notice:** Version 0.16.0 does not provide the complete hosted Pi and Telegram presentation path described here. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) restores presentation through one workflow-message path and supervised channel children. The decision and answer records remain separate from message sending.
+
 pi-workflows needs a reusable way to stop at a proposal and wait for a person. The same decision must appear in Pi and Telegram, and either channel must be able to continue the run. Workflows must be able to offer plain choices, choices that collect text, and choices that route back to planning.
 
 This document defines that behavior. The implementation is tracked in the [human decision gates plan](plans/2026-08-19-human-decision-gates-plan.md).
@@ -216,49 +218,45 @@ pi-workflows keeps credential references in a separate private file. A Telegram 
 
 Run `/workflow-channel setup` in Pi TUI to verify and install a profile, `/workflow-channel status` to inspect whether profiles are active, and `/workflow-channel reload` after a private configuration change. Setup asks for the token file path, not the token. It updates mode-`0600` private files and does not copy the token. Token values never enter source files, workflow inputs, SQLite runs, logs, child environments, or model-visible tool results.
 
-The same Unix account can read a local credential file. This design prevents accidental propagation, not a hostile same-account process. A separately owned connector can implement the same channel interface later if stronger isolation becomes necessary.
+The same Unix account can read a local credential file. This design prevents accidental propagation, not a hostile same-account process. A separately owned connector can implement the same channel-child protocol later if stronger isolation becomes necessary.
 
 ## Channel interface
 
-All decision channels implement one interface:
+The host owns decision state and launches each external channel adapter as a supervised child process. The private child protocol has these message kinds:
 
-```typescript
-interface HumanDecisionChannel {
-  readonly id: string;
-  start(): Promise<void>;
-  deliver(request: HumanDecisionRequest): Promise<DecisionDeliveryResult>;
-  settle(decision: AcceptedHumanDecision | HumanDecisionCancellation): Promise<void>;
-  stop(): Promise<void>;
-}
-```
+- `channel.ready`;
+- `channel.present`;
+- `channel.answer`;
+- `channel.settle`; and
+- `channel.exiting`.
 
-The context exposes a narrow answer submission function. It does not expose the workflow engine, arbitrary run mutation, or another channel's credentials.
+Each message names the channel profile, saved request or settlement record, expected revision, and stable message ID. The host validates and saves every state change. The child never opens SQLite, loads workflow code, changes a run directly, or receives another channel's credentials.
 
-Channel delivery is independent from workflow routing. A failed Telegram delivery leaves the decision available in Pi. Audience policy decides whether one successful channel is enough or whether all configured channels are required before the request is considered delivered.
+Channel handling is independent from workflow routing. A failed Telegram send leaves the decision available in Pi. Audience policy decides whether one successful channel is enough or whether all configured channels must receive the request.
 
 ### Pi channel
 
-The Pi channel uses documented extension UI APIs. It shows the request, lists the choices, and opens a text editor when the selected choice requires input. The host records the interactive session as the answer source.
+The host creates one `decision` workflow message for the origin session. The shared extension coordinator shows it through documented `pi.sendMessage()` with no model turn. The message lists the request ID, choices, input rule, and deadline. It uses no blocking Pi dialog and no private Pi API.
 
-The waiting workflow remains durable before the UI opens. Closing Pi or cancelling the view cannot lose the checkpoint. A later Pi session can reopen pending decisions.
+A verified operator answers with `/workflow answer` or the matching `piw` control. The host validates the choice and optional text, records the Pi channel as the source, and accepts only the first valid winner. Closing or reloading Pi cannot lose the request. On `session_start` or `session_tree`, the extension adopts an existing decision message or creates one new `decision` message when the pending request has no entry on the active branch.
 
 ### Telegram channel
 
-The Telegram channel uses the Bot API and private profile configuration. It sends one decision message with inline buttons.
+The Telegram adapter uses the Bot API and private profile configuration. It sends one decision message with inline buttons.
 
 A choice without input submits from its button. A text choice such as `replan` works as follows:
 
 1. the operator presses **Replan**;
 2. the bot sends a `ForceReply` prompt tied to that decision and choice;
 3. the operator replies to that exact prompt;
-4. the channel verifies the numeric user ID, chat ID, reply message ID, decision ID, and request digest; and
+4. the adapter verifies the numeric user ID, chat ID, reply message ID, decision ID, and request digest; and
 5. the exact received text becomes `input.instructions`.
 
-The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. Private local SQLite rows map each opaque ID to the validated decision presentation. Credentials remain outside the database.
+The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. The host's channel records map each opaque ID to the validated decision request. Credentials remain outside the database and reach only the matching supervised adapter child.
 
-Telegram permits one long-polling consumer for a bot profile. Active Pi processes use the shared SQLite lease so one process owns polling and the others observe the same channel state. The lease owner can accept a verified reply, but only the Pi session that owns the waiting run creates its continuation. Active sessions inspect the durable accepted-answer fence and recover their own continuation. If no Pi process is running, Telegram delivery and reply collection resume when Pi starts again. Running an always-on service is outside this design.
+Telegram permits one long-polling consumer for a bot profile. The global host starts at most one adapter child for that profile and keeps the package-owned on-demand host process alive while an external decision is pending. No Pi process or adapter child owns a SQLite lease. If the host stops, the next Pi, CLI, or `piw` client starts it and the host recovers the saved channel state before it starts another adapter child. This design installs no operating-system service.
 
-The Bot API does not provide an idempotency key for `sendMessage`. pi-workflows therefore writes a delivery intent before sending and never blindly retries an ambiguous send. A timed-out send is recorded as `unknown`; Pi remains available and an operator can request another delivery. This avoids automatic duplicate messages while keeping decision acceptance exactly once.
+The Bot API does not provide an idempotency key for `sendMessage`. The host saves the channel message before it tells the adapter to send. A confirmed Telegram message ID settles the send. A timed-out or disconnected send with no proof becomes `ambiguous` and is not retried automatically. Pi remains available, and a verified operator can inspect and resolve the channel message. This prevents blind duplicate sends without claiming exactly-once Telegram behavior.
 
 ## Durable decision records
 
@@ -315,7 +313,7 @@ Recovery follows these rules:
 - duplicate channel updates are harmless;
 - stale responses are rejected;
 - one human or timeout response creates one continuation;
-- the winning human answer or timeout policy dismisses any pending Pi dialog;
+- the winning human answer or timeout policy settles or cancels the pending Pi decision workflow message;
 - confirmed channel settlement is adopted without another remote call;
 - failed channel settlement has a bounded retry count and cannot create an unbounded record loop; and
 - cancellation resolves the owned waiting decision from durable state, even after restart, closes pending views, and prevents a later answer from continuing the run.
@@ -330,15 +328,15 @@ Adoption does not change the lease, claim generation, queue state, timestamps, o
 
 This alpha change updates the current request, accepted-result, receipt, resolution, continuation, and snapshot contracts in place. Old active runs refuse resume through normal source and definition identity checks. There is no compatibility reader, migration, dual path, or new schema generation. The continuation startup fix uses existing queue and lease records. It adds no field, table, migration, or schema version. Existing compatible prepared or initialized continuations are adopted. Updated viewers label a human decision as a checkpoint, show its deadline and automatic action when present, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
 
-The engine remains independent from Pi and Telegram. Core code owns decision contracts, validation, durable acceptance, and continuation. The Pi extension owns UI and channel lifecycle. The Telegram adapter owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
+The engine remains independent from Pi and Telegram. Core code owns decision contracts and validation. The host owns durable acceptance, continuation, workflow messages, and channel-child supervision. The Pi extension owns documented session presentation and controls. The Telegram adapter child owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
 
 ## Contract impact
 
 - **Session state:** Pi records normal workflow messages and interactive decision results.
 - **Other persistent data:** decision requests and resolutions can carry a deadline, automatic response, and resolution provenance in the existing decision store. Continuation startup uses existing run, queue, source, binding, lease, event, continuation, and decision-effect records. It adds no new persistent shape. The private channel index remains rebuildable.
 - **Pi internals:** none.
-- **Public Pi API:** documented extension lifecycle and UI methods only.
-- **Public pi-workflows API:** typed human choices, `humanDecision().onTimeout`, `humanDecisionEdge()`, the channel interface, the plan approval policy, the shared plan-change workflow, and the additive queue prepare-or-adopt operation.
+- **Public Pi API:** documented extension lifecycle, message, command, session, and status APIs only.
+- **Public pi-workflows API:** typed human choices, `humanDecision().onTimeout`, `humanDecisionEdge()`, channel profile configuration, the plan approval policy, the shared plan-change workflow, and the additive queue prepare-or-adopt operation.
 
 ## Verification requirements
 
@@ -349,7 +347,8 @@ The implementation must test:
 - runtime choice and input validation;
 - legacy checkpoint continuation;
 - model-tool answer rejection;
-- Pi interactive answers;
+- Pi decision workflow messages, branch adoption, branch-specific decision messages, and verified answers;
+- supervised channel-child protocol fencing and restart recovery;
 - Telegram callbacks and reply binding with a fake Bot API;
 - unauthorized users and chats;
 - stale request digests;
@@ -361,7 +360,7 @@ The implementation must test:
 - identical and conflicting retries;
 - crashes before and after answer acceptance and continuation creation;
 - ambiguous Telegram sends;
-- long-poll lease handoff between Pi processes;
+- one supervised long-poll adapter per profile and host-restart recovery;
 - decision cancellation and expiry;
 - included `plan-approval` routes and bounded replan loops;
 - viewer redaction; and
