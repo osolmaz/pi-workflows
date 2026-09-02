@@ -313,9 +313,11 @@ export class WorkflowClient {
         reads.set(contentPath, read);
       }
       const loaded = await read;
+      const digest = createHash("sha256").update(loaded.content).digest("hex");
       if (
         loaded.mediaType !== value.$artifact.mediaType ||
-        loaded.content.byteLength !== value.$artifact.bytes
+        loaded.content.byteLength !== value.$artifact.bytes ||
+        digest !== value.$artifact.sha256
       ) {
         throw new Error("Workflow content reference does not match its content");
       }

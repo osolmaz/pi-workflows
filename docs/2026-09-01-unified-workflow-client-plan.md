@@ -306,13 +306,13 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Large replay-checkpoint frame tests with TypeScript hydration and Rust artifact resolution.
 - Durable backup and applied-prune retry tests with a new transport request ID and one stored receipt, plus separate-invocation key tests that prevent stale receipt reuse.
 - One-shot missing-run tests that return a not-found error instead of rendering `null`.
-- Full TypeScript run-page assembly, exact-attempt step-trace selection, widget history, and content-hydration tests, plus Rust page and content retrieval tests.
+- Full TypeScript run-page assembly, exact-attempt step-trace selection, widget history, and content-hydration tests that bind bytes to the advertised digest, plus Rust page and content retrieval tests.
 - Extension mutation tests that prove the durable client path is used for starts, updates, and submissions.
 - Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
 - Durable generated-content recovery after memory-cache eviction, same-byte media collision tests, and run-scoped read tests.
 - Run-list and full-view failure tests that preserve the complete stored diagnostic instead of the machine error code.
 - Idempotent interaction retry with a different attempted submission ID.
-- Rust run-switch cleanup and cross-platform local transport compilation.
+- Rust run-switch cleanup, explicit single-run selection, and cross-platform local transport compilation.
 - Herdr capability, command, shortcut, placement, reuse, and cleanup tests.
 
 ### Integration tests

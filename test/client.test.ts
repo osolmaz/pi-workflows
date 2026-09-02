@@ -708,13 +708,15 @@ describe("WorkflowClient", () => {
       '{"$artifact":{"path":"user-path","mediaType":"user-type","bytes":1,"sha256":"user-digest"}}',
       "utf8",
     );
+    const plainContent = Buffer.from("plain text", "utf8");
+    const digest = (value: Buffer): string => createHash("sha256").update(value).digest("hex");
     const read = vi
       .spyOn(client, "readContent")
       .mockImplementation(async (_runId, contentPath) =>
         contentPath.includes("opaque")
           ? { mediaType: "application/json", content: opaqueContent }
           : contentPath.endsWith(".txt")
-            ? { mediaType: "text/plain", content: Buffer.from("plain text", "utf8") }
+            ? { mediaType: "text/plain", content: plainContent }
             : { mediaType: "application/json", content },
       );
     const reference = {
@@ -722,15 +724,15 @@ describe("WorkflowClient", () => {
         path: "artifacts/sha256/content.json",
         mediaType: "application/json",
         bytes: content.byteLength,
-        sha256: "unused-by-hydration",
+        sha256: digest(content),
       },
     } as const;
     const textReference = {
       $artifact: {
         path: "artifacts/sha256/content.txt",
         mediaType: "text/plain",
-        bytes: 10,
-        sha256: "unused-by-hydration",
+        bytes: plainContent.byteLength,
+        sha256: digest(plainContent),
       },
     } as const;
     const opaqueReference = {
@@ -738,7 +740,7 @@ describe("WorkflowClient", () => {
         path: "artifacts/sha256/opaque.json",
         mediaType: "application/json",
         bytes: opaqueContent.byteLength,
-        sha256: "unused-by-hydration",
+        sha256: digest(opaqueContent),
         opaque: true,
       },
     } as const;
@@ -791,7 +793,17 @@ describe("WorkflowClient", () => {
           path: "artifacts/sha256/content.json",
           mediaType: "application/json",
           bytes: content.byteLength + 1,
-          sha256: "unused-by-hydration",
+          sha256: digest(content),
+        },
+      }),
+    ).rejects.toThrow(/does not match/);
+    await expect(
+      client.hydrateContent("run-content", {
+        $artifact: {
+          path: "artifacts/sha256/content.json",
+          mediaType: "application/json",
+          bytes: content.byteLength,
+          sha256: "0".repeat(64),
         },
       }),
     ).rejects.toThrow(/does not match/);
