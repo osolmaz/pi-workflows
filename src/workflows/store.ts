@@ -2528,13 +2528,31 @@ export class WorkflowRunStore {
   persistViewContent(runId: string, content: Buffer, mediaType: string): string {
     if (this.readRunRow(runId) === undefined) throw new Error(`Workflow run not found: ${runId}`);
     return this.state.transaction(() => {
-      const hash = this.state.putBlob(content, mediaType);
+      const hash = createHash("sha256").update(content).digest();
       this.state.connection
         .prepare(
-          `INSERT INTO run_view_content(run_id, blob_hash, created_at) VALUES (?, ?, ?)
-           ON CONFLICT(run_id, blob_hash) DO NOTHING`,
+          `INSERT INTO run_view_content(
+             run_id, content_hash, media_type, byte_length, content, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(run_id, content_hash, media_type) DO NOTHING`,
         )
-        .run(runId, hash, Date.now());
+        .run(runId, hash, mediaType, content.byteLength, content, Date.now());
+      const stored = this.state.connection
+        .prepare(
+          `SELECT media_type AS mediaType, byte_length AS byteLength, content
+           FROM run_view_content
+           WHERE run_id = ? AND content_hash = ? AND media_type = ?`,
+        )
+        .get(runId, hash, mediaType);
+      if (
+        !isRecord(stored) ||
+        stored.mediaType !== mediaType ||
+        stored.byteLength !== content.byteLength ||
+        !Buffer.isBuffer(stored.content) ||
+        !stored.content.equals(content)
+      ) {
+        throw new Error("Run-scoped view content conflict");
+      }
       return hash.toString("hex");
     });
   }
@@ -2542,9 +2560,26 @@ export class WorkflowRunStore {
   readContentBlob(
     runId: string,
     digest: string,
+    mediaType: string,
   ): { mediaType: string; content: Buffer } | undefined {
-    if (!/^[0-9a-f]{64}$/u.test(digest) || this.readRunRow(runId) === undefined) return undefined;
-    return this.state.readBlob(Buffer.from(digest, "hex"));
+    if (!/^[0-9a-f]{64}$/u.test(digest)) return undefined;
+    const stored = this.state.connection
+      .prepare(
+        `SELECT media_type AS mediaType, byte_length AS byteLength, content
+         FROM run_view_content
+         WHERE run_id = ? AND content_hash = ? AND media_type = ?`,
+      )
+      .get(runId, Buffer.from(digest, "hex"), mediaType);
+    if (
+      !isRecord(stored) ||
+      stored.mediaType !== mediaType ||
+      typeof stored.byteLength !== "number" ||
+      !Buffer.isBuffer(stored.content) ||
+      stored.content.byteLength !== stored.byteLength
+    ) {
+      return undefined;
+    }
+    return { mediaType, content: stored.content };
   }
 
   readDisplayState(runId: string): WorkflowRunDisplayState | null {

@@ -246,6 +246,7 @@ type WorkflowRunViewRow = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   errorCode: string | null;
+  errorMessage: string | null;
   createdAt: number;
   updatedAt: number;
   startedAt: number | null;
@@ -3733,6 +3734,7 @@ function workflowRunViewSelect(clause: string): string {
     r.definition_digest AS definitionDigest, q.status,
     b.origin_session_id AS originSessionId, b.execution_mode AS executionMode,
     r.parent_run_id AS parentRunId, q.error_code AS errorCode,
+    CAST(error.content AS TEXT) AS errorMessage,
     q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
     source.source_type AS sourceType, source.source_ref AS sourceRef,
@@ -3740,7 +3742,8 @@ function workflowRunViewSelect(clause: string): string {
     FROM runs r JOIN workflow_definitions d ON d.definition_digest = r.definition_digest
     JOIN run_queue q ON q.run_id = r.run_id
     LEFT JOIN run_bindings b ON b.run_id = r.run_id
-    LEFT JOIN run_sources source ON source.run_id = r.run_id AND source.mount_path = '' ${clause}`;
+    LEFT JOIN run_sources source ON source.run_id = r.run_id AND source.mount_path = ''
+    LEFT JOIN blobs error ON error.blob_hash = q.error_hash ${clause}`;
 }
 
 function turnIntentSelect(clause: string): string {
@@ -3853,7 +3856,7 @@ function workflowRunViewRecord(row: WorkflowRunViewRow): WorkflowRunQueueViewRec
     executionMode: row.executionMode,
     parentRunId: row.parentRunId,
     errorCode: row.errorCode,
-    errorMessage: row.errorCode,
+    errorMessage: row.errorMessage,
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
     startedAt: row.startedAt === null ? null : new Date(row.startedAt).toISOString(),
@@ -3875,6 +3878,7 @@ function isWorkflowRunViewRow(value: unknown): value is WorkflowRunViewRow {
     (value.executionMode === "interactive" || value.executionMode === "headless") &&
     (value.parentRunId === null || typeof value.parentRunId === "string") &&
     (value.errorCode === null || typeof value.errorCode === "string") &&
+    (value.errorMessage === null || typeof value.errorMessage === "string") &&
     typeof value.createdAt === "number" &&
     typeof value.updatedAt === "number" &&
     (value.startedAt === null || typeof value.startedAt === "number") &&
