@@ -280,7 +280,10 @@ export function responseEntryId(entries: readonly unknown[]): string | null {
   return null;
 }
 
-function messageById(view: WorkflowSessionView, workflowMessageId: string): WorkflowMessage | undefined {
+function messageById(
+  view: WorkflowSessionView,
+  workflowMessageId: string,
+): WorkflowMessage | undefined {
   return view.workflowMessages.find((message) => message.workflowMessageId === workflowMessageId);
 }
 

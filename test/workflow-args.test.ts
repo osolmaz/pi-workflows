@@ -41,9 +41,7 @@ describe("parseWorkflowArgs answer", () => {
   it("parses restored hosted commands", () => {
     expect(parseWorkflowArgs("restart run-1")).toEqual({ kind: "restart", runId: "run-1" });
     expect(
-      parseWorkflowArgs(
-        'change-settings [{"op":"replace","path":"/mode","value":"safe"}]',
-      ),
+      parseWorkflowArgs('change-settings [{"op":"replace","path":"/mode","value":"safe"}]'),
     ).toEqual({
       kind: "change-settings",
       patch: [{ op: "replace", path: "/mode", value: "safe" }],

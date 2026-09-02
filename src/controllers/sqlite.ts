@@ -30,7 +30,6 @@ import type {
   JsonObject,
 } from "./types.js";
 
-
 export type WorkflowRunLaunchStatus =
   | "queued"
   | "starting"
@@ -2598,7 +2597,9 @@ export class SqliteControllerStore implements ControllerStore {
     const expectedLineageKind =
       options.parentRunId === undefined ? null : (options.lineageKind ?? "continuation");
     const parent =
-      options.parentRunId === undefined ? undefined : this.requireWorkflowRunRow(options.parentRunId);
+      options.parentRunId === undefined
+        ? undefined
+        : this.requireWorkflowRunRow(options.parentRunId);
     const expectedRootRunId = parent?.rootRunId ?? options.runId;
     const expectedRestartNumber =
       expectedLineageKind === "restart"
@@ -3275,14 +3276,6 @@ function isSequenceRow(value: unknown): value is { seq: number } {
   return isRecord(value);
 }
 function isKeyRow(value: unknown): value is { key: string } {
-  return isRecord(value);
-}
-function isResourceIdRow(value: unknown): value is { resourceId: string } {
-  return isRecord(value);
-}
-function isEffectTokenRow(
-  value: unknown,
-): value is { tokenHash: Buffer | null; expiresAt: number | null } {
   return isRecord(value);
 }
 function isEffectIdentityRow(value: unknown): value is { effectId: string; resourceId: string } {

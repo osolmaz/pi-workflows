@@ -110,12 +110,14 @@ export class WorkflowMessageStore {
       }
       const contentHash = this.state.putJson(options.content, now);
       const order =
-        ((this.state.connection
-          .prepare(
-            `SELECT COALESCE(MAX(order_number), 0) AS value
+        ((
+          this.state.connection
+            .prepare(
+              `SELECT COALESCE(MAX(order_number), 0) AS value
              FROM workflow_messages WHERE target_session_id = ?`,
-          )
-          .get(options.targetSessionId) as { value: number }).value ?? 0) + 1;
+            )
+            .get(options.targetSessionId) as { value: number }
+        ).value ?? 0) + 1;
       this.state.connection
         .prepare(
           `INSERT INTO workflow_messages(
@@ -201,7 +203,11 @@ export class WorkflowMessageStore {
     return isWorkflowMessageRow(row) ? this.mapMessage(row) : undefined;
   }
 
-  cancelPendingForSource(sourceId: string, kind?: WorkflowMessageKind, now: number = Date.now()): number {
+  cancelPendingForSource(
+    sourceId: string,
+    kind?: WorkflowMessageKind,
+    now: number = Date.now(),
+  ): number {
     return this.state.transaction(
       () =>
         this.state.connection
@@ -223,7 +229,9 @@ export class WorkflowMessageStore {
       const adopted: WorkflowMessage[] = [];
       for (const entry of entries) {
         if (!allowedMessageIds.has(entry.workflowMessageId)) {
-          throw new Error(`Workflow branch report contains an unknown message: ${entry.workflowMessageId}`);
+          throw new Error(
+            `Workflow branch report contains an unknown message: ${entry.workflowMessageId}`,
+          );
         }
         const current = this.require(entry.workflowMessageId);
         if (current.targetSessionId !== targetSessionId) {
@@ -278,7 +286,13 @@ export class WorkflowMessageStore {
              stop_reason, response_session_entry_id, started_at, ended_at
            ) VALUES (?, ?, ?, ?, 'started', NULL, NULL, ?, NULL)`,
         )
-        .run(workflowTurnId, options.workflowMessageId, options.runId, options.targetSessionId, now);
+        .run(
+          workflowTurnId,
+          options.workflowMessageId,
+          options.runId,
+          options.targetSessionId,
+          now,
+        );
       return this.requireTurn(workflowTurnId);
     });
   }
@@ -385,7 +399,8 @@ export class WorkflowMessageStore {
 
   private mapMessage(row: WorkflowMessageRow): WorkflowMessage {
     const content = this.state.readJson(row.contentHash);
-    if (!isWorkflowMessageContent(content)) throw new Error("Stored workflow message content is invalid");
+    if (!isWorkflowMessageContent(content))
+      throw new Error("Stored workflow message content is invalid");
     return {
       schema: WORKFLOW_MESSAGE_SCHEMA,
       workflowMessageId: row.workflowMessageId,

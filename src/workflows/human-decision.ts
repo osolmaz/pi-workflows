@@ -468,6 +468,14 @@ export class HumanDecisionStore {
     channel: string,
     value: HumanDecisionDeliveryRecord,
   ): Promise<"created" | "adopted"> {
+    return this.recordDeliverySync(request, channel, value);
+  }
+
+  recordDeliverySync(
+    request: HumanDecisionRequest | HumanDecisionChannelRequest,
+    channel: string,
+    value: HumanDecisionDeliveryRecord,
+  ): "created" | "adopted" {
     return this.recordChannelMessage(request.decisionId, channel, "delivery", value);
   }
 
@@ -570,6 +578,14 @@ export class HumanDecisionStore {
     channel: string,
     value: HumanDecisionSettlementRecord,
   ): Promise<"created" | "adopted"> {
+    return this.recordSettlementSync(decisionId, channel, value);
+  }
+
+  recordSettlementSync(
+    decisionId: string,
+    channel: string,
+    value: HumanDecisionSettlementRecord,
+  ): "created" | "adopted" {
     return this.recordChannelMessage(decisionId, channel, "settlement", value);
   }
 
@@ -1066,7 +1082,7 @@ export class HumanDecisionStore {
     purpose: "delivery" | "settlement",
     value: T,
   ): "created" | "adopted" {
-    const safeChannel = requireSimpleId(channel, "Human decision channel");
+    const safeChannel = requireChannelId(channel, "Human decision channel");
     assertId(value.attemptId, `${purpose} attempt id`);
     return this.state.transaction(() => {
       if (this.readRequestRow(decisionId) === undefined) {
@@ -1120,7 +1136,7 @@ export class HumanDecisionStore {
     channel: string,
     purpose: "delivery" | "settlement",
   ): T[] {
-    const channelId = channelIdFor(requireSimpleId(channel, "Human decision channel"));
+    const channelId = channelIdFor(requireChannelId(channel, "Human decision channel"));
     const rows = this.state.connection
       .prepare(
         `SELECT content_hash AS contentHash

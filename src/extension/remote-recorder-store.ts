@@ -78,9 +78,11 @@ export class RemoteSessionRecordingStore implements SessionRecordingStore {
     runId: string,
     attemptId?: string,
   ): Promise<{ eventCount: number; entryCount: number; lastEventSeq: number }> {
-    const receipt = await this.request(runId, "status", {
-      ...(attemptId === undefined ? {} : { attemptId }),
-    });
+    const receipt = await this.request(
+      runId,
+      "status",
+      attemptId === undefined ? {} : { attemptId },
+    );
     const eventCount = positiveOrZero(receipt.eventCount, "eventCount");
     const entryCount = positiveOrZero(receipt.entryCount, "entryCount");
     const lastEventSeq = positiveOrZero(receipt.lastEventSeq, "lastEventSeq");

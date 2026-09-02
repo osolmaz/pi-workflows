@@ -99,6 +99,192 @@ export default defineWorkflow({
   return workflowPath;
 }
 
+async function writeChannelDecisionWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "channel-decision.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import {
+  choice,
+  compute,
+  defineHumanChoices,
+  defineWorkflow,
+  humanDecision,
+  humanDecisionEdge,
+} from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+const choices = defineHumanChoices({
+  continue: choice({ label: "Continue" }),
+  stop: choice({ label: "Stop" }),
+});
+export default defineWorkflow({
+  name: "host-channel-decision",
+  startAt: "approve",
+  nodes: {
+    approve: humanDecision({
+      audience: "operator",
+      choices,
+      request: () => ({
+        title: "Continue?",
+        subject: { private: "not-for-channel" },
+        presentation: {
+          schema: "pi-workflows.decision-presentation.v1",
+          summary: "Choose whether to continue.",
+          blocks: [],
+        },
+      }),
+    }),
+    continued: compute({ run: ({ outputs }) => outputs.approve }),
+    stopped: compute({ run: ({ outputs }) => outputs.approve }),
+  },
+  edges: [
+    humanDecisionEdge({
+      from: "approve",
+      choices,
+      cases: { continue: "continued", stop: "stopped" },
+    }),
+  ],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeFakeChannelAdapter(cwd: string): Promise<string> {
+  const adapterPath = path.join(cwd, "fake-channel-adapter.mjs");
+  await fs.writeFile(
+    adapterPath,
+    `import fs from "node:fs";
+import readline from "node:readline";
+const launch = JSON.parse(Buffer.from(process.env.PI_WORKFLOWS_CHANNEL_LAUNCH, "base64url").toString("utf8"));
+const log = process.env.PI_WORKFLOWS_CHANNEL_TEST_LOG;
+const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+let sequence = 0;
+let revision = 0;
+let cursor = 0;
+let presented = null;
+let answered = false;
+let stopping = false;
+process.on("SIGTERM", () => { stopping = true; });
+const writeLog = (value) => fs.appendFileSync(log, JSON.stringify(value) + "\\n");
+async function report(message) {
+  sequence += 1;
+  process.stdout.write(JSON.stringify({
+    schema: "pi-workflows.channel-adapter.v1",
+    adapterEpoch: launch.adapterEpoch,
+    profile: launch.profile,
+    sequence,
+    expectedRevision: revision,
+    ...message,
+  }) + "\\n");
+  const next = await lines.next();
+  if (next.done) process.exit(0);
+  const response = JSON.parse(next.value);
+  if (response.outcome !== "accepted") throw new Error(response.error);
+  revision = response.revision;
+  return response;
+}
+let response = await report({ kind: "channel.ready", stableMessageId: "ready-" + launch.adapterEpoch + "-1", cursor });
+while (!stopping) {
+  const command = response.command;
+  if (!command || command.kind === "channel.poll") {
+    if (command?.kind === "channel.poll" && presented && !answered) {
+      answered = true;
+      const choice = Object.keys(presented.choices)[0];
+      cursor += 1;
+      writeLog({ kind: "answer", decisionId: presented.decisionId });
+      await report({
+        kind: "channel.answer",
+        stableMessageId: "answer-" + presented.decisionId,
+        decisionId: presented.decisionId,
+        requestDigest: presented.requestDigest,
+        response: { choice },
+        actorId: "100",
+        chatId: "-200",
+        eventId: "event-1",
+        idempotencyKey: "telegram:approval:event-1",
+        cursor,
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    response = await report({ kind: "channel.ready", stableMessageId: "ready-" + launch.adapterEpoch + "-" + (sequence + 1), cursor });
+    continue;
+  }
+  if (command.kind === "channel.present") {
+    if (Object.hasOwn(command.request, "subject")) throw new Error("channel received private subject");
+    presented = command.request;
+    writeLog({ kind: "present", decisionId: presented.decisionId });
+    response = await report({
+      kind: "channel.present",
+      stableMessageId: command.stableMessageId,
+      decisionId: presented.decisionId,
+      requestDigest: presented.requestDigest,
+      attemptId: command.attemptId,
+      state: "confirmed",
+      messages: [{ chatId: "-200", messageId: "10", recipientIndex: 0, partIndex: 0, contentDigest: "sha256:test" }],
+    });
+    continue;
+  }
+  if (command.kind === "channel.settle") {
+    writeLog({ kind: "settle", decisionId: command.request.decisionId });
+    response = await report({
+      kind: "channel.settle",
+      stableMessageId: command.stableMessageId,
+      decisionId: command.request.decisionId,
+      requestDigest: command.request.requestDigest,
+      attemptId: command.attemptId,
+      state: "confirmed",
+    });
+    continue;
+  }
+}
+await report({ kind: "channel.exiting", stableMessageId: "exit-" + launch.adapterEpoch, cursor });
+`,
+  );
+  return adapterPath;
+}
+
+async function writeCrashingChannelAdapter(cwd: string): Promise<string> {
+  const adapterPath = path.join(cwd, "crashing-channel-adapter.mjs");
+  await fs.writeFile(
+    adapterPath,
+    `import fs from "node:fs";
+import readline from "node:readline";
+const launch = JSON.parse(Buffer.from(process.env.PI_WORKFLOWS_CHANNEL_LAUNCH, "base64url").toString("utf8"));
+const log = process.env.PI_WORKFLOWS_CHANNEL_TEST_LOG;
+const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+let sequence = 0;
+let revision = 0;
+let cursor = 0;
+async function report(message) {
+  sequence += 1;
+  process.stdout.write(JSON.stringify({
+    schema: "pi-workflows.channel-adapter.v1",
+    adapterEpoch: launch.adapterEpoch,
+    profile: launch.profile,
+    sequence,
+    expectedRevision: revision,
+    ...message,
+  }) + "\\n");
+  const next = await lines.next();
+  if (next.done) process.exit(0);
+  const response = JSON.parse(next.value);
+  if (response.outcome !== "accepted") throw new Error(response.error);
+  revision = response.revision;
+  return response;
+}
+let response = await report({ kind: "channel.ready", stableMessageId: "ready-" + launch.adapterEpoch + "-1", cursor });
+for (;;) {
+  const command = response.command;
+  if (command?.kind === "channel.present" || command?.kind === "channel.settle") {
+    fs.appendFileSync(log, JSON.stringify({ kind: command.kind, messageId: command.stableMessageId }) + "\\n");
+    process.exit(23);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  response = await report({ kind: "channel.ready", stableMessageId: "ready-" + launch.adapterEpoch + "-" + (sequence + 1), cursor });
+}
+`,
+  );
+  return adapterPath;
+}
+
 async function writeInteractiveWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "interactive.workflow.ts");
   await fs.writeFile(
@@ -943,6 +1129,324 @@ setInterval(() => {}, 1000);
       await host.stop();
     }
   }, 45_000);
+
+  it("keeps the host available and reports an invalid channel configuration", async () => {
+    const databasePath = path.join(await makeTempDir("host-channel-invalid-state"), "state.sqlite");
+    const configDir = await makeTempDir("host-channel-invalid-config");
+    await fs.writeFile(
+      path.join(configDir, "channels.json"),
+      `${JSON.stringify({
+        schema: "pi-workflows.channels.v1",
+        audiences: {
+          operator: { channels: ["unsupported"], accept: "first-valid-answer" },
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const host = new WorkflowHost({
+      databasePath,
+      claimPollMs: 10,
+      env: { PI_WORKFLOWS_CONFIG_DIR: configDir },
+    });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      expect(await client.request({ operation: "host.status" })).toMatchObject({
+        outcome: "accepted",
+      });
+      expect(await client.request({ operation: "channel.status" })).toMatchObject({
+        outcome: "accepted",
+        receipt: {
+          configured: false,
+          error: expect.stringContaining("references unknown channel"),
+        },
+      });
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  });
+
+  it("supervises Telegram presentation, answer, and settlement through the host", async () => {
+    const cwd = await makeTempDir("host-channel-project");
+    const databasePath = path.join(await makeTempDir("host-channel-state"), "state.sqlite");
+    const configDir = await makeTempDir("host-channel-config");
+    const tokenFile = path.join(configDir, "telegram-token");
+    const logPath = path.join(configDir, "adapter-log.jsonl");
+    await fs.writeFile(tokenFile, "fixture-token\n", { mode: 0o600 });
+    await fs.writeFile(
+      path.join(configDir, "channels.json"),
+      `${JSON.stringify({
+        schema: "pi-workflows.channels.v1",
+        audiences: {
+          operator: {
+            channels: ["pi", "telegram:approval"],
+            accept: "first-valid-answer",
+          },
+        },
+        telegramProfiles: {
+          approval: {
+            credential: "approval",
+            allowedUserIds: ["100"],
+            allowedChatIds: ["-200"],
+          },
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await fs.writeFile(
+      path.join(configDir, "credentials.json"),
+      `${JSON.stringify({
+        schema: "pi-workflows.credentials.v1",
+        telegram: { approval: { tokenFile } },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const adapterEntryPath = await writeFakeChannelAdapter(cwd);
+    const workflowPath = await writeChannelDecisionWorkflow(cwd);
+    const host = new WorkflowHost({
+      databasePath,
+      claimPollMs: 10,
+      channelAdapterEntryPath: adapterEntryPath,
+      env: {
+        PI_WORKFLOWS_CONFIG_DIR: configDir,
+        PI_WORKFLOWS_CHANNEL_TEST_LOG: logPath,
+      },
+    });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "channel-decision-parent",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => {
+        const queue = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return queue
+            .listWorkflowRuns()
+            .some((run) => run.parentRunId === "channel-decision-parent" && run.status === "done");
+        } finally {
+          queue.close();
+        }
+      }, 30_000);
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          return (
+            state.state.connection
+              .prepare(
+                "SELECT status FROM channel_messages WHERE purpose = 'settlement' AND status = 'confirmed'",
+              )
+              .get() !== undefined
+          );
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+    const lines = (await fs.readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string });
+    expect(lines.map((line) => line.kind)).toEqual(
+      expect.arrayContaining(["present", "answer", "settle"]),
+    );
+    const state = new HostStateStore(databasePath, { readOnly: true });
+    try {
+      expect(
+        state.state.connection
+          .prepare(
+            "SELECT status FROM channel_messages WHERE purpose = 'delivery' AND status = 'confirmed'",
+          )
+          .get(),
+      ).toEqual({ status: "confirmed" });
+      expect(
+        state.state.connection
+          .prepare(
+            "SELECT status FROM channel_messages WHERE purpose = 'settlement' AND status = 'confirmed'",
+          )
+          .get(),
+      ).toEqual({ status: "confirmed" });
+    } finally {
+      state.close();
+    }
+  }, 60_000);
+
+  it("marks an interrupted Telegram effect ambiguous and retries only after explicit recovery", async () => {
+    const cwd = await makeTempDir("host-channel-crash-project");
+    const databasePath = path.join(await makeTempDir("host-channel-crash-state"), "state.sqlite");
+    const configDir = await makeTempDir("host-channel-crash-config");
+    const tokenFile = path.join(configDir, "telegram-token");
+    const logPath = path.join(configDir, "adapter.log");
+    await fs.writeFile(tokenFile, "test-token\n", { mode: 0o600 });
+    await fs.writeFile(
+      path.join(configDir, "channels.json"),
+      `${JSON.stringify({
+        schema: "pi-workflows.channels.v1",
+        audiences: {
+          operator: {
+            channels: ["pi", "telegram:approval"],
+            accept: "first-valid-answer",
+          },
+        },
+        telegramProfiles: {
+          approval: {
+            credential: "approval",
+            allowedUserIds: ["100"],
+            allowedChatIds: ["-200"],
+          },
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await fs.writeFile(
+      path.join(configDir, "credentials.json"),
+      `${JSON.stringify({
+        schema: "pi-workflows.credentials.v1",
+        telegram: { approval: { tokenFile } },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const host = new WorkflowHost({
+      databasePath,
+      claimPollMs: 10,
+      channelAdapterEntryPath: await writeCrashingChannelAdapter(cwd),
+      env: {
+        PI_WORKFLOWS_CONFIG_DIR: configDir,
+        PI_WORKFLOWS_CHANNEL_TEST_LOG: logPath,
+      },
+    });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      const subscribed = await client.request({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "channel-crash-session",
+          sessionId: "host-test-session",
+          coordinator: true,
+        },
+      });
+      const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
+        ?.coordinatorEpoch;
+      if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
+      await client.request({
+        operation: "workflowMessage.reportBranch",
+        payload: {
+          targetSessionId: "host-test-session",
+          coordinatorEpoch,
+          entries: [],
+          isIdle: true,
+          hasPendingMessages: false,
+        },
+      });
+      await startRun({
+        client,
+        cwd,
+        workflowPath: await writeChannelDecisionWorkflow(cwd),
+        runId: "channel-crash-parent",
+        executionMode: "interactive",
+      });
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          return (
+            state.state.connection
+              .prepare(
+                "SELECT 1 FROM effects WHERE owner_scope = 'channel' AND status = 'ambiguous' AND attempt_count = 1",
+              )
+              .get() !== undefined
+          );
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      const firstStatus = await client.request({ operation: "channel.status" });
+      const firstAmbiguous = (firstStatus.receipt as { ambiguous?: Array<{ messageId: string }> })
+        .ambiguous?.[0]?.messageId;
+      if (firstAmbiguous === undefined) throw new Error("ambiguous channel message missing");
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      expect((await fs.readFile(logPath, "utf8")).trim().split("\n")).toHaveLength(1);
+
+      const recoveryId = "channel-crash-retry";
+      const recovery = await client.request({
+        operation: "channel.recover",
+        idempotencyKey: recoveryId,
+        payload: {
+          targetSessionId: "host-test-session",
+          coordinatorEpoch,
+          messageId: firstAmbiguous,
+          action: "retry",
+        },
+      });
+      expect(recovery).toMatchObject({ outcome: "accepted" });
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          return (
+            state.state.connection
+              .prepare(
+                "SELECT 1 FROM effects WHERE owner_scope = 'channel' AND status = 'ambiguous' AND attempt_count = 2",
+              )
+              .get() !== undefined
+          );
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      const secondStatus = await client.request({ operation: "channel.status" });
+      const secondAmbiguous = (
+        secondStatus.receipt as {
+          ambiguous?: Array<{ messageId: string }>;
+        }
+      ).ambiguous?.[0]?.messageId;
+      if (secondAmbiguous === undefined) throw new Error("second ambiguous message missing");
+      expect(secondAmbiguous).not.toBe(firstAmbiguous);
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      expect((await fs.readFile(logPath, "utf8")).trim().split("\n")).toHaveLength(2);
+
+      const confirmId = "channel-crash-confirm";
+      expect(
+        await client.request({
+          operation: "channel.recover",
+          idempotencyKey: confirmId,
+          payload: {
+            targetSessionId: "host-test-session",
+            coordinatorEpoch,
+            messageId: secondAmbiguous,
+            action: "confirm",
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(
+          state.state.connection
+            .prepare("SELECT status FROM effects WHERE owner_scope = 'channel'")
+            .get(),
+        ).toEqual({ status: "applied" });
+        expect(
+          state.state.connection
+            .prepare(
+              "SELECT 1 AS present FROM channel_messages WHERE purpose = 'delivery' AND status = 'confirmed'",
+            )
+            .get(),
+        ).toEqual({ present: 1 });
+      } finally {
+        state.close();
+      }
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  }, 60_000);
 
   it("expires a parked interaction from its durable deadline after restart", async () => {
     const cwd = await makeTempDir("host-interaction-timeout-project");

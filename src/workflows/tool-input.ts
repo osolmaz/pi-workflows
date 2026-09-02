@@ -12,7 +12,8 @@ const inputSchema = Type.Unknown({
     "Ordinary checkpoint answer for answer; protected human decisions require a human channel; optional structured workflow input for start",
 });
 const runIdSchema = Type.String({
-  description: "Run id; required for restart and optional for status, cancel, answer, settings, and follow-ups",
+  description:
+    "Run id; required for restart and optional for status, cancel, answer, settings, and follow-ups",
 });
 const stepSchema = Type.String({
   description: "Workflow step id; required when action is update or submit",
@@ -44,10 +45,7 @@ export const WorkflowActionSchemas = {
     },
     noExtraProperties,
   ),
-  restart: Type.Object(
-    { action: Type.Literal("restart"), runId: runIdSchema },
-    noExtraProperties,
-  ),
+  restart: Type.Object({ action: Type.Literal("restart"), runId: runIdSchema }, noExtraProperties),
   "change-settings": Type.Object(
     {
       action: Type.Literal("change-settings"),

@@ -185,11 +185,7 @@ export function renderClientView(
   return lines.slice(start, start + height).map((line) => truncate(line, width));
 }
 
-function renderRun(
-  value: JsonValue,
-  now: Date,
-  selectedStepIndex: number | null,
-): string[] {
+function renderRun(value: JsonValue, now: Date, selectedStepIndex: number | null): string[] {
   if (!isRecord(value) || value.schema !== "pi-workflows.run-view.v1") {
     return JSON.stringify(value, null, 2).split("\n");
   }
@@ -210,11 +206,13 @@ function renderRun(
       ? -1
       : Math.min(Math.max(0, selectedStepIndex ?? steps.length - 1), steps.length - 1);
   const startedAt = typeof manifest.startedAt === "string" ? Date.parse(manifest.startedAt) : NaN;
-  const finishedAt = typeof manifest.finishedAt === "string" ? Date.parse(manifest.finishedAt) : NaN;
+  const finishedAt =
+    typeof manifest.finishedAt === "string" ? Date.parse(manifest.finishedAt) : NaN;
   const elapsed = Number.isFinite(startedAt)
     ? ` · elapsed ${formatDuration(Math.max(0, (Number.isFinite(finishedAt) ? finishedAt : now.getTime()) - startedAt))}`
     : "";
-  const position = selectedStepIndex === null || selected < 0 ? "" : ` · step ${selected + 1}/${steps.length}`;
+  const position =
+    selectedStepIndex === null || selected < 0 ? "" : ` · step ${selected + 1}/${steps.length}`;
   const lines = [
     `workflow ${workflowName}`,
     `${statusGlyph(status)} ${sanitizeText(status)} · run ${runId}${elapsed}${position}`,
@@ -227,14 +225,21 @@ function renderRun(
       if (!isRecord(step)) continue;
       const nodeId = typeof step.nodeId === "string" ? sanitizeText(step.nodeId) : "unknown";
       const outcome = typeof step.outcome === "string" ? step.outcome : "unknown";
-      lines.push(`${index === selected ? ">" : " "} ${stepGlyph(outcome)} ${nodeId} · ${sanitizeText(outcome)}`);
+      lines.push(
+        `${index === selected ? ">" : " "} ${stepGlyph(outcome)} ${nodeId} · ${sanitizeText(outcome)}`,
+      );
     }
     const inspected = steps[selected];
     if (isRecord(inspected)) {
-      const nodeId = typeof inspected.nodeId === "string" ? sanitizeText(inspected.nodeId) : "unknown";
+      const nodeId =
+        typeof inspected.nodeId === "string" ? sanitizeText(inspected.nodeId) : "unknown";
       const output = Object.hasOwn(inspected, "error") ? inspected.error : inspected.output;
       lines.push("", `step output — ${nodeId}`);
-      lines.push(...JSON.stringify(output ?? null, null, 2).split("\n").map((line) => `  ${sanitizeText(line)}`));
+      lines.push(
+        ...JSON.stringify(output ?? null, null, 2)
+          .split("\n")
+          .map((line) => `  ${sanitizeText(line)}`),
+      );
     }
   }
   if (status === "completed" && Object.hasOwn(state, "finalOutput")) {

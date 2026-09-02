@@ -41,9 +41,10 @@ export default defineConfig({
         "src/render/format.ts",
         "src/workflows/definition.ts",
         "src/workflows/text.ts",
-        // Loaded only by spawned headless pi children; subprocess execution
-        // (covered by the e2e suite) never registers in this report.
+        // Loaded only by spawned children; subprocess execution (covered by
+        // the integration and e2e suites) never registers in this report.
         "src/host/rpc-bridge.ts",
+        "src/channels/adapter-entry.ts",
       ],
       thresholds: {
         lines: 85,

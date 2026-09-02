@@ -162,7 +162,14 @@ export class SessionWorkflowView {
         ? reason
         : `Workflow ${run.state.workflowName} ${status.replace("_", " ")}.`;
     safelyUpdateUi(ctx, () => {
-      ctx.ui.notify(message, status === "failed" || status === "timed_out" || status === "ambiguous" ? "error" : status === "waiting" || status === "paused" ? "warning" : "info");
+      ctx.ui.notify(
+        message,
+        status === "failed" || status === "timed_out" || status === "ambiguous"
+          ? "error"
+          : status === "waiting" || status === "paused"
+            ? "warning"
+            : "info",
+      );
     });
   }
 }
