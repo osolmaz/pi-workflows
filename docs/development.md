@@ -159,7 +159,8 @@ workflow stores a long-lived registry token:
 For later versions:
 
 1. Update `version` in `package.json`, `package-lock.json`, `tui/Cargo.toml`,
-   and `tui/Cargo.lock`, then merge that change into the default branch.
+   `tui/Cargo.lock`, and `herdr-plugin.toml`, then merge that change into the
+   default branch.
 2. Publish a GitHub Release whose tag is `v<version>`, such as `v0.2.0`.
 3. Wait for the **Publish npm package** and **Publish crates.io package**
    workflows to finish.
