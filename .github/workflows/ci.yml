@@ -60,6 +60,34 @@ jobs:
       - name: End-to-end tests (mock provider, real pi runtime)
         run: npm run test:e2e
 
+  installed-e2e:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tui
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Installed-package end-to-end test
+        run: npm run test:e2e:live -- --runtime-only
+
   tui:
     runs-on: ubuntu-24.04
     permissions:

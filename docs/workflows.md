@@ -800,3 +800,41 @@ const engine = new WorkflowEngine({
 });
 const { state } = await engine.run(workflow, { task: "..." });
 ```
+
+## Test the installed package
+
+The installed-package end-to-end test packs this repository and installs the
+archive with production dependencies in a temporary consumer project. It then
+starts the repository-pinned base Pi with only that Pi Workflows installation.
+The test checks command isolation, host startup, widget and status changes,
+pause, resume, completion, and `piw <runId> --once` output.
+
+Run the deterministic phase without a model call:
+
+```bash
+npm run test:e2e:live -- --runtime-only
+```
+
+A real-model phase is manual. Supply the exact Pi provider and model as separate
+values. The runner does not select a default or accept model fallback:
+
+```bash
+npm run test:e2e:live -- \
+  --provider openai \
+  --model gpt-5.6-luna
+```
+
+For subscription authentication, use a dedicated Pi profile that has no other
+extensions or resources:
+
+```bash
+npm run test:e2e:live -- \
+  --profile ~/.config/pi-workflows-e2e/openai-codex \
+  --provider openai-codex \
+  --model gpt-5.6-luna
+```
+
+The profile and normal provider environment remain operator-owned. The runner
+does not read, copy, print, or save credentials. It uses one guarded temporary
+root and removes that root after success or failure. Use `--keep` only when you
+need the isolated files for diagnosis.
