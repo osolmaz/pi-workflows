@@ -101,11 +101,14 @@ export class HostViewStore {
       }
       const loaded = this.queue.listWorkflowRunViews({ offset: cursor, limit: pageSize });
       const summaries = loaded.runs.map((run) => {
-        const display = this.display(run, {
-          status: run.runStateStatus as WorkflowRunState["status"],
-          paused: run.paused,
-          error: run.errorMessage,
-        });
+        const display = this.projectDisplay(
+          run.runId,
+          this.display(run, {
+            status: run.runStateStatus as WorkflowRunState["status"],
+            paused: run.paused,
+            error: run.errorMessage,
+          }),
+        );
         return {
           runId: run.runId,
           workflowName: run.workflowName,
@@ -269,7 +272,7 @@ export class HostViewStore {
       transitions: completeTakenTransitions,
     });
     const revision = this.presentationRevision(runId);
-    const display = this.display(queue, loaded.state);
+    const display = this.projectDisplay(runId, this.display(queue, loaded.state));
     return {
       schema: RUN_VIEW_SCHEMA,
       runId,
@@ -491,6 +494,20 @@ export class HostViewStore {
       if (fieldValue !== undefined) projected[field] = this.projectValue(runId, fieldValue);
     }
     return projected;
+  }
+
+  private projectDisplay(runId: string, display: WorkflowDisplay): WorkflowDisplay {
+    if (
+      display.reason === null ||
+      Buffer.byteLength(display.reason, "utf8") <= INLINE_CONTENT_BYTES
+    ) {
+      return display;
+    }
+    return {
+      ...display,
+      reason: "Complete workflow failure details are available.",
+      reasonContent: this.registerContent(runId, display.reason, "text/plain"),
+    };
   }
 
   private projectValue(runId: string, value: JsonValue): JsonValue {

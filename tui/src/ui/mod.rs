@@ -1677,22 +1677,20 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     // connection must be visible while a cached run is still displayed.
     let Provider::Remote(remote) = &app.provider;
     let remote_status = (!remote.connected()).then(|| remote.status_label());
-    let local_load_error: Option<String> = None;
+    let load_error = remote.error();
     let local_stale = false;
 
     let Some(data) = app.provider.data(&run_id) else {
         frame.render_widget(
-            Paragraph::new(local_load_error.as_deref().map_or("Loading run…", |_| {
-                "Run unavailable. The run list is still usable."
-            }))
-            .style(Style::default().fg(palette.text).bg(palette.panel_bg))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" piw ")
-                    .style(Style::default().bg(palette.panel_bg))
-                    .border_style(pane_border(&palette, false)),
-            ),
+            Paragraph::new(load_error.as_deref().unwrap_or("Loading run…"))
+                .style(Style::default().fg(palette.text).bg(palette.panel_bg))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" piw ")
+                        .style(Style::default().bg(palette.panel_bg))
+                        .border_style(pane_border(&palette, false)),
+                ),
             main_area,
         );
         app.timeline = draw_transport(

@@ -735,6 +735,37 @@ describe("host workflow display reducer", () => {
       reason: completeFailureReason,
     });
     expect(failedViews.run("run-view")?.display.reason).toBe(completeFailureReason);
+
+    const oversizedFailureReason = "oversized diagnostic ".repeat(
+      Math.ceil((MAX_PROTOCOL_MESSAGE_BYTES * 2) / 21),
+    );
+    const oversizedErrorHash = state.putText(oversizedFailureReason);
+    state.connection
+      .prepare("UPDATE run_queue SET error_hash = ?, updated_at = ? WHERE run_id = 'run-view'")
+      .run(oversizedErrorHash, Date.now() + 1);
+    const oversizedViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    const oversizedList = oversizedViews.list();
+    const reasonContent = oversizedList.items[0]?.display.reasonContent as
+      | { $artifact?: { path?: string; sha256?: string } }
+      | undefined;
+    expect(oversizedList.items[0]?.display.reason).toBe(
+      "Complete workflow failure details are available.",
+    );
+    expect(
+      encodeProtocolLine({
+        schema: CLIENT_PROTOCOL_SCHEMA,
+        type: "event",
+        subscriptionId: "oversized-list",
+        event: "runs",
+        revision: 1,
+        payload: oversizedList as unknown as never,
+      }).byteLength,
+    ).toBeLessThanOrEqual(MAX_PROTOCOL_MESSAGE_BYTES + 1);
+    const reasonDigest = reasonContent?.$artifact?.sha256;
+    if (reasonDigest === undefined) throw new Error("failure reason content reference missing");
+    expect(
+      runs.readContentBlob("run-view", reasonDigest, "text/plain")?.content.toString("utf8"),
+    ).toBe(oversizedFailureReason);
     state.close();
   });
 });

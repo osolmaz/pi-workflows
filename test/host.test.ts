@@ -561,6 +561,33 @@ describe("global workflow host", () => {
     }
   });
 
+  it("ends a backpressure wait when the client socket closes", async () => {
+    const databasePath = path.join(await makeTempDir("host-backpressure-close"), "state.sqlite");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    await host.start();
+    const socket = new net.Socket();
+    const write = vi.spyOn(socket, "write").mockReturnValue(false);
+    const connection = {
+      id: "closing-viewer",
+      socket,
+      subscriptions: new Map([["runs", { id: "runs", kind: "runs" as const, revision: 0 }]]),
+      publishing: false,
+    };
+    const privateHost = host as unknown as {
+      publishConnection: (target: typeof connection) => Promise<void>;
+    };
+    try {
+      const publishing = privateHost.publishConnection(connection);
+      await waitUntil(() => write.mock.calls.length === 1, 5_000);
+      socket.emit("close");
+      await expect(publishing).resolves.toBeUndefined();
+      expect(connection.publishing).toBe(false);
+    } finally {
+      socket.destroy();
+      await host.stop();
+    }
+  });
+
   it("closes idle client sockets before it waits for listener shutdown", async () => {
     const databasePath = path.join(await makeTempDir("host-idle-client"), "state.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
