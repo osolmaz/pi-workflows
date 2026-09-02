@@ -18,6 +18,7 @@ type PendingTurn = {
 /** Adds every host-owned workflow message to one Pi session through one public API path. */
 export class WorkflowMessageCoordinator {
   private readonly queued = new Set<string>();
+  private readonly closedTurnMessages = new Set<string>();
   private synchronizing = false;
   private lastBranchEpoch: string | null = null;
   private view: WorkflowSessionView | null = null;
@@ -25,6 +26,10 @@ export class WorkflowMessageCoordinator {
 
   updateView(view: WorkflowSessionView): void {
     this.view = view;
+    const visibleIds = new Set(view.workflowMessages.map((message) => message.workflowMessageId));
+    for (const messageId of this.closedTurnMessages) {
+      if (!visibleIds.has(messageId)) this.closedTurnMessages.delete(messageId);
+    }
     for (const message of view.workflowMessages) {
       if (message.status === "sent" || message.status === "cancelled") {
         this.queued.delete(message.workflowMessageId);
@@ -146,6 +151,7 @@ export class WorkflowMessageCoordinator {
 
   clear(): void {
     this.queued.clear();
+    this.closedTurnMessages.clear();
     this.view = null;
     this.turn = null;
     this.lastBranchEpoch = null;
@@ -157,11 +163,17 @@ export class WorkflowMessageCoordinator {
     if (view === null) return undefined;
     if (view.openWorkflowMessageId !== null) {
       const open = messageById(view, view.openWorkflowMessageId);
-      if (open !== undefined && messageStartsTurn(open)) return open;
+      if (
+        open !== undefined &&
+        !this.closedTurnMessages.has(open.workflowMessageId) &&
+        messageStartsTurn(open)
+      ) {
+        return open;
+      }
     }
     for (const messageId of this.queued) {
       const queued = messageById(view, messageId);
-      if (queued !== undefined && messageStartsTurn(queued)) return queued;
+      if (queued?.status === "pending" && messageStartsTurn(queued)) return queued;
     }
     return undefined;
   }
@@ -207,6 +219,20 @@ export class WorkflowMessageCoordinator {
       stopReason: pending.end.stopReason,
       responseSessionEntryId: pending.end.responseSessionEntryId,
     });
+    if (message.kind === "terminal" || message.kind === "followUp") {
+      this.closedTurnMessages.add(pending.workflowMessageId);
+    }
+    for (const current of new Set([view, this.view])) {
+      if (current?.openWorkflowTurn?.workflowTurnId === pending.workflowTurnId) {
+        current.openWorkflowTurn = null;
+      }
+      if (
+        current?.openWorkflowMessageId === pending.workflowMessageId &&
+        (message.kind === "terminal" || message.kind === "followUp")
+      ) {
+        current.openWorkflowMessageId = null;
+      }
+    }
     this.turn = null;
   }
 
@@ -242,6 +268,7 @@ export class WorkflowMessageCoordinator {
         message.status = "sent";
         message.piSessionEntryId = entry.piSessionEntryId;
       }
+      this.queued.delete(entry.workflowMessageId);
     }
     this.lastBranchEpoch = view.coordinatorEpoch;
   }

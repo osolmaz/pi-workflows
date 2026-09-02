@@ -649,6 +649,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
+    try {
+      await submitVisibleAssistantResponse(client, ctx);
+    } catch (error) {
+      ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
+    }
     workflowMessages.endTurn(
       workflowTurnStopReason(event.messages, ctx.signal?.aborted === true),
       responseEntryId(ctx.sessionManager.getBranch()),
