@@ -143,8 +143,8 @@ describe("host workflow display reducer", () => {
         graphCursor: 0,
       }),
     ).toBeNull();
-    expect(runs.readContentBlob("missing-run", "0".repeat(64))).toBeUndefined();
-    expect(runs.readContentBlob("run-large-view", "invalid")).toBeUndefined();
+    expect(runs.readContentBlob("missing-run", "0".repeat(64), "application/json")).toBeUndefined();
+    expect(runs.readContentBlob("run-large-view", "invalid", "application/json")).toBeUndefined();
     const largeOutput = {
       text: "x".repeat(2 * 1024 * 1024),
       userArtifact: { $artifact: { path: "user-data", note: "not a host reference" } },
@@ -153,6 +153,24 @@ describe("host workflow display reducer", () => {
       store: runs,
       executor: new ScriptedExecutor().respond("reply", { output: largeOutput }),
     }).run(workflow, largeInput, { runId: "run-large-view" });
+    const collidingText = canonicalJson(largeInput);
+    const collidingDigest = runs.persistViewContent(
+      "run-large-view",
+      Buffer.from(collidingText, "utf8"),
+      "text/plain",
+    );
+    expect(runs.readContentBlob("run-large-view", collidingDigest, "text/plain")?.content).toEqual(
+      Buffer.from(collidingText, "utf8"),
+    );
+    const unlinkedContent = Buffer.from("unlinked view content", "utf8");
+    const unlinkedDigest = runs.persistViewContent("run-large-view", unlinkedContent, "text/plain");
+    state.connection
+      .prepare(
+        `DELETE FROM run_view_content
+         WHERE run_id = ? AND content_hash = ? AND media_type = ?`,
+      )
+      .run("run-large-view", Buffer.from(unlinkedDigest, "hex"), "text/plain");
+    expect(runs.readContentBlob("run-large-view", unlinkedDigest, "text/plain")).toBeUndefined();
     const attemptId = result.state.steps[0]?.attemptId;
     if (attemptId === undefined) throw new Error("attempt missing");
     await runs.writeSessionBinding("run-large-view", {
@@ -235,11 +253,14 @@ describe("host workflow display reducer", () => {
     expect(views.run("run-large-view")).toBe(view);
     expect(boundedRead).toHaveBeenCalledTimes(1);
     expect(
+      runs.readContentBlob("run-large-view", collidingDigest, "application/json")?.content,
+    ).toEqual(Buffer.from(collidingText, "utf8"));
+    expect(
       views.page("run-large-view", { kind: "trace_at_step", cursor: 0 })?.tracePage,
     ).toMatchObject({ total: expect.any(Number), items: expect.any(Array) });
     expect(runs.traceCursorForStep("run-large-view", 99, 10)).toBe(9);
     const outputDigest = createHash("sha256").update(canonicalJson(largeOutput)).digest("hex");
-    expect(runs.readContentBlob("run-large-view", outputDigest)).toMatchObject({
+    expect(runs.readContentBlob("run-large-view", outputDigest, "application/json")).toMatchObject({
       mediaType: "application/json",
     });
     const encoded = encodeProtocolLine({
@@ -287,7 +308,7 @@ describe("host workflow display reducer", () => {
     if (outputsPath === undefined || outputsDigest === undefined) {
       throw new Error("large aggregate outputs were not externalized");
     }
-    expect(runs.readContentBlob(view.runId, outputsDigest)).toMatchObject({
+    expect(runs.readContentBlob(view.runId, outputsDigest, "application/json")).toMatchObject({
       mediaType: "application/json",
     });
     const outputChunks: Buffer[] = [];
@@ -399,7 +420,8 @@ describe("host workflow display reducer", () => {
     const digest = historyReference.$artifact?.sha256;
     if (digest === undefined) throw new Error("complete graph history reference missing");
     const history = JSON.parse(
-      runs.readContentBlob(view.runId, digest)?.content.toString("utf8") ?? "null",
+      runs.readContentBlob(view.runId, digest, "application/json")?.content.toString("utf8") ??
+        "null",
     ) as {
       steps?: unknown[];
       transitions?: unknown[];
@@ -478,7 +500,7 @@ describe("host workflow display reducer", () => {
     expect(workflow.edgeTotal).toBe(nodeCount - 1);
     const digest = workflow.content?.$artifact?.sha256;
     if (digest === undefined) throw new Error("full workflow content reference missing");
-    const blob = runs.readContentBlob(view.runId, digest);
+    const blob = runs.readContentBlob(view.runId, digest, "application/json");
     expect(blob).toBeDefined();
     const fullWorkflow = JSON.parse(blob?.content.toString("utf8") ?? "null") as {
       nodes: object;
@@ -667,6 +689,23 @@ describe("host workflow display reducer", () => {
       )
       .run(Date.now());
     expect(views.session("session-view").run).toBeNull();
+
+    const completeFailureReason = `worker failed after cleanup: ${"diagnostic ".repeat(40)}`;
+    const errorHash = state.putText(completeFailureReason);
+    state.connection
+      .prepare(
+        `UPDATE run_queue
+         SET status = 'failed', error_code = 'workerExited', error_hash = ?, updated_at = ?
+         WHERE run_id = 'run-view'`,
+      )
+      .run(errorHash, Date.now());
+    state.connection.prepare("UPDATE runs SET status = 'failed' WHERE run_id = 'run-view'").run();
+    const failedViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    expect(failedViews.list().items[0]?.display).toMatchObject({
+      status: "failed",
+      reason: completeFailureReason,
+    });
+    expect(failedViews.run("run-view")?.display.reason).toBe(completeFailureReason);
     state.close();
   });
 });

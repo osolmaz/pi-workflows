@@ -559,8 +559,8 @@ export class HostViewStore {
     const match = /^artifacts\/sha256\/([0-9a-f]{64})\.(json|txt)$/u.exec(contentPath);
     if (match === null) return undefined;
     const mediaType = match[2] === "txt" ? "text/plain" : "application/json";
-    const blob = this.runs.readContentBlob(runId, match[1] as string);
-    if (blob === undefined || blob.mediaType !== mediaType) return undefined;
+    const blob = this.runs.readContentBlob(runId, match[1] as string, mediaType);
+    if (blob === undefined) return undefined;
     return this.rememberContent({
       runId,
       path: contentPath,
@@ -759,7 +759,7 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     facts.durableStatus === "cancelled"
   ) {
     status = facts.durableStatus;
-    reason = boundedReason(facts.errorMessage);
+    reason = facts.errorMessage;
   } else if (facts.paused) {
     status = "paused";
     reason = "The workflow is durably paused.";
@@ -776,7 +776,7 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     status = "completed";
   } else if (facts.queueStatus === "failed" || facts.queueStatus === "cancelled") {
     status = facts.queueStatus;
-    reason = boundedReason(facts.errorMessage);
+    reason = facts.errorMessage;
   } else {
     status = "running";
   }
@@ -1016,11 +1016,6 @@ export function workflowPageStart(total: number, cursor?: number): number {
 
 function clampCursor(cursor: number, total: number): number {
   return total === 0 ? 0 : Math.min(cursor, total - 1);
-}
-
-function boundedReason(value: string | null): string | null {
-  if (value === null) return null;
-  return value.length <= 240 ? value : `${value.slice(0, 237)}...`;
 }
 
 function toJson(value: unknown): JsonValue {

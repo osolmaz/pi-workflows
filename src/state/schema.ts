@@ -139,9 +139,13 @@ CREATE INDEX runs_parent_idx ON runs(parent_run_id);
 
 CREATE TABLE run_view_content (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  blob_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
+  content_hash BLOB NOT NULL,
+  media_type TEXT NOT NULL CHECK (media_type IN ('application/json', 'text/plain')),
+  byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+  content BLOB NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (run_id, blob_hash)
+  PRIMARY KEY (run_id, content_hash, media_type),
+  CHECK (byte_length = length(content))
 ) STRICT;
 
 CREATE TABLE viewer_runs (

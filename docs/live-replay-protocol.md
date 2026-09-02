@@ -60,7 +60,7 @@ The closed outcomes are `accepted`, `adopted`, `rejected`, `conflict`, `notFound
 
 ## Run and session views
 
-The host produces `pi-workflows.run-view.v1` from one consistent database read. The view contains the bounded workflow state, graph, trace, session projection, page cursors, presentation revision, and one `display` object.
+The host produces `pi-workflows.run-view.v1` from one consistent database read. The view contains the bounded workflow state, graph, trace, session projection, page cursors, presentation revision, and one `display` object. A terminal display includes the complete stored failure reason, not only its machine error code.
 
 The closed display statuses are:
 
@@ -84,7 +84,7 @@ A snapshot page contains at most 256 items and also has a byte budget. `view.pag
 
 The host counts histories first and reads only the selected SQLite ranges. An unchanged subscription uses a lightweight revision check and reuses its prior view. It does not rebuild complete histories every 250 milliseconds.
 
-Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, SHA-256 digest, and an opaque marker for host-created references. The host saves generated view content in the content-addressed blob store and links it to the run before it advertises the reference. Memory-cache eviction therefore cannot make an advertised aggregate unavailable. Run pruning removes the durable link. Clients reassemble and verify all chunks before display. Opaque content is restored as user data without interpreting nested objects as host references. Other cursors and content references keep the complete logical history and result available.
+Large prompt, output, event, settings, follow-up, and update values use a content reference instead of making a protocol frame exceed 1 MiB. `view.content` returns the referenced UTF-8 content in verified chunks. The reference includes its media type, byte count, SHA-256 digest, and an opaque marker for host-created references. The host saves generated view content directly under its exact run ID, content digest, and media type before it advertises the reference. It does not share media metadata with general state blobs. A request for another run or media representation is unavailable. Memory-cache eviction therefore cannot make an advertised aggregate unavailable. Run pruning removes the durable content. Clients reassemble and verify all chunks before display. Opaque content is restored as user data without interpreting nested objects as host references. Other cursors and content references keep the complete logical history and result available.
 
 ## Subscriptions and reconnection
 
