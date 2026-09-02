@@ -7,6 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMP_PREFIX = "pi-workflows-live-e2e-";
@@ -177,7 +178,7 @@ async function runProcess(executable, args, options) {
   return { stdout, stderr };
 }
 
-class RpcSession {
+export class RpcSession {
   constructor(child, context) {
     this.child = child;
     this.context = context;
@@ -187,6 +188,7 @@ class RpcSession {
     this.stdoutBuffer = "";
     this.parseError = undefined;
     this.exited = false;
+    this.exitError = undefined;
     child.stdout.on("data", (chunk) => this.onStdout(chunk));
     child.stderr.on("data", (chunk) => {
       this.stderr += chunk.toString("utf8");
@@ -196,6 +198,7 @@ class RpcSession {
       const error = new Error(
         `Pi RPC exited with code ${String(code)} and signal ${String(signal)}\n${this.diagnostic()}`,
       );
+      this.exitError = error;
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
     });
@@ -258,6 +261,7 @@ class RpcSession {
   }
 
   assertNoExtensionError() {
+    if (this.exitError !== undefined) throw this.exitError;
     const failure = this.events.find((event) => event.type === "extension_error");
     if (failure !== undefined) {
       throw new Error(
@@ -617,7 +621,7 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
   );
   const completed = await waitForRunDisplay(client, runId, "completed", RUNTIME_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "runtime workflow state");
-  if (JSON.stringify(state.finalOutput) !== JSON.stringify({ smoke: "runtime-passed" })) {
+  if (!isDeepStrictEqual(state.finalOutput, { smoke: "runtime-passed" })) {
     throw new Error(
       `Runtime workflow returned the wrong output: ${JSON.stringify(state.finalOutput)}`,
     );
@@ -699,7 +703,7 @@ async function runModelWorkflow(context, rpc, client, api) {
   const completed = await waitForRunDisplay(client, run.runId, "completed", MODEL_TIMEOUT_MS, rpc);
   const state = requireObject(completed.state, "model workflow state");
   const expected = { smoke: "model-passed", nonce: "pi-workflows-live-e2e" };
-  if (JSON.stringify(state.finalOutput) !== JSON.stringify(expected)) {
+  if (!isDeepStrictEqual(state.finalOutput, expected)) {
     throw new Error(
       `Model workflow returned the wrong output: ${JSON.stringify(state.finalOutput)}`,
     );
@@ -729,6 +733,12 @@ async function runModelWorkflow(context, rpc, client, api) {
       `Workflow delivery does not match the accepted attempt: ${JSON.stringify(details)}`,
     );
   }
+  const costUsd = entriesData.entries.reduce((total, entry) => {
+    const value = entry?.message?.usage?.cost?.total;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? total + value
+      : total;
+  }, 0);
   assertExactModel(
     await rpc.request("get_state"),
     context.options.provider,
@@ -736,7 +746,7 @@ async function runModelWorkflow(context, rpc, client, api) {
     api,
   );
   rpc.assertNoExtensionError();
-  return run.runId;
+  return { costUsd, runId: run.runId };
 }
 
 async function waitForEndpointClosed(endpoint) {
@@ -872,10 +882,13 @@ async function execute(root, options) {
 
     const runtimeRunId = await runRuntimeWorkflow(context, rpc, client, piwBinary);
     let modelRunId;
+    let modelCostUsd;
     let api;
     if (!options.runtimeOnly) {
       api = await preflightModel(context, rpc);
-      modelRunId = await runModelWorkflow(context, rpc, client, api);
+      const modelResult = await runModelWorkflow(context, rpc, client, api);
+      modelRunId = modelResult.runId;
+      modelCostUsd = modelResult.costUsd;
     }
 
     const hostStatus = requireAccepted(
@@ -892,6 +905,7 @@ async function execute(root, options) {
         api: api ?? null,
         mode: options.runtimeOnly ? "runtime-only" : "real-model",
         model: options.model ?? null,
+        modelCostUsd: modelCostUsd ?? null,
         modelRunId: modelRunId ?? null,
         packageVersion: packageJson.version,
         piVersion,
