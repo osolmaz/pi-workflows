@@ -41,6 +41,11 @@ typescript:
       allow:
         - src/state
         - src/workflows
+    # Decision channels own their Pi-independent configuration, protocol, and supervised adapters.
+    - from: src/channels
+      allow:
+        - src/state
+        - src/workflows
     # The extension is a host client and draws the widget graph. It never imports host execution code.
     - from: src/extension
       allow:
@@ -51,6 +56,7 @@ typescript:
         - src/render
         - src/herdr
         - src/client
+        - src/channels
     # The host runs headlessly; it spawns pi but never embeds it.
     - from: src/host
       allow:
@@ -59,6 +65,7 @@ typescript:
         - src/workflows
         - src/builtins
         - src/controllers
+        - src/channels
     # Herdr setup is a standalone host integration with no engine imports.
     - from: src/herdr
       allow: []
