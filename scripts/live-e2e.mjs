@@ -627,9 +627,18 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     );
   }
   await waitFor(
-    "Pi to clear the workflow widget and status",
-    () => hasWorkflowUiClear(rpc, resumeEvents),
+    "the completed Pi workflow widget and status",
+    () => hasWorkflowUiState(rpc, workflowName, "completed", resumeEvents),
     { rpc, timeoutMs: 30_000 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  if (hasWorkflowUiClear(rpc, resumeEvents)) {
+    throw new Error("Pi cleared the completed workflow before its retention interval");
+  }
+  await waitFor(
+    "Pi to clear the retained workflow widget and status",
+    () => hasWorkflowUiClear(rpc, resumeEvents),
+    { rpc, timeoutMs: 75_000 },
   );
 
   const completedFrame = await runProcess(
