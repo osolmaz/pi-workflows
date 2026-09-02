@@ -1,13 +1,16 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WorkflowClient } from "../client/client.js";
 import { materializeRunView } from "../client/materialize.js";
 import { syncHerdrPlugin } from "../herdr/setup.js";
-import type { JsonValue } from "../state/json.js";
+import { canonicalJson, type JsonValue } from "../state/json.js";
 import { verifyInactiveBackup } from "./backup.js";
 import { renderClientView, runViewer } from "./tui.js";
+
+const CLI_CLIENT_ID = "pi-workflows-cli";
 
 const USAGE = `pi-workflows — workflow runs and controller resources
 
@@ -212,7 +215,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       throw new Error("state prune backup path must be absolute");
     }
 
-    const client = new WorkflowClient();
+    const client = new WorkflowClient({ clientId: CLI_CLIENT_ID });
     try {
       await client.ensureRunning();
       if (args.command === "runs") {
@@ -284,7 +287,16 @@ async function runStateCommand(client: WorkflowClient, args: CliArgs): Promise<v
               : { backupPath: path.resolve(args.backupDestination) }),
           }
         : {};
-  const response = await client.request({ operation, payload });
+  const durable =
+    args.stateAction === "backup" || (args.stateAction === "prune" && args.pruneApply === true);
+  const idempotencyKey = durable
+    ? `state-${createHash("sha256").update(canonicalJson({ operation, payload })).digest("hex")}`
+    : undefined;
+  const response = await client.request({
+    operation,
+    payload,
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+  });
   requireAccepted(response);
   process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
 }
@@ -307,7 +319,7 @@ async function runHost(
     });
     return 0;
   }
-  const client = new WorkflowClient();
+  const client = new WorkflowClient({ clientId: CLI_CLIENT_ID });
   try {
     const response =
       action === "start"

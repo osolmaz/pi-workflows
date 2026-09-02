@@ -288,7 +288,10 @@ export class HostViewStore {
         eventPage,
         capture: toJson(loaded.sessionCapture),
         integrity: toJson(loaded.sessionIntegrity),
-        replayCheckpoint: this.runs.readSessionReplayCheckpoint(runId, eventPage.start),
+        replayCheckpoint: this.projectReplayCheckpoint(
+          runId,
+          this.runs.readSessionReplayCheckpoint(runId, eventPage.start),
+        ),
       },
       settingsScopes: settingsPage.items,
       settingsStart: settingsPage.start,
@@ -390,6 +393,10 @@ export class HostViewStore {
     return this.projectRecordField(runId, update, "data");
   }
 
+  private projectReplayCheckpoint(runId: string, value: JsonValue | null): JsonValue {
+    return value === null ? null : this.projectValue(runId, value);
+  }
+
   private projectRecordField(runId: string, value: unknown, field: string): JsonValue {
     const projected = toJson(value);
     if (isJsonObject(projected)) {
@@ -417,7 +424,8 @@ export class HostViewStore {
   }
 
   private projectWorkflow(runId: string, value: unknown): JsonValue {
-    const workflow = escapeArtifactSentinels(toJson(value));
+    const original = toJson(value);
+    const workflow = escapeArtifactSentinels(original);
     if (Buffer.byteLength(canonicalJson(workflow)) <= VIEW_PAGE_BYTES * 2) return workflow;
     if (
       !isJsonObject(workflow) ||
@@ -427,7 +435,7 @@ export class HostViewStore {
       typeof workflow.startAt !== "string" ||
       !Array.isArray(workflow.edges)
     ) {
-      return this.registerContent(runId, workflow, "application/json");
+      return this.registerContent(runId, original, "application/json");
     }
     const nodeEntries = Object.entries(workflow.nodes);
     const boundedNodeEntries = byteBoundedForwardPage(nodeEntries, ([nodeId, node]) => [
@@ -452,7 +460,7 @@ export class HostViewStore {
       edges,
       edgeStart: 0,
       edgeTotal: workflow.edges.length,
-      content: this.registerContent(runId, workflow, "application/json"),
+      content: this.registerContent(runId, original, "application/json"),
     };
   }
 

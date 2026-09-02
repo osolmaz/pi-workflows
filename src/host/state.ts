@@ -220,34 +220,45 @@ export class HostStateStore {
     return this.commandResponse(request.requestId, row);
   }
 
+  adoptCommand(request: ClientRequest): ClientResponse | undefined {
+    const existing = this.readCommand(request);
+    if (existing !== undefined) {
+      return existing.outcome === "accepted" || existing.outcome === "adopted"
+        ? { ...existing, outcome: "adopted" }
+        : existing;
+    }
+    const idempotent = this.state.connection
+      .prepare(
+        `SELECT request_id AS requestId, request_fingerprint AS clientRequestFingerprint,
+                outcome, accepted_revision AS revision, receipt_hash AS receiptHash,
+                error_hash AS errorHash
+         FROM host_commands WHERE client_id = ? AND idempotency_key = ?`,
+      )
+      .get(request.clientId, request.idempotencyKey);
+    if (!isIdempotentCommandRow(idempotent)) return undefined;
+    if (!idempotent.clientRequestFingerprint.equals(clientRequestFingerprint(request))) {
+      return conflictResponse(request.requestId, "Idempotency key was reused with another payload");
+    }
+    const adopted = this.commandResponse(idempotent.requestId, idempotent);
+    return {
+      ...adopted,
+      requestId: request.requestId,
+      ...(adopted.outcome === "accepted" || adopted.outcome === "adopted"
+        ? { outcome: "adopted" as const }
+        : {}),
+    };
+  }
+
   executeCommand(
     request: ClientRequest,
     hostEpoch: number,
     operation: () => Omit<ClientResponse, "schema" | "type" | "requestId">,
   ): ClientResponse {
-    const existing = this.readCommand(request);
-    if (existing !== undefined) {
-      return existing.outcome === "conflict" ? existing : { ...existing, outcome: "adopted" };
-    }
+    const existing = this.adoptCommand(request);
+    if (existing !== undefined) return existing;
     return this.state.transaction(() => {
-      const idempotent = this.state.connection
-        .prepare(
-          `SELECT request_id AS requestId, request_fingerprint AS clientRequestFingerprint,
-                  outcome, accepted_revision AS revision, receipt_hash AS receiptHash,
-                  error_hash AS errorHash
-           FROM host_commands WHERE client_id = ? AND idempotency_key = ?`,
-        )
-        .get(request.clientId, request.idempotencyKey);
-      if (isIdempotentCommandRow(idempotent)) {
-        if (!idempotent.clientRequestFingerprint.equals(clientRequestFingerprint(request))) {
-          return conflictResponse(
-            request.requestId,
-            "Idempotency key was reused with another payload",
-          );
-        }
-        const adopted = this.commandResponse(idempotent.requestId, idempotent);
-        return { ...adopted, requestId: request.requestId, outcome: "adopted" };
-      }
+      const idempotent = this.adoptCommand(request);
+      if (idempotent !== undefined) return idempotent;
 
       const result = operation();
       const response: ClientResponse = {

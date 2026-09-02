@@ -155,9 +155,12 @@ describe("client protocol fixtures", () => {
     ).toThrow("exceeds 1 MiB");
   });
 
-  it("creates stable request fingerprints", () => {
+  it("creates stable durable request fingerprints", () => {
     expect(clientRequestFingerprint(request)).toEqual(clientRequestFingerprint({ ...request }));
-    expect(clientRequestFingerprint({ ...request, requestId: "request-2" })).not.toEqual(
+    expect(clientRequestFingerprint({ ...request, requestId: "request-2" })).toEqual(
+      clientRequestFingerprint(request),
+    );
+    expect(clientRequestFingerprint({ ...request, payload: { changed: true } })).not.toEqual(
       clientRequestFingerprint(request),
     );
   });

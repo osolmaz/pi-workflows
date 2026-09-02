@@ -133,7 +133,7 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 
 The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of pending delivery records and their complete count. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
-Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus a durable reference to the complete definition. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. Session-event pages include the replay checkpoint immediately before their first event. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
+Large history remains available through byte-bounded pages. The host counts histories and reads only the selected SQLite ranges. A page has an item limit and an encoded byte budget. It echoes the requested cursor and run-view revision, and a client rejects a response that no longer matches its request or current snapshot. Large workflow topology has bounded node, edge, graph-step, and transition projections plus a durable reference to the complete original definition. TypeScript clients assemble every run-history page for one revision and hydrate the complete definition. Values that do not fit inline use digest-bound opaque content references, and `view.content` returns the complete value in verified chunks before a TypeScript non-interactive viewer emits the complete run or the extension updates its widget. Session-event pages include the replay checkpoint immediately before their first event. A large checkpoint uses the same content protocol. TypeScript hydrates it with the run view, and Rust requests and resolves it before replay. The complete logical result remains available. The client protocol does not add an arbitrary user-visible truncation.
 
 The run list is also byte-bounded and revision-bound. It contains only lightweight status and source facts. TypeScript and Rust clients assemble every page for one revision before replacing the visible complete list. An unchanged subscription performs a lightweight revision check and reuses its prior result.
 
@@ -212,6 +212,8 @@ This is an alpha hard replacement.
 - Do not change the SQLite schema unless implementation proves that the host view needs a durable field. The activity overlay needs no durable field.
 - Replace the current live wire contracts with `pi-workflows.client.v1` in place.
 - Keep the run-view schema at version 1 and change its fields in place.
+- Extend the version-1 `host_commands` operation set in place so backup and prune receipts are durable.
+- Exclude transport request IDs from durable request fingerprints. Keep every other command field in the durable identity.
 - Remove direct live SQLite access from the Pi extension, TypeScript viewer paths, replay server, Rust viewer, and active-state maintenance CLI.
 - Remove the old replay protocol and all production fallback selection.
 - Keep old incompatible state untouched and use the standard backup-and-reset instruction only when the SQLite digest itself is incompatible.
@@ -233,7 +235,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `src/host/`, `src/state/`, controller stores, and state maintenance commands.
 
-**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values before advertising their content references. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
+**Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values before advertising their content references. Store the complete original workflow definition, not its escaped projection. Externalize large replay checkpoints and make both clients resolve them. Give the CLI one stable client identity and stable keys for backup and applied prune. Keep an in-flight maintenance operation alive after disconnect, store its accepted or rejected command receipt before response, wait for it during host shutdown, and adopt an exact retry. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
 
 **Verification:** Concurrent run changes cannot produce a view for the wrong session or combine two revisions. A source-level dependency test fails if production extension, CLI, relay, or Rust code opens the active database path. It permits SQLite only in the named TypeScript module that verifies an explicit inactive backup.
 
@@ -297,7 +299,9 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - Status precedence and allowed-control table tests.
 - Activity validation against the recorded delivery entry, idempotency, sequence, first report after reconnect, refresh-before-expiry, disconnect, and bounded expiry tests.
 - Atomic origin-session view tests, including bounded pending delivery records and removal of a terminal run when its reservation ends.
-- Large workflow-topology frame tests with complete durable definition recovery.
+- Large workflow-topology frame tests with exact complete durable definition recovery, including user data that looks like an artifact sentinel.
+- Large replay-checkpoint frame tests with TypeScript hydration and Rust artifact resolution.
+- Durable backup and applied-prune retry tests with a new transport request ID and one stored receipt.
 - Full TypeScript run-page assembly, widget history, and content-hydration tests, plus Rust page and content retrieval tests.
 - Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
 - Durable generated-content recovery after memory-cache eviction.
