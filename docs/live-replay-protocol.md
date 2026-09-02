@@ -60,7 +60,7 @@ The closed outcomes are `accepted`, `adopted`, `rejected`, `conflict`, `notFound
 
 ## Run and session views
 
-The host produces `pi-workflows.run-view.v1` from one consistent database read. The view contains the bounded workflow state, graph, trace, session projection, page cursors, presentation revision, and one `display` object. A terminal display includes the complete stored failure reason, not only its machine error code.
+The host produces `pi-workflows.run-view.v1` from one consistent database read. The view contains the bounded workflow state, graph, trace, session projection, page cursors, presentation revision, and one `display` object. A terminal display includes the stored failure reason, not only its machine error code. A reason above the shared 16 KiB inline-content threshold uses a small `reason` notice and a digest-bound `reasonContent` reference. This keeps the run list below the 1 MiB frame limit and keeps the complete diagnostic available.
 
 The closed display statuses are:
 
@@ -88,7 +88,7 @@ Large prompt, output, event, settings, follow-up, and update values use a conten
 
 ## Subscriptions and reconnection
 
-A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. A request to watch a run that does not exist returns `notFound` and does not install a subscription. Explicit `piw <runId>` mode keeps that run selected even when the run list contains a newer run. After reconnection, the client sends accepted subscriptions again with its run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches. Unsubscribing sends the subscription ID to the host for every subscription kind, so no unused snapshot work remains on a live connection.
+A client keeps one persistent connection and records its desired run-list, run, and origin-session subscriptions. A request to watch a run that does not exist returns `notFound` and does not install a subscription. TypeScript and Rust clients show that response instead of waiting for a snapshot. Explicit `piw <runId>` mode keeps that run selected even when the run list contains a newer run. After reconnection, the client sends accepted subscriptions again with its run revision. The host sends a bounded snapshot when the client needs one. The protocol also supports retained revision patches. Unsubscribing sends the subscription ID to the host for every subscription kind, so no unused snapshot work remains on a live connection.
 
 A slow or disconnected client cannot stop the host, another client, claim renewal, or workflow execution. The host waits for socket drain before it publishes another snapshot to that connection. Polling coalesces while the connection is blocked, so the socket buffer cannot grow by one snapshot on every poll. When a connection closes, the host removes its subscriptions and exact origin-session activity immediately.
 

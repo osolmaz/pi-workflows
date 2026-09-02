@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { once } from "node:events";
 import fs from "node:fs";
 import net, { type Socket } from "node:net";
 import path from "node:path";
@@ -483,7 +482,7 @@ export class WorkflowHost {
         void (async () => {
           const request = parseClientRequest(frame);
           const response = await this.handleClientRequest(connection, request);
-          if (!socket.write(encodeProtocolLine(response))) await once(socket, "drain");
+          if (!socket.write(encodeProtocolLine(response))) await waitForSocketDrain(socket);
           this.publishConnection(connection);
         })().catch(() => {
           socket.destroy();

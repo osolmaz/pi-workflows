@@ -894,8 +894,15 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
             _ => {}
         },
         ServerMessage::Response(response) => {
-            if response.outcome == "unavailable" || response.outcome == "rejected" {
-                shared.lock().unwrap().error = response.error;
+            if response.outcome == "unavailable"
+                || response.outcome == "rejected"
+                || response.outcome == "notFound"
+            {
+                shared.lock().unwrap().error = Some(
+                    response
+                        .error
+                        .unwrap_or_else(|| format!("workflow request was {}", response.outcome)),
+                );
             } else if let Some(receipt) = response.receipt {
                 match receipt.get("schema").and_then(Value::as_str) {
                     Some("pi-workflows.run-list-page.v1") => {
@@ -1262,6 +1269,24 @@ fn page_name(kind: PageKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::protocol::PatchOp;
+
+    #[test]
+    fn missing_run_watch_sets_a_visible_client_error() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let message = crate::protocol::canonical_json(&json!({
+            "schema": PROTOCOL_ID,
+            "type": "response",
+            "requestId": "watch-missing",
+            "outcome": "notFound",
+            "error": "Workflow run not found"
+        }))
+        .unwrap();
+        handle_server_message(&message, &shared).unwrap();
+        assert_eq!(
+            shared.lock().unwrap().error.as_deref(),
+            Some("Workflow run not found")
+        );
+    }
 
     #[test]
     fn decodes_the_host_owned_run_view_contract() {

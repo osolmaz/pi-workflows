@@ -118,7 +118,7 @@ Move the public client boundary to `src/client/`.
 - bounded snapshot recovery when a cursor is stale or a client falls behind;
 - repeatable page navigation, including returning to a previously viewed cursor;
 - protocol and package-version rejection;
-- sanitized unavailable errors.
+- sanitized unavailable and not-found errors, including closed-socket backpressure waits.
 
 The Pi extension and TypeScript CLI use this implementation. Rust implements the same wire contract in `tui/src/client.rs` and proves parity with the shared fixtures. Rust does not import TypeScript and does not know the SQLite schema digest.
 
@@ -129,7 +129,7 @@ The host produces `pi-workflows.run-view.v1` from one consistent host-side read.
 - the current bounded workflow, graph, attempt, trace, and session projection;
 - presentation revision and page cursors;
 - live and interruption facts;
-- a `display` object with effective status, activity kind, allowed controls, and a bounded reason when action is required.
+- a `display` object with effective status, activity kind, allowed controls, and either the complete inline reason or a small notice plus a digest-bound `reasonContent` reference.
 
 The run-list row contains the same `display` object. The origin-session response contains the complete active run view or no active run plus an ordered byte-bounded window of pending delivery records and their complete count. It does not retain an older terminal run after the active session reservation ends. Those records include the request, delivery, contract, revision, presentation entry, and claim facts that the shared delivery coordinator needs for steps, decisions, notifications, and terminal turns. The host returns this session response from one consistent read. A client does not resolve a reservation, load a run, or inspect delivery tables in separate reads.
 
@@ -305,11 +305,11 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 - More-than-256-node graph-history tests that recover all graph steps and transitions through verified content in TypeScript and Rust.
 - Large replay-checkpoint frame tests with TypeScript hydration and Rust artifact resolution.
 - Durable backup and applied-prune retry tests with a new transport request ID and one stored receipt, plus separate-invocation key tests that prevent stale receipt reuse.
-- One-shot missing-run tests that return a not-found error instead of rendering `null`.
+- One-shot and Rust explicit-watch missing-run tests that show a not-found error instead of rendering `null` or loading forever.
 - Full TypeScript run-page assembly, exact-attempt step-trace selection, widget history, and content-hydration tests that bind bytes to the advertised digest, plus Rust page and content retrieval tests.
 - Extension mutation tests that prove the durable client path is used for starts, updates, and submissions.
-- Slow subscriber backpressure, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
-- Durable generated-content recovery after memory-cache eviction, same-byte media collision tests, and run-scoped read tests.
+- Slow subscriber and response backpressure, close-before-drain cleanup, explicit unsubscribe, stale revision, reconnect, and bounded page tests.
+- Durable generated-content recovery after memory-cache eviction, same-byte media collision tests, run-scoped read tests, and oversized run-list diagnostic references.
 - Run-list and full-view failure tests that preserve the complete stored diagnostic instead of the machine error code.
 - Idempotent interaction retry with a different attempted submission ID.
 - Rust run-switch cleanup, explicit single-run selection, and cross-platform local transport compilation.

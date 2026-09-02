@@ -19,6 +19,7 @@ export type WorkflowDisplay = {
   activity: "supervised_worker" | "origin_turn" | null;
   controls: Array<"pause" | "resume" | "cancel" | "answer" | "review">;
   reason: string | null;
+  reasonContent?: JsonValue;
 };
 
 export type WorkflowRunQueueView = {
