@@ -161,21 +161,63 @@ describe("host workflow display reducer", () => {
       cwd: projectPath,
       boundAt: "2026-01-01T00:00:00.000Z",
     });
-    const events: WorkflowSessionEventRecord[] = Array.from({ length: 300 }, (_, index) => {
-      const turn = Math.floor(index / 2);
-      const started = index % 2 === 0;
-      return {
-        seq: index + 1,
-        at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
-        nodeId: "reply",
-        attemptId,
-        turnId: `turn-${turn}`,
-        type: started ? "turn_started" : "turn_finished",
-        payload: started
-          ? { turnIndex: turn }
-          : { turnIndex: turn, messageId: `message-${turn}`, toolCallIds: [] },
-      };
-    });
+    const largeStreamingTexts = Array.from(
+      { length: 4 },
+      (_, index) => `message-${index} ${"stream ".repeat(55_000)}`,
+    );
+    const streamingEvents = largeStreamingTexts.flatMap(
+      (content, messageIndex): WorkflowSessionEventRecord[] => {
+        const seq = messageIndex * 3 + 1;
+        const messageId = `large-streaming-message-${messageIndex}`;
+        return [
+          {
+            seq,
+            at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, seq - 1)).toISOString(),
+            nodeId: "reply",
+            attemptId,
+            messageId,
+            type: "message_started",
+            payload: { role: "assistant" },
+          },
+          {
+            seq: seq + 1,
+            at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, seq)).toISOString(),
+            nodeId: "reply",
+            attemptId,
+            messageId,
+            type: "assistant_event",
+            payload: { type: "text_start", contentIndex: 0 },
+          },
+          {
+            seq: seq + 2,
+            at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, seq + 1)).toISOString(),
+            nodeId: "reply",
+            attemptId,
+            messageId,
+            type: "assistant_event",
+            payload: { type: "text_end", contentIndex: 0, content },
+          },
+        ];
+      },
+    );
+    const events: WorkflowSessionEventRecord[] = [
+      ...streamingEvents,
+      ...Array.from({ length: 300 }, (_, index): WorkflowSessionEventRecord => {
+        const turn = Math.floor(index / 2);
+        const started = index % 2 === 0;
+        return {
+          seq: index + streamingEvents.length + 1,
+          at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index + streamingEvents.length)).toISOString(),
+          nodeId: "reply",
+          attemptId,
+          turnId: `turn-${turn}`,
+          type: started ? "turn_started" : "turn_finished",
+          payload: started
+            ? { turnIndex: turn }
+            : { turnIndex: turn, messageId: `message-${turn}`, toolCallIds: [] },
+        };
+      }),
+    ];
     await runs.appendSessionEventBatch("run-large-view", events);
 
     const views = new HostViewStore(state, queue, hostState, runs, () => false);
@@ -263,11 +305,34 @@ describe("host workflow display reducer", () => {
 
     const session = view.session as {
       eventPage?: { start?: number; items?: unknown[] };
-      replayCheckpoint?: { throughSeq?: number } | null;
+      replayCheckpoint?: {
+        $artifact?: { path?: string; bytes?: number; sha256?: string };
+      } | null;
     };
     expect(session.eventPage?.items).toHaveLength(256);
     expect(session.eventPage?.start).toBeGreaterThan(0);
-    expect(session.replayCheckpoint?.throughSeq).toBe(session.eventPage?.start);
+    const checkpointPath = session.replayCheckpoint?.$artifact?.path;
+    expect(session.replayCheckpoint?.$artifact?.bytes).toBeGreaterThan(MAX_PROTOCOL_MESSAGE_BYTES);
+    if (checkpointPath === undefined)
+      throw new Error("large replay checkpoint was not externalized");
+    const checkpointChunks: Buffer[] = [];
+    let checkpointOffset = 0;
+    for (;;) {
+      const chunk = coldViews.content(view.runId, checkpointPath, checkpointOffset) as {
+        data: string;
+        nextOffset: number;
+        complete: boolean;
+      };
+      checkpointChunks.push(Buffer.from(chunk.data, "base64"));
+      checkpointOffset = chunk.nextOffset;
+      if (chunk.complete) break;
+    }
+    const checkpoint = JSON.parse(Buffer.concat(checkpointChunks).toString("utf8")) as {
+      throughSeq?: number;
+      messages?: Array<{ blocks?: Array<{ text?: string }> }>;
+    };
+    expect(checkpoint.throughSeq).toBe(session.eventPage?.start);
+    expect(checkpoint.messages?.[0]?.blocks?.[0]?.text).toBe(largeStreamingTexts[0]);
     state.close();
   });
 
@@ -294,6 +359,7 @@ describe("host workflow display reducer", () => {
       startAt: "node-0",
       nodes,
       edges,
+      operatorData: { $artifact: { path: "operator-owned", note: "not a host reference" } },
     };
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
     queue.enqueueWorkflowRun({
@@ -341,9 +407,12 @@ describe("host workflow display reducer", () => {
     if (digest === undefined) throw new Error("full workflow content reference missing");
     const blob = runs.readContentBlob(view.runId, digest);
     expect(blob).toBeDefined();
-    expect(
-      Object.keys(JSON.parse(blob?.content.toString("utf8") ?? "null").nodes as object),
-    ).toHaveLength(nodeCount);
+    const fullWorkflow = JSON.parse(blob?.content.toString("utf8") ?? "null") as {
+      nodes: object;
+      operatorData?: unknown;
+    };
+    expect(Object.keys(fullWorkflow.nodes)).toHaveLength(nodeCount);
+    expect(fullWorkflow.operatorData).toEqual(snapshot.operatorData);
     state.close();
   });
 

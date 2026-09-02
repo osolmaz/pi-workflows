@@ -162,7 +162,9 @@ export function parseClientResponse(line: string | Buffer): ClientResponse {
 }
 
 export function clientRequestFingerprint(request: ClientRequest): Buffer {
-  return createHash("sha256").update(canonicalJson(request)).digest();
+  return createHash("sha256")
+    .update(canonicalJson({ ...request, requestId: undefined }))
+    .digest();
 }
 
 export function clientSocketPath(databasePath: string): string {

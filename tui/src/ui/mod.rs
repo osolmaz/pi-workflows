@@ -867,6 +867,9 @@ impl App {
             for value in data.session_events.iter().chain(data.session_entries) {
                 collect_artifact_paths(value, &mut paths);
             }
+            if let Some(checkpoint) = data.session_replay_checkpoint.as_ref() {
+                collect_artifact_paths(checkpoint, &mut paths);
+            }
             paths.sort();
             paths.dedup();
             paths

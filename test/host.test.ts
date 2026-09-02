@@ -383,21 +383,64 @@ describe("global workflow host", () => {
     const directory = await makeTempDir("host-state-maintenance");
     const databasePath = path.join(directory, "state.sqlite");
     const backupPath = path.join(directory, "backup.sqlite");
+    const explicitBackupPath = path.join(directory, "explicit-backup.sqlite");
     const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
     await host.start();
-    const client = new WorkflowClient({ databasePath });
+    const client = new WorkflowClient({ databasePath, clientId: "maintenance-test" });
     try {
+      const before = new Date().toISOString();
       const preview = await client.request({
         operation: "state.prune",
-        payload: { before: new Date().toISOString(), apply: false },
+        payload: { before, apply: false },
       });
       expect(preview).toMatchObject({ outcome: "accepted", receipt: { applied: false } });
+      const appliedPayload = { before, apply: true, backupPath };
       const applied = await client.request({
         operation: "state.prune",
-        payload: { before: new Date().toISOString(), apply: true, backupPath },
+        requestId: "prune-apply-1",
+        idempotencyKey: "prune-apply",
+        payload: appliedPayload,
       });
       expect(applied).toMatchObject({ outcome: "accepted", receipt: { applied: true } });
+      const adopted = await client.request({
+        operation: "state.prune",
+        requestId: "prune-apply-2",
+        idempotencyKey: "prune-apply",
+        payload: appliedPayload,
+      });
+      expect(adopted).toMatchObject({ outcome: "adopted", receipt: applied.receipt });
       await expect(fs.stat(backupPath)).resolves.toBeDefined();
+
+      const mutableHost = host as unknown as {
+        state: { backup: (destination: string) => Promise<void> };
+      };
+      const originalBackup = mutableHost.state.backup.bind(mutableHost.state);
+      const backupSpy = vi
+        .spyOn(mutableHost.state, "backup")
+        .mockImplementation(async (destination) => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          await originalBackup(destination);
+        });
+      const firstBackup = client.request({
+        operation: "state.backup",
+        requestId: "backup-1",
+        idempotencyKey: "backup",
+        payload: { destination: explicitBackupPath },
+      });
+      const secondBackup = client.request({
+        operation: "state.backup",
+        requestId: "backup-2",
+        idempotencyKey: "backup",
+        payload: { destination: explicitBackupPath },
+      });
+      const [backup, adoptedBackup] = await Promise.all([firstBackup, secondBackup]);
+      expect(backup).toMatchObject({
+        outcome: "accepted",
+        receipt: { destination: explicitBackupPath },
+      });
+      expect(adoptedBackup).toMatchObject({ outcome: "adopted", receipt: backup.receipt });
+      expect(backupSpy).toHaveBeenCalledTimes(1);
+      await expect(fs.stat(explicitBackupPath)).resolves.toBeDefined();
     } finally {
       await client.close();
       await host.stop();

@@ -310,7 +310,7 @@ CREATE TABLE host_commands (
     'checkpoint.answer', 'decision.answer', 'interaction.submit', 'interaction.update',
     'notification.claim', 'notification.deliver', 'turn.claim', 'turn.resolve',
     'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
-    'host.status', 'host.stop'
+    'host.status', 'host.stop', 'state.backup', 'state.prune'
   )),
   idempotency_key TEXT NOT NULL,
   request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),

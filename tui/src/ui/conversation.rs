@@ -288,8 +288,8 @@ fn temporal_conversation_lines(
     };
     let through = through_event_seq.unwrap_or(u64::MAX);
     let state = if let Some(checkpoint) = replay_checkpoint {
-        let Ok(checkpoint) = serde_json::from_value::<TemporalSessionState>(checkpoint.clone())
-        else {
+        let checkpoint = super::resolve_remote_artifacts(checkpoint, context.remote_artifacts);
+        let Ok(checkpoint) = serde_json::from_value::<TemporalSessionState>(checkpoint) else {
             return vec![Line::from(Span::styled(
                 "invalid temporal replay checkpoint",
                 Style::default().fg(context.palette.error),
@@ -636,6 +636,64 @@ mod tests {
         .join("\n");
         assert!(text.contains("hello"));
         assert!(!text.contains("sequence gap"));
+    }
+
+    #[test]
+    fn temporal_replay_resolves_a_remote_checkpoint_artifact() {
+        let fixture = fixture();
+        let entries = fixture.get("entries").unwrap().as_array().unwrap();
+        let events = fixture.get("events").unwrap().as_array().unwrap();
+        let parsed_entries = entries
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<SessionEntryRecord>, _>>()
+            .unwrap();
+        let parsed_events = events
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<SessionEventRecord>, _>>()
+            .unwrap();
+        let checkpoint = serde_json::to_string(
+            &SessionReplayIndex::new(&parsed_entries, &parsed_events, 256).state_at_seq(4),
+        )
+        .unwrap();
+        let artifact_path = "artifacts/sha256/checkpoint.json";
+        let artifacts: HashMap<String, std::result::Result<String, String>> =
+            HashMap::from([(artifact_path.to_string(), Ok(checkpoint.clone()))]);
+        let checkpoint_ref = json!({
+            "$artifact": {
+                "path": artifact_path,
+                "mediaType": "application/json",
+                "bytes": checkpoint.len(),
+                "sha256": "0".repeat(64),
+                "opaque": true
+            }
+        });
+        let text = conversation_lines(
+            entries,
+            &events[4..],
+            &[],
+            None,
+            ConversationRenderOptions {
+                at_latest_step: false,
+                through_event_seq: Some(7),
+                width: 100,
+                palette: &Palette::catppuccin(),
+                run_dir: None,
+                remote_artifacts: &artifacts,
+                selected_entry: None,
+                payload_expanded: false,
+                replay_checkpoint: Some(&checkpoint_ref),
+            },
+        )
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(text.contains("hello"));
+        assert!(!text.contains("invalid temporal replay checkpoint"));
     }
 
     #[test]

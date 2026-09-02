@@ -131,11 +131,37 @@ describe("host durable state", () => {
       outcome: "adopted",
       receipt: { live: true },
     });
+    expect(host.executeCommand(request({ requestId: "request-2" }), 1, execute)).toMatchObject({
+      requestId: "request-2",
+      outcome: "adopted",
+      receipt: { live: true },
+    });
     expect(calls).toBe(1);
     expect(host.executeCommand(request({ payload: { changed: true } }), 1, execute)).toMatchObject({
       outcome: "conflict",
     });
     expect(calls).toBe(1);
+
+    let rejectedCalls = 0;
+    const rejected = () => {
+      rejectedCalls += 1;
+      return { outcome: "rejected" as const, error: "invalid request" };
+    };
+    expect(
+      host.executeCommand(
+        request({ requestId: "rejected-1", idempotencyKey: "rejected" }),
+        1,
+        rejected,
+      ),
+    ).toMatchObject({ outcome: "rejected", error: "invalid request" });
+    expect(
+      host.executeCommand(
+        request({ requestId: "rejected-2", idempotencyKey: "rejected" }),
+        1,
+        rejected,
+      ),
+    ).toMatchObject({ outcome: "rejected", error: "invalid request" });
+    expect(rejectedCalls).toBe(1);
     host.close();
     queue.close();
   });

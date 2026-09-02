@@ -191,6 +191,7 @@ export class WorkflowHost {
   private readonly activeControllers = new Map<string, ActiveController>();
   private readonly controlClaims = new Map<string, string>();
   private readonly activationTasks = new Map<string, Promise<void>>();
+  private readonly maintenanceCommands = new Map<string, Promise<ClientResponse>>();
   private readonly pendingStarts = new Set<string>();
   private readonly pendingRunClaims = new Map<string, string>();
   private readonly pendingResumes = new Set<string>();
@@ -331,6 +332,7 @@ export class WorkflowHost {
       }),
     );
     await Promise.allSettled(this.activationTasks.values());
+    await Promise.allSettled(this.maintenanceCommands.values());
     this.registry.killAll();
     this.deliveryClaims.clear();
     if (this.claim !== null) this.hostState.releaseHost(this.claim);
@@ -602,32 +604,83 @@ export class WorkflowHost {
         case "state.verify":
           this.state.integrityCheck();
           return clientResponse(request.requestId, "accepted", { valid: true });
-        case "state.backup": {
-          const payload = requireRecord(request.payload, "state.backup payload");
-          const destination = requireAbsolutePath(payload.destination, "destination");
-          await this.state.backup(destination);
-          return clientResponse(request.requestId, "accepted", { destination });
-        }
-        case "state.prune": {
-          const payload = requireRecord(request.payload, "state.prune payload");
-          const before = requireString(payload.before, "before");
-          const apply = requireBoolean(payload.apply, "apply");
-          const backupPath =
-            payload.backupPath === undefined
-              ? undefined
-              : requireAbsolutePath(payload.backupPath, "backupPath");
-          const report = await pruneState(this.state, this.databasePath, {
-            before,
-            apply,
-            ...(backupPath === undefined ? {} : { backupPath }),
+        case "state.backup":
+          return await this.executeMaintenanceCommand(request, async () => {
+            const payload = requireRecord(request.payload, "state.backup payload");
+            const destination = requireAbsolutePath(payload.destination, "destination");
+            await this.state.backup(destination);
+            return { destination };
           });
-          return clientResponse(request.requestId, "accepted", toJsonValue(report));
-        }
+        case "state.prune":
+          return await this.executeMaintenanceCommand(request, async () => {
+            const payload = requireRecord(request.payload, "state.prune payload");
+            const before = requireString(payload.before, "before");
+            const apply = requireBoolean(payload.apply, "apply");
+            const backupPath =
+              payload.backupPath === undefined
+                ? undefined
+                : requireAbsolutePath(payload.backupPath, "backupPath");
+            const report = await pruneState(this.state, this.databasePath, {
+              before,
+              apply,
+              ...(backupPath === undefined ? {} : { backupPath }),
+            });
+            return toJsonValue(report);
+          });
         default:
           return this.handleRequest(request);
       }
     } catch (error) {
       return clientResponse(request.requestId, "rejected", undefined, errorMessage(error));
+    }
+  }
+
+  private async executeMaintenanceCommand(
+    request: ClientRequest,
+    operation: () => Promise<JsonValue>,
+  ): Promise<ClientResponse> {
+    const adopted = this.hostState.adoptCommand(request);
+    if (adopted !== undefined) return adopted;
+    const claim = this.claim;
+    if (claim === null || this.stopping) {
+      return clientResponse(
+        request.requestId,
+        "unavailable",
+        undefined,
+        "Workflow host is stopping",
+      );
+    }
+    const key = canonicalJson([request.clientId, request.idempotencyKey]);
+    const active = this.maintenanceCommands.get(key);
+    if (active !== undefined) {
+      await active;
+      return (
+        this.hostState.adoptCommand(request) ??
+        clientResponse(
+          request.requestId,
+          "unavailable",
+          undefined,
+          "Workflow maintenance command did not complete durably",
+        )
+      );
+    }
+
+    const execution = (async (): Promise<ClientResponse> => {
+      let result: Omit<ClientResponse, "schema" | "type" | "requestId">;
+      try {
+        result = { outcome: "accepted", receipt: await operation() };
+      } catch (error) {
+        result = { outcome: "rejected", error: errorMessage(error) };
+      }
+      return this.hostState.executeCommand(request, claim.epoch, () => result);
+    })();
+    this.maintenanceCommands.set(key, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.maintenanceCommands.get(key) === execution) {
+        this.maintenanceCommands.delete(key);
+      }
     }
   }
 
