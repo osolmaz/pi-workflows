@@ -416,28 +416,44 @@ struct App {
 
 pub fn run_local(socket_path: &Path, cli_theme: Option<&str>) -> Result<()> {
     let remote = RemoteRuns::connect_local(socket_path)?;
-    run_app(Provider::Remote(remote), true, cli_theme)
+    run_app(Provider::Remote(remote), true, None, cli_theme)
 }
 
 pub fn run_single(socket_path: &Path, run_id: &str, cli_theme: Option<&str>) -> Result<()> {
     let mut remote = RemoteRuns::connect_local(socket_path)?;
     remote.watch(run_id);
-    run_app(Provider::Remote(remote), false, cli_theme)
+    run_app(
+        Provider::Remote(remote),
+        false,
+        Some(run_id.to_owned()),
+        cli_theme,
+    )
 }
 
 pub fn run_remote(url: &str, cli_theme: Option<&str>) -> Result<()> {
     let remote = RemoteRuns::connect(url)?;
-    run_app(Provider::Remote(remote), true, cli_theme)
+    run_app(Provider::Remote(remote), true, None, cli_theme)
 }
 
-fn run_app(provider: Provider, show_sidebar: bool, cli_theme: Option<&str>) -> Result<()> {
+fn run_app(
+    provider: Provider,
+    show_sidebar: bool,
+    initial_run: Option<String>,
+    cli_theme: Option<&str>,
+) -> Result<()> {
     let resolved_theme = theme::resolve(cli_theme);
     let mut terminal = ratatui::init();
     if let Err(error) = crossterm::execute!(std::io::stdout(), EnableMouseCapture) {
         ratatui::restore();
         return Err(error.into());
     }
-    let result = event_loop(&mut terminal, provider, show_sidebar, resolved_theme);
+    let result = event_loop(
+        &mut terminal,
+        provider,
+        show_sidebar,
+        initial_run,
+        resolved_theme,
+    );
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -447,6 +463,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     provider: Provider,
     show_sidebar: bool,
+    initial_run: Option<String>,
     resolved_theme: theme::ResolvedTheme,
 ) -> Result<()> {
     let sidebar_width = resolved_theme
@@ -461,7 +478,7 @@ fn event_loop(
         sidebar_explicit: false,
         sidebar_width,
         inspector_height,
-        selected_run: None,
+        selected_run: initial_run,
         runs_scroll: 0,
         focus: if show_sidebar {
             Focus::Runs
@@ -507,13 +524,15 @@ fn event_loop(
     while !app.quit {
         app.provider.tick();
         let summaries = app.provider.summaries();
-        if app.selected_run.is_none()
-            || !summaries
-                .iter()
-                .any(|summary| Some(&summary.run_id) == app.selected_run.as_ref())
-        {
-            app.selected_run = summaries.first().map(|summary| summary.run_id.clone());
-        }
+        let selected_available = summaries
+            .iter()
+            .any(|summary| Some(&summary.run_id) == app.selected_run.as_ref());
+        app.selected_run = reconcile_selected_run(
+            app.selected_run.take(),
+            summaries.first().map(|summary| summary.run_id.as_str()),
+            selected_available,
+            app.show_sidebar,
+        );
         if let Some(run_id) = app.selected_run.clone() {
             app.provider.ensure_watch(&run_id);
         }
@@ -533,6 +552,19 @@ fn event_loop(
         }
     }
     Ok(())
+}
+
+fn reconcile_selected_run(
+    selected_run: Option<String>,
+    first_available_run: Option<&str>,
+    selected_available: bool,
+    allow_reselection: bool,
+) -> Option<String> {
+    if allow_reselection && (selected_run.is_none() || !selected_available) {
+        first_available_run.map(str::to_owned)
+    } else {
+        selected_run
+    }
 }
 
 impl App {
@@ -3339,11 +3371,11 @@ mod tests {
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
         current_progress_epoch, graph_position_label, inspector_height_for_drag,
         inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, progress_rates,
-        push_human_decision_presentation, resolve_remote_artifacts, resolved_inspector_height,
-        sidebar_width_for_drag, step_projection_contains, temporal_delay_from_page,
-        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
-        InspectorTab, NodeBounds, Palette, Rect, StepRecord, TemporalDelay, TraceScope,
-        DEFAULT_NODE_STYLE,
+        push_human_decision_presentation, reconcile_selected_run, resolve_remote_artifacts,
+        resolved_inspector_height, sidebar_width_for_drag, step_projection_contains,
+        temporal_delay_from_page, temporal_through_seq, trace_events_for_scope,
+        valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds, Palette, Rect, StepRecord,
+        TemporalDelay, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -3372,6 +3404,28 @@ mod tests {
         let epoch = current_progress_epoch(&samples);
         assert_eq!(epoch.len(), 2);
         assert_eq!(progress_rates(epoch), vec![0.005]);
+    }
+
+    #[test]
+    fn single_run_selection_stays_on_the_requested_run() {
+        assert_eq!(
+            reconcile_selected_run(
+                Some("requested-run".to_owned()),
+                Some("newer-run"),
+                false,
+                false,
+            ),
+            Some("requested-run".to_owned())
+        );
+        assert_eq!(
+            reconcile_selected_run(
+                Some("missing-run".to_owned()),
+                Some("newer-run"),
+                false,
+                true,
+            ),
+            Some("newer-run".to_owned())
+        );
     }
 
     #[test]
