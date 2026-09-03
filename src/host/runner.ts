@@ -177,6 +177,8 @@ type SessionCoordinator = {
   connectionId: string;
   epoch: string;
   branchReported: boolean;
+  modelTurnActive: boolean;
+  needsTimerResume: boolean;
 };
 
 type ActiveChannel = {
@@ -272,8 +274,16 @@ export class WorkflowHost {
       snapshotLifecycle: (context) => this.applyLifecycleProjection(context),
       allowHostSessionRecording: true,
     });
-    this.views = new HostViewStore(this.state, this.queue, this.hostState, this.runStore, (runId) =>
-      this.activeRuns.has(runId),
+    this.views = new HostViewStore(
+      this.state,
+      this.queue,
+      this.hostState,
+      this.runStore,
+      (runId) => this.activeRuns.has(runId),
+      (targetSessionId) => {
+        const coordinator = this.sessionCoordinators.get(targetSessionId);
+        return coordinator?.branchReported === true && coordinator.modelTurnActive;
+      },
     );
     this.registry = options.registry ?? new HostProcessRegistry(this.stateDirectory);
   }
@@ -306,6 +316,9 @@ export class WorkflowHost {
         leaseMs: this.options.hostLeaseMs ?? HOST_LEASE_MS,
       });
       this.recoverPreviousHost(previousHost.hostId, this.claim.epoch);
+      const previousHeartbeatAt =
+        previousHost.heartbeatAt === null ? undefined : Date.parse(previousHost.heartbeatAt);
+      this.hostState.recoverInactiveModelTurns(previousHeartbeatAt);
       await this.listen();
       this.startTimers();
       this.started = true;
@@ -544,7 +557,10 @@ export class WorkflowHost {
       this.sockets.delete(socket);
       this.connections.delete(socket);
       for (const [sessionId, coordinator] of this.sessionCoordinators) {
-        if (coordinator.connectionId === connection.id) this.sessionCoordinators.delete(sessionId);
+        if (coordinator.connectionId !== connection.id) continue;
+        this.hostState.markSessionModelTurnsInactive(sessionId);
+        this.sessionCoordinators.delete(sessionId);
+        this.views.noteOriginActivityChange();
       }
       this.views.clearConnection(connection.id);
       this.publishViews();
@@ -608,12 +624,19 @@ export class WorkflowHost {
           const sessionId = requireString(payload.sessionId, "sessionId");
           this.addSubscription(connection, request, "session", sessionId);
           if (payload.coordinator === true) {
+            const previous = this.sessionCoordinators.get(sessionId);
+            if (previous !== undefined && previous.connectionId !== connection.id) {
+              this.hostState.markSessionModelTurnsInactive(sessionId);
+            }
             const coordinator = {
               connectionId: connection.id,
               epoch: `session-epoch-${randomUUID()}`,
               branchReported: false,
+              modelTurnActive: false,
+              needsTimerResume: true,
             } satisfies SessionCoordinator;
             this.sessionCoordinators.set(sessionId, coordinator);
+            this.views.noteOriginActivityChange();
             this.publishViews();
             return clientResponse(request.requestId, "accepted", {
               subscribed: true,
@@ -863,6 +886,9 @@ export class WorkflowHost {
     const messages = this.hostState.workflowMessages.listSession(report.targetSessionId);
     const allowed = new Set(messages.map((message) => message.workflowMessageId));
     this.state.transaction(() => {
+      if (coordinator.needsTimerResume) {
+        this.hostState.resumeSessionModelTurns(report.targetSessionId);
+      }
       this.hostState.workflowMessages.adoptBranch(report.targetSessionId, report.entries, allowed);
       if (report.isIdle && !report.hasPendingMessages) {
         for (const turn of this.hostState.workflowMessages.openTurnsForSession(
@@ -898,7 +924,10 @@ export class WorkflowHost {
         }
       }
       coordinator.branchReported = true;
+      coordinator.modelTurnActive = !report.isIdle;
+      coordinator.needsTimerResume = false;
     });
+    this.views.noteOriginActivityChange();
     this.publishViews();
     return clientResponse(request.requestId, "accepted", {
       recorded: true,
@@ -941,6 +970,8 @@ export class WorkflowHost {
       }
       return this.applyWorkflowTurnEnd(report);
     });
+    coordinator.modelTurnActive = report.state === "started";
+    this.views.noteOriginActivityChange();
     this.publishViews();
     return clientResponse(request.requestId, "accepted", toJsonValue(turn));
   }
@@ -3429,10 +3460,21 @@ export class WorkflowHost {
 
   private expireTimedOutInteraction(): void {
     if (this.stopping || this.claim === null) return;
-    const runId = this.hostState
-      .expiredInteractionRunIds()
-      .find((candidate) => !this.activeRuns.has(candidate) && !this.pendingStarts.has(candidate));
-    if (runId === undefined) return;
+    const activeSessionIds = new Set(
+      [...this.sessionCoordinators.entries()]
+        .filter(([, coordinator]) => coordinator.branchReported && coordinator.modelTurnActive)
+        .map(([sessionId]) => sessionId),
+    );
+    const expired = this.hostState
+      .expiredInteractionRuns()
+      .find(
+        (candidate) =>
+          activeSessionIds.has(candidate.targetSessionId) &&
+          !this.activeRuns.has(candidate.runId) &&
+          !this.pendingStarts.has(candidate.runId),
+      );
+    if (expired === undefined) return;
+    const { runId, targetSessionId } = expired;
     const claimToken = randomUUID();
     const claimed = this.queue.claimWorkflowRunForControl({
       runId,
@@ -3443,7 +3485,11 @@ export class WorkflowHost {
     if (claimed === undefined) return;
     let activated = false;
     try {
-      activated = this.queue.beginWorkflowRunInteractionTimeout({ runId, claimToken });
+      activated = this.queue.beginWorkflowRunInteractionTimeout({
+        runId,
+        targetSessionId,
+        claimToken,
+      });
       if (activated) {
         this.markPendingStart(runId, claimToken);
         setImmediate(() => void this.activateRun(claimed, claimToken));

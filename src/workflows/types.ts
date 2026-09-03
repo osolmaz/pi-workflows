@@ -98,8 +98,8 @@ export type WorkflowProgressData = {
 export type WorkflowNodeCommon = {
   /**
    * Per-node active-execution timeout or a callback that derives it from the run context.
-   * Waiting and paused origin-session time does not count. Null disables the deadline.
-   * Omission falls back to the engine default (15 minutes).
+   * Waiting, paused, disconnected, and host-down origin-session time does not count.
+   * Null disables the deadline. Omission falls back to the engine default (15 minutes).
    */
   timeoutMs?: number | null | ((context: WorkflowNodeContext) => MaybePromise<number | null>);
   /** Short human-readable label shown in the viewer while the node runs. */
