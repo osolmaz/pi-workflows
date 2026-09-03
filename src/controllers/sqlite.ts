@@ -5,6 +5,7 @@ import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson } from "../state/json.js";
 import { resourceIdFor, tokenHash } from "../state/mutation.js";
 import { initializeViewerRun, recordViewerDeltas } from "../state/viewer.js";
+import { WorkflowMessageStore } from "../state/workflow-messages.js";
 import {
   EffectRequestConflictError,
   ResourceConflictError,
@@ -270,6 +271,7 @@ type WorkflowRow = {
 export class SqliteControllerStore implements ControllerStore {
   readonly filePath: string;
   readonly state: StateDatabase;
+  private readonly workflowMessages: WorkflowMessageStore;
   private readonly ownsState: boolean;
   private readonly projectId: string | null;
   private closed = false;
@@ -293,6 +295,7 @@ export class SqliteControllerStore implements ControllerStore {
         checkLegacyState: filePath === workflowStatePath(),
       });
     this.filePath = this.state.filePath;
+    this.workflowMessages = new WorkflowMessageStore(this.state);
     if (options.global === true) {
       this.projectId = null;
     } else {
@@ -1556,7 +1559,7 @@ export class SqliteControllerStore implements ControllerStore {
       "(q.affinity_runner_id IS NULL OR q.affinity_runner_id = ? OR q.status IN ('parked', 'starting', 'running'))",
       "NOT (q.status = 'parked' AND (r.status = 'waiting' OR r.paused = 1))",
       "NOT EXISTS (SELECT 1 FROM interactive_requests i WHERE i.run_id = r.run_id AND i.status = 'pending')",
-      "(q.error_code IS NULL OR q.error_code <> 'workflowSourceChanged')",
+      "(q.error_code IS NULL OR q.error_code NOT IN ('workflowSourceChanged', 'workerNoProgress'))",
     ];
     const params: unknown[] = [now, now, options.runnerId, options.runnerId];
     if (this.projectId !== null) {
@@ -1667,6 +1670,78 @@ export class SqliteControllerStore implements ControllerStore {
 
   parkWorkflowRun(options: { runId: string; claimToken: string; now?: string }): boolean {
     return this.releaseRunClaim(options.runId, options.claimToken, "parked", options.now);
+  }
+
+  parkWorkflowRunForWorkerNoProgress(options: {
+    runId: string;
+    claimToken: string;
+    detail: string;
+    now?: string;
+  }): boolean {
+    const now = epoch(validTimestamp(options.now));
+    return this.state.transaction(() => {
+      if (
+        !this.verifyWorkflowRunClaim({
+          runId: options.runId,
+          claimToken: options.claimToken,
+          now: new Date(now).toISOString(),
+        })
+      ) {
+        return false;
+      }
+      const row = this.requireWorkflowRunRow(options.runId);
+      const lease = this.requireLease(row.resourceId);
+      const detail = options.detail.slice(0, 8_192);
+      const errorHash = this.state.putText(detail, now);
+      const run = this.state.connection
+        .prepare(
+          `UPDATE runs SET status_detail = ?, updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status NOT IN ('completed', 'failed', 'timed_out', 'cancelled')`,
+        )
+        .run(detail, now, options.runId);
+      const queue = this.state.connection
+        .prepare(
+          `UPDATE run_queue
+           SET status = 'parked', error_code = 'workerNoProgress', error_hash = ?,
+               available_at = ?, updated_at = ?, finished_at = NULL
+           WHERE run_id = ? AND status IN ('queued', 'starting', 'running', 'parked')`,
+        )
+        .run(errorHash, now, now, options.runId);
+      if (run.changes !== 1 || queue.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} changed during worker recovery`);
+      }
+      const released = this.state.connection
+        .prepare(
+          `UPDATE leases
+           SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+               acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ? AND token_hash = ? AND generation = ? AND expires_at > ?`,
+        )
+        .run(row.resourceId, tokenHash(options.claimToken), lease.generation, now);
+      /* istanbul ignore if -- the exact live claim is stable in this transaction */
+      if (released.changes !== 1) {
+        throw new Error(`Workflow run ${options.runId} claim changed during worker recovery`);
+      }
+      const revision = this.resourceRevision(row.resourceId);
+      this.bumpResource(row.resourceId, revision, now);
+      this.insertEvent(
+        row.resourceId,
+        revision + 1,
+        "run.worker_no_progress",
+        lease.ownerType ?? "system",
+        lease.ownerId,
+        { status: "parked", code: "workerNoProgress" },
+        now,
+        lease.generation || undefined,
+      );
+      recordViewerDeltas(
+        this.state,
+        options.runId,
+        [{ targetType: "summary" }, { targetType: "replay" }],
+        now,
+      );
+      return true;
+    });
   }
 
   pauseParkedWorkflowRun(options: { runId: string; now?: string }): boolean {
@@ -2015,6 +2090,7 @@ export class SqliteControllerStore implements ControllerStore {
       if (run.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} has inconsistent durable state`);
       }
+      this.settleWorkflowRunMessages(options.runId, now);
       this.cancelWorkflowRunDependents(options.runId, controlId, errorHash, now);
 
       const released = this.state.connection
@@ -2924,6 +3000,7 @@ export class SqliteControllerStore implements ControllerStore {
            WHERE run_id = ?`,
         )
         .run(status, errorHash, now, now, runId);
+      this.settleWorkflowRunMessages(runId, now);
       if (status === "cancelled") {
         this.cancelWorkflowRunDependents(
           runId,
@@ -2951,6 +3028,11 @@ export class SqliteControllerStore implements ControllerStore {
       );
       return true;
     });
+  }
+
+  private settleWorkflowRunMessages(runId: string, now: number): void {
+    this.workflowMessages.settleOpenTurnsForRun(runId, "lost", now);
+    this.workflowMessages.cancelPendingForRun(runId, now);
   }
 
   private cancelWorkflowRunDependents(

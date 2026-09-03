@@ -133,6 +133,8 @@ The run and queue projections follow these states:
 
 A lifecycle transaction updates the run, queue, attempt, decision, lease, event, and viewer facts that belong to one transition. The database must not commit a failed event while the run remains running, or a terminal queue row while the run remains nonterminal.
 
+A terminal state commits before the host builds its terminal workflow message. Missing or invalid presentation data can prevent that message, but it cannot roll back completion, failure, or cancellation. Later branch, turn, and worker reconciliation can try the same terminal message again.
+
 Waiting and paused work does not keep a worker or a live claim. Resume takes a new claim generation and starts a new worker from the last durable boundary.
 
 ## Worker lifecycle
@@ -162,6 +164,8 @@ A worker launch envelope contains:
 
 Before it loads workflow modules, the worker verifies the root identity and every saved mounted file hash or built-in revision. After loading, it also checks the complete mounted-source map against the saved map. A mismatch parks the run with `workflowSourceChanged`. The normal scheduler does not claim that run again. The operator can restore the recorded source and explicitly resume the run, or cancel it. Changed included code does not execute.
 
+After the ready message, the host sends one explicit command: `start`, `resume`, `continue`, or `restart`. A continuation names its waiting checkpoint parent. A restart begins a new run from the workflow start. The worker never infers the command from a nullable parent ID.
+
 The host records a worker epoch before spawn. The child must return a ready message before the startup deadline. Every later child message includes the run ID, generation, and worker epoch.
 
 The host records one terminal worker outcome:
@@ -173,7 +177,7 @@ The host records one terminal worker outcome:
 - `claimLost`
 - `orphaned`
 
-A worker exit is not automatically a run failure. The host decides from the last committed attempt and effect state whether it can resume, must park, or must fail.
+A worker exit is not automatically a run failure. The host decides from the last committed attempt and effect state whether it can resume, must park, or must fail. If the saved run revision did not advance after the worker became ready, the host parks the run with `workerNoProgress` and does not claim it again automatically. An explicit resume can make one new attempt after the operator corrects the cause.
 
 ## Process supervision
 
@@ -365,7 +369,11 @@ The coordinator waits until Pi is idle and has no queued user input, keeps the m
 
 After a send, the coordinator waits for the matching Pi entry and reports the active branch so the host records its entry ID and marks the message `sent`. Branch evidence marks a matching message `sent` even if its source cancelled it after the send. If Pi emits `agent_start` before that report or before the session view loads, the coordinator buffers the start and matching end, records the message first, and then reports the turn events in order.
 
-Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages. If Pi or the extension disappears after the send call but before inspection, the message stays `pending`. A replacement extension reports the branch before another send. Documented Pi APIs do not prove cross-branch absence or exactly-once model execution.
+The host alone decides whether that Pi model turn belongs to the workflow message. `workflowTurn.report` returns a version-1 receipt with `active`, `settled`, or `absent` ownership and the exact saved turn when one exists. The extension exposes workflow activity and starts session capture only after an `active` receipt. It clears its temporary copy after settlement, rejection, or disconnect. Every new Pi `agent_start` replaces any older local copy and requires fresh host acceptance before the turn can become workflow work.
+
+Turn start and end use the exact message, run, session, and turn IDs. A matching repeat adopts the saved result. A conflicting repeat remains an error. When a run becomes terminal, the same transaction ends its open turns as `lost` and cancels pending step and decision messages. Failure and cancellation also cancel pending follow-ups. A committed notification stays eligible for delivery. A late matching end report adopts that terminal cleanup. A terminal run cannot start another step turn, and a later ordinary Pi turn cannot inherit its old workflow ownership.
+
+Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages. If Pi or the extension disappears after the send call but before inspection, the message stays `pending`. A replacement extension reports the branch before another send. The idle branch report settles an unproved open host turn as `lost`. Documented Pi APIs do not prove cross-branch absence or exactly-once model execution.
 
 The extension subscribes to the active origin-session live run view and projects it into Pi's documented widget and status APIs. It never opens SQLite, runs workflow code, or derives a display status. `Shift+Up` and `Shift+Down` scroll the widget. When Herdr is available, the widget also shows `Ctrl+Shift+R piw`, and `/piw` remains the command fallback. Both actions open or focus the exact run from the same view.
 
@@ -427,7 +435,7 @@ Side-effecting action and shell behavior must have one of these contracts:
 - a managed effect with a read-back check that proves whether it applied;
 - an explicit non-resumable result that becomes `ambiguous` after an uncertain crash.
 
-The host reserves an effect before execution. The effect key includes the source resource, effect type, and author-provided idempotency key. The request fingerprint prevents key reuse with another payload.
+The host reserves an effect before execution. The engine creates the idempotency key from the run ID, effect type, full compiled node path, and node visit number. Workflow code provides the effect type and request, but it does not provide this internal key. Included workflows can use the same local node name without sharing a key. The request fingerprint prevents key reuse with another payload.
 
 An applied, rejected, or cancelled effect is terminal. An ambiguous effect is also terminal for automatic retry. An operator may use a separate reviewed recovery action after inspecting the external system.
 
@@ -444,7 +452,8 @@ Controller reconcile code runs in a supervised controller worker, not in the hos
 Use separate states and messages for these failures:
 
 - `claimLost`: another generation owns the run, or the claim expired.
-- `workerCrashed`: the child exited without a terminal protocol message.
+- `workerCrashed`: the child exited without a terminal protocol message after it saved progress.
+- `workerNoProgress`: the child exited before the saved run revision advanced and needs explicit resume or cancellation.
 - `workerTimedOut`: the child exceeded a declared deadline.
 - `hostUnavailable`: the client cannot reach or start the host.
 - `sourceChanged`: the workflow source does not match the saved identity.

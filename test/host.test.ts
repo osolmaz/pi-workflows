@@ -14,6 +14,7 @@ import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../src/host/state.js";
+import type { WorkflowMessage } from "../src/state/workflow-messages.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeComputeWorkflow(cwd: string): Promise<string> {
@@ -1601,7 +1602,10 @@ setInterval(() => {}, 1000);
           runId: message.runId,
           payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
       const activeState = new HostStateStore(databasePath, { readOnly: true });
       const activeDeadline = activeState.state.connection
         .prepare(
@@ -1624,7 +1628,10 @@ setInterval(() => {}, 1000);
           runId: message.runId,
           payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
+      ).toMatchObject({
+        outcome: "adopted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
       const duplicateState = new HostStateStore(databasePath, { readOnly: true });
       try {
         expect(
@@ -1657,7 +1664,10 @@ setInterval(() => {}, 1000);
             responseSessionEntryId: null,
           },
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "ended" } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "settled", turn: { state: "ended" } },
+      });
       await new Promise((resolve) =>
         setTimeout(resolve, Math.max(0, firstActiveDeadlineAt - Date.now()) + 100),
       );
@@ -1721,7 +1731,10 @@ setInterval(() => {}, 1000);
           runId: resumedMessage.runId,
           payload: resumedTurn,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
       const resumedTurnState = new HostStateStore(databasePath, { readOnly: true });
       const resumedTurnDeadline = resumedTurnState.state.connection
         .prepare(
@@ -2063,6 +2076,48 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     }
   }, 45_000);
 
+  it("does not restart a worker that exits before workflow progress", async () => {
+    const cwd = await makeTempDir("host-worker-no-progress-project");
+    const databasePath = path.join(
+      await makeTempDir("host-worker-no-progress-state"),
+      "state.sqlite",
+    );
+    const workflowPath = await writeComputeWorkflow(cwd);
+    const workerPath = path.join(cwd, "worker-no-progress.mjs");
+    await fs.writeFile(workerPath, "process.exit(1);\n", "utf8");
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10, workerEntryPath: workerPath });
+    const client = new WorkflowClient({ databasePath, clientId: "worker-no-progress-client" });
+    await host.start();
+    try {
+      await startRun({ client, cwd, workflowPath, runId: "worker-no-progress-run" });
+      await waitUntil(() => {
+        const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return store.getWorkflowRun("worker-no-progress-run")?.errorCode === "workerNoProgress";
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+      try {
+        expect(store.getWorkflowRun("worker-no-progress-run")).toMatchObject({
+          status: "parked",
+          errorCode: "workerNoProgress",
+        });
+        expect(
+          store.state.connection
+            .prepare("SELECT COUNT(*) AS count FROM run_workers WHERE run_id = ?")
+            .get("worker-no-progress-run"),
+        ).toEqual({ count: 1 });
+      } finally {
+        store.close();
+      }
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
   it("commits active cancellation before it returns the durable receipt", async () => {
     const cwd = await makeTempDir("host-cancel-project");
     const databasePath = path.join(await makeTempDir("host-cancel-state"), "state.sqlite");
@@ -2080,6 +2135,15 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
+      const corrupt = new SqliteControllerStore(databasePath, { global: true });
+      try {
+        const wrongMediaType = corrupt.state.putJson({ not: "text" });
+        corrupt.state.connection
+          .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
+          .run(wrongMediaType, "cancel-run");
+      } finally {
+        corrupt.close();
+      }
       const cancelled = await client.request({
         operation: "run.cancel",
         runId: "cancel-run",
@@ -2104,6 +2168,158 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           idempotencyKey: "cancel-request",
         }),
       ).resolves.toMatchObject({ outcome: "adopted", receipt: { status: "cancelled" } });
+    } finally {
+      await host.stop();
+    }
+  }, 45_000);
+
+  it("adopts a late turn end after terminal cleanup settles the turn", async () => {
+    const cwd = await makeTempDir("host-late-turn-project");
+    const databasePath = path.join(await makeTempDir("host-late-turn-state"), "state.sqlite");
+    const workflowPath = await writeInteractiveWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath, clientId: "late-turn-client" });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "late-turn-run",
+        executionMode: "interactive",
+      });
+      let message: WorkflowMessage | undefined;
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          message = state.workflowMessages
+            .listSession("host-test-session")
+            .find((candidate) => candidate.kind === "step");
+          return message !== undefined;
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      if (message === undefined) throw new Error("workflow step message missing");
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          const worker = state.state.connection
+            .prepare(
+              `SELECT status FROM run_workers
+               WHERE run_id = ? ORDER BY started_at DESC LIMIT 1`,
+            )
+            .get("late-turn-run") as { status: string } | undefined;
+          return worker !== undefined && !["starting", "ready", "running"].includes(worker.status);
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+
+      const subscribed = await client.request({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "late-turn-session",
+          sessionId: "host-test-session",
+          coordinator: true,
+        },
+      });
+      const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
+        ?.coordinatorEpoch;
+      if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
+      await client.request({
+        operation: "workflowMessage.reportBranch",
+        payload: {
+          targetSessionId: "host-test-session",
+          coordinatorEpoch,
+          entries: [
+            {
+              workflowMessageId: message.workflowMessageId,
+              piSessionEntryId: "late-turn-entry",
+            },
+          ],
+          isIdle: false,
+          hasPendingMessages: true,
+        },
+      });
+      const started = {
+        state: "started" as const,
+        workflowMessageId: message.workflowMessageId,
+        workflowTurnId: "late-turn-1",
+        runId: message.runId,
+        targetSessionId: message.targetSessionId,
+        coordinatorEpoch,
+      };
+      await expect(
+        client.request({
+          operation: "workflowTurn.report",
+          runId: message.runId,
+          payload: started,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
+      await expect(
+        client.request({
+          operation: "run.cancel",
+          runId: message.runId,
+          requestId: "late-turn-cancel",
+          idempotencyKey: "late-turn-cancel",
+        }),
+      ).resolves.toMatchObject({
+        outcome: "accepted",
+        receipt: { runId: "late-turn-run", status: "cancelled" },
+      });
+      await expect(
+        client.request({
+          operation: "workflowTurn.report",
+          runId: message.runId,
+          payload: {
+            ...started,
+            state: "ended",
+            stopReason: "error",
+            responseSessionEntryId: null,
+          },
+        }),
+      ).resolves.toMatchObject({
+        outcome: "adopted",
+        receipt: {
+          ownership: "settled",
+          turn: { state: "ended", stopReason: "lost" },
+        },
+      });
+      await expect(
+        client.request({
+          operation: "workflowTurn.report",
+          runId: message.runId,
+          payload: {
+            ...started,
+            workflowMessageId: "other-workflow-message",
+            state: "ended",
+            stopReason: "error",
+            responseSessionEntryId: null,
+          },
+        }),
+      ).resolves.toMatchObject({
+        outcome: "rejected",
+        error: "Workflow turn identity conflict: late-turn-1",
+      });
+
+      const state = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(state.workflowMessages.requireTurn("late-turn-1")).toMatchObject({
+          state: "ended",
+          stopReason: "lost",
+        });
+        expect(
+          state.state.connection
+            .prepare("SELECT COUNT(*) AS count FROM workflow_turns WHERE workflow_message_id = ?")
+            .get(message.workflowMessageId),
+        ).toEqual({ count: 1 });
+      } finally {
+        state.close();
+      }
     } finally {
       await host.stop();
     }
@@ -2425,14 +2641,20 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           runId: terminal.runId,
           payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
       expect(
         await client.request({
           operation: "workflowTurn.report",
           runId: terminal.runId,
           payload: started,
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "started" } });
+      ).toMatchObject({
+        outcome: "adopted",
+        receipt: { ownership: "active", turn: { state: "started" } },
+      });
       expect(
         await client.request({
           operation: "workflowTurn.report",
@@ -2444,7 +2666,30 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
             responseSessionEntryId: "assistant-entry-1",
           },
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { state: "ended" } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { ownership: "settled", turn: { state: "ended" } },
+      });
+      expect(
+        await client.request({
+          operation: "workflowTurn.report",
+          runId: terminal.runId,
+          payload: { ...started, workflowTurnId: "terminal-turn-stale" },
+        }),
+      ).toMatchObject({
+        outcome: "adopted",
+        receipt: { ownership: "absent", turn: null },
+      });
+      const afterStaleReport = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(
+          afterStaleReport.state.connection
+            .prepare("SELECT COUNT(*) AS count FROM workflow_turns WHERE workflow_message_id = ?")
+            .get(terminal.workflowMessageId),
+        ).toEqual({ count: 1 });
+      } finally {
+        afterStaleReport.close();
+      }
     } finally {
       await host.stop();
     }

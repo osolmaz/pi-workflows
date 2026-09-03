@@ -251,6 +251,14 @@ describe("host durable state", () => {
         targetSessionId: interaction.targetSessionId,
       }),
     ).toEqual(turn);
+    expect(() =>
+      host.workflowMessages.startTurn({
+        workflowMessageId: message.workflowMessageId,
+        workflowTurnId: "turn-conflict",
+        runId: interaction.runId,
+        targetSessionId: interaction.targetSessionId,
+      }),
+    ).toThrow(/already has open turn turn-1/);
     host.workflowMessages.endTurn({
       workflowMessageId: message.workflowMessageId,
       workflowTurnId: turn.workflowTurnId,
@@ -259,6 +267,20 @@ describe("host durable state", () => {
       stopReason: "completed",
       responseSessionEntryId: "assistant-entry-1",
     });
+    host.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "turn-lost",
+      runId: interaction.runId,
+      targetSessionId: interaction.targetSessionId,
+    });
+    expect(host.workflowMessages.settleOpenTurnsForRun(interaction.runId)).toEqual([
+      expect.objectContaining({
+        workflowTurnId: "turn-lost",
+        state: "ended",
+        stopReason: "lost",
+      }),
+    ]);
+    expect(host.workflowMessages.settleOpenTurnsForRun(interaction.runId)).toEqual([]);
     const validating = host.beginInteractionValidation({
       requestId: interaction.requestId,
       submissionId: "submission-rejected",

@@ -3,6 +3,8 @@ import type { WorkflowMessage, WorkflowTurn } from "../state/workflow-messages.j
 
 export const RUN_VIEW_SCHEMA = "pi-workflows.run-view.v1" as const;
 export const SESSION_VIEW_SCHEMA = "pi-workflows.session-view.v1" as const;
+export const WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA =
+  "pi-workflows.workflow-turn-report-receipt.v1" as const;
 
 export type WorkflowDisplayStatus =
   | "queued"
@@ -140,6 +142,12 @@ export type WorkflowBranchReport = {
   entries: Array<{ workflowMessageId: string; piSessionEntryId: string }>;
   isIdle: boolean;
   hasPendingMessages: boolean;
+};
+
+export type WorkflowTurnReportReceipt = {
+  schema: typeof WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA;
+  ownership: "active" | "settled" | "absent";
+  turn: WorkflowTurn | null;
 };
 
 export type WorkflowTurnReport =

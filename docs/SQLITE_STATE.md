@@ -104,7 +104,7 @@ A domain row and its event are written in one transaction. Normal APIs never upd
 
 `effect_attempts` records each application attempt and ownership generation. A matching repeated request adopts the existing effect. A different request under the same key is a conflict.
 
-Local effects use deterministic transactions. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and controller-child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
+Local effects use deterministic transactions. For workflow action nodes, the engine creates the idempotency key from the run ID, effect type, full compiled node path, and node visit number. A projected child-workflow view cannot replace that full identity. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and controller-child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
 
 Telegram delivery and settlement use these shared effect records. The host records one numbered attempt before it tells the supervised adapter child to act. A confirmed result stores Telegram message references in the effect result. `channel_messages` stores the decision feature's delivery or settlement receipt; it does not copy effect state or external message references.
 
@@ -125,10 +125,12 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                               |
 | Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
 | Effects             | `effects`, `effect_attempts`                                                                                                 |
-| Pi messages         | `workflow_messages`                                                                                                          |
+| Pi messages         | `workflow_messages`, `workflow_turns`                                                                                        |
 | Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                            |
 
 `workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial, reminder, and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
+
+`workflow_turns` stores the host-approved ownership of one Pi model turn. Each row names the exact workflow message, run, session, and turn ID. A partial unique index permits only one open turn for a message. The host checks for an exact saved turn or another open turn before insertion, so a normal conflict returns a controlled protocol error instead of a raw SQLite error. Terminalization ends every open turn for that run as `lost` in the same transaction. It cancels pending step and decision messages, plus follow-ups when the run did not complete successfully. Committed notifications remain eligible. Matching late reports adopt the saved result, while conflicting identities remain errors.
 
 `channels` stores configured channel resource identities. `channel_cursors` stores the last accepted external polling position. `channel_messages` stores immutable decision delivery and settlement records for audit and duplicate evidence. External application state and Telegram message references belong to `effects` and `effect_attempts`.
 
@@ -157,6 +159,8 @@ Insertion verifies the digest, media type, byte length, and exact bytes. Repeate
 Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer.
 
 Readers derive `steps`, `outputs`, `results`, carried-step count, current-node fields, waiting state, source objects, and continuation decision receipts from these rows. Compact trace events do not copy prompts, node outputs, run inputs, final outputs, action receipts, or assistant receipts.
+
+The run store reads each independent value through its declared media type. Input and final output use JSON readers. Run errors and presentation instructions use text readers. Terminal-message construction uses one typed terminal-data result instead of guessing the blob type. A missing or wrong media type fails presentation after the terminal state commits; it cannot roll back that state.
 
 ### Assistant-message attempts
 
@@ -215,7 +219,7 @@ A deadline with a validated default response is timeout-policy acceptance. It ca
 
 Late or repeated commands return or adopt the durable winner. They do not overwrite it.
 
-The same rule applies to run terminal outcomes, continuation admission, queue settlement, controller effects, retry scheduling, and channel settlement through their domain constraints and expected revisions.
+The same rule applies to run terminal outcomes, continuation admission, queue settlement, controller effects, retry scheduling, channel settlement, and workflow-turn reports through their domain constraints and expected revisions. A matching turn report adopts the saved ownership result. A different report for the same turn ID remains a conflict.
 
 ## Read contract
 
@@ -225,7 +229,7 @@ A settings scope uses its resource revision as its public change number. Each ac
 
 `workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the continuation-chain member that accepted them; rows are not rewritten when the chain continues. The host walks the chain to find its final outcome. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
 
-- A terminal run fact overrides stale message state.
+- A terminal run fact overrides stale message state and has no open workflow turn.
 - An accepted decision is accepted even if its continuation effect is still pending.
 - A cancelled decision is cancelled even if parent cleanup is still pending.
 - A stale owner is not shown as current.

@@ -279,6 +279,12 @@ export class WorkflowMessageStore {
         throw new Error("Workflow turn does not match its message");
       }
       if (message.status !== "sent") throw new Error("Workflow turn requires a sent message");
+      const open = this.openTurnForMessage(options.workflowMessageId);
+      if (open !== undefined) {
+        throw new Error(
+          `Workflow message ${options.workflowMessageId} already has open turn ${open.workflowTurnId}`,
+        );
+      }
       this.state.connection
         .prepare(
           `INSERT INTO workflow_turns(
@@ -335,6 +341,51 @@ export class WorkflowMessageStore {
       if (changed.changes !== 1) throw new Error("Workflow turn changed before its end report");
       return this.requireTurn(options.workflowTurnId);
     });
+  }
+
+  settleOpenTurnsForRun(
+    runId: string,
+    stopReason: WorkflowTurnStopReason = "lost",
+    now: number = Date.now(),
+  ): WorkflowTurn[] {
+    return this.state.transaction(() => {
+      const open = this.state.connection
+        .prepare(
+          `SELECT workflow_turn_id AS workflowTurnId, workflow_message_id AS workflowMessageId,
+                  run_id AS runId, target_session_id AS targetSessionId, state,
+                  stop_reason AS stopReason, response_session_entry_id AS responseSessionEntryId,
+                  started_at AS startedAt, ended_at AS endedAt
+           FROM workflow_turns WHERE run_id = ? AND state = 'started' ORDER BY started_at`,
+        )
+        .all(runId)
+        .filter(isWorkflowTurnRow)
+        .map(mapTurn);
+      this.state.connection
+        .prepare(
+          `UPDATE workflow_turns SET state = 'ended', stop_reason = ?, ended_at = ?
+           WHERE run_id = ? AND state = 'started'`,
+        )
+        .run(stopReason, now, runId);
+      return open.map((turn) => this.requireTurn(turn.workflowTurnId));
+    });
+  }
+
+  cancelPendingForRun(
+    runId: string,
+    now: number = Date.now(),
+    kinds: readonly WorkflowMessageKind[] = ["step", "decision", "followUp"],
+  ): number {
+    if (kinds.length === 0) return 0;
+    return this.state.transaction(
+      () =>
+        this.state.connection
+          .prepare(
+            `UPDATE workflow_messages SET status = 'cancelled', updated_at = ?
+             WHERE run_id = ? AND status = 'pending'
+               AND kind IN (${kinds.map(() => "?").join(", ")})`,
+          )
+          .run(now, runId, ...kinds).changes,
+    );
   }
 
   getTurn(workflowTurnId: string): WorkflowTurn | undefined {
