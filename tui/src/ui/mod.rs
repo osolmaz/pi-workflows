@@ -2977,6 +2977,14 @@ fn page_range(start: u64, length: usize, total: u64) -> String {
     }
 }
 
+fn display_reason_content(display: &WorkflowDisplay) -> Option<String> {
+    match display.reason_content.as_ref()? {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())),
+    }
+}
+
 fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'static>> {
     let state = data.state;
     let label =
@@ -3005,6 +3013,18 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
             label("reason"),
             Span::raw(sanitize_text(reason)),
         ]));
+    }
+    if let Some(content) = display_reason_content(data.display) {
+        for (index, logical_line) in content.lines().enumerate() {
+            lines.push(Line::from(vec![
+                if index == 0 {
+                    label("reason detail")
+                } else {
+                    Span::raw(" ".repeat(14))
+                },
+                Span::raw(sanitize_text(logical_line)),
+            ]));
+        }
     }
     if data.display.status.is_terminal() {
         if let Some(finished) = &state.finished_at {
@@ -3469,13 +3489,14 @@ fn draw_transport(
 mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
-        current_progress_epoch, display_end_ms, graph_position_label, inspector_height_for_drag,
-        inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, parse_run_summary,
-        progress_rates, push_human_decision_presentation, reconcile_selected_run,
-        resolve_remote_artifacts, resolved_inspector_height, sidebar_width_for_drag,
-        step_projection_contains, temporal_delay_from_page, temporal_through_seq,
-        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
-        Palette, Rect, StepRecord, TemporalDelay, TraceScope, DEFAULT_NODE_STYLE,
+        current_progress_epoch, display_end_ms, display_reason_content, graph_position_label,
+        inspector_height_for_drag, inspector_tab_label, inspector_tab_layout, next_page_cursor,
+        page_range, parse_run_summary, progress_rates, push_human_decision_presentation,
+        reconcile_selected_run, resolve_remote_artifacts, resolved_inspector_height,
+        sidebar_width_for_drag, step_projection_contains, temporal_delay_from_page,
+        temporal_through_seq, trace_events_for_scope, valid_session_binding, GraphNodeStyle,
+        InspectorTab, NodeBounds, Palette, Rect, StepRecord, TemporalDelay, TraceScope,
+        DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -3508,6 +3529,23 @@ mod tests {
         assert_eq!(
             summary.display.status,
             crate::state::types::RunStatus::Running
+        );
+    }
+
+    #[test]
+    fn display_reason_content_renders_the_complete_hydrated_host_value() {
+        let display: crate::state::types::WorkflowDisplay = serde_json::from_value(json!({
+            "status":"failed",
+            "activity":null,
+            "controls":[],
+            "reason":"Complete workflow failure details are available.",
+            "reasonContent":"complete failure reason"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            display_reason_content(&display).as_deref(),
+            Some("complete failure reason")
         );
     }
 

@@ -73,6 +73,7 @@ fn decode_view(
     raw: &Value,
     definition_content: Option<&str>,
     graph_history_content: Option<&str>,
+    display_reason_content: Option<&str>,
 ) -> Option<RemoteView> {
     let graph_revision = raw
         .get("graphRevision")
@@ -80,7 +81,10 @@ fn decode_view(
         .unwrap_or(revision);
     let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
     let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
-    let display: WorkflowDisplay = serde_json::from_value(raw.get("display")?.clone()).ok()?;
+    let mut display: WorkflowDisplay = serde_json::from_value(raw.get("display")?.clone()).ok()?;
+    if display_reason_artifact(raw).is_some() {
+        display.reason_content = Some(display_reason_value(raw, display_reason_content)?);
+    }
     let graph_history = graph_history_value(raw, graph_history_content);
     let graph_steps = graph_history
         .as_ref()
@@ -249,6 +253,23 @@ fn graph_history_value(raw: &Value, content: Option<&str>) -> Option<Value> {
     Some(history.clone())
 }
 
+fn display_reason_artifact(raw: &Value) -> Option<ArtifactRef> {
+    raw.pointer("/display/reasonContent")
+        .and_then(as_artifact_ref)
+}
+
+fn display_reason_value(raw: &Value, content: Option<&str>) -> Option<Value> {
+    let reason = raw.pointer("/display/reasonContent")?;
+    let Some(artifact) = display_reason_artifact(raw) else {
+        return Some(reason.clone());
+    };
+    match artifact.media_type.as_str() {
+        "text/plain" => Some(Value::String(content?.to_string())),
+        "application/json" => serde_json::from_str(content?).ok(),
+        _ => None,
+    }
+}
+
 fn workflow_definition_content(
     state: &mut Shared,
     run_id: &str,
@@ -257,26 +278,52 @@ fn workflow_definition_content(
     let Some(artifact) = workflow_definition_artifact(raw) else {
         return (None, false);
     };
-    referenced_json_content(state, run_id, artifact, "workflow definition")
+    referenced_content(
+        state,
+        run_id,
+        artifact,
+        &["application/json"],
+        "workflow definition",
+    )
 }
 
 fn graph_history_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Option<String>, bool) {
     let Some(artifact) = graph_history_artifact(raw) else {
         return (None, false);
     };
-    referenced_json_content(state, run_id, artifact, "workflow graph history")
+    referenced_content(
+        state,
+        run_id,
+        artifact,
+        &["application/json"],
+        "workflow graph history",
+    )
 }
 
-fn referenced_json_content(
+fn display_reason_content(state: &mut Shared, run_id: &str, raw: &Value) -> (Option<String>, bool) {
+    let Some(artifact) = display_reason_artifact(raw) else {
+        return (None, false);
+    };
+    referenced_content(
+        state,
+        run_id,
+        artifact,
+        &["text/plain", "application/json"],
+        "workflow display reason",
+    )
+}
+
+fn referenced_content(
     state: &mut Shared,
     run_id: &str,
     artifact: ArtifactRef,
+    accepted_media_types: &[&str],
     label: &str,
 ) -> (Option<String>, bool) {
     let key = (run_id.to_string(), artifact.path.clone());
     match state.artifacts.get(&key).cloned() {
         Some(ArtifactEntry::Ready(content)) => {
-            let valid = artifact.media_type == "application/json"
+            let valid = accepted_media_types.contains(&artifact.media_type.as_str())
                 && content.len() as u64 == artifact.bytes
                 && hex_sha256(content.as_bytes()) == artifact.sha256;
             if valid {
@@ -535,15 +582,18 @@ impl RemoteRuns {
             self.decoded.remove(run_id);
             return None;
         };
-        let (definition_content, graph_history_content, requested) = {
+        let (definition_content, graph_history_content, display_reason_content, requested) = {
             let mut shared = self.shared.lock().unwrap();
             let (definition, definition_requested) =
                 workflow_definition_content(&mut shared, run_id, &raw);
             let (graph_history, graph_requested) = graph_history_content(&mut shared, run_id, &raw);
+            let (display_reason, display_reason_requested) =
+                display_reason_content(&mut shared, run_id, &raw);
             (
                 definition,
                 graph_history,
-                definition_requested || graph_requested,
+                display_reason,
+                definition_requested || graph_requested || display_reason_requested,
             )
         };
         if requested {
@@ -560,10 +610,9 @@ impl RemoteRuns {
                 &raw,
                 definition_content.as_deref(),
                 graph_history_content.as_deref(),
+                display_reason_content.as_deref(),
             ) {
                 self.decoded.insert(run_id.to_string(), decoded);
-            } else {
-                self.decoded.remove(run_id);
             }
         }
         self.decoded.get(run_id)
@@ -1362,19 +1411,20 @@ mod tests {
             "possiblyInterrupted":false
         });
 
-        let view = decode_view(4, 1, &raw, None, None).expect("host view should decode");
+        let view = decode_view(4, 1, &raw, None, None, None).expect("host view should decode");
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
 
         let mut missing_display = raw;
         missing_display.as_object_mut().unwrap().remove("display");
-        assert!(decode_view(4, 1, &missing_display, None, None).is_none());
+        assert!(decode_view(4, 1, &missing_display, None, None, None).is_none());
     }
 
     #[test]
     fn uses_the_host_display_status_during_an_origin_turn() {
         let source = json!({"kind":"file","path":"/tmp/smoke.workflow.ts","hash":"abc"});
+        let reason_content = "The origin-session model turn is active.";
         let raw = json!({
             "manifest": {
                 "schema":"pi-workflows.run-manifest.v1",
@@ -1407,7 +1457,15 @@ mod tests {
                 "status":"running",
                 "activity":"origin_turn",
                 "controls":["pause","cancel"],
-                "reason":null
+                "reason":"The model is running.",
+                "reasonContent": {
+                    "$artifact": {
+                        "path":"artifacts/sha256/display-reason.txt",
+                        "mediaType":"text/plain",
+                        "bytes":reason_content.len(),
+                        "sha256":hex_sha256(reason_content.as_bytes())
+                    }
+                }
             },
             "workflow": {
                 "schema":"pi-workflows.definition-snapshot.v1",
@@ -1418,10 +1476,15 @@ mod tests {
             }
         });
 
-        let view = decode_view(4, 1, &raw, None, None).expect("host view should decode");
+        let view = decode_view(4, 1, &raw, None, None, Some(reason_content))
+            .expect("host view should decode");
 
         assert_eq!(view.state.status, crate::state::types::RunStatus::Waiting);
         assert_eq!(view.display.status, crate::state::types::RunStatus::Running);
+        assert_eq!(
+            view.display.reason_content,
+            Some(Value::String(reason_content.to_string()))
+        );
         assert_eq!(view.display.active_node(&view.state), Some("work"));
 
         let graph = GraphView {
@@ -1574,6 +1637,42 @@ mod tests {
         assert!(!requested);
         let complete = graph_history_value(&raw, loaded.as_deref()).unwrap();
         assert_eq!(complete["transitions"].as_array().map(Vec::len), Some(300));
+    }
+
+    #[test]
+    fn complete_display_reason_uses_the_shared_content_loader() {
+        let content = "complete workflow failure reason";
+        let path = "artifacts/sha256/display-reason.txt";
+        let raw = json!({
+            "display": {
+                "status":"failed",
+                "activity":null,
+                "controls":[],
+                "reason":"Complete workflow failure details are available.",
+                "reasonContent": {
+                    "$artifact": {
+                        "path":path,
+                        "mediaType":"text/plain",
+                        "bytes":content.len(),
+                        "sha256":hex_sha256(content.as_bytes())
+                    }
+                }
+            }
+        });
+        let mut state = Shared::default();
+        let (missing, requested) = display_reason_content(&mut state, "run-1", &raw);
+        assert!(missing.is_none());
+        assert!(requested);
+        state.artifacts.insert(
+            ("run-1".to_string(), path.to_string()),
+            ArtifactEntry::Ready(content.to_string()),
+        );
+        let (loaded, requested) = display_reason_content(&mut state, "run-1", &raw);
+        assert!(!requested);
+        assert_eq!(
+            display_reason_value(&raw, loaded.as_deref()),
+            Some(Value::String(content.to_string()))
+        );
     }
 
     #[test]
