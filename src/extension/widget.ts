@@ -38,16 +38,27 @@ const STATUS_GLYPHS: Record<WorkflowDisplayStatus, string> = {
 const PI_MAX_WIDGET_LINES = 10;
 const MAX_NODE_ERROR_CHARS = 120;
 
-export function nodeGlyph(state: WorkflowRunState, nodeId: string): string {
-  if (state.currentNode === nodeId) {
+function displayedRunningNode(
+  state: WorkflowRunState,
+  displayStatus: WorkflowDisplayStatus | undefined,
+): string | undefined {
+  return state.currentNode ?? (displayStatus === "running" ? state.waitingOn : undefined);
+}
+
+export function nodeGlyph(
+  state: WorkflowRunState,
+  nodeId: string,
+  displayStatus?: WorkflowDisplayStatus,
+): string {
+  if (displayedRunningNode(state, displayStatus) === nodeId) {
     return "◐";
+  }
+  if (state.waitingOn === nodeId) {
+    return "⏸";
   }
   const result = state.results[nodeId];
   if (!result) {
     return "·";
-  }
-  if (state.waitingOn === nodeId) {
-    return "⏸";
   }
   return result.outcome === "ok" ? "✓" : "✗";
 }
@@ -120,7 +131,7 @@ export function buildWidgetView(
   const progress = progressLines(state, now, updateHistory).slice(0, 4);
   const baseBudget = PI_MAX_WIDGET_LINES - 1 - footer.length - progress.length;
   const nodes = displayNodeIds(snapshot).map((nodeId) =>
-    compactNodeLine(state, snapshot, nodeId, now, paused, theme),
+    compactNodeLine(state, snapshot, nodeId, now, paused, status, theme),
   );
   const combineHintWithWindow =
     hint !== undefined && nodes.length > 0 && nodes.length + 1 > baseBudget;
@@ -268,15 +279,17 @@ function compactNodeLine(
   nodeId: string,
   now: Date,
   paused: boolean,
+  displayStatus: WorkflowDisplayStatus,
   theme?: WidgetTheme,
 ): string {
   const node = snapshot.nodes[nodeId];
-  const glyph = nodeGlyph(state, nodeId);
+  const runningNode = displayedRunningNode(state, displayStatus);
+  const isCurrent = runningNode === nodeId;
+  const isWaiting = state.waitingOn === nodeId && !isCurrent;
+  const glyph = nodeGlyph(state, nodeId, displayStatus);
   const typeGlyph = node ? nodeTypeGlyph(node.nodeType, node.actionExecution) : "?";
   const name = sanitizeText(nodeId);
-  const segments = nodeRuntimeSegments(state, snapshot, nodeId, now);
-  const isCurrent = state.currentNode === nodeId;
-  const isWaiting = state.waitingOn === nodeId;
+  const segments = nodeRuntimeSegments(state, snapshot, nodeId, now, isCurrent);
 
   if (isCurrent || isWaiting) {
     const tone = paused || isWaiting ? "warning" : "accent";
@@ -309,6 +322,7 @@ function nodeRuntimeSegments(
   snapshot: WorkflowDefinitionSnapshot,
   nodeId: string,
   now: Date,
+  isCurrent: boolean,
 ): string[] {
   const segments: string[] = [];
   const node = snapshot.nodes[nodeId];
@@ -320,11 +334,11 @@ function nodeRuntimeSegments(
     segments.push("assistant response");
   }
   const completedAttempts = state.steps.filter((step) => step.nodeId === nodeId).length;
-  const attempts = completedAttempts + (state.currentNode === nodeId ? 1 : 0);
+  const attempts = completedAttempts + (isCurrent ? 1 : 0);
   if (attempts > 1) {
     segments.push(`↻${attempts}`);
   }
-  if (state.currentNode === nodeId && state.currentSettingsChangeNumber !== undefined) {
+  if (isCurrent && state.currentSettingsChangeNumber !== undefined) {
     segments.push(`settings ${state.currentSettingsChangeNumber}`);
   } else {
     const latest = state.steps.findLast((step) => step.nodeId === nodeId);
@@ -334,8 +348,8 @@ function nodeRuntimeSegments(
   }
 
   const result = state.results[nodeId];
-  if (state.currentNode === nodeId) {
-    if (state.statusDetail) {
+  if (isCurrent) {
+    if (state.currentNode === nodeId && state.statusDetail) {
       segments.push(sanitizeText(state.statusDetail));
     }
     const elapsed = elapsedSince(state.currentNodeStartedAt, now);

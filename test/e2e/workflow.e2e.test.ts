@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WorkflowClient } from "../../src/client/client.js";
 import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
+import { buildWidgetView } from "../../src/extension/widget.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../../src/host/state.js";
 import { workflowStatePath } from "../../src/state/database.js";
 import { parseJson, type JsonValue } from "../../src/state/json.js";
@@ -75,6 +76,25 @@ export default defineWorkflow({
     }),
   },
   edges: [],
+});
+`;
+
+const MULTI_STEP_WIDGET_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "multi-step-widget-e2e",
+  startAt: "first",
+  nodes: {
+    first: agent({
+      prompt: () => "Submit the first multi-step widget result.",
+      expectedOutput: '{ "first": true }',
+    }),
+    second: agent({
+      prompt: () => "Submit the second multi-step widget result.",
+      expectedOutput: '{ "second": true }',
+    }),
+  },
+  edges: [{ from: "first", to: "second" }],
 });
 `;
 
@@ -430,6 +450,21 @@ describe.sequential("out-of-process workflow host end to end", () => {
         if (contract.workflow === "assistant-e2e" && contract.step === "present") {
           return { kind: "text", text: "Visible assistant E2E response." };
         }
+        if (contract.workflow === "multi-step-widget-e2e") {
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: contract.step,
+              attempt: contract.attempt,
+              output: contract.step === "first" ? { first: true } : { second: true },
+            },
+            ...(contract.step === "second"
+              ? { thinking: "Hold the second workflow turn open for inspection. ".repeat(300) }
+              : {}),
+          };
+        }
         if (contract.workflow === "pause-resume-e2e") {
           if (holdPauseSubmission) {
             return { kind: "text", text: "Waiting for the pause. ".repeat(500) };
@@ -462,7 +497,12 @@ describe.sequential("out-of-process workflow host end to end", () => {
         }
         return { kind: "text", text: "No scripted response." };
       },
-      { textChunkSize: 7, toolArgumentChunkSize: 11, chunkDelayMs: 5 },
+      {
+        textChunkSize: 7,
+        thinkingChunkSize: 10,
+        toolArgumentChunkSize: 11,
+        chunkDelayMs: 5,
+      },
     );
 
     projectDir = await makeTempDir("pi-workflows-host-e2e-project");
@@ -483,6 +523,10 @@ describe.sequential("out-of-process workflow host end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "pause-resume-e2e.workflow.ts"),
       PAUSE_RESUME_WORKFLOW,
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "multi-step-widget-e2e.workflow.ts"),
+      MULTI_STEP_WIDGET_WORKFLOW,
     );
     await fs.writeFile(
       path.join(projectDir, ".pi", "controllers", "hosted-e2e.controller.ts"),
@@ -527,6 +571,95 @@ describe.sequential("out-of-process workflow host end to end", () => {
     }
     await mock?.close();
   });
+
+  it("marks a completed agent node done while the next agent turn runs", async () => {
+    const requestStart = mock.requests.length;
+    pi.send({
+      id: "multi-step-widget-start",
+      type: "prompt",
+      message: "/workflow multi-step-widget-e2e",
+    });
+    await waitForCondition(
+      () =>
+        mock.requests
+          .slice(requestStart)
+          .some(({ messages }) =>
+            JSON.stringify(messages.at(-1)).includes("Submit the second multi-step widget result."),
+          ),
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
+
+    const { runId } = await waitForRun(
+      databasePath,
+      "multi-step-widget-e2e",
+      (candidate) => candidate.results.first?.outcome === "ok",
+      () => rpcDiagnostic(pi),
+    );
+    const client = new WorkflowClient({ databasePath });
+    const runView = await client.getRun(runId);
+    await client.close();
+    if (runView === null) throw new Error("Multi-step widget run view disappeared");
+    expect(runView.display).toMatchObject({ status: "running", activity: "origin_turn" });
+    expect(runView.state).toMatchObject({
+      status: "waiting",
+      waitingOn: "second",
+      currentAttemptId: expect.any(String),
+      results: { first: { outcome: "ok" } },
+    });
+    const currentAttemptId = runView.state.currentAttemptId;
+    if (currentAttemptId === undefined) throw new Error("Current attempt disappeared");
+    const { stdout: piwOutput } = await execFileAsync(
+      process.execPath,
+      ["--import", "tsx", path.join(REPO_ROOT, "src", "viewer", "cli.ts"), "view", runId, "--once"],
+      { cwd: REPO_ROOT, env: { ...process.env, ...piEnvironment() } },
+    );
+    expect(piwOutput).toContain("● running");
+    expect(piwOutput).toContain("✓ first · ok");
+    expect(piwOutput).not.toContain("○ waiting");
+
+    const store = new WorkflowRunStore(databasePath, { readOnly: true });
+    try {
+      const loaded = store.readRun(runId);
+      if (loaded === null) throw new Error("Multi-step widget run disappeared");
+      expect(loaded.state).toMatchObject({
+        status: "waiting",
+        waitingOn: "second",
+        currentAttemptId,
+        results: { first: { outcome: "ok" } },
+      });
+      expect(loaded.state.currentNode).toBeUndefined();
+
+      const lines = buildWidgetView(
+        loaded.state,
+        loaded.snapshot,
+        undefined,
+        null,
+        false,
+        100,
+        undefined,
+        undefined,
+        undefined,
+        runView.display.status,
+      ).lines;
+      expect(lines.find((line) => line.includes("first"))).toContain("✓");
+      expect(lines.find((line) => line.includes("second"))).toContain("◐");
+      expect(lines.join("\n")).not.toContain("second · waiting");
+    } finally {
+      store.close();
+    }
+
+    const completed = await waitForRun(
+      databasePath,
+      "multi-step-widget-e2e",
+      (candidate) => candidate.status === "completed",
+      () => rpcDiagnostic(pi),
+    );
+    expect(completed.state.results).toMatchObject({
+      first: { outcome: "ok" },
+      second: { outcome: "ok" },
+    });
+  }, 60_000);
 
   it("runs structured and visible agent steps through the origin Pi session", async () => {
     pi.send({ id: "assistant-start", type: "prompt", message: "/workflow assistant-e2e" });
@@ -694,6 +827,16 @@ describe.sequential("out-of-process workflow host end to end", () => {
       interaction.requestId,
     );
     expect(new Set(requestEntriesBeforeRestart)).toHaveLength(requestEntriesBeforeRestart.length);
+    const beforeRestartStore = new WorkflowRunStore(databasePath, { readOnly: true });
+    try {
+      expect(beforeRestartStore.readRun(interaction.runId)?.state).toMatchObject({
+        status: "waiting",
+        waitingOn: "work",
+        currentAttemptId: interaction.attemptId,
+      });
+    } finally {
+      beforeRestartStore.close();
+    }
 
     await pi.stop();
     const sessionFileName = (await fs.readdir(sessionDir)).find((name) => name.includes(sessionId));
@@ -707,6 +850,16 @@ describe.sequential("out-of-process workflow host end to end", () => {
     });
     await waitForRequestEntries(pi, interaction.requestId, requestEntriesBeforeRestart);
     await waitForPiIdle(pi);
+    const afterRestartStore = new WorkflowRunStore(databasePath, { readOnly: true });
+    try {
+      expect(afterRestartStore.readRun(interaction.runId)?.state).toMatchObject({
+        status: "waiting",
+        waitingOn: "work",
+        currentAttemptId: interaction.attemptId,
+      });
+    } finally {
+      afterRestartStore.close();
+    }
 
     holdRestartSubmission = false;
     pi.send({ id: "restart-continue", type: "prompt", message: "Complete the pending workflow." });

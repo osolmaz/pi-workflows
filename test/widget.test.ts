@@ -145,6 +145,8 @@ describe("nodeGlyph", () => {
     expect(nodeGlyph(state, "first")).toBe("✓");
     expect(nodeGlyph(state, "second")).toBe("✗");
     expect(nodeGlyph(state, "third")).toBe("⏸");
+    expect(nodeGlyph(makeState({ waitingOn: "third" }), "third")).toBe("⏸");
+    expect(nodeGlyph(makeState({ waitingOn: "third" }), "third", "running")).toBe("◐");
     expect(nodeGlyph(makeState(), "first")).toBe("·");
   });
 });
@@ -827,8 +829,12 @@ describe("buildWidgetLines", () => {
       undefined,
       "running",
     ).lines;
+    const runningText = stripAnsi(running.join("\n"));
     expect(stripAnsi(running[0] ?? "")).toContain("◐ workflow demo [running]");
-    expect(stripAnsi(running.join("\n"))).not.toContain("waiting on checkpoint");
+    expect(runningText).toContain("◐ ƒ third");
+    expect(runningText).not.toContain("⏸ ƒ third");
+    expect(runningText).not.toContain("third · waiting");
+    expect(runningText).not.toContain("waiting on checkpoint");
 
     const waiting = buildWidgetView(
       waitingState,
@@ -842,7 +848,9 @@ describe("buildWidgetLines", () => {
       undefined,
       "waiting",
     ).lines;
+    const waitingText = stripAnsi(waiting.join("\n"));
     expect(stripAnsi(waiting[0] ?? "")).toContain("○ workflow demo [waiting]");
+    expect(waitingText).toContain("⏸ ƒ third · waiting");
 
     const paused = buildWidgetView(
       waitingState,

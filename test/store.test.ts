@@ -11,7 +11,7 @@ import {
   listWorkflowRuns,
   readWorkflowRun,
 } from "../src/workflows/store.js";
-import { ScriptedExecutor, makeStateDatabasePath } from "./helpers.js";
+import { ScriptedExecutor, makeStateDatabasePath, waitUntil } from "./helpers.js";
 
 describe("WorkflowRunStore SQLite", () => {
   it("stores one complete run, definition, events, attempts, and output", async () => {
@@ -52,6 +52,54 @@ describe("WorkflowRunStore SQLite", () => {
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
       count: 0,
     });
+    store.close();
+  });
+
+  it("projects a waiting run from its unfinished attempt instead of its last result", async () => {
+    const databasePath = await makeStateDatabasePath("run-store-waiting-attempt");
+    const workflow = defineWorkflow({
+      name: "waiting-attempt",
+      startAt: "first",
+      nodes: {
+        first: agent({ prompt: () => "first" }),
+        second: agent({ prompt: () => "second" }),
+      },
+      edges: [{ from: "first", to: "second" }],
+    });
+    const executor = new ScriptedExecutor()
+      .respond("first", { output: { first: true } })
+      .respond("second", { hang: true });
+    const store = new WorkflowRunStore(databasePath);
+    const engine = new WorkflowEngine({ store, executor });
+    const running = engine.run(workflow, {});
+    await waitUntil(() => executor.requests.length === 2);
+    engine.park();
+    const parked = await running;
+    const attemptId = parked.state.currentAttemptId;
+    if (attemptId === undefined) throw new Error("Parked attempt is missing");
+
+    store.state.transaction(() => {
+      const now = Date.now();
+      store.state.connection
+        .prepare("UPDATE node_attempts SET status = 'waiting', updated_at = ? WHERE attempt_id = ?")
+        .run(now, attemptId);
+      store.state.connection
+        .prepare(
+          "UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ? WHERE run_id = ?",
+        )
+        .run("waiting for origin Pi session", now, now, parked.runId);
+    });
+
+    const loaded = store.readRun(parked.runId);
+    expect(loaded?.state).toMatchObject({
+      status: "waiting",
+      waitingOn: "second",
+      currentAttemptId: attemptId,
+      statusDetail: "waiting for origin Pi session",
+      results: { first: { outcome: "ok" } },
+    });
+    expect(loaded?.state.currentNode).toBeUndefined();
+    expect(loaded?.state.currentNodeStartedAt).toBe(parked.state.currentNodeStartedAt);
     store.close();
   });
 

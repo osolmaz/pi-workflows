@@ -3478,7 +3478,15 @@ export class WorkflowRunStore {
   ): WorkflowRunState {
     const sources = this.readRunSources(row.runId, snapshot);
     const carriedStepCount = this.carriedStepCount(row.runId);
-    const activeAttempt = row.status === "running" ? this.readActiveAttempt(row.runId) : undefined;
+    const activeAttempt =
+      row.status === "running" || row.status === "waiting"
+        ? this.readActiveAttempt(row.runId)
+        : undefined;
+    const runningAttempt = row.status === "running" ? activeAttempt : undefined;
+    const waitingNode =
+      row.status === "waiting"
+        ? (activeAttempt?.nodeId ?? projectionSteps.at(-1)?.nodeId)
+        : undefined;
     const humanDecision = this.readHumanDecisionReceipt(row.runId);
     const outputs: Record<string, unknown> = {};
     const results: Record<string, WorkflowNodeResult> = {};
@@ -3520,7 +3528,7 @@ export class WorkflowRunStore {
       results,
       steps: visibleSteps,
       ...(visibleUpdates.length === 0 ? {} : { updates: visibleUpdates }),
-      ...(activeAttempt === undefined ? {} : { currentNode: activeAttempt.nodeId }),
+      ...(runningAttempt === undefined ? {} : { currentNode: runningAttempt.nodeId }),
       ...(activeAttempt === undefined ? {} : { currentAttemptId: activeAttempt.attemptId }),
       ...(activeAttempt?.startedAt === null || activeAttempt === undefined
         ? {}
@@ -3541,9 +3549,7 @@ export class WorkflowRunStore {
       ...(row.statusDetail === null ? {} : { statusDetail: row.statusDetail }),
       ...(humanDecision === undefined ? {} : { humanDecision }),
       ...(row.paused === 0 ? {} : { paused: true }),
-      ...(row.status === "waiting" && projectionSteps.at(-1) !== undefined
-        ? { waitingOn: projectionSteps.at(-1)?.nodeId as string }
-        : {}),
+      ...(waitingNode === undefined ? {} : { waitingOn: waitingNode }),
       ...(row.finalOutputHash === null
         ? {}
         : { finalOutput: this.state.readJson(row.finalOutputHash) }),
