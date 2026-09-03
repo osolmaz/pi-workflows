@@ -97,9 +97,9 @@ export type WorkflowProgressData = {
 
 export type WorkflowNodeCommon = {
   /**
-   * Per-node timeout or a callback that derives it from the run context.
-   * Null disables the wall-clock deadline. Omission falls back to the engine
-   * default (15 minutes).
+   * Per-node active-execution timeout or a callback that derives it from the run context.
+   * Waiting and paused origin-session time does not count. Null disables the deadline.
+   * Omission falls back to the engine default (15 minutes).
    */
   timeoutMs?: number | null | ((context: WorkflowNodeContext) => MaybePromise<number | null>);
   /** Short human-readable label shown in the viewer while the node runs. */
@@ -719,7 +719,7 @@ export type WorkflowRunState = {
   currentNode?: string;
   currentAttemptId?: string;
   currentNodeStartedAt?: string;
-  /** Durable wall-clock deadline for the current attempt. Null disables the deadline. */
+  /** Durable active-execution deadline for the current attempt. Null disables the deadline. */
   currentNodeDeadlineAt?: string | null;
   currentSettingsScopeId?: string;
   currentSettingsChangeNumber?: number;
