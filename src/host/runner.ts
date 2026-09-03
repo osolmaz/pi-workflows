@@ -4519,7 +4519,7 @@ export class WorkflowHost {
     }
     if (!force && now < this.nextTerminalMessageReconciliationAt) return;
     this.nextTerminalMessageReconciliationAt = now + TERMINAL_MESSAGE_RECONCILE_MS;
-    for (const runId of [...this.pendingTerminalMessageReconciliations]) {
+    for (const runId of this.pendingTerminalMessageReconciliations) {
       this.tryEnsureTerminalWorkflowMessage(runId, now);
     }
     if (this.pendingTerminalMessageReconciliations.size === 0) {
