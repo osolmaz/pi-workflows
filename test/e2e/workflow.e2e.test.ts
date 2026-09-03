@@ -607,8 +607,10 @@ describe.sequential("out-of-process workflow host end to end", () => {
       currentAttemptId: expect.any(String),
       results: { first: { outcome: "ok" } },
     });
+    if (!isRecord(runView.state) || typeof runView.state.currentAttemptId !== "string") {
+      throw new Error("Current attempt disappeared");
+    }
     const currentAttemptId = runView.state.currentAttemptId;
-    if (currentAttemptId === undefined) throw new Error("Current attempt disappeared");
     const { stdout: piwOutput } = await execFileAsync(
       process.execPath,
       ["--import", "tsx", path.join(REPO_ROOT, "src", "viewer", "cli.ts"), "view", runId, "--once"],
