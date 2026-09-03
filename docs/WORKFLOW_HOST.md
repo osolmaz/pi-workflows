@@ -237,6 +237,8 @@ The protocol owns four operation groups:
 
 The host returns one canonical `pi-workflows.run-view.v1` document. It contains the existing bounded workflow projection and page cursors plus a `display` object. The queue field contains display metadata only. It does not repeat the input, launch options, worker affinity, or claim capability; the complete input remains reachable through the state projection. The `display` object contains the effective status, current activity kind, allowed controls, and the stored reason when action is required. A reason above the shared 16 KiB inline-content threshold uses a small `reason` notice and a digest-bound `reasonContent` reference, so one diagnostic cannot exceed the 1 MiB protocol frame while the complete reason remains available. Renderers use this object directly. They must not combine separate queries or infer status from durable rows.
 
+The unfinished node-attempt row is the one durable source for the current node. A running run exposes it as `currentNode`. A parked interactive run exposes the same node as `waitingOn`. A checkpoint has no unfinished attempt, so its completed checkpoint node supplies `waitingOn`. During an exact origin-session model turn, the host `display` changes that waiting node to running for presentation only. It does not infer another node or change the durable run state.
+
 Generated referenced content is stored directly in `run_view_content` under its exact run ID, content digest, and media type. It does not share general state-blob media metadata. A content read must match all three values, so a reference from another run or another media representation is unavailable.
 
 The origin-session response contains the active run view. When no run is active, it keeps the most recent terminal run visible while its terminal workflow message is pending or its first model turn is open, and then for 60 seconds after that turn ends. A newer run or `sessionView.clearTerminal` removes the retained terminal view. `/workflow clear` and the matching `piw` action call that control without changing workflow state.
@@ -524,6 +526,8 @@ The implementation conforms when:
 - the production package contains no embedded execution fallback;
 - the host is the only production process that opens live SQLite state;
 - the widget, status line, Herdr actions, CLI, and `piw` render the same host-produced status and controls;
+- running and waiting projections identify the current workflow node from the same unfinished attempt, while checkpoint waits use the completed checkpoint node;
+- an exact origin-session model turn presents that same waiting node as running without changing its durable identity;
 - a busy origin session displays `running` for the full exact workflow turn, including a terminal or pausing turn, and a stale turn-end report cannot clear newer activity;
 - normal worker continuation does not fail an active Pi session capture or report a false host interruption;
 - `paused` appears only after a durable pause and matching turn end;
