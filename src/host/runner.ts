@@ -126,6 +126,7 @@ const HOST_LEASE_MS = 30_000;
 const HOST_RENEW_MS = 10_000;
 const PACKAGE_VERSION = runtimePackageVersion();
 const CLAIM_POLL_MS = 2_000;
+const TERMINAL_MESSAGE_RECONCILE_MS = 1_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const CONTROLLER_CLAIM_LEASE_MS = 120_000;
 const CONTROLLER_RENEW_MS = 30_000;
@@ -238,6 +239,7 @@ export class WorkflowHost {
   private readonly pendingRunClaims = new Map<string, string>();
   private readonly pendingResumes = new Set<string>();
   private readonly blockedRuns = new Set<string>();
+  private readonly pendingTerminalMessageReconciliations = new Set<string>();
   private readonly sessionCoordinators = new Map<string, SessionCoordinator>();
   private readonly sockets = new Set<Socket>();
   private readonly connections = new Map<Socket, ClientConnection>();
@@ -253,6 +255,7 @@ export class WorkflowHost {
   private decisionChannelConfig: DecisionChannelConfig | null = null;
   private decisionChannelError: string | null = null;
   private channelReloading = false;
+  private nextTerminalMessageReconciliationAt = 0;
 
   constructor(options: WorkflowHostOptions = {}) {
     this.options = options;
@@ -326,6 +329,8 @@ export class WorkflowHost {
       const previousHeartbeatAt =
         previousHost.heartbeatAt === null ? undefined : Date.parse(previousHost.heartbeatAt);
       this.hostState.recoverInactiveModelTurns(previousHeartbeatAt);
+      this.discoverMissingTerminalWorkflowMessages();
+      this.reconcilePendingTerminalWorkflowMessages(Date.now(), true);
       await this.listen();
       this.startTimers();
       this.started = true;
@@ -482,6 +487,7 @@ export class WorkflowHost {
       void this.expireTimedOutDecision();
       void this.claimOne();
       void this.claimControllerOne();
+      this.reconcilePendingTerminalWorkflowMessages();
     }, this.options.claimPollMs ?? CLAIM_POLL_MS);
     this.pollTimer.unref?.();
     this.viewTimer = setInterval(() => {
@@ -4381,7 +4387,12 @@ export class WorkflowHost {
       return;
     }
     const terminal = this.runStore.readTerminalData(runId);
-    if (terminal === null) return;
+    if (terminal === null) {
+      if (this.terminalWorkflowMessageRequired(runId)) {
+        throw new Error(`Terminal workflow state is incomplete: ${runId}`);
+      }
+      return;
+    }
     const input = terminal.input;
     const finalOutput = terminal.finalOutput;
     const storedError = terminal.error;
@@ -4449,10 +4460,70 @@ export class WorkflowHost {
   ): void {
     try {
       this.ensureTerminalWorkflowMessage(runId, now, stateOverride);
+      if (this.terminalWorkflowMessageMissing(runId)) {
+        this.scheduleTerminalWorkflowMessageReconciliation(runId, now);
+      } else {
+        this.pendingTerminalMessageReconciliations.delete(runId);
+      }
     } catch (error) {
+      if (this.terminalWorkflowMessageRequired(runId)) {
+        this.scheduleTerminalWorkflowMessageReconciliation(runId, now);
+      }
       this.log(
         `terminal workflow message reconciliation failed for ${runId}: ${errorMessage(error)}`,
       );
+    }
+  }
+
+  private terminalWorkflowMessageRequired(runId: string): boolean {
+    const run = this.queue.getWorkflowRun(runId);
+    return (
+      run !== undefined &&
+      run.executionMode === "interactive" &&
+      run.originSessionId !== null &&
+      ["done", "failed", "cancelled"].includes(run.status)
+    );
+  }
+
+  private terminalWorkflowMessageMissing(runId: string): boolean {
+    return (
+      this.terminalWorkflowMessageRequired(runId) &&
+      this.hostState.workflowMessages.latestForSource("terminal", `terminal:${runId}`) === undefined
+    );
+  }
+
+  private discoverMissingTerminalWorkflowMessages(): void {
+    for (const run of this.queue.listWorkflowRuns({
+      statuses: ["done", "failed", "cancelled"],
+    })) {
+      if (this.terminalWorkflowMessageMissing(run.runId)) {
+        this.pendingTerminalMessageReconciliations.add(run.runId);
+      }
+    }
+  }
+
+  private scheduleTerminalWorkflowMessageReconciliation(runId: string, now: number): void {
+    this.pendingTerminalMessageReconciliations.add(runId);
+    if (this.nextTerminalMessageReconciliationAt === 0) {
+      this.nextTerminalMessageReconciliationAt = now + TERMINAL_MESSAGE_RECONCILE_MS;
+    }
+  }
+
+  private reconcilePendingTerminalWorkflowMessages(
+    now: number = Date.now(),
+    force: boolean = false,
+  ): void {
+    if (this.pendingTerminalMessageReconciliations.size === 0) {
+      this.nextTerminalMessageReconciliationAt = 0;
+      return;
+    }
+    if (!force && now < this.nextTerminalMessageReconciliationAt) return;
+    this.nextTerminalMessageReconciliationAt = now + TERMINAL_MESSAGE_RECONCILE_MS;
+    for (const runId of [...this.pendingTerminalMessageReconciliations]) {
+      this.tryEnsureTerminalWorkflowMessage(runId, now);
+    }
+    if (this.pendingTerminalMessageReconciliations.size === 0) {
+      this.nextTerminalMessageReconciliationAt = 0;
     }
   }
 
