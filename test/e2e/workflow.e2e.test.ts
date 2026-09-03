@@ -597,7 +597,15 @@ describe.sequential("out-of-process workflow host end to end", () => {
       () => rpcDiagnostic(pi),
     );
     const client = new WorkflowClient({ databasePath });
-    const runView = await client.getRun(runId);
+    let runView = await client.getRun(runId);
+    await waitForCondition(
+      async () => {
+        runView = await client.getRun(runId);
+        return runView?.display.status === "running" && runView.display.activity === "origin_turn";
+      },
+      () => rpcDiagnostic(pi),
+      10_000,
+    );
     await client.close();
     if (runView === null) throw new Error("Multi-step widget run view disappeared");
     expect(runView.display).toMatchObject({ status: "running", activity: "origin_turn" });
