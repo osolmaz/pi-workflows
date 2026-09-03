@@ -123,9 +123,7 @@ export function buildWidgetView(
     footer.push(paint(theme, "error", `  error: ${truncate(sanitizeText(state.error), 120)}`));
   }
   if (status === "waiting" && state.waitingOn) {
-    footer.push(
-      paint(theme, "warning", `  waiting on checkpoint: ${sanitizeText(state.waitingOn)}`),
-    );
+    footer.push(paint(theme, "warning", `  waiting on step: ${sanitizeText(state.waitingOn)}`));
   }
   const hint = actionHint?.trim() ? sanitizeText(actionHint) : undefined;
   const progress = progressLines(state, now, updateHistory).slice(0, 4);

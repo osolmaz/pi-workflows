@@ -834,7 +834,7 @@ describe("buildWidgetLines", () => {
     expect(runningText).toContain("◐ ƒ third");
     expect(runningText).not.toContain("⏸ ƒ third");
     expect(runningText).not.toContain("third · waiting");
-    expect(runningText).not.toContain("waiting on checkpoint");
+    expect(runningText).not.toContain("waiting on step");
 
     const waiting = buildWidgetView(
       waitingState,
@@ -882,7 +882,7 @@ describe("buildWidgetLines", () => {
     expect(noNodes.maxScroll).toBe(0);
   });
 
-  it("shows waiting checkpoints and sanitizes external text", () => {
+  it("shows a waiting step and sanitizes external text", () => {
     const waiting = buildWidgetLines(
       makeState({
         runTitle: "evil\u001b[2J\ntitle",
@@ -897,7 +897,7 @@ describe("buildWidgetLines", () => {
     expect(waitingText).not.toContain("\n");
     expect(waiting[0]).toContain("evil title");
     expect(stripAnsi(waitingText)).toContain("⏸ ƒ third · waiting");
-    expect(stripAnsi(waiting.at(-1) ?? "")).toContain("waiting on checkpoint: third");
+    expect(stripAnsi(waiting.at(-1) ?? "")).toContain("waiting on step: third");
 
     const failed = buildWidgetLines(
       makeState({ status: "failed", error: `boom\n${"x".repeat(200)}` }),
