@@ -191,14 +191,6 @@ function workflowEffect(
   return {
     type: normalized,
     recovery,
-    idempotencyKey: ({ state }: WorkflowNodeContext) => {
-      const nodeId = state.currentNode;
-      if (nodeId === undefined) {
-        throw new Error("Managed effect resolution requires an active workflow node");
-      }
-      const nodeInvocation = state.steps.filter((step) => step.nodeId === nodeId).length + 1;
-      return `${state.runId}:${normalized}:${nodeId}:${nodeInvocation}`;
-    },
     request: ({ input, outputs }: WorkflowNodeContext) => ({ input, outputs }),
   };
 }

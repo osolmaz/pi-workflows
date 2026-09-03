@@ -1563,17 +1563,15 @@ export class WorkflowEngine {
       );
     }
     const effectType = node.effect.type.trim();
-    const idempotencyKey =
-      typeof node.effect.idempotencyKey === "function"
-        ? await node.effect.idempotencyKey(context)
-        : node.effect.idempotencyKey;
+    const invocation = context.state.steps.filter((step) => step.nodeId === nodeId).length + 1;
+    const idempotencyKey = `${context.state.runId}:${effectType}:${nodeId}:${invocation}`;
     const request =
       typeof node.effect.request === "function"
         ? await node.effect.request(context)
         : node.effect.request;
     /* istanbul ignore if -- definition validation and effect helpers reject empty fields */
-    if (effectType.length === 0 || idempotencyKey.trim().length === 0) {
-      throw new Error("Managed effect type and idempotency key must be nonempty text");
+    if (effectType.length === 0) {
+      throw new Error("Managed effect type must be nonempty text");
     }
     canonicalJson(request);
     const reservation = await this.store.reserveEffect({

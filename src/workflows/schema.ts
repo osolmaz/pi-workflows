@@ -113,12 +113,6 @@ export function assertValidActionNode(node: ActionNodeDefinition, nodeId = "acti
   if (node.effect.recovery !== "idempotent" && node.effect.recovery !== "manual") {
     fail(`node ${nodeId} effect recovery must be idempotent or manual`);
   }
-  if (
-    typeof node.effect.idempotencyKey !== "string" &&
-    typeof node.effect.idempotencyKey !== "function"
-  ) {
-    fail(`node ${nodeId} effect idempotencyKey must be text or a function`);
-  }
   if (!("request" in node.effect)) {
     fail(`node ${nodeId} effect requires request data or a request function`);
   }

@@ -200,16 +200,9 @@ describe("node constructors", () => {
     ).toThrow(/effect recovery must be idempotent or manual/);
     expect(() =>
       action({
-        effect: { ...idempotentEffect("test.invalid-key"), idempotencyKey: 1 as never },
-        run: () => 1,
-      }),
-    ).toThrow(/effect idempotencyKey must be text or a function/);
-    expect(() =>
-      action({
         effect: {
           type: "test.missing-request",
           recovery: "manual",
-          idempotencyKey: "key",
         } as never,
         run: () => 1,
       }),

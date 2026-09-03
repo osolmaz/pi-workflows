@@ -113,7 +113,7 @@ import {
   type WorkerLaunchEnvelope,
 } from "./state.js";
 import { HostViewStore, WORKFLOW_PAGE_KINDS, type WorkflowPageKind } from "./view.js";
-import type { WorkerMessage, WorkerResponse } from "./worker-protocol.js";
+import type { WorkerMessage, WorkerResponse, WorkerRunCommand } from "./worker-protocol.js";
 import { WorkflowWorkerSupervisor } from "./worker-supervisor.js";
 
 const HOST_LEASE_MS = 30_000;
@@ -3741,17 +3741,14 @@ export class WorkflowHost {
       const timedOutInteraction = this.hostState.timedOutInteraction(message.runId);
       const resumeInteractionAttemptId =
         candidateInteraction?.attemptId ?? timedOutInteraction?.attemptId;
+      const record = current ?? active.record;
       return workerResponse(
         message,
         "accepted",
         {
-          initialized: current?.initialized ?? active.record.initialized,
-          input: active.record.input,
-          launchOptions: active.record.launchOptions,
-          parentRunId: active.record.parentRunId,
-          originSessionId: active.record.originSessionId,
+          command: workerRunCommand(record, resumeInteractionAttemptId),
+          originSessionId: record.originSessionId,
           stateDirectory: this.stateDirectory,
-          ...(resumeInteractionAttemptId === undefined ? {} : { resumeInteractionAttemptId }),
           ...(candidateInteraction === undefined ? {} : { candidateInteraction }),
           ...(this.options.piArgs === undefined ? {} : { piArgs: this.options.piArgs }),
         } as JsonValue,
@@ -4797,6 +4794,38 @@ function acquireHostLock(
     `${JSON.stringify({ schema: "pi-workflows.host-lock.v1", ...record })}\n`,
     { encoding: "utf8", mode: 0o600, flag: "wx" },
   );
+}
+
+function workerRunCommand(
+  record: WorkflowRunQueueRecord,
+  resumeInteractionAttemptId: string | undefined,
+): WorkerRunCommand {
+  if (record.initialized) {
+    return {
+      kind: "resume",
+      ...(resumeInteractionAttemptId === undefined ? {} : { resumeInteractionAttemptId }),
+    };
+  }
+  const input = record.input as JsonValue;
+  if (record.lineageKind === "restart") return { kind: "restart", input };
+  if (record.lineageKind === "continuation") {
+    if (record.parentRunId === null) {
+      throw new Error(`Workflow continuation ${record.runId} has no parent run`);
+    }
+    const launchOptions = isObjectRecord(record.launchOptions) ? record.launchOptions : {};
+    return {
+      kind: "continue",
+      parentRunId: record.parentRunId,
+      input,
+      ...(launchOptions.humanDecision === undefined
+        ? {}
+        : { humanDecision: launchOptions.humanDecision as JsonValue }),
+    };
+  }
+  if (record.parentRunId !== null) {
+    throw new Error(`Workflow run ${record.runId} has a parent without a lineage kind`);
+  }
+  return { kind: "start", input };
 }
 
 function workerResponse(
