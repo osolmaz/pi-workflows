@@ -359,6 +359,7 @@ export class WorkflowHost {
     this.viewTimer = null;
     const server = this.server;
     this.server = null;
+    this.detachSessionCoordinators();
     await this.closeServer(server);
     for (const [runId, claimToken] of this.pendingRunClaims) {
       this.queue.parkWorkflowRun({ runId, claimToken });
@@ -556,15 +557,21 @@ export class WorkflowHost {
     socket.on("close", () => {
       this.sockets.delete(socket);
       this.connections.delete(socket);
-      for (const [sessionId, coordinator] of this.sessionCoordinators) {
-        if (coordinator.connectionId !== connection.id) continue;
-        this.hostState.markSessionModelTurnsInactive(sessionId);
-        this.sessionCoordinators.delete(sessionId);
-        this.views.noteOriginActivityChange();
-      }
+      this.detachSessionCoordinators(connection.id);
       this.views.clearConnection(connection.id);
       this.publishViews();
     });
+  }
+
+  private detachSessionCoordinators(connectionId?: string): void {
+    let changed = false;
+    for (const [sessionId, coordinator] of this.sessionCoordinators) {
+      if (connectionId !== undefined && coordinator.connectionId !== connectionId) continue;
+      this.hostState.markSessionModelTurnsInactive(sessionId);
+      this.sessionCoordinators.delete(sessionId);
+      changed = true;
+    }
+    if (changed) this.views.noteOriginActivityChange();
   }
 
   private async handleClientRequest(
