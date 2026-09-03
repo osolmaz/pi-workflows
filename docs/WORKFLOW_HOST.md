@@ -267,7 +267,7 @@ Each report names the sent workflow message, workflow turn ID, run, and origin s
 
 At `agent_end`, the extension derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host applies the end, activity update, pause, unproductive-turn counter, and pending step-message cancellation in one transaction. A repeated report adopts that result. A stale turn ID cannot clear newer activity.
 
-An aborted turn sets the run pause, cancels pending step messages, and does not increment `unproductiveTurnEnds`. The interaction derives its paused state from the run. A completed, recoverably failed, or proved-lost turn increments the counter only when the submitted-output step remains pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. At most one pending reminder-reason step exists. Acceptance, pause, cancellation, timeout, and branch re-presentation cancel pending step messages.
+An aborted turn sets the run pause, cancels pending step messages, and does not increment `unproductiveTurnEnds`. The interaction derives its paused state from the run. Resuming that submitted-output step atomically clears the pause, increments the interaction revision, and creates one step message with reason `resumed`. Pi starts a fresh model turn from that message. A protected decision does not start a model turn, so pause and resume do not change its interaction revision or create another decision message. A completed, recoverably failed, or proved-lost turn increments the counter only when the submitted-output step remains pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. At most one pending reminder-reason step exists. Acceptance, pause, cancellation, timeout, and branch re-presentation cancel pending step messages.
 
 The process-local coordinator epoch ends on client disconnect, but an open reported workflow turn does not end. Host startup does not close Pi turns. On `session_start`, `workflowMessage.reportBranch` closes an unended open message as `lost` only when Pi is idle. A busy Pi session re-reports the same started turn. A lost step follows the unproductive-turn rule. A lost terminal or follow-up closes after its first turn. Follow-up activity controls ordering but does not show the completed workflow as `running`. Activity cannot grant workflow authority or settle a workflow request.
 
@@ -357,7 +357,7 @@ Agent and assistant-message steps for an interactive run execute in the origin P
 
 The worker commits the node's resolved wall-clock deadline before it proposes `interaction.requested`. The host commits the request, changes the node attempt to waiting, parks the queue row, releases the claim, and acknowledges the worker. The worker then exits. The host continues to enforce the durable deadline while no worker exists. If the deadline passes, one control claim atomically closes the stale request and schedules a supervised timeout-resume child. The child preserves the same attempt and deadline, records `timed_out`, and follows any `$result.outcome` edge. A run with no timeout recovery edge becomes terminal and releases its session reservation. Restart recovery starts this timeout path before it schedules other work.
 
-The extension finds eligible workflow messages during `session_start`, after model turns settle, and once per second while the session is open. One `WorkflowMessageCoordinator` handles every message kind. After every host connection, it waits for the complete origin-session view and reports the active branch before it sends a workflow message or reports a model turn. The host view names the next eligible pending message only to the active coordinator epoch.
+The extension finds eligible workflow messages during `session_start`, after model turns settle, and once per second while the session is open. The same poll also establishes the one session subscription when initial host startup or connection fails. It keeps at most one connection attempt and one active subscription, so the open Pi session recovers without a restart and without duplicate coordinators. One `WorkflowMessageCoordinator` handles every message kind. After every host connection, it waits for the complete origin-session view and reports the active branch before it sends a workflow message or reports a model turn. The host view names the next eligible pending message only to the active coordinator epoch.
 
 The coordinator waits until Pi is idle and has no queued user input, keeps the message ID in its in-memory queued map, and searches the active branch for that hidden ID. It reports a matching entry before any send. Otherwise, it rechecks synchronously that Pi is idle, has no pending input, the message is absent, and its connection still owns the active epoch. It calls documented `pi.sendMessage()` with no `await` between the final check and call. A poll can discover work, but it cannot send an ID already in the queued map.
 
@@ -371,7 +371,7 @@ A tool update or submission goes to the host. It includes the exact request, nod
 
 An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`. When a protected decision reaches its saved `onTimeout` deadline, the host takes a control claim on the waiting parent, atomically records the validated default, closes the pending interaction, releases the parent claim, and reserves the continuation. A human answer cannot win after that deadline.
 
-The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema.
+The session keeps normal Pi entries for prompts, tools, and replies. Pi Workflows stores the public session entry ID used for presentation adoption. It does not edit the Pi session file or schema. A normal worker continuation leaves an active session capture open until the matching Pi turn ends. Only proved interruption can fail that capture; worker handoff alone cannot report that the host stopped.
 
 One session sends one workflow message at a time. Messages keep acceptance order, but an earlier ineligible or cancelled message does not block unrelated eligible work. Source state and message kind decide eligibility. A reload clears only process-local queued state. `workflowMessage.reportBranch` adopts existing entries and closes lost turns. When a pending source has no entry on the active branch, it creates one message of that source's own kind: a step with reason `resumed` for an interaction, or a decision for a protected decision. Repeating a report or returning to a branch that already contains that source creates no new message.
 
@@ -492,6 +492,7 @@ The implementation conforms when:
 - an expired or replaced owner cannot write;
 - a blocked worker cannot stop host renewal;
 - Pi can restart while work computes or waits;
+- an open Pi session reconnects after initial host startup or connection fails;
 - the host can restart and recover from committed state;
 - run, queue, attempt, decision, lease, event, and viewer projections remain consistent after injected crashes;
 - an expired running row can be resumed or cancelled safely;
@@ -509,6 +510,8 @@ The implementation conforms when:
 - a branch change creates at most one source-kind message when that source has no entry on the active branch;
 - a partial unique index allows at most one pending step message for each interactive request;
 - pause is stored once on the run and derived for its interaction;
+- resuming an aborted submitted-output step creates one new resumed message and one fresh origin-session model turn;
+- pausing and resuming a protected decision does not invalidate its answer revision or create a duplicate decision message;
 - follow-ups wait for the final continuation outcome, its terminal turn, earlier follow-ups, and release of the origin-session reservation;
 - only the final leaf in a checkpoint continuation chain receives a terminal workflow message;
 - effects are deduplicated or marked ambiguous;
@@ -522,6 +525,7 @@ The implementation conforms when:
 - the host is the only production process that opens live SQLite state;
 - the widget, status line, Herdr actions, CLI, and `piw` render the same host-produced status and controls;
 - a busy origin session displays `running` for the full exact workflow turn, including a terminal or pausing turn, and a stale turn-end report cannot clear newer activity;
+- normal worker continuation does not fail an active Pi session capture or report a false host interruption;
 - `paused` appears only after a durable pause and matching turn end;
 - a terminal run remains in the origin-session view while its terminal message is pending or its first turn is open, and then for 60 seconds after that turn ends, without retaining execution authority;
 - a TypeScript-created live database is viewable by the matching Rust `piw` through the client protocol without a duplicated SQLite digest;

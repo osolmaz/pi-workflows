@@ -339,6 +339,23 @@ describe("WorkflowRunStore branch behavior", () => {
     store.close();
   });
 
+  it("keeps a live session capture open during normal run preparation", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("run-recording-capture"));
+    await store.initializeRun(workflow, state("run-recording"));
+    await store.writeSessionBinding("run-recording", {
+      schema: SESSION_BINDING_SCHEMA,
+      runId: "run-recording",
+      piSessionId: "session-a",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    expect(store.readRun("run-recording")?.sessionCapture?.status).toBe("recording");
+    expect((await store.prepareRunResume("run-recording")).sessionCapture?.status).toBe(
+      "recording",
+    );
+    store.close();
+  });
+
   it("adopts an already terminal capture during run preparation", async () => {
     const store = new WorkflowRunStore(await makeStateDatabasePath("run-terminal-capture"));
     await store.initializeRun(workflow, state("run-5"));

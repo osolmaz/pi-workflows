@@ -428,6 +428,31 @@ async function waitForRunDisplay(client, runId, status, timeoutMs, rpc) {
   );
 }
 
+async function waitForPiIdle(rpc, timeoutMs = 30_000) {
+  return await waitFor(
+    "Pi to become idle",
+    async () => {
+      const state = requireObject(await rpc.request("get_state"), "Pi state");
+      return state.isStreaming === false && state.pendingMessageCount === 0;
+    },
+    { rpc, timeoutMs },
+  );
+}
+
+async function waitForCompletedSessionCapture(client, runId, rpc, timeoutMs = 30_000) {
+  return await waitFor(
+    `the completed workflow session capture for ${runId}`,
+    async () => {
+      const view = await client.getRun(runId);
+      return view?.session?.capture?.status === "complete" &&
+        view.session.integrity?.status === "complete"
+        ? view
+        : false;
+    },
+    { rpc, timeoutMs },
+  );
+}
+
 function assertOneFrame(output, workflowName, status) {
   const normalized = output.toLowerCase();
   if (!output.includes(workflowName) || !normalized.includes(status)) {
@@ -501,13 +526,80 @@ async function buildPiw(context) {
   return binary;
 }
 
+async function createIncompatibleState(candidate, databasePath) {
+  stage("creating an incompatible state fixture before Pi starts");
+  const stateModule = await import(
+    `${pathToFileURL(path.join(candidate, "dist", "state", "database.js")).href}?fixture=${Date.now()}`
+  );
+  const state = new stateModule.StateDatabase({ filePath: databasePath });
+  try {
+    state.connection
+      .prepare("UPDATE schema_meta SET app_version = ? WHERE id = 1")
+      .run("live-e2e-incompatible");
+  } finally {
+    state.close();
+  }
+}
+
+async function moveIncompatibleState(databasePath) {
+  const backupDirectory = path.join(path.dirname(databasePath), "incompatible-live-e2e");
+  await fs.mkdir(backupDirectory);
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const source = `${databasePath}${suffix}`;
+    try {
+      await fs.rename(source, path.join(backupDirectory, `state.sqlite${suffix}`));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function hasHostUnavailableNotice(rpc) {
+  return extensionUiEvents(rpc).some(
+    (event) =>
+      event.method === "notify" &&
+      event.notifyType === "warning" &&
+      typeof event.message === "string" &&
+      event.message.startsWith("Workflow host is unavailable:"),
+  );
+}
+
+async function waitForSessionCoordinator(client, sessionId, rpc) {
+  let coordinatorPresent = false;
+  const unsubscribe = await client.watchSession(sessionId, (event) => {
+    if (event.event === "session_snapshot" && typeof event.payload?.coordinatorEpoch === "string") {
+      coordinatorPresent = true;
+    }
+  });
+  try {
+    await waitFor(
+      "the existing Pi session to reconnect to the workflow host",
+      () => {
+        return coordinatorPresent;
+      },
+      { rpc, timeoutMs: 30_000 },
+    );
+  } finally {
+    await unsubscribe();
+  }
+  const notices = extensionUiEvents(rpc).filter(
+    (event) =>
+      event.method === "notify" &&
+      typeof event.message === "string" &&
+      event.message.startsWith("Workflow host is unavailable:"),
+  );
+  if (notices.length !== 1) {
+    throw new Error(`Expected one host-unavailable notice, observed ${notices.length}`);
+  }
+}
+
 async function startPi(context) {
   const args = [
     context.options.piEntry,
     "--mode",
     "rpc",
     "--session-id",
-    randomUUID(),
+    context.sessionId,
     "--session-dir",
     context.sessions,
     "--name",
@@ -631,6 +723,10 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     () => hasWorkflowUiState(rpc, workflowName, "completed", resumeEvents),
     { rpc, timeoutMs: 30_000 },
   );
+  if (!context.options.runtimeOnly) {
+    await waitForPiIdle(rpc, MODEL_TIMEOUT_MS);
+    await waitForCompletedSessionCapture(client, runId, rpc, MODEL_TIMEOUT_MS);
+  }
   await new Promise((resolve) => setTimeout(resolve, 2_000));
   if (hasWorkflowUiClear(rpc, resumeEvents)) {
     throw new Error("Pi cleared the completed workflow before its retention interval");
@@ -725,6 +821,9 @@ async function runModelWorkflow(context, rpc, client, api) {
     throw new Error(`Model workflow step was not accepted: ${JSON.stringify(step)}`);
   }
 
+  await waitForPiIdle(rpc, MODEL_TIMEOUT_MS);
+  await waitForCompletedSessionCapture(client, run.runId, rpc, MODEL_TIMEOUT_MS);
+
   const entriesData = requireObject(await rpc.request("get_entries"), "Pi entries response");
   if (!Array.isArray(entriesData.entries)) throw new Error("Pi returned no session entries");
   const deliveries = entriesData.entries.filter(
@@ -801,6 +900,7 @@ async function execute(root, options) {
     profile,
     project: path.join(root, "project"),
     root,
+    sessionId: randomUUID(),
     sessions: path.join(root, "sessions"),
     temporary: path.join(root, "tmp"),
     xdgCache: path.join(root, "xdg-cache"),
@@ -876,18 +976,30 @@ async function execute(root, options) {
       await runProcess("rustc", ["--version"], context.processOptions(context.project))
     ).stdout.trim();
 
+    const databasePath = path.join(context.home, ".pi", "agent", "workflows", "state.sqlite");
+    await createIncompatibleState(candidate, databasePath);
     rpc = await startPi(context);
     await assertPackageIsolation(rpc, candidate);
+    await waitFor(
+      "the initial incompatible-state host failure",
+      () => hasHostUnavailableNotice(rpc),
+      {
+        rpc,
+        timeoutMs: 30_000,
+      },
+    );
+    await moveIncompatibleState(databasePath);
+
     const clientModule = await import(
       `${pathToFileURL(path.join(candidate, "dist", "client", "index.js")).href}?live=${Date.now()}`
     );
-    const databasePath = path.join(context.home, ".pi", "agent", "workflows", "state.sqlite");
     client = new clientModule.WorkflowClient({
       clientId: `live-e2e-${randomUUID()}`,
       databasePath,
       env: context.env,
     });
     await client.ensureAvailable();
+    await waitForSessionCoordinator(client, context.sessionId, rpc);
 
     const runtimeRunId = await runRuntimeWorkflow(context, rpc, client, piwBinary);
     let modelRunId;

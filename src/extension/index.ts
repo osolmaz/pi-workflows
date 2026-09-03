@@ -175,6 +175,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let sessionContext: ExtensionContext | null = null;
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
+  let sessionConnectTask: Promise<void> | null = null;
+  let hostUnavailableNotified = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
@@ -547,76 +549,100 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
+    hostUnavailableNotified = false;
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     let snapshotGeneration = 0;
     const sessionClient = client;
+
+    const connectSession = (): void => {
+      if (
+        generation !== sessionGeneration ||
+        sessionContext !== ctx ||
+        sessionUnsubscribe !== null ||
+        sessionConnectTask !== null
+      ) {
+        return;
+      }
+      const task = (async () => {
+        try {
+          await sessionClient.ensureAvailable();
+          const unsubscribe = await sessionClient.watchSession(
+            sessionId,
+            (event) => {
+              if (generation !== sessionGeneration || sessionContext !== ctx) return;
+              const currentSnapshotGeneration = ++snapshotGeneration;
+              if (event.event === "unavailable") {
+                sessionSnapshots.delete(sessionId);
+                sessionView.clear(ctx);
+                return;
+              }
+              if (!isWorkflowSessionView(event.payload)) return;
+              void materializeSessionView(sessionClient, event.payload)
+                .then((session) => {
+                  if (
+                    generation !== sessionGeneration ||
+                    currentSnapshotGeneration !== snapshotGeneration ||
+                    sessionContext !== ctx
+                  ) {
+                    return;
+                  }
+                  sessionSnapshots.set(sessionId, session);
+                  workflowMessages.updateView(session);
+                  sessionView.update(session, ctx);
+                  const ownedMessageId =
+                    session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
+                  const ownedMessage = session.workflowMessages.find(
+                    (message) => message.workflowMessageId === ownedMessageId,
+                  );
+                  const prepare =
+                    ownedMessage !== undefined &&
+                    (ownedMessage.kind === "step" ||
+                      ownedMessage.kind === "terminal" ||
+                      ownedMessage.kind === "followUp")
+                      ? ensureRecorder(ownedMessage, ctx)
+                      : Promise.resolve();
+                  void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
+                })
+                .catch(() => {
+                  // A newer session revision retries from its own stable snapshot.
+                });
+            },
+            { coordinator: true },
+          );
+          if (generation !== sessionGeneration || sessionContext !== ctx) {
+            await unsubscribe();
+            return;
+          }
+          sessionUnsubscribe = unsubscribe;
+          hostUnavailableNotified = false;
+          const capability = await herdrViewer.probe();
+          if (generation !== sessionGeneration || sessionContext !== ctx) return;
+          sessionView.setActionHint(capability.available ? PIW_SHORTCUT_HINT : undefined, ctx);
+          await presentInOrder(ctx);
+        } catch (error) {
+          if (
+            generation === sessionGeneration &&
+            sessionContext === ctx &&
+            !hostUnavailableNotified
+          ) {
+            hostUnavailableNotified = true;
+            ctx.ui.notify(`Workflow host is unavailable: ${errorMessage(error)}`, "warning");
+          }
+        }
+      })();
+      sessionConnectTask = task;
+      void task.finally(() => {
+        if (sessionConnectTask === task) sessionConnectTask = null;
+      });
+    };
+
     pollTimer = setInterval(() => {
+      connectSession();
       if (sessionContext !== null) void presentInOrder(sessionContext).catch(() => undefined);
     }, INTERACTION_POLL_MS);
     pollTimer.unref?.();
-
-    void (async () => {
-      try {
-        await sessionClient.ensureAvailable();
-        const unsubscribe = await sessionClient.watchSession(
-          sessionId,
-          (event) => {
-            if (generation !== sessionGeneration || sessionContext !== ctx) return;
-            const currentSnapshotGeneration = ++snapshotGeneration;
-            if (event.event === "unavailable") {
-              sessionSnapshots.delete(sessionId);
-              sessionView.clear(ctx);
-              return;
-            }
-            if (!isWorkflowSessionView(event.payload)) return;
-            void materializeSessionView(sessionClient, event.payload)
-              .then((session) => {
-                if (
-                  generation !== sessionGeneration ||
-                  currentSnapshotGeneration !== snapshotGeneration ||
-                  sessionContext !== ctx
-                ) {
-                  return;
-                }
-                sessionSnapshots.set(sessionId, session);
-                workflowMessages.updateView(session);
-                sessionView.update(session, ctx);
-                const ownedMessageId =
-                  session.nextWorkflowMessageId ?? session.openWorkflowMessageId;
-                const ownedMessage = session.workflowMessages.find(
-                  (message) => message.workflowMessageId === ownedMessageId,
-                );
-                const prepare =
-                  ownedMessage !== undefined &&
-                  (ownedMessage.kind === "step" ||
-                    ownedMessage.kind === "terminal" ||
-                    ownedMessage.kind === "followUp")
-                    ? ensureRecorder(ownedMessage, ctx)
-                    : Promise.resolve();
-                void prepare.then(async () => await presentInOrder(ctx)).catch(() => undefined);
-              })
-              .catch(() => {
-                // A newer session revision retries from its own stable snapshot.
-              });
-          },
-          { coordinator: true },
-        );
-        if (generation !== sessionGeneration || sessionContext !== ctx) {
-          await unsubscribe();
-          return;
-        }
-        sessionUnsubscribe = unsubscribe;
-        const capability = await herdrViewer.probe();
-        if (generation !== sessionGeneration || sessionContext !== ctx) return;
-        sessionView.setActionHint(capability.available ? PIW_SHORTCUT_HINT : undefined, ctx);
-        await presentInOrder(ctx);
-      } catch (error) {
-        if (generation === sessionGeneration && sessionContext === ctx) {
-          ctx.ui.notify(`Workflow host is unavailable: ${errorMessage(error)}`, "warning");
-        }
-      }
-    })();
+    connectSession();
   });
 
   pi.on("session_tree", async (_event, ctx) => {
@@ -654,10 +680,23 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     } catch (error) {
       ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
     }
+    const finishedMessage = workflowMessages.activeTurnMessage();
     workflowMessages.endTurn(
       workflowTurnStopReason(event.messages, ctx.signal?.aborted === true),
       responseEntryId(ctx.sessionManager.getBranch()),
     );
+    if (
+      activeRecorder !== null &&
+      finishedMessage !== undefined &&
+      (finishedMessage.kind === "terminal" || finishedMessage.kind === "followUp")
+    ) {
+      const finishedRecorder = activeRecorder;
+      activeRecorder = null;
+      await finishedRecorder.finish();
+      if (sessionRecorders.get(finishedMessage.runId) === finishedRecorder) {
+        sessionRecorders.delete(finishedMessage.runId);
+      }
+    }
     await presentInOrder(ctx).catch((error) => {
       ctx.ui.notify(`Could not record workflow model activity: ${errorMessage(error)}`, "warning");
     });
@@ -720,6 +759,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     pollTimer = null;
     if (sessionUnsubscribe !== null) await sessionUnsubscribe().catch(() => undefined);
     sessionUnsubscribe = null;
+    sessionConnectTask = null;
+    hostUnavailableNotified = false;
     await client.close();
     client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
   });

@@ -78,6 +78,14 @@ An API-key run can use an ephemeral agent directory. Pi receives the caller's ex
 
 Before a model call, the runner will execute Pi's documented `auth check` command for the exact provider and model. It will stop before the workflow starts when authentication or model resolution fails.
 
+## Startup recovery
+
+Before Pi starts, the runner creates an incompatible state fixture inside the guarded temporary home. It then starts Pi and waits for the extension's one bounded host-unavailable warning. The runner moves the fixture intact, as the alpha reset instruction requires, and starts the host through the installed client.
+
+The same Pi process must establish its origin-session subscription without a restart. An observer subscription verifies that the host has a coordinator epoch for that session. More polling must not produce a second host-unavailable warning. The normal runtime workflow then proves that the recovered session receives live widget updates.
+
+This check reproduces the case where Pi starts before the host can open durable state. It changes no operator database or Pi session.
+
 ## Runtime workflow
 
 The first workflow does not call a model. It has one delayed compute step and a fixed final output.
@@ -179,8 +187,14 @@ Add tests for:
 - timeout, missing-run, and host connection failures;
 - packed npm installation with production dependencies;
 - extension source isolation in base Pi;
+- origin-session reconnection after initial host startup fails;
+- one warning during the simulated outage;
 - RPC widget and status transitions;
 - pause with no active worker;
+- abort of an active origin-session model turn;
+- one new resumed step message and one fresh model turn after resume;
+- protected decision revision stability across pause and resume;
+- a complete session capture with no false host-interruption diagnostic;
 - resume and completion;
 - exact provider and model validation;
 - model fallback rejection;
@@ -222,4 +236,4 @@ The implementation uses documented Pi package installation and CLI model selecti
 
 ## Completion criteria
 
-The work is complete when a clean base Pi process loads only the packed Pi Workflows package. The deterministic runtime workflow must pass every widget and lifecycle check, while `piw --once` must agree with Pi and the host. An explicitly selected built-in model must complete the structured agent workflow. Cleanup must leave no process or large temporary directory, and all repository checks must pass.
+The work is complete when a clean base Pi process loads only the packed Pi Workflows package. The same Pi process must recover after the temporary incompatible-state gate is removed. The deterministic runtime workflow must pass every widget and lifecycle check, while `piw --once` must agree with Pi and the host. The full Pi mock-provider test must abort an active origin-session workflow turn, resume it through a distinct resumed step message, complete through one fresh model turn, and leave a complete session capture. The installed real-model check must reject a false host-interruption diagnostic. An explicitly selected built-in model must complete the structured agent workflow. Cleanup must leave no process or large temporary directory, and all repository checks must pass.

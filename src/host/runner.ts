@@ -1233,7 +1233,15 @@ export class WorkflowHost {
       }
       case "run.resume": {
         const runId = requireRunId(request);
-        if (this.queue.resumePausedInteraction({ runId })) {
+        const resumedInteraction = this.state.transaction(() => {
+          const now = Date.now();
+          if (!this.queue.resumePausedInteraction({ runId, now: new Date(now).toISOString() })) {
+            return false;
+          }
+          this.hostState.resumePendingInteraction(runId, now);
+          return true;
+        });
+        if (resumedInteraction) {
           return {
             outcome: "accepted",
             receipt: {

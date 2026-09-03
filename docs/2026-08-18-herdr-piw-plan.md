@@ -26,7 +26,7 @@ When pi-workflows runs inside Herdr, show a shortcut that opens the current run 
 
 ### One package with two host entry points
 
-The package root will contain `herdr-plugin.toml`. Pi loads the existing extension entry point. Herdr loads a `piw` pane entry point from the same package root. A small checked-in JavaScript launcher validates `PI_WORKFLOWS_RUN_DIR` and starts `piw` with an argv array.
+The package root will contain `herdr-plugin.toml`. Pi loads the existing extension entry point. Herdr loads a `piw` pane entry point from the same package root. A small checked-in JavaScript launcher validates the workflow run ID and starts `piw` with an argv array. It uses Herdr's configured executable path when that path works. If Herdr replaced its executable after the server started and the configured path no longer exists, the launcher retries the pane label command through `PATH`.
 
 `pi-workflows herdr setup` explicitly links the current package root with `herdr plugin link`. It is idempotent and never changes plugin registration during normal Pi startup.
 
@@ -58,6 +58,7 @@ Herdr's public snapshot does not expose plugin metadata tokens. The launcher wil
 - All six placements work and preserve the calling pane unless the user selects a focused viewer.
 - Repeated opens and Pi reloads focus the existing run viewer.
 - Failures produce bounded, useful messages and leave no empty tab or workspace.
+- A viewer still opens when the Herdr server supplies a replaced executable path and the current `herdr` command is in `PATH`.
 - The package tarball contains the Herdr manifest and launcher.
 - `osolmaz/pi-workflows` is public, has a root `herdr-plugin.toml`, and has the `herdr-plugin` GitHub topic.
 

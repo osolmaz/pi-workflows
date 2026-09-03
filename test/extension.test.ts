@@ -352,6 +352,45 @@ describe("pi-workflows hosted extension", () => {
     }
   }, 30_000);
 
+  it("reconnects the session after initial host startup fails", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const originalEnsureAvailable = WorkflowClient.prototype.ensureAvailable;
+    const ensureAvailable = vi
+      .spyOn(WorkflowClient.prototype, "ensureAvailable")
+      .mockRejectedValueOnce(new Error("injected startup failure"))
+      .mockImplementation(function (this: WorkflowClient) {
+        return originalEnsureAvailable.call(this);
+      });
+    const watchSession = vi.spyOn(WorkflowClient.prototype, "watchSession");
+    const fake = makePi({ cwd });
+
+    await fake.emit("session_start");
+    await waitUntil(
+      () =>
+        fake.notifications.some(
+          (notification) =>
+            notification.level === "warning" &&
+            notification.message.includes("injected startup failure"),
+        ),
+      5_000,
+    );
+    await waitUntil(() => ensureAvailable.mock.calls.length >= 2, 30_000);
+    await waitUntil(() => watchSession.mock.calls.length === 1, 30_000);
+
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+
+    expect(fake.sent).toHaveLength(1);
+    expect(watchSession).toHaveBeenCalledTimes(1);
+    expect(
+      fake.notifications.filter((notification) =>
+        notification.message.startsWith("Workflow host is unavailable:"),
+      ),
+    ).toHaveLength(1);
+    await fake.emit("session_shutdown");
+  }, 60_000);
+
   it("starts, presents, updates, and completes an interactive hosted run", async () => {
     const { cwd, workflowPath } = await setupProject();
     const durableRequests = vi.spyOn(WorkflowClient.prototype, "requestDurable");
@@ -464,11 +503,21 @@ describe("pi-workflows hosted extension", () => {
         store.close();
       }
     }, 30_000);
+    await waitUntil(() => fake.sent.length === 2, 30_000);
+    expect(fake.sent[1]?.details).toMatchObject({
+      reason: "resumed",
+      requestId: (fake.sent[0]!.details as { requestId: string }).requestId,
+    });
+    expect((fake.sent[1]!.details as { workflowMessageId: string }).workflowMessageId).not.toBe(
+      (fake.sent[0]!.details as { workflowMessageId: string }).workflowMessageId,
+    );
+    const resumedContract = stepContract(fake.sent[1] as Record<string, unknown>);
+    expect(resumedContract).toEqual(contract);
     await expect(
       fake.runTool("resumed-submit", {
         action: "submit",
-        step: contract.nodeId,
-        attempt: contract.attemptId,
+        step: resumedContract.nodeId,
+        attempt: resumedContract.attemptId,
         output: { reply: "continued" },
       }),
     ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });

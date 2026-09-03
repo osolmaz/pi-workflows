@@ -151,9 +151,9 @@ A start against a closed message is rejected. Follow-up turns are reported for o
 
 The extension creates one workflow turn ID at `agent_start` and keeps it through the matching `agent_end` and host reconnect. It buffers starts and ends until the session view and message receipt are ready.
 
-At `agent_end`, it derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host saves one immutable end result. A repeated report adopts it, and a stale turn ID cannot clear newer activity.
+At `agent_end`, it derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host saves one immutable end result. A repeated report adopts it, and a stale turn ID cannot clear newer activity. A supervised worker can continue after accepted tool output while that Pi turn is still open. This normal continuation leaves the session capture recording until `agent_end`; it does not mark the capture as interrupted.
 
-The host applies the end and its workflow consequence in one transaction. An aborted turn sets the run pause and cancels the request's pending step messages; the interaction derives its paused state from the run. A completed, recoverably failed, or proved-lost turn increments `unproductiveTurnEnds` only when the submitted-output step is pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. A partial unique index enforces at most one pending step message for the request, regardless of reason. Acceptance, pause, cancel, timeout, and branch re-presentation cancel all pending step messages. A cancelled message did not start a turn and does not increment the counter.
+The host applies the end and its workflow consequence in one transaction. An aborted turn sets the run pause and cancels the request's pending step messages; the interaction derives its paused state from the run. Resuming that submitted-output step atomically clears the pause, increments the interaction revision, and creates one new step message with reason `resumed`. That message starts a fresh Pi model turn. A protected decision does not start a model turn, so its revision and decision message do not change when its run resumes. A completed, recoverably failed, or proved-lost turn increments `unproductiveTurnEnds` only when the submitted-output step is pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. A partial unique index enforces at most one pending step message for the request, regardless of reason. Acceptance, pause, cancel, timeout, and branch re-presentation cancel all pending step messages. A cancelled message did not start a turn and does not increment the counter.
 
 There is no activity heartbeat, refresh lease, or sequence counter. The host shows `running` from the matching start until the matching end. Host startup never marks a Pi turn lost. On `session_start`, only an idle-session branch report can close an open sent message with synthetic stop reason `lost`. Polling and time alone cannot create a reminder.
 
@@ -214,10 +214,13 @@ Tests must prove:
 - messages remain in saved order without message-pointer deadlocks;
 - an early `agent_start` and `agent_end` wait for the message receipt and session view, then apply in order;
 - every matching model turn shows `running` for its full duration;
+- normal worker continuation leaves the active session capture open until the matching turn ends;
 - stale turn-end reports and starts against closed messages are rejected;
 - a manual turn cancels pending step messages that it supersedes;
 - a turn cannot bind to an interaction whose run is paused;
 - aborted turns pause without incrementing the unproductive-turn counter;
+- resuming an aborted step creates one new resumed message and one fresh model turn;
+- resuming a protected decision keeps its answer revision and does not create a duplicate decision message;
 - host restart does not close a live Pi turn, while an idle-session branch report can close an unended turn as lost;
 - two reminder-reason steps are sent at most once and the next unproductive turn fails;
 - initial, reminder, and resumed prompts use the same step kind and differ only by reason;

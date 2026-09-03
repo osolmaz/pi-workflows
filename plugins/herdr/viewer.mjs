@@ -12,12 +12,14 @@ if (!/^[A-Za-z0-9]+:p[A-Za-z0-9]+$/u.test(paneId)) {
   fail("HERDR_PANE_ID is missing or invalid.");
 }
 
-const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
+const configuredHerdr = process.env.HERDR_BIN_PATH ?? "herdr";
 const label = `piw · ${runId}`;
-const labeled = spawnSync(herdr, ["pane", "rename", paneId, label], {
-  encoding: "utf8",
-  stdio: ["ignore", "ignore", "pipe"],
-});
+let herdr = configuredHerdr;
+let labeled = renamePane(herdr, paneId, label);
+if (labeled.error?.code === "ENOENT" && herdr !== "herdr") {
+  herdr = "herdr";
+  labeled = renamePane(herdr, paneId, label);
+}
 if (labeled.error) fail(`Could not label the Herdr viewer pane: ${labeled.error.message}`);
 if (labeled.status !== 0) {
   fail(`Could not label the Herdr viewer pane: ${bounded(labeled.stderr) || "unknown error"}`);
@@ -31,6 +33,13 @@ viewer.on("error", (error) => fail(`Could not start piw: ${error.message}`));
 viewer.on("exit", (code, signal) => {
   process.exitCode = signal ? 1 : (code ?? 1);
 });
+
+function renamePane(command, targetPaneId, targetLabel) {
+  return spawnSync(command, ["pane", "rename", targetPaneId, targetLabel], {
+    encoding: "utf8",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+}
 
 function fail(message) {
   process.stderr.write(`${message}\n`);

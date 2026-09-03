@@ -63,6 +63,21 @@ export default defineWorkflow({
 });
 `;
 
+const PAUSE_RESUME_WORKFLOW = `import { agent, defineWorkflow } from "@osolmaz/pi-workflows";
+
+export default defineWorkflow({
+  name: "pause-resume-e2e",
+  startAt: "work",
+  nodes: {
+    work: agent({
+      prompt: () => "Submit the durable pause and resume E2E result.",
+      expectedOutput: '{ "resumed": true }',
+    }),
+  },
+  edges: [],
+});
+`;
+
 const CONTROLLER = `import { conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
 
 export default defineController({
@@ -382,6 +397,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
   let databasePath: string;
   let sessionDir: string;
   let sessionId: string;
+  let holdPauseSubmission = true;
   let holdRestartSubmission = true;
 
   const piEnvironment = (): Record<string, string> => ({
@@ -413,6 +429,21 @@ describe.sequential("out-of-process workflow host end to end", () => {
         }
         if (contract.workflow === "assistant-e2e" && contract.step === "present") {
           return { kind: "text", text: "Visible assistant E2E response." };
+        }
+        if (contract.workflow === "pause-resume-e2e") {
+          if (holdPauseSubmission) {
+            return { kind: "text", text: "Waiting for the pause. ".repeat(500) };
+          }
+          return {
+            kind: "tool",
+            toolName: "workflow",
+            args: {
+              action: "submit",
+              step: contract.step,
+              attempt: contract.attempt,
+              output: { resumed: true },
+            },
+          };
         }
         if (contract.workflow === "restart-e2e") {
           if (holdRestartSubmission) {
@@ -448,6 +479,10 @@ describe.sequential("out-of-process workflow host end to end", () => {
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "restart-e2e.workflow.ts"),
       RESTART_WORKFLOW,
+    );
+    await fs.writeFile(
+      path.join(projectDir, ".pi", "workflows", "pause-resume-e2e.workflow.ts"),
+      PAUSE_RESUME_WORKFLOW,
     );
     await fs.writeFile(
       path.join(projectDir, ".pi", "controllers", "hosted-e2e.controller.ts"),
@@ -556,6 +591,93 @@ describe.sequential("out-of-process workflow host end to end", () => {
       store.close();
     }
   }, 60_000);
+
+  it("starts a fresh origin-session turn after pause and resume", async () => {
+    const requestStart = mock.requests.length;
+    pi.send({ id: "pause-start", type: "prompt", message: "/workflow pause-resume-e2e" });
+    await waitForCondition(
+      () =>
+        mock.requests
+          .slice(requestStart)
+          .some(({ messages }) =>
+            JSON.stringify(messages.at(-1)).includes(
+              "Submit the durable pause and resume E2E result.",
+            ),
+          ),
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
+
+    pi.send({ id: "pause-abort", type: "abort" });
+    const paused = await waitForRun(
+      databasePath,
+      "pause-resume-e2e",
+      (candidate) => candidate.paused === true,
+      () => rpcDiagnostic(pi),
+    );
+    await waitForPiIdle(pi);
+
+    holdPauseSubmission = false;
+    pi.send({ id: "pause-resume", type: "prompt", message: "/workflow resume" });
+    const { state } = await waitForRun(
+      databasePath,
+      "pause-resume-e2e",
+      (candidate) => candidate.status === "completed",
+      () => rpcDiagnostic(pi),
+      60_000,
+    );
+    expect(state.finalOutput).toEqual({ resumed: true });
+    await waitForPiIdle(pi);
+
+    const client = new WorkflowClient({ databasePath });
+    let runReceipt: JsonValue | undefined;
+    await waitForCondition(
+      async () => {
+        const runView = await client.request({
+          operation: "view.run.get",
+          runId: paused.runId,
+        });
+        runReceipt = runView.receipt;
+        if (!isRecord(runReceipt) || !isRecord(runReceipt.session)) return false;
+        const { capture, integrity } = runReceipt.session;
+        return (
+          isRecord(capture) &&
+          capture.status === "complete" &&
+          isRecord(integrity) &&
+          integrity.status === "complete"
+        );
+      },
+      () => rpcDiagnostic(pi),
+      30_000,
+    );
+    await client.close();
+    expect(runReceipt).toMatchObject({
+      session: {
+        capture: { status: "complete" },
+        integrity: { status: "complete", diagnostics: [] },
+      },
+    });
+
+    const stepEntries = customEntriesForRun(
+      await readRpcEntries(pi),
+      "pi-workflows-step",
+      paused.runId,
+    );
+    expect(stepEntries).toHaveLength(2);
+    const details = stepEntries.map((entry) => entry.details).filter(isRecord);
+    expect(details.map((value) => value.reason)).toEqual(["initial", "resumed"]);
+    expect(new Set(details.map((value) => value.requestId))).toHaveLength(1);
+    expect(new Set(details.map((value) => value.workflowMessageId))).toHaveLength(2);
+    expect(
+      mock.requests
+        .slice(requestStart)
+        .filter(({ messages }) =>
+          JSON.stringify(messages.at(-1)).includes(
+            "Submit the durable pause and resume E2E result.",
+          ),
+        ),
+    ).toHaveLength(2);
+  }, 90_000);
 
   it("adopts one durable interaction across a real Pi restart", async () => {
     pi.send({ id: "restart-start", type: "prompt", message: "/workflow restart-e2e" });
