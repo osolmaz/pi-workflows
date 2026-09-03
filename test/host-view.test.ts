@@ -238,7 +238,14 @@ describe("host workflow display reducer", () => {
     ];
     await runs.appendSessionEventBatch("run-large-view", events);
 
-    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const views = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     const legacyRead = vi.spyOn(runs, "readRun");
     const boundedRead = vi.spyOn(runs, "readRunView");
     const view = views.run("run-large-view");
@@ -284,7 +291,14 @@ describe("host workflow display reducer", () => {
     if (contentPath === undefined) throw new Error("large output was not externalized");
     expect(views.content(view.runId, "not-a-content-path", 0)).toBeNull();
     expect(() => views.content(view.runId, contentPath, -1)).toThrow(/offset/);
-    const coldViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    const coldViews = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     const chunks: Buffer[] = [];
     let offset = 0;
     for (;;) {
@@ -436,7 +450,14 @@ describe("host workflow display reducer", () => {
       {},
       { runId: "run-large-graph" },
     );
-    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const views = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     const view = views.run("run-large-graph");
     if (view === null) throw new Error("large graph view missing");
     expect(view.graphStepTotal).toBe(nodeCount);
@@ -502,7 +523,14 @@ describe("host workflow display reducer", () => {
       originSessionId: "session-large-topology",
     });
     const runs = new WorkflowRunStore(databasePath, { state });
-    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    const views = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     const view = views.run("run-large-topology");
     if (view === null) throw new Error("large topology view missing");
     const encoded = encodeProtocolLine({
@@ -601,6 +629,7 @@ describe("host workflow display reducer", () => {
       hostState,
       runs,
       (runId) => runId === "run-view",
+      () => false,
     );
     expect(applyingViews.run("run-view")?.display.status).toBe("running");
     await runs.settleEffect({
@@ -633,7 +662,15 @@ describe("host workflow display reducer", () => {
         },
       },
     });
-    const views = new HostViewStore(state, queue, hostState, runs, () => false);
+    let modelTurnActive = true;
+    const views = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => modelTurnActive,
+    );
     const readRun = vi.spyOn(runs, "readRun");
     const initialList = views.list();
     expect(initialList.items).toHaveLength(1);
@@ -667,6 +704,11 @@ describe("host workflow display reducer", () => {
       status: "running",
       activity: "origin_turn",
     });
+    modelTurnActive = false;
+    views.noteOriginActivityChange();
+    expect(views.run("run-view")?.display.status).toBe("waiting");
+    modelTurnActive = true;
+    views.noteOriginActivityChange();
     const runningList = views.list();
     expect(runningList.revision).not.toBe(initialList.revision);
     expect(runningList.items).toMatchObject([
@@ -705,7 +747,14 @@ describe("host workflow display reducer", () => {
       )
       .run(errorHash, Date.now());
     state.connection.prepare("UPDATE runs SET status = 'failed' WHERE run_id = 'run-view'").run();
-    const failedViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    const failedViews = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     expect(failedViews.list().items[0]?.display).toMatchObject({
       status: "failed",
       reason: completeFailureReason,
@@ -719,7 +768,14 @@ describe("host workflow display reducer", () => {
     state.connection
       .prepare("UPDATE run_queue SET error_hash = ?, updated_at = ? WHERE run_id = 'run-view'")
       .run(oversizedErrorHash, Date.now() + 1);
-    const oversizedViews = new HostViewStore(state, queue, hostState, runs, () => false);
+    const oversizedViews = new HostViewStore(
+      state,
+      queue,
+      hostState,
+      runs,
+      () => false,
+      () => false,
+    );
     const oversizedList = oversizedViews.list();
     const reasonContent = oversizedList.items[0]?.display.reasonContent as
       | { $artifact?: { path?: string; sha256?: string } }

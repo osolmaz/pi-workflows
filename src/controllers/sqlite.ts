@@ -1445,6 +1445,7 @@ export class SqliteControllerStore implements ControllerStore {
 
   beginWorkflowRunInteractionTimeout(options: {
     runId: string;
+    targetSessionId: string;
     claimToken: string;
     now?: string;
   }): boolean {
@@ -1466,7 +1467,8 @@ export class SqliteControllerStore implements ControllerStore {
            FROM interactive_requests i
            JOIN node_attempts a ON a.attempt_id = i.attempt_id
            JOIN runs r ON r.run_id = i.run_id
-           WHERE i.run_id = ? AND i.status = 'pending' AND r.paused = 0
+           WHERE i.run_id = ? AND i.target_session_id = ?
+             AND i.status = 'pending' AND r.paused = 0
              AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
              AND EXISTS (
                SELECT 1 FROM workflow_messages m
@@ -1475,7 +1477,7 @@ export class SqliteControllerStore implements ControllerStore {
              )
            ORDER BY a.deadline_at, i.request_id LIMIT 1`,
         )
-        .get(options.runId, now);
+        .get(options.runId, options.targetSessionId, now);
       if (!isExpiredInteractionRow(interaction)) return false;
       const request = this.state.connection
         .prepare(

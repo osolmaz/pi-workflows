@@ -1519,6 +1519,8 @@ setInterval(() => {}, 1000);
       claimPollMs: 10,
     });
     const client = new WorkflowClient({ databasePath });
+    let reconnectedClient: WorkflowClient | undefined;
+    let recoveredHost: WorkflowHost | undefined;
     await restarted.start();
     try {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1731,9 +1733,106 @@ setInterval(() => {}, 1000);
       if (resumedTurnDeadline?.startedAt == null || resumedTurnDeadline.deadlineAt == null) {
         throw new Error("resumed model-turn deadline is missing");
       }
-      expect(resumedTurnDeadline.deadlineAt).toBeGreaterThan(firstActiveDeadlineAt);
-      expect(resumedTurnDeadline.deadlineAt).toBeGreaterThan(Date.now() + 1_000);
-      expect(resumedTurnDeadline.deadlineAt - resumedTurnDeadline.startedAt).toBe(
+      const secondActiveDeadlineAt = resumedTurnDeadline.deadlineAt;
+      expect(secondActiveDeadlineAt).toBeGreaterThan(firstActiveDeadlineAt);
+      expect(secondActiveDeadlineAt).toBeGreaterThan(Date.now() + 1_000);
+      expect(secondActiveDeadlineAt - resumedTurnDeadline.startedAt).toBe(configuredDurationMs);
+
+      await client.close();
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, secondActiveDeadlineAt - Date.now()) + 100),
+      );
+      const disconnectedState = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(disconnectedState.getInteraction(timedRequestId)?.status).toBe("pending");
+        expect(
+          disconnectedState.state.connection
+            .prepare("SELECT error_code AS errorCode FROM run_queue WHERE run_id = ?")
+            .get("interaction-timeout-run"),
+        ).toEqual({ errorCode: null });
+      } finally {
+        disconnectedState.close();
+      }
+      const disconnectedViewer = new WorkflowClient({ databasePath });
+      try {
+        expect(
+          await disconnectedViewer.request({
+            operation: "run.status",
+            runId: "interaction-timeout-run",
+          }),
+        ).toMatchObject({ outcome: "accepted", receipt: { display: { status: "waiting" } } });
+      } finally {
+        await disconnectedViewer.close();
+      }
+
+      await restarted.stop();
+      recoveredHost = new WorkflowHost({
+        databasePath,
+        runnerId: "host-timeout-recovered",
+        claimPollMs: 10,
+      });
+      await recoveredHost.start();
+      const recoveredState = new HostStateStore(databasePath, { readOnly: true });
+      try {
+        expect(recoveredState.getInteraction(timedRequestId)?.status).toBe("pending");
+      } finally {
+        recoveredState.close();
+      }
+
+      reconnectedClient = new WorkflowClient({ databasePath });
+      const reconnected = await reconnectedClient.request({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "timeout-session-reconnected",
+          sessionId: "host-test-session",
+          coordinator: true,
+        },
+      });
+      const reconnectedEpoch = (reconnected.receipt as { coordinatorEpoch?: string } | undefined)
+        ?.coordinatorEpoch;
+      if (reconnectedEpoch === undefined) throw new Error("reconnected coordinator epoch missing");
+      expect(
+        await reconnectedClient.request({
+          operation: "workflowMessage.reportBranch",
+          payload: {
+            targetSessionId: "host-test-session",
+            coordinatorEpoch: reconnectedEpoch,
+            entries: [
+              {
+                workflowMessageId: message.workflowMessageId,
+                piSessionEntryId: "timeout-step-entry",
+              },
+              {
+                workflowMessageId: resumedMessage.workflowMessageId,
+                piSessionEntryId: "timeout-step-entry-2",
+              },
+            ],
+            isIdle: false,
+            hasPendingMessages: true,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+      expect(
+        await reconnectedClient.request({
+          operation: "run.status",
+          runId: "interaction-timeout-run",
+        }),
+      ).toMatchObject({ outcome: "accepted", receipt: { display: { status: "running" } } });
+      const reconnectedState = new HostStateStore(databasePath, { readOnly: true });
+      const reconnectedDeadline = reconnectedState.state.connection
+        .prepare(
+          `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
+           FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+           WHERE i.request_id = ?`,
+        )
+        .get(timedRequestId) as { startedAt: number | null; deadlineAt: number | null } | undefined;
+      reconnectedState.close();
+      if (reconnectedDeadline?.startedAt == null || reconnectedDeadline.deadlineAt == null) {
+        throw new Error("reconnected model-turn deadline is missing");
+      }
+      expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(secondActiveDeadlineAt);
+      expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(Date.now() + 1_000);
+      expect(reconnectedDeadline.deadlineAt - reconnectedDeadline.startedAt).toBe(
         configuredDurationMs,
       );
 
@@ -1756,12 +1855,14 @@ setInterval(() => {}, 1000);
           )
           .get(timedRequestId) as { status: string; deadlineAt: number | null } | undefined;
         expect(attempt?.status).toBe("timed_out");
-        expect(attempt?.deadlineAt).toBe(resumedTurnDeadline.deadlineAt);
+        expect(attempt?.deadlineAt).toBe(reconnectedDeadline.deadlineAt);
       } finally {
         finalState.close();
       }
     } finally {
       await client.close();
+      await reconnectedClient?.close();
+      await recoveredHost?.stop();
       await restarted.stop();
     }
   }, 60_000);

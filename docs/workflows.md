@@ -204,8 +204,8 @@ adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
 without submitting, the host increments the request's unproductive-turn counter
 and can create at most two step messages with reason `reminder`. The next
-unproductive turn fails the step. Timeout and
-cancellation remain active during this process. For assistant-message output, the engine appends a normal-response contract,
+unproductive turn fails the step. The timeout remains active during each
+reported model turn, and cancellation remains active throughout. For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
 form's active Pi turn.
@@ -213,8 +213,8 @@ form's active Pi turn.
 `timeoutMs` can be a finite positive number, `null`, or a function of the normal
 node context that returns either value. Omit it to use the 15-minute engine
 default. The limit counts active node execution. For an origin-session agent
-node, it counts reported model-turn time and excludes message delivery, waiting,
-and paused time. Set it to `null` to disable only this deadline; cancellation,
+node, it counts reported model-turn time from an active connected Pi session.
+It excludes message delivery, waiting, paused time, disconnects, and host downtime. Set it to `null` to disable only this deadline; cancellation,
 parking, claim loss, shutdown, and the node's abort signal still work. A timeout
 function can use prepared outputs to select a policy for this run. It has 30
 seconds to return. Computed timeout functions are runtime code, so definition
@@ -730,9 +730,9 @@ possible. Defaults worth knowing:
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
   turn, and late output for that attempt is rejected. Interactive runs save the
   resolved deadline before they park. The host advances it only during a
-  reported origin-session model turn. Message delivery, waiting, pauses, and a
-  closed Pi session do not consume the limit. This active-time budget survives
-  host restart.
+  reported model turn from an active connected origin session. Message delivery,
+  waiting, pauses, disconnects, and host downtime do not consume the limit. This
+  active-time budget survives host restart.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` atomically parks the run with `paused: true`, stores the

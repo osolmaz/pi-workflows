@@ -604,6 +604,71 @@ export class HostStateStore {
     this.shiftInteractionTimeout(row, Math.max(0, modelTurnStoppedAt - pausedAt), now);
   }
 
+  markSessionModelTurnsInactive(targetSessionId: string, now: number = Date.now()): void {
+    this.state.connection
+      .prepare(
+        `UPDATE node_attempts SET updated_at = ?
+         WHERE attempt_id IN (
+           SELECT DISTINCT i.attempt_id
+           FROM interactive_requests i
+           JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+           JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+                                AND t.state = 'started'
+           WHERE i.target_session_id = ? AND i.status = 'pending'
+         )`,
+      )
+      .run(now, targetSessionId);
+  }
+
+  recoverInactiveModelTurns(
+    previousHeartbeatAt: number | undefined,
+    now: number = Date.now(),
+  ): void {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT i.attempt_id AS attemptId, a.started_at AS startedAt,
+                a.deadline_at AS deadlineAt, a.updated_at AS updatedAt,
+                MAX(t.started_at) AS turnStartedAt
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+                              AND t.state = 'started'
+         WHERE i.status = 'pending'
+         GROUP BY i.attempt_id`,
+      )
+      .all()
+      .filter(isInactiveInteractionTimeoutRow);
+    for (const row of rows) {
+      const inactiveAt =
+        previousHeartbeatAt === undefined
+          ? row.updatedAt
+          : Math.max(previousHeartbeatAt, row.turnStartedAt);
+      this.shiftInteractionTimeout(row, Math.max(0, now - inactiveAt), now);
+    }
+  }
+
+  resumeSessionModelTurns(targetSessionId: string, now: number = Date.now()): void {
+    const rows = this.state.connection
+      .prepare(
+        `SELECT i.attempt_id AS attemptId, a.started_at AS startedAt,
+                a.deadline_at AS deadlineAt, a.updated_at AS updatedAt,
+                MAX(t.started_at) AS turnStartedAt
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+                              AND t.state = 'started'
+         WHERE i.target_session_id = ? AND i.status = 'pending'
+         GROUP BY i.attempt_id`,
+      )
+      .all(targetSessionId)
+      .filter(isInactiveInteractionTimeoutRow);
+    for (const row of rows) {
+      this.shiftInteractionTimeout(row, Math.max(0, now - row.updatedAt), now);
+    }
+  }
+
   getInteraction(requestId: string): InteractiveRequestRecord | undefined {
     return this.interactiveRequest(requestId);
   }
@@ -685,10 +750,10 @@ export class HostStateStore {
       .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
   }
 
-  expiredInteractionRunIds(now: number = Date.now()): string[] {
+  expiredInteractionRuns(now: number = Date.now()): ExpiredInteractionRunRow[] {
     return this.state.connection
       .prepare(
-        `SELECT i.run_id AS runId
+        `SELECT i.run_id AS runId, i.target_session_id AS targetSessionId
          FROM interactive_requests i
          JOIN node_attempts a ON a.attempt_id = i.attempt_id
          JOIN runs r ON r.run_id = i.run_id
@@ -701,11 +766,11 @@ export class HostStateStore {
              JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
              WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
            )
-         GROUP BY i.run_id
+         GROUP BY i.run_id, i.target_session_id
          ORDER BY MIN(a.deadline_at), i.run_id`,
       )
       .all(now)
-      .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
+      .filter(isExpiredInteractionRunRow);
   }
 
   timedOutInteraction(runId: string): TimedOutInteractionRow | undefined {
@@ -1035,7 +1100,11 @@ export class HostStateStore {
     };
   }
 
-  private shiftInteractionTimeout(row: InteractionTimeoutRow, idleMs: number, now: number): void {
+  private shiftInteractionTimeout(
+    row: Pick<InteractionTimeoutRow, "attemptId" | "startedAt" | "deadlineAt">,
+    idleMs: number,
+    now: number,
+  ): void {
     if (idleMs === 0 || row.deadlineAt === null) return;
     const changed = this.state.connection
       .prepare(
@@ -1138,6 +1207,14 @@ type InteractionTimeoutRow = {
   deadlineAt: number | null;
   previousTurnEndedAt: number | null;
 };
+type InactiveInteractionTimeoutRow = {
+  attemptId: string;
+  startedAt: number | null;
+  deadlineAt: number | null;
+  updatedAt: number;
+  turnStartedAt: number;
+};
+type ExpiredInteractionRunRow = { runId: string; targetSessionId: string };
 type PausedAtRow = { pausedAt: number };
 type InteractiveRequestRow = {
   requestId: string;
@@ -1236,6 +1313,23 @@ function isInteractionTimeoutRow(value: unknown): value is InteractionTimeoutRow
     nullableNumber(value.startedAt) &&
     nullableNumber(value.deadlineAt) &&
     nullableNumber(value.previousTurnEndedAt)
+  );
+}
+
+function isInactiveInteractionTimeoutRow(value: unknown): value is InactiveInteractionTimeoutRow {
+  return (
+    isRecord(value) &&
+    typeof value.attemptId === "string" &&
+    nullableNumber(value.startedAt) &&
+    nullableNumber(value.deadlineAt) &&
+    typeof value.updatedAt === "number" &&
+    typeof value.turnStartedAt === "number"
+  );
+}
+
+function isExpiredInteractionRunRow(value: unknown): value is ExpiredInteractionRunRow {
+  return (
+    isRecord(value) && typeof value.runId === "string" && typeof value.targetSessionId === "string"
   );
 }
 

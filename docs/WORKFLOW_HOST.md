@@ -408,7 +408,7 @@ At startup the host:
 5. Parks uncertain effects for manual review.
 6. Makes pure and fully settled work claimable.
 7. Restores pending interactive requests, workflow messages, external-channel decisions, and scheduled controller work without changing Pi message or turn state.
-8. Starts supervised timeout recovery for pending interactive requests only when their durable deadline expired during a reported model turn. Message delivery, waiting, paused time, and a closed Pi session do not consume the node timeout.
+8. Starts supervised timeout recovery for pending interactive requests only when their durable deadline expired during a reported model turn from an active connected session. A disconnect suspends the timer, and a new branch report resumes it without losing the prior active time. Message delivery, waiting, paused time, host downtime, and a closed Pi session do not consume the node timeout.
 9. Resumes any remaining provisional `validating` submission in a new supervised child.
 10. Waits for the extension's active-branch report before it confirms pending entries as sent, closes a turn as `lost`, or creates a branch-specific replacement. The extension sends this report after every host connection.
 11. Starts no model turn until a matching Pi session connects or headless mode is declared.

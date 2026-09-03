@@ -69,6 +69,7 @@ export class HostViewStore {
   private readonly runCache = new Map<string, { version: string; view: WorkflowRunView | null }>();
   private readonly sessionCache = new Map<string, { version: string; view: WorkflowSessionView }>();
   private contentBytes = 0;
+  private originActivityRevision = 0;
   private readonly workflowMessages: WorkflowMessageStore;
 
   constructor(
@@ -77,8 +78,13 @@ export class HostViewStore {
     private readonly hostState: HostStateStore,
     private readonly runs: WorkflowRunStore,
     private readonly hasLiveWorker: (runId: string) => boolean,
+    private readonly hasActiveSessionTurn: (targetSessionId: string) => boolean,
   ) {
     this.workflowMessages = hostState.workflowMessages;
+  }
+
+  noteOriginActivityChange(): void {
+    this.originActivityRevision += 1;
   }
 
   list(cursor = 0, limit?: number): WorkflowRunListPage {
@@ -773,8 +779,8 @@ export class HostViewStore {
     return isObjectRecord(row) &&
       typeof row.messageUpdatedAt === "number" &&
       typeof row.turnUpdatedAt === "number"
-      ? `${row.messageUpdatedAt}:${row.turnUpdatedAt}`
-      : "0:0";
+      ? `${row.messageUpdatedAt}:${row.turnUpdatedAt}${this.originActivityRevision === 0 ? "" : `-${this.originActivityRevision}`}`
+      : `0:0${this.originActivityRevision === 0 ? "" : `-${this.originActivityRevision}`}`;
   }
 
   private display(
@@ -796,12 +802,16 @@ export class HostViewStore {
   private hasActivity(runId: string): boolean {
     const row = this.state.connection
       .prepare(
-        `SELECT 1 AS present FROM workflow_turns t
+        `SELECT t.target_session_id AS targetSessionId FROM workflow_turns t
          JOIN workflow_messages m ON m.workflow_message_id = t.workflow_message_id
          WHERE t.run_id = ? AND t.state = 'started' AND m.kind IN ('step', 'terminal') LIMIT 1`,
       )
       .get(runId);
-    return row !== undefined;
+    return (
+      isObjectRecord(row) &&
+      typeof row.targetSessionId === "string" &&
+      this.hasActiveSessionTurn(row.targetSessionId)
+    );
   }
 
   private hasPendingInteraction(runId: string): boolean {
