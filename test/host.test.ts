@@ -2126,7 +2126,13 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     const client = new WorkflowClient({ databasePath, clientId: "cancel-client" });
     await host.start();
     try {
-      await startRun({ client, cwd, workflowPath, runId: "cancel-run" });
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "cancel-run",
+        executionMode: "interactive",
+      });
       await waitUntil(() => {
         const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
         try {
@@ -2135,14 +2141,24 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
+      let originalPresentationHash: Buffer | undefined;
       const corrupt = new SqliteControllerStore(databasePath, { global: true });
       try {
+        const row = corrupt.state.connection
+          .prepare(
+            "SELECT presentation_prompt_hash AS presentationPromptHash FROM runs WHERE run_id = ?",
+          )
+          .get("cancel-run") as { presentationPromptHash: Buffer };
+        originalPresentationHash = row.presentationPromptHash;
         const wrongMediaType = corrupt.state.putJson({ not: "text" });
         corrupt.state.connection
           .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
           .run(wrongMediaType, "cancel-run");
       } finally {
         corrupt.close();
+      }
+      if (originalPresentationHash === undefined) {
+        throw new Error("Cancellation presentation prompt is missing");
       }
       const cancelled = await client.request({
         operation: "run.cancel",
@@ -2157,9 +2173,42 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun("cancel-run")?.status).toBe("cancelled");
+        expect(
+          store.state.connection
+            .prepare(
+              "SELECT COUNT(*) AS count FROM workflow_messages WHERE run_id = ? AND kind = 'terminal'",
+            )
+            .get("cancel-run"),
+        ).toEqual({ count: 0 });
       } finally {
         store.close();
       }
+
+      const repair = new SqliteControllerStore(databasePath, { global: true });
+      try {
+        repair.state.connection
+          .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
+          .run(originalPresentationHash, "cancel-run");
+      } finally {
+        repair.close();
+      }
+      await waitUntil(() => {
+        const repaired = new SqliteControllerStore(databasePath, {
+          readOnly: true,
+          global: true,
+        });
+        try {
+          const terminalMessages = repaired.state.connection
+            .prepare(
+              "SELECT COUNT(*) AS count FROM workflow_messages WHERE run_id = ? AND kind = 'terminal'",
+            )
+            .get("cancel-run") as { count: number };
+          return terminalMessages.count === 1;
+        } finally {
+          repaired.close();
+        }
+      }, 30_000);
+
       await expect(
         client.request({
           operation: "run.cancel",

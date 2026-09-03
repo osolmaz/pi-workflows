@@ -133,7 +133,7 @@ The run and queue projections follow these states:
 
 A lifecycle transaction updates the run, queue, attempt, decision, lease, event, and viewer facts that belong to one transition. The database must not commit a failed event while the run remains running, or a terminal queue row while the run remains nonterminal.
 
-A terminal state commits before the host builds its terminal workflow message. Missing or invalid presentation data can prevent that message, but it cannot roll back completion, failure, or cancellation. Later branch, turn, and worker reconciliation can try the same terminal message again.
+A terminal state commits before the host builds its terminal workflow message. Missing or invalid presentation data can prevent that message, but it cannot roll back completion, failure, or cancellation. The host schedules another attempt and also finds missing terminal messages when it starts, so repaired presentation data can produce the same terminal message later.
 
 Waiting and paused work does not keep a worker or a live claim. Resume takes a new claim generation and starts a new worker from the last durable boundary.
 
