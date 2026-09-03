@@ -389,7 +389,7 @@ export default defineWorkflow({
   return workflowPath;
 }
 
-async function writeBlockingWorkflow(cwd: string): Promise<string> {
+async function writeBlockingWorkflow(cwd: string, waitMs = 900): Promise<string> {
   const workflowPath = path.join(cwd, "blocking.workflow.ts");
   await fs.writeFile(
     workflowPath,
@@ -402,7 +402,7 @@ export default defineWorkflow({
   nodes: {
     work: compute({
       run: () => {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 900);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${waitMs});
         return { finished: true };
       },
     }),
@@ -2747,7 +2747,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
   it("renews a live claim while workflow code blocks longer than its lease", async () => {
     const cwd = await makeTempDir("host-blocked-worker-project");
     const databasePath = path.join(await makeTempDir("host-blocked-worker-state"), "state.sqlite");
-    const workflowPath = await writeBlockingWorkflow(cwd);
+    const workflowPath = await writeBlockingWorkflow(cwd, 5_000);
     const host = new WorkflowHost({
       databasePath,
       claimPollMs: 10,
