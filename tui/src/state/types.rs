@@ -51,6 +51,96 @@ impl RunStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum WorkflowActivity {
+    SupervisedWorker,
+    OriginTurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowControl {
+    Pause,
+    Resume,
+    Cancel,
+    Answer,
+    Review,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowDisplay {
+    pub status: RunStatus,
+    pub activity: Option<WorkflowActivity>,
+    pub controls: Vec<WorkflowControl>,
+    pub reason: Option<String>,
+    #[serde(rename = "reasonContent", skip_serializing_if = "Option::is_none")]
+    pub reason_content: Option<Value>,
+}
+
+impl WorkflowDisplay {
+    pub fn active_node<'a>(&self, state: &'a RunState) -> Option<&'a str> {
+        if self.status != RunStatus::Running {
+            return None;
+        }
+        state.current_node.as_deref().or_else(|| {
+            (self.activity == Some(WorkflowActivity::OriginTurn))
+                .then_some(state.waiting_on.as_deref())
+                .flatten()
+        })
+    }
+}
+
+#[cfg(test)]
+mod workflow_display_tests {
+    use super::{RunState, RunStatus, WorkflowActivity, WorkflowControl, WorkflowDisplay};
+    use serde_json::json;
+
+    #[test]
+    fn preserves_the_host_display_and_uses_only_a_running_origin_turn_as_the_active_wait() {
+        let state: RunState = serde_json::from_value(json!({
+            "schema":"pi-workflows.run-state.v1",
+            "traceSeq":1,
+            "runId":"run-1",
+            "workflowName":"smoke",
+            "startedAt":"2026-01-01T00:00:00.000Z",
+            "updatedAt":"2026-01-01T00:00:01.000Z",
+            "status":"waiting",
+            "input":{},
+            "outputs":{},
+            "results":{},
+            "steps":[],
+            "waitingOn":"work"
+        }))
+        .unwrap();
+        let running: WorkflowDisplay = serde_json::from_value(json!({
+            "status":"running",
+            "activity":"origin_turn",
+            "controls":["pause","cancel"],
+            "reason":null,
+            "reasonContent":{"turn":"active"}
+        }))
+        .unwrap();
+
+        assert_eq!(running.status, RunStatus::Running);
+        assert_eq!(running.activity, Some(WorkflowActivity::OriginTurn));
+        assert_eq!(
+            running.controls,
+            vec![WorkflowControl::Pause, WorkflowControl::Cancel]
+        );
+        assert_eq!(running.active_node(&state), Some("work"));
+
+        let waiting = WorkflowDisplay {
+            status: RunStatus::Waiting,
+            activity: None,
+            controls: vec![WorkflowControl::Pause, WorkflowControl::Cancel],
+            reason: Some("waiting".into()),
+            reason_content: None,
+        };
+        assert_eq!(waiting.active_node(&state), None);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeOutcome {
     Ok,
     TimedOut,

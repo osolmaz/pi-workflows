@@ -11,6 +11,8 @@ The viewer uses the [incremental and virtualized viewer design](plans/2026-08-28
 
 The run browser subscribes to small host-owned metadata views. It does not load trace, step, session, settings, or follow-up payloads. The host publishes a new bounded view only when its content changes.
 
+Each live view keeps the host's `display` value separate from the durable workflow `state`. The run browser, current-run status, timeline, and latest graph use `display` directly. During an origin-session model turn, the latest graph presents the durable `waitingOn` node as running. Replay continues to use durable state and recorded history. `piw` does not calculate another live status.
+
 The selected run contains bounded pages. Step, trace, session-entry, session-event, settings, follow-up, and update pages have both a row limit and a byte budget. Replay can jump to any position. The viewer loads the page that contains that position and keeps only the current windows. A session-event page includes the replay checkpoint immediately before its first event. A compact graph projection keeps the latest attempt for each node and the taken transitions up to the replay point.
 
 Large values use host content references. `piw` fetches them in bounded chunks when the user opens the related detail, verifies the byte count and SHA-256 digest, and then shows the complete text or JSON value. Page and content requests run outside input and drawing through the shared client protocol. A newer page selection replaces the previous request, including when the user returns to an earlier page. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.

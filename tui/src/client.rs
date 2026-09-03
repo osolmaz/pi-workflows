@@ -7,6 +7,7 @@ use crate::protocol::{
 };
 use crate::state::types::{
     as_artifact_ref, ArtifactRef, DefinitionSnapshot, Manifest, RunState, StepRecord,
+    WorkflowDisplay,
 };
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -32,6 +33,7 @@ pub struct RemoteView {
     generation: u64,
     pub manifest: Manifest,
     pub state: RunState,
+    pub display: WorkflowDisplay,
     pub graph_steps: Vec<StepRecord>,
     pub taken_transitions: Vec<String>,
     pub graph_cursor: u64,
@@ -78,6 +80,7 @@ fn decode_view(
         .unwrap_or(revision);
     let manifest: Manifest = serde_json::from_value(raw.get("manifest")?.clone()).ok()?;
     let state: RunState = serde_json::from_value(raw.get("state")?.clone()).ok()?;
+    let display: WorkflowDisplay = serde_json::from_value(raw.get("display")?.clone()).ok()?;
     let graph_history = graph_history_value(raw, graph_history_content);
     let graph_steps = graph_history
         .as_ref()
@@ -148,6 +151,7 @@ fn decode_view(
         generation,
         manifest,
         state,
+        display,
         graph_steps,
         taken_transitions,
         graph_cursor,
@@ -1269,6 +1273,7 @@ fn page_name(kind: PageKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::protocol::PatchOp;
+    use crate::render::{render_graph, render_graph_lines, GraphNodeStyle, GraphView};
 
     #[test]
     fn missing_run_watch_sets_a_visible_client_error() {
@@ -1326,6 +1331,12 @@ mod tests {
                 "nodes":{"done":{"nodeType":"compute"}},
                 "edges":[]
             },
+            "display": {
+                "status":"completed",
+                "activity":null,
+                "controls":[],
+                "reason":null
+            },
             "graphSteps":[],
             "takenTransitions":[],
             "graphCursor":0,
@@ -1355,6 +1366,114 @@ mod tests {
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
+
+        let mut missing_display = raw;
+        missing_display.as_object_mut().unwrap().remove("display");
+        assert!(decode_view(4, 1, &missing_display, None, None).is_none());
+    }
+
+    #[test]
+    fn uses_the_host_display_status_during_an_origin_turn() {
+        let source = json!({"kind":"file","path":"/tmp/smoke.workflow.ts","hash":"abc"});
+        let raw = json!({
+            "manifest": {
+                "schema":"pi-workflows.run-manifest.v1",
+                "runId":"run-1",
+                "workflowName":"smoke",
+                "workflowSource":source,
+                "startedAt":"2026-01-01T00:00:00.000Z",
+                "finishedAt":null,
+                "status":"running",
+                "traceSchema":"pi-workflows.trace-event.v1",
+                "paths":{"workflow":"host","state":"host","trace":"host"}
+            },
+            "state": {
+                "schema":"pi-workflows.run-state.v1",
+                "traceSeq":1,
+                "runId":"run-1",
+                "workflowName":"smoke",
+                "workflowSource":source,
+                "startedAt":"2026-01-01T00:00:00.000Z",
+                "finishedAt":"2026-01-01T00:00:01.000Z",
+                "updatedAt":"2026-01-01T00:00:01.000Z",
+                "status":"waiting",
+                "input":{},
+                "outputs":{},
+                "results":{},
+                "steps":[],
+                "waitingOn":"work"
+            },
+            "display": {
+                "status":"running",
+                "activity":"origin_turn",
+                "controls":["pause","cancel"],
+                "reason":null
+            },
+            "workflow": {
+                "schema":"pi-workflows.definition-snapshot.v1",
+                "name":"smoke",
+                "startAt":"work",
+                "nodes":{"work":{"nodeType":"agent"}},
+                "edges":[]
+            }
+        });
+
+        let view = decode_view(4, 1, &raw, None, None).expect("host view should decode");
+
+        assert_eq!(view.state.status, crate::state::types::RunStatus::Waiting);
+        assert_eq!(view.display.status, crate::state::types::RunStatus::Running);
+        assert_eq!(view.display.active_node(&view.state), Some("work"));
+
+        let graph = GraphView {
+            state: &view.state,
+            display: &view.display,
+            snapshot: view.snapshot.as_ref(),
+            graph_steps: Some(&view.graph_steps),
+            taken_transitions: Some(&view.taken_transitions),
+        };
+        let rendered =
+            render_graph_lines(&graph, -1, 1_767_225_660_000, GraphNodeStyle::Line).join("\n");
+        assert!(rendered.contains("◐ work"), "{rendered}");
+        assert!(!rendered.contains("⏸ work"), "{rendered}");
+
+        let replayed = render_graph(&graph, -1, false, 1_767_225_660_000, GraphNodeStyle::Line)
+            .expect("graph should render")
+            .canvas
+            .render_plain()
+            .join("\n");
+        assert!(!replayed.contains("◐ work"), "{replayed}");
+    }
+
+    #[test]
+    fn display_only_patch_changes_the_live_status_without_changing_durable_state() {
+        let mut raw = json!({
+            "display": {
+                "status":"waiting",
+                "activity":null,
+                "controls":["pause","cancel","answer"],
+                "reason":"The workflow is waiting for origin-session input."
+            },
+            "state":{"status":"waiting"}
+        });
+
+        apply_patch(
+            &mut raw,
+            &[
+                PatchOp::Replace {
+                    path: "/display/status".into(),
+                    value: json!("running"),
+                },
+                PatchOp::Replace {
+                    path: "/display/activity".into(),
+                    value: json!("origin_turn"),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(raw["display"]["status"], "running");
+        assert_eq!(raw["display"]["activity"], "origin_turn");
+        assert_eq!(raw["state"]["status"], "waiting");
     }
 
     #[test]
