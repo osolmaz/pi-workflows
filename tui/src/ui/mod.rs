@@ -19,7 +19,7 @@ use crate::render::{
 use crate::session::{assess_capture, CaptureIntegrity};
 use crate::state::types::{
     DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, SessionCapture,
-    SessionEntryRecord, SessionEventRecord, StepRecord, SESSION_BINDING_SCHEMA,
+    SessionEntryRecord, SessionEventRecord, StepRecord, WorkflowDisplay, SESSION_BINDING_SCHEMA,
 };
 use crate::theme::{self, Palette, ThemeConfig};
 use anyhow::Result;
@@ -54,7 +54,7 @@ pub struct RunSummary {
     pub run_id: String,
     pub workflow_name: String,
     pub run_title: Option<String>,
-    pub status: RunStatus,
+    pub display: WorkflowDisplay,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub live: bool,
@@ -65,6 +65,7 @@ pub struct RunSummary {
 pub struct RunData<'a> {
     pub graph_revision: u64,
     pub state: &'a RunState,
+    pub display: &'a WorkflowDisplay,
     pub graph_steps: &'a [crate::state::types::StepRecord],
     pub taken_transitions: &'a [String],
     pub graph_cursor: u64,
@@ -116,11 +117,12 @@ fn valid_session_binding(binding: Option<&Value>) -> bool {
 fn parse_run_summary(summary: &Value) -> Option<RunSummary> {
     let manifest: crate::state::types::Manifest =
         serde_json::from_value(summary.get("manifest")?.clone()).ok()?;
+    let display: WorkflowDisplay = serde_json::from_value(summary.get("display")?.clone()).ok()?;
     Some(RunSummary {
         run_id: manifest.run_id,
         workflow_name: manifest.workflow_name,
         run_title: manifest.run_title,
-        status: manifest.status,
+        display,
         started_at: manifest.started_at,
         finished_at: manifest.finished_at,
         live: summary
@@ -158,6 +160,7 @@ impl Provider {
         Some(RunData {
             graph_revision: view.graph_revision,
             state: &view.state,
+            display: &view.display,
             graph_steps: &view.graph_steps,
             taken_transitions: &view.taken_transitions,
             graph_cursor: view.graph_cursor,
@@ -1621,6 +1624,14 @@ fn status_glyph(status: RunStatus) -> &'static str {
     }
 }
 
+fn display_end_ms(status: RunStatus, finished_at: Option<&str>, now: i64) -> i64 {
+    if status == RunStatus::Running {
+        now
+    } else {
+        finished_at.and_then(parse_timestamp_ms).unwrap_or(now)
+    }
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -1805,6 +1816,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     // Graph pane.
     let view = GraphView {
         state: data.state,
+        display: data.display,
         snapshot: data.snapshot,
         graph_steps: Some(data.graph_steps),
         taken_transitions: Some(data.taken_transitions),
@@ -1822,9 +1834,8 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
             .and_then(Value::as_str)
     });
     let followed_node_id = if at_latest {
-        data.state
-            .current_node
-            .as_deref()
+        data.display
+            .active_node(data.state)
             .or(data.state.waiting_on.as_deref())
             .or_else(|| selected_step.map(|step| step.node_id.as_str()))
     } else {
@@ -1839,7 +1850,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
         graph_cursor: data.graph_cursor,
         at_latest,
         node_style,
-        elapsed_second: if at_latest && data.state.current_node.is_some() {
+        elapsed_second: if at_latest && data.display.active_node(data.state).is_some() {
             rendered_at / 1_000
         } else {
             0
@@ -1909,7 +1920,7 @@ fn draw(frame: &mut Frame, app: &mut App, summaries: &[RunSummary]) {
     if follow {
         graph_flags.push("FOLLOW");
     }
-    if data.state.paused == Some(true) {
+    if data.display.status == RunStatus::Paused {
         graph_flags.push("PAUSED");
     }
     if capture.status == "failed" {
@@ -2225,11 +2236,11 @@ fn draw_runs(
             } else {
                 ""
             };
-            let end = summary
-                .finished_at
-                .as_deref()
-                .and_then(parse_timestamp_ms)
-                .unwrap_or_else(now_ms);
+            let end = display_end_ms(
+                summary.display.status,
+                summary.finished_at.as_deref(),
+                now_ms(),
+            );
             let elapsed = parse_timestamp_ms(&summary.started_at)
                 .map(|start| format!(" {}", format_duration((end - start).max(0))))
                 .unwrap_or_default();
@@ -2242,8 +2253,8 @@ fn draw_runs(
                 vec![
                     Span::raw(if index == selected { "▶" } else { " " }),
                     Span::styled(
-                        status_glyph(summary.status),
-                        status_style(summary.status, palette),
+                        status_glyph(summary.display.status),
+                        status_style(summary.display.status, palette),
                     ),
                     Span::raw(initial),
                     Span::styled(
@@ -2259,8 +2270,8 @@ fn draw_runs(
                 vec![
                     Span::raw(marker.to_string()),
                     Span::styled(
-                        format!("{} ", status_glyph(summary.status)),
-                        status_style(summary.status, palette),
+                        format!("{} ", status_glyph(summary.display.status)),
+                        status_style(summary.display.status, palette),
                     ),
                     Span::raw(sanitize_text(&name)),
                     Span::styled(elapsed, Style::default().fg(palette.muted)),
@@ -2980,8 +2991,8 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
         Line::from(vec![
             label("status"),
             Span::styled(
-                state.status.label().to_string(),
-                status_style(state.status, palette),
+                data.display.status.label().to_string(),
+                status_style(data.display.status, palette),
             ),
         ]),
         Line::from(vec![
@@ -2989,11 +3000,19 @@ fn info_lines(data: &RunData, run_id: &str, palette: &Palette) -> Vec<Line<'stat
             Span::raw(sanitize_text(&state.started_at)),
         ]),
     ];
-    if let Some(finished) = &state.finished_at {
+    if let Some(reason) = &data.display.reason {
         lines.push(Line::from(vec![
-            label("finished"),
-            Span::raw(sanitize_text(finished)),
+            label("reason"),
+            Span::raw(sanitize_text(reason)),
         ]));
+    }
+    if data.display.status.is_terminal() {
+        if let Some(finished) = &state.finished_at {
+            lines.push(Line::from(vec![
+                label("finished"),
+                Span::raw(sanitize_text(finished)),
+            ]));
+        }
     }
     if let Some(source) = &state.workflow_source {
         lines.push(Line::from(vec![
@@ -3398,21 +3417,30 @@ fn draw_transport(
     options: TransportOptions<'_>,
     palette: &Palette,
 ) -> timeline::TimelineGeometry {
-    let elapsed = data.map(|(data, _, _)| {
+    let elapsed = data.map(|(data, _, at_latest)| {
         let state = data.state;
-        let end = state
-            .finished_at
-            .as_deref()
-            .and_then(parse_timestamp_ms)
-            .unwrap_or_else(now_ms);
+        let now = now_ms();
+        let end = if at_latest {
+            display_end_ms(data.display.status, state.finished_at.as_deref(), now)
+        } else {
+            state
+                .finished_at
+                .as_deref()
+                .and_then(parse_timestamp_ms)
+                .unwrap_or(now)
+        };
         let start = parse_timestamp_ms(&state.started_at).unwrap_or(end);
         format_duration((end - start).max(0))
     });
     let view = data.map(|(data, bounded_index, at_latest)| {
         let temporal = data.session_event_total > 0;
         timeline::TimelineView {
-            status: data.state.status,
-            paused: data.state.paused == Some(true),
+            status: if at_latest {
+                data.display.status
+            } else {
+                data.state.status
+            },
+            paused: at_latest && data.display.status == RunStatus::Paused,
             elapsed: elapsed.as_deref().unwrap_or("0ms"),
             steps: if temporal {
                 data.session_event_total as usize
@@ -3441,17 +3469,71 @@ fn draw_transport(
 mod tests {
     use super::{
         centered_camera, clamp_camera_axis, collect_artifact_paths, completed_step_at, contains,
-        current_progress_epoch, graph_position_label, inspector_height_for_drag,
-        inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, progress_rates,
-        push_human_decision_presentation, reconcile_selected_run, resolve_remote_artifacts,
-        resolved_inspector_height, sidebar_width_for_drag, step_projection_contains,
-        temporal_delay_from_page, temporal_through_seq, trace_events_for_scope,
-        valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds, Palette, Rect, StepRecord,
-        TemporalDelay, TraceScope, DEFAULT_NODE_STYLE,
+        current_progress_epoch, display_end_ms, graph_position_label, inspector_height_for_drag,
+        inspector_tab_label, inspector_tab_layout, next_page_cursor, page_range, parse_run_summary,
+        progress_rates, push_human_decision_presentation, reconcile_selected_run,
+        resolve_remote_artifacts, resolved_inspector_height, sidebar_width_for_drag,
+        step_projection_contains, temporal_delay_from_page, temporal_through_seq,
+        trace_events_for_scope, valid_session_binding, GraphNodeStyle, InspectorTab, NodeBounds,
+        Palette, Rect, StepRecord, TemporalDelay, TraceScope, DEFAULT_NODE_STYLE,
     };
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn run_summary_uses_the_host_display_status() {
+        let summary = parse_run_summary(&json!({
+            "manifest": {
+                "schema":"pi-workflows.run-manifest.v1",
+                "runId":"run-1",
+                "workflowName":"smoke",
+                "startedAt":"2026-01-01T00:00:00.000Z",
+                "finishedAt":null,
+                "status":"waiting",
+                "traceSchema":"pi-workflows.trace-event.v1",
+                "paths":{"workflow":"host","state":"host","trace":"host"}
+            },
+            "display": {
+                "status":"running",
+                "activity":"origin_turn",
+                "controls":["pause","cancel"],
+                "reason":null
+            },
+            "live":true,
+            "possiblyInterrupted":false
+        }))
+        .expect("run summary should decode");
+
+        assert_eq!(
+            summary.display.status,
+            crate::state::types::RunStatus::Running
+        );
+    }
+
+    #[test]
+    fn running_display_keeps_elapsed_time_live() {
+        let finished_at = "2026-01-01T00:00:05.000Z";
+        let finished_ms = crate::format::parse_timestamp_ms(finished_at).unwrap();
+        let now = finished_ms + 1_000;
+
+        assert_eq!(
+            display_end_ms(
+                crate::state::types::RunStatus::Running,
+                Some(finished_at),
+                now,
+            ),
+            now
+        );
+        assert_eq!(
+            display_end_ms(
+                crate::state::types::RunStatus::Waiting,
+                Some(finished_at),
+                now,
+            ),
+            finished_ms
+        );
+    }
 
     #[test]
     fn progress_estimation_resets_on_phase_change() {

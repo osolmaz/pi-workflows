@@ -8,7 +8,7 @@ use crate::canvas::{CanvasStyle, CharCanvas};
 use crate::format::{format_duration, parse_timestamp_ms, sanitize_text};
 use crate::layout::{layout_graph, GraphCell, GraphEdge, GraphLayout, GraphSegment};
 use crate::state::types::{
-    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, RunStatus, StepRecord,
+    DefinitionSnapshot, EdgeDef, NodeOutcome, RunState, StepRecord, WorkflowDisplay,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Everything the graph needs from a loaded run.
 pub struct GraphView<'a> {
     pub state: &'a RunState,
+    pub display: &'a WorkflowDisplay,
     pub snapshot: Option<&'a DefinitionSnapshot>,
     pub graph_steps: Option<&'a [StepRecord]>,
     pub taken_transitions: Option<&'a [String]>,
@@ -214,7 +215,7 @@ fn derive_node_status(
     at_latest_step: bool,
 ) -> NodeStatus {
     let state = view.state;
-    if at_latest_step && state.current_node.as_deref() == Some(node_id) {
+    if at_latest_step && view.display.active_node(state) == Some(node_id) {
         return NodeStatus::Active;
     }
     if at_latest_step && state.waiting_on.as_deref() == Some(node_id) {
@@ -471,7 +472,8 @@ fn render_cell_text(
         .snapshot
         .is_some_and(|snapshot| snapshot.start_at == *node_id);
     let is_end = outgoing == 0;
-    let elapsed = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
+    let is_active = at_latest_step && view.display.active_node(state) == Some(node_id.as_str());
+    let elapsed = if is_active {
         let started_at = state
             .current_node_started_at
             .as_deref()
@@ -516,11 +518,7 @@ fn render_cell_text(
             .join(" · ")
     });
     let branch_lines = bounded_branch_lines(&labels);
-    let count = if at_latest_step && state.current_node.as_deref() == Some(node_id.as_str()) {
-        attempts.max(1)
-    } else {
-        attempts
-    };
+    let count = if is_active { attempts.max(1) } else { attempts };
     let timing = if attempt.is_some() || count > 0 {
         format!(
             "{count} attempt{} · {elapsed}",
@@ -878,15 +876,14 @@ fn derive_pair_in_flight(
     visible_steps: &[StepRecord],
     at_latest_step: bool,
 ) -> Option<String> {
-    let state = view.state;
     if at_latest_step {
-        if state.status == RunStatus::Running {
-            if let (Some(current), Some(last)) = (
-                state.current_node.as_deref().filter(|id| !id.is_empty()),
-                visible_steps.last(),
-            ) {
-                return Some(format!("{}->{current}", last.node_id));
-            }
+        if let (Some(current), Some(last)) = (
+            view.display
+                .active_node(view.state)
+                .filter(|id| !id.is_empty()),
+            visible_steps.last(),
+        ) {
+            return Some(format!("{}->{current}", last.node_id));
         }
         return None;
     }

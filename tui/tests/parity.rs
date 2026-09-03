@@ -1,5 +1,5 @@
 use piw::render::{render_graph_lines, GraphNodeStyle, GraphView};
-use piw::state::types::{DefinitionSnapshot, RunState};
+use piw::state::types::{DefinitionSnapshot, RunState, WorkflowDisplay};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -42,8 +42,16 @@ fn rust_renderer_matches_every_typescript_fixture() {
     for path in paths {
         let fixture: LayoutFixture =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let display = WorkflowDisplay {
+            status: fixture.state.status,
+            activity: None,
+            controls: Vec::new(),
+            reason: None,
+            reason_content: None,
+        };
         let view = GraphView {
             state: &fixture.state,
+            display: &display,
             snapshot: Some(&fixture.snapshot),
             graph_steps: None,
             taken_transitions: None,
