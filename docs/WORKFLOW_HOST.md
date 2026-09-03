@@ -1,6 +1,6 @@
 # Workflow host
 
-Status: the out-of-process host, unified live client, workflow-message contract, and restored session behavior are implemented. [Fix workflow turn ownership after failures](2026-09-04-workflow-turn-ownership-plan.md) records the approved fix for stale model-turn ownership. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
+Status: the out-of-process host, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow run state](2026-09-04-workflow-run-state-plan.md) records the approved refactor for turn ownership, managed effects, restarts, terminal data, cancellation, and worker recovery. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
 
 ## Purpose
 
