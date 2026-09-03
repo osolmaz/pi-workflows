@@ -517,6 +517,31 @@ export class HostStateStore {
     });
   }
 
+  resumePendingInteraction(runId: string, now: number = Date.now()): InteractiveRequestRecord {
+    return this.state.transaction(() => {
+      const row = this.state.connection
+        .prepare(
+          `SELECT request_id AS requestId FROM interactive_requests
+           WHERE run_id = ? AND status = 'pending' ORDER BY created_at LIMIT 1`,
+        )
+        .get(runId);
+      if (!isRequestIdRow(row)) throw new Error("Pending workflow interaction is missing");
+      const current = this.requireInteractiveRequest(row.requestId);
+      if (current.kind === "decision") return current;
+      this.workflowMessages.cancelPendingForSource(current.requestId, "step", now);
+      const changed = this.state.connection
+        .prepare(
+          `UPDATE interactive_requests SET revision = revision + 1, updated_at = ?
+           WHERE request_id = ? AND status = 'pending'`,
+        )
+        .run(now, row.requestId);
+      if (changed.changes !== 1) throw new Error("Pending workflow interaction resume is stale");
+      const request = this.requireInteractiveRequest(row.requestId);
+      this.ensureInteractionMessage(request, "resumed", now);
+      return request;
+    });
+  }
+
   getInteraction(requestId: string): InteractiveRequestRecord | undefined {
     return this.interactiveRequest(requestId);
   }

@@ -1464,7 +1464,6 @@ export class WorkflowRunStore {
     this.verifySettingsProjections(runId);
     const revision = this.resourceRevision(runId);
     this.contexts.set(runId, { revision, lock: Promise.resolve() });
-    this.finalizeRecordingCaptures(runId, "Workflow host stopped before the run finished");
     this.state.transaction(() => {
       const row = this.requireRunRow(runId);
       const context = this.contextFor(runId);
