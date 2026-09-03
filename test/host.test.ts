@@ -1154,13 +1154,15 @@ setInterval(() => {}, 1000);
       expect(await client.request({ operation: "host.status" })).toMatchObject({
         outcome: "accepted",
       });
-      expect(await client.request({ operation: "channel.status" })).toMatchObject({
-        outcome: "accepted",
-        receipt: {
-          configured: false,
-          error: expect.stringContaining("references unknown channel"),
-        },
-      });
+      await expect
+        .poll(async () => await client.request({ operation: "channel.status" }))
+        .toMatchObject({
+          outcome: "accepted",
+          receipt: {
+            configured: false,
+            error: expect.stringContaining("references unknown channel"),
+          },
+        });
     } finally {
       await client.close();
       await host.stop();
