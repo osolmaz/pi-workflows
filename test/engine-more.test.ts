@@ -71,7 +71,7 @@ describe("WorkflowEngine additional paths", () => {
     expect(state.steps[0]?.action).toEqual({ actionType: "function" });
   });
 
-  it("resolves static managed effect fields", async () => {
+  it("owns managed effect identity from the exact run, node, and visit", async () => {
     const workflow = defineWorkflow({
       name: "static-effect",
       startAt: "act",
@@ -80,7 +80,6 @@ describe("WorkflowEngine additional paths", () => {
           effect: {
             type: "test.static-action",
             recovery: "manual",
-            idempotencyKey: "static-key",
             request: { operation: "write" },
           },
           run: ({ effect }) => effect,
@@ -88,11 +87,11 @@ describe("WorkflowEngine additional paths", () => {
       },
       edges: [],
     });
-    const { state } = await (await makeEngine()).run(workflow, {});
+    const { state } = await (await makeEngine()).run(workflow, {}, { runId: "static-effect-run" });
     expect(state.finalOutput).toEqual({
       type: "test.static-action",
       recovery: "manual",
-      idempotencyKey: "static-key",
+      idempotencyKey: "static-effect-run:test.static-action:act:1",
     });
   });
 

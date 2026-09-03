@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { compileWorkflowDefinition, compositionMetadata } from "../src/workflows/composition.js";
 import {
+  action,
   checkpoint,
   compute,
   defineWorkflow,
   defineWorkflowRegistry,
+  idempotentEffect,
   includedResult,
   includeWorkflow,
 } from "../src/workflows/definition.js";
@@ -366,6 +368,58 @@ describe("workflow composition", () => {
     expect(state.status).toBe("failed");
     expect(state.error).toContain("middle-limit");
     expect(sideEffect).not.toHaveBeenCalled();
+  });
+
+  it("keeps managed effect identities distinct across included workflow paths", async () => {
+    const child = defineWorkflow({
+      name: "effect-child",
+      startAt: "write",
+      exits: { ready: { from: "write" } },
+      nodes: {
+        write: action({
+          effect: idempotentEffect("test.write"),
+          run: ({ effect }) => effect.idempotencyKey,
+        }),
+      },
+      edges: [],
+    });
+    const parent = defineWorkflow({
+      name: "effect-parent",
+      startAt: "start",
+      includes: {
+        first: includeWorkflow(child),
+        second: includeWorkflow(child),
+      },
+      nodes: {
+        start: compute({ run: () => null }),
+        finish: compute({
+          run: ({ outputs }) => ({ first: outputs.first, second: outputs.second }),
+        }),
+      },
+      edges: [
+        { from: "start", to: "first" },
+        { from: "first.ready", to: "second" },
+        { from: "second.ready", to: "finish" },
+      ],
+    });
+    const engine = new WorkflowEngine({
+      executor: new ScriptedExecutor(),
+      databasePath: await makeStateDatabasePath("pi-workflows-composition-effect-identity"),
+    });
+
+    const { state } = await engine.run(parent, {}, { runId: "effect-composition-run" });
+
+    expect(state.status).toBe("completed");
+    expect(state.finalOutput).toEqual({
+      first: {
+        exit: "ready",
+        output: "effect-composition-run:test.write:first/write:1",
+      },
+      second: {
+        exit: "ready",
+        output: "effect-composition-run:test.write:second/write:1",
+      },
+    });
   });
 
   it("rejects an included child terminal path without a named exit", () => {

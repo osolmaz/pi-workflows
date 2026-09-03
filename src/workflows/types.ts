@@ -53,9 +53,7 @@ export type WorkflowEffectRecovery = "idempotent" | "manual";
 export type WorkflowManagedEffect = {
   /** Stable external effect category, for example `github.comment`. */
   type: string;
-  /** Stable key. Idempotent adapters must pass this key to the external system. */
-  idempotencyKey: string | ((context: WorkflowNodeContext) => MaybePromise<string>);
-  /** Canonical request data used to reject key reuse with another operation. */
+  /** Canonical request data used to reject engine-owned key reuse with another operation. */
   request: unknown | ((context: WorkflowNodeContext) => MaybePromise<unknown>);
   /** `manual` never retries after an uncertain child exit. */
   recovery: WorkflowEffectRecovery;

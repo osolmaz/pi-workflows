@@ -31,6 +31,7 @@ import {
   parseWorkerResponse,
   type WorkerMessage,
   type WorkerResponse,
+  type WorkerRunCommand,
 } from "./worker-protocol.js";
 import { HostBackedWorkflowStore, type WorkerStoreTransport } from "./worker-store.js";
 
@@ -38,14 +39,10 @@ const STARTUP_ENV = "PI_WORKFLOWS_WORKER_LAUNCH";
 const PRESENTATION_TIMEOUT_MS = 30_000;
 
 type WorkerBootstrap = {
-  initialized: boolean;
-  input: JsonValue;
-  launchOptions: JsonValue;
-  parentRunId: string | null;
+  command: WorkerRunCommand;
   originSessionId: string | null;
   stateDirectory: string;
   piArgs?: string[];
-  resumeInteractionAttemptId?: string;
   candidateInteraction?: {
     requestId: string;
     attemptId: string;
@@ -278,6 +275,35 @@ export function validateAcceptedAssistantSubmission(
   };
 }
 
+export async function executeWorkerRunCommand(
+  engine: Pick<WorkflowEngine, "run" | "resumeRun" | "continueRun">,
+  workflow: WorkflowDefinition,
+  runId: string,
+  workflowSource: WorkflowSource,
+  command: WorkerRunCommand,
+) {
+  switch (command.kind) {
+    case "start":
+    case "restart":
+      return await engine.run(workflow, command.input, { runId, workflowSource });
+    case "resume":
+      return await engine.resumeRun(workflow, runId, {
+        workflowSource,
+        ...(command.resumeInteractionAttemptId === undefined
+          ? {}
+          : { resumeInteractionAttemptId: command.resumeInteractionAttemptId }),
+      });
+    case "continue":
+      return await engine.continueRun(workflow, command.parentRunId, command.input, {
+        runId,
+        workflowSource,
+        ...(command.humanDecision === undefined
+          ? {}
+          : { humanDecision: command.humanDecision as ResolvedHumanDecision }),
+      });
+  }
+}
+
 export async function runWorkflowWorker(): Promise<number> {
   const launch = readLaunchEnvelope();
   const transport = new StdioWorkerTransport(launch);
@@ -360,32 +386,14 @@ export async function runWorkflowWorker(): Promise<number> {
         await store.requestPresentation(instructions);
       },
     });
-    const launchOptions =
-      typeof bootstrap.launchOptions === "object" &&
-      bootstrap.launchOptions !== null &&
-      !Array.isArray(bootstrap.launchOptions)
-        ? (bootstrap.launchOptions as Record<string, unknown>)
-        : {};
     try {
-      const result = bootstrap.initialized
-        ? await engine.resumeRun(workflow, launch.runId, {
-            workflowSource: workflowSource.root,
-            ...(bootstrap.resumeInteractionAttemptId === undefined
-              ? {}
-              : { resumeInteractionAttemptId: bootstrap.resumeInteractionAttemptId }),
-          })
-        : bootstrap.parentRunId === null
-          ? await engine.run(workflow, bootstrap.input, {
-              runId: launch.runId,
-              workflowSource: workflowSource.root,
-            })
-          : await engine.continueRun(workflow, bootstrap.parentRunId, bootstrap.input, {
-              runId: launch.runId,
-              workflowSource: workflowSource.root,
-              ...(launchOptions.humanDecision === undefined
-                ? {}
-                : { humanDecision: launchOptions.humanDecision as ResolvedHumanDecision }),
-            });
+      const result = await executeWorkerRunCommand(
+        engine,
+        workflow,
+        launch.runId,
+        workflowSource.root,
+        bootstrap.command,
+      );
       await transport.control("worker.exiting", {
         status: result.state.status,
         traceSeq: result.state.traceSeq,

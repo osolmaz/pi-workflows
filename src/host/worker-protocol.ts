@@ -4,6 +4,17 @@ import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 export const WORKER_MESSAGE_SCHEMA = "pi-workflows.worker-message.v1" as const;
 export const WORKER_RESPONSE_SCHEMA = "pi-workflows.worker-response.v1" as const;
 
+export type WorkerRunCommand =
+  | { kind: "start"; input: JsonValue }
+  | { kind: "resume"; resumeInteractionAttemptId?: string }
+  | {
+      kind: "continue";
+      parentRunId: string;
+      input: JsonValue;
+      humanDecision?: JsonValue;
+    }
+  | { kind: "restart"; input: JsonValue };
+
 export const WORKER_MESSAGE_KINDS = [
   "worker.ready",
   "node.started",

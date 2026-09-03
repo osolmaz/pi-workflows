@@ -589,15 +589,10 @@ function wrappedEffect(
   project: (context: WorkflowNodeContext) => WorkflowNodeContext,
 ): WorkflowManagedEffect | undefined {
   if (node.effect === undefined) return undefined;
-  const idempotencyKey = node.effect.idempotencyKey;
   const request = node.effect.request;
   return {
     type: node.effect.type,
     recovery: node.effect.recovery,
-    idempotencyKey:
-      typeof idempotencyKey === "function"
-        ? (context: WorkflowNodeContext) => idempotencyKey(project(context))
-        : idempotencyKey,
     request:
       typeof request === "function"
         ? (context: WorkflowNodeContext) => request(project(context))
