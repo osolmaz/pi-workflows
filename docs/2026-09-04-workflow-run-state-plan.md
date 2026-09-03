@@ -2,7 +2,7 @@
 title: Unify workflow run state
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-04
-status: approved
+status: implemented
 ---
 
 # Unify workflow run state

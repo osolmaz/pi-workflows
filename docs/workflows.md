@@ -323,7 +323,10 @@ keeps normal output capture. Lines and update data are each limited to 64 KiB.
 See [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the envelope, progress
 schema, limits, estimation, and error rules.
 
-The host reserves the effect before it lets the action run. A repeated key with
+The host reserves the effect before it lets the action run. The engine creates
+the internal key from the run ID, effect type, full compiled node path, and node
+visit number. Workflow code does not supply that key. Two included workflows
+can use the same local node name without sharing an effect. A repeated key with
 the same request adopts the durable record; the same key with another request
 is a conflict. A normal caught error settles the attempt as rejected. After an
 uncertain process exit, an idempotent effect returns to pending for retry, while
@@ -739,6 +742,9 @@ possible. Defaults worth knowing:
   receipt, and fences the worker before process-group shutdown. `/workflow
 resume` takes a new generation and reruns only work after the last durable
   boundary.
+- The host tells each worker to `start`, `resume`, `continue`, or `restart`.
+  A checkpoint continuation names its waiting parent. A restart begins at the
+  workflow start and does not reuse checkpoint continuation rules.
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command
@@ -753,6 +759,9 @@ resume` takes a new generation and reruns only work after the last durable
   same transaction. Claim loss does not write a failed run event.
 - An uncommitted pure or idempotent node can run again after a worker crash. An
   uncertain manual effect parks as ambiguous and never retries automatically.
+  If a ready worker exits before the saved run revision advances, the host parks
+  the run with `workerNoProgress`. The scheduler does not claim it again until
+  an operator explicitly resumes or cancels it.
 - Host status reports safe counts and timestamps. It does not report session
   IDs, project paths, prompts, payloads, tokens, process IDs, or credentials.
 

@@ -566,6 +566,47 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
+  it("requires an explicit resume after a worker exits without workflow progress", async () => {
+    const { store } = await setup();
+    reserve(store);
+    const claimed = store.claimWorkflowRun({
+      runId: "run-1",
+      runnerId: "host-1",
+      claimToken: "token",
+      leaseMs: 10_000,
+    });
+    expect(claimed).toBeDefined();
+    expect(
+      store.parkWorkflowRunForWorkerNoProgress({
+        runId: "run-1",
+        claimToken: "token",
+        detail: "worker exited before workflow progress",
+      }),
+    ).toBe(true);
+    expect(store.getWorkflowRun("run-1")).toMatchObject({
+      status: "parked",
+      errorCode: "workerNoProgress",
+      errorMessage: "worker exited before workflow progress",
+    });
+    expect(
+      store.claimNextWorkflowRun({
+        runnerId: "host-2",
+        claimToken: "automatic-token",
+        leaseMs: 10_000,
+      }),
+    ).toBeUndefined();
+
+    expect(
+      store.claimWorkflowRun({
+        runId: "run-1",
+        runnerId: "host-2",
+        claimToken: "resume-token",
+        leaseMs: 10_000,
+      }),
+    ).toMatchObject({ status: "starting", errorCode: null, errorMessage: null });
+    store.close();
+  });
+
   it("records terminal queue failures in the run projection", async () => {
     const { store } = await setup();
     reserve(store);
@@ -581,12 +622,19 @@ describe("workflow run queue in canonical SQLite", () => {
       errorCode: "launch_failed",
       errorMessage: "could not launch",
     });
-    expect(
-      new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
-    ).toMatchObject({
+    const runStore = new WorkflowRunStore(store.filePath, { state: store.state });
+    expect(runStore.readRun("run-1")?.state).toMatchObject({
       status: "failed",
       error: "could not launch",
       finishedAt: expect.any(String),
+    });
+    expect(runStore.readTerminalData("run-1")).toMatchObject({
+      status: "failed",
+      input: {},
+      finalOutput: null,
+      error: "could not launch",
+      presentationInstructions:
+        "Explain the final workflow result to the user in a normal response.",
     });
     expect(store.cancelWorkflowRun({ runId: "missing" })).toBe(false);
     store.close();
@@ -602,6 +650,37 @@ describe("workflow run queue in canonical SQLite", () => {
       claimToken: "owner",
       leaseMs: 1_000,
       now: new Date(now).toISOString(),
+    });
+    const hostState = new HostStateStore(store.filePath, { state: store.state });
+    const message = hostState.workflowMessages.create({
+      workflowMessageId: "cancel-message",
+      runId: "run-1",
+      targetSessionId: "session-1",
+      kind: "terminal",
+      sourceId: "cancel-source",
+      idempotencyKey: "cancel-message",
+      content: {
+        schema: "pi-workflows.workflow-message-content.v1",
+        customType: "test-terminal",
+        content: "Finish.",
+        display: false,
+        details: {},
+        triggerTurn: true,
+      },
+      now,
+    });
+    hostState.workflowMessages.adoptBranch(
+      "session-1",
+      [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "entry-1" }],
+      new Set([message.workflowMessageId]),
+      now,
+    );
+    hostState.workflowMessages.startTurn({
+      workflowMessageId: message.workflowMessageId,
+      workflowTurnId: "cancel-turn",
+      runId: "run-1",
+      targetSessionId: "session-1",
+      now,
     });
     expect(
       store.cancelWorkflowRun({ runId: "run-1", now: new Date(now + 500).toISOString() }),
@@ -626,6 +705,10 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(
       new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
     ).toMatchObject({ status: "cancelled", error: "Workflow run cancelled" });
+    expect(hostState.workflowMessages.requireTurn("cancel-turn")).toMatchObject({
+      state: "ended",
+      stopReason: "lost",
+    });
     store.close();
   });
 

@@ -183,7 +183,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   const workflowMessages = new WorkflowMessageCoordinator();
   const sessionView = new SessionWorkflowView();
   const sessionRecorders = new Map<string, SessionRecorder>();
+  let agentRunning = false;
   let activeRecorder: SessionRecorder | null = null;
+  let activeRecorderMessageId: string | null = null;
 
   const ensureRecorder = async (
     message: WorkflowMessage,
@@ -203,6 +205,33 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     return recorder;
   };
 
+  const activateRecorder = async (ctx: ExtensionContext): Promise<void> => {
+    if (!agentRunning) return;
+    const message = workflowMessages.activeTurnMessage();
+    if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
+    const contract = agentContractForWorkflowMessage(message);
+    if (contract === undefined && message.kind !== "terminal" && message.kind !== "followUp") {
+      return;
+    }
+    const recorder = await ensureRecorder(message, ctx);
+    if (
+      !agentRunning ||
+      workflowMessages.activeTurnMessage()?.workflowMessageId !== message.workflowMessageId
+    ) {
+      return;
+    }
+    if (contract === undefined) {
+      recorder.beginWorkflowMessage(
+        message.workflowMessageId,
+        message.kind as "terminal" | "followUp",
+      );
+    } else {
+      recorder.beginAttempt(contract);
+    }
+    activeRecorder = recorder;
+    activeRecorderMessageId = message.workflowMessageId;
+  };
+
   const presentInOrder = async (ctx: ExtensionContext): Promise<void> => {
     const prior = presentationTail;
     let release: (() => void) | undefined;
@@ -212,6 +241,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     await prior;
     try {
       await workflowMessages.synchronize(pi, client, ctx);
+      await activateRecorder(ctx);
     } finally {
       sessionView.refresh(ctx);
       release?.();
@@ -651,27 +681,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    agentRunning = true;
+    activeRecorder = null;
+    activeRecorderMessageId = null;
     workflowMessages.startTurn();
     await presentInOrder(ctx).catch(() => undefined);
-    const message = workflowMessages.activeTurnMessage();
-    const contract = message === undefined ? undefined : agentContractForWorkflowMessage(message);
-    if (
-      message === undefined ||
-      (contract === undefined && message.kind !== "terminal" && message.kind !== "followUp")
-    ) {
-      activeRecorder = null;
-      return;
-    }
-    const recorder = await ensureRecorder(message, ctx);
-    if (contract === undefined) {
-      recorder.beginWorkflowMessage(
-        message.workflowMessageId,
-        message.kind as "terminal" | "followUp",
-      );
-    } else {
-      recorder.beginAttempt(contract);
-    }
-    activeRecorder = recorder;
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -681,6 +695,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
     }
     const finishedMessage = workflowMessages.activeTurnMessage();
+    agentRunning = false;
+    activeRecorderMessageId = null;
     workflowMessages.endTurn(
       workflowTurnStopReason(event.messages, ctx.signal?.aborted === true),
       responseEntryId(ctx.sessionManager.getBranch()),
@@ -747,7 +763,9 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     sessionGeneration += 1;
     sessionContext = null;
+    agentRunning = false;
     activeRecorder = null;
+    activeRecorderMessageId = null;
     await Promise.allSettled(
       [...sessionRecorders.values()].map(async (recorder) => recorder.stop()),
     );

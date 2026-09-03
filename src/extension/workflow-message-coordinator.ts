@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowClient } from "../client/client.js";
-import type { WorkflowSessionView, WorkflowTurnReport } from "../client/view.js";
+import {
+  WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA,
+  type WorkflowSessionView,
+  type WorkflowTurnReport,
+  type WorkflowTurnReportReceipt,
+} from "../client/view.js";
 import type { JsonValue } from "../state/json.js";
-import type { WorkflowMessage, WorkflowTurnStopReason } from "../state/workflow-messages.js";
+import {
+  WORKFLOW_TURN_SCHEMA,
+  type WorkflowMessage,
+  type WorkflowTurnStopReason,
+} from "../state/workflow-messages.js";
 
 const WORKFLOW_MESSAGE_ID_FIELD = "workflowMessageId";
 
@@ -11,6 +20,7 @@ type PendingTurn = {
   workflowTurnId: string;
   workflowMessageId: string | null;
   runId: string | null;
+  message: WorkflowMessage | null;
   startedReported: boolean;
   end: { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null } | null;
 };
@@ -22,6 +32,7 @@ export class WorkflowMessageCoordinator {
   private synchronizing = false;
   private lastBranchEpoch: string | null = null;
   private view: WorkflowSessionView | null = null;
+  private awaitingTurnMessage: WorkflowMessage | null = null;
   private turn: PendingTurn | null = null;
 
   updateView(view: WorkflowSessionView): void {
@@ -50,15 +61,17 @@ export class WorkflowMessageCoordinator {
   }
 
   startTurn(): void {
-    if (this.turn !== null && this.turn.end === null) return;
+    const awaited = this.awaitingTurnMessage;
+    this.awaitingTurnMessage = null;
     this.turn = {
       workflowTurnId: `workflow-turn-${randomUUID()}`,
       workflowMessageId: null,
       runId: null,
+      message: null,
       startedReported: false,
       end: null,
     };
-    const candidate = this.turnCandidate();
+    const candidate = awaited ?? this.turnCandidate();
     if (candidate !== undefined) this.bindTurn(candidate);
   }
 
@@ -68,10 +81,8 @@ export class WorkflowMessageCoordinator {
   }
 
   activeTurnMessage(): WorkflowMessage | undefined {
-    if (this.view === null || this.turn?.workflowMessageId === null || this.turn === null) {
-      return undefined;
-    }
-    return messageById(this.view, this.turn.workflowMessageId);
+    if (this.turn === null || !this.turn.startedReported) return undefined;
+    return this.turn.message ?? undefined;
   }
 
   async synchronize(
@@ -89,7 +100,8 @@ export class WorkflowMessageCoordinator {
           workflowTurnId: view.openWorkflowTurn.workflowTurnId,
           workflowMessageId: view.openWorkflowTurn.workflowMessageId,
           runId: view.openWorkflowTurn.runId,
-          startedReported: false,
+          message: messageById(view, view.openWorkflowTurn.workflowMessageId) ?? null,
+          startedReported: true,
           end: null,
         };
       }
@@ -128,6 +140,9 @@ export class WorkflowMessageCoordinator {
         this.queued.delete(messageId);
         return;
       }
+      if (message.content.triggerTurn && messageStartsTurn(message)) {
+        this.awaitingTurnMessage = message;
+      }
       try {
         pi.sendMessage(
           {
@@ -140,6 +155,9 @@ export class WorkflowMessageCoordinator {
         );
       } catch (error) {
         this.queued.delete(messageId);
+        if (this.awaitingTurnMessage?.workflowMessageId === messageId) {
+          this.awaitingTurnMessage = null;
+        }
         throw error;
       }
       await this.reportBranch(client, ctx, view);
@@ -153,6 +171,7 @@ export class WorkflowMessageCoordinator {
     this.queued.clear();
     this.closedTurnMessages.clear();
     this.view = null;
+    this.awaitingTurnMessage = null;
     this.turn = null;
     this.lastBranchEpoch = null;
     this.synchronizing = false;
@@ -182,6 +201,7 @@ export class WorkflowMessageCoordinator {
     if (this.turn === null) return;
     this.turn.workflowMessageId = message.workflowMessageId;
     this.turn.runId = message.runId;
+    this.turn.message = message;
   }
 
   private async flushTurn(client: WorkflowClient, view: WorkflowSessionView): Promise<void> {
@@ -195,31 +215,47 @@ export class WorkflowMessageCoordinator {
     ) {
       return;
     }
-    const message = messageById(view, pending.workflowMessageId);
-    if (message?.status !== "sent") return;
+    let message = pending.message;
     if (!pending.startedReported) {
+      message = messageById(view, pending.workflowMessageId) ?? null;
+      if (message?.status !== "sent") return;
+      try {
+        const receipt = await reportTurn(client, {
+          state: "started",
+          workflowMessageId: pending.workflowMessageId,
+          workflowTurnId: pending.workflowTurnId,
+          runId: pending.runId,
+          targetSessionId: view.sessionId,
+          coordinatorEpoch: view.coordinatorEpoch,
+        });
+        if (receipt.ownership !== "active") {
+          this.turn = null;
+          return;
+        }
+        pending.message = message;
+        pending.startedReported = true;
+      } catch (error) {
+        this.turn = null;
+        throw error;
+      }
+    }
+    if (pending.end === null) return;
+    try {
       await reportTurn(client, {
-        state: "started",
+        state: "ended",
         workflowMessageId: pending.workflowMessageId,
         workflowTurnId: pending.workflowTurnId,
         runId: pending.runId,
         targetSessionId: view.sessionId,
         coordinatorEpoch: view.coordinatorEpoch,
+        stopReason: pending.end.stopReason,
+        responseSessionEntryId: pending.end.responseSessionEntryId,
       });
-      pending.startedReported = true;
+    } catch (error) {
+      this.turn = null;
+      throw error;
     }
-    if (pending.end === null) return;
-    await reportTurn(client, {
-      state: "ended",
-      workflowMessageId: pending.workflowMessageId,
-      workflowTurnId: pending.workflowTurnId,
-      runId: pending.runId,
-      targetSessionId: view.sessionId,
-      coordinatorEpoch: view.coordinatorEpoch,
-      stopReason: pending.end.stopReason,
-      responseSessionEntryId: pending.end.responseSessionEntryId,
-    });
-    if (message.kind === "terminal" || message.kind === "followUp") {
+    if (message?.kind === "terminal" || message?.kind === "followUp") {
       this.closedTurnMessages.add(pending.workflowMessageId);
     }
     for (const current of new Set([view, this.view])) {
@@ -228,7 +264,7 @@ export class WorkflowMessageCoordinator {
       }
       if (
         current?.openWorkflowMessageId === pending.workflowMessageId &&
-        (message.kind === "terminal" || message.kind === "followUp")
+        (message?.kind === "terminal" || message?.kind === "followUp")
       ) {
         current.openWorkflowMessageId = null;
       }
@@ -318,7 +354,10 @@ function messageStartsTurn(message: WorkflowMessage): boolean {
   return message.kind === "step" || message.kind === "terminal" || message.kind === "followUp";
 }
 
-async function reportTurn(client: WorkflowClient, report: WorkflowTurnReport): Promise<void> {
+async function reportTurn(
+  client: WorkflowClient,
+  report: WorkflowTurnReport,
+): Promise<WorkflowTurnReportReceipt> {
   const response = await client.request({
     operation: "workflowTurn.report",
     runId: report.runId,
@@ -327,6 +366,31 @@ async function reportTurn(client: WorkflowClient, report: WorkflowTurnReport): P
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
     throw new Error(response.error ?? "Workflow host rejected the model-turn report");
   }
+  const receipt = response.receipt;
+  if (
+    !isRecord(receipt) ||
+    receipt.schema !== WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA ||
+    !["active", "settled", "absent"].includes(String(receipt.ownership))
+  ) {
+    throw new Error("Workflow host returned an invalid model-turn receipt");
+  }
+  const ownership = receipt.ownership as WorkflowTurnReportReceipt["ownership"];
+  if (ownership === "absent") {
+    if (receipt.turn !== null) {
+      throw new Error("Workflow host returned an invalid model-turn receipt");
+    }
+  } else if (
+    !isRecord(receipt.turn) ||
+    receipt.turn.schema !== WORKFLOW_TURN_SCHEMA ||
+    receipt.turn.workflowTurnId !== report.workflowTurnId ||
+    receipt.turn.workflowMessageId !== report.workflowMessageId ||
+    receipt.turn.runId !== report.runId ||
+    receipt.turn.targetSessionId !== report.targetSessionId ||
+    receipt.turn.state !== (ownership === "active" ? "started" : "ended")
+  ) {
+    throw new Error("Workflow host returned an invalid model-turn receipt");
+  }
+  return receipt as unknown as WorkflowTurnReportReceipt;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

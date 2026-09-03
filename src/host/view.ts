@@ -804,7 +804,8 @@ export class HostViewStore {
       .prepare(
         `SELECT t.target_session_id AS targetSessionId FROM workflow_turns t
          JOIN workflow_messages m ON m.workflow_message_id = t.workflow_message_id
-         WHERE t.run_id = ? AND t.state = 'started' AND m.kind IN ('step', 'terminal') LIMIT 1`,
+         WHERE t.run_id = ? AND t.state = 'started'
+           AND m.kind IN ('step', 'terminal', 'followUp') LIMIT 1`,
       )
       .get(runId);
     return (

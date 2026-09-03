@@ -54,10 +54,14 @@ describe("workflow worker run commands", () => {
       }),
     ).resolves.toBe(result);
 
-    expect(engine.run).toHaveBeenCalledWith(workflow, { task: "again" }, {
-      runId: "restart-1",
-      workflowSource: source,
-    });
+    expect(engine.run).toHaveBeenCalledWith(
+      workflow,
+      { task: "again" },
+      {
+        runId: "restart-1",
+        workflowSource: source,
+      },
+    );
     expect(engine.continueRun).not.toHaveBeenCalled();
   });
 
@@ -79,10 +83,15 @@ describe("workflow worker run commands", () => {
       }),
     ).resolves.toBe(result);
 
-    expect(engine.continueRun).toHaveBeenCalledWith(workflow, "parent-1", { answer: true }, {
-      runId: "continuation-1",
-      workflowSource: source,
-    });
+    expect(engine.continueRun).toHaveBeenCalledWith(
+      workflow,
+      "parent-1",
+      { answer: true },
+      {
+        runId: "continuation-1",
+        workflowSource: source,
+      },
+    );
     expect(engine.run).not.toHaveBeenCalled();
   });
 });

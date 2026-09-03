@@ -143,6 +143,17 @@ export type WorkflowRunDisplayState = {
   error: string | null;
 };
 
+export type WorkflowRunTerminalData = {
+  runId: string;
+  status: "completed" | "failed" | "timed_out" | "cancelled";
+  statusDetail: string | null;
+  input: JsonValue;
+  finalOutput: JsonValue | null;
+  error: string | null;
+  presentationInstructions: string;
+  restartNumber: number;
+};
+
 export type WorkflowRunStoreOptions = {
   authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
   /** Host-owned projection updates that must commit with each run snapshot. */
@@ -2179,6 +2190,59 @@ export class WorkflowRunStore {
       eventCount: segment?.eventCount ?? 0,
       entryCount: segment?.entryCount ?? 0,
       lastEventSeq: segment?.eventCount ?? 0,
+    };
+  }
+
+  readRunInput(runId: string): JsonValue | null {
+    const row = this.readRunRow(runId);
+    return row === undefined ? null : this.state.readJson(row.inputHash);
+  }
+
+  readRunFinalOutput(runId: string): JsonValue | null {
+    const row = this.readRunRow(runId);
+    return row?.finalOutputHash == null ? null : this.state.readJson(row.finalOutputHash);
+  }
+
+  readRunError(runId: string): string | null {
+    const row = this.readRunRow(runId);
+    return row?.errorHash == null ? null : this.readText(row.errorHash);
+  }
+
+  readPresentationInstructions(runId: string): string {
+    const row = this.state.connection
+      .prepare("SELECT presentation_prompt_hash AS hash FROM runs WHERE run_id = ?")
+      .get(runId) as { hash?: Buffer | null } | undefined;
+    if (row?.hash == null) {
+      return "Explain the final workflow result to the user in a normal response.";
+    }
+    return this.readText(row.hash);
+  }
+
+  readTerminalData(runId: string): WorkflowRunTerminalData | null {
+    const row = this.state.connection
+      .prepare(
+        `SELECT status, status_detail AS statusDetail, restart_number AS restartNumber
+         FROM runs WHERE run_id = ?`,
+      )
+      .get(runId) as
+      | { status?: unknown; statusDetail?: unknown; restartNumber?: unknown }
+      | undefined;
+    if (
+      row === undefined ||
+      !["completed", "failed", "timed_out", "cancelled"].includes(String(row.status)) ||
+      typeof row.restartNumber !== "number"
+    ) {
+      return null;
+    }
+    return {
+      runId,
+      status: row.status as WorkflowRunTerminalData["status"],
+      statusDetail: typeof row.statusDetail === "string" ? row.statusDetail : null,
+      input: this.readRunInput(runId) as JsonValue,
+      finalOutput: this.readRunFinalOutput(runId),
+      error: this.readRunError(runId),
+      presentationInstructions: this.readPresentationInstructions(runId),
+      restartNumber: row.restartNumber,
     };
   }
 
