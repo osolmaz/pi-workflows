@@ -542,6 +542,68 @@ export class HostStateStore {
     });
   }
 
+  beginInteractionModelTurn(requestId: string, now: number = Date.now()): void {
+    const row = this.state.connection
+      .prepare(
+        `SELECT i.attempt_id AS attemptId, i.created_at AS createdAt,
+                a.started_at AS startedAt, a.deadline_at AS deadlineAt,
+                (SELECT MAX(t.ended_at)
+                 FROM workflow_messages m
+                 JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+                 WHERE m.source_id = i.request_id AND m.kind = 'step'
+                   AND t.state = 'ended') AS previousTurnEndedAt
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         WHERE i.request_id = ? AND i.status = 'pending'`,
+      )
+      .get(requestId);
+    if (!isInteractionTimeoutRow(row)) {
+      throw new Error("Pending workflow interaction timeout is missing");
+    }
+    this.shiftInteractionTimeout(
+      row,
+      Math.max(0, now - (row.previousTurnEndedAt ?? row.startedAt ?? row.createdAt)),
+      now,
+    );
+  }
+
+  interactionPauseStartedAt(runId: string): number | undefined {
+    const row = this.state.connection
+      .prepare(
+        `SELECT r.updated_at AS pausedAt
+         FROM runs r
+         JOIN interactive_requests i ON i.run_id = r.run_id AND i.status = 'pending'
+         WHERE r.run_id = ? AND r.paused = 1 LIMIT 1`,
+      )
+      .get(runId);
+    return isPausedAtRow(row) ? row.pausedAt : undefined;
+  }
+
+  resumeInteractionModelTurn(
+    runId: string,
+    pausedAt: number | undefined,
+    now: number = Date.now(),
+  ): void {
+    if (pausedAt === undefined) return;
+    const row = this.state.connection
+      .prepare(
+        `SELECT i.attempt_id AS attemptId, i.created_at AS createdAt,
+                a.started_at AS startedAt, a.deadline_at AS deadlineAt,
+                t.ended_at AS previousTurnEndedAt
+         FROM interactive_requests i
+         JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+         WHERE i.run_id = ? AND i.status = 'pending' AND t.started_at <= ?
+           AND (t.ended_at IS NULL OR t.ended_at > ?)
+         ORDER BY t.started_at DESC LIMIT 1`,
+      )
+      .get(runId, pausedAt, pausedAt);
+    if (!isInteractionTimeoutRow(row)) return;
+    const modelTurnStoppedAt = Math.min(now, row.previousTurnEndedAt ?? now);
+    this.shiftInteractionTimeout(row, Math.max(0, modelTurnStoppedAt - pausedAt), now);
+  }
+
   getInteraction(requestId: string): InteractiveRequestRecord | undefined {
     return this.interactiveRequest(requestId);
   }
@@ -629,10 +691,16 @@ export class HostStateStore {
         `SELECT i.run_id AS runId
          FROM interactive_requests i
          JOIN node_attempts a ON a.attempt_id = i.attempt_id
+         JOIN runs r ON r.run_id = i.run_id
          JOIN run_queue q ON q.run_id = i.run_id
-         WHERE i.status = 'pending'
+         WHERE i.status = 'pending' AND r.paused = 0
            AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
            AND q.status NOT IN ('done', 'failed', 'cancelled')
+           AND EXISTS (
+             SELECT 1 FROM workflow_messages m
+             JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+             WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
+           )
          GROUP BY i.run_id
          ORDER BY MIN(a.deadline_at), i.run_id`,
       )
@@ -648,8 +716,13 @@ export class HostStateStore {
          JOIN node_attempts a ON a.attempt_id = i.attempt_id
          JOIN runs r ON r.run_id = i.run_id
          WHERE i.run_id = ? AND i.status = 'cancelled' AND r.status = 'running'
-           AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
+           AND r.paused = 0 AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
            AND a.status IN ('pending', 'running', 'waiting', 'interrupted', 'timed_out')
+           AND EXISTS (
+             SELECT 1 FROM workflow_messages m
+             JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+             WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
+           )
          ORDER BY a.deadline_at, i.request_id LIMIT 1`,
       )
       .get(runId, Date.now());
@@ -962,6 +1035,19 @@ export class HostStateStore {
     };
   }
 
+  private shiftInteractionTimeout(row: InteractionTimeoutRow, idleMs: number, now: number): void {
+    if (idleMs === 0 || row.deadlineAt === null) return;
+    const changed = this.state.connection
+      .prepare(
+        `UPDATE node_attempts
+         SET started_at = CASE WHEN started_at IS NULL THEN NULL ELSE started_at + ? END,
+             deadline_at = deadline_at + ?, updated_at = ?
+         WHERE attempt_id = ? AND deadline_at = ?`,
+      )
+      .run(idleMs, idleMs, now, row.attemptId, row.deadlineAt);
+    if (changed.changes !== 1) throw new Error("Workflow interaction timeout changed concurrently");
+  }
+
   private requireInteractiveRequest(requestId: string): InteractiveRequestRecord {
     const request = this.interactiveRequest(requestId);
     if (request === undefined) throw new Error(`Interactive request not found: ${requestId}`);
@@ -1045,6 +1131,14 @@ type TimedOutInteractionRow = {
   attemptId: string;
   nodeId: string;
 };
+type InteractionTimeoutRow = {
+  attemptId: string;
+  createdAt: number;
+  startedAt: number | null;
+  deadlineAt: number | null;
+  previousTurnEndedAt: number | null;
+};
+type PausedAtRow = { pausedAt: number };
 type InteractiveRequestRow = {
   requestId: string;
   runId: string;
@@ -1132,6 +1226,21 @@ function isTimedOutInteractionRow(value: unknown): value is TimedOutInteractionR
     typeof value.attemptId === "string" &&
     typeof value.nodeId === "string"
   );
+}
+
+function isInteractionTimeoutRow(value: unknown): value is InteractionTimeoutRow {
+  return (
+    isRecord(value) &&
+    typeof value.attemptId === "string" &&
+    typeof value.createdAt === "number" &&
+    nullableNumber(value.startedAt) &&
+    nullableNumber(value.deadlineAt) &&
+    nullableNumber(value.previousTurnEndedAt)
+  );
+}
+
+function isPausedAtRow(value: unknown): value is PausedAtRow {
+  return isRecord(value) && typeof value.pausedAt === "number";
 }
 
 function isSubmissionRow(value: unknown): value is SubmissionRow {

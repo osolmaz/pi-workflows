@@ -212,7 +212,9 @@ form's active Pi turn.
 
 `timeoutMs` can be a finite positive number, `null`, or a function of the normal
 node context that returns either value. Omit it to use the 15-minute engine
-default. Set it to `null` to disable only the wall-clock deadline; cancellation,
+default. The limit counts active node execution. For an origin-session agent
+node, it counts reported model-turn time and excludes message delivery, waiting,
+and paused time. Set it to `null` to disable only this deadline; cancellation,
 parking, claim loss, shutdown, and the node's abort signal still work. A timeout
 function can use prepared outputs to select a policy for this run. It has 30
 seconds to return. Computed timeout functions are runtime code, so definition
@@ -727,8 +729,10 @@ possible. Defaults worth knowing:
   number or context callback. A timed-out node has outcome `timed_out` and can
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
   turn, and late output for that attempt is rejected. Interactive runs save the
-  resolved wall-clock deadline before they park. The host enforces that deadline
-  while Pi is closed and after host restart.
+  resolved deadline before they park. The host advances it only during a
+  reported origin-session model turn. Message delivery, waiting, pauses, and a
+  closed Pi session do not consume the limit. This active-time budget survives
+  host restart.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` atomically parks the run with `paused: true`, stores the

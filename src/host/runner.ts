@@ -918,6 +918,10 @@ export class WorkflowHost {
     }
     const turn = this.state.transaction(() => {
       if (report.state === "started") {
+        const existing = this.hostState.workflowMessages.getTurn(report.workflowTurnId);
+        if (existing === undefined && this.queue.isWorkflowRunPaused(report.runId)) {
+          throw new Error("A paused workflow cannot start a model turn");
+        }
         const session = this.views.session(report.targetSessionId, {
           epoch: coordinator.epoch,
           active: true,
@@ -927,8 +931,11 @@ export class WorkflowHost {
           throw new Error("Workflow turn start does not match the open workflow message");
         }
         const message = this.hostState.workflowMessages.require(report.workflowMessageId);
-        if (message.kind === "step") {
-          this.hostState.workflowMessages.cancelPendingForSource(message.sourceId, "step");
+        if (existing === undefined && message.kind === "step") {
+          const now = Date.now();
+          this.hostState.beginInteractionModelTurn(message.sourceId, now);
+          this.hostState.workflowMessages.cancelPendingForSource(message.sourceId, "step", now);
+          return this.hostState.workflowMessages.startTurn({ ...report, now });
         }
         return this.hostState.workflowMessages.startTurn(report);
       }
@@ -1235,9 +1242,11 @@ export class WorkflowHost {
         const runId = requireRunId(request);
         const resumedInteraction = this.state.transaction(() => {
           const now = Date.now();
+          const pausedAt = this.hostState.interactionPauseStartedAt(runId);
           if (!this.queue.resumePausedInteraction({ runId, now: new Date(now).toISOString() })) {
             return false;
           }
+          this.hostState.resumeInteractionModelTurn(runId, pausedAt, now);
           this.hostState.resumePendingInteraction(runId, now);
           return true;
         });
@@ -3438,7 +3447,7 @@ export class WorkflowHost {
       if (activated) {
         this.markPendingStart(runId, claimToken);
         setImmediate(() => void this.activateRun(claimed, claimToken));
-        this.log(`run ${runId} is finishing its expired origin-session deadline`);
+        this.log(`run ${runId} is finishing its expired origin-session model-turn deadline`);
       }
     } catch (error) {
       this.log(`interaction timeout failed for run ${runId}: ${errorMessage(error)}`);

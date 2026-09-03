@@ -1465,8 +1465,14 @@ export class SqliteControllerStore implements ControllerStore {
           `SELECT i.request_id AS requestId, i.attempt_id AS attemptId
            FROM interactive_requests i
            JOIN node_attempts a ON a.attempt_id = i.attempt_id
-           WHERE i.run_id = ? AND i.status = 'pending'
+           JOIN runs r ON r.run_id = i.run_id
+           WHERE i.run_id = ? AND i.status = 'pending' AND r.paused = 0
              AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
+             AND EXISTS (
+               SELECT 1 FROM workflow_messages m
+               JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
+               WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
+             )
            ORDER BY a.deadline_at, i.request_id LIMIT 1`,
         )
         .get(options.runId, now);
@@ -1497,7 +1503,7 @@ export class SqliteControllerStore implements ControllerStore {
       if (request.changes !== 1 || run.changes !== 1 || queue.changes !== 1) {
         throw new Error(`Workflow run ${options.runId} changed during interaction timeout`);
       }
-      const error = "Workflow node deadline expired before origin-session input arrived";
+      const error = "Workflow node model-turn deadline expired";
       const receiptHash = this.state.putJson({ status: "rejected", error }, now);
       this.state.connection
         .prepare(
