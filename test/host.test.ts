@@ -1517,6 +1517,7 @@ setInterval(() => {}, 1000);
       databasePath,
       runnerId: "host-timeout-restarted",
       claimPollMs: 10,
+      hostRenewMs: 40,
     });
     const client = new WorkflowClient({ databasePath });
     let reconnectedClient: WorkflowClient | undefined;
@@ -1739,6 +1740,25 @@ setInterval(() => {}, 1000);
       expect(secondActiveDeadlineAt - resumedTurnDeadline.startedAt).toBe(configuredDurationMs);
 
       await client.close();
+      let disconnectedAt: number | undefined;
+      await waitUntil(() => {
+        const state = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          const attempt = state.state.connection
+            .prepare(
+              `SELECT a.status, a.updated_at AS updatedAt
+               FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+               WHERE i.request_id = ?`,
+            )
+            .get(timedRequestId) as { status: string; updatedAt: number } | undefined;
+          disconnectedAt = attempt?.updatedAt;
+          return attempt?.status === "interrupted";
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      if (disconnectedAt === undefined) throw new Error("disconnect time was not recorded");
+      const recordedDisconnectAt = disconnectedAt;
       await new Promise((resolve) =>
         setTimeout(resolve, Math.max(0, secondActiveDeadlineAt - Date.now()) + 100),
       );
@@ -1750,6 +1770,18 @@ setInterval(() => {}, 1000);
             .prepare("SELECT error_code AS errorCode FROM run_queue WHERE run_id = ?")
             .get("interaction-timeout-run"),
         ).toEqual({ errorCode: null });
+        expect(
+          disconnectedState.state.connection
+            .prepare(
+              `SELECT a.status, a.updated_at AS updatedAt
+               FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+               WHERE i.request_id = ?`,
+            )
+            .get(timedRequestId),
+        ).toEqual({ status: "interrupted", updatedAt: recordedDisconnectAt });
+        const heartbeatAt = disconnectedState.hostStatus().heartbeatAt;
+        expect(heartbeatAt).not.toBeNull();
+        expect(Date.parse(heartbeatAt ?? "")).toBeGreaterThan(recordedDisconnectAt);
       } finally {
         disconnectedState.close();
       }
@@ -1775,6 +1807,20 @@ setInterval(() => {}, 1000);
       const recoveredState = new HostStateStore(databasePath, { readOnly: true });
       try {
         expect(recoveredState.getInteraction(timedRequestId)?.status).toBe("pending");
+        const recoveredAttempt = recoveredState.state.connection
+          .prepare(
+            `SELECT a.status, a.deadline_at AS deadlineAt, a.updated_at AS updatedAt
+             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
+             WHERE i.request_id = ?`,
+          )
+          .get(timedRequestId) as
+          | { status: string; deadlineAt: number | null; updatedAt: number }
+          | undefined;
+        expect(recoveredAttempt?.status).toBe("interrupted");
+        expect(recoveredAttempt?.updatedAt).toBeGreaterThan(recordedDisconnectAt);
+        expect((recoveredAttempt?.deadlineAt ?? 0) - secondActiveDeadlineAt).toBe(
+          (recoveredAttempt?.updatedAt ?? 0) - recordedDisconnectAt,
+        );
       } finally {
         recoveredState.close();
       }
@@ -1821,19 +1867,31 @@ setInterval(() => {}, 1000);
       const reconnectedState = new HostStateStore(databasePath, { readOnly: true });
       const reconnectedDeadline = reconnectedState.state.connection
         .prepare(
-          `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
+          `SELECT a.status, a.started_at AS startedAt, a.deadline_at AS deadlineAt,
+                  a.updated_at AS updatedAt
            FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
            WHERE i.request_id = ?`,
         )
-        .get(timedRequestId) as { startedAt: number | null; deadlineAt: number | null } | undefined;
+        .get(timedRequestId) as
+        | {
+            status: string;
+            startedAt: number | null;
+            deadlineAt: number | null;
+            updatedAt: number;
+          }
+        | undefined;
       reconnectedState.close();
       if (reconnectedDeadline?.startedAt == null || reconnectedDeadline.deadlineAt == null) {
         throw new Error("reconnected model-turn deadline is missing");
       }
+      expect(reconnectedDeadline.status).toBe("waiting");
       expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(secondActiveDeadlineAt);
       expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(Date.now() + 1_000);
       expect(reconnectedDeadline.deadlineAt - reconnectedDeadline.startedAt).toBe(
         configuredDurationMs,
+      );
+      expect(reconnectedDeadline.deadlineAt - secondActiveDeadlineAt).toBe(
+        reconnectedDeadline.updatedAt - recordedDisconnectAt,
       );
 
       await waitUntil(() => {
