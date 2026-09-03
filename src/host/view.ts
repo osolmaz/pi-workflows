@@ -921,7 +921,10 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     reason = "The workflow is waiting for origin-session input.";
   } else if (facts.queueStatus === "parked" || facts.queueStatus === "queued") {
     status = "queued";
-    reason = facts.queueStatus === "parked" ? "The workflow is ready to resume." : null;
+    reason =
+      facts.queueStatus === "parked"
+        ? (facts.errorMessage ?? "The workflow is ready to resume.")
+        : null;
   } else if (facts.queueStatus === "done") {
     status = "completed";
   } else if (facts.queueStatus === "failed" || facts.queueStatus === "cancelled") {

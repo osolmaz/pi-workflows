@@ -88,6 +88,18 @@ describe("host workflow display reducer", () => {
       display({ durableStatus: "running", pendingInteraction: false, queueStatus: "queued" })
         .controls,
     ).toEqual(["cancel"]);
+    expect(
+      display({
+        durableStatus: "running",
+        pendingInteraction: false,
+        queueStatus: "parked",
+        errorMessage: "The worker exited before it saved workflow progress.",
+      }),
+    ).toMatchObject({
+      status: "queued",
+      reason: "The worker exited before it saved workflow progress.",
+      controls: ["resume", "cancel"],
+    });
   });
 
   it("keeps every large history reachable through bounded pages", () => {
