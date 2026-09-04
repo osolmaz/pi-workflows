@@ -29,7 +29,7 @@ Use the existing run-tree prune logic as the one cleanup engine. Automatic clean
 
 A terminal root run and all its restart or continuation descendants remain for 30 days after `finished_at`. Every descendant must be terminal and older than the cutoff before the server can remove the tree. Protected state or a reference from outside the tree blocks removal.
 
-The Workflow Server checks for cleanup after startup recovery and after workflow runners exit. It starts cleanup only while normal server work is idle. One server process completes no more than one sweep in 24 hours. An interrupted sweep remains due and continues at the next safe trigger.
+The Workflow Server checks for cleanup after startup recovery and after workflow runners exit. It also schedules a daily check after each completed sweep. It starts cleanup only while normal server work is idle. One server process completes no more than one sweep in 24 hours. An interrupted sweep remains due. The next idle lifecycle trigger or a five-minute idle retry continues it.
 
 Automatic cleanup creates no backup. Creating a new backup for every sweep would cause another unbounded store. The explicit manual prune command keeps its current dry-run and backup-first apply forms.
 
@@ -75,7 +75,7 @@ The server requests one automatic sweep after recovery and after a workflow runn
 
 A sweep starts only when there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or server shutdown. It deletes one complete root tree in one transaction, yields, and checks for new work before it selects another tree.
 
-A completed sweep starts a 24-hour in-process interval. A sweep that stops because new work appeared remains due. The next idle startup or runner-exit trigger can continue it without waiting for another complete interval.
+A completed sweep starts a 24-hour in-process interval and schedules the next daily check. A sweep that stops because new work appeared remains due. The next idle lifecycle trigger or a five-minute idle retry continues it. A new request during the completed-sweep interval waits until that interval ends.
 
 The cleanup scheduler is part of the existing server process. It does not add a service, scheduler process, or second writer.
 
@@ -101,7 +101,7 @@ Manual prune keeps its current backup-first full compaction and integrity checks
 
 ### Failure handling
 
-A cleanup error does not fail a workflow or stop the server. The server records one clear diagnostic and waits for a later safe trigger. It does not retry in a tight loop.
+A cleanup error does not fail a workflow or stop the server. The server records one clear diagnostic and waits five minutes before another safe attempt. It does not retry in a tight loop.
 
 Cleanup is atomic for one complete root tree. An interruption can leave later trees for another sweep, but it cannot leave half of one lineage tree deleted.
 
@@ -167,13 +167,13 @@ Automatic and manual cleanup select the same eligible trees. Automatic cleanup c
 
 **Change**
 
-Request cleanup after startup recovery and after runner exit. Coalesce overlapping requests. Enforce the idle check and 24-hour completed-sweep interval.
+Request cleanup after startup recovery and after runner exit. Schedule a daily check after each completed sweep. Coalesce overlapping requests. Enforce the idle check, five-minute idle retry, and 24-hour completed-sweep interval.
 
 A failed sweep logs one bounded error and waits for a later trigger. Shutdown starts no new sweep and settles any current scheduling task safely.
 
 **Check**
 
-Server tests use fake time and temporary databases to cover startup, runner exit, coalescing, the 24-hour interval, interruption, clean shutdown, and one injected failure.
+Server tests use controlled scheduler timestamps and temporary databases to cover startup, runner exit, coalescing, the 24-hour interval, interruption, clean shutdown, and one injected failure.
 
 ### Reuse pages and compact when worthwhile
 

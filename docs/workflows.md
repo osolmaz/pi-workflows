@@ -777,7 +777,7 @@ Pi Workflows keeps a terminal root run and all its restart or continuation desce
 
 Protected work includes waiting or parked runs, live queue rows, pending workflow messages, open workflow turns, pending interactions or decisions, recording session segments, queued follow-ups, active leases, unsettled effects, controller ownership, active runner content, resumable checkpoints, and undelivered terminal results.
 
-The server checks for cleanup after startup recovery and after workflow runners exit. It runs only while normal server work is idle. One process completes at most one sweep in 24 hours. If work appears, cleanup stops between complete root trees and continues at a later idle trigger.
+The server checks for cleanup after startup recovery and after workflow runners exit. It also schedules a daily check after each completed sweep. Cleanup runs only while normal server work is idle. One process completes at most one sweep in 24 hours. If work appears, cleanup stops between complete root trees. The next idle lifecycle trigger or a five-minute idle retry continues it.
 
 Automatic cleanup does not create a backup. The explicit `pi-workflows state prune` apply command still requires a new absolute verified backup. Both paths use the same eligibility, deletion, and blob-reference rules.
 

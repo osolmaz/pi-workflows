@@ -14,7 +14,16 @@ import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerProcessRegistry } from "../src/server/processes.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore, type InteractiveRequestRecord } from "../src/server/state.js";
+import {
+  encodeRunnerLine,
+  MAX_WORKFLOW_RUNNER_PROTOCOL_MESSAGE_BYTES,
+  type WorkflowRunnerResponse,
+} from "../src/server/workflow-runner-protocol.js";
 import { canonicalJson } from "../src/state/json.js";
+import {
+  AUTOMATIC_STATE_PRUNE_INTERVAL_MS,
+  AUTOMATIC_STATE_RETENTION_MS,
+} from "../src/state/prune.js";
 import type { WorkflowMessage } from "../src/state/workflow-messages.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
@@ -1146,7 +1155,7 @@ setInterval(() => {}, 1000);
         await runStore.appendSessionEntry("large-resume-run", {
           id: `entry-${index}`,
           type: "message",
-          content: "x".repeat(128 * 1024),
+          content: `${index}:${"x".repeat(128 * 1024)}`,
         });
       }
       expect(
@@ -1192,6 +1201,13 @@ setInterval(() => {}, 1000);
       if (typeof secondContract.contract?.nodeId !== "string") {
         throw new Error("second interaction node is missing");
       }
+      const incrementalStore = new WorkflowRunStore(databasePath);
+      await incrementalStore.appendSessionEntry("large-resume-run", {
+        id: "entry-after-first-resume",
+        type: "message",
+        content: "small unique change after the first resume",
+      });
+      incrementalStore.close();
       const secondResponse = await client.request({
         operation: "interaction.submit",
         runId: pendingSecondInteraction.runId,
@@ -1218,19 +1234,246 @@ setInterval(() => {}, 1000);
         }
       }, 30_000);
       const completedStore = new WorkflowRunStore(databasePath);
-      expect(completedStore.readRun("large-resume-run")?.sessionEntries).toHaveLength(17);
+      expect(completedStore.readRun("large-resume-run")?.sessionEntries).toHaveLength(18);
       const crashed = completedStore.state.connection
         .prepare(
           "SELECT count(*) AS count FROM run_workers WHERE run_id = ? AND status = 'crashed'",
         )
         .get("large-resume-run") as { count: number };
       expect(crashed.count).toBe(0);
+
+      const history = completedStore.state.connection
+        .prepare(
+          `SELECT COALESCE(sum(b.byte_length), 0) AS bytes
+           FROM session_entries e JOIN blobs b ON b.blob_hash = e.entry_hash
+           WHERE e.run_id = ?`,
+        )
+        .get("large-resume-run") as { bytes: number };
+      const resultBlobs = completedStore.state.connection
+        .prepare(
+          `SELECT count(*) AS count, COALESCE(sum(b.byte_length), 0) AS bytes
+           FROM (
+             SELECT DISTINCT m.result_hash AS resultHash
+             FROM worker_messages m JOIN run_workers w ON w.worker_epoch = m.worker_epoch
+             WHERE w.run_id = ? AND m.result_hash IS NOT NULL
+           ) results JOIN blobs b ON b.blob_hash = results.resultHash`,
+        )
+        .get("large-resume-run") as { count: number; bytes: number };
+      const resultRows = completedStore.state.connection
+        .prepare(
+          `SELECT m.message_id AS messageId, m.outcome,
+                  m.accepted_revision AS revision, m.result_hash AS resultHash
+           FROM worker_messages m JOIN run_workers w ON w.worker_epoch = m.worker_epoch
+           WHERE w.run_id = ? AND m.result_hash IS NOT NULL`,
+        )
+        .all("large-resume-run") as Array<{
+        messageId: string;
+        outcome: WorkflowRunnerResponse["outcome"];
+        revision: number | null;
+        resultHash: Buffer;
+      }>;
+      const frameBytes = resultRows.map(
+        (row) =>
+          encodeRunnerLine({
+            schema: "pi-workflows.worker-response.v1",
+            messageId: row.messageId,
+            outcome: row.outcome,
+            ...(row.revision === null ? {} : { revision: row.revision }),
+            result: completedStore.state.readJson(row.resultHash),
+          }).byteLength,
+      );
+      const pageCount = completedStore.state.connection.pragma("page_count", { simple: true });
+      const pageSize = completedStore.state.connection.pragma("page_size", { simple: true });
+      expect(history.bytes).toBeGreaterThan(2 * 1024 * 1024);
+      expect(resultBlobs.count).toBeGreaterThan(1);
+      expect(resultBlobs.bytes).toBeLessThan(history.bytes);
+      expect(Math.max(...frameBytes)).toBeLessThan(MAX_WORKFLOW_RUNNER_PROTOCOL_MESSAGE_BYTES);
+      expect((pageCount as number) * (pageSize as number)).toBeLessThan(history.bytes * 4);
       completedStore.close();
     } finally {
       await client.close();
       await host.stop();
     }
   }, 60_000);
+
+  it("prunes expired state after recovery and after a later runner exit", async () => {
+    const cwd = await makeTempDir("host-automatic-prune-project");
+    const databasePath = path.join(await makeTempDir("host-automatic-prune-state"), "state.sqlite");
+    const workflowPath = await writeComputeWorkflow(cwd);
+    const setupHost = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const setupClient = new WorkflowClient({ databasePath });
+    await setupHost.start();
+    try {
+      await startRun({
+        client: setupClient,
+        cwd,
+        workflowPath,
+        runId: "automatic-prune-first",
+      });
+      await waitUntil(() => {
+        const queue = new SqliteResourceManagerStore(databasePath, {
+          readOnly: true,
+          global: true,
+        });
+        try {
+          return queue.getWorkflowRun("automatic-prune-first")?.status === "done";
+        } finally {
+          queue.close();
+        }
+      }, 30_000);
+      await startRun({
+        client: setupClient,
+        cwd,
+        workflowPath,
+        runId: "automatic-prune-blocked",
+      });
+      await waitUntil(() => {
+        const queue = new SqliteResourceManagerStore(databasePath, {
+          readOnly: true,
+          global: true,
+        });
+        try {
+          return ["automatic-prune-first", "automatic-prune-blocked"].every(
+            (runId) => queue.getWorkflowRun(runId)?.status === "done",
+          );
+        } finally {
+          queue.close();
+        }
+      }, 30_000);
+    } finally {
+      await setupClient.close();
+      await setupHost.stop();
+    }
+
+    const now = Date.now();
+    const setup = new WorkflowRunStore(databasePath);
+    setup.state.connection
+      .prepare("UPDATE runs SET finished_at = ? WHERE run_id IN (?, ?)")
+      .run(
+        now - AUTOMATIC_STATE_RETENTION_MS - 1,
+        "automatic-prune-first",
+        "automatic-prune-blocked",
+      );
+    const blockedResource = setup.state.connection
+      .prepare("SELECT resource_id AS resourceId FROM runs WHERE run_id = ?")
+      .get("automatic-prune-blocked") as { resourceId: string };
+    setup.state.connection
+      .prepare(
+        `UPDATE leases SET owner_type = 'system', owner_id = 'retention-test', token_hash = ?,
+           acquired_at = ?, heartbeat_at = ?, expires_at = ? WHERE resource_id = ?`,
+      )
+      .run(Buffer.alloc(32, 4), now, now, now + 60_000, blockedResource.resourceId);
+    setup.close();
+
+    const logs: string[] = [];
+    const host = new WorkflowServer({
+      databasePath,
+      claimPollMs: 10,
+      onLog: (message) => logs.push(message),
+    });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      await waitUntil(() => {
+        const store = new WorkflowRunStore(databasePath, { readOnly: true });
+        try {
+          return store.readRun("automatic-prune-first") === null;
+        } finally {
+          store.close();
+        }
+      }, 10_000);
+      await expect(client.getRun("automatic-prune-first")).resolves.toBeNull();
+      await expect(client.getRun("automatic-prune-blocked")).resolves.not.toBeNull();
+      const retained = new WorkflowRunStore(databasePath, { readOnly: true });
+      expect(retained.readRun("automatic-prune-blocked")).not.toBeNull();
+      retained.close();
+
+      const writable = new WorkflowRunStore(databasePath);
+      writable.state.connection
+        .prepare(
+          `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
+             acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
+           WHERE resource_id = ?`,
+        )
+        .run(blockedResource.resourceId);
+      writable.close();
+
+      const internal = host as unknown as {
+        lastAutomaticStatePruneAt: number | null;
+        requestAutomaticStatePrune(): void;
+      };
+      internal.requestAutomaticStatePrune();
+      internal.requestAutomaticStatePrune();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const throttled = new WorkflowRunStore(databasePath, { readOnly: true });
+      expect(throttled.readRun("automatic-prune-blocked")).not.toBeNull();
+      throttled.close();
+
+      internal.lastAutomaticStatePruneAt = Date.now() - AUTOMATIC_STATE_PRUNE_INTERVAL_MS - 1;
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "automatic-prune-trigger",
+      });
+      await waitUntil(() => {
+        const store = new WorkflowRunStore(databasePath, { readOnly: true });
+        try {
+          return store.readRun("automatic-prune-blocked") === null;
+        } finally {
+          store.close();
+        }
+      }, 30_000);
+      await waitUntil(
+        () =>
+          logs.filter((message) => message.startsWith("automatic state prune completed")).length ===
+          2,
+      );
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  }, 60_000);
+
+  it("keeps cleanup failures nonfatal and does not retry them in a tight loop", async () => {
+    const databasePath = path.join(
+      await makeTempDir("host-automatic-prune-failure"),
+      "state.sqlite",
+    );
+    const logs: string[] = [];
+    const host = new WorkflowServer({
+      databasePath,
+      claimPollMs: 10,
+      onLog: (message) => logs.push(message),
+    });
+    const lockPath = `${databasePath}.maintenance.lock`;
+    await fs.writeFile(lockPath, "busy");
+    await host.start();
+    try {
+      await waitUntil(
+        () =>
+          logs.filter((message) => message.startsWith("automatic state prune failed")).length === 1,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(
+        logs.filter((message) => message.startsWith("automatic state prune failed")),
+      ).toHaveLength(1);
+
+      await fs.rm(lockPath);
+      const internal = host as unknown as {
+        nextAutomaticStatePruneAttemptAt: number;
+        requestAutomaticStatePrune(): void;
+      };
+      internal.nextAutomaticStatePruneAttemptAt = 0;
+      internal.requestAutomaticStatePrune();
+      await waitUntil(() =>
+        logs.some((message) => message.startsWith("automatic state prune completed")),
+      );
+    } finally {
+      await fs.rm(lockPath, { force: true });
+      await host.stop();
+    }
+  });
 
   it("resolves a protected decision timeout and starts its continuation", async () => {
     const cwd = await makeTempDir("host-decision-timeout-project");

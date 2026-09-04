@@ -62,7 +62,11 @@ import {
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
 import { resourceIdFor } from "../state/mutation.js";
-import { pruneState } from "../state/prune.js";
+import {
+  AUTOMATIC_STATE_PRUNE_INTERVAL_MS,
+  pruneState,
+  pruneStateAutomatically,
+} from "../state/prune.js";
 import { recordViewerDeltas } from "../state/viewer.js";
 import { workflowMessageIdFor } from "../state/workflow-messages.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
@@ -135,6 +139,7 @@ const SERVER_RENEW_MS = 10_000;
 const PACKAGE_VERSION = runtimePackageVersion();
 const CLAIM_POLL_MS = 2_000;
 const TERMINAL_MESSAGE_RECONCILE_MS = 1_000;
+const AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS = 5 * 60 * 1_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RESOURCE_MANAGER_CLAIM_LEASE_MS = 120_000;
 const RESOURCE_MANAGER_RENEW_MS = 30_000;
@@ -264,6 +269,12 @@ export class WorkflowServer {
   private decisionChannelConfig: DecisionChannelConfig | null = null;
   private decisionChannelError: string | null = null;
   private channelReloading = false;
+  private automaticStatePruneTask: Promise<void> | null = null;
+  private automaticStatePruneTimer: ReturnType<typeof setTimeout> | null = null;
+  private automaticStatePruneScheduled = false;
+  private automaticStatePruneDue = true;
+  private lastAutomaticStatePruneAt: number | null = null;
+  private nextAutomaticStatePruneAttemptAt = 0;
   private nextTerminalMessageReconciliationAt = 0;
 
   constructor(options: WorkflowServerOptions = {}) {
@@ -347,13 +358,16 @@ export class WorkflowServer {
       this.startTimers();
       this.started = true;
       this.log(`ready on ${this.socketPath} at epoch ${this.claim.epoch}`);
+      this.requestAutomaticStatePrune();
       this.expireTimedOutInteraction();
-      void this.expireTimedOutDecision();
-      void this.claimOne();
-      void this.claimResourceManagerOne();
-      void this.reloadDecisionChannels().catch((error) => {
-        this.log(`decision channel startup failed: ${errorMessage(error)}`);
-      });
+      void this.expireTimedOutDecision().finally(() => this.resumeAutomaticStatePruneIfDue());
+      void this.claimOne().finally(() => this.resumeAutomaticStatePruneIfDue());
+      void this.claimResourceManagerOne().finally(() => this.resumeAutomaticStatePruneIfDue());
+      void this.reloadDecisionChannels()
+        .catch((error) => {
+          this.log(`decision channel startup failed: ${errorMessage(error)}`);
+        })
+        .finally(() => this.resumeAutomaticStatePruneIfDue());
     } catch (error) {
       const server = this.server;
       this.server = null;
@@ -378,9 +392,12 @@ export class WorkflowServer {
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     if (this.pollTimer !== null) clearInterval(this.pollTimer);
     if (this.viewTimer !== null) clearInterval(this.viewTimer);
+    if (this.automaticStatePruneTimer !== null) clearTimeout(this.automaticStatePruneTimer);
     this.heartbeatTimer = null;
     this.pollTimer = null;
     this.viewTimer = null;
+    this.automaticStatePruneTimer = null;
+    this.automaticStatePruneScheduled = false;
     const server = this.server;
     this.server = null;
     this.detachSessionCoordinators();
@@ -419,6 +436,9 @@ export class WorkflowServer {
     this.activeChannels.clear();
     await Promise.allSettled(this.activationTasks.values());
     await Promise.allSettled(this.maintenanceCommands.values());
+    if (this.automaticStatePruneTask !== null) {
+      await Promise.allSettled([this.automaticStatePruneTask]);
+    }
     this.registry.killAll();
     if (this.claim !== null) this.serverState.releaseServer(this.claim);
     this.claim = null;
@@ -763,6 +783,7 @@ export class WorkflowServer {
           });
         case "state.prune":
           return await this.executeMaintenanceCommand(request, async () => {
+            await this.waitForAutomaticStatePrune();
             const payload = requireRecord(request.payload, "state.prune payload");
             const before = requireString(payload.before, "before");
             const apply = requireBoolean(payload.apply, "apply");
@@ -836,6 +857,7 @@ export class WorkflowServer {
       if (this.maintenanceCommands.get(key) === execution) {
         this.maintenanceCommands.delete(key);
       }
+      this.requestAutomaticStatePrune();
     }
   }
 
@@ -1925,6 +1947,127 @@ export class WorkflowServer {
       for (const digest of active.contentDigests) digests.add(digest);
     }
     return [...digests].map((digest) => Buffer.from(digest, "hex"));
+  }
+
+  private requestAutomaticStatePrune(): void {
+    this.automaticStatePruneDue = true;
+    if (
+      !this.started ||
+      this.stopping ||
+      this.automaticStatePruneScheduled ||
+      this.automaticStatePruneTask !== null
+    ) {
+      return;
+    }
+    this.automaticStatePruneScheduled = true;
+    setImmediate(() => {
+      if (!this.automaticStatePruneScheduled) return;
+      this.automaticStatePruneScheduled = false;
+      this.startAutomaticStatePrune();
+    });
+  }
+
+  private resumeAutomaticStatePruneIfDue(): void {
+    if (this.automaticStatePruneDue) this.requestAutomaticStatePrune();
+  }
+
+  private startAutomaticStatePrune(): void {
+    if (this.automaticStatePruneTask !== null || this.stopping || !this.started) return;
+    const task = this.runAutomaticStatePrune();
+    this.automaticStatePruneTask = task;
+    void task.finally(() => {
+      if (this.automaticStatePruneTask === task) this.automaticStatePruneTask = null;
+    });
+  }
+
+  private async runAutomaticStatePrune(): Promise<void> {
+    if (!this.automaticStatePruneDue) return;
+    if (!this.automaticStatePruneCanContinue()) {
+      this.scheduleAutomaticStatePruneTimer(AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS);
+      return;
+    }
+    const now = Date.now();
+    if (now < this.nextAutomaticStatePruneAttemptAt) {
+      this.scheduleAutomaticStatePruneTimer(this.nextAutomaticStatePruneAttemptAt - now);
+      return;
+    }
+    if (
+      this.lastAutomaticStatePruneAt !== null &&
+      now - this.lastAutomaticStatePruneAt < AUTOMATIC_STATE_PRUNE_INTERVAL_MS
+    ) {
+      this.scheduleAutomaticStatePruneTimer(
+        this.lastAutomaticStatePruneAt + AUTOMATIC_STATE_PRUNE_INTERVAL_MS - now,
+      );
+      return;
+    }
+    try {
+      const report = await pruneStateAutomatically(this.state, this.databasePath, {
+        now,
+        activeBlobHashes: () => this.activeRunnerContentHashes(),
+        shouldContinue: () => this.automaticStatePruneCanContinue(),
+      });
+      if (!report.completed) {
+        this.automaticStatePruneDue = true;
+        this.scheduleAutomaticStatePruneTimer(AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS);
+        return;
+      }
+      this.lastAutomaticStatePruneAt = now;
+      this.nextAutomaticStatePruneAttemptAt = 0;
+      this.automaticStatePruneDue = false;
+      this.scheduleAutomaticStatePruneTimer(AUTOMATIC_STATE_PRUNE_INTERVAL_MS);
+      this.log(
+        `automatic state prune completed: ${report.selectedRuns} run(s) selected, ` +
+          `${report.blockedTrees} tree(s) blocked, ${report.deletedBlobs} blob(s) and ` +
+          `${report.deletedBlobBytes} byte(s) removed`,
+      );
+      if (report.compactionError !== undefined) {
+        this.log(`automatic state compaction failed: ${report.compactionError}`);
+      }
+    } catch (error) {
+      this.automaticStatePruneDue = true;
+      this.nextAutomaticStatePruneAttemptAt = Date.now() + AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS;
+      this.scheduleAutomaticStatePruneTimer(AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS);
+      this.log(`automatic state prune failed: ${errorMessage(error)}`);
+    }
+  }
+
+  private scheduleAutomaticStatePruneTimer(delayMs: number): void {
+    if (this.stopping || !this.started) return;
+    if (this.automaticStatePruneTimer !== null) clearTimeout(this.automaticStatePruneTimer);
+    this.automaticStatePruneTimer = setTimeout(
+      () => {
+        this.automaticStatePruneTimer = null;
+        this.requestAutomaticStatePrune();
+      },
+      Math.max(1, delayMs),
+    );
+    this.automaticStatePruneTimer.unref?.();
+  }
+
+  private automaticStatePruneCanContinue(): boolean {
+    return (
+      this.started &&
+      !this.stopping &&
+      this.activeRuns.size === 0 &&
+      this.activeResourceManagers.size === 0 &&
+      this.activationTasks.size === 0 &&
+      this.maintenanceCommands.size === 0 &&
+      this.pendingStarts.size === 0 &&
+      this.pendingRunClaims.size === 0 &&
+      this.pendingResumes.size === 0 &&
+      this.controlClaims.size === 0 &&
+      this.pendingTerminalMessageReconciliations.size === 0 &&
+      !this.resourceManagerPollActive &&
+      !this.decisionTimeoutActive &&
+      !this.channelReloading &&
+      [...this.activeChannels.values()].every((channel) => channel.inFlight.size === 0)
+    );
+  }
+
+  private async waitForAutomaticStatePrune(): Promise<void> {
+    this.automaticStatePruneScheduled = false;
+    const task = this.automaticStatePruneTask;
+    if (task !== null) await task;
   }
 
   private stateStatusReceipt(): JsonValue {
@@ -3139,6 +3282,7 @@ export class WorkflowServer {
     } finally {
       clearInterval(renewTimer);
       this.activeResourceManagers.delete(key);
+      this.requestAutomaticStatePrune();
       if (!this.stopping) setImmediate(() => void this.claimResourceManagerOne());
     }
   }
@@ -3798,6 +3942,7 @@ export class WorkflowServer {
     } finally {
       this.reapRunnerDescendants(envelope.runnerEpoch);
       this.activeRuns.delete(runId);
+      this.requestAutomaticStatePrune();
     }
   }
 
@@ -4434,6 +4579,10 @@ export class WorkflowServer {
            AND generation = ?`,
       )
       .run(context.runId, active.generation);
+    this.queue.settleRunEffect(
+      context.runId,
+      context.state.status === "waiting" ? "run.park_queue" : "run.settle_queue",
+    );
   }
 
   private ensureTerminalWorkflowMessage(

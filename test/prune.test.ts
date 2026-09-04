@@ -5,7 +5,10 @@ import workflow from "../examples/workflows/echo.workflow.js";
 import { StateDatabase } from "../src/state/database.js";
 import { resourceIdFor } from "../src/state/mutation.js";
 import {
+  AUTOMATIC_STATE_RETENTION_MS,
   pruneState as pruneStateWithDatabase,
+  pruneStateAutomatically,
+  shouldVacuumStateAutomatically,
   type StatePruneOptions,
   type StatePruneReport,
   validateStatePruneOptions,
@@ -262,6 +265,354 @@ describe("state prune", () => {
       expect(report).toMatchObject({ deletedBlobs: 1, applied: true });
       expect(state.readBlob(retained)?.content.toString("utf8")).toBe("active runner content");
       expect(state.readBlob(unprotected)).toBeUndefined();
+    } finally {
+      state.close();
+    }
+  });
+
+  it("automatically deletes whole expired trees and unreferenced blobs without a backup", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-automatic");
+    const result = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
+    }).run(workflow, {});
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    const now = Date.now();
+    try {
+      state.connection
+        .prepare("UPDATE runs SET finished_at = ? WHERE run_id = ?")
+        .run(now - AUTOMATIC_STATE_RETENTION_MS - 1, result.runId);
+      const orphan = state.putBlob(Buffer.alloc(256 * 1024, 7), "application/json");
+      const report = await pruneStateAutomatically(state, databasePath, { now });
+
+      expect(report).toMatchObject({
+        applied: true,
+        completed: true,
+        candidateTrees: 1,
+        blockedTrees: 0,
+        selectedRuns: 1,
+      });
+      expect(report.deletedBlobs).toBeGreaterThan(0);
+      expect(
+        state.connection.prepare("SELECT 1 FROM runs WHERE run_id = ?").get(result.runId),
+      ).toBe(undefined);
+      expect(state.readBlob(orphan)).toBeUndefined();
+      expect(fs.readdirSync(path.dirname(databasePath))).not.toContain("backup.sqlite");
+
+      const repeated = await pruneStateAutomatically(state, databasePath, { now });
+      expect(repeated).toMatchObject({
+        completed: true,
+        candidateTrees: 0,
+        selectedRuns: 0,
+        deletedRows: 0,
+        deletedBlobs: 0,
+      });
+    } finally {
+      state.close();
+    }
+  });
+
+  it("rechecks each automatic tree and stops between complete tree transactions", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-automatic-recheck");
+    const first = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "first" } }),
+    }).run(workflow, {});
+    const second = await new WorkflowEngine({
+      databasePath,
+      executor: new ScriptedExecutor().respond("reply", { output: { reply: "second" } }),
+    }).run(workflow, {});
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    const now = Date.now();
+    try {
+      state.connection
+        .prepare("UPDATE runs SET finished_at = ? WHERE run_id IN (?, ?)")
+        .run(now - AUTOMATIC_STATE_RETENTION_MS - 1, first.runId, second.runId);
+      let yielded = false;
+      const report = await pruneStateAutomatically(state, databasePath, {
+        now,
+        yieldControl: async () => {
+          if (yielded) return;
+          yielded = true;
+          state.connection
+            .prepare("UPDATE runs SET finished_at = ? WHERE run_id IN (?, ?)")
+            .run(now, first.runId, second.runId);
+        },
+      });
+
+      expect(report.completed).toBe(false);
+      expect(report.selectedRuns).toBe(2);
+      expect(state.connection.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({
+        count: 1,
+      });
+    } finally {
+      state.close();
+    }
+  });
+
+  it("protects every live or unsettled state owned by an expired run", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-protected");
+    const results = [];
+    for (let index = 0; index < 9; index += 1) {
+      results.push(
+        await new WorkflowEngine({
+          databasePath,
+          executor: new ScriptedExecutor().respond("reply", {
+            output: { reply: `run-${index}` },
+          }),
+        }).run(workflow, {}),
+      );
+    }
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    const now = Date.now();
+    try {
+      state.connection
+        .prepare("UPDATE runs SET finished_at = ?")
+        .run(now - AUTOMATIC_STATE_RETENTION_MS - 1);
+      const contentHash = state.putText("protected", now);
+      const contractHash = state.putJson({ contract: "protected" }, now);
+      const launchHash = state.putJson({ launch: "protected" }, now);
+      const attemptIds = results.map((result) => {
+        const row = state.connection
+          .prepare("SELECT attempt_id AS attemptId FROM node_attempts WHERE run_id = ? LIMIT 1")
+          .get(result.runId) as { attemptId: string };
+        return row.attemptId;
+      });
+
+      state.connection
+        .prepare(
+          `INSERT INTO workflow_messages(
+             workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
+             order_number, status, created_at, updated_at
+           ) VALUES ('pending-message', ?, 'protected-session', 'step', 'pending-source', ?, 1, 'pending', ?, ?)`,
+        )
+        .run(results[0]?.runId, contentHash, now, now);
+      state.connection
+        .prepare(
+          `INSERT INTO workflow_messages(
+             workflow_message_id, run_id, target_session_id, kind, source_id, content_hash,
+             order_number, status, pi_session_entry_id, created_at, updated_at
+           ) VALUES ('open-turn-message', ?, 'protected-session', 'step', 'turn-source', ?, 2, 'sent', 'pi-entry', ?, ?)`,
+        )
+        .run(results[1]?.runId, contentHash, now, now);
+      state.connection
+        .prepare(
+          `INSERT INTO workflow_turns(
+             workflow_turn_id, workflow_message_id, run_id, target_session_id, state, started_at
+           ) VALUES ('open-turn', 'open-turn-message', ?, 'protected-session', 'started', ?)`,
+        )
+        .run(results[1]?.runId, now);
+      state.connection
+        .prepare(
+          `INSERT INTO interactive_requests(
+             request_id, run_id, attempt_id, target_session_id, kind, contract_hash,
+             status, created_at, updated_at
+           ) VALUES ('pending-interaction', ?, ?, 'protected-session', 'agent', ?, 'pending', ?, ?)`,
+        )
+        .run(results[2]?.runId, attemptIds[2], contractHash, now, now);
+      state.connection
+        .prepare("UPDATE node_attempts SET status = 'waiting' WHERE attempt_id = ?")
+        .run(attemptIds[3]);
+      state.connection
+        .prepare(
+          `INSERT INTO run_workers(
+             worker_epoch, run_id, generation, host_epoch, launch_envelope_hash,
+             status, started_at, ready_at
+           ) VALUES ('active-worker', ?, 1, 1, ?, 'running', ?, ?)`,
+        )
+        .run(results[4]?.runId, launchHash, now, now);
+
+      const segmentResourceId = resourceIdFor("session", "recording-segment");
+      state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'session', 'recording-segment', 1, ?, ?)`,
+        )
+        .run(segmentResourceId, now, now);
+      state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(segmentResourceId);
+      state.connection
+        .prepare(
+          `INSERT INTO session_segments(
+             segment_id, run_id, session_id, resource_id, status, created_at
+           ) VALUES ('recording-segment', ?, 'protected-session', ?, 'recording', ?)`,
+        )
+        .run(results[5]?.runId, segmentResourceId, now);
+
+      const effectId = "pending-effect";
+      const effectResourceId = resourceIdFor("effect", effectId);
+      const source = state.connection
+        .prepare("SELECT resource_id AS resourceId FROM runs WHERE run_id = ?")
+        .get(results[6]?.runId) as { resourceId: string };
+      state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'effect', ?, 1, ?, ?)`,
+        )
+        .run(effectResourceId, effectId, now, now);
+      state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(effectResourceId);
+      state.connection
+        .prepare(
+          `INSERT INTO effects(
+             effect_id, resource_id, source_resource_id, source_revision, effect_type,
+             idempotency_key, payload_hash, owner_scope, status, created_at, updated_at
+           ) VALUES (?, ?, ?, 1, 'test', 'pending-effect', ?, 'run', 'pending', ?, ?)`,
+        )
+        .run(effectId, effectResourceId, source.resourceId, contentHash, now, now);
+
+      const decisionId = "pending-decision";
+      const decisionResourceId = resourceIdFor("decision", decisionId);
+      state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'decision', ?, 1, ?, ?)`,
+        )
+        .run(decisionResourceId, decisionId, now, now);
+      state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(decisionResourceId);
+      state.connection
+        .prepare(
+          `INSERT INTO human_decisions(
+             decision_id, resource_id, run_id, attempt_id, audience, title, subject_hash,
+             presentation_hash, choices_hash, request_digest, presentation_revision,
+             request_hash, created_at
+           ) VALUES (?, ?, ?, ?, 'operator', 'Pending', ?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .run(
+          decisionId,
+          decisionResourceId,
+          results[7]?.runId,
+          attemptIds[7],
+          contractHash,
+          contractHash,
+          contractHash,
+          Buffer.alloc(32, 8),
+          contractHash,
+          now,
+        );
+
+      const controllerId = "retention-controller";
+      const controllerResourceId = resourceIdFor("controller", controllerId);
+      state.connection
+        .prepare(
+          `INSERT INTO resources(
+             resource_id, resource_type, aggregate_key, revision, created_at, updated_at
+           ) VALUES (?, 'controller', ?, 1, ?, ?)`,
+        )
+        .run(controllerResourceId, controllerId, now, now);
+      state.connection
+        .prepare("INSERT INTO leases(resource_id, generation) VALUES (?, 0)")
+        .run(controllerResourceId);
+      state.connection
+        .prepare(
+          `INSERT INTO controller_resources(
+             controller_resource_id, resource_id, controller_name, resource_key, uid,
+             generation, spec_hash, status_hash, created_at, updated_at
+           ) VALUES (?, ?, 'retention', 'protected', 'retention-protected', 1, ?, ?, ?, ?)`,
+        )
+        .run(controllerId, controllerResourceId, contractHash, contractHash, now, now);
+      state.connection
+        .prepare(
+          `INSERT INTO controller_workflows(
+             request_id, controller_resource_id, request_key, workflow_name,
+             input_fingerprint, run_id, status, created_at, updated_at
+           ) VALUES (
+             'retention-controller-request', ?, 'protected', 'retention', ?, ?, 'succeeded', ?, ?
+           )`,
+        )
+        .run(controllerId, Buffer.alloc(32, 9), results[8]?.runId, now, now);
+
+      const report = await pruneStateAutomatically(state, databasePath, { now });
+      expect(report).toMatchObject({
+        completed: true,
+        candidateTrees: 9,
+        blockedTrees: 9,
+        selectedRuns: 0,
+      });
+      expect(state.connection.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({
+        count: 9,
+      });
+    } finally {
+      state.close();
+    }
+  });
+
+  it("reuses free pages and compacts only above both automatic thresholds", async () => {
+    expect(
+      shouldVacuumStateAutomatically({
+        pageCount: 100,
+        freePageCount: 20,
+        pageSize: 4096,
+        reclaimableBytes: 64 * 1024 * 1024,
+        freePageRatio: 0.2,
+      }),
+    ).toBe(true);
+    expect(
+      shouldVacuumStateAutomatically({
+        pageCount: 100,
+        freePageCount: 19,
+        pageSize: 4096,
+        reclaimableBytes: 64 * 1024 * 1024,
+        freePageRatio: 0.19,
+      }),
+    ).toBe(false);
+
+    const databasePath = await makeStateDatabasePath("state-prune-pages");
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    try {
+      state.putBlob(Buffer.alloc(2 * 1024 * 1024, 11), "application/json");
+      state.connection.pragma("wal_checkpoint(TRUNCATE)");
+      const bytesBefore = fs.statSync(databasePath).size;
+      const logical = await pruneStateAutomatically(state, databasePath);
+      expect(logical.compacted).toBe(false);
+      expect(logical.reclaimableBytes).toBeGreaterThan(1024 * 1024);
+      const reusablePages = logical.pageCount;
+
+      state.putBlob(Buffer.alloc(2 * 1024 * 1024, 12), "application/json");
+      state.connection.pragma("wal_checkpoint(TRUNCATE)");
+      const pageCountAfterReuse = state.connection.pragma("page_count", { simple: true });
+      expect(pageCountAfterReuse).toBeLessThanOrEqual(reusablePages + 2);
+
+      const compacted = await pruneStateAutomatically(state, databasePath, {
+        vacuumMinBytes: 1,
+        vacuumMinFreeRatio: 0,
+      });
+      expect(compacted.compacted).toBe(true);
+      expect(fs.statSync(databasePath).size).toBeLessThan(bytesBefore);
+    } finally {
+      state.close();
+    }
+  });
+
+  it("keeps logical cleanup when automatic compaction fails", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-compaction-failure");
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    try {
+      const orphan = state.putBlob(Buffer.alloc(2 * 1024 * 1024, 13), "application/json");
+      state.connection.pragma("wal_checkpoint(TRUNCATE)");
+      const report = await pruneStateAutomatically(state, databasePath, {
+        vacuumMinBytes: 1,
+        vacuumMinFreeRatio: 0,
+        vacuum: () => {
+          throw new Error("injected compaction failure");
+        },
+      });
+
+      expect(report).toMatchObject({
+        completed: true,
+        compacted: false,
+        compactionError: "injected compaction failure",
+      });
+      expect(report.reclaimableBytes).toBeGreaterThan(1024 * 1024);
+      expect(state.readBlob(orphan)).toBeUndefined();
+      state.integrityCheck();
     } finally {
       state.close();
     }
