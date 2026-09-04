@@ -25,6 +25,8 @@ type ChildWorkerSupervisorOptions<Message, Response> = {
   isReady: (message: Message) => boolean;
   isTerminal: (message: Message) => boolean;
   startupTimeoutMs?: number;
+  maxMessageBytes?: number;
+  oversizedMessage?: string;
   onSpawn?: (identity: ProcessIdentity) => void;
   onDiagnostic?: (message: string) => void;
 };
@@ -39,7 +41,7 @@ type ChildWorkerStartOptions = {
 export class ChildWorkerSupervisor<Message, Response> {
   private child: ChildProcessWithoutNullStreams | null = null;
   private identity: ProcessIdentity | null = null;
-  private readonly decoder = new NdjsonFrameDecoder();
+  private readonly decoder: NdjsonFrameDecoder;
   private diagnostic = Buffer.alloc(0);
   private terminalMessage = false;
   private stopping: WorkerOutcome | null = null;
@@ -55,7 +57,9 @@ export class ChildWorkerSupervisor<Message, Response> {
     this.exitResolve = resolve;
   });
 
-  constructor(private readonly options: ChildWorkerSupervisorOptions<Message, Response>) {}
+  constructor(private readonly options: ChildWorkerSupervisorOptions<Message, Response>) {
+    this.decoder = new NdjsonFrameDecoder(options.maxMessageBytes, options.oversizedMessage);
+  }
 
   async start(options: ChildWorkerStartOptions): Promise<void> {
     if (this.child !== null) throw new Error(`${this.options.label} already started`);

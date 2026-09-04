@@ -336,8 +336,7 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const loaded = await this.store.prepareRunResume(runId);
-    const state = loaded.state;
+    const state = await this.store.prepareRunResume(runId);
     const sourceMismatch = workflowIdentityMismatch(state, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
@@ -456,21 +455,21 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const parent = await this.store.readRun(parentRunId);
-    if (parent === null) {
+    const parentState = await this.store.readRunState(parentRunId);
+    if (parentState === null) {
       throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
     }
-    if (parent.state.status !== "waiting" || parent.state.waitingOn === undefined) {
+    if (parentState.status !== "waiting" || parentState.waitingOn === undefined) {
       throw new Error(
-        `Cannot continue workflow run ${parentRunId} with status ${parent.state.status}`,
+        `Cannot continue workflow run ${parentRunId} with status ${parentState.status}`,
       );
     }
-    const sourceMismatch = workflowIdentityMismatch(parent.state, workflow, options.workflowSource);
+    const sourceMismatch = workflowIdentityMismatch(parentState, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(parentRunId);
     }
 
-    const waitingNodeId = parent.state.waitingOn;
+    const waitingNodeId = parentState.waitingOn;
     const waitingNode = workflow.nodes[waitingNodeId];
     const humanContract =
       waitingNode?.nodeType === "checkpoint" ? waitingNode.humanDecision : undefined;
@@ -481,7 +480,7 @@ export class WorkflowEngine {
       if (options.humanDecision === undefined) {
         throw new Error(`Checkpoint ${waitingNodeId} requires an accepted verified human decision`);
       }
-      const request = parent.state.finalOutput as HumanDecisionRequest;
+      const request = parentState.finalOutput as HumanDecisionRequest;
       if (
         request?.schema !== "pi-workflows.human-decision-request.v1" ||
         request.decisionId !== options.humanDecision.decisionId ||
@@ -495,7 +494,7 @@ export class WorkflowEngine {
       }
       acceptedResponse = validateHumanDecisionResponse(request, durableDecision.response);
       acceptedNodeId = request.nodeId;
-      normalizedInput = structuredClone(parent.state.input);
+      normalizedInput = structuredClone(parentState.input);
     } else {
       const suppliedInput = input === undefined ? null : input;
       normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
@@ -512,9 +511,9 @@ export class WorkflowEngine {
       options.runId,
     );
     state.parentRunId = parentRunId;
-    state.outputs = structuredClone(parent.state.outputs);
-    state.results = structuredClone(parent.state.results);
-    state.steps = structuredClone(parent.state.steps);
+    state.outputs = structuredClone(parentState.outputs);
+    state.results = structuredClone(parentState.results);
+    state.steps = structuredClone(parentState.steps);
     if (humanContract !== undefined && options.humanDecision !== undefined) {
       const receipt = {
         decisionId: options.humanDecision.decisionId,
@@ -557,7 +556,7 @@ export class WorkflowEngine {
         ...(state.runTitle ? { runTitle: state.runTitle } : {}),
         input: state.input,
         continuedFrom: parentRunId,
-        checkpoint: parent.state.waitingOn,
+        checkpoint: parentState.waitingOn,
         carriedSteps: state.steps.length,
       },
     });

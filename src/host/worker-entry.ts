@@ -26,8 +26,12 @@ import type {
 } from "../workflows/types.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
 import type { WorkerLaunchEnvelope } from "./state.js";
+import { materializeWorkerContent } from "./worker-content.js";
 import {
+  MAX_WORKER_PROTOCOL_MESSAGE_BYTES,
   encodeWorkerLine,
+  isWorkerContentChunk,
+  isWorkerContentReference,
   parseWorkerResponse,
   type WorkerMessage,
   type WorkerResponse,
@@ -79,7 +83,7 @@ class StdioWorkerTransport implements WorkerStoreTransport {
       ...(options.attemptId === undefined ? {} : { attemptId: options.attemptId }),
       payload: options.payload,
     };
-    const response = await this.send(message);
+    const response = await this.sendResolved(message);
     if (response.outcome === "claimLost") {
       throw new ClaimLostError(this.launch.runId, "ownerChanged");
     }
@@ -96,7 +100,7 @@ class StdioWorkerTransport implements WorkerStoreTransport {
     operation: "worker.ready" | "worker.exiting",
     payload: JsonValue,
   ): Promise<WorkerResponse> {
-    return await this.send({
+    return await this.sendResolved({
       schema: "pi-workflows.worker-message.v1",
       launchSchema: this.launch.schema,
       messageId: randomUUID(),
@@ -117,6 +121,37 @@ class StdioWorkerTransport implements WorkerStoreTransport {
     this.failAll(new Error("Workflow worker transport closed"));
   }
 
+  private async sendResolved(message: WorkerMessage): Promise<WorkerResponse> {
+    const response = await this.send(message);
+    if (!isWorkerContentReference(response.result)) return response;
+    const reference = response.result;
+    const expectedRevision = response.revision ?? message.expectedRevision;
+    return {
+      ...response,
+      result: await materializeWorkerContent(reference, async (offset) => {
+        const chunkResponse = await this.send({
+          schema: "pi-workflows.worker-message.v1",
+          launchSchema: this.launch.schema,
+          messageId: randomUUID(),
+          kind: "worker.progress",
+          operation: "content.read",
+          runId: this.launch.runId,
+          generation: this.launch.generation,
+          workerEpoch: this.launch.workerEpoch,
+          expectedRevision,
+          payload: { sha256: reference.sha256, offset },
+        });
+        if (chunkResponse.outcome === "claimLost") {
+          throw new ClaimLostError(this.launch.runId, "ownerChanged");
+        }
+        if (chunkResponse.outcome !== "accepted" || !isWorkerContentChunk(chunkResponse.result)) {
+          throw new Error(chunkResponse.error ?? "Workflow worker content read was rejected");
+        }
+        return chunkResponse.result;
+      }),
+    };
+  }
+
   private async send(message: WorkerMessage): Promise<WorkerResponse> {
     const response = new Promise<WorkerResponse>((resolve, reject) => {
       this.pending.set(message.messageId, { resolve, reject });
@@ -127,7 +162,10 @@ class StdioWorkerTransport implements WorkerStoreTransport {
 
   private onData(chunk: Buffer): void {
     this.buffered = Buffer.concat([this.buffered, chunk]);
-    if (this.buffered.byteLength > 1024 * 1024 && !this.buffered.includes(0x0a)) {
+    if (
+      this.buffered.byteLength > MAX_WORKER_PROTOCOL_MESSAGE_BYTES &&
+      !this.buffered.includes(0x0a)
+    ) {
       this.failAll(new Error("Worker response exceeds 1 MiB"));
       return;
     }

@@ -1,8 +1,11 @@
-import { MAX_PROTOCOL_MESSAGE_BYTES } from "../client/protocol.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 
+export const MAX_WORKER_PROTOCOL_MESSAGE_BYTES = 1024 * 1024;
+export const WORKER_CONTENT_CHUNK_BYTES = 512 * 1024;
 export const WORKER_MESSAGE_SCHEMA = "pi-workflows.worker-message.v1" as const;
 export const WORKER_RESPONSE_SCHEMA = "pi-workflows.worker-response.v1" as const;
+export const WORKER_CONTENT_REFERENCE_SCHEMA = "pi-workflows.worker-content-reference.v1" as const;
+export const WORKER_CONTENT_CHUNK_SCHEMA = "pi-workflows.worker-content-chunk.v1" as const;
 
 export type WorkerRunCommand =
   | { kind: "start"; input: JsonValue }
@@ -35,26 +38,30 @@ export const WORKER_MESSAGE_KINDS = [
 ] as const;
 
 export type WorkerMessageKind = (typeof WORKER_MESSAGE_KINDS)[number];
-export type WorkerStoreOperation =
-  | "store.initializeRun"
-  | "store.prepareRunResume"
-  | "store.readRun"
-  | "store.writeSnapshot"
-  | "store.publishUpdate"
-  | "store.findSettingsScope"
-  | "store.ensureSettingsScope"
-  | "store.getSettingsScopeAtChange"
-  | "store.createHumanDecisionRequest"
-  | "store.readResolvedHumanDecision"
-  | "store.reserveEffect"
-  | "store.settleEffect"
-  | "process.register"
-  | "process.unregister"
-  | "interaction.request"
-  | "interaction.accept"
-  | "interaction.reject"
-  | "notification.request"
-  | "presentation.request";
+export const WORKER_STORE_OPERATIONS = [
+  "store.initializeRun",
+  "store.prepareRunResume",
+  "store.readRunState",
+  "store.writeSnapshot",
+  "store.publishUpdate",
+  "store.findSettingsScope",
+  "store.ensureSettingsScope",
+  "store.getSettingsScopeAtChange",
+  "store.createHumanDecisionRequest",
+  "store.readResolvedHumanDecision",
+  "store.reserveEffect",
+  "store.settleEffect",
+  "content.read",
+  "process.register",
+  "process.unregister",
+  "interaction.request",
+  "interaction.accept",
+  "interaction.reject",
+  "notification.request",
+  "presentation.request",
+] as const;
+export type WorkerStoreOperation = (typeof WORKER_STORE_OPERATIONS)[number];
+const WORKER_CONTROL_OPERATIONS = ["worker.ready", "worker.exiting"] as const;
 
 export type WorkerMessage = {
   schema: typeof WORKER_MESSAGE_SCHEMA;
@@ -78,6 +85,54 @@ export type WorkerResponse = {
   result?: JsonValue;
   error?: string;
 };
+
+export type WorkerContentReference = {
+  schema: typeof WORKER_CONTENT_REFERENCE_SCHEMA;
+  sha256: string;
+  mediaType: "application/json";
+  bytes: number;
+};
+
+export type WorkerContentChunk = {
+  schema: typeof WORKER_CONTENT_CHUNK_SCHEMA;
+  sha256: string;
+  mediaType: "application/json";
+  bytes: number;
+  offset: number;
+  nextOffset: number;
+  complete: boolean;
+  data: string;
+};
+
+export function isWorkerContentReference(value: unknown): value is WorkerContentReference {
+  return (
+    isRecord(value) &&
+    value.schema === WORKER_CONTENT_REFERENCE_SCHEMA &&
+    typeof value.sha256 === "string" &&
+    /^[0-9a-f]{64}$/u.test(value.sha256) &&
+    value.mediaType === "application/json" &&
+    Number.isSafeInteger(value.bytes) &&
+    (value.bytes as number) >= 0
+  );
+}
+
+export function isWorkerContentChunk(value: unknown): value is WorkerContentChunk {
+  return (
+    isRecord(value) &&
+    value.schema === WORKER_CONTENT_CHUNK_SCHEMA &&
+    typeof value.sha256 === "string" &&
+    /^[0-9a-f]{64}$/u.test(value.sha256) &&
+    value.mediaType === "application/json" &&
+    Number.isSafeInteger(value.bytes) &&
+    (value.bytes as number) >= 0 &&
+    Number.isSafeInteger(value.offset) &&
+    (value.offset as number) >= 0 &&
+    Number.isSafeInteger(value.nextOffset) &&
+    (value.nextOffset as number) >= (value.offset as number) &&
+    typeof value.complete === "boolean" &&
+    typeof value.data === "string"
+  );
+}
 
 export function workerKindForOperation(
   operation: WorkerStoreOperation,
@@ -107,7 +162,7 @@ export function workerKindForOperation(
 
 export function encodeWorkerLine(message: WorkerMessage | WorkerResponse): Buffer {
   const encoded = Buffer.from(`${canonicalJson(message)}\n`, "utf8");
-  if (encoded.byteLength > MAX_PROTOCOL_MESSAGE_BYTES) {
+  if (encoded.byteLength > MAX_WORKER_PROTOCOL_MESSAGE_BYTES) {
     throw new Error("Worker protocol message exceeds 1 MiB");
   }
   return encoded;
@@ -134,6 +189,14 @@ export function parseWorkerMessage(line: Buffer | string): WorkerMessage {
     throw new Error("Worker expectedRevision must be non-negative");
   }
   requireText(value.operation, "operation");
+  if (
+    !WORKER_STORE_OPERATIONS.includes(value.operation as WorkerStoreOperation) &&
+    !WORKER_CONTROL_OPERATIONS.includes(
+      value.operation as (typeof WORKER_CONTROL_OPERATIONS)[number],
+    )
+  ) {
+    throw new Error("Invalid worker operation");
+  }
   if (value.attemptId !== undefined) requireText(value.attemptId, "attemptId");
   if (!Object.hasOwn(value, "payload")) throw new Error("Worker payload is required");
   return value as WorkerMessage;
@@ -154,7 +217,7 @@ export function parseWorkerResponse(line: Buffer | string): WorkerResponse {
 
 function parseWorkerValue(line: Buffer | string): Record<string, unknown> {
   const buffer = Buffer.isBuffer(line) ? line : Buffer.from(line, "utf8");
-  if (buffer.byteLength + 1 > MAX_PROTOCOL_MESSAGE_BYTES) {
+  if (buffer.byteLength + 1 > MAX_WORKER_PROTOCOL_MESSAGE_BYTES) {
     throw new Error("Worker protocol message exceeds 1 MiB");
   }
   const text = buffer.toString("utf8");

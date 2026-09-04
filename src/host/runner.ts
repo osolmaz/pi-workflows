@@ -119,6 +119,7 @@ import {
   type WorkerLaunchEnvelope,
 } from "./state.js";
 import { HostViewStore, WORKFLOW_PAGE_KINDS, type WorkflowPageKind } from "./view.js";
+import { boundWorkerResponse, readWorkerContentChunk } from "./worker-content.js";
 import type { WorkerMessage, WorkerResponse, WorkerRunCommand } from "./worker-protocol.js";
 import { WorkflowWorkerSupervisor } from "./worker-supervisor.js";
 
@@ -163,6 +164,7 @@ type ActiveRun = {
   workflowLoadFailure?: string;
   control?: "cancel" | "pause" | "handoff";
   claimLost?: boolean;
+  contentDigests: Set<string>;
 };
 
 type ClientSubscription = {
@@ -3693,6 +3695,7 @@ export class WorkflowHost {
       supervisor,
       launchProgressRevision: runRevision(this.state, runId),
       exiting: false,
+      contentDigests: new Set(),
     };
     this.activeRuns.set(runId, active);
     this.clearPendingStart(runId, claimToken);
@@ -3777,9 +3780,12 @@ export class WorkflowHost {
       return workerResponse(message, "claimLost", undefined, "Worker epoch is stale");
     }
     const stored = this.hostState.readWorkerMessage(message);
-    if (stored !== undefined) return stored;
+    if (stored !== undefined) {
+      return boundWorkerResponse(this.state, active.contentDigests, stored);
+    }
     const response = await this.handleFreshWorkerMessage(active, message);
-    return this.hostState.recordWorkerMessage(message, response);
+    const recorded = this.hostState.recordWorkerMessage(message, response);
+    return boundWorkerResponse(this.state, active.contentDigests, recorded);
   }
 
   private async handleFreshWorkerMessage(
@@ -3867,11 +3873,8 @@ export class WorkflowHost {
           await this.prepareInteractionResume(message.runId);
           result = await this.runStore.prepareRunResume(message.runId);
           break;
-        case "store.readRun":
-          result = this.runStore.readRun(
-            requireString(payload.runId, "runId"),
-            payload.options as never,
-          );
+        case "store.readRunState":
+          result = this.runStore.readRunState(requireString(payload.runId, "runId"));
           break;
         case "store.writeSnapshot": {
           const state = payload.state as WorkflowRunState;
@@ -3943,6 +3946,14 @@ export class WorkflowHost {
           ) {
             throw new Error("Run claim was lost during ambiguous-effect recovery");
           }
+          break;
+        case "content.read":
+          result = readWorkerContentChunk(
+            this.state,
+            active.contentDigests,
+            requireString(payload.sha256, "worker content digest"),
+            requireNonNegativeInteger(payload.offset, "worker content offset"),
+          );
           break;
         case "store.settleEffect": {
           const options = payload.options as {
