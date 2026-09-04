@@ -10,6 +10,7 @@ const skillsRoot = path.join(repoRoot, "skills");
 interface PackageManifest {
   version: string;
   files?: string[];
+  dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   pi?: {
@@ -81,16 +82,17 @@ describe("Pi package resources", () => {
     await expect(fs.stat(path.join(repoRoot, skillPath))).resolves.toBeDefined();
   });
 
-  it("pins one compatible Pi SDK baseline", async () => {
+  it("tests the latest Pi SDK with open-ended peer support", async () => {
     const manifest = JSON.parse(await fs.readFile(packageJsonPath, "utf8")) as PackageManifest;
     for (const packageName of [
       "@earendil-works/pi-ai",
       "@earendil-works/pi-coding-agent",
       "@earendil-works/pi-tui",
     ]) {
-      expect(manifest.devDependencies?.[packageName]).toBe("0.84.2");
-      expect(manifest.peerDependencies?.[packageName]).toBe(">=0.84.2 <0.85.0");
+      expect(manifest.devDependencies?.[packageName]).toBe("0.85.0");
+      expect(manifest.peerDependencies?.[packageName]).toBe(">=0.84.2");
     }
+    expect(manifest.dependencies?.["@earendil-works/pi-server"]).toBe(">=0.85.0");
   });
 
   it("ships one matching Herdr plugin from the package root", async () => {

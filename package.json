@@ -71,14 +71,15 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@earendil-works/pi-server": ">=0.85.0",
     "better-sqlite3": "^13.0.2",
     "jiti": "^2.7.0",
     "tsx": "^4.23.13"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-ai": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-tui": "0.85.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
     "@vitest/coverage-istanbul": "^4.1.10",
@@ -89,9 +90,9 @@
     "vitest": "^4.1.10"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.2 <0.85.0",
-    "@earendil-works/pi-coding-agent": ">=0.84.2 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.84.2 <0.85.0",
+    "@earendil-works/pi-ai": ">=0.84.2",
+    "@earendil-works/pi-coding-agent": ">=0.84.2",
+    "@earendil-works/pi-tui": ">=0.84.2",
     "typebox": "*"
   },
   "engines": {
