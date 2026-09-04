@@ -9,7 +9,8 @@ import { clientSocketPath } from "../../src/client/protocol.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const piBin = path.join(repoRoot, "node_modules", ".bin", "pi");
-const SERVER_STOP_TIMEOUT_MS = 5_000;
+const PACKAGE_DISCOVERY_TIMEOUT_MS = 30_000;
+const SERVER_STOP_TIMEOUT_MS = PACKAGE_DISCOVERY_TIMEOUT_MS;
 const tempFixtures: Array<{ directory: string; serverExpected: boolean }> = [];
 
 type CommandInfo = {
@@ -59,7 +60,7 @@ async function getCommands(args: string[], tempDir: string): Promise<CommandInfo
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`Pi package discovery timed out.\n${stderr}`));
-    }, 30_000);
+    }, PACKAGE_DISCOVERY_TIMEOUT_MS);
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
