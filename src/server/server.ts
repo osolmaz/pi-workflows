@@ -770,11 +770,16 @@ export class WorkflowServer {
               payload.backupPath === undefined
                 ? undefined
                 : requireAbsolutePath(payload.backupPath, "backupPath");
-            const report = await pruneState(this.state, this.databasePath, {
-              before,
-              apply,
-              ...(backupPath === undefined ? {} : { backupPath }),
-            });
+            const report = await pruneState(
+              this.state,
+              this.databasePath,
+              {
+                before,
+                apply,
+                ...(backupPath === undefined ? {} : { backupPath }),
+              },
+              () => this.activeRunnerContentHashes(),
+            );
             return toJsonValue(report);
           });
         default:
@@ -1912,6 +1917,14 @@ export class WorkflowServer {
          )`,
       ),
     };
+  }
+
+  private activeRunnerContentHashes(): Buffer[] {
+    const digests = new Set<string>();
+    for (const active of this.activeRuns.values()) {
+      for (const digest of active.contentDigests) digests.add(digest);
+    }
+    return [...digests].map((digest) => Buffer.from(digest, "hex"));
   }
 
   private stateStatusReceipt(): JsonValue {

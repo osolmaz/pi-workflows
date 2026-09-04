@@ -48,6 +48,7 @@ export async function pruneState(
   state: StateDatabase,
   databasePath: string,
   options: StatePruneOptions,
+  activeBlobHashes: () => readonly Buffer[] = () => [],
 ): Promise<StatePruneReport> {
   validateStatePruneOptions(options);
   const cutoff = parseCutoff(options.before);
@@ -114,8 +115,9 @@ export async function pruneState(
            )`,
         )
         .run();
-      const blobStats = unreferencedBlobStats(state.connection);
-      deleteUnreferencedBlobs(state.connection);
+      const retainedBlobHashes = activeBlobHashes();
+      const blobStats = unreferencedBlobStats(state.connection, retainedBlobHashes);
+      deleteUnreferencedBlobs(state.connection, retainedBlobHashes);
       deletedRows = totalChanges(state.connection) - beforeChanges;
       deletedBlobs = blobStats.count;
       deletedBlobBytes = blobStats.bytes;
@@ -356,21 +358,31 @@ function selectionSignature(database: Database.Database, runIds: string[]): stri
   return JSON.stringify([resourceRows, queueRows]);
 }
 
-function unreferencedBlobStats(database: Database.Database): { count: number; bytes: number } {
-  const predicate = blobReferencePredicate(database);
+function unreferencedBlobStats(
+  database: Database.Database,
+  retainedBlobHashes: readonly Buffer[],
+): { count: number; bytes: number } {
+  const predicate = blobReferencePredicate(database, retainedBlobHashes.length);
   const row = database
     .prepare(
       `SELECT count(*) AS count, COALESCE(sum(byte_length), 0) AS bytes FROM blobs WHERE ${predicate}`,
     )
-    .get();
+    .get(...retainedBlobHashes);
   return isBlobStatsRow(row) ? row : { count: 0, bytes: 0 };
 }
 
-function deleteUnreferencedBlobs(database: Database.Database): void {
-  database.prepare(`DELETE FROM blobs WHERE ${blobReferencePredicate(database)}`).run();
+function deleteUnreferencedBlobs(
+  database: Database.Database,
+  retainedBlobHashes: readonly Buffer[],
+): void {
+  database
+    .prepare(
+      `DELETE FROM blobs WHERE ${blobReferencePredicate(database, retainedBlobHashes.length)}`,
+    )
+    .run(...retainedBlobHashes);
 }
 
-function blobReferencePredicate(database: Database.Database): string {
+function blobReferencePredicate(database: Database.Database, retainedBlobCount: number): string {
   const tables = database
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
     .all()
@@ -387,7 +399,13 @@ function blobReferencePredicate(database: Database.Database): string {
       );
     }
   }
-  return references.length === 0 ? "1 = 1" : `blob_hash NOT IN (${references.join(" UNION ")})`;
+  const unreferenced =
+    references.length === 0 ? "1 = 1" : `blob_hash NOT IN (${references.join(" UNION ")})`;
+  if (retainedBlobCount === 0) return unreferenced;
+  const retainedPlaceholders = placeholders(
+    Array.from({ length: retainedBlobCount }, () => undefined),
+  );
+  return `${unreferenced} AND blob_hash NOT IN (${retainedPlaceholders})`;
 }
 
 function descendants(root: string, children: Map<string, string[]>): string[] {
