@@ -438,7 +438,7 @@ The server keeps terminal root-run trees for 30 days from `finished_at`. A tree 
 
 The server protects waiting and parked runs, live queue rows, pending workflow messages, open workflow turns, pending interactions and human decisions, recording session segments, queued follow-ups, active leases, unsettled effects, controller ownership, active runner content, resumable checkpoints, and undelivered terminal results. A cross-tree continuation or step reference also blocks deletion. Unknown ownership blocks deletion.
 
-The server requests a sweep after startup recovery and after a workflow runner exits. Overlapping requests join one in-process task. A sweep starts only when there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes at most one sweep in 24 hours. If new work appears, cleanup stops between complete root trees and remains due for the next idle trigger.
+The server requests a sweep after startup recovery and after a workflow runner exits. It also schedules the next daily check after a completed sweep. Overlapping requests join one in-process task. A sweep starts only when there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes at most one sweep in 24 hours. If new work appears, cleanup stops between complete root trees and remains due. The next idle lifecycle trigger or a five-minute idle retry continues it.
 
 Automatic cleanup and `state prune` use the same selector, exact-tree deletion, and unreferenced-blob collection. Automatic cleanup does not make a backup. The explicit manual apply command still requires a new absolute verified backup.
 
@@ -446,7 +446,7 @@ Automatic cleanup deletes one root tree per transaction and rechecks that tree b
 
 After deletion, SQLite can reuse free pages. The server truncates the WAL while idle. It runs automatic `VACUUM` only when it is still idle, at least 64 MiB is reclaimable, and at least 20 percent of database pages are free. A skipped or failed compaction leaves committed deletion and reusable pages intact.
 
-A cleanup failure records one bounded diagnostic. It does not fail a workflow, stop the server, or start a tight retry loop.
+A cleanup failure records one bounded diagnostic. It does not fail a workflow or stop the server. The next attempt waits five minutes, so it cannot start a tight retry loop.
 
 Retained runs keep their normal resume, bounded viewer, content-reference, and terminal-result behavior. Deleted expired runs disappear from run lists and direct views. Pi session history is unchanged.
 

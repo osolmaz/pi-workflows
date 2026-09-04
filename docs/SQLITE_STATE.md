@@ -253,13 +253,13 @@ The server keeps terminal root-run trees for 30 days from `finished_at`. A tree 
 
 Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, controller ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a continuation or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
 
-The server requests cleanup after startup recovery and after workflow runners exit. Overlapping requests use one in-process task. Cleanup starts only while there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes no more than one sweep in 24 hours. An interrupted sweep stays due until another idle startup or runner-exit trigger.
+The server requests cleanup after startup recovery and after workflow runners exit. It also schedules the next daily check after a completed sweep. Overlapping requests use one in-process task. Cleanup starts only while there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes no more than one sweep in 24 hours. A due sweep that finds work active or stops between trees remains due. The next idle lifecycle trigger or a five-minute idle retry continues it.
 
 Automatic cleanup does not create a backup. It rechecks and deletes one complete root tree in one transaction, yields, and checks for new work before it selects another tree. Manual prune uses the same selection and deletion code, but keeps its backup requirement.
 
 After logical deletion, the server truncates the WAL while idle and measures `page_count`, `freelist_count`, and `page_size`. SQLite can reuse free pages without shrinking the main file. Automatic cleanup runs `VACUUM` only while the server remains idle, at least 64 MiB is reclaimable, and at least 20 percent of pages are free. A skipped or failed `VACUUM` does not undo committed deletion. The server reports the result and leaves the free pages available for reuse.
 
-A cleanup error does not fail a workflow or stop the server. The server records one bounded diagnostic and waits for a later safe trigger. It does not retry in a tight loop.
+A cleanup error does not fail a workflow or stop the server. The server records one bounded diagnostic and waits five minutes before another safe attempt. It does not retry in a tight loop.
 
 Retained runs keep their current resume, viewer, content-reference, and terminal-result behavior. A deleted run is absent from run lists and direct views. Cleanup never edits Pi session history.
 
