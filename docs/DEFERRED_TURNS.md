@@ -1,6 +1,6 @@
 # Terminal workflow messages
 
-This specification defines the final Pi message for an interactive workflow. It replaces the separate deferred-turn and `workflow_turn_intents` design. Terminal messages use the same host state, client operations, and extension coordinator as all other [workflow messages](WORKFLOW_STEP_MESSAGES.md).
+This specification defines the final Pi message for an interactive workflow. It replaces the separate deferred-turn and `workflow_turn_intents` design. Terminal messages use the same server state, client operations, and extension coordinator as all other [workflow messages](WORKFLOW_STEP_MESSAGES.md).
 
 The earlier [deferred-turn plan](plans/2026-08-21-deferred-turn-intents-plan.md) and [terminal restart plan](plans/2026-08-27-workflow-terminal-restart-plan.md) remain historical design records. This document is the current contract.
 
@@ -14,7 +14,7 @@ The earlier [deferred-turn plan](plans/2026-08-21-deferred-turn-intents-plan.md)
 
 ## Core rule
 
-The host creates one `terminal` workflow message in the same transaction that records the final terminal outcome. Only the final run in a continuation chain creates this message. A parent settled by a continuation does not create one.
+The server creates one `terminal` workflow message in the same transaction that records the final terminal outcome. Only the final run in a continuation chain creates this message. A parent settled by a continuation does not create one.
 
 The terminal message uses the same `workflow_messages` table and `WorkflowMessageCoordinator` as steps, decisions, notifications, and follow-ups. Initial, reminder, and resumed prompts are one step-message kind. There is no `workflow_turn_intents` table, deferred-turn sender, terminal sender, or second send path.
 
@@ -28,9 +28,9 @@ A terminal message can report:
 - workflow failure;
 - timeout with no recovery edge;
 - cancellation;
-- launch or worker failure that became the final run outcome.
+- launch or runner failure that became the final run outcome.
 
-Pause, Escape, a waiting checkpoint, a nonfinal continuation parent, user hold, and normal host shutdown do not create a terminal message.
+Pause, Escape, a waiting checkpoint, a nonfinal continuation parent, user hold, and normal server shutdown do not create a terminal message.
 
 A claim loss is a handoff. It creates no terminal outcome or terminal message unless later recovery proves that the run itself failed.
 
@@ -48,15 +48,15 @@ A terminal workflow message is open only until its first model turn ends. The ex
 
 The end report includes `stopReason: "completed"`, `"aborted"`, or `"error"`. Response-entry evidence comes from `ctx.sessionManager.getBranch()` after `agent_end` and can be null. A repeated report adopts the stored result. A stale turn ID cannot end a newer turn.
 
-If Pi restarts after a terminal message was sent but before its end was reported, the extension's idle-session active-branch report records a synthetic end with `stopReason: "lost"`. Host restart alone does not close the turn. The terminal result remains durable and visible, but the host does not pretend that the model turn completed.
+If Pi restarts after a terminal message was sent but before its end was reported, the extension's idle-session active-branch report records a synthetic end with `stopReason: "lost"`. Server restart alone does not close the turn. The terminal result remains durable and visible, but the server does not pretend that the model turn completed.
 
 ## Sending and recovery
 
-After every host connection, the coordinator waits for the complete origin-session view and reports the active branch before it sends a workflow message or reports a model turn. The host gives the next eligible pending message only to the active coordinator epoch for that session. A replacement connection fences the old one.
+After every server connection, the coordinator waits for the complete origin-session view and reports the active branch before it sends a workflow message or reports a model turn. The server gives the next eligible pending message only to the active coordinator epoch for that session. A replacement connection fences the old one.
 
 The coordinator waits until Pi is idle and has no pending messages. It keeps the terminal workflow message ID in its in-memory queued map, checks the active branch, and reports a matching entry before any send. Otherwise, it performs one final synchronous check that Pi is idle, has no pending input, the message is absent, and its connection still owns the active epoch. It calls documented `pi.sendMessage()` without an `await` between that check and the call.
 
-A matching hidden workflow message ID in the active branch proves that Pi accepted the message. The host records the matching Pi entry ID and changes the message to `sent`, even if its source cancelled it after the send. If the extension reloads, it reports the active branch and adopts that entry before another send.
+A matching hidden workflow message ID in the active branch proves that Pi accepted the message. The server records the matching Pi entry ID and changes the message to `sent`, even if its source cancelled it after the send. If the extension reloads, it reports the active branch and adopts that entry before another send.
 
 Absence is usable only when all three facts are true:
 

@@ -6,7 +6,7 @@ Status: this is the implemented workflow-message contract. [Unify workflow messa
 
 Pi Workflows must add several kinds of content to an origin Pi conversation. These include interactive step prompts, protected human decisions, passive notifications, terminal results, and follow-up prompts. Initial, reminder, and resumed prompts are one step-message kind with different display reasons.
 
-The host saves all of them as workflow messages. One extension component sends them through documented Pi APIs. Feature records continue to own workflow results, answers, settings, and timeouts.
+The server saves all of them as workflow messages. One extension component sends them through documented Pi APIs. Feature records continue to own workflow results, answers, settings, and timeouts.
 
 The model receives complete instructions when a workflow message starts a turn. The user sees a compact card for structured workflow content and can expand it.
 
@@ -24,7 +24,7 @@ The message kinds are:
 | `terminal`     | Custom message that starts a model turn         | Final result and safe recovery choice            |
 | `followUp`     | Custom message that starts normal work          | Work saved for after successful completion       |
 
-The host stores one `WorkflowMessage` record before Pi can send it:
+The server stores one `WorkflowMessage` record before Pi can send it:
 
 ```ts
 type WorkflowMessage = {
@@ -45,9 +45,9 @@ type WorkflowMessage = {
 
 The exact Pi content and custom display details remain in the content-addressed value store. `contentDigest` binds the record to those bytes. `sourceId` links the message to the feature record that created it.
 
-`kind` determines the custom renderer, whether a model turn starts, and the host eligibility rule. The host does not store duplicate flags or message-to-message pointers for those facts.
+`kind` determines the custom renderer, whether a model turn starts, and the server eligibility rule. The server does not store duplicate flags or message-to-message pointers for those facts.
 
-`order` is the acceptance order for one origin session. The host marks one pending item as next in the origin-session view. An earlier ineligible or cancelled item does not block unrelated eligible work.
+`order` is the acceptance order for one origin session. The server marks one pending item as next in the origin-session view. An earlier ineligible or cancelled item does not block unrelated eligible work.
 
 A source lifecycle transaction can change `pending` to `cancelled`. Active-branch evidence changes `pending` or `cancelled` to `sent`; evidence wins because Pi already contains the entry. `sent` is terminal. A pending message can be new or uncertain after a process stopped, so the coordinator always checks the active branch before sending it.
 
@@ -118,26 +118,26 @@ Notifications keep the custom type `pi-workflows-notification` and use `triggerT
 
 ## One sender
 
-The extension has one `WorkflowMessageCoordinator` for all message kinds. The host keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one, so two Pi processes cannot send for the same session.
+The extension has one `WorkflowMessageCoordinator` for all message kinds. The server keeps one active coordinator connection and process-local epoch for each origin session. A replacement connection fences the old one, so two Pi processes cannot send for the same session.
 
 The coordinator follows this sequence:
 
-1. After every host connection, wait for the complete origin-session view and report the active branch before any send or turn report.
-2. Wait until the host view names the next eligible pending message, Pi is idle, and Pi has no queued user input.
+1. After every server connection, wait for the complete origin-session view and report the active branch before any send or turn report.
+2. Wait until the server view names the next eligible pending message, Pi is idle, and Pi has no queued user input.
 3. Save the message ID in the coordinator's queued map.
 4. Search the active Pi branch for the same hidden message ID and report a matching entry.
 5. Recheck synchronously that Pi is idle, has no pending input, the message is absent, and this connection still owns the active session epoch.
 6. Call `pi.sendMessage()` with no `await` between that final check and call.
 7. Wait until the new Pi entry is visible.
-8. Report the active branch so the host saves its Pi entry ID and marks the message `sent`.
+8. Report the active branch so the server saves its Pi entry ID and marks the message `sent`.
 
 The coordinator sends only one workflow message at a time. A poll can find work, but it cannot send an ID already in its queued map.
 
-Pi can emit `agent_start` before the host saves the new Pi entry ID. The coordinator keeps that start and any matching end in its in-memory session map. It first marks the workflow message `sent`, then reports the saved turn events in order. It does not drop a turn event while host confirmation is in progress.
+Pi can emit `agent_start` before the server saves the new Pi entry ID. The coordinator keeps that start and any matching end in its in-memory session map. It first marks the workflow message `sent`, then reports the saved turn events in order. It does not drop a turn event while server confirmation is in progress.
 
 A visible active-branch entry with the hidden ID is `sent`, even if the source lifecycle cancelled the message before the evidence arrived. Active-branch absence is usable only when the branch has no matching ID, Pi is idle, and Pi has no pending messages in the same observation. If Pi or the extension disappears after the send call, the message stays `pending`; reconnect reports the branch before another send. These rules do not prove cross-branch absence or exactly-once model execution.
 
-After Pi, the extension, or the host restarts, branch reporting runs before any new send. It re-creates a message of the source's own kind only when the active branch has no entry for that source. A pending interaction gets one `step` with reason `resumed`; a pending decision gets one `decision`. Old incompatible workflow state is not reinterpreted.
+After Pi, the extension, or the server restarts, branch reporting runs before any new send. It re-creates a message of the source's own kind only when the active branch has no entry for that source. A pending interaction gets one `step` with reason `resumed`; a pending decision gets one `decision`. Old incompatible workflow state is not reinterpreted.
 
 ## Model-turn status
 
@@ -149,13 +149,13 @@ After Pi, the extension, or the host restarts, branch reporting runs before any 
 
 A start against a closed message is rejected. Follow-up turns are reported for ordering but do not show the completed workflow as `running`.
 
-The extension creates one workflow turn ID at `agent_start` and keeps it through the matching `agent_end` and host reconnect. It buffers starts and ends until the session view and message receipt are ready.
+The extension creates one workflow turn ID at `agent_start` and keeps it through the matching `agent_end` and server reconnect. It buffers starts and ends until the session view and message receipt are ready.
 
-At `agent_end`, it derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The host saves one immutable end result. A repeated report adopts it, and a stale turn ID cannot clear newer activity. A supervised worker can continue after accepted tool output while that Pi turn is still open. This normal continuation leaves the session capture recording until `agent_end`; it does not mark the capture as interrupted.
+At `agent_end`, it derives `completed`, `aborted`, or `error` from the documented assistant messages. It reads response-entry evidence from `ctx.sessionManager.getBranch()`; the entry ID can be null. The server saves one immutable end result. A repeated report adopts it, and a stale turn ID cannot clear newer activity. A supervised runner can continue after accepted tool output while that Pi turn is still open. This normal continuation leaves the session capture recording until `agent_end`; it does not mark the capture as interrupted.
 
-The host applies the end and its workflow consequence in one transaction. An aborted turn sets the run pause and cancels the request's pending step messages; the interaction derives its paused state from the run. Resuming that submitted-output step atomically clears the pause, increments the interaction revision, and creates one new step message with reason `resumed`. That message starts a fresh Pi model turn. A protected decision does not start a model turn, so its revision and decision message do not change when its run resumes. A completed, recoverably failed, or proved-lost turn increments `unproductiveTurnEnds` only when the submitted-output step is pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. A partial unique index enforces at most one pending step message for the request, regardless of reason. Acceptance, pause, cancel, timeout, and branch re-presentation cancel all pending step messages. A cancelled message did not start a turn and does not increment the counter.
+The server applies the end and its workflow consequence in one transaction. An aborted turn sets the run pause and cancels the request's pending step messages; the interaction derives its paused state from the run. Resuming that submitted-output step atomically clears the pause, increments the interaction revision, and creates one new step message with reason `resumed`. That message starts a fresh Pi model turn. A protected decision does not start a model turn, so its revision and decision message do not change when its run resumes. A completed, recoverably failed, or proved-lost turn increments `unproductiveTurnEnds` only when the submitted-output step is pending, not paused, and has no accepted or validating submission. Values one and two create one step message with reason `reminder`; a value above two fails the attempt. A partial unique index enforces at most one pending step message for the request, regardless of reason. Acceptance, pause, cancel, timeout, and branch re-presentation cancel all pending step messages. A cancelled message did not start a turn and does not increment the counter.
 
-There is no activity heartbeat, refresh lease, or sequence counter. The host shows `running` from the matching start until the matching end. Host startup never marks a Pi turn lost. On `session_start`, only an idle-session branch report can close an open sent message with synthetic stop reason `lost`. Polling and time alone cannot create a reminder.
+There is no activity heartbeat, refresh lease, or sequence counter. The server shows `running` from the matching start until the matching end. Server startup never marks a Pi turn lost. On `session_start`, only an idle-session branch report can close an open sent message with synthetic stop reason `lost`. Polling and time alone cannot create a reminder.
 
 ## Feature ownership
 
@@ -190,9 +190,9 @@ A terminal or follow-up message does not reopen the completed workflow. A slash-
 
 ## Session recording
 
-The extension records workflow-related Pi events through a batched host client operation. It uses documented Pi events and does not read or edit Pi session files.
+The extension records workflow-related Pi events through a batched server client operation. It uses documented Pi events and does not read or edit Pi session files.
 
-The host deduplicates settled entries by Pi entry ID. It links attempts to their prompt, response, first, and last entries. A recording failure does not fail workflow execution.
+The server deduplicates settled entries by Pi entry ID. It links attempts to their prompt, response, first, and last entries. A recording failure does not fail workflow execution.
 
 ## Public API boundary
 
@@ -214,14 +214,14 @@ Tests must prove:
 - messages remain in saved order without message-pointer deadlocks;
 - an early `agent_start` and `agent_end` wait for the message receipt and session view, then apply in order;
 - every matching model turn shows `running` for its full duration;
-- normal worker continuation leaves the active session capture open until the matching turn ends;
+- normal runner continuation leaves the active session capture open until the matching turn ends;
 - stale turn-end reports and starts against closed messages are rejected;
 - a manual turn cancels pending step messages that it supersedes;
 - a turn cannot bind to an interaction whose run is paused;
 - aborted turns pause without incrementing the unproductive-turn counter;
 - resuming an aborted step creates one new resumed message and one fresh model turn;
 - resuming a protected decision keeps its answer revision and does not create a duplicate decision message;
-- host restart does not close a live Pi turn, while an idle-session branch report can close an unended turn as lost;
+- server restart does not close a live Pi turn, while an idle-session branch report can close an unended turn as lost;
 - two reminder-reason steps are sent at most once and the next unproductive turn fails;
 - initial, reminder, and resumed prompts use the same step kind and differ only by reason;
 - terminal and follow-up messages each start only at their durable boundary;

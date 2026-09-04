@@ -10,9 +10,9 @@ date: 2026-09-01
 
 This repair restored the widget, Escape pause, and the first shared sender. Version 0.16.0 still has a model-turn status bug and did not preserve all earlier session features. The approved [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md) replaces separate send records with one workflow-message contract and restores the remaining behavior.
 
-The out-of-process workflow host removed the Pi workflow widget and Escape-to-pause behavior. A later delivery safety fix also caused normal polling to report `Interactive request presentation claim conflict`. This plan restores those features and fixes delivery without bringing back the embedded workflow runtime.
+The out-of-process workflow server removed the Pi workflow widget and Escape-to-pause behavior. A later delivery safety fix also caused normal polling to report `Interactive request presentation claim conflict`. This plan restores those features and fixes delivery without bringing back the embedded workflow runtime.
 
-[Workflow host](WORKFLOW_HOST.md) remains the process and state specification. [Workflow step messages](WORKFLOW_STEP_MESSAGES.md) remains the session message specification. This plan records the cause, scope, implementation order, and acceptance checks for the repair.
+[Workflow server](WORKFLOW_SERVER.md) remains the process and state specification. [Workflow step messages](WORKFLOW_STEP_MESSAGES.md) remains the session message specification. This plan records the cause, scope, implementation order, and acceptance checks for the repair.
 
 ## Observed problems
 
@@ -34,7 +34,7 @@ The coordinator also removes its local queued guard before durable settlement fi
 ## Requirements
 
 - Keep one global host as the normal workflow state writer.
-- Keep workflow and controller code in supervised child processes.
+- Keep workflow and resource manager code in supervised child processes.
 - Use documented Pi extension APIs only.
 - Preserve one ordered session delivery path for steps, decisions, notifications, and final results.
 - Never send through an expired claim.
@@ -92,7 +92,7 @@ The change may update:
 - host pause and resume handling for parked interactions;
 - existing version-1 interaction response fields;
 - focused unit, integration, and live Pi tests;
-- the workflow host and authoring documentation.
+- the workflow server and authoring documentation.
 
 ## Non-goals
 
@@ -125,7 +125,7 @@ The change may update:
 - A paused interaction rejects `update` and `submit`.
 - Resume keeps the same request and allows submission without another prompt.
 - Non-aborted turns and unrelated sessions do not pause the workflow.
-- The extension and host execute no workflow or controller code in their own event loops.
+- The extension and host execute no workflow or resource manager code in their own event loops.
 
 ## Verification
 

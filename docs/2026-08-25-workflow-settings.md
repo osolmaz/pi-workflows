@@ -108,7 +108,7 @@ await ctx.workflows.changeSettings({
 });
 ```
 
-Each request has a stable host-issued ID. Repeating the same ID and content returns the first result. Reusing an ID with different content fails. When one model response emits several workflow tool calls, the extension applies them in source order so a settings change cannot race past a later step submission.
+Each request has a stable server-issued ID. Repeating the same ID and content returns the first result. Reusing an ID with different content fails. When one model response emits several workflow tool calls, the extension applies them in source order so a settings change cannot race past a later step submission.
 
 `expectedChangeNumber` protects the complete settings value. A JSON Patch `test` operation can protect one field. When no expected number is supplied, the patch applies to the latest saved value in database acceptance order.
 
@@ -127,7 +127,7 @@ The permissions mean:
 
 `read` is not a privacy filter. Workflow code in that scope receives the complete typed settings value.
 
-The host records the actor outside the patch:
+The server records the actor outside the patch:
 
 - `session` for a model workflow-tool call;
 - `human` for a direct command or verified human decision;

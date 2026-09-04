@@ -66,7 +66,7 @@ Unit tests must cover completed, failed, timed-out, maxSteps, cancelled, and blo
 
 - `finishRun` in `src/extension/index.ts`
 - `src/extension/deferred-turn-coordinator.ts`
-- Existing turn-intent state in `src/controllers/sqlite.ts`
+- Existing turn-intent state in `src/resource-managers/sqlite.ts`
 
 **Change**
 
@@ -77,7 +77,7 @@ Normal presentation and fallback delivery must compete for the same intent. The 
 Do not create this turn for:
 
 - waiting checkpoints
-- controller child runs
+- resource manager child runs
 - internal helper runs that already report to an owner
 
 **Verification**
@@ -345,7 +345,7 @@ Add regression coverage for:
 3. Failed, timed-out, and maxSteps runs offer restart.
 4. Explicit cancellation is not restartable through the shortcut.
 5. Waiting checkpoints do not produce a terminal turn.
-6. Controller child runs do not produce competing turns.
+6. ResourceManager child runs do not produce competing turns.
 7. Presentation and fallback races produce one turn.
 8. Restart uses the exact workflow reference and input.
 9. Restart leaves the prior run unchanged.

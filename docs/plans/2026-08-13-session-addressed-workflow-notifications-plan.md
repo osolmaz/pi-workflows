@@ -23,7 +23,7 @@ pi-workflows must not send one workflow's report into an unrelated conversation.
 
 ## Data model
 
-Queue records gain an optional `origin_session_id`. Interactive runs set it from `ctx.sessionManager.getSessionId()`. Controller-created detached runs leave it empty. A session runner can claim a record only when the origin is empty or matches its current session. The standalone host can claim either form.
+Queue records gain an optional `origin_session_id`. Interactive runs set it from `ctx.sessionManager.getSessionId()`. ResourceManager-created detached runs leave it empty. A session runner can claim a record only when the origin is empty or matches its current session. The standalone host can claim either form.
 
 A `workflow_notifications` table is the durable outbox:
 

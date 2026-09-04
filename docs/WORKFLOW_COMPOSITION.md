@@ -320,7 +320,7 @@ A protected change to model choice, benchmark method, credentials, hardware, spe
 
 ## Compatibility
 
-Workflows without inputs, exits, or includes run unchanged. Existing controller child workflows remain unchanged. Existing terminal SQLite runs remain readable.
+Workflows without inputs, exits, or includes run unchanged. Existing resource manager child workflows remain unchanged. Existing terminal SQLite runs remain readable.
 
 Composition and assistant-message output are compatible public API additions under the project's pre-1.0 policy.
 

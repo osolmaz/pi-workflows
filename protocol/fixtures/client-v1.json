@@ -1,7 +1,7 @@
 {
   "valid": [
     "{\"connectionId\":\"connection-1\",\"packageVersion\":\"0.15.3\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"hello\"}",
-    "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-1\",\"operation\":\"host.status\",\"payload\":{},\"requestId\":\"request-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
+    "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-1\",\"operation\":\"server.status\",\"payload\":{},\"requestId\":\"request-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
     "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-runs-page\",\"operation\":\"view.runs.page\",\"payload\":{\"cursor\":2,\"revision\":\"3:10:20\"},\"requestId\":\"request-runs-page\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
     "{\"clientId\":\"client-1\",\"idempotencyKey\":\"key-run-get\",\"operation\":\"view.run.get\",\"payload\":{},\"requestId\":\"request-run-get\",\"runId\":\"run-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",
     "{\"clientId\":\"client-1\",\"expectedRevision\":7,\"idempotencyKey\":\"key-page\",\"operation\":\"view.page\",\"payload\":{\"cursor\":299,\"kind\":\"steps\"},\"requestId\":\"request-page\",\"runId\":\"run-1\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}",

@@ -2,7 +2,7 @@
 title: Keep large workflow history out of runner resume replies
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-04
-status: planned
+status: implemented
 ---
 
 # Keep large workflow history out of runner resume replies
@@ -37,9 +37,8 @@ This change does not:
 - truncate or delete workflow history
 - raise the message limit as the primary fix
 - make the complete run record available to workflow execution
-- rename the workflow components
 
-The component naming plan is recorded separately. It must not be mixed into this functional change.
+The component naming hard cut is a separate refactor. It does not change this functional contract, and it is kept in a separate commit.
 
 ## Design
 
@@ -123,20 +122,20 @@ There is no compatibility reader, alternate operation, dual path, feature flag, 
 
 **Where**
 
-- `test/host.test.ts`
-- `test/host-protocol-state.test.ts`
-- `test/worker-entry.test.ts`
+- `test/server.test.ts`
+- `test/server-protocol-state.test.ts`
+- `test/workflow-runner-entry.test.ts`
 - Add a focused runner-server integration fixture under `test/fixtures/` only if the existing helpers cannot create the case clearly.
 
 **Change**
 
 Create a waiting run with more than 2 MB of recorded session entries and events while keeping its workflow state small. Resume it through the real child-runner protocol used in tests.
 
-First prove that the current complete-run response crosses the runner message limit and crashes the runner. Keep the fixture deterministic and use temporary directories. Do not call a model.
+Prove that the old complete-run response crossed the runner message limit and crashed the runner. Keep the fixture deterministic and use temporary directories. Do not call a model.
 
 **Verification**
 
-The regression fails on the old code with the same oversized worker-response error seen in the saved Monitor run.
+The regression fails on the old code with the same oversized runner-response error seen in the saved Monitor run.
 
 ### Narrow resume preparation to workflow state
 
@@ -144,12 +143,12 @@ The regression fails on the old code with the same oversized worker-response err
 
 - `src/workflows/store.ts`
 - `src/workflows/engine.ts`
-- `src/host/worker-store.ts`
-- `src/host/runner.ts`
+- `src/server/workflow-runner-store.ts`
+- `src/server/server.ts`
 
 **Change**
 
-Change `prepareRunResume()` to return the committed `WorkflowRunState` directly. Add a state-only store read that uses the run row and state blob without loading session, trace, viewer, settings, or follow-up records.
+Change `prepareRunResume()` to return the committed `WorkflowRunState` directly. Add a state-only store read that reconstructs the execution state from normalized run rows without loading session, trace, viewer, settings, or follow-up records.
 
 Update `WorkflowEngine.resumeRun()` to use the returned state directly. Keep every existing resume validation and interrupted-attempt update. Keep the trace event, revision update, and viewer delta.
 
@@ -163,13 +162,13 @@ Store and engine tests prove that resume returns the same committed state and re
 
 - `src/workflows/engine.ts`
 - `src/workflows/store.ts`
-- `src/host/worker-store.ts`
-- `src/host/worker-protocol.ts`
-- `src/host/runner.ts`
+- `src/server/workflow-runner-store.ts`
+- `src/server/workflow-runner-protocol.ts`
+- `src/server/server.ts`
 
 **Change**
 
-Replace the engine-facing `readRun()` method and `store.readRun` worker operation with `readRunState()` and `store.readRunState`.
+Replace the engine-facing `readRun()` method and `store.readRun` runner operation with `readRunState()` and `store.readRunState`.
 
 Update `continueRun()` to read only the parent `WorkflowRunState`. Keep all current waiting-state, source, human-decision, and continuation checks.
 
@@ -184,8 +183,8 @@ Engine tests cover ordinary continuation plus human-decision continuation. Proto
 **Where**
 
 - `src/workflows/store.ts`
-- `src/host/runner.ts`
-- `src/host/view.ts`
+- `src/server/server.ts`
+- `src/server/view.ts`
 - Existing session recording and viewer tests
 
 **Change**
@@ -202,7 +201,7 @@ A run with more than 2 MB of history resumes with a small state response. The sa
 
 **Where**
 
-- `src/host/view.ts`
+- `src/server/view.ts`
 - `src/client/client.ts`
 - `docs/tui-viewer.md`
 - Existing viewer protocol tests
@@ -221,12 +220,12 @@ Existing viewer page and content-reference tests pass. Hydration, replay, and la
 
 **Where**
 
-- `src/host/worker-protocol.ts`
-- `src/host/child-worker-supervisor.ts`
-- `src/host/worker-entry.ts`
-- `src/host/worker-store.ts`
-- `src/workflows/store.ts` or a small host-owned content helper
-- Protocol and worker tests
+- `src/server/workflow-runner-protocol.ts`
+- `src/server/child-runner-supervisor.ts`
+- `src/server/workflow-runner-entry.ts`
+- `src/server/workflow-runner-store.ts`
+- `src/workflows/store.ts` or a small server-owned content helper
+- Protocol and runner tests
 
 **Change**
 
@@ -244,10 +243,10 @@ Protocol tests cover the exact boundary, one byte over it, multiple chunks, and 
 
 **Where**
 
-- `WorkerStoreOperation` in `src/host/worker-protocol.ts`
-- `HostBackedWorkflowStore` in `src/host/worker-store.ts`
-- Worker operation dispatch in `src/host/runner.ts`
-- `docs/WORKFLOW_HOST.md`
+- `WorkflowRunnerStoreOperation` in `src/server/workflow-runner-protocol.ts`
+- `ServerBackedWorkflowStore` in `src/server/workflow-runner-store.ts`
+- Runner operation dispatch in `src/server/server.ts`
+- `docs/WORKFLOW_SERVER.md`
 
 **Change**
 
@@ -266,10 +265,10 @@ A contract test exercises every operation with its largest supported result shap
 - `test/store.test.ts`
 - `test/engine.test.ts`
 - `test/engine-more.test.ts`
-- `test/host.test.ts`
-- `test/worker-entry.test.ts`
-- Existing worker protocol and end-to-end test files
-- `docs/WORKFLOW_HOST.md`
+- `test/server.test.ts`
+- `test/workflow-runner-entry.test.ts`
+- Existing runner protocol and end-to-end test files
+- `docs/WORKFLOW_SERVER.md`
 - `docs/SQLITE_STATE.md`
 - `docs/workflows.md`
 
@@ -314,5 +313,5 @@ The change is complete when all of these statements are true:
 - A large reply cannot cause a runner crash loop.
 - No runner operation returns a complete run when it needs only one small part.
 - The SQLite schema and Pi core do not change, and no installed service changes.
-- The naming work remains separate.
+- The public naming hard cut remains a separate refactor commit.
 - All repository checks pass.

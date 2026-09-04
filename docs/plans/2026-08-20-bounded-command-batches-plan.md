@@ -63,7 +63,7 @@ The helper does not interpret repository, review, CI, or test results. Autoimple
 
 ## Cancellation and interruption
 
-The workflow action passes its abort signal to the helper. An abort stops active process groups through the existing `runShellAction` SIGTERM and bounded SIGKILL path. Workers do not start queued items after the abort.
+The workflow action passes its abort signal to the helper. An abort stops active process groups through the existing `runShellAction` SIGTERM and bounded SIGKILL path. Runners do not start queued items after the abort.
 
 Accepted batch outputs use the existing run trace and artifact files. Large strings use normal artifact externalization.
 

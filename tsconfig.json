@@ -18,7 +18,7 @@
     "paths": {
       "@osolmaz/pi-workflows": ["./src/workflows/index.ts"],
       "@osolmaz/pi-workflows/builtins": ["./src/builtins/index.ts"],
-      "@osolmaz/pi-workflows/controllers": ["./src/controllers/index.ts"],
+      "@osolmaz/pi-workflows/resource-managers": ["./src/resource-managers/index.ts"],
       "pi-workflows/extension": ["./src/extension/index.ts"]
     }
   },

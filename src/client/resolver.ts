@@ -9,10 +9,10 @@ export type ResolvedWorkflowLaunch = {
   definitionSnapshot: JsonValue;
 };
 
-export type ResolvedControllerInitialization = {
-  schema: "pi-workflows.resolved-controller-initialization.v1";
-  controllerName: string;
-  controllerPath: string;
+export type ResolvedResourceManagerInitialization = {
+  schema: "pi-workflows.resolved-resource-manager-initialization.v1";
+  resourceManagerName: string;
+  resourceManagerPath: string;
   sourceHash: string;
   initialStatus: JsonValue;
 };

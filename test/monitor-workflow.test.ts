@@ -80,7 +80,7 @@ function actionRequest(
     },
     defect: {
       sharedCodeOrDataDefect: false,
-      paidWorkers: "not-applicable",
+      paidRunners: "not-applicable",
       evidence: "No shared defect is present.",
     },
     verification: "Confirm that the worker is active.",
@@ -115,7 +115,7 @@ function actionResult(
     status,
     summary: status === "succeeded" ? "Started the missing unit." : "The start command failed.",
     evidence: { process: status === "succeeded" ? "active" : "not-found" },
-    verification: "Checked the real worker process.",
+    verification: "Checked the real runner process.",
     failureId: "unit-5-idle",
     targetStateId: "units:4-of-5:idle",
     ...overrides,
@@ -393,7 +393,7 @@ describe("built-in monitor workflow", () => {
           action: actionRequest("repair", {
             defect: {
               sharedCodeOrDataDefect: true,
-              paidWorkers: "running",
+              paidRunners: "running",
               evidence: "Two affected workers are still active.",
             },
           }),
@@ -585,7 +585,7 @@ describe("built-in monitor workflow", () => {
         actionRequest("advance", {
           defect: {
             sharedCodeOrDataDefect: "yes",
-            paidWorkers: "stopped",
+            paidRunners: "stopped",
             evidence: "stopped",
           },
         }),
@@ -595,11 +595,11 @@ describe("built-in monitor workflow", () => {
         actionRequest("advance", {
           defect: {
             sharedCodeOrDataDefect: false,
-            paidWorkers: "unknown",
+            paidRunners: "unknown",
             evidence: "unknown",
           },
         }),
-        "paidWorkers is invalid",
+        "paidRunners is invalid",
       ],
     ];
     for (const [action, message] of invalid) {

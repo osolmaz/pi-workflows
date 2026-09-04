@@ -63,7 +63,7 @@ Cancellation and terminal-message creation currently share a transaction path. I
 
 The compiler assigns complete node paths. The engine uses those paths to identify logical work. Child workflows can receive a local view of inputs and outputs, but that local view cannot replace the compiled identity.
 
-The host state store owns every durable transition. Host orchestration code asks the store to start, pause, finish, cancel, or recover work. It does not update lifecycle tables directly.
+The host state store owns every durable transition. Server orchestration code asks the store to start, pause, finish, cancel, or recover work. It does not update lifecycle tables directly.
 
 The worker receives one explicit command and executes it. It does not infer the command from nullable fields.
 
@@ -210,13 +210,13 @@ Update authoring docs and all built-in workflows in the same change. Keep no ali
 
 ### Make worker commands explicit
 
-Add the tagged run command to `src/host/worker-protocol.ts`, the host bootstrap response, and `src/host/worker-entry.ts`.
+Add the tagged run command to `src/server/workflow-runner-protocol.ts`, the host bootstrap response, and `src/server/workflow-runner-entry.ts`.
 
 Replace the `initialized` and `parentRunId` dispatch heuristic with an exhaustive command switch. Add the engine path for a fresh restart and keep checkpoint continuation separate. Remove the superseded dispatch code.
 
 ### Centralize durable transitions
 
-Move direct lifecycle SQL from `src/host/runner.ts` into typed store operations in the state and workflow-store modules. Replace ambiguous boolean returns used by run failure and cancellation with typed results.
+Move direct lifecycle SQL from `src/server/runner.ts` into typed store operations in the state and workflow-store modules. Replace ambiguous boolean returns used by run failure and cancellation with typed results.
 
 Keep claim fencing and revision checks in each state transaction. The runner handles process supervision and protocol routing only.
 
@@ -256,7 +256,7 @@ Do not keep feature flags or fallback behavior.
 
 ### Update documentation
 
-Update `WORKFLOW_HOST.md`, `SQLITE_STATE.md`, and `workflows.md` after implementation so they describe the shipped interfaces and recovery behavior. Keep this plan as the decision and implementation record.
+Update `WORKFLOW_SERVER.md`, `SQLITE_STATE.md`, and `workflows.md` after implementation so they describe the shipped interfaces and recovery behavior. Keep this plan as the decision and implementation record.
 
 ## Tests
 
@@ -284,7 +284,7 @@ Update `WORKFLOW_HOST.md`, `SQLITE_STATE.md`, and `workflows.md` after implement
 - A later reconciliation creates the missing terminal message once.
 - Terminalization ends open turns and pending interactions in the same state transaction.
 
-### Worker recovery
+### Runner recovery
 
 - A worker crash after a newer durable revision resumes safely.
 - A worker crash at the same revision parks once and does not relaunch.
@@ -316,7 +316,7 @@ Automated tests use temporary directories and deterministic providers. They do n
 - A terminal run has no open workflow turn.
 - Later ordinary Pi turns cannot attach to terminal workflow work.
 - No raw SQLite uniqueness or media-type error reaches normal recovery paths.
-- Host, extension, widget, CLI, Herdr, and `piw` agree on run activity.
+- Server, extension, widget, CLI, Herdr, and `piw` agree on run activity.
 - Pi core and private Pi APIs remain unchanged. Pi session schemas also remain unchanged.
 - One host and one database remain. The system keeps one client protocol and one production runtime.
 

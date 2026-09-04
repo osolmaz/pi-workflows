@@ -1,6 +1,6 @@
 # SQLite state
 
-Status: this is the implemented single-host database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior.
+Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior.
 
 Pi Workflows stores all live durable state in one database:
 
@@ -8,11 +8,11 @@ Pi Workflows stores all live durable state in one database:
 ~/.pi/agent/workflows/state.sqlite
 ```
 
-There is one database for the user installation. Project and run IDs separate data inside it. The host is the only production process that opens this live database. Workflow targets, extensions, CLI clients, Herdr adapters, and `piw` do not open it. Live clients use `pi-workflows.client.v1`.
+There is one database for the user installation. Project and run IDs separate data inside it. The server is the only production process that opens this live database. Workflow targets, extensions, CLI clients, Herdr adapters, and `piw` do not open it. Live clients use `pi-workflows.client.v1`.
 
 ## Viewer projection
 
-The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md). The host owns this projection and exposes it as the canonical live run view. Local and remote renderers do not recreate it or validate its SQLite tables.
+The database includes the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md). The server owns this projection and exposes it as the canonical live run view. Local and remote renderers do not recreate it or validate its SQLite tables.
 
 `viewer_runs` stores one presentation revision and retained revision floor for each run. `viewer_deltas` stores ordered target patches by run, presentation revision, and delta index. `viewer_session_checkpoints` stores the bounded active message and tool state at each 256-event boundary. `run_view_content` stores generated reference bytes under the exact run ID, content digest, and media type. It is separate from general state blobs, and content reads require all three identities. A viewer-visible transaction writes the domain change, advances the presentation revision, and writes its patch blobs before the same commit. Session-event transactions write each reached replay checkpoint in that transaction.
 
@@ -27,12 +27,12 @@ This is an in-place alpha schema change. The schema name and version remain `pi-
 The database stores:
 
 - workflow definitions, runs, events, node attempts, outputs, and updates
-- global host epochs, command receipts, worker epochs, and worker messages
+- global server epochs, command receipts, runner epochs, and runner messages
 - durable origin-session interaction requests and submissions
 - captured Pi session entries and events
-- run and controller queues, claims, retries, and continuations
+- run and resource manager queues, claims, retries, and continuations
 - human-decision requests, submissions, resolutions, and cancellations
-- controller resources, finalizers, effects, and child workflows
+- managed resources, finalizers, effects, and child workflows
 - workflow messages that Pi must add to origin conversations
 - workflow settings, accepted JSON Patch changes, and post-completion follow-up prompts
 - nonsecret channel cursors, inbox records, messages, and settlement receipts
@@ -40,7 +40,7 @@ The database stores:
 
 Credentials and raw secrets must not enter the database. Channel credential files stay in their existing private configuration directory.
 
-The implementation does not create live run directories, artifact files, decision directories, project databases, controller databases, or channel databases.
+The implementation does not create live run directories, artifact files, decision directories, project databases, resource manager databases, or channel databases.
 
 ## Database settings
 
@@ -62,9 +62,9 @@ The database also uses:
 - directory mode `0700`
 - database and backup mode `0600`
 
-The host opens the active database. It verifies the application ID, user version, schema metadata, compiled DDL digest, and exact SQLite schema shape. An incompatible database fails with the standard backup-and-reset instruction. Pi Workflows does not import, reinterpret, or delete that state.
+The server opens the active database. It verifies the application ID, user version, schema metadata, compiled DDL digest, and exact SQLite schema shape. An incompatible database fails with the standard backup-and-reset instruction. Pi Workflows does not import, reinterpret, or delete that state.
 
-The host completes this verification before it serves any client, and no other production process opens the active database. A maintenance verifier may open an explicit inactive backup with SQLite read-only mode and `PRAGMA query_only = ON`. That offline verification path is not a live client and cannot select the active state database. TypeScript and Rust clients validate the client protocol and package versions, not the SQLite DDL digest.
+The server completes this verification before it serves any client, and no other production process opens the active database. A maintenance verifier may open an explicit inactive backup with SQLite read-only mode and `PRAGMA query_only = ON`. That offline verification path is not a live client and cannot select the active state database. TypeScript and Rust clients validate the client protocol and package versions, not the SQLite DDL digest.
 
 The normalized run layout is an in-place alpha cutover. It keeps SQLite user version `1` and the current `v1` public record identifiers. A database with the former nested run-snapshot layout is incompatible and must be moved or removed. There is no migration, compatibility reader, dual write, alias, or second schema generation.
 
@@ -74,7 +74,7 @@ Four record groups provide the common lifecycle rules.
 
 ### Resources
 
-`resources` identifies each mutable aggregate and holds its current revision. Runs, settings scopes, follow-up items, decisions, controller resources, effects, channels, workflow messages, and session segments have stable resource identities.
+`resources` identifies each mutable aggregate and holds its current revision. Runs, settings scopes, follow-up items, decisions, managed resources, effects, channels, workflow messages, and session segments have stable resource identities.
 
 Every accepted domain command compares its expected revision and increments it once.
 
@@ -104,9 +104,9 @@ A domain row and its event are written in one transaction. Normal APIs never upd
 
 `effect_attempts` records each application attempt and ownership generation. A matching repeated request adopts the existing effect. A different request under the same key is a conflict.
 
-Local effects use deterministic transactions. For workflow action nodes, the engine creates the idempotency key from the run ID, effect type, full compiled node path, and node visit number. A projected child-workflow view cannot replace that full identity. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and controller-child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
+Local effects use deterministic transactions. For workflow action nodes, the engine creates the idempotency key from the run ID, effect type, full compiled node path, and node visit number. A projected child-workflow view cannot replace that full identity. Run queue settlement effects are created only for runs that have a `run_queue` row; direct engine and resource-manager child runs do not create phantom queue work. External effects use provider idempotency or observation when available. An uncertain result becomes `ambiguous` and is not repeated without evidence.
 
-Telegram delivery and settlement use these shared effect records. The host records one numbered attempt before it tells the supervised adapter child to act. A confirmed result stores Telegram message references in the effect result. `channel_messages` stores the decision feature's delivery or settlement receipt; it does not copy effect state or external message references.
+Telegram delivery and settlement use these shared effect records. The server records one numbered attempt before it tells the supervised adapter child to act. A confirmed result stores Telegram message references in the effect result. `channel_messages` stores the decision feature's delivery or settlement receipt; it does not copy effect state or external message references.
 
 ## Domain tables
 
@@ -117,34 +117,36 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Schema and projects | `schema_meta`, `projects`                                                                                                    |
 | Content             | `blobs`, `run_view_content`                                                                                                  |
 | Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                       |
-| Host protocol       | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
+| Server protocol     | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
 | Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
 | Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                              |
 | Post-run follow-ups | `workflow_follow_ups`                                                                                                        |
 | Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                   |
 | Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                               |
-| Controllers         | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
+| Managed resources   | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
 | Effects             | `effects`, `effect_attempts`                                                                                                 |
 | Pi messages         | `workflow_messages`, `workflow_turns`                                                                                        |
 | Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                            |
 
+The `host_*`, `run_workers`, `worker_*`, and `controller_*` names remain version-1 internal SQLite identifiers. The `host` and `controller` actor and owner values and the `~/.pi/agent/workflows/host/` state directory also remain internal identifiers. Public APIs and documentation call these components the workflow server, workflow runner, resource manager, resource runner, and managed resource. The alpha hard cut adds no alias or second storage path.
+
 `workflow_messages` is the only table that owns adding workflow content to Pi. It stores the target session, message kind, source record, content digest, session order, `pending`, `sent`, or `cancelled` state, confirmed Pi entry ID, and creation and update times. The table stores no sender, send lease, `sending` state, or separate sent time. Active-branch evidence changes `pending` or `cancelled` to `sent`. Initial, reminder, and resumed prompts are all `step` messages; their custom details contain the reason. Interactive requests, decisions, terminal runs, notifications, follow-ups, and settings keep their own domain state.
 
-`workflow_turns` stores the host-approved ownership of one Pi model turn. Each row names the exact workflow message, run, session, and turn ID. A partial unique index permits only one open turn for a message. The host checks for an exact saved turn or another open turn before insertion, so a normal conflict returns a controlled protocol error instead of a raw SQLite error. Terminalization ends every open turn for that run as `lost` in the same transaction. It cancels pending step and decision messages, plus follow-ups when the run did not complete successfully. Committed notifications remain eligible. Matching late reports adopt the saved result, while conflicting identities remain errors.
+`workflow_turns` stores the server-approved ownership of one Pi model turn. Each row names the exact workflow message, run, session, and turn ID. A partial unique index permits only one open turn for a message. The server checks for an exact saved turn or another open turn before insertion, so a normal conflict returns a controlled protocol error instead of a raw SQLite error. Terminalization ends every open turn for that run as `lost` in the same transaction. It cancels pending step and decision messages, plus follow-ups when the run did not complete successfully. Committed notifications remain eligible. Matching late reports adopt the saved result, while conflicting identities remain errors.
 
 `channels` stores configured channel resource identities. `channel_cursors` stores the last accepted external polling position. `channel_messages` stores immutable decision delivery and settlement records for audit and duplicate evidence. External application state and Telegram message references belong to `effects` and `effect_attempts`.
 
-Foreign keys join projects, runs, attempts, decisions, controllers, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per interaction request, one nonterminal interactive continuation-chain reservation per Pi session, one decision winner, and one deterministic effect key. A run waiting for a checkpoint or protected decision keeps that chain reservation. A parked waiting parent does not block its own continuation. Reserving that continuation transfers the reservation and settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
+Foreign keys join projects, runs, attempts, decisions, managed resources, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per interaction request, one nonterminal interactive continuation-chain reservation per Pi session, one decision winner, and one deterministic effect key. A run waiting for a checkpoint or protected decision keeps that chain reservation. A parked waiting parent does not block its own continuation. Reserving that continuation transfers the reservation and settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
 
-### Hosted commands and interactions
+### ServerBacked commands and interactions
 
-`workflow_host_state` stores the one current host epoch and its live local
+`workflow_host_state` stores the one current server epoch and its live local
 claim. `host_commands` stores each client request fingerprint, operation,
 outcome, revision, and receipt or error. Repeating an exact request adopts the
 stored receipt. Reusing an ID or idempotency key for another request is a
 conflict.
 
-`run_workers` records each worker epoch before spawn and later records its exact
+`run_workers` records each runner epoch before spawn and later records its exact
 process identity and terminal outcome. `worker_messages` deduplicates accepted
 state-changing child messages.
 
@@ -152,7 +154,7 @@ state-changing child messages.
 
 ## Content-addressed values
 
-`blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes. `run_view_content` keeps host-generated large view values reachable for the life of the run, including aggregate outputs that do not exist as one source record. The host creates this link before it sends a content reference. Deleting the run removes the link, and normal blob pruning can then remove unreferenced content.
+`blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes. An oversized required runner result uses this same content-addressed store, and the runner reads and verifies it in bounded parts. It does not copy session history into runner resume state. `run_view_content` separately keeps server-generated large view values reachable for the life of the run, including aggregate outputs that do not exist as one source record. The server creates this link before it sends a content reference. Deleting the run removes the link, and normal blob pruning can then remove unreferenced content.
 
 Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Opening the database never deletes blobs. The explicit prune command removes unreferenced blobs after it deletes safe old run trees.
 
@@ -168,7 +170,7 @@ An agent definition records `expectedOutput` as either a submitted-output descri
 
 A completed interactive assistant-message attempt stores the accepted visible text as its node output. Its small receipt keeps the text digest, final Pi session entry ID, optional author-supplied limit, and whether recovery adopted an existing response.
 
-An interrupted assistant-message attempt keeps its attempt ID. The extension adopts a matching durable request and existing Pi branch entry instead of displaying the prompt or accepting the response twice. Submitted and non-agent attempts use a fresh execution attempt after an uncommitted worker exit.
+An interrupted assistant-message attempt keeps its attempt ID. The extension adopts a matching durable request and existing Pi branch entry instead of displaying the prompt or accepting the response twice. Submitted and non-agent attempts use a fresh execution attempt after an uncommitted runner exit.
 
 ## Write contract
 
@@ -201,13 +203,13 @@ A TypeScript write permit carries the expected facts between layers. It is not a
 Reading or finding a row never gives write authority.
 
 - A run owner may advance the run, apply automatic decision policy, create its continuation, settle its parent, and complete its queue work.
-- A controller claim owner may update controller status, reserve effects, and start child workflows for that resource.
+- A resource manager claim owner may update resource manager status, reserve effects, and start child workflows for that resource.
 - A verified human channel actor may submit one answer candidate for the named decision. It does not gain run ownership.
-- The host-owned channel adapter path may update only its channel cursor, decision delivery and settlement records, and exact managed effects.
+- The server-owned channel adapter path may update only its channel cursor, decision delivery and settlement records, and exact managed effects.
 - Control commands have narrow explicit operations, such as requesting cancellation or deletion.
 - Model-originated workflow answers cannot resolve protected human decisions.
 
-The global host is the sole live database owner and the normal state writer. Its protected stores check ownership and renew the exact live claim in the same transaction as the write. A stale or expired owner cannot renew itself. Pi extensions, CLI commands, Herdr adapters, and the Rust `piw` program use the versioned client protocol for live reads and controls. They do not open the active database. Only explicit inactive backup verification remains a direct read-only SQLite operation.
+The global server is the sole live database owner and the normal state writer. Its protected stores check ownership and renew the exact live claim in the same transaction as the write. A stale or expired owner cannot renew itself. Pi extensions, CLI commands, Herdr adapters, and the Rust `piw` program use the versioned client protocol for live reads and controls. They do not open the active database. Only explicit inactive backup verification remains a direct read-only SQLite operation.
 
 ## Competing outcomes
 
@@ -219,15 +221,15 @@ A deadline with a validated default response is timeout-policy acceptance. It ca
 
 Late or repeated commands return or adopt the durable winner. They do not overwrite it.
 
-The same rule applies to run terminal outcomes, continuation admission, queue settlement, controller effects, retry scheduling, channel settlement, and workflow-turn reports through their domain constraints and expected revisions. A matching turn report adopts the saved ownership result. A different report for the same turn ID remains a conflict.
+The same rule applies to run terminal outcomes, continuation admission, queue settlement, resource manager effects, retry scheduling, channel settlement, and workflow-turn reports through their domain constraints and expected revisions. A matching turn report adopts the saved ownership result. A different report for the same turn ID remains a conflict.
 
 ## Read contract
 
-Durable status is a pure projection of domain rows, immutable facts, current leases, effect results, and exact workflow-turn start and end reports. The host uses these facts to produce one live run view. An open workflow turn can change display status only. It cannot change workflow authority. Every renderer consumes the host-produced display status and allowed controls without running another status reducer.
+Durable status is a pure projection of domain rows, immutable facts, current leases, effect results, and exact workflow-turn start and end reports. The server uses these facts to produce one live run view. An open workflow turn can change display status only. It cannot change workflow authority. Every renderer consumes the server-produced display status and allowed controls without running another status reducer.
 
 A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
 
-`workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the continuation-chain member that accepted them; rows are not rewritten when the chain continues. The host walks the chain to find its final outcome. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
+`workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the continuation-chain member that accepted them; rows are not rewritten when the chain continues. The server walks the chain to find its final outcome. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
 
 - A terminal run fact overrides stale message state and has no open workflow turn.
 - An accepted decision is accepted even if its continuation effect is still pending.
@@ -239,9 +241,9 @@ Read paths do not repair state. Owner reconcilers apply pending effects and writ
 
 ## Projects and concurrency
 
-All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped controller and run queries use that key. One global host owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/host/`. A second live host is rejected even when it was started from another project.
+All projects use the same file. `projects` stores a stable ID and canonical path. Project-scoped resource manager and run queries use that key. One global server owns the file for the user installation. Its socket, lock, and exact child-process registry are under `~/.pi/agent/workflows/host/`. A second live server is rejected even when it was started from another project.
 
-SQLite WAL keeps bounded projection reads consistent with commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions. Production clients receive revisioned snapshots, patches, and pages from the host instead of opening concurrent SQLite readers.
+SQLite WAL keeps bounded projection reads consistent with commits. Writers are serialized by SQLite and must keep transactions short. Hashing, model calls, shell work, and external requests happen outside write transactions. Production clients receive revisioned snapshots, patches, and pages from the server instead of opening concurrent SQLite readers.
 
 This contract is for local storage on one machine. It does not claim distributed consensus or network-filesystem safety.
 
@@ -268,15 +270,15 @@ pi-workflows state prune --before 2026-08-01T00:00:00Z --dry-run
 pi-workflows state prune --before 2026-08-01T00:00:00Z --backup /absolute/path/to/before-prune.sqlite --apply
 ```
 
-These commands send maintenance operations to the host when they target the active database. Only `pi-workflows state verify` with an explicit inactive backup opens SQLite in the command process. It rejects the active database, including another path to the same file.
+These commands send maintenance operations to the server when they target the active database. Only `pi-workflows state verify` with an explicit inactive backup opens SQLite in the command process. It rejects the active database, including another path to the same file.
 
 `status` reports only safe counts, file size, active leases, and unsettled effects.
 It does not print actor IDs, channel references, payloads, or credentials.
 
-`prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, and refuses trees with live queues, active leases, unsettled effects, controller references, channel references, or step links from runs outside the tree. It deletes the safe aggregates, removes blobs with no remaining foreign-key reference, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. Pi Workflows never runs prune at startup.
+`prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, and refuses trees with live queues, active leases, unsettled effects, managed resource references, channel references, or step links from runs outside the tree. It deletes the safe aggregates, removes blobs with no remaining foreign-key reference, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. Pi Workflows never runs prune at startup.
 
 ## Alpha cutover
 
-The persisted-state alpha boundary is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import. No direct live-state client, replay server reader, or Rust SQLite fallback remains outside the host.
+The persisted-state alpha boundary is a hard cut. Pi Workflows has no normal reader or writer for older live storage. It does not use dual reads, dual writes, aliases, versioned state roots, or automatic import. No direct live-state client, replay server reader, or Rust SQLite fallback remains outside the server.
 
 Older state remains untouched. Pi Workflows fails before mutation with this instruction: “Pi Workflows durable state is incompatible. Back up and move state.sqlite with its -wal and -shm files, then start Pi Workflows to create a new state.sqlite database. The incompatible state was not changed.”

@@ -118,7 +118,7 @@ includes:
 - Workflow resolution and definition validation.
 - Declared input validation.
 - Parent checkpoint and source checks for continuations.
-- Controller-store access.
+- ResourceManager-store access.
 - Existing active or queued session reservation.
 - Pending final presentation conflicts.
 
@@ -275,7 +275,7 @@ can correct it without including secret values.
 
 ### 1. Replace the alpha controller-store layout
 
-Update `src/controllers/sqlite.ts` and its exported queue and notification types.
+Update `src/resource-managers/sqlite.ts` and its exported queue and notification types.
 
 - Keep `CONTROLLER_STORE_SCHEMA` at `pi-workflows.controller-store.v1`.
 - Change `SCHEMA_SQL` directly.
@@ -316,8 +316,8 @@ Preparation owns resolution, validation, run ID allocation, immutable source ide
 digest, and reservation. Activation owns claims, engine construction, recorder setup, `activeRun`,
 running state, and executor release.
 
-Controller child workflows remain on their controller scheduler path. Share pure workflow-resolution
-helpers where useful, but do not make controller children wait for an interactive agent boundary.
+ResourceManager child workflows remain on their controller scheduler path. Share pure workflow-resolution
+helpers where useful, but do not make resource manager children wait for an interactive agent boundary.
 
 ### 4. Change the start tool
 

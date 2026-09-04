@@ -53,7 +53,7 @@ function repairObservation() {
       },
       defect: {
         sharedCodeOrDataDefect: true,
-        paidWorkers: "stopped",
+        paidRunners: "stopped",
         evidence: "No affected paid workers are active.",
       },
       verification: "Run test-a and confirm it passes.",

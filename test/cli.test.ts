@@ -14,9 +14,9 @@ describe("pi-workflows CLI", () => {
 
   it("does not accept old storage path options", () => {
     expect(() => parseCliArgs(["runs", "--dir", "/tmp/runs"])).toThrow(/Unknown argument/);
-    expect(() => parseCliArgs(["controllers", "--controller-dir", "/tmp/controllers"])).toThrow(
-      /Unknown argument/,
-    );
+    expect(() =>
+      parseCliArgs(["resource-managers", "--resource-manager-dir", "/tmp/resource-managers"]),
+    ).toThrow(/Unknown argument/);
   });
 
   it("parses state maintenance commands", () => {
@@ -52,20 +52,22 @@ describe("pi-workflows CLI", () => {
     );
   });
 
-  it("parses controller and host commands", () => {
-    expect(parseCliArgs(["controller", "jobs", "one"])).toMatchObject({
-      command: "controller",
-      controllerName: "jobs",
+  it("parses resource manager and server commands", () => {
+    expect(parseCliArgs(["resource-manager", "jobs", "one"])).toMatchObject({
+      command: "resource-manager",
+      resourceManagerName: "jobs",
       resourceKey: "one",
     });
-    expect(parseCliArgs(["host", "run", "--", "--model", "test"])).toEqual({
-      command: "host",
-      hostAction: "run",
+    expect(parseCliArgs(["server", "run", "--", "--model", "test"])).toEqual({
+      command: "server",
+      serverAction: "run",
       once: false,
       json: false,
       piArgs: ["--model", "test"],
     });
-    expect(() => parseCliArgs(["host", "run", "--project", "/tmp/project"])).toThrow(/global host/);
+    expect(() => parseCliArgs(["server", "run", "--project", "/tmp/project"])).toThrow(
+      /global server/,
+    );
   });
 
   it("rejects a relative prune backup path", async () => {

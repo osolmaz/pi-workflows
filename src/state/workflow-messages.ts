@@ -92,7 +92,7 @@ type WorkflowTurnRow = {
   endedAt: number | null;
 };
 
-/** Durable workflow content that the host requires Pi to add to one origin session. */
+/** Durable workflow content that the server requires Pi to add to one origin session. */
 export class WorkflowMessageStore {
   constructor(readonly state: StateDatabase) {}
 

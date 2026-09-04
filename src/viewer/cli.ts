@@ -12,35 +12,35 @@ import { renderClientView, runViewer } from "./tui.js";
 
 const CLI_CLIENT_ID = "pi-workflows-cli";
 
-const USAGE = `pi-workflows — workflow runs and controller resources
+const USAGE = `pi-workflows — workflow runs and managed resources
 
 Usage:
   pi-workflows view [runId] [--once]
   pi-workflows runs
-  pi-workflows controllers
-  pi-workflows controller <controller> <key>
+  pi-workflows resource-managers
+  pi-workflows resource-manager <resource-manager> <key>
   pi-workflows state status
   pi-workflows state verify [inactive-backup]
   pi-workflows state backup <destination>
   pi-workflows state prune --before <timestamp> --dry-run
   pi-workflows state prune --before <timestamp> --backup <absolute-path> --apply
-  pi-workflows host start
-  pi-workflows host status
-  pi-workflows host stop
-  pi-workflows host run [-- <extra pi args>]
+  pi-workflows server start
+  pi-workflows server status
+  pi-workflows server stop
+  pi-workflows server run [-- <extra pi args>]
   pi-workflows herdr sync [--json]
   pi-workflows herdr setup [--json]
 
-Active state is available only through the package-owned workflow host.
+Active state is available only through the package-owned workflow server.
 `;
 
 export type CliArgs = {
   command: string;
   runId?: string;
-  controllerName?: string;
+  resourceManagerName?: string;
   resourceKey?: string;
   herdrAction?: string;
-  hostAction?: "start" | "status" | "stop" | "run";
+  serverAction?: "start" | "status" | "stop" | "run";
   stateAction?: "status" | "verify" | "backup" | "prune";
   backupDestination?: string;
   verifyBackup?: string;
@@ -55,9 +55,16 @@ export function parseCliArgs(argv: string[]): CliArgs {
   const args = [...argv];
   const command = args[0] && !args[0].startsWith("-") ? (args.shift() as string) : "view";
   if (
-    !["view", "runs", "controllers", "controller", "state", "host", "herdr", "help"].includes(
-      command,
-    )
+    ![
+      "view",
+      "runs",
+      "resource-managers",
+      "resource-manager",
+      "state",
+      "server",
+      "herdr",
+      "help",
+    ].includes(command)
   ) {
     throw new Error(`Unknown command: ${command}`);
   }
@@ -87,23 +94,24 @@ export function parseCliArgs(argv: string[]): CliArgs {
   }
 
   if (command !== "herdr" && json) throw new Error("--json is available only for herdr sync");
-  if (command === "host") {
-    if (project !== undefined) throw new Error("The global host does not accept --project");
+  if (command === "server") {
+    if (project !== undefined) throw new Error("The global server does not accept --project");
     const action = positionals[0];
     if (action !== "start" && action !== "status" && action !== "stop" && action !== "run") {
-      throw new Error("host requires start, status, stop, or run");
+      throw new Error("server requires start, status, stop, or run");
     }
-    if (positionals.length !== 1) throw new Error("host accepts one lifecycle action");
+    if (positionals.length !== 1) throw new Error("server accepts one lifecycle action");
     if (piArgs.length > 0 && action !== "run") {
-      throw new Error("Extra Pi arguments are available only for host run");
+      throw new Error("Extra Pi arguments are available only for server run");
     }
-    return { command, hostAction: action, once, json, piArgs };
+    return { command, serverAction: action, once, json, piArgs };
   }
-  if (command === "controller") {
-    if (positionals.length !== 2) throw new Error("controller requires <controller> and <key>");
+  if (command === "resource-manager") {
+    if (positionals.length !== 2)
+      throw new Error("resource-manager requires <resource-manager> and <key>");
     return {
       command,
-      controllerName: positionals[0] as string,
+      resourceManagerName: positionals[0] as string,
       resourceKey: positionals[1] as string,
       once,
       json,
@@ -188,8 +196,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   try {
-    if (args.command === "host") {
-      return await runHost(args.hostAction as "start" | "status" | "stop" | "run", args.piArgs);
+    if (args.command === "server") {
+      return await runServer(args.serverAction as "start" | "status" | "stop" | "run", args.piArgs);
     }
     if (args.command === "herdr") {
       const result = syncHerdrPlugin(packageRoot());
@@ -223,13 +231,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         printJsonLines(runs);
         return 0;
       }
-      if (args.command === "controllers" || args.command === "controller") {
+      if (args.command === "resource-managers" || args.command === "resource-manager") {
         const response = await client.request({
-          operation: args.command === "controllers" ? "controller.list" : "controller.get",
+          operation:
+            args.command === "resource-managers" ? "resourceManager.list" : "resourceManager.get",
           payload: {
             projectPath: process.cwd(),
-            ...(args.command === "controller"
-              ? { controller: args.controllerName as string, key: args.resourceKey as string }
+            ...(args.command === "resource-manager"
+              ? {
+                  resourceManager: args.resourceManagerName as string,
+                  key: args.resourceKey as string,
+                }
               : {}),
           },
         });
@@ -298,19 +310,19 @@ async function runStateCommand(client: WorkflowClient, args: CliArgs): Promise<v
   process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
 }
 
-async function runHost(
+async function runServer(
   action: "start" | "status" | "stop" | "run",
   piArgs: string[] | undefined,
 ): Promise<number> {
   if (action === "run") {
-    const { WorkflowHost } = await import("../host/runner.js");
-    const host = new WorkflowHost({
+    const { WorkflowServer } = await import("../server/server.js");
+    const server = new WorkflowServer({
       piArgs: piArgs ?? [],
-      onLog: (message) => process.stdout.write(`[host] ${message}\n`),
+      onLog: (message) => process.stdout.write(`[server] ${message}\n`),
     });
-    await host.start();
+    await server.start();
     await new Promise<void>((resolve) => {
-      const shutdown = () => void host.stop().then(resolve);
+      const shutdown = () => void server.stop().then(resolve);
       process.once("SIGTERM", shutdown);
       process.once("SIGINT", shutdown);
     });
@@ -321,7 +333,9 @@ async function runHost(
     const response =
       action === "start"
         ? await client.ensureRunning()
-        : await client.request({ operation: action === "status" ? "host.status" : "host.stop" });
+        : await client.request({
+            operation: action === "status" ? "server.status" : "server.stop",
+          });
     process.stdout.write(`${JSON.stringify(response.receipt ?? {})}\n`);
     return response.outcome === "accepted" || response.outcome === "adopted" ? 0 : 1;
   } finally {
@@ -364,7 +378,7 @@ function printJsonLines(value: JsonValue): void {
 
 function requireAccepted(response: { outcome: string; error?: string }): void {
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
-    throw new Error(response.error ?? `Workflow host returned ${response.outcome}`);
+    throw new Error(response.error ?? `Workflow server returned ${response.outcome}`);
   }
 }
 

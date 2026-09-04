@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
+import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
@@ -21,7 +21,7 @@ const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).di
 async function setup() {
   const projectPath = await makeTempDir("run-fence-project");
   const databasePath = path.join(await makeTempDir("run-fence-state"), "state.sqlite");
-  const queue = new SqliteControllerStore(databasePath, { projectPath });
+  const queue = new SqliteResourceManagerStore(databasePath, { projectPath });
   return { queue, databasePath };
 }
 

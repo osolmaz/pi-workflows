@@ -62,7 +62,7 @@ Fallback eligibility is separate from pending state. An intent can remain pendin
 | Terminal workflow failure after an active turn abort         | Yes              | No                                | Terminal handling updates the existing intent and makes it eligible.                                      |
 | Workflow reports started, then crashes asynchronously        | Yes              | Yes, after durable failure        | Covers failures before the first workflow prompt, including invalid runtime input discovered after start. |
 | Queued launch activation fails                               | Yes              | Yes, after durable launch failure | Replaces the `launch_failure` notification trigger.                                                       |
-| Controller stops an active workflow agent turn               | Yes              | No                                | Terminal or handoff policy decides eligibility.                                                           |
+| ResourceManager stops an active workflow agent turn          | Yes              | No                                | Terminal or handoff policy decides eligibility.                                                           |
 | Queue claim is lost during an active agent turn              | Yes              | No                                | Treat as ownership transfer, not failure.                                                                 |
 | Completed or waiting run has a presentation                  | No new intent    | Not applicable                    | The presentation resolves an existing intent when present.                                                |
 | Direct `/workflow cancel`                                    | No               | Not applicable                    | The user explicitly requested control and no automatic model turn.                                        |
@@ -74,7 +74,7 @@ A later distinct event can create a new intent. Repeated handling of the same so
 
 ## Storage
 
-Add `workflow_turn_intents` to the existing `SqliteControllerStore` database. Keep the database path and `pi-workflows.controller-store.v1` schema identifier.
+Add `workflow_turn_intents` to the existing `SqliteResourceManagerStore` database. Keep the database path and `pi-workflows.controller-store.v1` schema identifier.
 
 The existing `workflow_notifications` table remains a passive outbox for workflow-authored `progress` and `final` reports. It cannot represent this lifecycle clearly because it has one delivery transition and identifies node notification output. Adding natural resolution, fallback eligibility, and competing claims to that table would mix two different contracts.
 
@@ -316,7 +316,7 @@ Do not publish a package or create a release without separate authorization.
 ## Contract impact
 
 - **Session state:** internal workflow messages gain an optional `turnIntentId`; fallback uses `pi-workflows-deferred-turn`.
-- **Controller storage:** add `workflow_turn_intents`; restrict workflow notifications to passive `progress` and `final` kinds.
+- **ResourceManager storage:** add `workflow_turn_intents`; restrict workflow notifications to passive `progress` and `final` kinds.
 - **Run bundles:** unchanged.
 - **Workflow engine:** unchanged.
 - **Workflow author API:** unchanged.

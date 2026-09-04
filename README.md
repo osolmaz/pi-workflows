@@ -73,19 +73,19 @@ The npm package also includes the simpler `pi-workflows` snapshot viewer. To
 link that command from a clone, run `npm install && npm run build && npm link`,
 or run it in place with `npx tsx src/viewer/cli.ts`.
 
-All live workflow and controller state uses one local database:
+All live workflow and resource manager state uses one local database:
 
 ```text
 ~/.pi/agent/workflows/state.sqlite
 ```
 
-Runs, decisions, queues, claims, controllers, session capture, notifications,
-channel transport state, effects, and large text values all live there. The
-package-owned host is the only production process that opens the active
-database. The extension, CLI, Herdr adapter, and `piw` use the same versioned
-local client protocol. See [SQLite state](docs/SQLITE_STATE.md).
+Runs, decisions, queues, claims, managed resources, session capture,
+notifications, channel transport state, effects, and large text values all live
+there. The package-owned server is the only production process that opens the
+active database. The extension, CLI, Herdr adapter, and `piw` use the same
+versioned local client protocol. See [SQLite state](docs/SQLITE_STATE.md).
 
-One host-owned workflow-message path handles steps, reminders, resumed work,
+One server-owned workflow-message path handles steps, reminders, resumed work,
 human decisions, notifications, terminal results, and follow-up prompts. The
 shared extension coordinator reports exact Pi branches and model turns, so an
 active workflow turn stays `running`, repeated polling cannot send the same
@@ -120,8 +120,8 @@ Then, from any Pi conversation:
 ```
 
 `/workflow` with no arguments lists discovered workflows. `/workflow pause`
-stops the worker and parks the run at its last durable boundary. `/workflow
-resume` starts a new worker generation from that boundary. `/workflow cancel`
+stops the runner and parks the run at its last durable boundary. `/workflow
+resume` starts a new runner generation from that boundary. `/workflow cancel`
 stops the active run; `/workflow cancel <run-id>` can also cancel a named stale
 run when no live owner holds it. A checkpoint waits until `/workflow answer
 <json-or-text>` supplies its input.
@@ -191,11 +191,11 @@ decision. A person must answer that request through `/workflow answer` in the
 origin Pi session. The model uses `update` for durable progress from the current
 attempt and `submit` for structured step output. Assistant-message steps require
 a normal visible assistant response instead. The extension sends all lifecycle
-mutations to the host and reports success only after the host commits them.
+mutations to the server and reports success only after the server commits them.
 
 A model-started workflow is saved before the tool reports it as accepted, so
 the returned run ID works with `workflow status` and `workflow cancel`
-immediately. Duplicate host commands and step submissions adopt their stored
+immediately. Duplicate server commands and step submissions adopt their stored
 receipts instead of repeating a committed transition.
 
 pi-workflows includes a [monitor](docs/MONITOR.md) workflow for plain-language
@@ -215,9 +215,9 @@ target again after repair and stops when the same issue and target evidence
 return without progress. Project and global workflows can replace the built-in
 `monitor` by using the same file name.
 
-A monitor occupies the session's one active workflow slot. If its worker or the
-host stops during the shell wait, the run parks and repeats that idempotent wait
-node when the host resumes it.
+A monitor occupies the session's one active workflow slot. If its runner or the
+server stops during the shell wait, the run parks and repeats that idempotent wait
+node when the server resumes it.
 
 Because interactive agent steps run in the origin conversation, you can have a
 long discussion first and then trigger a workflow that builds on it. The
@@ -234,8 +234,8 @@ earlier `autodevise` name, and the old command and export are not retained.
 ## Viewers
 
 Runs persist in `~/.pi/agent/workflows/state.sqlite` as they execute. The global
-host is the only process that opens this database. Viewers use the shared client
-protocol and re-render from the host's run view on every state change:
+server is the only process that opens this database. Viewers use the shared client
+protocol and re-render from the server's run view on every state change:
 
 ```bash
 pi-workflows view          # interactive picker, live updates
@@ -270,7 +270,7 @@ Run the same command after a pi-workflows update. `pi-workflows herdr setup`
 remains an alias for existing installations.
 
 When Pi runs inside Herdr, the workflow widget shows a `Ctrl+Shift+R piw`
-shortcut. The shortcut opens the exact host-owned run view and lets you choose
+shortcut. The shortcut opens the exact server-owned run view and lets you choose
 a split, tab, or new workspace. `/piw` opens the same menu, and `/piw right`,
 `/piw below`, `/piw left`, `/piw above`, `/piw tab`, or `/piw workspace`
 selects a placement directly. If a viewer for that run already exists,
@@ -303,21 +303,21 @@ including progress counts and ETA data.
 See [docs/workflows.md](docs/workflows.md) for the full authoring reference
 and [docs/SQLITE_STATE.md](docs/SQLITE_STATE.md) for the on-disk run format.
 
-## Controllers
+## Resource managers
 
-Controllers keep long-running automation aligned with current external state. They store desired state in `spec` and report observed state through conditions and `status`, then reconcile a deduplicated resource key whenever an event or retry makes it ready.
+Resource managers keep long-running automation aligned with current external state. They store desired state in `spec` and report observed state through conditions and `status`, then reconcile a deduplicated resource key whenever an event or retry makes it ready.
 
-Put `*.controller.ts` files in `.pi/controllers/` or `~/.pi/agent/controllers/`. Import the API from `@osolmaz/pi-workflows/controllers`:
+Put `*.resource-manager.ts` files in `.pi/resource-managers/` or `~/.pi/agent/resource-managers/`. Import the API from `@osolmaz/pi-workflows/resource-managers`:
 
 ```typescript
-import { conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
+import { conditionTrue, defineResourceManager } from "@osolmaz/pi-workflows/resource-managers";
 
-export default defineController({
+export default defineResourceManager({
   name: "example",
   initialStatus: () => ({ phase: "new" }),
   reconcile: (ctx, resource) =>
     ctx.settled({
-      controllerStatus: { phase: "done" },
+      resourceManagerStatus: { phase: "done" },
       conditions: [conditionTrue("Ready", "Complete")],
     }),
 });
@@ -326,41 +326,41 @@ export default defineController({
 Apply and inspect resources from Pi:
 
 ```text
-/controller apply example item-1 {"enabled":true}
-/controller get example item-1
-/controller reconcile example item-1
+/resource-manager apply example item-1 {"enabled":true}
+/resource-manager get example item-1
+/resource-manager reconcile example item-1
 ```
 
-The extension resolves controller initialization in a child process, then sends the declarative resource to the global host. Controller reconciliation also runs in supervised children. The standalone CLI provides read-only views with `pi-workflows controllers` and `pi-workflows controller <controller> <key>`. See [docs/CONTROLLERS.md](docs/CONTROLLERS.md) for reconciliation, queue, effect, and child workflow semantics.
+The extension resolves resource manager initialization in a child process, then sends the declarative resource to the global server. Resource manager reconciliation also runs in supervised resource runners. The standalone CLI provides read-only views with `pi-workflows resource-managers` and `pi-workflows resource-manager <resource-manager> <key>`. See [docs/RESOURCE_MANAGERS.md](docs/RESOURCE_MANAGERS.md) for reconciliation, queue, effect, and child workflow semantics.
 
 ## Always-on workflows
 
 Every workflow enters one durable global queue. The extension starts the
-package-owned host on demand. Closing Pi does not stop a compute, action, or
+package-owned server on demand. Closing Pi does not stop a compute, action, or
 shell node. When a run reaches an interactive agent, assistant-message, or
-human-decision step, the host parks it and saves a request for the origin Pi
+human-decision step, the server parks it and saves a request for the origin Pi
 session. Reopening that session presents the same request once. A protected
 human decision does not start a model turn; a person answers it with
 `/workflow answer`.
 
-The host also reconciles controllers. Controller child workflows without an
-origin session can use headless `pi --mode rpc` agent steps. A child that needs
-a visible assistant response must have an origin-session binding.
+The server also reconciles managed resources. Resource manager child workflows
+without an origin session can use headless `pi --mode rpc` agent steps. A child
+that needs a visible assistant response must have an origin-session binding.
 
 Use the CLI to inspect or control the on-demand process:
 
 ```bash
-pi-workflows host start
-pi-workflows host status
-pi-workflows host stop
-pi-workflows host run  # stay attached; stop with Ctrl-C
+pi-workflows server start
+pi-workflows server status
+pi-workflows server stop
+pi-workflows server run  # stay attached; stop with Ctrl-C
 ```
 
-These commands manage one host for the complete user database, not one host per
-project. They do not install an operating-system service. A new host reaps exact
-orphan process identities and resumes safe work from committed state. See
+These commands manage one server for the complete user database, not one server
+per project. They do not install an operating-system service. A new server reaps
+exact orphan process identities and resumes safe work from committed state. See
 [docs/workflows.md](docs/workflows.md#durable-runs-parking-and-resume) and
-[docs/WORKFLOW_HOST.md](docs/WORKFLOW_HOST.md).
+[docs/WORKFLOW_SERVER.md](docs/WORKFLOW_SERVER.md).
 
 ## Examples
 
@@ -401,7 +401,7 @@ workflow examples. Copy any of them into `.pi/workflows/` to use them:
   result plateaus or a diverse generation all fails. Conclusions are
   written before the winner is promoted out of the loop directory.
 
-The controller example at `examples/controllers/pull-request.controller.ts`
+The resource manager example at `examples/resource-managers/pull-request.resource-manager.ts`
 shows child repair work and check polling. It also uses expected-head guards
 and recoverable merge effects.
 

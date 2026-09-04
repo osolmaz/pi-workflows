@@ -20,7 +20,7 @@ type QueuedSessionDelivery = {
 const SESSION_ENTRY_CONFIRMATION_MS = 10_000;
 
 /**
- * Delivers at most one host-owned message into a Pi session at a time.
+ * Delivers at most one server-owned message into a Pi session at a time.
  *
  * Pi's public sendMessage API does not return the saved session entry ID. Keep
  * the claimed delivery in memory until that entry becomes observable. Polling
@@ -54,7 +54,7 @@ export class SessionDeliveryCoordinator {
           return;
         }
 
-        // Remember the host claim before the final idle check. If Pi starts a
+        // Remember the server claim before the final idle check. If Pi starts a
         // turn while the claim request is in flight, a later poll can use this
         // exact still-live claim instead of making a conflicting second claim.
         this.claimed = delivery;

@@ -10,7 +10,7 @@ import { buildWidgetView } from "./widget.js";
 const WIDGET_KEY = "pi-workflows";
 const WIDGET_SCROLL_STEP = 3;
 
-/** Client-backed projection of the host-owned run into the origin Pi session. */
+/** Client-backed projection of the server-owned run into the origin Pi session. */
 export class SessionWorkflowView {
   private session: WorkflowSessionView | null = null;
   private scroll: number | null = null;

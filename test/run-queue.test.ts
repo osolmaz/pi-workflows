@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import rawWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
-import { HostStateStore } from "../src/host/state.js";
+import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
+import { ServerStateStore } from "../src/server/state.js";
 import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
@@ -17,12 +17,12 @@ async function setup() {
   const projectPath = await makeTempDir("run-queue-project");
   const databasePath = path.join(await makeTempDir("run-queue-state"), "state.sqlite");
   return {
-    store: new SqliteControllerStore(databasePath, { projectPath }),
+    store: new SqliteResourceManagerStore(databasePath, { projectPath }),
     projectPath,
   };
 }
 
-function reserve(store: SqliteControllerStore, runId = "run-1") {
+function reserve(store: SqliteResourceManagerStore, runId = "run-1") {
   return store.reserveWorkflowRun({
     runId,
     workflowName: "echo",
@@ -285,7 +285,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(claimed).toMatchObject({ runId: "control-run", status: "queued" });
     expect(store.getWorkflowRun("control-run")?.status).toBe("queued");
 
-    const global = new SqliteControllerStore(store.filePath, { readOnly: true, global: true });
+    const global = new SqliteResourceManagerStore(store.filePath, { readOnly: true, global: true });
     expect(global.listWorkflowRuns().map((run) => run.runId)).toContain("control-run");
     global.close();
     store.close();
@@ -321,8 +321,8 @@ describe("workflow run queue in canonical SQLite", () => {
          ) VALUES (?, ?, ?, 1, 'agent', 'waiting', ?, ?)`,
       )
       .run("pause-attempt", "pause-run", "echo", now, now);
-    const hostState = new HostStateStore(store.filePath, { state: store.state });
-    hostState.createInteractiveRequest({
+    const serverState = new ServerStateStore(store.filePath, { state: store.state });
+    serverState.createInteractiveRequest({
       requestId: "pause-request",
       runId: "pause-run",
       attemptId: "pause-attempt",
@@ -577,7 +577,7 @@ describe("workflow run queue in canonical SQLite", () => {
     });
     expect(claimed).toBeDefined();
     expect(
-      store.parkWorkflowRunForWorkerNoProgress({
+      store.parkWorkflowRunForRunnerNoProgress({
         runId: "run-1",
         claimToken: "token",
         detail: "worker exited before workflow progress",
@@ -585,7 +585,7 @@ describe("workflow run queue in canonical SQLite", () => {
     ).toBe(true);
     expect(store.getWorkflowRun("run-1")).toMatchObject({
       status: "parked",
-      errorCode: "workerNoProgress",
+      errorCode: "runnerNoProgress",
       errorMessage: "worker exited before workflow progress",
     });
     expect(
@@ -651,8 +651,8 @@ describe("workflow run queue in canonical SQLite", () => {
       leaseMs: 1_000,
       now: new Date(now).toISOString(),
     });
-    const hostState = new HostStateStore(store.filePath, { state: store.state });
-    const message = hostState.workflowMessages.create({
+    const serverState = new ServerStateStore(store.filePath, { state: store.state });
+    const message = serverState.workflowMessages.create({
       workflowMessageId: "cancel-message",
       runId: "run-1",
       targetSessionId: "session-1",
@@ -669,13 +669,13 @@ describe("workflow run queue in canonical SQLite", () => {
       },
       now,
     });
-    hostState.workflowMessages.adoptBranch(
+    serverState.workflowMessages.adoptBranch(
       "session-1",
       [{ workflowMessageId: message.workflowMessageId, piSessionEntryId: "entry-1" }],
       new Set([message.workflowMessageId]),
       now,
     );
-    hostState.workflowMessages.startTurn({
+    serverState.workflowMessages.startTurn({
       workflowMessageId: message.workflowMessageId,
       workflowTurnId: "cancel-turn",
       runId: "run-1",
@@ -705,7 +705,7 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(
       new WorkflowRunStore(store.filePath, { state: store.state }).readRun("run-1")?.state,
     ).toMatchObject({ status: "cancelled", error: "Workflow run cancelled" });
-    expect(hostState.workflowMessages.requireTurn("cancel-turn")).toMatchObject({
+    expect(serverState.workflowMessages.requireTurn("cancel-turn")).toMatchObject({
       state: "ended",
       stopReason: "lost",
     });

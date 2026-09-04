@@ -9,8 +9,8 @@ import { clientSocketPath } from "../../src/client/protocol.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const piBin = path.join(repoRoot, "node_modules", ".bin", "pi");
-const HOST_STOP_TIMEOUT_MS = 5_000;
-const tempFixtures: Array<{ directory: string; hostExpected: boolean }> = [];
+const SERVER_STOP_TIMEOUT_MS = 5_000;
+const tempFixtures: Array<{ directory: string; serverExpected: boolean }> = [];
 
 type CommandInfo = {
   name: string;
@@ -19,7 +19,7 @@ type CommandInfo = {
 
 async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-workflows-package-"));
-  tempFixtures.push({ directory: dir, hostExpected: false });
+  tempFixtures.push({ directory: dir, serverExpected: false });
   return dir;
 }
 
@@ -91,7 +91,7 @@ async function getCommands(args: string[], tempDir: string): Promise<CommandInfo
       }
       const fixture = tempFixtures.find(({ directory }) => directory === tempDir);
       if (fixture !== undefined) {
-        fixture.hostExpected = response.data.commands.some(({ name }) => name === "workflow");
+        fixture.serverExpected = response.data.commands.some(({ name }) => name === "workflow");
       }
       resolve(response.data.commands);
     });
@@ -104,18 +104,18 @@ function command(commands: CommandInfo[], name: string): CommandInfo | undefined
   return commands.find((entry) => entry.name === name);
 }
 
-async function stopPackageHost(directory: string): Promise<void> {
+async function stopPackageServer(directory: string): Promise<void> {
   const databasePath = path.join(directory, ".pi", "agent", "workflows", "state.sqlite");
   const endpoint = clientSocketPath(databasePath);
   const lockPath = path.join(path.dirname(endpoint), "host.lock.json");
-  const deadline = Date.now() + HOST_STOP_TIMEOUT_MS;
+  const deadline = Date.now() + SERVER_STOP_TIMEOUT_MS;
   const client = new WorkflowClient({ databasePath });
   try {
     for (;;) {
       try {
-        const response = await client.request({ operation: "host.stop" });
+        const response = await client.request({ operation: "server.stop" });
         if (response.outcome !== "accepted") {
-          throw new Error(response.error ?? "Temporary workflow host rejected stop");
+          throw new Error(response.error ?? "Temporary workflow server rejected stop");
         }
         break;
       } catch (error) {
@@ -141,12 +141,12 @@ async function stopPackageHost(directory: string): Promise<void> {
     if (active.every((value) => !value)) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`Temporary workflow host did not stop: ${endpoint}`);
+  throw new Error(`Temporary workflow server did not stop: ${endpoint}`);
 }
 
 afterEach(async () => {
   for (const fixture of tempFixtures.splice(0)) {
-    if (fixture.hostExpected) await stopPackageHost(fixture.directory);
+    if (fixture.serverExpected) await stopPackageServer(fixture.directory);
     await fs.rm(fixture.directory, { recursive: true, force: true });
   }
 });

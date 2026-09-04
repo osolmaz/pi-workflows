@@ -22,12 +22,12 @@ typescript:
     - from: src/workflows
       allow:
         - src/state
-    # The public local client owns transport envelopes and host startup.
+    # The public local client owns transport envelopes and server startup.
     - from: src/client
       allow:
         - src/state
     # Durable reconciliation may launch finite child workflows, never the reverse.
-    - from: src/controllers
+    - from: src/resource-managers
       allow:
         - src/state
         - src/workflows
@@ -46,37 +46,37 @@ typescript:
       allow:
         - src/state
         - src/workflows
-    # The extension is a host client and draws the widget graph. It never imports host execution code.
+    # The extension is a server client and draws the widget graph. It never imports server execution code.
     - from: src/extension
       allow:
         - src/state
         - src/workflows
         - src/builtins
-        - src/controllers
+        - src/resource-managers
         - src/render
         - src/herdr
         - src/client
         - src/channels
-    # The host runs headlessly; it spawns pi but never embeds it.
-    - from: src/host
+    # The server runs headlessly; it spawns pi but never embeds it.
+    - from: src/server
       allow:
         - src/client
         - src/state
         - src/workflows
         - src/builtins
-        - src/controllers
+        - src/resource-managers
         - src/channels
-    # Herdr setup is a standalone host integration with no engine imports.
+    # Herdr setup is a standalone server integration with no engine imports.
     - from: src/herdr
       allow: []
-    # The viewer only reads run bundles and dispatches host commands; it
+    # The viewer only reads run bundles and dispatches server commands; it
     # must never import the extension.
     - from: src/viewer
       allow:
         - src/state
         - src/workflows
-        - src/controllers
+        - src/resource-managers
         - src/render
         - src/client
-        - src/host
+        - src/server
         - src/herdr

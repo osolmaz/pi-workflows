@@ -314,7 +314,7 @@ The checkpoint continuation is a new stored run, but it is the same logical work
 - A final presentation must settle before the first prompt becomes ready.
 - Workflow failure, timeout, and user cancellation cancel every unsent prompt with a saved reason.
 - A terminal workflow accepts no new prompt, but a repeated request ID can still return its earlier result.
-- A prompt can be removed only before it is sent. A `session` actor can remove only a prompt added by the same session tool source. A verified `human` actor can remove any unsent prompt for that run. Controllers can remove only prompts they added with the same controller resource.
+- A prompt can be removed only before it is sent. A `session` actor can remove only a prompt added by the same session tool source. A verified `human` actor can remove any unsent prompt for that run. Controllers can remove only prompts they added with the same managed resource.
 
 ### Presentation and delivery
 
@@ -404,7 +404,7 @@ Add the three tables described above. Add atomic change, lookup, replay, and ins
 
 ### 5. Bind settings to node attempts
 
-Update `src/workflows/engine.ts`, `src/host/runner.ts`, and `src/host/rpc-executor.ts`. Save and expose one fixed settings value for every attempt.
+Update `src/workflows/engine.ts`, `src/server/runner.ts`, and `src/server/rpc-executor.ts`. Save and expose one fixed settings value for every attempt.
 
 ### 6. Add safe route changes
 
@@ -418,8 +418,8 @@ Update:
 - `src/extension/workflow-tool.ts`
 - `src/extension/index.ts`
 - `src/extension/step-message.ts`
-- `src/controllers/workflows.ts`
-- `src/controllers/types.ts`
+- `src/resource-managers/workflows.ts`
+- `src/resource-managers/types.ts`
 
 Add `change-settings`, `queue-follow-up`, and `remove-follow-up`. Keep source data outside model input. Use provider-compatible string action schemas.
 

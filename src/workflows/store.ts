@@ -156,7 +156,7 @@ export type WorkflowRunTerminalData = {
 
 export type WorkflowRunStoreOptions = {
   authorityProvider?: (runId: string) => RunWriteAuthority | undefined;
-  /** Host-owned projection updates that must commit with each run snapshot. */
+  /** Server-owned projection updates that must commit with each run snapshot. */
   snapshotLifecycle?: (context: {
     runId: string;
     state: WorkflowRunState;
@@ -164,13 +164,13 @@ export type WorkflowRunStoreOptions = {
     database: StateDatabase;
     now: number;
   }) => void;
-  /** The global host may record an attested Pi session after the worker lease ends. */
-  allowHostSessionRecording?: boolean;
+  /** The global server may record an attested Pi session after the runner lease ends. */
+  allowServerSessionRecording?: boolean;
   state?: StateDatabase;
   readOnly?: boolean;
 };
 
-/** The state boundary used by workflow code, including out-of-process workers. */
+/** The state boundary used by workflow code, including out-of-process runners. */
 export interface WorkflowExecutionStore {
   readonly databasePath: string;
   initializeRun(
@@ -496,7 +496,7 @@ export class WorkflowRunStore {
     | ((runId: string) => RunWriteAuthority | undefined)
     | undefined;
   private readonly snapshotLifecycle: WorkflowRunStoreOptions["snapshotLifecycle"];
-  private readonly allowHostSessionRecording: boolean;
+  private readonly allowServerSessionRecording: boolean;
   private readonly contexts = new Map<string, RunContext>();
   private readonly ownsState: boolean;
   private readonly mutations: StateMutationStore;
@@ -505,7 +505,7 @@ export class WorkflowRunStore {
   constructor(databasePath: string = workflowStatePath(), options: WorkflowRunStoreOptions = {}) {
     this.authorityProvider = options.authorityProvider;
     this.snapshotLifecycle = options.snapshotLifecycle;
-    this.allowHostSessionRecording = options.allowHostSessionRecording === true;
+    this.allowServerSessionRecording = options.allowServerSessionRecording === true;
     this.ownsState = options.state === undefined;
     this.state =
       options.state ??
@@ -523,7 +523,7 @@ export class WorkflowRunStore {
     if (this.ownsState) this.state.close();
   }
 
-  /** Host-only synchronization after a queue lifecycle mutation on the run resource. */
+  /** Server-only synchronization after a queue lifecycle mutation on the run resource. */
   synchronizeRevision(runId: string): number {
     const revision = this.resourceRevision(runId);
     const context = this.contexts.get(runId);
@@ -1508,7 +1508,7 @@ export class WorkflowRunStore {
 
   async markRunInterrupted(
     runId: string,
-    reason = "Workflow host stopped before the run finished",
+    reason = "Workflow server stopped before the run finished",
   ): Promise<LoadedWorkflowRun | null> {
     const loaded = this.readRun(runId);
     if (loaded === null || loaded.state.status !== "running") return loaded;
@@ -1546,7 +1546,7 @@ export class WorkflowRunStore {
     );
   }
 
-  /** Host-only synchronous form for an already serialized command transaction. */
+  /** Server-only synchronous form for an already serialized command transaction. */
   publishUpdateSynchronous(
     runId: string,
     state: WorkflowRunState,
@@ -2532,7 +2532,7 @@ export class WorkflowRunStore {
 
   private assertSessionWriteAuthority(runId: string): void {
     const run = this.requireRunRow(runId);
-    if (this.allowHostSessionRecording) return;
+    if (this.allowServerSessionRecording) return;
     this.assertWriteAuthority(run, this.contextFor(runId).revision);
   }
 

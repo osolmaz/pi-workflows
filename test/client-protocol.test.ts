@@ -31,7 +31,7 @@ const request: ClientRequest = {
   type: "request",
   requestId: "request-1",
   clientId: "client-1",
-  operation: "host.status",
+  operation: "server.status",
   idempotencyKey: "request-1",
   payload: {},
 };

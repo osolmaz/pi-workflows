@@ -13,7 +13,7 @@ type SessionCommandContext = {
   coordinatorEpoch: string;
 };
 
-/** Sends bounded session recording batches to the single workflow host writer. */
+/** Sends bounded session recording batches to the single workflow server writer. */
 export class RemoteSessionRecordingStore implements SessionRecordingStore {
   constructor(
     private readonly client: WorkflowClient,
@@ -103,7 +103,7 @@ export class RemoteSessionRecordingStore implements SessionRecordingStore {
       payload: { ...this.context(), action, ...extra },
     });
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
-      throw new Error(response.error ?? "Workflow host rejected the session recording batch");
+      throw new Error(response.error ?? "Workflow server rejected the session recording batch");
     }
     if (!isRecord(response.receipt)) throw new Error("Session recording receipt is invalid");
     return response.receipt;

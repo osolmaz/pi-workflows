@@ -28,7 +28,7 @@ function terminalMessage(status: "pending" | "sent" = "pending"): WorkflowMessag
   };
 }
 
-function acceptedHostRequest(options: Record<string, unknown>) {
+function acceptedServerRequest(options: Record<string, unknown>) {
   if (options.operation !== "workflowTurn.report") return { outcome: "accepted" };
   const payload = options.payload as {
     state: "started" | "ended";
@@ -88,12 +88,14 @@ describe("WorkflowMessageCoordinator", () => {
     const branch: Record<string, unknown>[] = [];
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(current);
-    const request = vi.fn(async (options: Record<string, unknown>) => acceptedHostRequest(options));
-    let activeBeforeHostAcceptance: WorkflowMessage | undefined;
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
+    let activeBeforeServerAcceptance: WorkflowMessage | undefined;
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
       coordinator.startTurn();
-      activeBeforeHostAcceptance = coordinator.activeTurnMessage();
+      activeBeforeServerAcceptance = coordinator.activeTurnMessage();
     });
     const ctx = {
       isIdle: () => true,
@@ -102,7 +104,7 @@ describe("WorkflowMessageCoordinator", () => {
     } as never;
 
     await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx);
-    expect(activeBeforeHostAcceptance).toBeUndefined();
+    expect(activeBeforeServerAcceptance).toBeUndefined();
     expect(coordinator.activeTurnMessage()).toBe(message);
     const started = request.mock.calls
       .map(([call]) => call)
@@ -181,7 +183,9 @@ describe("WorkflowMessageCoordinator", () => {
     const message = terminalMessage();
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(message));
-    const request = vi.fn(async (options: Record<string, unknown>) => acceptedHostRequest(options));
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
     });
@@ -212,7 +216,9 @@ describe("WorkflowMessageCoordinator", () => {
     const current = view(message);
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(current);
-    const request = vi.fn(async (options: Record<string, unknown>) => acceptedHostRequest(options));
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({ type: "custom_message", id: "entry-1", details: entry.details });
       coordinator.startTurn();
@@ -284,7 +290,9 @@ describe("WorkflowMessageCoordinator", () => {
     const message = terminalMessage();
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(message));
-    const request = vi.fn(async (options: Record<string, unknown>) => acceptedHostRequest(options));
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
     const sendMessage = vi.fn((entry: { details: unknown }) => {
       branch.push({
         type: "custom_message",
