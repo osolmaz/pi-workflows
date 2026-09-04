@@ -771,6 +771,22 @@ resume` takes a new generation and reruns only work after the last durable
 - Server status reports safe counts and timestamps. It does not report session
   IDs, project paths, prompts, payloads, tokens, process IDs, or credentials.
 
+## Run history retention
+
+Pi Workflows keeps a terminal root run and all its restart or continuation descendants for 30 days from `finished_at`. The server can remove the tree after that point only when every descendant is terminal and no protected work or outside reference remains.
+
+Protected work includes waiting or parked runs, live queue rows, pending workflow messages, open workflow turns, pending interactions or decisions, recording session segments, queued follow-ups, active leases, unsettled effects, controller ownership, active runner content, resumable checkpoints, and undelivered terminal results.
+
+The server checks for cleanup after startup recovery and after workflow runners exit. It runs only while normal server work is idle. One process completes at most one sweep in 24 hours. If work appears, cleanup stops between complete root trees and continues at a later idle trigger.
+
+Automatic cleanup does not create a backup. The explicit `pi-workflows state prune` apply command still requires a new absolute verified backup. Both paths use the same eligibility, deletion, and blob-reference rules.
+
+Deleting a run tree removes its unreferenced blobs. SQLite can reuse those pages immediately. Automatic `VACUUM` runs only while the server remains idle, at least 64 MiB is reclaimable, and at least 20 percent of pages are free. A failed or skipped compaction does not restore deleted history or make free pages unusable.
+
+Retained runs keep complete resume and viewer behavior through the existing bounded reads. An expired deleted run no longer appears in lists and a direct view returns not found. Pi session history is not changed.
+
+This is a history policy, not a hard disk limit. Recent or protected runs can be large. See [SQLite state](SQLITE_STATE.md) and [the automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) for the full safety and test contract.
+
 ## Workflows started by resource managers
 
 A resource manager can start a workflow as a finite child job with `ctx.workflows.ensure()`. The request key is stable across reconciliation passes, and the input fingerprint prevents one key from being reused for different work.
