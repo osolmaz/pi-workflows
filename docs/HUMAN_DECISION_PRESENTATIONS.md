@@ -59,7 +59,7 @@ A request uses `pi-workflows.human-decision-request.v1`. It contains:
 | `title`              | Yes      | Short decision title shown by every channel.    |
 | `subject`            | Yes      | Canonical JSON data used by the workflow.       |
 | `presentation`       | Yes      | Human-readable content defined below.           |
-| `audience`           | Yes      | Named audience resolved by the host.            |
+| `audience`           | Yes      | Named audience resolved by the server.          |
 | `choices`            | Yes      | Typed choices and optional input contracts.     |
 | `revision`           | Yes      | Positive decision revision.                     |
 | `subjectDigest`      | Yes      | SHA-256 digest of the canonical subject.        |
@@ -216,13 +216,13 @@ The renderer:
 
 The renderer never adds an ellipsis in place of omitted decision content.
 
-The host saves each channel message before the adapter sends it. It records each part after an unambiguous response. If a send result is uncertain, the host marks that channel message `ambiguous` and does not retry that part or later parts automatically. Another configured channel can still answer the decision.
+The server saves each channel message before the adapter sends it. It records each part after an unambiguous response. If a send result is uncertain, the server marks that channel message `ambiguous` and does not retry that part or later parts automatically. Another configured channel can still answer the decision.
 
 ### Pi
 
-The host creates one `decision` workflow message. The shared extension coordinator sends it through documented `pi.sendMessage()` without starting a model turn. Its custom renderer shows the complete presentation and fingerprint with the choices, input rules, request ID, and deadline. It wraps and scrolls with normal Pi custom-message behavior.
+The server creates one `decision` workflow message. The shared extension coordinator sends it through documented `pi.sendMessage()` without starting a model turn. Its custom renderer shows the complete presentation and fingerprint with the choices, input rules, request ID, and deadline. It wraps and scrolls with normal Pi custom-message behavior.
 
-A verified operator answers through `/workflow answer` or the matching `piw` control. When Telegram or another channel accepts the decision, the host cancels an unsent Pi decision message. A sent card remains normal conversation history, while later answer controls return the saved winner. Pi Workflows does not open a blocking dialog, modify Pi core, or use undocumented TUI state.
+A verified operator answers through `/workflow answer` or the matching `piw` control. When Telegram or another channel accepts the decision, the server cancels an unsent Pi decision message. A sent card remains normal conversation history, while later answer controls return the saved winner. Pi Workflows does not open a blocking dialog, modify Pi core, or use undocumented TUI state.
 
 ### Other channels
 

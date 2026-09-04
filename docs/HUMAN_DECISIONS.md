@@ -168,7 +168,7 @@ The accepted human sources are:
 - the Pi interactive decision view; and
 - a configured external decision channel such as Telegram.
 
-The host assigns the source. A workflow or model cannot claim that an answer came from a person. Pi non-interactive modes can wait for Telegram, but they cannot manufacture a Pi UI answer.
+The server assigns the source. A workflow or model cannot claim that an answer came from a person. Pi non-interactive modes can wait for Telegram, but they cannot manufacture a Pi UI answer.
 
 ## Audiences and channel profiles
 
@@ -199,7 +199,7 @@ Private configuration maps the audience to channels:
 }
 ```
 
-The workflow never receives a bot token, user ID, chat ID, Telegram message ID, or Pi session detail. Channel profiles are private host configuration and are excluded from run presentation.
+The workflow never receives a bot token, user ID, chat ID, Telegram message ID, or Pi session detail. Channel profiles are private server configuration and are excluded from run presentation.
 
 pi-workflows keeps credential references in a separate private file. A Telegram credential points to an existing absolute mode-`0600` token file:
 
@@ -222,7 +222,7 @@ The same Unix account can read a local credential file. This design prevents acc
 
 ## Channel interface
 
-The host owns decision state and launches each external channel adapter as a supervised child process. The private child protocol has these message kinds:
+The server owns decision state and launches each external channel adapter as a supervised child process. The private child protocol has these message kinds:
 
 - `channel.ready`;
 - `channel.present`;
@@ -230,15 +230,15 @@ The host owns decision state and launches each external channel adapter as a sup
 - `channel.settle`; and
 - `channel.exiting`.
 
-Each message names the adapter epoch, channel profile, saved request or settlement record, expected revision, and stable attempt ID. The host validates and saves every state change. The child never opens SQLite, loads workflow code, changes a run directly, receives the canonical decision subject, or receives another channel's credentials.
+Each message names the adapter epoch, channel profile, saved request or settlement record, expected revision, and stable attempt ID. The server validates and saves every state change. The child never opens SQLite, loads workflow code, changes a run directly, receives the canonical decision subject, or receives another channel's credentials.
 
 Channel handling is independent from workflow routing. A failed Telegram send leaves the decision available in Pi. Audience policy decides whether one successful channel is enough or whether all configured channels must receive the request.
 
 ### Pi channel
 
-The host creates one `decision` workflow message for the origin session. The shared extension coordinator shows it through documented `pi.sendMessage()` with no model turn. The message lists the request ID, choices, input rule, and deadline. It uses no blocking Pi dialog and no private Pi API.
+The server creates one `decision` workflow message for the origin session. The shared extension coordinator shows it through documented `pi.sendMessage()` with no model turn. The message lists the request ID, choices, input rule, and deadline. It uses no blocking Pi dialog and no private Pi API.
 
-A verified operator answers with `/workflow answer` or the matching `piw` control. The host validates the choice and optional text, records the Pi channel as the source, and accepts only the first valid winner. Closing or reloading Pi cannot lose the request. On `session_start` or `session_tree`, the extension adopts an existing decision message or creates one new `decision` message when the pending request has no entry on the active branch.
+A verified operator answers with `/workflow answer` or the matching `piw` control. The server validates the choice and optional text, records the Pi channel as the source, and accepts only the first valid winner. Closing or reloading Pi cannot lose the request. On `session_start` or `session_tree`, the extension adopts an existing decision message or creates one new `decision` message when the pending request has no entry on the active branch.
 
 ### Telegram channel
 
@@ -252,11 +252,11 @@ A choice without input submits from its button. A text choice such as `replan` w
 4. the adapter verifies the numeric user ID, chat ID, reply message ID, decision ID, and request digest; and
 5. the exact received text becomes `input.instructions`.
 
-The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. The host's channel records map each opaque ID to the validated decision request. Credentials remain outside the database and reach only the matching supervised adapter child.
+The adapter does not infer a choice from ordinary chat text. Callback payloads contain short opaque IDs because Telegram limits callback data. The server's channel records map each opaque ID to the validated decision request. Credentials remain outside the database and reach only the matching supervised adapter child.
 
-Telegram permits one long-polling consumer for a bot profile. The global host starts at most one adapter child for that profile and keeps the package-owned on-demand host process alive while an external decision is pending. No Pi process or adapter child owns a SQLite lease. If the host stops, the next Pi, CLI, or `piw` client starts it and the host recovers the saved channel state before it starts another adapter child. This design installs no operating-system service.
+Telegram permits one long-polling consumer for a bot profile. The global server starts at most one adapter child for that profile and keeps the package-owned on-demand server process alive while an external decision is pending. No Pi process or adapter child owns a SQLite lease. If the server stops, the next Pi, CLI, or `piw` client starts it and the server recovers the saved channel state before it starts another adapter child. This design installs no operating-system service.
 
-The Bot API does not provide an idempotency key for `sendMessage`. Before it tells the adapter to send or settle a message, the host records the exact attempt in `effects` and `effect_attempts`. A confirmed Telegram message ID settles the effect and remains in its result. A timed-out, disconnected, or interrupted exact attempt with no proof becomes `ambiguous` and is not retried automatically. Pi remains available while the operator checks Telegram and explicitly confirms or retries the operation. This prevents blind duplicate sends without claiming exactly-once Telegram behavior.
+The Bot API does not provide an idempotency key for `sendMessage`. Before it tells the adapter to send or settle a message, the server records the exact attempt in `effects` and `effect_attempts`. A confirmed Telegram message ID settles the effect and remains in its result. A timed-out, disconnected, or interrupted exact attempt with no proof becomes `ambiguous` and is not retried automatically. Pi remains available while the operator checks Telegram and explicitly confirms or retries the operation. This prevents blind duplicate sends without claiming exactly-once Telegram behavior.
 
 ## Durable decision records
 
@@ -328,7 +328,7 @@ Adoption does not change the lease, claim generation, queue state, timestamps, o
 
 This alpha change updates the current request, accepted-result, receipt, resolution, continuation, and snapshot contracts in place. Old active runs refuse resume through normal source and definition identity checks. There is no compatibility reader, migration, dual path, or new schema generation. The continuation startup fix uses existing queue and lease records. It adds no field, table, migration, or schema version. Existing compatible prepared or initialized continuations are adopted. Updated viewers label a human decision as a checkpoint, show its deadline and automatic action when present, and keep the canonical subject separate. Private channel configuration and transport identifiers remain hidden.
 
-The engine remains independent from Pi and Telegram. Core code owns decision contracts and validation. The host owns durable acceptance, continuation, workflow messages, and channel-child supervision. The Pi extension owns documented session presentation and controls. The Telegram adapter child owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
+The engine remains independent from Pi and Telegram. Core code owns decision contracts and validation. The server owns durable acceptance, continuation, workflow messages, and channel-child supervision. The Pi extension owns documented session presentation and controls. The Telegram adapter child owns Bot API translation. Workflow definitions own only the question, choices, audience, and routes.
 
 ## Contract impact
 
@@ -360,7 +360,7 @@ The implementation must test:
 - identical and conflicting retries;
 - crashes before and after answer acceptance and continuation creation;
 - ambiguous Telegram sends;
-- one supervised long-poll adapter per profile and host-restart recovery;
+- one supervised long-poll adapter per profile and server-restart recovery;
 - decision cancellation and expiry;
 - included `plan-approval` routes and bounded replan loops;
 - viewer redaction; and

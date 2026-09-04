@@ -13,7 +13,7 @@ export type ViewerOptions = {
   runId?: string | undefined;
 };
 
-/** Interactive client view. All durable reads stay in the workflow host. */
+/** Interactive client view. All durable reads stay in the workflow server. */
 export async function runViewer(options: ViewerOptions): Promise<void> {
   let value: JsonValue = options.runId === undefined ? [] : null;
   let selected = 0;

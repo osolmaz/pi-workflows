@@ -125,7 +125,7 @@ The action step returns whether the action succeeded, failed, or was blocked, wi
 
 The repair input preserves the action request, target evidence, authority, constraints, repository, and delivery limits. Existing plan approval rules still apply when the recorded contract requires them.
 
-Paid workers affected by a shared code or data defect must stop at safe boundaries before repair starts. Monitor preserves their durable outputs and failure evidence.
+Paid runners affected by a shared code or data defect must stop at safe boundaries before repair starts. Monitor preserves their durable outputs and failure evidence.
 
 After a completed repair, Monitor runs `observe` immediately. If the same failure ID and target-state ID return, Monitor stops. It does not run the same repair cycle again.
 

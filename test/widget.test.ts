@@ -338,7 +338,7 @@ describe("buildWidgetLines", () => {
       updateId: "u2",
       seq: 2,
       key: "worker",
-      data: { ...overall.data, label: "Worker", completed: 2 },
+      data: { ...overall.data, label: "Runner", completed: 2 },
     } as const;
     const state = makeState({ currentNode: "second", updates: [overall, worker] });
     const view = buildWidgetView(
@@ -353,7 +353,7 @@ describe("buildWidgetLines", () => {
     );
     const lines = view.lines.join("\n");
     expect(lines).toContain("Overall  5/10 items");
-    expect(lines).toContain("Worker  2/10 items");
+    expect(lines).toContain("Runner  2/10 items");
   });
 
   it("merges monitor estimates with every durable projected track", () => {
@@ -388,7 +388,7 @@ describe("buildWidgetLines", () => {
           attemptId: "a1",
           type: "progress",
           key: "worker",
-          data: { ...overallData, label: "Worker", completed: 2 },
+          data: { ...overallData, label: "Runner", completed: 2 },
         },
       ],
       outputs: {
@@ -408,7 +408,7 @@ describe("buildWidgetLines", () => {
       "\n",
     );
     expect(lines).toContain("Overall  5/10 items");
-    expect(lines).toContain("Worker  2/10 items");
+    expect(lines).toContain("Runner  2/10 items");
   });
 
   it("shows optional progress, ETA, elapsed update age, and next-check time", () => {

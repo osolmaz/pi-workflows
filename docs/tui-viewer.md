@@ -9,13 +9,13 @@ a recorded Pi conversation, themes, and remote viewing.
 
 The viewer uses the [incremental and virtualized viewer design](plans/2026-08-28-piw-incremental-viewer-plan.md).
 
-The run browser subscribes to small host-owned metadata views. It does not load trace, step, session, settings, or follow-up payloads. The host publishes a new bounded view only when its content changes.
+The run browser subscribes to small server-owned metadata views. It does not load trace, step, session, settings, or follow-up payloads. The server publishes a new bounded view only when its content changes.
 
-Each live view keeps the host's `display` value separate from the durable workflow `state`. The run browser, current-run status, timeline, and latest graph use `display` directly. During an origin-session model turn, the latest graph presents the durable `waitingOn` node as running. Replay continues to use durable state and recorded history. `piw` does not calculate another live status.
+Each live view keeps the server's `display` value separate from the durable workflow `state`. The run browser, current-run status, timeline, and latest graph use `display` directly. During an origin-session model turn, the latest graph presents the durable `waitingOn` node as running. Replay continues to use durable state and recorded history. `piw` does not calculate another live status.
 
 The selected run contains bounded pages. Step, trace, session-entry, session-event, settings, follow-up, and update pages have both a row limit and a byte budget. Replay can jump to any position. The viewer loads the page that contains that position and keeps only the current windows. A session-event page includes the replay checkpoint immediately before its first event. A compact graph projection keeps the latest attempt for each node and the taken transitions up to the replay point.
 
-Large values use host content references. `piw` fetches workflow definitions, graph history, and complete host display reasons before it publishes the related live view. It fetches other large details when the user opens them. It verifies the byte count and SHA-256 digest before it shows the complete text or JSON value. Page and content requests run outside input and drawing through the shared client protocol. A newer page selection replaces the previous request, including when the user returns to an earlier page. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
+Large values use server content references. `piw` fetches workflow definitions, graph history, and complete server display reasons before it publishes the related live view. It fetches other large details when the user opens them. It verifies the byte count and SHA-256 digest before it shows the complete text or JSON value. Page and content requests run outside input and drawing through the shared client protocol. A newer page selection replaces the previous request, including when the user returns to an earlier page. A failed first read leaves the run browser usable. A failed refresh keeps the last good view and marks it stale.
 
 ## Install
 
@@ -28,10 +28,10 @@ cargo install pi-workflows
 
 ## Modes
 
-- `piw` connects to the local package-owned workflow host. If the socket is absent, it runs the installed `pi-workflows host start` command.
-- `piw <runId>` opens one host-owned run view.
-- `piw <runId> --once` waits for that run, renders one complete 120 × 40 plain-text frame, and exits. It returns a nonzero status for host, protocol, missing-run, or snapshot-timeout failures.
-- `piw serve [--bind 127.0.0.1:9377]` relays each WebSocket connection to one host socket over the [live client protocol](live-replay-protocol.md). Only loopback addresses are accepted; use an SSH tunnel for remote viewing.
+- `piw` connects to the local package-owned workflow server. If the socket is absent, it runs the installed `pi-workflows server start` command.
+- `piw <runId>` opens one server-owned run view.
+- `piw <runId> --once` waits for that run, renders one complete 120 × 40 plain-text frame, and exits. It returns a nonzero status for server, protocol, missing-run, or snapshot-timeout failures.
+- `piw serve [--bind 127.0.0.1:9377]` relays each WebSocket connection to one server socket over the [live client protocol](live-replay-protocol.md). Only loopback addresses are accepted; use an SSH tunnel for remote viewing.
 - `piw --connect ws://…` reads from another `piw serve` process.
 - `piw --theme <name>` selects a theme for this invocation.
 - `piw --list-themes` prints the built-in theme names.
@@ -169,7 +169,7 @@ light_name = "catppuccin-latte"
 colors accept `#rrggbb`, `#rgb`, `rgb(r,g,b)`, named terminal colors, and
 `reset`. Invalid fields are reported without discarding valid fields.
 
-When `auto_switch` is enabled, `PIW_THEME_APPEARANCE=dark|light` or the host's
+When `auto_switch` is enabled, `PIW_THEME_APPEARANCE=dark|light` or the server's
 `COLORFGBG` value selects `dark_name` or `light_name` at startup. A manual
 selection in the picker disables automatic switching.
 
@@ -213,7 +213,7 @@ Revision gaps force a bounded snapshot.
 
 `piw serve` is a frame relay. It keeps no run projection or client activity after either side closes. Clients keep separate revision and page cursors, so one client's replay jump does not move another client. A lagged client gets a bounded snapshot instead of an unbounded patch backlog.
 
-The host resolves expanded prompt and output fields from durable content. Local and remote snapshots carry the same bounded semantic view and do not expose a database path.
+The server resolves expanded prompt and output fields from durable content. Local and remote snapshots carry the same bounded semantic view and do not expose a database path.
 
 ## Interaction
 

@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { HostProcessRegistry } from "../src/host/processes.js";
-import { RpcStepExecutor } from "../src/host/rpc-executor.js";
+import { ServerProcessRegistry } from "../src/server/processes.js";
+import { RpcStepExecutor } from "../src/server/rpc-executor.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 describe("RpcStepExecutor spawn", () => {
   it("marks assistant responses unsupported unless an origin session can resume them", async () => {
     const dir = await makeTempDir("pi-rpc-assistant-mode");
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     expect(new RpcStepExecutor({ cwd: dir, registry }).assistantMessageMode).toBe("unsupported");
     expect(
       new RpcStepExecutor({ cwd: dir, registry, assistantMessageMode: "park" })
@@ -28,7 +28,7 @@ sleep 60
 `,
       { encoding: "utf8", mode: 0o755 },
     );
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     const executor = new RpcStepExecutor({ cwd: dir, registry, piBin: fakePi });
     const abort = new AbortController();
     const stepPromise = executor
@@ -64,7 +64,7 @@ sleep 60
 
   it("fails the step instead of crashing when pi is missing", async () => {
     const dir = await makeTempDir("pi-rpc-missing");
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     const executor = new RpcStepExecutor({
       cwd: dir,
       registry,
@@ -105,7 +105,7 @@ describe("RpcStepExecutor.close", () => {
       encoding: "utf8",
       mode: 0o755,
     });
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     const executor = new RpcStepExecutor({ cwd: dir, registry, piBin: fakePi });
     const abort = new AbortController();
     const stepPromise = executor

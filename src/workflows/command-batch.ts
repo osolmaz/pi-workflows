@@ -117,8 +117,8 @@ export async function runCommandBatch(
     }
   };
 
-  const workerCount = Math.min(request.maxConcurrency, total);
-  await Promise.all(Array.from({ length: workerCount }, worker));
+  const runnerCount = Math.min(request.maxConcurrency, total);
+  await Promise.all(Array.from({ length: runnerCount }, worker));
 
   for (let index = 0; index < total; index += 1) {
     if (results[index] !== undefined) continue;

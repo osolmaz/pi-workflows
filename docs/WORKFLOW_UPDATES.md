@@ -11,10 +11,10 @@ const processRows = action({
   run: async (context) => {
     await context.publishUpdate({
       type: "progress",
-      key: "worker-a",
+      key: "runner-a",
       data: {
         schema: "pi-workflows.progress.v1",
-        label: "Worker A",
+        label: "Runner A",
         status: "running",
         phase: "processing",
         completed: 420,
@@ -37,10 +37,10 @@ An agent publishes the same update through the existing `workflow` tool:
   "attempt": "017f5d57-83f1-4d2d-88e6-3dbf878fed17",
   "update": {
     "type": "progress",
-    "key": "worker-a",
+    "key": "runner-a",
     "data": {
       "schema": "pi-workflows.progress.v1",
-      "label": "Worker A",
+      "label": "Runner A",
       "status": "running",
       "completed": 420,
       "total": 1000,
@@ -226,7 +226,7 @@ Shell actions may define a line parser:
 
 ```ts
 shell({
-  exec: () => ({ command: "worker", args: ["--progress=ndjson"] }),
+  exec: () => ({ command: "runner", args: ["--progress=ndjson"] }),
   updates: {
     streams: ["stdout"],
     parseLine: ({ stream, text }, context) => {
@@ -234,7 +234,7 @@ shell({
       if (value.kind !== "progress") return undefined;
       return {
         type: "progress",
-        key: value.worker,
+        key: value.runner,
         data: value.data,
       };
     },
@@ -248,11 +248,11 @@ The runtime keeps normal stdout and stderr capture. It applies backpressure whil
 
 The parser is workflow-author code. Update data never selects or changes the command, arguments, working directory, environment, or privileges.
 
-## Controllers and hosts
+## Controllers and servers
 
-The engine exposes the same publication operation through its runner interface. A controller or standalone host may publish only for a workflow run and attempt whose claim it owns.
+The engine exposes the same publication operation through its runner interface. A controller or standalone server may publish only for a workflow run and attempt whose claim it owns.
 
-Controller resource events remain controller events. They become workflow updates only when a controller deliberately publishes them to a linked workflow run.
+Managed resource events remain resource manager events. They become workflow updates only when a resource manager deliberately publishes them to a linked workflow run.
 
 ## Persistence
 
@@ -271,7 +271,7 @@ Each accepted update transaction inserts one `workflow_updates` row and one
   "payload": {
     "updateId": "upd_01K2GZVY3A4D7X8J9M0N",
     "type": "progress",
-    "key": "worker-a",
+    "key": "runner-a",
     "data": {
       "schema": "pi-workflows.progress.v1",
       "status": "running",
@@ -306,11 +306,11 @@ Default safety limits per run are:
 
 The rate limiter uses a token bucket. A rejected update is not queued silently. Agent callers receive a tool error; code publishers receive a rejected promise.
 
-The standalone host and Pi extension apply the same limits.
+The standalone server and Pi extension apply the same limits.
 
 ## Progress update type
 
-`progress` is the standard optional profile for measurable work. Each key represents one process, worker, phase owner, or explicit overall total.
+`progress` is the standard optional profile for measurable work. Each key represents one process, runner, phase owner, or explicit overall total.
 
 Minimal progress data:
 
@@ -326,7 +326,7 @@ Measured progress:
 ```json
 {
   "schema": "pi-workflows.progress.v1",
-  "label": "Worker A",
+  "label": "Runner A",
   "status": "running",
   "phase": "processing",
   "completed": 420,
@@ -363,7 +363,7 @@ Unknown fields in `pi-workflows.progress.v1` are validation errors.
 
 ## Progress estimation
 
-The workflows layer exports pure validation and estimation helpers. Reduction and formatting use the same module. The helpers import no Pi, extension, controller, or viewer code.
+The workflows layer exports pure validation and estimation helpers. Reduction and formatting use the same module. The helpers import no Pi, extension, resource manager, or viewer code.
 
 The estimator groups records by run and key. A new estimation epoch starts when:
 
@@ -402,7 +402,7 @@ The compact widget:
 A typical line is:
 
 ```text
-Worker A  420/1,000 rows  ETA 18–20m
+Runner A  420/1,000 rows  ETA 18–20m
 ```
 
 A footer line may show:
@@ -445,4 +445,4 @@ Updates are data. They do not grant permission to execute a command, retry work,
 
 SQLite runs are private and may contain update data from external systems. The database permission and export warnings in [SQLite state](SQLITE_STATE.md) apply.
 
-This feature does not add remote transports, a metrics database, global aggregation, automatic polling, or a new Pi core API. Workflow authors remain responsible for the trust and cost of their agent, action, shell, and controller code.
+This feature does not add remote transports, a metrics database, global aggregation, automatic polling, or a new Pi core API. Workflow authors remain responsible for the trust and cost of their agent, action, shell, and resource manager code.

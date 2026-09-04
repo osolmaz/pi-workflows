@@ -33,7 +33,7 @@ const BUILTIN_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const RESERVED_EXTENSION_NAMES = new Set([
   "workflow",
   "piw",
-  "controller",
+  "resource-manager",
   "workflow-update",
   "workflow-answer",
   "workflow-submit",
@@ -162,8 +162,8 @@ export async function runPiAgentGroup(
     }
   };
 
-  const workerCount = Math.min(options.maxConcurrency, requests.length);
-  await Promise.all(Array.from({ length: workerCount }, worker));
+  const runnerCount = Math.min(options.maxConcurrency, requests.length);
+  await Promise.all(Array.from({ length: runnerCount }, worker));
 
   if (options.signal.aborted) throw cancellationError("group", options.signal.reason);
   if (primary !== undefined) {

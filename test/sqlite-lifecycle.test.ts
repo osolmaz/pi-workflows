@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import echoWorkflow from "../examples/workflows/echo.workflow.js";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
+import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { canonicalJson } from "../src/state/json.js";
 import { WorkflowMessageStore, workflowMessageIdFor } from "../src/state/workflow-messages.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
@@ -17,11 +17,11 @@ import { ScriptedExecutor, makeTempDir } from "./helpers.js";
 async function databaseFixture() {
   const projectPath = await makeTempDir("sqlite-lifecycle-project");
   const databasePath = path.join(await makeTempDir("sqlite-lifecycle-state"), "state.sqlite");
-  const store = new SqliteControllerStore(databasePath, { projectPath });
+  const store = new SqliteResourceManagerStore(databasePath, { projectPath });
   return { store, projectPath, databasePath };
 }
 
-function reserve(store: SqliteControllerStore, runId: string, sessionId: string) {
+function reserve(store: SqliteResourceManagerStore, runId: string, sessionId: string) {
   const workflow = compileWorkflowDefinition(echoWorkflow);
   const snapshot = createDefinitionSnapshot(workflow);
   const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
@@ -39,12 +39,12 @@ function reserve(store: SqliteControllerStore, runId: string, sessionId: string)
 }
 
 describe("SQLite delivery lifecycle", () => {
-  it("returns explicit missing and stale controller outcomes", async () => {
+  it("returns explicit missing and stale resource manager outcomes", async () => {
     const { store } = await databaseFixture();
-    expect(store.getResource({ controller: "missing", key: "none" })).toBeUndefined();
+    expect(store.getResource({ resourceManager: "missing", key: "none" })).toBeUndefined();
     expect(store.getResourceByUid("missing")).toBeUndefined();
     expect(
-      store.claimNext({ controllers: [], ownerId: "worker", leaseMs: 10_000 }),
+      store.claimNext({ resourceManagers: [], ownerId: "worker", leaseMs: 10_000 }),
     ).toBeUndefined();
     expect(
       store.renewWorkflowRunClaim({
@@ -53,27 +53,27 @@ describe("SQLite delivery lifecycle", () => {
         leaseMs: 10_000,
       }),
     ).toBe(false);
-    store.putResource({ controller: "jobs", key: "one", spec: {}, initialStatus: {} });
+    store.putResource({ resourceManager: "jobs", key: "one", spec: {}, initialStatus: {} });
     expect(
-      store.claimNext({ controllers: ["other"], ownerId: "worker", leaseMs: 10_000 }),
+      store.claimNext({ resourceManagers: ["other"], ownerId: "worker", leaseMs: 10_000 }),
     ).toBeUndefined();
     const claim = store.claimNext({
-      controllers: ["jobs"],
+      resourceManagers: ["jobs"],
       ownerId: "worker",
       leaseMs: 10_000,
     });
     if (claim === undefined) throw new Error("claim missing");
     expect(
-      store.claimNext({ controllers: ["jobs"], ownerId: "other", leaseMs: 10_000 }),
+      store.claimNext({ resourceManagers: ["jobs"], ownerId: "other", leaseMs: 10_000 }),
     ).toBeUndefined();
     expect(store.renewClaim({ ...claim, token: "wrong" }, 10_000)).toBe(false);
     expect(store.settleClaim({ ...claim, token: "wrong" })).toBe(false);
     expect(
       store.requeueClaim({ ...claim, token: "wrong" }, { availableAt: new Date().toISOString() }),
     ).toBe(false);
-    expect(store.recordEvent({ controller: "jobs", key: "one", type: "observed" }).payload).toEqual(
-      {},
-    );
+    expect(
+      store.recordEvent({ resourceManager: "jobs", key: "one", type: "observed" }).payload,
+    ).toEqual({});
     expect(store.settleClaim(claim)).toBe(true);
     store.close();
   });
@@ -81,21 +81,21 @@ describe("SQLite delivery lifecycle", () => {
   it("validates finalizers and missing effect or workflow records", async () => {
     const { store } = await databaseFixture();
     const resource = store.putResource({
-      controller: "jobs",
+      resourceManager: "jobs",
       key: "one",
       spec: {},
       initialStatus: {},
     });
     expect(() =>
       store.updateFinalizers({
-        ref: { controller: "jobs", key: "one" },
+        ref: { resourceManager: "jobs", key: "one" },
         expectedResourceVersion: resource.metadata.resourceVersion,
         finalizers: ["same", "same"],
       }),
     ).toThrow(/unique/);
     expect(() =>
       store.updateFinalizers({
-        ref: { controller: "jobs", key: "one" },
+        ref: { resourceManager: "jobs", key: "one" },
         expectedResourceVersion: 99,
         finalizers: [],
       }),
@@ -108,7 +108,7 @@ describe("SQLite delivery lifecycle", () => {
         "missing",
         { state: "failed" },
         {
-          controller: "jobs",
+          resourceManager: "jobs",
           key: "one",
           ownerId: "worker",
           token: "none",
@@ -125,7 +125,7 @@ describe("SQLite delivery lifecycle", () => {
 
   it("shares one connection without transferring close ownership", async () => {
     const { store, databasePath, projectPath } = await databaseFixture();
-    const shared = new SqliteControllerStore(databasePath, {
+    const shared = new SqliteResourceManagerStore(databasePath, {
       state: store.state,
       projectPath,
     });
@@ -254,15 +254,19 @@ describe("SQLite delivery lifecycle", () => {
     store.close();
   });
 
-  it("maps rejected and ambiguous controller effects", async () => {
+  it("maps rejected and ambiguous resource manager effects", async () => {
     const { store } = await databaseFixture();
     const resource = store.putResource({
-      controller: "jobs",
+      resourceManager: "jobs",
       key: "one",
       spec: {},
       initialStatus: {},
     });
-    const claim = store.claimNext({ controllers: ["jobs"], ownerId: "worker", leaseMs: 60_000 });
+    const claim = store.claimNext({
+      resourceManagers: ["jobs"],
+      ownerId: "worker",
+      leaseMs: 60_000,
+    });
     if (claim === undefined) throw new Error("claim missing");
     for (const [key, state] of [
       ["rejected", "rejected"],

@@ -253,7 +253,7 @@ Add `--list-themes`. A picker Apply writes only the theme selection, preserves
 unknown config keys and comments, and uses a same-directory temporary file plus
 atomic rename. Applying a manual theme disables `auto_switch`, matching Herdr.
 
-Host light/dark detection and automatic sibling switching are a final theme
+Server light/dark detection and automatic sibling switching are a final theme
 phase, not a prerequisite for manual theme selection. When added, query the
 host terminal background only through standard terminal escape sequences,
 restore terminal modes on exit, and retain the manually configured theme when

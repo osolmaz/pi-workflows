@@ -5,9 +5,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WorkflowClient } from "../../src/client/client.js";
-import { SqliteControllerStore } from "../../src/controllers/sqlite.js";
 import { buildWidgetView } from "../../src/extension/widget.js";
-import { HostStateStore, type InteractiveRequestRecord } from "../../src/host/state.js";
+import { SqliteResourceManagerStore } from "../../src/resource-managers/sqlite.js";
+import { ServerStateStore, type InteractiveRequestRecord } from "../../src/server/state.js";
 import { workflowStatePath } from "../../src/state/database.js";
 import { parseJson, type JsonValue } from "../../src/state/json.js";
 import { WorkflowRunStore } from "../../src/workflows/store.js";
@@ -98,21 +98,21 @@ export default defineWorkflow({
 });
 `;
 
-const CONTROLLER = `import { conditionTrue, defineController } from "@osolmaz/pi-workflows/controllers";
+const RESOURCE_MANAGER = `import { conditionTrue, defineResourceManager } from "@osolmaz/pi-workflows/resource-managers";
 
-export default defineController({
+export default defineResourceManager({
   name: "hosted-e2e",
   initialStatus: (spec) => ({
     phase: "new",
     resolverPid: process.pid,
-    workerPid: null,
+    runnerPid: null,
     value: typeof spec === "object" && spec !== null && "value" in spec ? spec.value : null,
   }),
   reconcile: (ctx, resource) => ctx.settled({
-    controllerStatus: {
-      ...resource.status.controllerStatus,
+    resourceManagerStatus: {
+      ...resource.status.resourceManagerStatus,
       phase: "done",
-      workerPid: process.pid,
+      runnerPid: process.pid,
     },
     conditions: [conditionTrue("Ready", "Complete")],
   }),
@@ -312,7 +312,7 @@ async function waitForPendingInteraction(
   await waitForCondition(
     () => {
       try {
-        const host = new HostStateStore(databasePath, { readOnly: true });
+        const host = new ServerStateStore(databasePath, { readOnly: true });
         const runs = new WorkflowRunStore(databasePath, { readOnly: true });
         try {
           found = host
@@ -409,7 +409,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-describe.sequential("out-of-process workflow host end to end", () => {
+describe.sequential("out-of-process workflow server end to end", () => {
   let mock: Awaited<ReturnType<typeof startMockOpenAiServer>>;
   let pi: RpcHandle;
   let projectDir: string;
@@ -511,7 +511,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
     sessionDir = path.join(agentDir, "sessions");
     sessionId = randomUUID();
     await fs.mkdir(path.join(projectDir, ".pi", "workflows"), { recursive: true });
-    await fs.mkdir(path.join(projectDir, ".pi", "controllers"), { recursive: true });
+    await fs.mkdir(path.join(projectDir, ".pi", "resource-managers"), { recursive: true });
     await fs.writeFile(
       path.join(projectDir, ".pi", "workflows", "assistant-e2e.workflow.ts"),
       ASSISTANT_WORKFLOW,
@@ -529,8 +529,8 @@ describe.sequential("out-of-process workflow host end to end", () => {
       MULTI_STEP_WIDGET_WORKFLOW,
     );
     await fs.writeFile(
-      path.join(projectDir, ".pi", "controllers", "hosted-e2e.controller.ts"),
-      CONTROLLER,
+      path.join(projectDir, ".pi", "resource-managers", "hosted-e2e.resource-manager.ts"),
+      RESOURCE_MANAGER,
     );
     await fs.writeFile(
       path.join(agentDir, "models.json"),
@@ -565,7 +565,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
     await pi?.stop();
     const client = new WorkflowClient({ databasePath });
     try {
-      await client.request({ operation: "host.stop" });
+      await client.request({ operation: "server.stop" });
     } catch {
       // The host is already stopped.
     }
@@ -722,7 +722,7 @@ describe.sequential("out-of-process workflow host end to end", () => {
       ).toHaveLength(1);
     }
 
-    const store = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+    const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
     try {
       const workers = store.state.connection
         .prepare("SELECT pid, status FROM run_workers WHERE run_id = ? ORDER BY started_at")
@@ -884,12 +884,12 @@ describe.sequential("out-of-process workflow host end to end", () => {
       requestEntriesBeforeRestart,
     );
 
-    const hostState = new HostStateStore(databasePath, { readOnly: true });
+    const serverState = new ServerStateStore(databasePath, { readOnly: true });
     let submission:
       | { submissionId: string; idempotencyKey: string; payload: JsonValue }
       | undefined;
     try {
-      const row = hostState.state.connection
+      const row = serverState.state.connection
         .prepare(
           `SELECT s.submission_id AS submissionId, s.idempotency_key AS idempotencyKey,
                   b.content AS payload
@@ -907,11 +907,11 @@ describe.sequential("out-of-process workflow host end to end", () => {
         };
       }
     } finally {
-      hostState.close();
+      serverState.close();
     }
     if (submission === undefined) throw new Error("Accepted interaction submission is missing");
 
-    const currentState = new HostStateStore(databasePath, { readOnly: true });
+    const currentState = new ServerStateStore(databasePath, { readOnly: true });
     const current = currentState.getInteraction(interaction.requestId);
     currentState.close();
     if (current === undefined) throw new Error("Durable interaction is missing");
@@ -952,25 +952,25 @@ describe.sequential("out-of-process workflow host end to end", () => {
     });
   }, 75_000);
 
-  it("applies and reconciles a controller through supervised children", async () => {
+  it("applies and reconciles a resource manager through supervised children", async () => {
     pi.send({
-      id: "controller-apply",
+      id: "resource-manager-apply",
       type: "prompt",
-      message: '/controller apply hosted-e2e item-1 {"value":7}',
+      message: '/resource-manager apply hosted-e2e item-1 {"value":7}',
     });
     await waitForCondition(
       () => {
         try {
-          const store = new SqliteControllerStore(databasePath, {
+          const store = new SqliteResourceManagerStore(databasePath, {
             projectPath: projectDir,
             readOnly: true,
           });
           try {
             const resource = store.getResource<
               unknown,
-              { phase: string; resolverPid: number; workerPid: number | null; value: number }
-            >({ controller: "hosted-e2e", key: "item-1" });
-            return resource?.status.controllerStatus.phase === "done";
+              { phase: string; resolverPid: number; runnerPid: number | null; value: number }
+            >({ resourceManager: "hosted-e2e", key: "item-1" });
+            return resource?.status.resourceManagerStatus.phase === "done";
           } finally {
             store.close();
           }
@@ -981,24 +981,24 @@ describe.sequential("out-of-process workflow host end to end", () => {
       () => rpcDiagnostic(pi),
       45_000,
     );
-    const store = new SqliteControllerStore(databasePath, {
+    const store = new SqliteResourceManagerStore(databasePath, {
       projectPath: projectDir,
       readOnly: true,
     });
     try {
       const resource = store.getResource<
         unknown,
-        { phase: string; resolverPid: number; workerPid: number | null; value: number }
-      >({ controller: "hosted-e2e", key: "item-1" });
+        { phase: string; resolverPid: number; runnerPid: number | null; value: number }
+      >({ resourceManager: "hosted-e2e", key: "item-1" });
       expect(resource?.status).toMatchObject({
         observedGeneration: 1,
-        controllerStatus: { phase: "done", value: 7 },
+        resourceManagerStatus: { phase: "done", value: 7 },
         conditions: [{ type: "Ready", status: true, reason: "Complete" }],
       });
-      expect(resource?.status.controllerStatus.resolverPid).not.toBe(process.pid);
-      expect(resource?.status.controllerStatus.workerPid).not.toBe(process.pid);
-      expect(resource?.status.controllerStatus.workerPid).not.toBe(
-        resource?.status.controllerStatus.resolverPid,
+      expect(resource?.status.resourceManagerStatus.resolverPid).not.toBe(process.pid);
+      expect(resource?.status.resourceManagerStatus.runnerPid).not.toBe(process.pid);
+      expect(resource?.status.resourceManagerStatus.runnerPid).not.toBe(
+        resource?.status.resourceManagerStatus.resolverPid,
       );
     } finally {
       store.close();
@@ -1007,13 +1007,13 @@ describe.sequential("out-of-process workflow host end to end", () => {
 
   it("reports privacy-safe host state and renders a completed run", async () => {
     const client = new WorkflowClient({ databasePath });
-    const status = await client.request({ operation: "host.status" });
+    const status = await client.request({ operation: "server.status" });
     expect(status.receipt).toMatchObject({
       state: "running",
       socketAvailable: true,
       lifecycleContradictions: 0,
     });
-    expect(status.receipt).not.toHaveProperty("hostId");
+    expect(status.receipt).not.toHaveProperty("serverId");
     expect(status.receipt).not.toHaveProperty("pid");
     expect(status.receipt).not.toHaveProperty("projectPath");
     expect(status.receipt).not.toHaveProperty("sessionId");

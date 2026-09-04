@@ -1,38 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { parseControllerArgs, parseWorkflowArgs } from "../src/extension/index.js";
+import { parseResourceManagerArgs, parseWorkflowArgs } from "../src/extension/index.js";
 
-describe("parseControllerArgs", () => {
-  it("parses hosted controller commands", () => {
-    expect(parseControllerArgs("")).toEqual({ kind: "list" });
-    expect(parseControllerArgs("list")).toEqual({ kind: "list" });
-    expect(parseControllerArgs("get sample one")).toEqual({
+describe("parseResourceManagerArgs", () => {
+  it("parses resource manager commands", () => {
+    expect(parseResourceManagerArgs("")).toEqual({ kind: "list" });
+    expect(parseResourceManagerArgs("list")).toEqual({ kind: "list" });
+    expect(parseResourceManagerArgs("get sample one")).toEqual({
       kind: "get",
-      controller: "sample",
+      resourceManager: "sample",
       key: "one",
     });
-    expect(parseControllerArgs('apply sample one {"enabled":true}')).toEqual({
+    expect(parseResourceManagerArgs('apply sample one {"enabled":true}')).toEqual({
       kind: "apply",
-      controller: "sample",
+      resourceManager: "sample",
       key: "one",
       spec: { enabled: true },
     });
-    expect(parseControllerArgs("reconcile sample one")).toEqual({
+    expect(parseResourceManagerArgs("reconcile sample one")).toEqual({
       kind: "reconcile",
-      controller: "sample",
+      resourceManager: "sample",
       key: "one",
     });
-    expect(parseControllerArgs("delete sample one")).toEqual({
+    expect(parseResourceManagerArgs("delete sample one")).toEqual({
       kind: "delete",
-      controller: "sample",
+      resourceManager: "sample",
       key: "one",
     });
   });
 
   it("rejects embedded-host controls and malformed apply specs", () => {
-    expect(() => parseControllerArgs("start")).toThrow(/Usage/u);
-    expect(() => parseControllerArgs("stop")).toThrow(/Usage/u);
-    expect(() => parseControllerArgs("apply sample one {broken")).toThrow(
-      /Invalid controller spec JSON/u,
+    expect(() => parseResourceManagerArgs("start")).toThrow(/Usage/u);
+    expect(() => parseResourceManagerArgs("stop")).toThrow(/Usage/u);
+    expect(() => parseResourceManagerArgs("apply sample one {broken")).toThrow(
+      /Invalid resource manager spec JSON/u,
     );
   });
 });

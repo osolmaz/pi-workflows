@@ -17,7 +17,6 @@ import { errorMessage } from "../workflows/errors.js";
 import { discoverWorkflows } from "../workflows/loader.js";
 import { createRunId } from "../workflows/store.js";
 import type { AgentStepContract, HumanDecisionResponse } from "../workflows/types.js";
-import { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
 import {
   HerdrWorkflowViewer,
   PIW_SHORTCUT,
@@ -27,12 +26,19 @@ import {
 } from "./herdr-viewer.js";
 import { SessionRecorder } from "./recorder.js";
 import { RemoteSessionRecordingStore } from "./remote-recorder-store.js";
+import {
+  parseResourceManagerArgs,
+  type ParsedResourceManagerArgs,
+} from "./resource-manager-command.js";
 import { SessionWorkflowView } from "./session-view.js";
 import { recoverAssistantStep, registerWorkflowAgentStepMessageRenderer } from "./step-message.js";
 import { responseEntryId, WorkflowMessageCoordinator } from "./workflow-message-coordinator.js";
 import { parseWorkflowToolInput, WorkflowToolParameters } from "./workflow-tool.js";
 
-export { parseControllerArgs, type ParsedControllerArgs } from "./controller-command.js";
+export {
+  parseResourceManagerArgs,
+  type ParsedResourceManagerArgs,
+} from "./resource-manager-command.js";
 
 export {
   audienceChannels,
@@ -176,7 +182,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   let sessionGeneration = 0;
   let sessionUnsubscribe: (() => Promise<void>) | null = null;
   let sessionConnectTask: Promise<void> | null = null;
-  let hostUnavailableNotified = false;
+  let serverUnavailableNotified = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let presentationTail = Promise.resolve();
   let toolTail = Promise.resolve();
@@ -460,8 +466,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("controller", {
-    description: "Manage hosted controller resources: list, get, apply, reconcile, or delete",
+  pi.registerCommand("resource-manager", {
+    description: "Manage hosted managed resources: list, get, apply, reconcile, or delete",
     getArgumentCompletions: (prefix: string) => {
       const items = ["list", "get", "apply", "reconcile", "delete"]
         .filter((value) => value.startsWith(prefix))
@@ -470,7 +476,11 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     },
     handler: async (args, ctx) => {
       try {
-        const result = await executeControllerCommand(client, ctx, parseControllerArgs(args));
+        const result = await executeResourceManagerCommand(
+          client,
+          ctx,
+          parseResourceManagerArgs(args),
+        );
         ctx.ui.notify(result.message, result.level ?? "info");
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
@@ -579,7 +589,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
-    hostUnavailableNotified = false;
+    serverUnavailableNotified = false;
     const sessionId = ctx.sessionManager.getSessionId();
     const generation = ++sessionGeneration;
     let snapshotGeneration = 0;
@@ -645,7 +655,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
             return;
           }
           sessionUnsubscribe = unsubscribe;
-          hostUnavailableNotified = false;
+          serverUnavailableNotified = false;
           const capability = await herdrViewer.probe();
           if (generation !== sessionGeneration || sessionContext !== ctx) return;
           sessionView.setActionHint(capability.available ? PIW_SHORTCUT_HINT : undefined, ctx);
@@ -654,10 +664,10 @@ export default function piWorkflows(pi: ExtensionAPI): void {
           if (
             generation === sessionGeneration &&
             sessionContext === ctx &&
-            !hostUnavailableNotified
+            !serverUnavailableNotified
           ) {
-            hostUnavailableNotified = true;
-            ctx.ui.notify(`Workflow host is unavailable: ${errorMessage(error)}`, "warning");
+            serverUnavailableNotified = true;
+            ctx.ui.notify(`Workflow server is unavailable: ${errorMessage(error)}`, "warning");
           }
         }
       })();
@@ -778,7 +788,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     if (sessionUnsubscribe !== null) await sessionUnsubscribe().catch(() => undefined);
     sessionUnsubscribe = null;
     sessionConnectTask = null;
-    hostUnavailableNotified = false;
+    serverUnavailableNotified = false;
     await client.close();
     client = new WorkflowClient({ clientId: `pi-extension-${randomUUID()}` });
   });
@@ -1083,57 +1093,57 @@ async function executeCommand(
   }
 }
 
-async function executeControllerCommand(
+async function executeResourceManagerCommand(
   client: WorkflowClient,
   ctx: ExtensionContext,
-  command: ParsedControllerArgs,
+  command: ParsedResourceManagerArgs,
 ): Promise<CommandResult> {
   const projectPath = path.resolve(ctx.cwd);
   if (command.kind === "list") {
     const response = await requestAccepted(client, {
-      operation: "controller.list",
+      operation: "resourceManager.list",
       payload: { projectPath },
     });
     return {
-      message: summarizeControllerResources(response.receipt),
+      message: summarizeManagedResources(response.receipt),
       details: { action: "list", resources: response.receipt ?? [] },
     };
   }
 
   const idempotencyKey = randomUUID();
   if (command.kind === "apply") {
-    const resolved = await client.resolveControllerInitialization({
+    const resolved = await client.resolveResourceManagerInitialization({
       cwd: projectPath,
-      controllerName: command.controller,
+      resourceManagerName: command.resourceManager,
       spec: command.spec,
     });
     const response = await requestAccepted(client, {
-      operation: "controller.apply",
-      requestId: `controller-apply-${idempotencyKey}`,
+      operation: "resourceManager.apply",
+      requestId: `resource-manager-apply-${idempotencyKey}`,
       idempotencyKey,
       payload: {
         projectPath,
-        controller: resolved.controllerName,
+        resourceManager: resolved.resourceManagerName,
         key: command.key,
         spec: command.spec,
         initialStatus: resolved.initialStatus,
-        controllerPath: resolved.controllerPath,
+        resourceManagerPath: resolved.resourceManagerPath,
         sourceHash: resolved.sourceHash,
       },
     });
     return {
-      message: `Applied controller resource ${command.controller}/${command.key}.`,
+      message: `Applied managed resource ${command.resourceManager}/${command.key}.`,
       details: { action: "apply", resource: response.receipt ?? null },
     };
   }
 
   const response = await requestAccepted(client, {
-    operation: `controller.${command.kind}`,
-    requestId: `controller-${command.kind}-${idempotencyKey}`,
+    operation: `resourceManager.${command.kind}`,
+    requestId: `resource-manager-${command.kind}-${idempotencyKey}`,
     idempotencyKey,
     payload: {
       projectPath,
-      controller: command.controller,
+      resourceManager: command.resourceManager,
       key: command.key,
     },
   });
@@ -1144,7 +1154,7 @@ async function executeControllerCommand(
     };
   }
   return {
-    message: `Controller resource ${command.controller}/${command.key} ${command.kind} request accepted.`,
+    message: `Managed resource ${command.resourceManager}/${command.key} ${command.kind} request accepted.`,
     details: { action: command.kind, resource: response.receipt ?? null },
   };
 }
@@ -1333,7 +1343,7 @@ async function requestAccepted(
       ? await client.request(options)
       : await client.requestDurable({ ...options, idempotencyKey: options.idempotencyKey });
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
-    throw new Error(response.error ?? `Workflow host rejected ${options.operation}`);
+    throw new Error(response.error ?? `Workflow server rejected ${options.operation}`);
   }
   return response;
 }
@@ -1418,18 +1428,18 @@ function summarizeRun(value: JsonValue | undefined): string {
     .join(" ");
 }
 
-function summarizeControllerResources(value: JsonValue | undefined): string {
-  if (!Array.isArray(value) || value.length === 0) return "No controller resources.";
+function summarizeManagedResources(value: JsonValue | undefined): string {
+  if (!Array.isArray(value) || value.length === 0) return "No managed resources.";
   const resources = value.map((item) => {
     if (!isRecord(item) || !isRecord(item.metadata)) return "unknown";
-    const controller =
-      typeof item.metadata.controller === "string" ? item.metadata.controller : "unknown";
+    const resourceManager =
+      typeof item.metadata.resourceManager === "string" ? item.metadata.resourceManager : "unknown";
     const key = typeof item.metadata.key === "string" ? item.metadata.key : "unknown";
     const generation =
       typeof item.metadata.generation === "number" ? item.metadata.generation : "unknown";
-    return `${controller}/${key} generation=${generation}`;
+    return `${resourceManager}/${key} generation=${generation}`;
   });
-  return `Controller resources: ${resources.join(", ")}.`;
+  return `Managed resources: ${resources.join(", ")}.`;
 }
 
 function jsonValue(value: unknown): JsonValue {

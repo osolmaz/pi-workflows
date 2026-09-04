@@ -10,7 +10,7 @@ status: implemented
 
 pi-workflows should feel the same whether the user watches a run or walks away from it. In the user's words: "I might start a workflow locally in Pi then I wait for it to complete. All the while I am looking at the screen and I'm not closing the Pi window. When the workflow ends I just want to be able to continue the same Pi session like normal with a session up to date with what happened in the workflow." And: "I just want to interact by starting a workflow, closing it, and then coming back and then still being able to continue it when I open it up. It's syncing continuously or something."
 
-These are not two modes. The user asked for "both in a single unified system." This plan makes the Pi window irrelevant to execution: closing or opening the window is a change in observation, not in the run. The work stays on one machine, uses the merged controller runtime as its foundation, and does not modify Pi core.
+These are not two modes. The user asked for "both in a single unified system." This plan makes the Pi window irrelevant to execution: closing or opening the window is a change in observation, not in the run. The work stays on one machine, uses the merged resource manager runtime as its foundation, and does not modify Pi core.
 
 This revision incorporates an external design review of the first draft. The review confirmed the three design rules and found five structural gaps in the details. The Decisions section resolves each one before implementation starts.
 
@@ -23,7 +23,7 @@ Four rules define the system:
 3. **The session is always a view.** It attaches to a run's event stream and renders it. An open window sees a live tail; a reopened window catches up from the same stream. Interaction such as approvals uses durable waiting states, never prompts tied to the window's lifetime.
 4. **Claims arbitrate every lifecycle decision.** Only the current claim holder may resume, interrupt, or write a terminal event for a run. Recovery code that finds an abandoned run goes through the queue instead of writing to the bundle directly.
 
-The controller runtime already provides most of the machinery: a deduplicated queue with expiring claims, a structured event table, crash recovery through the trace tail, and guarded effect records. This plan extends that treatment to runs the user starts interactively and adds the view layer.
+The resource manager runtime already provides most of the machinery: a deduplicated queue with expiring claims, a structured event table, crash recovery through the trace tail, and guarded effect records. This plan extends that treatment to runs the user starts interactively and adds the view layer.
 
 ## Decisions
 
@@ -31,8 +31,8 @@ These points were open in the first draft. External review showed each one is lo
 
 1. **Write fencing on bundles.** Every claim records a runner ID, a token, and a lease expiry in the store. Every bundle write verifies the token inside the run lock before appending and fails the runner fast when the token no longer matches. Expiring claims alone do not stop a stalled runner from writing; fencing does.
 2. **Explicit resume protocol.** Resume is a named operation, not a restart. It truncates a torn trace tail to the last complete line, rebuilds run state from the trace, seeds the trace sequence from the tail, accounts for already-executed steps against the step limit, and records a resume boundary event before continuing.
-3. **Resume scope.** User-started runs get node-level resume. Controller child runs keep their current new-attempt semantics, because attempt immutability and parent-side retry already work and are tested. Both behaviors are explicit; nothing mixes silently.
-4. **A dedicated run queue.** Interactive runs do not fit the controller queue, which is keyed to controller resources. A new `workflow_run_queue` table shares the claim, lease, and fencing pattern and adds runner affinity fields. Runs stay out of `/controller list`.
+3. **Resume scope.** User-started runs get node-level resume. ResourceManager child runs keep their current new-attempt semantics, because attempt immutability and parent-side retry already work and are tested. Both behaviors are explicit; nothing mixes silently.
+4. **A dedicated run queue.** Interactive runs do not fit the controller queue, which is keyed to managed resources. A new `workflow_run_queue` table shares the claim, lease, and fencing pattern and adds runner affinity fields. Runs stay out of `/resource-manager list`.
 5. **Origin affinity.** An interactively started run is inserted and claimed in one transaction, so the session that started it owns it from birth. The standalone host takes over only when that claim is released or expires. This guarantees a watched run's conversation happens in the watching session.
 6. **Close-to-park shutdown.** `session_shutdown` stops writing a terminal cancel event for queued runs. It aborts in-flight work without a terminal event and releases the claim, leaving a resumable bundle. A clean close releases claims explicitly; a crash relies on lease expiry.
 7. **Per-attempt capture.** Session capture becomes segmented per attempt, keyed by attempt ID, so a run handed off to the host or a new session starts a fresh capture segment instead of failing integrity checks.
@@ -40,7 +40,7 @@ These points were open in the first draft. External review showed each one is lo
 9. **Source pinning.** The manifest stores a content hash of the workflow source at run start. Resume refuses to continue against changed source unless forced, and a forced resume records the mismatch in the trace.
 10. **Snapshot catch-up.** Notifications are idempotent snapshots of run state as of a store sequence number, recomputed from the store, not a stream of one-off messages. The watermark persists per session before sending. A skipped incremental notification is subsumed by the next snapshot.
 11. **A run-level event feed.** Run lifecycle transitions write rows into a store table, so one watermark covers both controller and run events. Tailing `trace.ndjson` is reserved for the single actively watched run.
-12. **Store-error backoff.** Worker loops treat store errors such as `SQLITE_BUSY` as transient and back off instead of letting a worker die silently. The host's advisory lock guards host-versus-host only; the embedded runner does not take it, and a second host refuses to start.
+12. **Store-error backoff.** Runner loops treat store errors such as `SQLITE_BUSY` as transient and back off instead of letting a worker die silently. The host's advisory lock guards host-versus-host only; the embedded runner does not take it, and a second host refuses to start.
 13. **Orphan reaping.** The host spawns `pi --mode rpc` children in their own process group, records child PIDs in the bundle, and reaps known orphans on startup. Consequential actions stay behind guarded effects regardless.
 
 ## Requirements
@@ -55,11 +55,11 @@ These points were open in the first draft. External review showed each one is lo
 ## Work items
 
 1. **Run queue and fencing.** Add the `workflow_run_queue` table with claim tokens, lease expiry, and runner affinity. Gate every bundle write on the token inside the run lock. Insert-and-claim interactive starts in one transaction.
-2. **Node-level resume.** Implement the explicit resume protocol from Decision 2, with source pinning from Decision 9. User-started runs resume at the interrupted node; controller child runs are untouched.
+2. **Node-level resume.** Implement the explicit resume protocol from Decision 2, with source pinning from Decision 9. User-started runs resume at the interrupted node; resource manager child runs are untouched.
 3. **Close-to-park and capture segments.** Change `session_shutdown` to abort-without-terminal plus claim release for queued runs. Split session capture into per-attempt segments the integrity checker understands.
 4. **Continuation runs.** Chain an answered checkpoint to a new run ID with a parent link and carried-forward outputs. Render the chain as one logical run in views.
 5. **Session sync.** Add the run-level event feed, per-session watermarks, snapshot catch-up on `session_start`, and noteworthy-event messages. Live watching tails `trace.ndjson` from a remembered byte offset with `fs.watch`, reusing the TUI viewer's file-tail path.
-6. **Standalone host.** A `pi-workflows` CLI subcommand loads controller definitions, opens the project store, and runs claiming in a loop with store-error backoff. Conversation child nodes run in spawned headless `pi --mode rpc` sessions with orphan reaping. The host takes an advisory lock against other hosts, drains on SIGTERM, and recovers on restart. It is a foreground process the user runs in a terminal; it is not a service.
+6. **Standalone host.** A `pi-workflows` CLI subcommand loads resource manager definitions, opens the project store, and runs claiming in a loop with store-error backoff. Conversation child nodes run in spawned headless `pi --mode rpc` sessions with orphan reaping. The host takes an advisory lock against other hosts, drains on SIGTERM, and recovers on restart. It is a foreground process the user runs in a terminal; it is not a service.
 
 ## Non-goals
 
@@ -89,7 +89,7 @@ The implementation matches the decisions above with these refinements:
 - Graph validation now allows outgoing edges from checkpoint nodes. The old
   rejection encoded terminal-forever checkpoints; continuations make those
   edges live. This is a deliberate contract change for workflow authors.
-- The host command is `pi-workflows host`, chosen over `run` because the
+- The host command is `pi-workflows server`, chosen over `run` because the
   viewer CLI's vocabulary already uses runs for bundles.
 - The first capture stays flat at `session/`; only binds from the second
   recorder onward write segments under `session/segments/`. This keeps the

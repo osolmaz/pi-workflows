@@ -96,7 +96,7 @@ The runner will start it through Pi RPC and check the following sequence:
 2. RPC emits `setWidget` and `setStatus` for the `pi-workflows` key with `running` state.
 3. `/workflow pause` is accepted.
 4. The widget and status change to `paused`.
-5. Host status reports one parked run and no active workflow worker.
+5. Server status reports one parked run and no active workflow runner.
 6. `/workflow resume` is accepted.
 7. The widget and status return to `running`.
 8. The workflow completes with the fixed output.
@@ -170,7 +170,7 @@ A real-model run requires explicit provider and model arguments. `--runtime-only
 The standalone runner will own one temporary root and remove it in a `finally` path. It will:
 
 - close the Pi RPC process;
-- stop the workflow host through the installed client;
+- stop the workflow server through the installed client;
 - wait for the host endpoint to disappear;
 - stop child workers started for the smoke workflows;
 - remove the npm consumer installation, sessions, workflow state, and fixture project.

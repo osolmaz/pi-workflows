@@ -21,7 +21,7 @@ planning workflow that was first released as `autodevise`; the old command and
 export are not retained. A project or global file named `monitor.workflow.ts`
 replaces the built-in monitor. Each built-in has a stable reference such as
 `builtin:monitor` and an explicit revision. A resolver child snapshots the
-selected built-in before start, and each run worker verifies that identity
+selected built-in before start, and each run runner verifies that identity
 before execution. A revision mismatch refuses resume. Project and global
 workflow files also use their absolute path and SHA-256 hash as source
 identity.
@@ -108,54 +108,60 @@ Function actions receive `WorkflowActionContext`, which adds
 
 ## Durable runs, parking, and resume
 
-Every run enters one global SQLite queue. One package-owned host claims runs,
+Every run enters one global SQLite queue. One package-owned server claims runs,
 renews live claims, commits state, and supervises one child process for each
-active run generation. The extension is a local host client. It does not run
+active run generation. The extension is a local server client. It does not run
 the workflow engine or workflow definitions.
 
-The host starts on demand when a Pi or CLI client needs it. These commands
-control the same user-level host for all projects:
+The server starts on demand when a Pi or CLI client needs it. These commands
+control the same user-level server for all projects:
 
 ```bash
-pi-workflows host start
-pi-workflows host status
-pi-workflows host stop
-pi-workflows host run
+pi-workflows server start
+pi-workflows server status
+pi-workflows server stop
+pi-workflows server run
 ```
 
-`host run` stays attached. The other commands start, inspect, or stop the
+`server run` stays attached. The other commands start, inspect, or stop the
 on-demand process. No command installs an operating-system service.
 
-The extension, CLI, and `piw` use the same version-1 client protocol over a Unix socket or Windows named pipe. The host sends byte-bounded run-list and run-view pages. Clients collect a complete run list for one revision and reject stale run pages whose cursor or revision no longer matches. The host reads only the selected history ranges and reuses an unchanged subscribed view after a lightweight revision check. It waits for a slow socket to drain and removes every subscription when its client unsubscribes. Large values stay available through verified content chunks. Host-generated aggregate values are saved and linked to the run before the host advertises them.
+The extension, CLI, and `piw` use the same version-1 client protocol over a Unix socket or Windows named pipe. The server sends byte-bounded run-list and run-view pages. Clients collect a complete run list for one revision and reject stale run pages whose cursor or revision no longer matches. The server reads only the selected history ranges and reuses an unchanged subscribed view after a lightweight revision check. It waits for a slow socket to drain and removes every subscription when its client unsubscribes. Large values stay available through verified content chunks. Server-generated aggregate values are saved and linked to the run before the server advertises them.
 
-A worker verifies the root and all mounted source identities before it loads
+A runner verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes
-from committed state through a host-backed store. A source mismatch parks the
+from committed state through a server-backed store. Resume and continuation
+reads return only `WorkflowRunState`. Session messages, tool results, activity
+events, viewer history, settings, follow-ups, and other inspection data stay in
+server-owned SQLite. If one required result exceeds the runner protocol frame,
+the server returns a digest-bound reference and the runner reads and verifies it
+in bounded parts. A source mismatch parks the
 run with `workflowSourceChanged`; normal scheduling does not retry it. Restore
 the recorded source and explicitly resume, or cancel the run. A headless Pi
-child uses its own registered process group. The worker stops that group on
-normal completion, and the host reaps it if the worker exits first. If the
-worker stops for another recoverable reason, pure work can run again. A
+child uses its own registered process group. The runner stops that group on
+normal completion, and the server reaps it if the runner exits first. If the
+runner stops for another recoverable reason, pure work can run again. A
 protected write checks and renews the exact live token and generation in one
 transaction. An expired or replaced owner cannot revive itself.
 
 Interactive agent and assistant-message steps do not run headlessly for a Pi
-session. The worker commits a durable interaction request and parks. The origin
+session. The runner commits a durable interaction request and parks. The origin
 session presents the request through documented Pi APIs and submits the exact
-request, node, attempt, and revision. The host records submitted output as
-provisional. A new supervised worker loads the workflow and runs its `validate`
-function before the host accepts the submission. A validation error leaves the
+request, node, attempt, and revision. The server records submitted output as
+provisional. A new supervised runner loads the workflow and runs its `validate`
+function before the server accepts the submission. A validation error leaves the
 same request pending and returns the error to the model. Closing Pi leaves that
 request pending; reopening the same session adopts the existing session entry
 or presents it once. Step prompts, protected decisions, notifications, terminal
-results, and follow-ups use the host-owned `workflow_messages` table and one
+results, and follow-ups use the server-owned `workflow_messages` table and one
 extension sender. Initial, reminder, and resumed prompts are the same step-message
-kind with different display reasons. A terminal workflow message becomes eligible only after
-the terminal outcome is committed. A controller child without an origin session can use a supervised
-headless `pi --mode rpc` child for structured agent steps.
+kind with different display reasons. A terminal workflow message becomes
+eligible only after the terminal outcome is committed. A resource manager child
+without an origin session can use a supervised headless `pi --mode rpc` child
+for structured agent steps.
 
-Pause stops the worker and parks at the last durable boundary. Resume takes a
-new generation. Cancellation can stop a live worker or atomically claim and
+Pause stops the runner and parks at the last durable boundary. Resume takes a
+new generation. Cancellation can stop a live runner or atomically claim and
 cancel an expired running row. Resume refuses changed workflow source.
 
 ## Node types
@@ -194,15 +200,15 @@ agent({
 because an invalid response is already visible and must not be retried.
 
 For submitted output, the engine appends the existing workflow-tool contract.
-The host checks the durable transport identifiers, stores a `validating`
-submission, and starts a supervised worker. In that worker, the output passes
+The server checks the durable transport identifiers, stores a `validating`
+submission, and starts a supervised runner. In that runner, the output passes
 through tolerant JSON normalization and then `validate`. The tool reports
 success only after this check accepts the output. If the tool turn is aborted,
-the client stops waiting but does not cancel the durable host command. A retry
+the client stops waiting but does not cancel the durable server command. A retry
 uses a new transport request ID with the same durable submission identity and
 adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
-without submitting, the host increments the request's unproductive-turn counter
+without submitting, the server increments the request's unproductive-turn counter
 and can create at most two step messages with reason `reminder`. The next
 unproductive turn fails the step. The timeout remains active during each
 reported model turn, and cancellation remains active throughout. For assistant-message output, the engine appends a normal-response contract,
@@ -214,7 +220,7 @@ form's active Pi turn.
 node context that returns either value. Omit it to use the 15-minute engine
 default. The limit counts active node execution. For an origin-session agent
 node, it counts reported model-turn time from an active connected Pi session.
-It excludes message delivery, waiting, paused time, disconnects, and host downtime. Set it to `null` to disable only this deadline; cancellation,
+It excludes message delivery, waiting, paused time, disconnects, and server downtime. Set it to `null` to disable only this deadline; cancellation,
 parking, claim loss, shutdown, and the node's abort signal still work. A timeout
 function can use prepared outputs to select a policy for this run. It has 30
 seconds to return. Computed timeout functions are runtime code, so definition
@@ -232,7 +238,7 @@ compute({ run: ({ outputs }) => ({ merged: { ...outputs } }) });
 
 Queues a durable plain-text message for the Pi session that started the run.
 The runner does not write the message into its own conversation. A standalone
-host can execute this node, and the message still waits for the origin session.
+server can execute this node, and the message still waits for the origin session.
 
 ```typescript
 notify({
@@ -245,13 +251,13 @@ The runtime gives each logical execution of a notification node a stable index.
 A retry after a crash reuses that index, so it cannot queue the same message
 twice. Re-entering the node later in a loop gets the next index. A workflow
 with a `notify` node must be an interactive queued run with an origin session.
-Controller child workflows are detached and must report through their
-controller resource instead.
+ResourceManager child workflows are detached and must report through their
+managed resource instead.
 
 ### action
 
 Performs managed work. Every function action and shell action must declare how
-the host recovers if the worker exits after the external operation but before
+the server recovers if the runner exits after the external operation but before
 it saves a receipt.
 
 Use `idempotentEffect(type)` only when the operation has a stable external
@@ -267,8 +273,8 @@ action({
 ```
 
 Use `manualEffect(type)` when the external system cannot prove whether an
-uncertain request applied. An uncertain worker exit marks that effect
-`ambiguous`, parks the run, and requires explicit operator recovery. The host
+uncertain request applied. An uncertain runner exit marks that effect
+`ambiguous`, parks the run, and requires explicit operator recovery. The server
 does not retry it automatically.
 
 The shell form (`shell` is a synonym that requires `exec`) runs a command owned
@@ -323,7 +329,7 @@ keeps normal output capture. Lines and update data are each limited to 64 KiB.
 See [WORKFLOW_UPDATES.md](WORKFLOW_UPDATES.md) for the envelope, progress
 schema, limits, estimation, and error rules.
 
-The host reserves the effect before it lets the action run. The engine creates
+The server reserves the effect before it lets the action run. The engine creates
 the internal key from the run ID, effect type, full compiled node path, and node
 visit number. Workflow code does not supply that key. Two included workflows
 can use the same local node name without sharing an effect. A repeated key with
@@ -382,9 +388,9 @@ humanDecision({
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the host takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. The removed `body` request form is invalid under the alpha hard cut.
+The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the server takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. The removed `body` request form is invalid under the alpha hard cut.
 
-The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the host-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
+The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the server-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
 See [Human decisions](HUMAN_DECISIONS.md) for channels, recovery, persistence, and plan approval.
 
@@ -490,8 +496,8 @@ A direct user request to continue or resume the active workflow maps to
 `resume` immediately. The model does not call `status` instead of `resume` or
 use it as a prerequisite. An already active run adopts the resume request. A
 pending interaction on a paused run remains the same durable request and resumes
-without a worker. Other paused or parked work gets a new claim generation and worker.
-With no resumable run, the host rejects the request.
+without a runner. Other paused or parked work gets a new claim generation and runner.
+With no resumable run, the server rejects the request.
 
 The origin Pi session shows its active run in the workflow widget. `Shift+Up`
 and `Shift+Down` scroll it. A sent step message is open only while its
@@ -503,16 +509,16 @@ pending step messages. A turn that starts while the run is paused does not bind
 to the workflow. The paused run does not accept updates, submissions, or
 decision answers until `resume`.
 
-`status` reports the durable queue projection. A host command succeeds only
+`status` reports the durable queue projection. A server command succeeds only
 after its transaction commits. The protocol stores request fingerprints and
 receipts, so an exact duplicate adopts the committed result and conflicting
 reuse is rejected.
 
 The normal extension offers these actions through the origin Pi session. The
-headless RPC bridge offers only `update` and `submit`, so a controller child
-cannot recursively control unrelated runs. Controller code can use its narrow
+headless RPC bridge offers only `update` and `submit`, so a resource manager child
+cannot recursively control unrelated runs. ResourceManager code can use its narrow
 `ctx.workflows` methods for child runs, settings, and follow-up records. Those
-methods also commit through the global host.
+methods also commit through the global server.
 
 ### Built-in plain summary
 
@@ -666,7 +672,7 @@ The interval uses the existing shell action to launch the current Node
 executable with a timer. This works on every platform supported by Pi. The node
 and command timeouts are higher than the maximum interval. Cancelling the
 workflow aborts the timer process immediately. If the owning Pi process or
-standalone host stops during the wait, normal parking rules abort the shell node
+standalone server stops during the wait, normal parking rules abort the shell node
 and resume later by running that wait again from the beginning.
 
 A monitor uses the session's single active workflow slot. It does not provide
@@ -709,7 +715,7 @@ notification does not start an assistant response. Step prompts, decisions, noti
 
 Workflow nodes normally produce structured values for routing and persistence.
 When a person must receive normal prose, use an agent node with
-`expectedOutput: assistantMessage()`. The worker parks and records the exact
+`expectedOutput: assistantMessage()`. The runner parks and records the exact
 step request. The origin Pi session starts the model turn, and the visible
 assistant text becomes the node output after the turn settles.
 
@@ -718,7 +724,7 @@ looks for an existing session entry with the durable request ID. It inserts a
 new visible message only when no adopted entry exists. A repeated submission
 returns its stored receipt.
 
-A headless controller child cannot produce a visible assistant message without
+A headless resource manager child cannot produce a visible assistant message without
 an approved origin-session binding. Use structured agent output for detached
 work. A final continuation-chain outcome creates its own terminal workflow message through the shared coordinator only after the outcome is durable.
 
@@ -732,42 +738,42 @@ possible. Defaults worth knowing:
   number or context callback. A timed-out node has outcome `timed_out` and can
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
   turn, and late output for that attempt is rejected. Interactive runs save the
-  resolved deadline before they park. The host advances it only during a
+  resolved deadline before they park. The server advances it only during a
   reported model turn from an active connected origin session. Message delivery,
-  waiting, pauses, disconnects, and host downtime do not consume the limit. This
-  active-time budget survives host restart.
+  waiting, pauses, disconnects, and server downtime do not consume the limit. This
+  active-time budget survives server restart.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` atomically parks the run with `paused: true`, stores the
-  receipt, and fences the worker before process-group shutdown. `/workflow
+  receipt, and fences the runner before process-group shutdown. `/workflow
 resume` takes a new generation and reruns only work after the last durable
   boundary.
-- The host tells each worker to `start`, `resume`, `continue`, or `restart`.
+- The server tells each runner to `start`, `resume`, `continue`, or `restart`.
   A checkpoint continuation names its waiting parent. A restart begins at the
   workflow start and does not reuse checkpoint continuation rules.
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command
-  reports success. Cancellation can use that run ID before its scheduled worker
+  reports success. Cancellation can use that run ID before its scheduled runner
   starts. Active cancellation commits its terminal state and command receipt
-  together before worker shutdown. It cancels effects that have not started and
+  together before runner shutdown. It cancels effects that have not started and
   marks applying effects ambiguous for explicit recovery. `workflow status` and
   `workflow cancel` can use the run ID immediately.
 - One interactive workflow request is presented per Pi session. Other requests
   remain durable and ordered.
 - Each protected write renews only its exact live token and generation in the
   same transaction. Claim loss does not write a failed run event.
-- An uncommitted pure or idempotent node can run again after a worker crash. An
+- An uncommitted pure or idempotent node can run again after a runner crash. An
   uncertain manual effect parks as ambiguous and never retries automatically.
-  If a ready worker exits before the saved run revision advances, the host parks
-  the run with `workerNoProgress`. The scheduler does not claim it again until
+  If a ready runner exits before the saved run revision advances, the server parks
+  the run with `runnerNoProgress`. The scheduler does not claim it again until
   an operator explicitly resumes or cancels it.
-- Host status reports safe counts and timestamps. It does not report session
+- Server status reports safe counts and timestamps. It does not report session
   IDs, project paths, prompts, payloads, tokens, process IDs, or credentials.
 
-## Workflows started by controllers
+## Workflows started by resource managers
 
-A controller can start a workflow as a finite child job with `ctx.workflows.ensure()`. The request key is stable across reconciliation passes, and the input fingerprint prevents one key from being reused for different work.
+A resource manager can start a workflow as a finite child job with `ctx.workflows.ensure()`. The request key is stable across reconciliation passes, and the input fingerprint prevents one key from being reused for different work.
 
 ```typescript
 const run = await ctx.workflows.ensure({
@@ -788,16 +794,16 @@ if (run.state !== "succeeded") {
 }
 ```
 
-Child workflow completion queues the parent resource again. The global host runs the child through the same queue and supervised worker model as any other run. A host or worker crash resumes the existing durable run when its committed effect state makes that safe. Consequential external mutations belong in the workflow or controller effect API; an uncertain result stops for explicit recovery.
+Child workflow completion queues the parent resource again. The global server runs the child through the same queue and supervised runner model as any other run. A server or runner crash resumes the existing durable run when its committed effect state makes that safe. Consequential external mutations belong in the workflow or resource manager effect API; an uncertain result stops for explicit recovery.
 
-See [CONTROLLERS.md](CONTROLLERS.md) for controller definitions and the full recovery contract.
+See [RESOURCE_MANAGERS.md](RESOURCE_MANAGERS.md) for resource manager definitions and the full recovery contract.
 
 ## Using the engine outside Pi
 
 The engine remains Pi-agnostic. `WorkflowEngine` takes any `AgentStepExecutor`,
 so tests and custom library integrations can script agent steps. The package's
 production extension does not use this as a selectable embedded runtime; it
-always sends runs to the global host.
+always sends runs to the global server.
 
 ```typescript
 import { WorkflowEngine, type AgentStepExecutor } from "@osolmaz/pi-workflows";
@@ -822,7 +828,7 @@ const { state } = await engine.run(workflow, { task: "..." });
 The installed-package end-to-end test packs this repository and installs the
 archive with production dependencies in a temporary consumer project. It then
 starts the repository-pinned base Pi with only that Pi Workflows installation.
-The test checks command isolation, host startup, widget and status changes,
+The test checks command isolation, server startup, widget and status changes,
 pause, resume, completion, and `piw <runId> --once` output.
 
 Run the deterministic phase without a model call:

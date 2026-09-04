@@ -4,8 +4,8 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: "@osolmaz/pi-workflows/controllers",
-        replacement: new URL("./src/controllers/index.ts", import.meta.url).pathname,
+        find: "@osolmaz/pi-workflows/resource-managers",
+        replacement: new URL("./src/resource-managers/index.ts", import.meta.url).pathname,
       },
       {
         find: "@osolmaz/pi-workflows",
@@ -30,20 +30,20 @@ export default defineConfig({
         "src/**/index.ts",
         "src/**/types.ts",
         "src/**/errors.ts",
-        "src/controllers/conditions.ts",
-        "src/controllers/definition.ts",
-        "src/controllers/json.ts",
-        "src/controllers/results.ts",
-        // The standalone host and viewer run in dedicated integration suites;
+        "src/resource-managers/conditions.ts",
+        "src/resource-managers/definition.ts",
+        "src/resource-managers/json.ts",
+        "src/resource-managers/results.ts",
+        // The standalone server and viewer run in dedicated integration suites;
         // their subprocess and watcher branches are not observable here.
-        "src/host/**",
+        "src/server/**",
         "src/viewer/**",
         "src/render/format.ts",
         "src/workflows/definition.ts",
         "src/workflows/text.ts",
         // Loaded only by spawned children; subprocess execution (covered by
         // the integration and e2e suites) never registers in this report.
-        "src/host/rpc-bridge.ts",
+        "src/server/rpc-bridge.ts",
         "src/channels/adapter-entry.ts",
       ],
       thresholds: {

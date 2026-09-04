@@ -3,8 +3,8 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { HostProcessRegistry } from "../src/host/processes.js";
-import { RpcStepExecutor } from "../src/host/rpc-executor.js";
+import { ServerProcessRegistry } from "../src/server/processes.js";
+import { RpcStepExecutor } from "../src/server/rpc-executor.js";
 import type { AgentStepRequest } from "../src/workflows/types.js";
 import { makeTempDir } from "./helpers.js";
 
@@ -56,7 +56,7 @@ describe("RpcStepExecutor submissions", () => {
     );
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     const submission = await executor.runAgentStep(
@@ -73,7 +73,7 @@ describe("RpcStepExecutor submissions", () => {
     );
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     const request = requestFor("work", "a1") as AgentStepRequest;
@@ -98,7 +98,7 @@ describe("RpcStepExecutor submissions", () => {
     let calls = 0;
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     const submission = await executor.runAgentStep(
@@ -126,7 +126,7 @@ sleep 2
     );
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     // The marker is already waiting when the step starts; the executor
@@ -145,7 +145,7 @@ sleep 2
     );
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     const submission = await executor.runAgentStep(
@@ -160,7 +160,7 @@ sleep 2
     const { fakePi } = await makeFakePi("sleep 30\n");
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     const abort = new AbortController();
@@ -175,7 +175,7 @@ sleep 2
     const { fakePi } = await makeFakePi("exit 3\n");
     const executor = new RpcStepExecutor({
       cwd: "/tmp",
-      registry: new HostProcessRegistry("/tmp"),
+      registry: new ServerProcessRegistry("/tmp"),
       piBin: fakePi,
     });
     await expect(
@@ -189,12 +189,12 @@ sleep 2
   });
 });
 
-describe("HostProcessRegistry edge cases", () => {
+describe("ServerProcessRegistry edge cases", () => {
   it("tolerates corrupt registry files", async () => {
     const dir = await makeTempDir("pi-host-registry-corrupt");
     const file = path.join(dir, "host.children.json");
     await fs.writeFile(file, "not json\n", "utf8");
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     expect(registry.reapOrphans()).toEqual([]);
     await fs.writeFile(file, '{"not": "an array"}', "utf8");
     expect(registry.reapOrphans()).toEqual([]);
@@ -210,7 +210,7 @@ describe("HostProcessRegistry edge cases", () => {
 
   it("kills one exact registered process group", async () => {
     const dir = await makeTempDir("pi-host-registry-one");
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,
       stdio: "ignore",
@@ -226,7 +226,7 @@ describe("HostProcessRegistry edge cases", () => {
 
   it("killAll clears the registry and tolerates dead pids", async () => {
     const dir = await makeTempDir("pi-host-registry-kill");
-    const registry = new HostProcessRegistry(dir);
+    const registry = new ServerProcessRegistry(dir);
     expect(() => registry.register(424_250)).toThrow(/attest/);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,

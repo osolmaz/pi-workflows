@@ -25,7 +25,7 @@ type PendingTurn = {
   end: { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null } | null;
 };
 
-/** Adds every host-owned workflow message to one Pi session through one public API path. */
+/** Adds every server-owned workflow message to one Pi session through one public API path. */
 export class WorkflowMessageCoordinator {
   private readonly queued = new Set<string>();
   private readonly closedTurnMessages = new Set<string>();
@@ -296,7 +296,7 @@ export class WorkflowMessageCoordinator {
       },
     });
     if (response.outcome !== "accepted" && response.outcome !== "adopted") {
-      throw new Error(response.error ?? "Workflow host rejected the Pi branch report");
+      throw new Error(response.error ?? "Workflow server rejected the Pi branch report");
     }
     for (const entry of entries) {
       const message = messageById(view, entry.workflowMessageId);
@@ -364,7 +364,7 @@ async function reportTurn(
     payload: report as unknown as JsonValue,
   });
   if (response.outcome !== "accepted" && response.outcome !== "adopted") {
-    throw new Error(response.error ?? "Workflow host rejected the model-turn report");
+    throw new Error(response.error ?? "Workflow server rejected the model-turn report");
   }
   const receipt = response.receipt;
   if (
@@ -372,12 +372,12 @@ async function reportTurn(
     receipt.schema !== WORKFLOW_TURN_REPORT_RECEIPT_SCHEMA ||
     !["active", "settled", "absent"].includes(String(receipt.ownership))
   ) {
-    throw new Error("Workflow host returned an invalid model-turn receipt");
+    throw new Error("Workflow server returned an invalid model-turn receipt");
   }
   const ownership = receipt.ownership as WorkflowTurnReportReceipt["ownership"];
   if (ownership === "absent") {
     if (receipt.turn !== null) {
-      throw new Error("Workflow host returned an invalid model-turn receipt");
+      throw new Error("Workflow server returned an invalid model-turn receipt");
     }
   } else if (
     !isRecord(receipt.turn) ||
@@ -388,7 +388,7 @@ async function reportTurn(
     receipt.turn.targetSessionId !== report.targetSessionId ||
     receipt.turn.state !== (ownership === "active" ? "started" : "ended")
   ) {
-    throw new Error("Workflow host returned an invalid model-turn receipt");
+    throw new Error("Workflow server returned an invalid model-turn receipt");
   }
   return receipt as unknown as WorkflowTurnReportReceipt;
 }

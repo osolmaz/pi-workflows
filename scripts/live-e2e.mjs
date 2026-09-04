@@ -560,7 +560,7 @@ function hasHostUnavailableNotice(rpc) {
       event.method === "notify" &&
       event.notifyType === "warning" &&
       typeof event.message === "string" &&
-      event.message.startsWith("Workflow host is unavailable:"),
+      event.message.startsWith("Workflow server is unavailable:"),
   );
 }
 
@@ -573,7 +573,7 @@ async function waitForSessionCoordinator(client, sessionId, rpc) {
   });
   try {
     await waitFor(
-      "the existing Pi session to reconnect to the workflow host",
+      "the existing Pi session to reconnect to the workflow server",
       () => {
         return coordinatorPresent;
       },
@@ -586,7 +586,7 @@ async function waitForSessionCoordinator(client, sessionId, rpc) {
     (event) =>
       event.method === "notify" &&
       typeof event.message === "string" &&
-      event.message.startsWith("Workflow host is unavailable:"),
+      event.message.startsWith("Workflow server is unavailable:"),
   );
   if (notices.length !== 1) {
     throw new Error(`Expected one host-unavailable notice, observed ${notices.length}`);
@@ -634,7 +634,7 @@ async function assertPackageIsolation(rpc, candidate) {
   const data = requireObject(await rpc.request("get_commands"), "Pi commands response");
   if (!Array.isArray(data.commands)) throw new Error("Pi commands response has no command list");
   const commandPath = (command) => command.path ?? command.sourceInfo?.path;
-  for (const required of ["workflow", "controller", "piw"]) {
+  for (const required of ["workflow", "resource-manager", "piw"]) {
     const command = data.commands.find((item) => item.name === required);
     if (command === undefined || command.source !== "extension") {
       throw new Error(`Installed candidate did not register /${required}`);
@@ -688,11 +688,11 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     "a parked run with no active worker",
     async () => {
       const response = requireAccepted(
-        await client.request({ operation: "host.status" }),
+        await client.request({ operation: "server.status" }),
         "host status",
       );
       const receipt = requireObject(response.receipt, "host status receipt");
-      return receipt.activeWorkers === 0 && receipt.parkedRuns === 1 ? receipt : false;
+      return receipt.activeRunners === 0 && receipt.parkedRuns === 1 ? receipt : false;
     },
     { rpc, timeoutMs: 30_000 },
   );
@@ -859,7 +859,7 @@ async function runModelWorkflow(context, rpc, client, api) {
 
 async function waitForEndpointClosed(endpoint) {
   await waitFor(
-    "the workflow host endpoint to close",
+    "the workflow server endpoint to close",
     () =>
       new Promise((resolve) => {
         const socket = net.createConnection(endpoint);
@@ -1012,13 +1012,13 @@ async function execute(root, options) {
       modelCostUsd = modelResult.costUsd;
     }
 
-    const hostStatus = requireAccepted(
-      await client.request({ operation: "host.status" }),
+    const serverStatus = requireAccepted(
+      await client.request({ operation: "server.status" }),
       "final host status",
     );
-    const hostReceipt = requireObject(hostStatus.receipt, "final host status receipt");
-    if (hostReceipt.lifecycleContradictions !== 0 || hostReceipt.ambiguousEffects !== 0) {
-      throw new Error(`Host ended with unsafe state: ${JSON.stringify(hostReceipt)}`);
+    const serverReceipt = requireObject(serverStatus.receipt, "final host status receipt");
+    if (serverReceipt.lifecycleContradictions !== 0 || serverReceipt.ambiguousEffects !== 0) {
+      throw new Error(`Server ended with unsafe state: ${JSON.stringify(serverReceipt)}`);
     }
     rpc.assertNoExtensionError();
     process.stdout.write(
@@ -1044,7 +1044,7 @@ async function execute(root, options) {
     if (client !== undefined) {
       const endpoint = client.endpoint;
       try {
-        await client.request({ operation: "host.stop" });
+        await client.request({ operation: "server.stop" });
       } catch {
         // The host is already stopped or never became available.
       }

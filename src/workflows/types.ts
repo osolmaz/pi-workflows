@@ -96,7 +96,7 @@ export type WorkflowProgressData = {
 export type WorkflowNodeCommon = {
   /**
    * Per-node active-execution timeout or a callback that derives it from the run context.
-   * Waiting, paused, disconnected, and host-down origin-session time does not count.
+   * Waiting, paused, disconnected, and server-down origin-session time does not count.
    * Null disables the deadline. Omission falls back to the engine default (15 minutes).
    */
   timeoutMs?: number | null | ((context: WorkflowNodeContext) => MaybePromise<number | null>);
@@ -962,7 +962,7 @@ export type WorkflowEngineOptions = {
   notificationSink?: WorkflowNotificationSink;
   /** Canonical SQLite database. Defaults to `~/.pi/agent/workflows/state.sqlite`. */
   databasePath?: string;
-  /** Durable execution store. Workers use a host-backed implementation. */
+  /** Durable execution store. Runners use a server-backed implementation. */
   store?: import("./store.js").WorkflowExecutionStore;
   /**
    * Awaited after `run_started` is persisted, before any node executes.

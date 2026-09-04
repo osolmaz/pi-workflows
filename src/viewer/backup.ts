@@ -10,7 +10,7 @@ export function verifyInactiveBackup(
   const resolved = path.resolve(databasePath);
   const active = path.resolve(activeDatabasePath);
   if (sameFile(resolved, active)) {
-    throw new Error("Active workflow state must be verified through the workflow host");
+    throw new Error("Active workflow state must be verified through the workflow server");
   }
   const state = new StateDatabase({ filePath: resolved, mode: "read-only" });
   try {

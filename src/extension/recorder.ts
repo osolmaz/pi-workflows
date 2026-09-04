@@ -104,7 +104,7 @@ export type SessionRecordingStore = {
   ): Promise<{ eventCount: number; entryCount: number; lastEventSeq: number }>;
 };
 
-/** Records settled Pi entries and normalized temporal events through the workflow host. */
+/** Records settled Pi entries and normalized temporal events through the workflow server. */
 export class SessionRecorder {
   private readonly store: SessionRecordingStore;
   private readonly runId: string;

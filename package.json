@@ -1,7 +1,7 @@
 {
   "name": "@osolmaz/pi-workflows",
   "version": "0.16.2",
-  "description": "Workflow and controller runtime with a live terminal viewer for the pi coding agent",
+  "description": "Workflow and resource manager runtime with a live terminal viewer for the pi coding agent",
   "keywords": [
     "pi-package"
   ],
@@ -44,9 +44,9 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
     },
-    "./controllers": {
-      "types": "./dist/controllers/index.d.ts",
-      "default": "./dist/controllers/index.js"
+    "./resource-managers": {
+      "types": "./dist/resource-managers/index.d.ts",
+      "default": "./dist/resource-managers/index.js"
     },
     "./builtins": {
       "types": "./dist/builtins/index.d.ts",

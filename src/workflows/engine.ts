@@ -332,7 +332,7 @@ export class WorkflowEngine {
     validateWorkflowDefinition(workflow);
     this.presentationRequired = workflow.presentationPrompt !== undefined;
     // Reset before any await: a park or cancel landing during preparation
-    // must survive, or a host drain would hang while the run executes.
+    // must survive, or a server drain would hang while the run executes.
     this.cancelled = false;
     this.paused = false;
     this.parked = false;

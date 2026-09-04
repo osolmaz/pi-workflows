@@ -138,7 +138,7 @@ Children receive only the built-in read-only tool instances requested by Sanity 
 Children receive no:
 
 - `workflow` tool;
-- `/workflow`, `/piw`, `/controller`, or workflow-channel command;
+- `/workflow`, `/piw`, `/resource-manager`, or workflow-channel command;
 - run, node, or attempt identifier;
 - workflow update, answer, submit, pause, resume, or cancel callback;
 - child workflow run or parent workflow handle.
@@ -239,7 +239,7 @@ Unit and integration tests must cover:
 - serial two-session and parallel five-session behavior;
 - existing progress keys, model labels, throttling, and rendering;
 - interactive Pi with normal extensions enabled and the local mock provider;
-- standalone `WorkflowHost` through the same private runtime path;
+- standalone `WorkflowServer` through the same private runtime path;
 - no child session files or child workflow runs;
 - built-in revision 4 and historical terminal run reading;
 - one full detailed assistant response followed by one short plain-language assistant response;

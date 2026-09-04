@@ -60,7 +60,7 @@ Pi and Telegram implement one channel interface. Workflows address a named audie
 - Reject stale responses by decision ID and canonical request digest.
 - Rebuild the pending-decision index from immutable records.
 
-### Host and channels
+### Server and channels
 
 - Add a `HumanDecisionChannel` interface outside the engine layer.
 - Add a Pi channel using documented TUI APIs.

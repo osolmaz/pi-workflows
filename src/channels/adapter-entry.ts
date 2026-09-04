@@ -20,7 +20,7 @@ type ChannelAdapterReport = ChannelAdapterMessage extends infer Message
     : never
   : never;
 
-class AdapterHostConnection {
+class AdapterServerConnection {
   private sequence = 0;
   private revision = 0;
   private readonly lines = createInterface({ input: process.stdin, crlfDelay: Infinity })[
@@ -43,13 +43,13 @@ class AdapterHostConnection {
       await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
     }
     const next = await this.lines.next();
-    if (next.done) throw new Error("Workflow host closed the channel adapter connection");
+    if (next.done) throw new Error("Workflow server closed the channel adapter connection");
     const response = parseChannelAdapterResponse(Buffer.from(next.value, "utf8"));
     if (response.sequence !== this.sequence) {
-      throw new Error("Workflow host returned a mismatched channel response");
+      throw new Error("Workflow server returned a mismatched channel response");
     }
     if (response.outcome !== "accepted") {
-      throw new Error(response.error ?? "Workflow host rejected the channel adapter message");
+      throw new Error(response.error ?? "Workflow server rejected the channel adapter message");
     }
     this.revision = response.revision;
     return response;
@@ -58,7 +58,7 @@ class AdapterHostConnection {
 
 export async function runChannelAdapter(): Promise<number> {
   const launch = readLaunch();
-  const host = new AdapterHostConnection(launch);
+  const server = new AdapterServerConnection(launch);
   const telegram = new TelegramAdapter({
     profile: launch.profile,
     token: launch.token,
@@ -85,7 +85,7 @@ export async function runChannelAdapter(): Promise<number> {
     stopping = true;
   });
 
-  let response = await host.report({
+  let response = await server.report({
     kind: "channel.ready",
     stableMessageId: controlId("ready"),
     cursor,
@@ -94,7 +94,7 @@ export async function runChannelAdapter(): Promise<number> {
     const command = response.command;
     if (command === null) {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      response = await host.report({
+      response = await server.report({
         kind: "channel.ready",
         stableMessageId: controlId("ready"),
         cursor,
@@ -108,7 +108,7 @@ export async function runChannelAdapter(): Promise<number> {
     if (command.kind === "channel.present") {
       try {
         const messages = await telegram.present(command.request);
-        response = await host.report({
+        response = await server.report({
           kind: "channel.present",
           stableMessageId: command.stableMessageId,
           decisionId: command.request.decisionId,
@@ -118,7 +118,7 @@ export async function runChannelAdapter(): Promise<number> {
           messages,
         });
       } catch (error) {
-        response = await host.report({
+        response = await server.report({
           kind: "channel.present",
           stableMessageId: command.stableMessageId,
           decisionId: command.request.decisionId,
@@ -134,7 +134,7 @@ export async function runChannelAdapter(): Promise<number> {
     if (command.kind === "channel.settle") {
       try {
         await telegram.settle(command.outcome, command.response, command.messages);
-        response = await host.report({
+        response = await server.report({
           kind: "channel.settle",
           stableMessageId: command.stableMessageId,
           decisionId: command.request.decisionId,
@@ -143,7 +143,7 @@ export async function runChannelAdapter(): Promise<number> {
           state: "confirmed",
         });
       } catch (error) {
-        response = await host.report({
+        response = await server.report({
           kind: "channel.settle",
           stableMessageId: command.stableMessageId,
           decisionId: command.request.decisionId,
@@ -160,7 +160,7 @@ export async function runChannelAdapter(): Promise<number> {
     const polled = await telegram.poll(command.cursor);
     cursor = polled.cursor;
     for (const answer of polled.answers) {
-      await host.report({
+      await server.report({
         kind: "channel.answer",
         stableMessageId: channelStableMessageId([
           launch.profile,
@@ -177,14 +177,14 @@ export async function runChannelAdapter(): Promise<number> {
         cursor,
       });
     }
-    response = await host.report({
+    response = await server.report({
       kind: "channel.ready",
       stableMessageId: controlId("ready"),
       cursor,
     });
   }
 
-  await host.report({
+  await server.report({
     kind: "channel.exiting",
     stableMessageId: controlId("exiting"),
     cursor,

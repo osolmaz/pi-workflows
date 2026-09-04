@@ -10,22 +10,22 @@ The viewer follows the [incremental and virtualized viewer plan](plans/2026-08-2
 ```
 src/workflows/   finite graph engine: definitions, execution, SQLite stores, loader
 src/builtins/    default workflows shipped at lowest discovery precedence
-src/controllers/ durable resources, queue, reconciliation, effects, child runs
-src/host/        global host, local protocols, resolvers, and worker supervision
+src/resource-managers/ durable resources, queue, reconciliation, effects, child runs
+src/server/      global server, local protocols, resolvers, and runner supervision
 src/extension/   thin Pi client: commands, workflow tool, and origin-session bridge
-src/viewer/      standalone read-only views over runs and controller resources
+src/viewer/      standalone read-only views over runs and managed resources
 tui/             Rust piw viewer, bounded SQLite projection, and replay server
 ```
 
 The dependency direction is enforced by `slophammer.yml`. `src/workflows`
 imports nothing outside itself and never imports Pi. Durable updates,
 progress validation, estimation, and text formatting stay in this layer so the
-engine, extension, hosts, and viewers share one contract. `src/builtins` contains
+engine, extension, servers, and viewers share one contract. `src/builtins` contains
 package-owned definitions and imports only the public workflow engine.
-`src/controllers` may import the public workflow engine for child-run
-scheduling. `src/host` may import controller stores and workflow stores, but the
-host event loop never loads workflow or controller definitions. Resolver and
-worker child entry points load those definitions. The extension uses static
+`src/resource-managers` may import the public workflow engine for child-run
+scheduling. `src/server` may import resource manager stores and workflow stores,
+but the server event loop never loads workflow or resource manager definitions.
+Resolver and runner child entry points load those definitions. The extension uses static
 built-in metadata and never imports the workflow engine. The extension and
 viewer never import each other. The viewer reads SQLite state in read-only mode,
 so it works from any process.
@@ -64,12 +64,13 @@ line, misplaces an arrow, or lets a label damage an edge, those tests fail
 with the offending drawing in the assertion message.
 
 Inside the engine, the model-facing seam is the `AgentStepExecutor` interface.
-The production run worker uses an interaction executor for origin-session work
-and `RpcStepExecutor` for headless controller work. The worker receives a
-`HostBackedWorkflowStore`; it cannot open a writable production store.
+The production workflow runner uses an interaction executor for origin-session
+work and `RpcStepExecutor` for headless resource manager work. The runner
+receives a `ServerBackedWorkflowStore`; it cannot open a writable production
+store.
 
 The Pi extension uses documented session lifecycle, message, tool, and session
-manager APIs. It writes no Pi session file. It saves host mutations through the
+manager APIs. It writes no Pi session file. It saves server mutations through the
 local protocol and uses the public session branch only to adopt the exact
 visible entry for a durable interaction request. Tests can still use scripted
 executors through the Pi-agnostic engine API.
@@ -135,9 +136,9 @@ the real pi CLI from `devDependencies` in RPC mode with:
 - `HOME` pointed at a temporary home containing the canonical workflow database,
 - the extension loaded from source with `-e src/extension/index.ts`.
 
-It drives `/workflow` over the RPC protocol and checks the global host,
+It drives `/workflow` over the RPC protocol and checks the global server,
 durable interaction request, origin-session presentation, accepted submission,
-worker recovery, final SQLite state, and viewer output. It also restarts the
+runner recovery, final SQLite state, and viewer output. It also restarts the
 real Pi process while one request is pending and proves that the same request is
 not inserted twice. Nothing outside the temp directories is touched, and no
 real model is called.

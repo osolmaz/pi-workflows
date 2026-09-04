@@ -83,7 +83,7 @@ type MonitorCostSafety = {
 };
 type MonitorDefectSafety = {
   sharedCodeOrDataDefect: boolean;
-  paidWorkers: "not-applicable" | "stopped" | "running";
+  paidRunners: "not-applicable" | "stopped" | "running";
   evidence: string;
 };
 type MonitorActionRequest = {
@@ -308,20 +308,20 @@ function parseCostSafety(input: unknown): MonitorCostSafety {
 
 function parseDefectSafety(input: unknown): MonitorDefectSafety {
   const value = requireRecord(input, "action defect");
-  requireExactKeys(value, ["sharedCodeOrDataDefect", "paidWorkers", "evidence"], "action defect");
+  requireExactKeys(value, ["sharedCodeOrDataDefect", "paidRunners", "evidence"], "action defect");
   if (typeof value.sharedCodeOrDataDefect !== "boolean") {
     throw new Error("action defect sharedCodeOrDataDefect must be boolean");
   }
   if (
-    value.paidWorkers !== "not-applicable" &&
-    value.paidWorkers !== "stopped" &&
-    value.paidWorkers !== "running"
+    value.paidRunners !== "not-applicable" &&
+    value.paidRunners !== "stopped" &&
+    value.paidRunners !== "running"
   ) {
-    throw new Error("action defect paidWorkers is invalid");
+    throw new Error("action defect paidRunners is invalid");
   }
   return {
     sharedCodeOrDataDefect: value.sharedCodeOrDataDefect,
-    paidWorkers: value.paidWorkers,
+    paidRunners: value.paidRunners,
     evidence: requireBoundedString(value.evidence, "action defect evidence", MAX_ACTION_TEXT_CHARS),
   };
 }
@@ -396,7 +396,7 @@ function parseActionRequest(input: unknown): MonitorActionRequest {
   if (
     request.kind === "repair" &&
     request.defect.sharedCodeOrDataDefect &&
-    request.defect.paidWorkers === "running"
+    request.defect.paidRunners === "running"
   ) {
     throw new Error("paid workers must stop before a shared code or data repair");
   }
@@ -850,7 +850,7 @@ const monitorWorkflow: WorkflowDefinition = defineWorkflow({
         ].join("\n\n");
       },
       expectedOutput:
-        '{ "route": "wait" | "act" | "stop", "goalState": "complete" | "incomplete" | "blocked", "workState": "running" | "waiting" | "idle" | "failed" | "stopped" | "unknown", "observation": "factual state", "report": "concise factual summary", "targetStateId": "stable observed target-state ID", "authorizedActions": ["safe action already authorized by the user"], "progress": { "tracks": [{ "key": "stable-key", "data": { "schema": "pi-workflows.progress.v1", "status": "running", "completed": 1, "total": 2, "unit": "items" } }] } (optional), "action": { "kind": "advance" | "recover" | "repair", "incomplete": "what remains", "evidence": {}, "nextAction": "one exact action", "authority": { "status": "authorized", "basis": "existing authority", "allowedMutations": ["allowed file, system, or resource"], "forbiddenMutations": [], "costLimit": "recorded limit or not applicable", "providerRuntime": "recorded contract or not applicable", "requiredChecks": [], "stopConditions": [], "allowedRecoveryActions": [], "repository": "optional absolute path", "baseBranch": "optional branch", "merge": false, "repairApproval": { "mode": "auto" | "required" | "skip" } }, "cost": { "paidAction": false, "status": "not-applicable" | "within-limit", "evidence": "cost evidence" }, "defect": { "sharedCodeOrDataDefect": false, "paidWorkers": "not-applicable" | "stopped" | "running", "evidence": "worker evidence" }, "verification": "how to prove success", "failureId": "stable failure ID", "targetStateId": "stable target-state ID" } (required only for act), "reason": "short reason" }',
+        '{ "route": "wait" | "act" | "stop", "goalState": "complete" | "incomplete" | "blocked", "workState": "running" | "waiting" | "idle" | "failed" | "stopped" | "unknown", "observation": "factual state", "report": "concise factual summary", "targetStateId": "stable observed target-state ID", "authorizedActions": ["safe action already authorized by the user"], "progress": { "tracks": [{ "key": "stable-key", "data": { "schema": "pi-workflows.progress.v1", "status": "running", "completed": 1, "total": 2, "unit": "items" } }] } (optional), "action": { "kind": "advance" | "recover" | "repair", "incomplete": "what remains", "evidence": {}, "nextAction": "one exact action", "authority": { "status": "authorized", "basis": "existing authority", "allowedMutations": ["allowed file, system, or resource"], "forbiddenMutations": [], "costLimit": "recorded limit or not applicable", "providerRuntime": "recorded contract or not applicable", "requiredChecks": [], "stopConditions": [], "allowedRecoveryActions": [], "repository": "optional absolute path", "baseBranch": "optional branch", "merge": false, "repairApproval": { "mode": "auto" | "required" | "skip" } }, "cost": { "paidAction": false, "status": "not-applicable" | "within-limit", "evidence": "cost evidence" }, "defect": { "sharedCodeOrDataDefect": false, "paidRunners": "not-applicable" | "stopped" | "running", "evidence": "worker evidence" }, "verification": "how to prove success", "failureId": "stable failure ID", "targetStateId": "stable target-state ID" } (required only for act), "reason": "short reason" }',
       validate: validateMonitorObservation,
     }),
     guard: compute({ run: guardObservation }),

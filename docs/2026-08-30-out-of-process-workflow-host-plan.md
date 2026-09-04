@@ -12,7 +12,7 @@ A live workflow lost its lease while it was still working. The workflow engine k
 
 This plan fixes that failure first, then removes its root architectural cause. One user-level host will own workflow state. Each active run will execute in a supervised child process. Pi will become a client that starts work, presents interactive requests, and submits answers through documented extension APIs.
 
-[Workflow host](WORKFLOW_HOST.md) defines the complete target process, protocol, state, recovery, and Pi integration contracts. This plan gives the implementation order and acceptance checks.
+[Workflow server](WORKFLOW_SERVER.md) defines the complete target process, protocol, state, recovery, and Pi integration contracts. This plan gives the implementation order and acceptance checks.
 
 ## Goals
 
@@ -273,7 +273,7 @@ The host protocol and worker runtime may exist under tests before the final swit
 - Recover a resumable expired run.
 - Stop an uncertain effect for manual review.
 
-### Host and child isolation
+### Server and child isolation
 
 - Block a child event loop longer than the run lease and prove the host keeps ownership.
 - Kill Pi while a run computes.
@@ -333,7 +333,7 @@ Run Pi Reviewer against `main` until no P0 or P1 findings remain. Check pull-req
 - Expired running rows can be resumed or cancelled safely.
 - Pi restart does not lose or falsely fail pending work.
 - An unanswered interactive request keeps its original node deadline, follows its timeout route, and cannot hold a stale session reservation forever.
-- Host restart recovers durable work without duplicate transitions.
+- Server restart recovers durable work without duplicate transitions.
 - Interactive steps still use the origin Pi session.
 - Duplicate commands and submissions return stored receipts.
 - A submission is not accepted until supervised workflow validation succeeds.

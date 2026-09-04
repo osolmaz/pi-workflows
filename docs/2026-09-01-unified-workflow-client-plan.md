@@ -37,7 +37,7 @@ These are not independent display defects. The extension, Herdr integration, and
 
 ## Root cause
 
-`WorkflowHostClient` is the authority for commands, but it is not the authority for live views.
+`WorkflowClient` is the authority for commands, but it is not the authority for live views.
 
 The Pi extension opens SQLite twice during one refresh. It first finds the origin session reservation and then loads the run from a second database snapshot. It maps durable workflow state directly to a widget label. The host cannot add exact origin-session model activity to that result.
 
@@ -200,7 +200,7 @@ The widget shows the Herdr hint only when the documented Herdr capability check 
 
 ### One live `piw` source
 
-Local `piw` connects to the package-owned host, subscribes to run views, and fetches pages through `pi-workflows.client.v1`. When the socket is absent, Rust may start the host only by executing the installed `pi-workflows host start` command. Rust does not reimplement host launch, locking, epochs, or readiness. If that command is unavailable or fails, `piw` stops with the direct install or startup instruction.
+Local `piw` connects to the package-owned host, subscribes to run views, and fetches pages through `pi-workflows.client.v1`. When the socket is absent, Rust may start the host only by executing the installed `pi-workflows server start` command. Rust does not reimplement host launch, locking, epochs, or readiness. If that command is unavailable or fails, `piw` stops with the direct install or startup instruction.
 
 `piw serve` stops reading SQLite. It becomes a loopback-only WebSocket relay for the same logical protocol. Remote clients continue to use an SSH tunnel. The relay opens one host socket connection for each WebSocket connection and couples their lifecycles one to one. It carries frames only. It does not multiplex clients, translate run state, keep another projection, or retain activity after either side closes.
 
@@ -237,7 +237,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### 2. Make the host the only live database reader
 
-**Location:** `src/host/`, `src/state/`, controller stores, and state maintenance commands.
+**Location:** `src/server/`, `src/state/`, controller stores, and state maintenance commands.
 
 **Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values in the run-scoped content table under their digest and media type before advertising their references. Do not reuse general state blobs or allow another run to read the content. Store the complete original workflow definition, not its escaped projection. Externalize large replay checkpoints and make both clients resolve them. Route state-changing Pi extension commands through the durable retry path. Give the CLI one stable client identity and one fresh key for each backup or applied prune invocation. Reuse that key only for the invocation's automatic reconnect retry, with a new request ID. Keep an in-flight maintenance operation alive after disconnect, store its accepted or rejected command receipt before response, wait for it during host shutdown, and adopt an exact retry. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
 
@@ -245,7 +245,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### 3. Add the host status reducer and activity overlay
 
-**Location:** a host-owned view module under `src/host/` or `src/viewer/`, with no Pi import.
+**Location:** a host-owned view module under `src/server/` or `src/viewer/`, with no Pi import.
 
 **Change:** Build the `display` object from durable facts and the validated activity overlay. Add connection-scoped activity leases and monotonic sequences. Apply the documented status precedence and allowed-control rules in one function.
 
@@ -255,7 +255,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 **Location:** `src/extension/session-view.ts`, `src/extension/index.ts`, and the delivery coordinator.
 
-**Change:** Remove all extension imports and construction of `HostStateStore`, `SqliteControllerStore`, `WorkflowRunStore`, and the active state path. Replace `waitForInteractionSubmission`, `pendingInteractionForSession`, `pendingDecision`, `interactionPresentationClaimIsLive`, `hasClaimableNotification`, `hasClaimableTurn`, `terminalRunState`, `sessionRun`, and the widget's two-read refresh with `WorkflowClient` requests or the one origin-session subscription. The `interaction.submit` response supplies the final validation outcome. Report exact delivery activity from documented Pi events and the coordinator's delivery map. Render only the host `display` object. Keep Escape pause tied to the exact active workflow delivery.
+**Change:** Remove all extension imports and construction of `ServerStateStore`, `SqliteResourceManagerStore`, `WorkflowRunStore`, and the active state path. Replace `waitForInteractionSubmission`, `pendingInteractionForSession`, `pendingDecision`, `interactionPresentationClaimIsLive`, `hasClaimableNotification`, `hasClaimableTurn`, `terminalRunState`, `sessionRun`, and the widget's two-read refresh with `WorkflowClient` requests or the one origin-session subscription. The `interaction.submit` response supplies the final validation outcome. Report exact delivery activity from documented Pi events and the coordinator's delivery map. Render only the host `display` object. Keep Escape pause tied to the exact active workflow delivery.
 
 **Verification:** Hold Pi busy longer than both the poll interval and activity lease. The widget stays `running` while refreshed exact activity is live, falls back to `waiting` after activity ends without submission, and shows `paused` only after the host accepts pause. The controlled run produces one visible delivery and one model turn without claiming a universal exactly-once guarantee.
 
@@ -277,7 +277,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### 7. Remove split paths and update documentation
 
-**Location:** old host/replay protocol code, obsolete viewer readers, `docs/WORKFLOW_HOST.md`, `docs/SQLITE_STATE.md`, `docs/live-replay-protocol.md`, README usage, and package contents.
+**Location:** old host/replay protocol code, obsolete viewer readers, `docs/WORKFLOW_SERVER.md`, `docs/SQLITE_STATE.md`, `docs/live-replay-protocol.md`, README usage, and package contents.
 
 **Change:** Delete the superseded request/response and replay contracts, direct live readers, duplicated status reducers, and fallback flags. Update all user commands and architecture diagrams to show the one client stack. Keep inactive backup verification explicitly separate.
 

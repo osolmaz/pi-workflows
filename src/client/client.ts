@@ -20,7 +20,7 @@ import {
   type ClientResponse,
 } from "./protocol.js";
 import type {
-  ResolvedControllerInitialization,
+  ResolvedResourceManagerInitialization,
   ResolvedSettingsChange,
   ResolvedWorkflowLaunch,
 } from "./resolver.js";
@@ -55,7 +55,7 @@ export class WorkflowClientVersionError extends Error {
 export type WorkflowClientOptions = {
   clientId?: string;
   databasePath?: string;
-  hostEntryPath?: string;
+  serverEntryPath?: string;
   env?: Record<string, string>;
 };
 
@@ -64,7 +64,7 @@ export class WorkflowClient {
   readonly databasePath: string;
   readonly endpoint: string;
 
-  private readonly hostEntryPath: string | undefined;
+  private readonly serverEntryPath: string | undefined;
   private readonly env: Record<string, string> | undefined;
   private socket: Socket | null = null;
   private connectTask: Promise<ClientHello> | null = null;
@@ -78,7 +78,7 @@ export class WorkflowClient {
     this.clientId = options.clientId ?? `client-${randomUUID()}`;
     this.databasePath = options.databasePath ?? workflowStatePath();
     this.endpoint = clientSocketPath(this.databasePath);
-    this.hostEntryPath = options.hostEntryPath;
+    this.serverEntryPath = options.serverEntryPath;
     this.env = options.env;
   }
 
@@ -143,7 +143,7 @@ export class WorkflowClient {
     const response = await this.request({ operation: "view.run.get", runId });
     if (response.outcome === "notFound") return null;
     if (response.outcome !== "accepted" || !isWorkflowRunView(response.receipt, runId)) {
-      throw new Error(response.error ?? "Workflow host returned an invalid run view");
+      throw new Error(response.error ?? "Workflow server returned an invalid run view");
     }
     return response.receipt;
   }
@@ -216,13 +216,13 @@ export class WorkflowClient {
       }
     }
     throw new Error(
-      `Workflow host did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      `Workflow server did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
     );
   }
 
   async ensureRunning(): Promise<ClientResponse> {
     await this.ensureAvailable();
-    return await this.request({ operation: "host.status" });
+    return await this.request({ operation: "server.status" });
   }
 
   async readContent(
@@ -367,23 +367,23 @@ export class WorkflowClient {
     )) as unknown as ResolvedWorkflowLaunch;
   }
 
-  async resolveControllerInitialization(options: {
+  async resolveResourceManagerInitialization(options: {
     cwd: string;
-    controllerName: string;
+    resourceManagerName: string;
     spec: JsonValue;
     timeoutMs?: number;
-  }): Promise<ResolvedControllerInitialization> {
+  }): Promise<ResolvedResourceManagerInitialization> {
     return (await this.runResolver(
       {
-        schema: "pi-workflows.controller-initialization-request.v1",
+        schema: "pi-workflows.resource-manager-initialization-request.v1",
         cwd: options.cwd,
-        controllerName: options.controllerName,
+        resourceManagerName: options.resourceManagerName,
         spec: options.spec,
       },
       options.cwd,
-      "pi-workflows.resolved-controller-initialization.v1",
+      "pi-workflows.resolved-resource-manager-initialization.v1",
       options.timeoutMs,
-    )) as unknown as ResolvedControllerInitialization;
+    )) as unknown as ResolvedResourceManagerInitialization;
   }
 
   async resolveSettingsChange(options: {
@@ -498,7 +498,7 @@ export class WorkflowClient {
 
   private async send(request: ClientRequest, signal?: AbortSignal): Promise<ClientResponse> {
     const socket = this.socket;
-    if (socket === null || socket.destroyed) throw new Error("Workflow host is unavailable");
+    if (socket === null || socket.destroyed) throw new Error("Workflow server is unavailable");
     if (signal?.aborted === true) throw abortReason(signal);
     if (this.pending.has(request.requestId)) {
       throw new Error(`Workflow request is already pending: ${request.requestId}`);
@@ -549,10 +549,11 @@ export class WorkflowClient {
         for (const frame of decoder.push(chunk)) {
           const message = parseClientMessage(frame);
           if (!receivedHello) {
-            if (message.type !== "hello") throw new Error("Workflow host did not send hello first");
+            if (message.type !== "hello")
+              throw new Error("Workflow server did not send hello first");
             if (message.packageVersion !== CLIENT_PACKAGE_VERSION) {
               throw new WorkflowClientVersionError(
-                `Workflow client version mismatch: host ${message.packageVersion}, client ${CLIENT_PACKAGE_VERSION}. Install matching pi-workflows and piw packages.`,
+                `Workflow client version mismatch: server ${message.packageVersion}, client ${CLIENT_PACKAGE_VERSION}. Install matching pi-workflows and piw packages.`,
               );
             }
             receivedHello = true;
@@ -597,9 +598,9 @@ export class WorkflowClient {
       helloReject(error);
     });
     socket.once("close", () => {
-      if (!receivedHello) helloReject(new Error("Workflow host closed before hello"));
+      if (!receivedHello) helloReject(new Error("Workflow server closed before hello"));
       if (this.socket === socket) {
-        this.resetConnection(new Error("Workflow host connection closed"));
+        this.resetConnection(new Error("Workflow server connection closed"));
         this.scheduleReconnect();
       }
     });
@@ -611,7 +612,7 @@ export class WorkflowClient {
         helloPromise.then(() => undefined),
         new Promise<never>((_, reject) => {
           connectTimer = setTimeout(
-            () => reject(new Error("Workflow host connection timed out")),
+            () => reject(new Error("Workflow server connection timed out")),
             CONNECT_TIMEOUT_MS,
           );
           connectTimer.unref?.();
@@ -620,7 +621,7 @@ export class WorkflowClient {
       const hello = await Promise.race([
         helloPromise,
         delay(CONNECT_TIMEOUT_MS).then(() => {
-          throw new Error("Workflow host hello timed out");
+          throw new Error("Workflow server hello timed out");
         }),
       ]);
       await this.restoreSubscriptions();
@@ -702,7 +703,7 @@ export class WorkflowClient {
     }
   }
 
-  private resetConnection(reason = new Error("Workflow host is unavailable")): void {
+  private resetConnection(reason = new Error("Workflow server is unavailable")): void {
     const socket = this.socket;
     this.socket = null;
     this.hello = null;
@@ -718,7 +719,7 @@ export class WorkflowClient {
             type: "event",
             subscriptionId,
             event: "unavailable",
-            payload: { message: "Workflow host connection is unavailable." },
+            payload: { message: "Workflow server connection is unavailable." },
           });
         } catch {
           // One renderer cannot block reconnection for other subscriptions.
@@ -742,8 +743,8 @@ export class WorkflowClient {
     expectedSchema: string,
     timeoutMs = RESOLVER_TIMEOUT_MS,
   ): Promise<JsonValue> {
-    const builtEntry = fileURLToPath(new URL("../host/resolver-entry.js", import.meta.url));
-    const sourceEntry = fileURLToPath(new URL("../host/resolver-entry.ts", import.meta.url));
+    const builtEntry = fileURLToPath(new URL("../server/resolver-entry.js", import.meta.url));
+    const sourceEntry = fileURLToPath(new URL("../server/resolver-entry.ts", import.meta.url));
     const args = fs.existsSync(builtEntry)
       ? [builtEntry]
       : ["--import", createRequire(import.meta.url).resolve("tsx"), sourceEntry];
@@ -791,11 +792,11 @@ export class WorkflowClient {
   }
 
   private startDetached(): void {
-    const builtEntry = fileURLToPath(new URL("../host/host-entry.js", import.meta.url));
-    const sourceEntry = fileURLToPath(new URL("../host/host-entry.ts", import.meta.url));
-    const entry = this.hostEntryPath ?? builtEntry;
+    const builtEntry = fileURLToPath(new URL("../server/server-entry.js", import.meta.url));
+    const sourceEntry = fileURLToPath(new URL("../server/server-entry.ts", import.meta.url));
+    const entry = this.serverEntryPath ?? builtEntry;
     const args =
-      this.hostEntryPath === undefined && !fs.existsSync(builtEntry)
+      this.serverEntryPath === undefined && !fs.existsSync(builtEntry)
         ? ["--import", createRequire(import.meta.url).resolve("tsx"), sourceEntry]
         : [entry];
     const child = spawn(process.execPath, [...args, "--database", this.databasePath], {
@@ -829,7 +830,7 @@ function parseWorkflowRunListPage(value: unknown): WorkflowRunListPage {
         isRecord(item) && typeof item.runId === "string" && typeof item.workflowName === "string",
     )
   ) {
-    throw new Error("Workflow host returned an invalid run list page");
+    throw new Error("Workflow server returned an invalid run list page");
   }
   return value as unknown as WorkflowRunListPage;
 }
@@ -851,7 +852,7 @@ function abortReason(signal: AbortSignal): Error {
 
 function waitForSocketDrain(socket: Socket, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return Promise.reject(abortReason(signal));
-  if (socket.destroyed) return Promise.reject(new Error("Workflow host connection closed"));
+  if (socket.destroyed) return Promise.reject(new Error("Workflow server connection closed"));
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       socket.off("drain", onDrain);
@@ -865,7 +866,7 @@ function waitForSocketDrain(socket: Socket, signal?: AbortSignal): Promise<void>
       else reject(error);
     };
     const onDrain = (): void => settle();
-    const onClose = (): void => settle(new Error("Workflow host connection closed"));
+    const onClose = (): void => settle(new Error("Workflow server connection closed"));
     const onError = (error: Error): void => settle(error);
     const onAbort = (): void => settle(abortReason(signal as AbortSignal));
     socket.once("drain", onDrain);

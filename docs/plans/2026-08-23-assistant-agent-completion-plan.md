@@ -300,13 +300,13 @@ Add an executor capability that distinguishes:
 
 The interactive Pi executor supports assistant completion.
 
-A detached WorkflowHost must not run such a node in an invisible RPC child. It must:
+A detached WorkflowServer must not run such a node in an invisible RPC child. It must:
 
 - park the run before the node;
 - leave it claimable by the origin Pi session;
 - resume when that session is available.
 
-A controller child or detached run with no origin session must fail clearly before prompting:
+A resource manager child or detached run with no origin session must fail clearly before prompting:
 
 > Assistant completion requires an origin Pi session.
 
@@ -318,9 +318,9 @@ Direct RPC clients can support assistant completion because RPC exposes `message
 
 - `src/workflows/types.ts`
 - `src/workflows/engine.ts`
-- `src/host/runner.ts`
-- `src/host/rpc-executor.ts`
-- `src/host/rpc-bridge.ts` only if the bridge needs completion metadata
+- `src/server/runner.ts`
+- `src/server/rpc-executor.ts`
+- `src/server/rpc-bridge.ts` only if the bridge needs completion metadata
 - Queue and host tests
 
 ### Verification

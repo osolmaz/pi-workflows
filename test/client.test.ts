@@ -13,7 +13,7 @@ import {
   parseClientMessage,
   type ClientRequest,
 } from "../src/client/protocol.js";
-import { WorkflowHost } from "../src/host/runner.js";
+import { WorkflowServer } from "../src/server/server.js";
 import type { JsonValue } from "../src/state/json.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
@@ -93,7 +93,7 @@ describe("WorkflowClient", () => {
 
   it("rejects a backpressured request when its connection closes", async () => {
     const databasePath = path.join(await makeTempDir("client-drain-close"), "state.sqlite");
-    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await host.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-drain-close" });
     await client.connect();
@@ -101,10 +101,10 @@ describe("WorkflowClient", () => {
     if (socket === null) throw new Error("client socket missing");
     const write = vi.spyOn(socket, "write").mockReturnValue(false);
     try {
-      const request = client.request({ operation: "host.status" });
+      const request = client.request({ operation: "server.status" });
       await waitUntil(() => write.mock.calls.length === 1, 5_000);
       socket.emit("close");
-      await expect(request).rejects.toThrow("Workflow host connection closed");
+      await expect(request).rejects.toThrow("Workflow server connection closed");
     } finally {
       socket.destroy();
       await client.close();
@@ -114,7 +114,7 @@ describe("WorkflowClient", () => {
 
   it("uses one connection and rejects watches for missing runs", async () => {
     const databasePath = path.join(await makeTempDir("client-live"), "state.sqlite");
-    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
     await host.start();
     const client = new WorkflowClient({ databasePath, clientId: "client-live" });
     const events: string[] = [];
@@ -130,7 +130,7 @@ describe("WorkflowClient", () => {
 
       await expect(
         client.request({
-          operation: "host.status",
+          operation: "server.status",
           requestId: "status-request",
           idempotencyKey: "status-idempotency",
           expectedRevision: 0,
@@ -144,7 +144,7 @@ describe("WorkflowClient", () => {
           counts: {
             resources: expect.any(Number),
             runs: expect.any(Number),
-            controllers: expect.any(Number),
+            resourceManagers: expect.any(Number),
             decisions: expect.any(Number),
             settingsScopes: expect.any(Number),
             pendingInteractions: expect.any(Number),
@@ -218,7 +218,7 @@ describe("WorkflowClient", () => {
       await client.close();
       await host.stop();
     }
-    await expect(client.request({ operation: "host.status" })).rejects.toThrow(
+    await expect(client.request({ operation: "server.status" })).rejects.toThrow(
       "Workflow client is closed",
     );
   });

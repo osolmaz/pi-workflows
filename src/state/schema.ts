@@ -302,8 +302,8 @@ CREATE TABLE host_commands (
     'workflowMessage.reportBranch', 'workflowTurn.report', 'sessionView.clearTerminal',
     'run.restart', 'run.changeSettings', 'followUp.queue', 'followUp.remove', 'session.record',
     'channel.reload', 'channel.recover',
-    'controller.list', 'controller.get', 'controller.apply', 'controller.reconcile', 'controller.delete',
-    'host.status', 'host.stop', 'state.backup', 'state.prune'
+    'resourceManager.list', 'resourceManager.get', 'resourceManager.apply', 'resourceManager.reconcile', 'resourceManager.delete',
+    'server.status', 'server.stop', 'state.backup', 'state.prune'
   )),
   idempotency_key TEXT NOT NULL,
   request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),

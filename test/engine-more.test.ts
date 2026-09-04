@@ -27,9 +27,9 @@ describe("WorkflowEngine additional paths", () => {
   });
 
   it("yields to the host event loop after each committed graph transition", async () => {
-    let hostTurnRan = false;
-    const hostTurn = setImmediate(() => {
-      hostTurnRan = true;
+    let serverTurnRan = false;
+    const serverTurn = setImmediate(() => {
+      serverTurnRan = true;
     });
     const workflow = defineWorkflow({
       name: "fair-transition",
@@ -37,7 +37,7 @@ describe("WorkflowEngine additional paths", () => {
       nodes: {
         check: compute({
           run: () => {
-            expect(hostTurnRan).toBe(true);
+            expect(serverTurnRan).toBe(true);
             return "done";
           },
         }),
@@ -49,7 +49,7 @@ describe("WorkflowEngine additional paths", () => {
       const { state } = await (await makeEngine()).run(workflow, {});
       expect(state.status).toBe("completed");
     } finally {
-      clearImmediate(hostTurn);
+      clearImmediate(serverTurn);
     }
   });
 

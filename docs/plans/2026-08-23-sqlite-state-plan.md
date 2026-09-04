@@ -19,7 +19,7 @@ This database becomes the only live source of workflow state. It stores workflow
 
 The replacement must also fix the broader ownership problem. Finding shared state never grants permission to change it. Every write checks the actor, current owner when ownership is required, ownership generation, expected resource revision, and requested state transition in the same transaction.
 
-The current formats are specified in [Run bundle format](../SQLITE_STATE.md), [Human decisions](../HUMAN_DECISIONS.md), and [Controller runtime specification](../CONTROLLERS.md). This plan replaces their storage sections. Workflow authoring behavior stays the same unless this plan names a required contract change.
+The current formats are specified in [Run bundle format](../SQLITE_STATE.md), [Human decisions](../HUMAN_DECISIONS.md), and [ResourceManager runtime specification](../RESOURCE_MANAGERS.md). This plan replaces their storage sections. Workflow authoring behavior stays the same unless this plan names a required contract change.
 
 ## Boundaries
 
@@ -43,7 +43,7 @@ Use one SQLite database per user installation. Projects and runs share that data
 
 Use four shared records:
 
-- A **resource** is one mutable item, such as a run, decision, controller resource, effect, or channel.
+- A **resource** is one mutable item, such as a run, decision, managed resource, effect, or channel.
 - A **lease** says which process currently owns a resource. Every ownership change increases a durable generation number.
 - An **event** is the immutable audit record for one accepted resource change.
 - An **effect** is follow-up work created by a resource change, such as creating a continuation, delivering a notification, or closing a decision presentation.
@@ -452,26 +452,26 @@ This table records all human answer attempts without granting them authority.
 
 `(trigger_type, trigger_id)` is unique.
 
-## Controller schema
+## ResourceManager schema
 
 ### `controller_resources`
 
-| Field                    | Type      | Rules                                       |
-| ------------------------ | --------- | ------------------------------------------- |
-| `controller_resource_id` | `TEXT`    | Primary key                                 |
-| `resource_id`            | `TEXT`    | Unique foreign key to a controller resource |
-| `project_id`             | `TEXT`    | Foreign key to `projects`                   |
-| `controller_name`        | `TEXT`    | Controller definition name                  |
-| `resource_key`           | `TEXT`    | Key within controller and project           |
-| `resource_uid`           | `TEXT`    | Unique durable UID                          |
-| `spec_generation`        | `INTEGER` | Positive desired-state generation           |
-| `spec_hash`              | `BLOB`    | Spec JSON in `blobs`                        |
-| `status_hash`            | `BLOB`    | Status JSON in `blobs`                      |
-| `deletion_requested_at`  | `INTEGER` | Optional deletion time                      |
-| `created_at`             | `INTEGER` | Creation time                               |
-| `updated_at`             | `INTEGER` | Last accepted change                        |
+| Field                    | Type      | Rules                                    |
+| ------------------------ | --------- | ---------------------------------------- |
+| `controller_resource_id` | `TEXT`    | Primary key                              |
+| `resource_id`            | `TEXT`    | Unique foreign key to a managed resource |
+| `project_id`             | `TEXT`    | Foreign key to `projects`                |
+| `controller_name`        | `TEXT`    | ResourceManager definition name          |
+| `resource_key`           | `TEXT`    | Key within controller and project        |
+| `resource_uid`           | `TEXT`    | Unique durable UID                       |
+| `spec_generation`        | `INTEGER` | Positive desired-state generation        |
+| `spec_hash`              | `BLOB`    | Spec JSON in `blobs`                     |
+| `status_hash`            | `BLOB`    | Status JSON in `blobs`                   |
+| `deletion_requested_at`  | `INTEGER` | Optional deletion time                   |
+| `created_at`             | `INTEGER` | Creation time                            |
+| `updated_at`             | `INTEGER` | Last accepted change                     |
 
-`(project_id, controller_name, resource_key)` is unique. `resources.revision` replaces the separate controller resource version.
+`(project_id, controller_name, resource_key)` is unique. `resources.revision` replaces the separate managed resource version.
 
 ### `controller_finalizers`
 
@@ -494,7 +494,7 @@ The primary key is `(controller_resource_id, finalizer)`.
 | `created_at`             | `INTEGER` | Enqueue time                                       |
 | `updated_at`             | `INTEGER` | Last queue change                                  |
 
-Ownership uses the controller resource lease.
+Ownership uses the managed resource lease.
 
 ### `controller_workflows`
 
@@ -502,7 +502,7 @@ Ownership uses the controller resource lease.
 | ------------------------ | --------- | ------------------------------------------------------------------------ |
 | `request_id`             | `TEXT`    | Primary key                                                              |
 | `controller_resource_id` | `TEXT`    | Foreign key to `controller_resources`                                    |
-| `request_key`            | `TEXT`    | Stable key from controller code                                          |
+| `request_key`            | `TEXT`    | Stable key from resource manager code                                    |
 | `workflow_name`          | `TEXT`    | Requested workflow                                                       |
 | `input_fingerprint`      | `BLOB`    | 32-byte digest                                                           |
 | `reserved_run_id`        | `TEXT`    | Deterministic run ID before the run row exists                           |
@@ -786,7 +786,7 @@ Keep domain stores with their owners:
 ```text
 src/workflows/sqlite-store.ts
 src/workflows/human-decision.ts
-src/controllers/sqlite.ts
+src/resource-managers/sqlite.ts
 src/extension/decision-channels.ts
 ```
 
@@ -836,7 +836,7 @@ Verify all race orders, stale request digests, duplicate submissions, model-answ
 
 ### Move controllers
 
-Move the complete controller resource lifecycle into the canonical database, including queue work, finalizers, effects, events, and child workflows. Remove the project controller database path and schema.
+Move the complete managed resource lifecycle into the canonical database, including queue work, finalizers, effects, events, and child workflows. Remove the project controller database path and schema.
 
 Verify the complete controller lifecycle, including revision conflicts, generation changes, delayed work, effects, child workflows, deletion, and finalizers.
 
@@ -876,7 +876,7 @@ After code behavior matches this plan:
 
 - replace [Run bundle format](../SQLITE_STATE.md) with the SQLite state specification or retire it in favor of `SQLITE_STATE.md`
 - update [Human decisions](../HUMAN_DECISIONS.md)
-- update [Controller runtime specification](../CONTROLLERS.md)
+- update [ResourceManager runtime specification](../RESOURCE_MANAGERS.md)
 - update [Workflow authoring reference](../workflows.md)
 - update [Rust TUI viewer](../tui-viewer.md)
 - update [Development guide](../development.md)
@@ -930,7 +930,7 @@ Test run creation, node execution, looping, included workflows, progress updates
 
 Test human versus timeout, human versus cancellation, timeout versus cancellation, defaulted deadline, no-default deadline, stale digest, duplicate answer, late answer, repeated cancellation, owner-only policy, model-answer rejection, one continuation, parent projection, and stale presentation closure.
 
-### Controller tests
+### ResourceManager tests
 
 Test the complete controller lifecycle, including resource updates, generations, queue claims, delayed work, effect receipts, uncertain outcomes, child workflows, deletion, finalizers, and owner loss.
 

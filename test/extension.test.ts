@@ -2,9 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
-import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import piWorkflows from "../src/extension/index.js";
-import { HostStateStore } from "../src/host/state.js";
+import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
+import { ServerStateStore } from "../src/server/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
@@ -15,7 +15,7 @@ afterEach(async () => {
   if (testHome !== undefined) {
     const client = new WorkflowClient({ databasePath: workflowStatePath(testHome) });
     try {
-      await client.request({ operation: "host.stop" });
+      await client.request({ operation: "server.stop" });
     } catch {
       // The test did not start a host or already stopped it.
     }
@@ -136,9 +136,9 @@ function makePi(options: {
       if (command === undefined) throw new Error("workflow command was not registered");
       await command(args, ctx);
     },
-    runControllerCommand: async (args: string) => {
-      const command = commands.get("controller");
-      if (command === undefined) throw new Error("controller command was not registered");
+    runResourceManagerCommand: async (args: string) => {
+      const command = commands.get("resource-manager");
+      if (command === undefined) throw new Error("resource manager command was not registered");
       await command(args, ctx);
     },
     runChannelCommand: async (args: string) => {
@@ -385,7 +385,7 @@ describe("pi-workflows hosted extension", () => {
     expect(watchSession).toHaveBeenCalledTimes(1);
     expect(
       fake.notifications.filter((notification) =>
-        notification.message.startsWith("Workflow host is unavailable:"),
+        notification.message.startsWith("Workflow server is unavailable:"),
       ),
     ).toHaveLength(1);
     await fake.emit("session_shutdown");
@@ -412,7 +412,7 @@ describe("pi-workflows hosted extension", () => {
       output: { answer: "done" },
     });
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -422,7 +422,7 @@ describe("pi-workflows hosted extension", () => {
         store.close();
       }
     }, 30_000);
-    const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+    const store = new ServerStateStore(workflowStatePath(), { readOnly: true });
     try {
       expect(store.listPendingInteractions("session-one")).toEqual([]);
     } finally {
@@ -625,7 +625,7 @@ describe("pi-workflows hosted extension", () => {
     fake.flushSentMessages();
     await fake.emit("agent_settled");
     await waitUntil(() => {
-      const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+      const store = new ServerStateStore(workflowStatePath(), { readOnly: true });
       try {
         return store.workflowMessages.listSession("session-one")[0]?.piSessionEntryId === "entry-1";
       } finally {
@@ -642,7 +642,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(() => {
-      const store = new HostStateStore(workflowStatePath(), { readOnly: true });
+      const store = new ServerStateStore(workflowStatePath(), { readOnly: true });
       try {
         return store.listPendingInteractions("session-one").length === 1;
       } finally {
@@ -651,7 +651,7 @@ describe("pi-workflows hosted extension", () => {
     }, 30_000);
     await new Promise((resolve) => setTimeout(resolve, 1_200));
     expect(fake.sent).toEqual([]);
-    const pendingStore = new HostStateStore(workflowStatePath(), { readOnly: true });
+    const pendingStore = new ServerStateStore(workflowStatePath(), { readOnly: true });
     try {
       expect(pendingStore.listPendingInteractions("session-one")[0]).toMatchObject({
         status: "pending",
@@ -685,7 +685,7 @@ describe("pi-workflows hosted extension", () => {
         output: { answer: "wrong" },
       }),
     ).rejects.toThrow(/answer must be accepted/);
-    const afterRejection = new HostStateStore(workflowStatePath(), { readOnly: true });
+    const afterRejection = new ServerStateStore(workflowStatePath(), { readOnly: true });
     try {
       expect(afterRejection.listPendingInteractions("session-one")).toHaveLength(1);
       expect(
@@ -712,7 +712,7 @@ describe("pi-workflows hosted extension", () => {
       content: [{ text: "Workflow step output accepted." }],
     });
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -732,7 +732,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -750,7 +750,7 @@ describe("pi-workflows hosted extension", () => {
       content: [{ text: expect.stringContaining("Answered checkpoint") }],
     });
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -808,7 +808,7 @@ describe("pi-workflows hosted extension", () => {
       expect.objectContaining({ message: "Human decision answer accepted." }),
     );
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -887,7 +887,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(firstPath);
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -901,7 +901,7 @@ describe("pi-workflows hosted extension", () => {
     }, 30_000);
     await fake.runCommand(secondPath);
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -944,14 +944,14 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 90_000);
 
-  it("applies controller resources through the host and a source resolver child", async () => {
+  it("applies managed resources through the host and a source resolver child", async () => {
     const { cwd } = await setupProject();
-    const directory = path.join(cwd, ".pi", "controllers");
+    const directory = path.join(cwd, ".pi", "resource-managers");
     await fs.mkdir(directory, { recursive: true });
     await fs.writeFile(
-      path.join(directory, "sample.controller.ts"),
-      `import { defineController } from ${JSON.stringify(path.resolve("src/controllers/index.ts"))};
-export default defineController({
+      path.join(directory, "sample.resource-manager.ts"),
+      `import { defineResourceManager } from ${JSON.stringify(path.resolve("src/resource-managers/index.ts"))};
+export default defineResourceManager({
   name: "sample",
   initialStatus: (spec) => ({
     resolverPid: process.pid,
@@ -962,34 +962,34 @@ export default defineController({
     );
     const fake = makePi({ cwd });
     await fake.emit("session_start");
-    await fake.runControllerCommand('apply sample one {"value":7}');
+    await fake.runResourceManagerCommand('apply sample one {"value":7}');
     await waitUntil(() => {
-      const store = new SqliteControllerStore(workflowStatePath(), {
+      const store = new SqliteResourceManagerStore(workflowStatePath(), {
         projectPath: cwd,
         readOnly: true,
       });
       try {
-        return store.getResource({ controller: "sample", key: "one" }) !== undefined;
+        return store.getResource({ resourceManager: "sample", key: "one" }) !== undefined;
       } finally {
         store.close();
       }
     }, 30_000);
-    const store = new SqliteControllerStore(workflowStatePath(), {
+    const store = new SqliteResourceManagerStore(workflowStatePath(), {
       projectPath: cwd,
       readOnly: true,
     });
     try {
       const resource = store.getResource<unknown, { resolverPid: number; value: number }>({
-        controller: "sample",
+        resourceManager: "sample",
         key: "one",
       });
-      expect(resource?.status.controllerStatus.value).toBe(7);
-      expect(resource?.status.controllerStatus.resolverPid).not.toBe(process.pid);
+      expect(resource?.status.resourceManagerStatus.value).toBe(7);
+      expect(resource?.status.resourceManagerStatus.resolverPid).not.toBe(process.pid);
     } finally {
       store.close();
     }
     expect(fake.notifications).toContainEqual(
-      expect.objectContaining({ message: "Applied controller resource sample/one." }),
+      expect.objectContaining({ message: "Applied managed resource sample/one." }),
     );
     await fake.emit("session_shutdown");
   }, 60_000);

@@ -118,7 +118,7 @@ The report nodes write a normal assistant message and then submit an acknowledge
 
 The sleep node uses the existing pi-workflows shell action to launch the current Node executable with a timer. Set the node timeout above the largest supported interval because the engine default is 15 minutes. Set the shell execution timeout above the requested wait by a small fixed margin. Cancellation aborts the timer process immediately.
 
-If the Pi TUI or standalone workflow host stops during sleep, pi-workflows parks the run and kills the shell child. Resuming the run starts that sleep node again from the beginning. This is existing workflow behavior and is acceptable for this feature. No special timer persistence is added.
+If the Pi TUI or standalone workflow server stops during sleep, pi-workflows parks the run and kills the shell child. Resuming the run starts that sleep node again from the beginning. This is existing workflow behavior and is acceptable for this feature. No special timer persistence is added.
 
 The workflow uses a high but finite `maxSteps` value as a second safety guard. Check and report values have explicit size limits so a long run cannot grow its bundle without bound.
 
@@ -145,7 +145,7 @@ After the upstream change is complete, update the pinned pi-workflows commit in 
 
 ## Non-goals
 
-This work does not add cron expressions, calendar schedules, a background service, controller resources, OS notifications, concurrent workflows in one session, resumable shell processes, or guaranteed wall-clock wake times across runner shutdowns. It does not let headless child agents recursively start workflows.
+This work does not add cron expressions, calendar schedules, a background service, managed resources, OS notifications, concurrent workflows in one session, resumable shell processes, or guaranteed wall-clock wake times across runner shutdowns. It does not let headless child agents recursively start workflows.
 
 ## Acceptance criteria
 

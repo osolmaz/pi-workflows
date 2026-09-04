@@ -108,9 +108,9 @@ New interactive agent-step instructions become `pi-workflows-agent-step` custom 
 
 Existing user-message entries remain readable and are not rewritten. No private Pi entry type, Pi schema change, or separate persistent store is introduced.
 
-### Controller storage
+### ResourceManager storage
 
-The controller database schema does not change for the first implementation. Controllers publish only through a claimed workflow run. Controller-native status remains in controller resources.
+The controller database schema does not change for the first implementation. Controllers publish only through a claimed workflow run. ResourceManager-native status remains in managed resources.
 
 ## Public API impact
 
@@ -177,7 +177,7 @@ Files expected to change:
 - `src/workflows/shell.ts`
 - `src/extension/workflow-tool.ts`
 - `src/extension/index.ts`
-- `src/host/rpc-executor.ts`
+- `src/server/rpc-executor.ts`
 - `test/extension.test.ts`
 - `test/workflow-args.test.ts`
 - `test/e2e/workflow.e2e.test.ts`
@@ -282,7 +282,7 @@ Files expected to change:
 - `src/extension/executor.ts`
 - `src/extension/index.ts`
 - `src/extension/` message-renderer module
-- `src/host/rpc-executor.ts`
+- `src/server/rpc-executor.ts`
 - `test/executor.test.ts`
 - `test/extension.test.ts`
 - `test/e2e/workflow.e2e.test.ts`
@@ -491,4 +491,4 @@ Before any run publishes an update, rollback is an exact dependency pin to `0.5.
 
 ## Follow-up boundary
 
-A truly indefinite monitor belongs in the controller runtime. This plan keeps the finite workflow safety ceiling and does not hide it behind a huge number or automatic restart. A later controller resource may use the same update and progress contracts alongside the notification and viewer contracts.
+A truly indefinite monitor belongs in the resource manager runtime. This plan keeps the finite workflow safety ceiling and does not hide it behind a huge number or automatic restart. A later managed resource may use the same update and progress contracts alongside the notification and viewer contracts.

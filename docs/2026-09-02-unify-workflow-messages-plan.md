@@ -15,7 +15,7 @@ This change gives the host one saved list of workflow messages that Pi must add 
 
 The same change restores the user features removed during the host cut. It keeps one global host, one client protocol, one database, and one production runtime.
 
-[Workflow host](WORKFLOW_HOST.md) remains the process and state specification. [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) remains the Pi message specification. This plan changes both contracts in place.
+[Workflow server](WORKFLOW_SERVER.md) remains the process and state specification. [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) remains the Pi message specification. This plan changes both contracts in place.
 
 ## Current problems
 
@@ -70,9 +70,9 @@ Several reference pages still describe reminders, follow-ups, live settings cont
 
 - Do not restore the embedded workflow executor.
 - Do not let the extension, CLI, or `piw` open live SQLite state.
-- Do not restore per-project hosts or `/controller start` and `/controller stop`.
+- Do not restore per-project hosts or `/resource-manager start` and `/resource-manager stop`.
 - Do not send a workflow prompt into an active model turn.
-- Do not run workflow or controller code in the host event loop.
+- Do not run workflow or resource manager code in the host event loop.
 - Do not change Pi core, private Pi APIs, Pi session files, or Pi session schemas.
 - Do not add another database, service, runtime, compatibility reader, fallback, or feature flag.
 - Do not claim exactly-once model execution.
@@ -227,7 +227,7 @@ The host applies the end and its workflow consequence in one transaction:
 
 The transaction stores one immutable end event, updates activity, and creates or cancels messages together. Repeating the same report adopts that result. A stale or different turn ID cannot end newer activity.
 
-The host clears process-local activity when the client disconnects. Host startup does not close a Pi turn because the host cannot know whether Pi is still working. On `session_start`, the extension reports the active branch before new sends. If Pi is still busy, it reports `started` again with the retained turn ID. Only an idle-session branch report can close an open sent message with synthetic `stopReason: "lost"`. A lost step follows the normal unproductive-turn rule. A lost terminal or follow-up closes without reopening the completed workflow.
+The host clears process-local activity when the client disconnects. Server startup does not close a Pi turn because the host cannot know whether Pi is still working. On `session_start`, the extension reports the active branch before new sends. If Pi is still busy, it reports `started` again with the retained turn ID. Only an idle-session branch report can close an open sent message with synthetic `stopReason: "lost"`. A lost step follows the normal unproductive-turn rule. A lost terminal or follow-up closes without reopening the completed workflow.
 
 ### Display rule
 
@@ -391,7 +391,7 @@ Restore TypeScript viewer step scrubbing and its one-second elapsed-time redraw.
 - Escape pauses only the exact matching workflow turn.
 - Pause, cancel, answer, update, and submit remain durable host commands.
 - A pending interaction on a paused run rejects update and submit until resume.
-- Workflow and controller code remain in supervised children.
+- Workflow and resource manager code remain in supervised children.
 - Side effects remain idempotent or explicitly ambiguous.
 - `/piw`, `Ctrl+Shift+R`, Herdr placement, and widget scrolling remain available.
 - Local and remote `piw` use the same client protocol and exact run view.
@@ -455,7 +455,7 @@ The later status work binds only to `workflow_messages`. Do not implement a temp
 
 ### Update reference documentation
 
-Update [Workflow host](WORKFLOW_HOST.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](live-replay-protocol.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](session-event-journal.md), [Rust TUI viewer](tui-viewer.md), the earlier host plans, the authoring reference, and README to match the implementation.
+Update [Workflow server](WORKFLOW_SERVER.md), [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md), [SQLite state](SQLITE_STATE.md), [Live client protocol](live-replay-protocol.md), [Deferred workflow turns](DEFERRED_TURNS.md), [workflow follow-ups](2026-08-25-workflow-follow-ups.md), [workflow settings](2026-08-25-workflow-settings.md), [Human decisions](HUMAN_DECISIONS.md), [Human decision presentations](HUMAN_DECISION_PRESENTATIONS.md), [Session event journal](session-event-journal.md), [Rust TUI viewer](tui-viewer.md), the earlier host plans, the authoring reference, and README to match the implementation.
 
 Remove temporary current-version warnings only after live checks pass.
 
