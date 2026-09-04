@@ -9,6 +9,11 @@ npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 ```
 
+After the automated checks, run one real-model live E2E with an authenticated low-cost model. Use
+an exact provider and model ID. Prefer `gpt-5.6-luna` through `openai` or `openai-codex`, or
+`deepseek/deepseek-v4-flash` through `openrouter`, when available. Do not use a more expensive model
+when a low-cost model can verify the same path.
+
 Repository rules:
 
 - Use Conventional Commits for commit messages and PR titles.
@@ -17,8 +22,8 @@ Repository rules:
   `src/workflows` and never each other.
 - Persisted structured values use camelCase fields and versioned `schema`
   identifiers. Live durable state follows `docs/SQLITE_STATE.md`.
-- Tests must not write outside temp directories, call real models, or perform
-  destructive actions.
+- Automated tests must not write outside temp directories, call real models, or perform destructive
+  actions. The required real-model live E2E is a separate manual validation run.
 - Do not add arbitrary limits to user-visible output. Add a limit only when a named external
   interface requires it. Document that requirement and keep the complete result available.
 - New engine features need unit tests and a section in `docs/workflows.md`.
