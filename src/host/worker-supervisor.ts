@@ -6,6 +6,7 @@ import { ChildWorkerSupervisor, type SupervisedWorkerResult } from "./child-work
 import { HostProcessRegistry, type ProcessIdentity } from "./processes.js";
 import type { WorkerLaunchEnvelope, WorkerOutcome } from "./state.js";
 import {
+  MAX_WORKER_PROTOCOL_MESSAGE_BYTES,
   encodeWorkerLine,
   parseWorkerMessage,
   type WorkerMessage,
@@ -37,6 +38,8 @@ export class WorkflowWorkerSupervisor {
       encodeResponse: encodeWorkerLine,
       isReady: (message) => message.kind === "worker.ready",
       isTerminal: (message) => message.kind === "worker.exiting",
+      maxMessageBytes: MAX_WORKER_PROTOCOL_MESSAGE_BYTES,
+      oversizedMessage: "Worker protocol message exceeds 1 MiB",
       ...(options.startupTimeoutMs === undefined
         ? {}
         : { startupTimeoutMs: options.startupTimeoutMs }),

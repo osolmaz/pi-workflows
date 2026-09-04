@@ -178,11 +178,8 @@ export interface WorkflowExecutionStore {
     state: WorkflowRunState,
     options?: InitializeWorkflowRunOptions,
   ): Promise<string>;
-  prepareRunResume(runId: string): Promise<LoadedWorkflowRun>;
-  readRun(
-    runId: string,
-    options?: ReadWorkflowRunOptions,
-  ): LoadedWorkflowRun | null | Promise<LoadedWorkflowRun | null>;
+  prepareRunResume(runId: string): Promise<WorkflowRunState>;
+  readRunState(runId: string): WorkflowRunState | null | Promise<WorkflowRunState | null>;
   writeSnapshot(
     runId: string,
     state: WorkflowRunState,
@@ -1466,11 +1463,11 @@ export class WorkflowRunStore {
     return { runId, originSessionId, followUps };
   }
 
-  async prepareRunResume(runId: string): Promise<LoadedWorkflowRun> {
-    const loaded = this.readRun(runId, { includeTrace: true });
-    if (loaded === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
-    if (loaded.state.status !== "running") {
-      throw new Error(`Cannot resume workflow run ${runId} with status ${loaded.state.status}`);
+  async prepareRunResume(runId: string): Promise<WorkflowRunState> {
+    const state = this.readRunState(runId);
+    if (state === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
+    if (state.status !== "running") {
+      throw new Error(`Cannot resume workflow run ${runId} with status ${state.status}`);
     }
     this.verifySettingsProjections(runId);
     const revision = this.resourceRevision(runId);
@@ -1498,13 +1495,13 @@ export class WorkflowRunStore {
         payload: {},
       };
       insertRunEvent(this.state, row.resourceId, nextRevision, at, traceEvent);
-      loaded.state.traceSeq = nextRevision;
-      loaded.state.updatedAt = at;
-      this.persistRunState(row, loaded.state, nextRevision, now);
-      recordViewerDeltas(this.state, runId, runViewerTargets(loaded.state, traceEvent), now);
+      state.traceSeq = nextRevision;
+      state.updatedAt = at;
+      this.persistRunState(row, state, nextRevision, now);
+      recordViewerDeltas(this.state, runId, runViewerTargets(state, traceEvent), now);
       context.revision = nextRevision;
     });
-    const prepared = this.readRun(runId, { includeTrace: true });
+    const prepared = this.readRunState(runId);
     if (prepared === null) throw new Error(`Workflow run became unreadable: ${runId}`);
     return prepared;
   }
@@ -1765,7 +1762,7 @@ export class WorkflowRunStore {
           },
         };
         insertRunEvent(this.state, run.resourceId, revision, at, traceEvent);
-        const current = this.readRunState(run, this.readDefinition(run.definitionHash));
+        const current = this.materializeRunState(run, this.readDefinition(run.definitionHash));
         current.traceSeq = revision;
         current.updatedAt = at;
         this.persistRunState(run, current, revision, now);
@@ -2246,11 +2243,17 @@ export class WorkflowRunStore {
     };
   }
 
+  readRunState(runId: string): WorkflowRunState | null {
+    const row = this.readRunRow(runId);
+    if (row === undefined) return null;
+    return this.materializeRunState(row, this.readDefinition(row.definitionHash));
+  }
+
   readRun(runId: string, options: ReadWorkflowRunOptions = {}): LoadedWorkflowRun | null {
     const row = this.readRunRow(runId);
     if (row === undefined) return null;
     const snapshot = this.readDefinition(row.definitionHash);
-    const state = this.readRunState(row, snapshot);
+    const state = this.materializeRunState(row, snapshot);
     const segments = this.segmentRows(runId).map((segment) => this.loadSegment(segment, state));
     const flat = segments.find((segment) => segment.attemptId === "") ?? emptySegment();
     return {
@@ -3522,7 +3525,7 @@ export class WorkflowRunStore {
     return row;
   }
 
-  private readRunState(row: RunRow, snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
+  private materializeRunState(row: RunRow, snapshot: WorkflowDefinitionSnapshot): WorkflowRunState {
     const steps = this.readSteps(row.runId);
     return this.buildRunState(
       row,

@@ -185,10 +185,15 @@ export function clientSocketPath(databasePath: string): string {
 export class NdjsonFrameDecoder {
   private buffered = Buffer.alloc(0);
 
+  constructor(
+    private readonly maxMessageBytes = MAX_PROTOCOL_MESSAGE_BYTES,
+    private readonly oversizedMessage = "Client protocol message exceeds 1 MiB",
+  ) {}
+
   push(chunk: Buffer): Buffer[] {
     this.buffered = Buffer.concat([this.buffered, chunk]);
-    if (this.buffered.byteLength > MAX_PROTOCOL_MESSAGE_BYTES && !this.buffered.includes(0x0a)) {
-      throw new ClientProtocolError("Client protocol message exceeds 1 MiB");
+    if (this.buffered.byteLength > this.maxMessageBytes && !this.buffered.includes(0x0a)) {
+      throw new ClientProtocolError(this.oversizedMessage);
     }
     const frames: Buffer[] = [];
     for (;;) {
@@ -197,8 +202,8 @@ export class NdjsonFrameDecoder {
       const frame = this.buffered.subarray(0, newline);
       this.buffered = this.buffered.subarray(newline + 1);
       if (frame.byteLength === 0) continue;
-      if (frame.byteLength + 1 > MAX_PROTOCOL_MESSAGE_BYTES) {
-        throw new ClientProtocolError("Client protocol message exceeds 1 MiB");
+      if (frame.byteLength + 1 > this.maxMessageBytes) {
+        throw new ClientProtocolError(this.oversizedMessage);
       }
       frames.push(frame);
     }

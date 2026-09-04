@@ -14,7 +14,9 @@ import { SqliteControllerStore } from "../src/controllers/sqlite.js";
 import { HostProcessRegistry } from "../src/host/processes.js";
 import { WorkflowHost } from "../src/host/runner.js";
 import { HostStateStore, type InteractiveRequestRecord } from "../src/host/state.js";
+import { canonicalJson } from "../src/state/json.js";
 import type { WorkflowMessage } from "../src/state/workflow-messages.js";
+import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeComputeWorkflow(cwd: string): Promise<string> {
@@ -301,6 +303,27 @@ export default defineWorkflow({
     done: compute({ run: ({ outputs }) => outputs.ask }),
   },
   edges: [{ from: "ask", to: "done" }],
+});\n`,
+  );
+  return workflowPath;
+}
+
+async function writeTwoStepInteractiveWorkflow(cwd: string): Promise<string> {
+  const workflowPath = path.join(cwd, "two-step-interactive.workflow.ts");
+  await fs.writeFile(
+    workflowPath,
+    `import { agent, compute, defineWorkflow } from ${JSON.stringify(
+      path.resolve("src/workflows/index.ts"),
+    )};
+export default defineWorkflow({
+  name: "host-two-step-interactive",
+  startAt: "first",
+  nodes: {
+    first: agent({ prompt: () => "Return the first result." }),
+    second: agent({ prompt: () => "Return the second result." }),
+    done: compute({ run: ({ outputs }) => outputs.second }),
+  },
+  edges: [{ from: "first", to: "second" }, { from: "second", to: "done" }],
 });\n`,
   );
   return workflowPath;
@@ -1074,6 +1097,129 @@ setInterval(() => {}, 1000);
       } finally {
         observed.close();
       }
+    } finally {
+      await client.close();
+      await host.stop();
+    }
+  }, 60_000);
+
+  it("resumes with more than 2 MiB of server-owned session history", async () => {
+    const cwd = await makeTempDir("host-large-resume-project");
+    const databasePath = path.join(await makeTempDir("host-large-resume-state"), "state.sqlite");
+    const workflowPath = await writeTwoStepInteractiveWorkflow(cwd);
+    const host = new WorkflowHost({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath });
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "large-resume-run",
+        executionMode: "interactive",
+      });
+      let interaction: InteractiveRequestRecord | undefined;
+      await waitUntil(() => {
+        const observed = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          interaction = observed.listPendingInteractions("host-test-session")[0];
+          return interaction !== undefined;
+        } finally {
+          observed.close();
+        }
+      }, 30_000);
+      if (interaction === undefined) throw new Error("interaction was not created");
+      const pendingInteraction = interaction;
+
+      const runStore = new WorkflowRunStore(databasePath);
+      await runStore.writeSessionBinding("large-resume-run", {
+        schema: SESSION_BINDING_SCHEMA,
+        runId: "large-resume-run",
+        piSessionId: "large-resume-session",
+        cwd,
+        boundAt: new Date().toISOString(),
+      });
+      for (let index = 0; index < 17; index += 1) {
+        await runStore.appendSessionEntry("large-resume-run", {
+          id: `entry-${index}`,
+          type: "message",
+          content: "x".repeat(128 * 1024),
+        });
+      }
+      expect(
+        Buffer.byteLength(canonicalJson(runStore.readRun("large-resume-run"))),
+      ).toBeGreaterThan(2 * 1024 * 1024);
+      runStore.close();
+
+      const contract = pendingInteraction.contract as { contract?: { nodeId?: unknown } };
+      if (typeof contract.contract?.nodeId !== "string") {
+        throw new Error("interaction node is missing");
+      }
+      const response = await client.request({
+        operation: "interaction.submit",
+        runId: pendingInteraction.runId,
+        expectedRevision: pendingInteraction.revision,
+        payload: {
+          requestId: pendingInteraction.requestId,
+          submissionId: "large-resume-submission",
+          step: contract.contract.nodeId,
+          attempt: pendingInteraction.attemptId,
+          value: { output: { answer: "done" } },
+        },
+      });
+      expect(response.outcome).toBe("accepted");
+
+      let secondInteraction: InteractiveRequestRecord | undefined;
+      await waitUntil(() => {
+        const observed = new HostStateStore(databasePath, { readOnly: true });
+        try {
+          secondInteraction = observed
+            .listPendingInteractions("host-test-session")
+            .find((candidate) => candidate.requestId !== pendingInteraction.requestId);
+          return secondInteraction !== undefined;
+        } finally {
+          observed.close();
+        }
+      }, 30_000);
+      if (secondInteraction === undefined) throw new Error("second interaction was not created");
+      const pendingSecondInteraction = secondInteraction;
+      const secondContract = pendingSecondInteraction.contract as {
+        contract?: { nodeId?: unknown };
+      };
+      if (typeof secondContract.contract?.nodeId !== "string") {
+        throw new Error("second interaction node is missing");
+      }
+      const secondResponse = await client.request({
+        operation: "interaction.submit",
+        runId: pendingSecondInteraction.runId,
+        expectedRevision: pendingSecondInteraction.revision,
+        payload: {
+          requestId: pendingSecondInteraction.requestId,
+          submissionId: "large-resume-second-submission",
+          step: secondContract.contract.nodeId,
+          attempt: pendingSecondInteraction.attemptId,
+          value: { output: { answer: "done" } },
+        },
+      });
+      expect(secondResponse.outcome).toBe("accepted");
+
+      await waitUntil(() => {
+        const state = new SqliteControllerStore(databasePath, { readOnly: true, global: true });
+        try {
+          return state.getWorkflowRun("large-resume-run")?.status === "done";
+        } finally {
+          state.close();
+        }
+      }, 30_000);
+      const completedStore = new WorkflowRunStore(databasePath);
+      expect(completedStore.readRun("large-resume-run")?.sessionEntries).toHaveLength(17);
+      const crashed = completedStore.state.connection
+        .prepare(
+          "SELECT count(*) AS count FROM run_workers WHERE run_id = ? AND status = 'crashed'",
+        )
+        .get("large-resume-run") as { count: number };
+      expect(crashed.count).toBe(0);
+      completedStore.close();
     } finally {
       await client.close();
       await host.stop();

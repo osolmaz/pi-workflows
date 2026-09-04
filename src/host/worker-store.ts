@@ -4,8 +4,6 @@ import type { WorkflowSettingsScopeRecord } from "../workflows/settings.js";
 import {
   createDefinitionSnapshot,
   type InitializeWorkflowRunOptions,
-  type LoadedWorkflowRun,
-  type ReadWorkflowRunOptions,
   type WorkflowExecutionStore,
 } from "../workflows/store.js";
 import type {
@@ -62,15 +60,12 @@ export class HostBackedWorkflowStore implements WorkflowExecutionStore {
     });
   }
 
-  async prepareRunResume(runId: string): Promise<LoadedWorkflowRun> {
-    return await this.call<LoadedWorkflowRun>("store.prepareRunResume", { runId });
+  async prepareRunResume(runId: string): Promise<WorkflowRunState> {
+    return await this.call<WorkflowRunState>("store.prepareRunResume", { runId });
   }
 
-  async readRun(
-    runId: string,
-    options: ReadWorkflowRunOptions = {},
-  ): Promise<LoadedWorkflowRun | null> {
-    return await this.call<LoadedWorkflowRun | null>("store.readRun", { runId, options });
+  async readRunState(runId: string): Promise<WorkflowRunState | null> {
+    return await this.call<WorkflowRunState | null>("store.readRunState", { runId });
   }
 
   async writeSnapshot(

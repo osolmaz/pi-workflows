@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { StateDatabase } from "../src/state/database.js";
+import { canonicalJson } from "../src/state/json.js";
 import { readViewerDeltas } from "../src/state/viewer.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import {
@@ -339,6 +340,35 @@ describe("WorkflowRunStore branch behavior", () => {
     store.close();
   });
 
+  it("keeps large session history out of resume preparation", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("run-large-resume"));
+    await store.initializeRun(workflow, state("run-large-resume"));
+    await store.writeSessionBinding("run-large-resume", {
+      schema: SESSION_BINDING_SCHEMA,
+      runId: "run-large-resume",
+      piSessionId: "session-large",
+      cwd: "/tmp",
+      boundAt: new Date().toISOString(),
+    });
+    for (let index = 0; index < 17; index += 1) {
+      await store.appendSessionEntry("run-large-resume", {
+        id: `entry-${index}`,
+        type: "message",
+        content: "x".repeat(128 * 1024),
+      });
+    }
+
+    const completeRun = store.readRun("run-large-resume");
+    expect(completeRun).not.toBeNull();
+    expect(Buffer.byteLength(canonicalJson(completeRun))).toBeGreaterThan(2 * 1024 * 1024);
+
+    const preparedState = await store.prepareRunResume("run-large-resume");
+    expect(preparedState).toMatchObject({ runId: "run-large-resume", status: "running" });
+    expect(Buffer.byteLength(canonicalJson(preparedState))).toBeLessThan(1024 * 1024);
+    expect(store.readRun("run-large-resume")?.sessionEntries).toHaveLength(17);
+    store.close();
+  });
+
   it("keeps a live session capture open during normal run preparation", async () => {
     const store = new WorkflowRunStore(await makeStateDatabasePath("run-recording-capture"));
     await store.initializeRun(workflow, state("run-recording"));
@@ -350,9 +380,8 @@ describe("WorkflowRunStore branch behavior", () => {
       boundAt: new Date().toISOString(),
     });
     expect(store.readRun("run-recording")?.sessionCapture?.status).toBe("recording");
-    expect((await store.prepareRunResume("run-recording")).sessionCapture?.status).toBe(
-      "recording",
-    );
+    await store.prepareRunResume("run-recording");
+    expect(store.readRun("run-recording")?.sessionCapture?.status).toBe("recording");
     store.close();
   });
 
@@ -374,7 +403,8 @@ describe("WorkflowRunStore branch behavior", () => {
       entryCount: 0,
       lastEventSeq: 0,
     });
-    expect((await store.prepareRunResume("run-5")).sessionCapture?.status).toBe("complete");
+    await store.prepareRunResume("run-5");
+    expect(store.readRun("run-5")?.sessionCapture?.status).toBe("complete");
     store.close();
   });
 
