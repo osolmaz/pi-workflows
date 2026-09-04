@@ -1,4 +1,4 @@
-//! `piw serve`: a loopback-only, one-WebSocket-to-one-host-socket relay.
+//! `piw serve`: a loopback-only, one-WebSocket-to-one-server-socket relay.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -58,36 +58,36 @@ async fn relay(stream: TcpStream, socket_path: PathBuf) -> Result<()> {
         .context("accepting WebSocket")?;
     #[cfg(unix)]
     {
-        let host = UnixStream::connect(&socket_path)
+        let server = UnixStream::connect(&socket_path)
             .await
-            .with_context(|| format!("connecting to workflow host {}", socket_path.display()))?;
-        relay_host(websocket, host).await
+            .with_context(|| format!("connecting to workflow server {}", socket_path.display()))?;
+        relay_server(websocket, server).await
     }
     #[cfg(windows)]
     {
-        let host = ClientOptions::new()
+        let server = ClientOptions::new()
             .open(&socket_path)
-            .with_context(|| format!("connecting to workflow host {}", socket_path.display()))?;
-        relay_host(websocket, host).await
+            .with_context(|| format!("connecting to workflow server {}", socket_path.display()))?;
+        relay_server(websocket, server).await
     }
     #[cfg(not(any(unix, windows)))]
-    anyhow::bail!("local workflow host transport is not supported on this platform");
+    anyhow::bail!("local workflow server transport is not supported on this platform");
 }
 
-async fn relay_host<S>(
+async fn relay_server<S>(
     websocket: tokio_tungstenite::WebSocketStream<TcpStream>,
-    host: S,
+    server: S,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut ws_sink, mut ws_stream) = websocket.split();
-    let (host_read, mut host_write) = tokio::io::split(host);
-    let mut host_lines = BufReader::new(host_read).lines();
+    let (server_read, mut server_write) = tokio::io::split(server);
+    let mut server_lines = BufReader::new(server_read).lines();
     loop {
         tokio::select! {
-            host_line = host_lines.next_line() => {
-                let Some(line) = host_line.context("reading workflow host")? else { break };
+            server_line = server_lines.next_line() => {
+                let Some(line) = server_line.context("reading workflow server")? else { break };
                 ws_sink.send(Message::Text(line.into())).await.context("sending WebSocket frame")?;
             }
             ws_message = ws_stream.next() => {
@@ -97,9 +97,9 @@ where
                         if text.contains('\n') || text.contains('\r') {
                             anyhow::bail!("client frame contains a line break");
                         }
-                        host_write.write_all(text.as_bytes()).await?;
-                        host_write.write_all(b"\n").await?;
-                        host_write.flush().await?;
+                        server_write.write_all(text.as_bytes()).await?;
+                        server_write.write_all(b"\n").await?;
+                        server_write.flush().await?;
                     }
                     Message::Close(_) => break,
                     Message::Ping(payload) => ws_sink.send(Message::Pong(payload)).await?,
@@ -184,13 +184,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn relay_couples_one_websocket_to_one_host_socket() {
+    async fn relay_couples_one_websocket_to_one_server_socket() {
         let temporary = tempdir().unwrap();
         let socket_path = temporary.path().join("host.sock");
-        let host_listener = UnixListener::bind(&socket_path).unwrap();
-        let host_task = tokio::spawn(async move {
-            let (host, _) = host_listener.accept().await.unwrap();
-            let (read, mut write) = host.into_split();
+        let server_listener = UnixListener::bind(&socket_path).unwrap();
+        let server_task = tokio::spawn(async move {
+            let (server, _) = server_listener.accept().await.unwrap();
+            let (read, mut write) = server.into_split();
             let hello = format!(
                 "{{\"connectionId\":\"one\",\"packageVersion\":\"{}\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"hello\"}}\n",
                 env!("CARGO_PKG_VERSION")
@@ -207,12 +207,12 @@ mod tests {
             .unwrap();
         let hello = websocket.next().await.unwrap().unwrap();
         assert!(hello.into_text().unwrap().contains("\"type\":\"hello\""));
-        let request = "{\"clientId\":\"client\",\"idempotencyKey\":\"key\",\"operation\":\"host.status\",\"payload\":{},\"requestId\":\"request\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}";
+        let request = "{\"clientId\":\"client\",\"idempotencyKey\":\"key\",\"operation\":\"server.status\",\"payload\":{},\"requestId\":\"request\",\"schema\":\"pi-workflows.client.v1\",\"type\":\"request\"}";
         websocket
             .send(Message::Text(request.to_string().into()))
             .await
             .unwrap();
-        assert_eq!(host_task.await.unwrap(), request);
+        assert_eq!(server_task.await.unwrap(), request);
         websocket.close(None).await.unwrap();
         relay_task.abort();
     }

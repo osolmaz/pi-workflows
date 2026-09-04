@@ -46,7 +46,7 @@ Each run will use:
 
 Pi will start with `--no-skills`, `--no-themes`, `--no-prompt-templates`, `--no-context-files`, and `--no-builtin-tools`. The runner must not use `--no-extensions`, because that would also disable Pi Workflows.
 
-After startup, the runner will call RPC `get_commands`. The `workflow`, `controller`, and `piw` commands must come from the packed Pi Workflows package. Any other user or project extension is a failure. Base Pi's own inline commands are allowed.
+After startup, the runner will call RPC `get_commands`. The `workflow`, `resource-manager`, and `piw` commands must come from the packed Pi Workflows package. Any other user or project extension is a failure. Base Pi's own inline commands are allowed.
 
 ## Installed package test
 

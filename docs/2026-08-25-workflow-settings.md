@@ -131,7 +131,7 @@ The server records the actor outside the patch:
 
 - `session` for a model workflow-tool call;
 - `human` for a direct command or verified human decision;
-- `controller` for a controller request;
+- `controller` for a resource manager request; this internal version-1 actor value is retained;
 - `policy` only for existing saved policy code.
 
 Patch data cannot claim another actor type.

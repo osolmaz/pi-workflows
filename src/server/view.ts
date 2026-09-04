@@ -904,7 +904,7 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     reason = "An external effect needs explicit recovery.";
   } else if (facts.runnerActive || facts.originTurnActive) {
     status = "running";
-    activity = facts.runnerActive ? "supervised_worker" : "origin_turn";
+    activity = facts.runnerActive ? "supervised_runner" : "origin_turn";
   } else if (
     facts.durableStatus === "completed" ||
     facts.durableStatus === "failed" ||

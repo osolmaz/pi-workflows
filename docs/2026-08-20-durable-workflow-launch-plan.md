@@ -18,7 +18,7 @@ If startup then fails, pi-workflows must save the failure and start one new mode
 actionable error. The model can correct the request and call `workflow start` again. A failed launch
 must release the session reservation so the corrected run can start.
 
-This change stays inside pi-workflows. It uses the existing project-scoped SQLite controller store
+This change stays inside pi-workflows. It uses the existing project-scoped SQLite resource manager store
 and documented Pi extension APIs. It does not change Pi, add a service, or add another database.
 
 ## Current failure
@@ -81,12 +81,12 @@ pi-workflows is in alpha. Change the current storage and tool contracts in place
 - Change the SQLite table definitions and TypeScript types directly.
 - Remove the superseded status values and launch path in the same change.
 
-An existing controller store with the old alpha table layout is incompatible. On open, pi-workflows
+An existing resource manager store with the old alpha table layout is incompatible. On open, pi-workflows
 must verify the required table columns and status contract. If the layout is old, it must stop with a
-clear instruction to preserve any needed run evidence and reset the project-scoped controller store.
+clear instruction to preserve any needed run evidence and reset the project-scoped resource manager store.
 It must not silently reinterpret or delete old state.
 
-Run bundles remain separate evidence. Resetting an incompatible controller queue must not delete run
+Run bundles remain separate evidence. Resetting an incompatible resource manager queue must not delete run
 bundle directories.
 
 ## Public behavior
@@ -217,7 +217,7 @@ bundle owns input after the engine starts.
 
 Keep `workflow_notifications` limited to passive `progress` and `final` reports. A launch failure creates an eligible row in `workflow_turn_intents`; it does not add a run-level notification kind.
 
-The project-scoped controller store remains private local state. Tests must verify restrictive file
+The project-scoped resource manager store remains private local state. Tests must verify restrictive file
 and directory permissions.
 
 ## State transitions
@@ -273,7 +273,7 @@ can correct it without including secret values.
 
 ## Implementation plan
 
-### 1. Replace the alpha controller-store layout
+### 1. Replace the alpha resource manager store layout
 
 Update `src/resource-managers/sqlite.ts` and its exported queue and notification types.
 
@@ -316,7 +316,7 @@ Preparation owns resolution, validation, run ID allocation, immutable source ide
 digest, and reservation. Activation owns claims, engine construction, recorder setup, `activeRun`,
 running state, and executor release.
 
-ResourceManager child workflows remain on their controller scheduler path. Share pure workflow-resolution
+Resource manager child workflows remain on their resource manager scheduler path. Share pure workflow-resolution
 helpers where useful, but do not make resource manager children wait for an interactive agent boundary.
 
 ### 4. Change the start tool
@@ -361,7 +361,7 @@ surface.
 ### 8. Update documentation
 
 Update `docs/workflows.md` with the queued start contract, run ID, status, cancellation, failure
-follow-up, and model retry behavior. Update controller-store documentation with the alpha reset rule.
+follow-up, and model retry behavior. Update resource manager store documentation with the alpha reset rule.
 Do not document a v2 schema or migration path.
 
 ## Tests
@@ -438,7 +438,7 @@ copy as the implementation source.
 
 - Do not change Pi or propose a new Pi API.
 - Do not add a service, daemon, remote queue, telemetry endpoint, or second database.
-- Do not preserve old alpha controller-store layouts.
+- Do not preserve old alpha resource manager store layouts.
 - Do not add a migration or v2 schema.
 - Do not add blind automatic workflow retries.
 - Do not change built-in workflow behavior except for test fixtures needed to verify startup.

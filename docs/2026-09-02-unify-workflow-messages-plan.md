@@ -270,7 +270,7 @@ This applies to:
 - cancelled runs;
 - launch failures;
 - claim loss when safe handoff is impossible and the host commits a terminal result;
-- controller interruption.
+- resource manager interruption.
 
 An ordinary claim transfer remains a handoff and creates no terminal message. A stale owner cannot create one.
 
@@ -498,7 +498,7 @@ Remove temporary current-version warnings only after live checks pass.
 - Pause and resume a presented step and receive one step message with reason `resumed`.
 - Prove initial, reminder, and resumed prompts use the same message kind, contract, attempt identity, eligibility, and recovery path.
 - Prove the partial unique index allows at most one pending step message per request for every reason.
-- Complete, fail, time out, cancel, fail launch without recoverable handoff, and interrupt through a controller; receive one terminal turn in each case.
+- Complete, fail, time out, cancel, fail launch without recoverable handoff, and interrupt through a resource manager; receive one terminal turn in each case.
 - Settle a checkpoint parent through a continuation and prove only the final chain leaf gets a terminal turn.
 - Restart safely, reject a fourth restart, and reject a repeated terminal fingerprint.
 - Queue and remove follow-ups, then send remaining prompts once in order without pointer deadlock.

@@ -716,18 +716,18 @@ async fn run_local(
     {
         let socket = UnixStream::connect(path)
             .await
-            .with_context(|| format!("connecting to workflow host {}", path.display()))?;
+            .with_context(|| format!("connecting to workflow server {}", path.display()))?;
         run_local_connection(socket, shared, wake).await
     }
     #[cfg(windows)]
     {
         let socket = ClientOptions::new()
             .open(path)
-            .with_context(|| format!("connecting to workflow host {}", path.display()))?;
+            .with_context(|| format!("connecting to workflow server {}", path.display()))?;
         run_local_connection(socket, shared, wake).await
     }
     #[cfg(not(any(unix, windows)))]
-    anyhow::bail!("local workflow host transport is not supported on this platform");
+    anyhow::bail!("local workflow server transport is not supported on this platform");
 }
 
 async fn run_local_connection<S>(
@@ -898,7 +898,7 @@ fn handle_server_message(text: &str, shared: &Arc<Mutex<Shared>>) -> Result<()> 
         ServerMessage::Hello(hello) => {
             anyhow::ensure!(
                 hello.package_version == env!("CARGO_PKG_VERSION"),
-                "workflow client version mismatch: host {}, piw {}",
+                "workflow client version mismatch: server {}, piw {}",
                 hello.package_version,
                 env!("CARGO_PKG_VERSION")
             );
@@ -1343,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_the_host_owned_run_view_contract() {
+    fn decodes_the_server_owned_run_view_contract() {
         let source = json!({"kind":"file","path":"/tmp/smoke.workflow.ts","hash":"abc"});
         let raw = json!({
             "manifest": {
@@ -1411,7 +1411,7 @@ mod tests {
             "possiblyInterrupted":false
         });
 
-        let view = decode_view(4, 1, &raw, None, None, None).expect("host view should decode");
+        let view = decode_view(4, 1, &raw, None, None, None).expect("server view should decode");
         assert_eq!(view.manifest.workflow_name, "smoke");
         assert_eq!(view.state.status, crate::state::types::RunStatus::Completed);
         assert_eq!(view.update_total, 300);
@@ -1422,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_the_host_display_status_during_an_origin_turn() {
+    fn uses_the_server_display_status_during_an_origin_turn() {
         let source = json!({"kind":"file","path":"/tmp/smoke.workflow.ts","hash":"abc"});
         let reason_content = "The origin-session model turn is active.";
         let raw = json!({
@@ -1477,7 +1477,7 @@ mod tests {
         });
 
         let view = decode_view(4, 1, &raw, None, None, Some(reason_content))
-            .expect("host view should decode");
+            .expect("server view should decode");
 
         assert_eq!(view.state.status, crate::state::types::RunStatus::Waiting);
         assert_eq!(view.display.status, crate::state::types::RunStatus::Running);

@@ -105,7 +105,7 @@ function usage() {
   npm run test:e2e:live -- --provider PROVIDER --model MODEL [--profile ABSOLUTE_PATH]
 
 Options:
-  --runtime-only       Run the installed package, widget, host, pause/resume, and piw checks without a model call.
+  --runtime-only       Run the installed package, widget, server, pause/resume, and piw checks without a model call.
   --provider NAME      Exact built-in Pi provider for the optional real-model phase.
   --model ID           Exact model id for the optional real-model phase.
   --profile PATH       Dedicated Pi agent directory that already contains subscription authentication.
@@ -404,7 +404,7 @@ function validateProfile(profile) {
 
 async function findRun(client, workflowName) {
   return await waitFor(
-    `host run ${workflowName}`,
+    `server run ${workflowName}`,
     async () => {
       const response = requireAccepted(
         await client.request({ operation: "run.list", payload: { limit: 20 } }),
@@ -554,7 +554,7 @@ async function moveIncompatibleState(databasePath) {
   }
 }
 
-function hasHostUnavailableNotice(rpc) {
+function hasServerUnavailableNotice(rpc) {
   return extensionUiEvents(rpc).some(
     (event) =>
       event.method === "notify" &&
@@ -589,7 +589,7 @@ async function waitForSessionCoordinator(client, sessionId, rpc) {
       event.message.startsWith("Workflow server is unavailable:"),
   );
   if (notices.length !== 1) {
-    throw new Error(`Expected one host-unavailable notice, observed ${notices.length}`);
+    throw new Error(`Expected one server-unavailable notice, observed ${notices.length}`);
   }
 }
 
@@ -689,9 +689,9 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     async () => {
       const response = requireAccepted(
         await client.request({ operation: "server.status" }),
-        "host status",
+        "server status",
       );
-      const receipt = requireObject(response.receipt, "host status receipt");
+      const receipt = requireObject(response.receipt, "server status receipt");
       return receipt.activeRunners === 0 && receipt.parkedRuns === 1 ? receipt : false;
     },
     { rpc, timeoutMs: 30_000 },
@@ -981,8 +981,8 @@ async function execute(root, options) {
     rpc = await startPi(context);
     await assertPackageIsolation(rpc, candidate);
     await waitFor(
-      "the initial incompatible-state host failure",
-      () => hasHostUnavailableNotice(rpc),
+      "the initial incompatible-state server failure",
+      () => hasServerUnavailableNotice(rpc),
       {
         rpc,
         timeoutMs: 30_000,
@@ -1014,9 +1014,9 @@ async function execute(root, options) {
 
     const serverStatus = requireAccepted(
       await client.request({ operation: "server.status" }),
-      "final host status",
+      "final server status",
     );
-    const serverReceipt = requireObject(serverStatus.receipt, "final host status receipt");
+    const serverReceipt = requireObject(serverStatus.receipt, "final server status receipt");
     if (serverReceipt.lifecycleContradictions !== 0 || serverReceipt.ambiguousEffects !== 0) {
       throw new Error(`Server ended with unsafe state: ${JSON.stringify(serverReceipt)}`);
     }
@@ -1046,7 +1046,7 @@ async function execute(root, options) {
       try {
         await client.request({ operation: "server.stop" });
       } catch {
-        // The host is already stopped or never became available.
+        // The server is already stopped or never became available.
       }
       await client.close();
       await waitForEndpointClosed(endpoint);

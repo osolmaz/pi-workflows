@@ -237,7 +237,7 @@ No migration, compatibility reader, dual protocol, bridge period, or feature fla
 
 ### 2. Make the host the only live database reader
 
-**Location:** `src/server/`, `src/state/`, controller stores, and state maintenance commands.
+**Location:** `src/server/`, `src/state/`, resource manager stores, and state maintenance commands.
 
 **Change:** Add host handlers for atomic origin-session view lookup, run-list and run-view snapshots, revision subscriptions, bounded pages, and active database maintenance. Keep projection reads and writes in the host. A view read must resolve the session reservation, run, durable display facts, and presentation revision from one consistent read boundary. Persist generated large view values in the run-scoped content table under their digest and media type before advertising their references. Do not reuse general state blobs or allow another run to read the content. Store the complete original workflow definition, not its escaped projection. Externalize large replay checkpoints and make both clients resolve them. Route state-changing Pi extension commands through the durable retry path. Give the CLI one stable client identity and one fresh key for each backup or applied prune invocation. Reuse that key only for the invocation's automatic reconnect retry, with a new request ID. Keep an in-flight maintenance operation alive after disconnect, store its accepted or rejected command receipt before response, wait for it during host shutdown, and adopt an exact retry. Wait for socket drain before sending another snapshot, and remove every subscription kind explicitly when its client unsubscribes.
 
