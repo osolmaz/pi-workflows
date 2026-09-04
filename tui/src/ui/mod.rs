@@ -2328,7 +2328,7 @@ fn step_duration(step: &StepRecord) -> String {
     format_duration(duration)
 }
 
-/// Collect artifact references from the current host-owned run view.
+/// Collect artifact references from the current server-owned run view.
 fn collect_artifact_paths(value: &Value, paths: &mut Vec<String>) {
     if let Some(artifact) = crate::state::types::as_artifact_ref(value) {
         paths.push(artifact.path);
@@ -3503,7 +3503,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn run_summary_uses_the_host_display_status() {
+    fn run_summary_uses_the_server_display_status() {
         let summary = parse_run_summary(&json!({
             "manifest": {
                 "schema":"pi-workflows.run-manifest.v1",
@@ -3533,7 +3533,7 @@ mod tests {
     }
 
     #[test]
-    fn display_reason_content_renders_the_complete_hydrated_host_value() {
+    fn display_reason_content_renders_the_complete_hydrated_server_value() {
         let display: crate::state::types::WorkflowDisplay = serde_json::from_value(json!({
             "status":"failed",
             "activity":null,

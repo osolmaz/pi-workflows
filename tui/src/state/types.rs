@@ -1,4 +1,4 @@
-//! Serde types for the workflow documents carried in host-owned run views.
+//! Serde types for the workflow documents carried in server-owned run views.
 //! Unknown document fields are tolerated, but the client envelope is strict.
 
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl RunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowActivity {
-    SupervisedWorker,
+    SupervisedRunner,
     OriginTurn,
 }
 
@@ -95,7 +95,7 @@ mod workflow_display_tests {
     use serde_json::json;
 
     #[test]
-    fn preserves_the_host_display_and_uses_only_a_running_origin_turn_as_the_active_wait() {
+    fn preserves_the_server_display_and_uses_only_a_running_origin_turn_as_the_active_wait() {
         let state: RunState = serde_json::from_value(json!({
             "schema":"pi-workflows.run-state.v1",
             "traceSeq":1,

@@ -69,7 +69,7 @@ describe("host workflow display reducer", () => {
   it("reports exact activity and allowed controls", () => {
     expect(display({ runnerActive: true })).toMatchObject({
       status: "running",
-      activity: "supervised_worker",
+      activity: "supervised_runner",
       controls: ["pause", "cancel"],
     });
     expect(display({ originTurnActive: true })).toMatchObject({

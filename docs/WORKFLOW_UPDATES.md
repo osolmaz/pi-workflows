@@ -250,7 +250,7 @@ The parser is workflow-author code. Update data never selects or changes the com
 
 ## Controllers and servers
 
-The engine exposes the same publication operation through its runner interface. A controller or standalone server may publish only for a workflow run and attempt whose claim it owns.
+The engine exposes the same publication operation through its runner interface. A resource manager or standalone server may publish only for a workflow run and attempt whose claim it owns.
 
 Managed resource events remain resource manager events. They become workflow updates only when a resource manager deliberately publishes them to a linked workflow run.
 

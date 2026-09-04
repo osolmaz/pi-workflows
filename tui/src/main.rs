@@ -14,7 +14,7 @@ struct Cli {
     /// Optional run id. Without one, show all runs.
     run_id: Option<String>,
 
-    /// Connect to a `piw serve` relay instead of the local workflow host.
+    /// Connect to a `piw serve` relay instead of the local workflow server.
     #[arg(long, value_name = "URL", conflicts_with = "run_id")]
     connect: Option<String>,
 
@@ -40,7 +40,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Relay each WebSocket connection to one local workflow host connection.
+    /// Relay each WebSocket connection to one local workflow server connection.
     Serve {
         /// Address to bind. Workflow state can contain private data; keep this local.
         #[arg(long, default_value = "127.0.0.1:9377")]
@@ -74,7 +74,7 @@ fn default_socket() -> PathBuf {
     state_directory.join("host").join("host.sock")
 }
 
-async fn host_available(socket_path: &PathBuf) -> bool {
+async fn server_available(socket_path: &PathBuf) -> bool {
     #[cfg(unix)]
     return tokio::net::UnixStream::connect(socket_path).await.is_ok();
     #[cfg(windows)]
@@ -83,24 +83,24 @@ async fn host_available(socket_path: &PathBuf) -> bool {
     socket_path.exists()
 }
 
-async fn ensure_host(socket_path: &PathBuf) -> Result<()> {
-    if host_available(socket_path).await {
+async fn ensure_server(socket_path: &PathBuf) -> Result<()> {
+    if server_available(socket_path).await {
         return Ok(());
     }
     let status = ProcessCommand::new("pi-workflows")
-        .args(["host", "start"])
+        .args(["server", "start"])
         .status()
-        .context("starting the installed pi-workflows host")?;
-    anyhow::ensure!(status.success(), "pi-workflows host start failed");
+        .context("starting the installed pi-workflows server")?;
+    anyhow::ensure!(status.success(), "pi-workflows server start failed");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if host_available(socket_path).await {
+        if server_available(socket_path).await {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!(
-        "workflow host endpoint did not become ready at {}",
+        "workflow server endpoint did not become ready at {}",
         socket_path.display()
     )
 }
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
     }
     let socket_path = default_socket();
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(ensure_host(&socket_path))?;
+    runtime.block_on(ensure_server(&socket_path))?;
     match cli.command {
         Some(Command::Serve { bind }) => {
             runtime.block_on(server::serve(server::ServeOptions { socket_path, bind }))
