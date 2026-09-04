@@ -1,6 +1,6 @@
 # SQLite state
 
-Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior.
+Status: this is the implemented single-server database contract. The [workflow-message plan](2026-09-02-unify-workflow-messages-plan.md) records the schema version 1 hard cut that unified Pi message state and restored hosted behavior. The [automatic state-retention plan](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract.
 
 Pi Workflows stores all live durable state in one database:
 
@@ -156,7 +156,7 @@ state-changing child messages.
 
 `blobs` stores canonical JSON and UTF-8 text as bytes. Its primary key is the 32-byte SHA-256 digest of the bytes. An oversized required runner result uses this same content-addressed store, and the runner reads and verifies it in bounded parts. It does not copy session history into runner resume state. `run_view_content` separately keeps server-generated large view values reachable for the life of the run, including aggregate outputs that do not exist as one source record. The server creates this link before it sends a content reference. Deleting the run removes the link, and normal blob pruning can then remove unreferenced content.
 
-Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Opening the database never deletes blobs. The explicit prune command removes unreferenced blobs after it deletes safe old run trees. It retains each blob referenced by an active runner transfer until that runner exits.
+Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Automatic retention and explicit prune remove unreferenced blobs after they delete safe old run trees. They retain each blob referenced by a database foreign key or active runner transfer.
 
 Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer.
 
@@ -247,6 +247,24 @@ SQLite WAL keeps bounded projection reads consistent with commits. Writers are s
 
 This contract is for local storage on one machine. It does not claim distributed consensus or network-filesystem safety.
 
+## Automatic retention
+
+The server keeps terminal root-run trees for 30 days from `finished_at`. A tree is eligible only when every restart or continuation descendant is terminal, older than the cutoff, free of protected work, and free of references from outside the tree.
+
+Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, controller ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a continuation or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
+
+The server requests cleanup after startup recovery and after workflow runners exit. Overlapping requests use one in-process task. Cleanup starts only while there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes no more than one sweep in 24 hours. An interrupted sweep stays due until another idle startup or runner-exit trigger.
+
+Automatic cleanup does not create a backup. It rechecks and deletes one complete root tree in one transaction, yields, and checks for new work before it selects another tree. Manual prune uses the same selection and deletion code, but keeps its backup requirement.
+
+After logical deletion, the server truncates the WAL while idle and measures `page_count`, `freelist_count`, and `page_size`. SQLite can reuse free pages without shrinking the main file. Automatic cleanup runs `VACUUM` only while the server remains idle, at least 64 MiB is reclaimable, and at least 20 percent of pages are free. A skipped or failed `VACUUM` does not undo committed deletion. The server reports the result and leaves the free pages available for reuse.
+
+A cleanup error does not fail a workflow or stop the server. The server records one bounded diagnostic and waits for a later safe trigger. It does not retry in a tight loop.
+
+Retained runs keep their current resume, viewer, content-reference, and terminal-result behavior. A deleted run is absent from run lists and direct views. Cleanup never edits Pi session history.
+
+The retention policy does not promise a hard database-size limit. Recent or protected work can be large, and physical file shrink depends on a safe, successful `VACUUM`.
+
 ## Backup and verification
 
 An active database must be backed up with the SQLite backup API. Copying only `state.sqlite` while WAL writes are active is not supported.
@@ -275,7 +293,7 @@ These commands send maintenance operations to the server when they target the ac
 `status` reports only safe counts, file size, active leases, and unsettled effects.
 It does not print actor IDs, channel references, payloads, or credentials.
 
-`prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, and refuses trees with live queues, active leases, unsettled effects, managed resource references, channel references, or step links from runs outside the tree. It deletes the safe aggregates, removes blobs with no remaining foreign-key reference, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. Pi Workflows never runs prune at startup.
+`prune --dry-run` reports complete terminal run trees older than the cutoff and the trees that safety checks block. It does not change the database. `prune --apply` requires a new absolute backup path. It verifies the backup, locks maintenance, rechecks the same selection in an exclusive transaction, deletes safe aggregates and unreferenced blobs, checkpoints the WAL, vacuums the file, and runs integrity and foreign-key checks. The manual command and automatic retention use the same blocker rules. Automatic retention starts after server recovery and does not create a backup.
 
 ## Alpha cutover
 

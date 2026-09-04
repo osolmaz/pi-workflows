@@ -1,6 +1,6 @@
 # Workflow server
 
-Status: the out-of-process server, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow run state](2026-09-04-workflow-run-state-plan.md) records the approved refactor for turn ownership, managed effects, restarts, terminal data, cancellation, and runner recovery. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
+Status: the out-of-process server, unified live client, workflow-message contract, and restored session behavior are implemented. [Unify workflow run state](2026-09-04-workflow-run-state-plan.md) records the approved refactor for turn ownership, managed effects, restarts, terminal data, cancellation, and runner recovery. [Add automatic workflow state retention](plans/2026-09-04-automatic-state-retention-plan.md) records the approved 30-day cleanup contract. [Unify workflow messages and restore hosted behavior](2026-09-02-unify-workflow-messages-plan.md), [run workflows outside Pi](2026-08-30-out-of-process-workflow-host-plan.md), [restore workflow session delivery and controls](2026-09-01-restore-session-delivery-controls-plan.md), and [unify live workflow clients](2026-09-01-unified-workflow-client-plan.md) record the earlier design and implementation plans.
 
 ## Purpose
 
@@ -426,10 +426,31 @@ At startup the server:
 9. Resumes any remaining provisional `validating` submission in a new supervised child.
 10. Waits for the extension's active-branch report before it confirms pending entries as sent, closes a turn as `lost`, or creates a branch-specific replacement. The extension sends this report after every server connection.
 11. Starts no model turn until a matching Pi session connects or headless mode is declared.
+12. Requests an automatic state-retention sweep after recovery. The sweep waits until normal server work is idle.
 
 Recovery resumes from the last committed boundary. An uncommitted compute node may run again because compute is pure. An action with a stored effect receipt adopts that receipt. An effect in `ambiguous` state requires explicit recovery.
 
 Claim loss is a handoff, not a run failure. The old owner writes no terminal event after claim loss.
+
+## State retention
+
+The server keeps terminal root-run trees for 30 days from `finished_at`. A tree can expire only when all restart and continuation descendants are terminal, older than the cutoff, and free of protected state or references from outside the tree.
+
+The server protects waiting and parked runs, live queue rows, pending workflow messages, open workflow turns, pending interactions and human decisions, recording session segments, queued follow-ups, active leases, unsettled effects, controller ownership, active runner content, resumable checkpoints, and undelivered terminal results. A cross-tree continuation or step reference also blocks deletion. Unknown ownership blocks deletion.
+
+The server requests a sweep after startup recovery and after a workflow runner exits. Overlapping requests join one in-process task. A sweep starts only when there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes at most one sweep in 24 hours. If new work appears, cleanup stops between complete root trees and remains due for the next idle trigger.
+
+Automatic cleanup and `state prune` use the same selector, exact-tree deletion, and unreferenced-blob collection. Automatic cleanup does not make a backup. The explicit manual apply command still requires a new absolute verified backup.
+
+Automatic cleanup deletes one root tree per transaction and rechecks that tree before deletion. It then yields so server work can start. Matching repeated cleanup has no additional effect.
+
+After deletion, SQLite can reuse free pages. The server truncates the WAL while idle. It runs automatic `VACUUM` only when it is still idle, at least 64 MiB is reclaimable, and at least 20 percent of database pages are free. A skipped or failed compaction leaves committed deletion and reusable pages intact.
+
+A cleanup failure records one bounded diagnostic. It does not fail a workflow, stop the server, or start a tight retry loop.
+
+Retained runs keep their normal resume, bounded viewer, content-reference, and terminal-result behavior. Deleted expired runs disappear from run lists and direct views. Pi session history is unchanged.
+
+This policy limits old completed history. It does not set a hard database-size cap because recent or protected work can be arbitrarily large. Physical file shrink also depends on a safe, successful SQLite compaction.
 
 ## Effects and retry safety
 
@@ -549,4 +570,11 @@ The implementation conforms when:
 - a terminal run remains in the origin-session view while its terminal message is pending or its first turn is open, and then for 60 seconds after that turn ends, without retaining execution authority;
 - a TypeScript-created live database is viewable by the matching Rust `piw` through the client protocol without a duplicated SQLite digest;
 - no removed server, replay, or direct SQLite client path remains selectable;
+- only complete terminal run trees older than 30 days and free of protected work can expire;
+- startup and runner-exit cleanup share the manual prune selector and deletion rules;
+- automatic cleanup creates no backup, while manual apply remains backup-first;
+- repeated cleanup cannot partly delete a lineage tree or remove a referenced blob;
+- retained runs keep their resume, viewer, content-reference, and terminal-result behavior;
+- large session history does not get copied into repeated runner result blobs;
+- free pages remain reusable when automatic compaction is skipped or fails;
 - real Pi end-to-end tests, repository checks, reviewer checks, and CI pass.
