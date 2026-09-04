@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import { WorkflowClient } from "../src/client/client.js";
 import {
   encodeProtocolLine,
@@ -25,8 +26,9 @@ import {
   AUTOMATIC_STATE_RETENTION_MS,
 } from "../src/state/prune.js";
 import type { WorkflowMessage } from "../src/state/workflow-messages.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
-import { makeTempDir, waitUntil } from "./helpers.js";
+import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeComputeWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "compute.workflow.ts");
@@ -1300,70 +1302,19 @@ setInterval(() => {}, 1000);
     const cwd = await makeTempDir("host-automatic-prune-project");
     const databasePath = path.join(await makeTempDir("host-automatic-prune-state"), "state.sqlite");
     const workflowPath = await writeComputeWorkflow(cwd);
-    const setupHost = new WorkflowServer({ databasePath, claimPollMs: 10 });
-    const setupClient = new WorkflowClient({ databasePath });
-    await setupHost.start();
+    const seedStore = new WorkflowRunStore(databasePath);
     try {
-      await startRun({
-        client: setupClient,
-        cwd,
-        workflowPath,
-        runId: "automatic-prune-first",
+      const seedEngine = new WorkflowEngine({
+        store: seedStore,
+        executor: new ScriptedExecutor().respond("reply", { output: { reply: "first" } }),
       });
-      await waitUntil(() => {
-        const queue = new SqliteResourceManagerStore(databasePath, {
-          readOnly: true,
-          global: true,
-        });
-        try {
-          return queue.getWorkflowRun("automatic-prune-first")?.status === "done";
-        } finally {
-          queue.close();
-        }
-      }, 30_000);
-      await startRun({
-        client: setupClient,
-        cwd,
-        workflowPath,
-        runId: "automatic-prune-blocked",
-      });
-      await waitUntil(() => {
-        const queue = new SqliteResourceManagerStore(databasePath, {
-          readOnly: true,
-          global: true,
-        });
-        try {
-          return ["automatic-prune-first", "automatic-prune-blocked"].every(
-            (runId) => queue.getWorkflowRun(runId)?.status === "done",
-          );
-        } finally {
-          queue.close();
-        }
-      }, 30_000);
+      await seedEngine.run(echoWorkflow, {}, { runId: "automatic-prune-first" });
+      seedStore.state.connection
+        .prepare("UPDATE runs SET finished_at = ? WHERE run_id = ?")
+        .run(Date.now() - AUTOMATIC_STATE_RETENTION_MS - 1, "automatic-prune-first");
     } finally {
-      await setupClient.close();
-      await setupHost.stop();
+      seedStore.close();
     }
-
-    const now = Date.now();
-    const setup = new WorkflowRunStore(databasePath);
-    setup.state.connection
-      .prepare("UPDATE runs SET finished_at = ? WHERE run_id IN (?, ?)")
-      .run(
-        now - AUTOMATIC_STATE_RETENTION_MS - 1,
-        "automatic-prune-first",
-        "automatic-prune-blocked",
-      );
-    const blockedResource = setup.state.connection
-      .prepare("SELECT resource_id AS resourceId FROM runs WHERE run_id = ?")
-      .get("automatic-prune-blocked") as { resourceId: string };
-    setup.state.connection
-      .prepare(
-        `UPDATE leases SET owner_type = 'system', owner_id = 'retention-test', token_hash = ?,
-           acquired_at = ?, heartbeat_at = ?, expires_at = ? WHERE resource_id = ?`,
-      )
-      .run(Buffer.alloc(32, 4), now, now, now + 60_000, blockedResource.resourceId);
-    setup.close();
 
     const logs: string[] = [];
     const host = new WorkflowServer({
@@ -1383,20 +1334,20 @@ setInterval(() => {}, 1000);
         }
       }, 10_000);
       await expect(client.getRun("automatic-prune-first")).resolves.toBeNull();
-      await expect(client.getRun("automatic-prune-blocked")).resolves.not.toBeNull();
-      const retained = new WorkflowRunStore(databasePath, { readOnly: true });
-      expect(retained.readRun("automatic-prune-blocked")).not.toBeNull();
-      retained.close();
 
-      const writable = new WorkflowRunStore(databasePath);
-      writable.state.connection
-        .prepare(
-          `UPDATE leases SET owner_type = NULL, owner_id = NULL, token_hash = NULL,
-             acquired_at = NULL, heartbeat_at = NULL, expires_at = NULL
-           WHERE resource_id = ?`,
-        )
-        .run(blockedResource.resourceId);
-      writable.close();
+      const laterStore = new WorkflowRunStore(databasePath);
+      try {
+        const laterEngine = new WorkflowEngine({
+          store: laterStore,
+          executor: new ScriptedExecutor().respond("reply", { output: { reply: "later" } }),
+        });
+        await laterEngine.run(echoWorkflow, {}, { runId: "automatic-prune-later" });
+        laterStore.state.connection
+          .prepare("UPDATE runs SET finished_at = ? WHERE run_id = ?")
+          .run(Date.now() - AUTOMATIC_STATE_RETENTION_MS - 1, "automatic-prune-later");
+      } finally {
+        laterStore.close();
+      }
 
       const internal = host as unknown as {
         lastAutomaticStatePruneAt: number | null;
@@ -1406,7 +1357,7 @@ setInterval(() => {}, 1000);
       internal.requestAutomaticStatePrune();
       await new Promise((resolve) => setTimeout(resolve, 50));
       const throttled = new WorkflowRunStore(databasePath, { readOnly: true });
-      expect(throttled.readRun("automatic-prune-blocked")).not.toBeNull();
+      expect(throttled.readRun("automatic-prune-later")).not.toBeNull();
       throttled.close();
 
       internal.lastAutomaticStatePruneAt = Date.now() - AUTOMATIC_STATE_PRUNE_INTERVAL_MS - 1;
@@ -1419,7 +1370,7 @@ setInterval(() => {}, 1000);
       await waitUntil(() => {
         const store = new WorkflowRunStore(databasePath, { readOnly: true });
         try {
-          return store.readRun("automatic-prune-blocked") === null;
+          return store.readRun("automatic-prune-later") === null;
         } finally {
           store.close();
         }
@@ -1429,6 +1380,16 @@ setInterval(() => {}, 1000);
           logs.filter((message) => message.startsWith("automatic state prune completed")).length ===
           2,
       );
+      const settled = new WorkflowRunStore(databasePath, { readOnly: true });
+      const settlement = settled.state.connection
+        .prepare(
+          `SELECT e.status
+           FROM effects e JOIN runs r ON r.resource_id = e.source_resource_id
+           WHERE r.run_id = ? AND e.effect_type = 'run.settle_queue'`,
+        )
+        .get("automatic-prune-trigger") as { status: string } | undefined;
+      expect(settlement?.status).toBe("applied");
+      settled.close();
     } finally {
       await client.close();
       await host.stop();
