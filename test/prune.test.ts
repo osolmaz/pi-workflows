@@ -242,6 +242,31 @@ describe("state prune", () => {
     expect(preview).toMatchObject({ candidateTrees: 1, blockedTrees: 1, selectedRuns: 0 });
   });
 
+  it("retains unreferenced blobs used by active runner transfers", async () => {
+    const databasePath = await makeStateDatabasePath("state-prune-active-runner-content");
+    const state = new StateDatabase({ filePath: databasePath, mode: "read-write" });
+    try {
+      const retained = state.putBlob(Buffer.from("active runner content"), "application/json");
+      const unprotected = state.putBlob(Buffer.from("unused content"), "application/json");
+      const report = await pruneStateWithDatabase(
+        state,
+        databasePath,
+        {
+          before: new Date().toISOString(),
+          apply: true,
+          backupPath: path.join(path.dirname(databasePath), "backup.sqlite"),
+        },
+        () => [retained],
+      );
+
+      expect(report).toMatchObject({ deletedBlobs: 1, applied: true });
+      expect(state.readBlob(retained)?.content.toString("utf8")).toBe("active runner content");
+      expect(state.readBlob(unprotected)).toBeUndefined();
+    } finally {
+      state.close();
+    }
+  });
+
   it("requires an absolute new backup path for apply mode", async () => {
     const databasePath = await makeStateDatabasePath("state-prune-backup");
     await expect(

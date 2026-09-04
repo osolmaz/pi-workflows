@@ -225,19 +225,20 @@ Existing viewer page and content-reference tests pass. Hydration, replay, and la
 - `src/server/workflow-runner-entry.ts`
 - `src/server/workflow-runner-store.ts`
 - `src/workflows/store.ts` or a small server-owned content helper
+- `src/state/prune.ts`
 - Protocol and runner tests
 
 **Change**
 
 Give the internal runner protocol its own named frame limit. Add a typed version-1 content reference and one bounded content-read operation on the existing runner connection.
 
-Before the server writes a response, encode and measure it. Spill only an oversized result to the existing content-addressed blob store. Return its reference so the runner can read and verify bounded parts. Keep message metadata and errors small enough to remain inline.
+Before the server writes a response, encode and measure it. Spill only an oversized result to the existing content-addressed blob store. Return its reference so the runner can read and verify bounded parts. Keep message metadata and errors small enough to remain inline. Retain referenced blobs during active runner transfers, including during state pruning.
 
 Convert all content persistence and range failures into bounded rejected responses. Do the same for invalid media types, lengths, digests, or parsed values. Do not stop the runner only because a result is too large.
 
 **Verification**
 
-Protocol tests cover the exact boundary, one byte over it, multiple chunks, and missing content. They also cover invalid offsets, wrong digests, or malformed JSON. A required state larger than one frame resumes successfully after verified reconstruction. A rejected large-result read fails the workflow request clearly without a runner crash loop.
+Protocol tests cover the exact boundary, one byte over it, multiple chunks, and missing content. They also cover invalid offsets, wrong digests, or malformed JSON. A required state larger than one frame resumes successfully after verified reconstruction. An active large-result transfer survives concurrent state pruning. A rejected large-result read fails the workflow request clearly without a runner crash loop.
 
 ### Audit all runner-server operations
 
