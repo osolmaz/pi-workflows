@@ -23,7 +23,6 @@ async function fixture() {
     definitionSnapshot: snapshot,
     input: {},
     launchOptions: {},
-    runnerId: "host",
     originSessionId: "session",
   });
   queue.state.connection

@@ -7,6 +7,8 @@ status: implemented
 
 # Unify workflow run state
 
+> Historical plan. The [durable execution plan](2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+
 ## Goal
 
 Several Pi Workflows failures appeared together after the out-of-process host change. A provider error left old workflow-turn ownership behind. A composed workflow reused an effect key. Restart treated a failed run as a checkpoint continuation. Terminal code read a text error as JSON. That read error blocked cancellation, while the host repeatedly started a worker that could not make progress.

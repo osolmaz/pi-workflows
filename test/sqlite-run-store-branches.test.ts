@@ -3,6 +3,7 @@ import { StateDatabase } from "../src/state/database.js";
 import { canonicalJson } from "../src/state/json.js";
 import { readViewerDeltas } from "../src/state/viewer.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
+import { WorkflowEngine } from "../src/workflows/engine.js";
 import {
   RUN_STATE_SCHEMA,
   SESSION_BINDING_SCHEMA,
@@ -15,7 +16,7 @@ import {
 } from "../src/workflows/store.js";
 import { executionTransition } from "../src/workflows/transitions.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
-import { makeStateDatabasePath, makeTempDir } from "./helpers.js";
+import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const workflow = defineWorkflow({
   name: "store-branches",
@@ -63,15 +64,9 @@ describe("WorkflowRunStore branch behavior", () => {
     const current = state("run-1");
     await store.initializeRun(workflow, current);
     await expect(store.initializeRun(workflow, state("run-1"))).rejects.toThrow(/already exists/);
-    current.status = "completed";
-    current.finishedAt = new Date().toISOString();
-    await store.commitTransition(
+    await new WorkflowEngine({ store, executor: new ScriptedExecutor() }).resumeRun(
+      workflow,
       "run-1",
-      executionTransition(current, {
-        scope: "run",
-        type: "run_completed",
-        payload: { finalOutput: true },
-      }),
     );
     expect((await store.markRunInterrupted("run-1"))?.state.status).toBe("completed");
     expect(await store.markRunInterrupted("missing")).toBeNull();
@@ -81,10 +76,10 @@ describe("WorkflowRunStore branch behavior", () => {
   it("rejects aborted and stale-attempt update publication", async () => {
     const store = new WorkflowRunStore(await makeStateDatabasePath("run-update-branches"));
     const current = state("run-2");
+    await store.initializeRun(workflow, current);
     current.currentNode = "work";
     current.currentAttemptId = "attempt-1";
     current.currentNodeStartedAt = new Date().toISOString();
-    await store.initializeRun(workflow, current);
     await store.commitTransition(
       "run-2",
       executionTransition(current, {

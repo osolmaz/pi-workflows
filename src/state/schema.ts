@@ -275,7 +275,6 @@ CREATE TABLE run_queue (
     'queued', 'starting', 'running', 'parked', 'done', 'failed', 'cancelled'
   )),
   available_at INTEGER NOT NULL,
-  affinity_runner_id TEXT,
   origin_session_id TEXT,
   consecutive_errors INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0),
   error_code TEXT,

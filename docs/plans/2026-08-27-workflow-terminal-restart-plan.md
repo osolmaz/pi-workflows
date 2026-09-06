@@ -6,6 +6,8 @@ date: 2026-08-27
 
 # Full plan
 
+> Historical plan. The [durable execution plan](../2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+
 ## Goal
 
 After every top-level workflow run ends, give the model one normal successor turn.

@@ -30,7 +30,7 @@ The database stores:
 - global server epochs, command receipts, runner epochs, and runner messages
 - durable origin-session interaction requests and submissions
 - captured Pi session entries and events
-- run and resource manager queues, claims, retries, and continuations
+- run and resource manager queues, claims, and declared retries
 - human-decision requests, submissions, resolutions, and cancellations
 - managed resources, finalizers, effects, and child workflows
 - workflow messages that Pi must add to origin conversations
@@ -122,7 +122,7 @@ The shared records do not replace domain schemas. The following `STRICT` tables 
 | Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                                                          |
 | Post-run follow-ups | `workflow_follow_ups`                                                                                                                                    |
 | Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                                               |
-| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                                                           |
+| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`                                                                            |
 | Managed resources   | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                                              |
 | Effects             | `effects`, `effect_attempts`                                                                                                                             |
 | Pi messages         | `workflow_messages`, `workflow_turns`                                                                                                                    |
@@ -160,9 +160,24 @@ Insertion verifies the digest, media type, byte length, and exact bytes. Repeate
 
 Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership. Each completed checkpoint keeps its own accepted output.
 
-Readers derive `steps`, `outputs`, `results`, carried-step count, current-node fields, waiting state, source objects, and continuation decision receipts from these rows. Compact trace events do not copy prompts, node outputs, run inputs, final outputs, action receipts, or assistant receipts.
+Readers derive `steps`, `outputs`, `results`, current-node fields, waiting state, source objects, and accepted decision receipts from these rows. Compact trace events do not copy prompts, node outputs, run inputs, final outputs, action receipts, or assistant receipts.
 
 The run store reads each independent value through its declared media type. Input and final output use JSON readers. Run errors and presentation instructions use text readers. Terminal-message construction uses one typed terminal-data result instead of guessing the blob type. A missing or wrong media type fails presentation after the terminal state commits; it cannot roll back that state.
+
+### State verification
+
+`state status` reports invariant violations with the affected run IDs. `state verify`
+and inactive-backup verification check the same facts after SQLite integrity and
+foreign-key checks. They detect terminal queue mismatches, waiting runs without
+responses, pending requests on inactive attempts, missing accepted submissions,
+invalid active clocks, and conflicting Pi turns. Verification does not repair
+state or create replacement work.
+
+Queued, starting, running, and parked queue phases can coexist with live execution
+states during admission and response validation. They are not contradictions by
+themselves. A pending settlement effect also explains a terminal result whose queue
+has not yet settled. Expired claims remain recovery facts, not proof of completed
+work.
 
 ### Active execution time
 
@@ -224,7 +239,7 @@ A TypeScript write permit carries the expected facts between layers. It is not a
 
 Reading or finding a row never gives write authority.
 
-- A run owner may advance the run, apply automatic decision policy, create its continuation, settle its parent, and complete its queue work.
+- A run owner may advance the exact run, apply its declared automatic decision policy, and settle its queue work.
 - A resource manager claim owner may update resource manager status, reserve effects, and start child workflows for that resource.
 - A verified human channel actor may submit one answer candidate for the named decision. It does not gain run ownership.
 - The server-owned channel adapter path may update only its channel cursor, decision delivery and settlement records, and exact managed effects.
@@ -243,18 +258,18 @@ A deadline with a validated default response is timeout-policy acceptance. It ca
 
 Late or repeated commands return or adopt the durable winner. They do not overwrite it.
 
-The same rule applies to run terminal outcomes, continuation admission, queue settlement, resource manager effects, retry scheduling, channel settlement, and workflow-turn reports through their domain constraints and expected revisions. A matching turn report adopts the saved ownership result. A different report for the same turn ID remains a conflict.
+The same rule applies to run terminal outcomes, exact-request acceptance, queue settlement, resource manager effects, retry scheduling, channel settlement, and workflow-turn reports through their domain constraints and expected revisions. A matching turn report adopts the saved ownership result. A different report for the same turn ID remains a conflict.
 
 ## Read contract
 
 Durable status is a pure projection of domain rows, immutable facts, current leases, effect results, and exact workflow-turn start and end reports. The server uses these facts to produce one live run view. An open workflow turn can change display status only. It cannot change workflow authority. Every renderer consumes the server-produced display status and allowed controls without running another status reducer.
 
-A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint continuation keeps the same settings resources and transfers them to the continuation run.
+A settings scope uses its resource revision as its public change number. Each accepted patch, current value, and node binding is saved in one transaction. A checkpoint resumes in the same run and keeps the same settings resources.
 
-`workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the continuation-chain member that accepted them; rows are not rewritten when the chain continues. The server walks the chain to find its final outcome. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
+`workflow_follow_ups` records source acceptance order, removal, and cancellation. The source and message stay attached to the run that accepted them. The server uses that run's outcome; an explicit restart does not retarget the prompt. `workflow_messages` owns message state and Pi entry evidence. Failure, timeout, and cancellation cancel unsent follow-up messages.
 
 - A terminal run fact overrides stale message state and has no open workflow turn.
-- An accepted decision is accepted even if its continuation effect is still pending.
+- An accepted decision stays accepted while the scheduler waits for execution capacity.
 - A cancelled decision is cancelled even if parent cleanup is still pending.
 - A stale owner is not shown as current.
 - An ambiguous external effect is shown as unresolved.
@@ -273,7 +288,7 @@ This contract is for local storage on one machine. It does not claim distributed
 
 The server keeps terminal root-run trees for 30 days from `finished_at`. A tree is eligible only when every restart descendant is terminal, older than the cutoff, free of protected work, and free of references from outside the tree.
 
-Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, controller ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a continuation or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
+Automatic cleanup keeps a tree when it has a waiting or parked run, a live queue row, a pending workflow message, an open workflow turn, a pending interaction or human decision, a recording session segment, a queued follow-up, an active lease, an unsettled effect, controller ownership, an active runner content hash, a resumable checkpoint, an undelivered terminal result, or a run or step reference from outside the tree. Unknown or conflicting ownership also blocks deletion.
 
 The server requests cleanup after startup recovery and after workflow runners exit. It also schedules the next daily check after a completed sweep. Overlapping requests use one in-process task. Cleanup starts only while there is no active or pending workflow runner, resource-manager runner, state-maintenance command, or shutdown. One server process completes no more than one sweep in 24 hours. A due sweep that finds work active or stops between trees remains due. The next idle lifecycle trigger or a five-minute idle retry continues it.
 

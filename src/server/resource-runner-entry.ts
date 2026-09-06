@@ -145,7 +145,7 @@ class ServerBackedResourceManagerEffects implements ResourceManagerEffects {
     try {
       applied = await definition.apply(this.signal);
     } catch (error) {
-      applied = { state: "indeterminate", error: boundedError(error) };
+      applied = { state: "indeterminate", error: errorMessage(error) };
     }
     return await this.transport.request<EffectRecord>("effect.settle", {
       key: definition.key,
@@ -246,7 +246,7 @@ export async function runResourceRunner(): Promise<number> {
       validateResult(result);
       await transport.request("runner.finished", result as unknown as JsonValue);
     } catch (error) {
-      await transport.request("runner.failed", { error: boundedError(error) });
+      await transport.request("runner.failed", { error: errorMessage(error) });
     } finally {
       clearTimeout(timer);
     }
@@ -294,11 +294,6 @@ function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
     operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
     if (signal.aborted) onAbort();
   });
-}
-
-function boundedError(error: unknown): string {
-  const message = errorMessage(error);
-  return message.length <= 8_192 ? message : `${message.slice(0, 8_192)}…`;
 }
 
 async function main(): Promise<void> {

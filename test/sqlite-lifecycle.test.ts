@@ -40,7 +40,6 @@ function reserve(queue: WorkflowRunQueueStore, runId: string, sessionId: string)
     definitionDigest,
     definitionSnapshot: snapshot,
     input: {},
-    runnerId: sessionId,
     originSessionId: sessionId,
   });
 }
@@ -334,14 +333,13 @@ describe("SQLite delivery lifecycle", () => {
     store.close();
   });
 
-  it("filters claims by session and rejects wrong tokens", async () => {
+  it("excludes named runs and rejects wrong claim tokens", async () => {
     const { store, queue } = await databaseFixture();
     reserve(queue, "run-a", "session-a");
     reserve(queue, "run-b", "session-b");
     expect(
       queue.claimNextWorkflowRun({
         runnerId: "session-a",
-        sessionId: "session-a",
         claimToken: "token-a",
         leaseMs: 10_000,
         excludeRunIds: ["run-b"],

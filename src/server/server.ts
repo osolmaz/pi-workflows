@@ -67,6 +67,7 @@ import {
 import { recordViewerDeltas } from "../state/viewer.js";
 import { workflowMessageIdFor } from "../state/workflow-messages.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
+import { workflowStateViolations } from "../workflows/diagnostics.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
 import { WorkflowRunQueueStore, type WorkflowRunQueueRecord } from "../workflows/queue.js";
@@ -783,9 +784,18 @@ export class WorkflowServer {
           return await this.submitInteractionAndWait(request);
         case "state.status":
           return clientResponse(request.requestId, "accepted", this.stateStatusReceipt());
-        case "state.verify":
+        case "state.verify": {
           this.state.integrityCheck();
-          return clientResponse(request.requestId, "accepted", { valid: true });
+          const violations = workflowStateViolations(this.state);
+          return clientResponse(
+            request.requestId,
+            violations.length === 0 ? "accepted" : "rejected",
+            { valid: violations.length === 0, violations },
+            violations.length === 0
+              ? undefined
+              : violations.map((item) => `${item.code} ${item.runId}: ${item.detail}`).join("\n"),
+          );
+        }
         case "state.backup":
           return await this.executeMaintenanceCommand(request, async () => {
             const payload = requireRecord(request.payload, "state.backup payload");
@@ -1046,11 +1056,16 @@ export class WorkflowServer {
           existing.runId === report.runId &&
           existing.targetSessionId === report.targetSessionId
         ) {
-          const run = this.queue.getWorkflowRun(report.runId);
-          if (run !== undefined && ["done", "failed", "cancelled"].includes(run.status)) {
-            outcome = "adopted";
-            return workflowTurnReceipt("settled", existing);
+          if (
+            report.stopReason === "aborted" &&
+            message.kind === "step" &&
+            this.serverState.getInteraction(message.sourceId)?.status === "pending"
+          ) {
+            this.queue.pauseParkedWorkflowRun({ runId: report.runId });
+            this.serverState.workflowMessages.cancelPendingForSource(message.sourceId, "step");
           }
+          outcome = "adopted";
+          return workflowTurnReceipt("settled", existing);
         }
         outcome = existing.state === "ended" ? "adopted" : "accepted";
         const turn = this.applyWorkflowTurnEnd(report);
@@ -1555,7 +1570,6 @@ export class WorkflowServer {
       definitionSnapshot: this.state.readJson(definition.definitionHash),
       input: source.input,
       launchOptions: source.launchOptions,
-      runnerId: this.serverId,
       originSessionId: session.targetSessionId,
       executionMode: "interactive",
       parentRunId: sourceRunId,
@@ -1842,6 +1856,7 @@ export class WorkflowServer {
       return typeof row?.count === "number" ? row.count : 0;
     };
     const now = Date.now();
+    const violations = workflowStateViolations(this.state);
     return {
       state: serverStatus.live ? "running" : "stale",
       epoch: serverStatus.epoch,
@@ -1873,18 +1888,8 @@ export class WorkflowServer {
       activeResourceRunners: this.activeResourceManagers.size,
       executionWorkers: this.executionWorkerCount(),
       maxWorkers: this.maxWorkers,
-      lifecycleContradictions: count(
-        `SELECT COUNT(*) AS count
-         FROM runs r JOIN run_queue q ON q.run_id = r.run_id
-         WHERE NOT (
-           (r.status = 'queued' AND q.status = 'queued')
-           OR (r.status = 'running' AND q.status IN ('starting', 'running', 'parked'))
-           OR (r.status = 'waiting' AND q.status = 'parked')
-           OR (r.status = 'completed' AND q.status = 'done')
-           OR (r.status IN ('failed', 'timed_out') AND q.status = 'failed')
-           OR (r.status = 'cancelled' AND q.status = 'cancelled')
-         )`,
-      ),
+      lifecycleContradictions: violations.filter((item) => item.code === "queueState").length,
+      stateViolations: violations,
     };
   }
 
@@ -2203,7 +2208,6 @@ export class WorkflowServer {
       definitionSnapshot: payload.definitionSnapshot,
       input: payload.input,
       launchOptions: payload.launchOptions ?? {},
-      runnerId: this.serverId,
       originSessionId,
       executionMode,
       ...(typeof payload.parentRunId === "string" ? { parentRunId: payload.parentRunId } : {}),
@@ -3378,7 +3382,6 @@ export class WorkflowServer {
       definitionSnapshot: resolved.definitionSnapshot,
       input: request.input,
       launchOptions: {},
-      runnerId: this.serverId,
       originSessionId: `resource-manager-${active.resource.metadata.uid}`,
       executionMode: "headless",
     });

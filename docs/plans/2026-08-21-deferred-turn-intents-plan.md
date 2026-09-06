@@ -6,6 +6,8 @@ date: 2026-08-21
 
 # Guarantee one successor turn after workflow interruption
 
+> Historical plan. The [durable execution plan](../2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+
 Pi Workflows can stop the active agent turn before the agent receives a tool result or can take its next action. This happens when an active workflow step is cancelled, times out, loses its queue claim, or is interrupted by a controller. The workflow can also return a successful start result and then fail asynchronously before it sends its first prompt. In that case, the user can see a UI error while the model still believes that the workflow started successfully.
 
 Add one general rule: an eligible workflow event creates one durable obligation for one later agent turn. The next normal workflow prompt or result presentation satisfies the obligation when one exists. Otherwise, Pi Workflows sends one factual fallback turn after the old turn settles.

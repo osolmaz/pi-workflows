@@ -44,6 +44,80 @@ function apply(current: WorkflowRunState, transition: WorkflowTransition) {
 }
 
 describe("host-owned execution transitions", () => {
+  it("rejects skipped graph nodes, rewritten attempt starts, and fabricated completion", () => {
+    const guarded: WorkflowDefinitionSnapshot = {
+      ...definition,
+      nodes: {
+        ...definition.nodes,
+        approve: { nodeType: "checkpoint" },
+        ship: { nodeType: "compute" },
+      },
+      edges: [
+        { from: "work", to: "approve" },
+        { from: "approve", to: "ship" },
+      ],
+    };
+    expect(() =>
+      applyExecutionTransition(
+        state(),
+        guarded,
+        {
+          ...start,
+          event: { ...start.event, nodeId: "ship" },
+        },
+        now,
+      ),
+    ).toThrow("accepted graph route");
+    const active = apply(state(), start);
+    expect(() => apply(active, { ...start, startedAt: "2027-01-01T00:00:00.000Z" })).toThrow(
+      "already active",
+    );
+    expect(active.currentNodeStartedAt).toBe(now);
+    const completed = apply(active, {
+      kind: "finishAttempt",
+      step: {
+        attemptId: "attempt-one",
+        nodeId: "work",
+        nodeType: "compute",
+        outcome: "ok",
+        startedAt: now,
+        finishedAt: now,
+        prompt: null,
+        output: { result: 1 },
+      },
+      event: {
+        scope: "node",
+        type: "node_finished",
+        nodeId: "work",
+        attemptId: "attempt-one",
+        payload: { outcome: "ok", output: { result: 1 } },
+      },
+    });
+    expect(() =>
+      applyExecutionTransition(
+        completed,
+        guarded,
+        {
+          ...start,
+          event: { ...start.event, nodeId: "ship", attemptId: "attempt-two" },
+        },
+        now,
+      ),
+    ).toThrow("accepted graph route");
+    const finish: WorkflowTransition = {
+      kind: "finish",
+      status: "completed",
+      finalOutput: { result: 1 },
+      event: { scope: "run", type: "run_completed", payload: {} },
+    };
+    expect(() => applyExecutionTransition(completed, guarded, finish, now)).toThrow(
+      "accepted graph result",
+    );
+    expect(() => apply(completed, { ...finish, finalOutput: { fabricated: true } })).toThrow(
+      "accepted graph result",
+    );
+    expect(apply(completed, finish).status).toBe("completed");
+  });
   it("changes only the named attempt and preserves the original projection", () => {
     const original = state();
     const active = apply(original, start);

@@ -7,6 +7,8 @@ status: approved
 
 # Unify workflow messages and restore hosted behavior
 
+> Historical plan. The [durable execution plan](2026-09-06-durable-execution-plan.md) supersedes its continuation, scheduling, and automatic model-turn choices. Use the current reference pages for the implemented contract.
+
 ## Summary
 
 The out-of-process host made workflow execution safer, but the change did not preserve all session behavior. The current host also loses track of some active model turns. A model can still be responding while the widget and `piw` show `waiting`.
