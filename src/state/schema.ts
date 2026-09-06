@@ -279,7 +279,7 @@ CREATE TABLE run_queue (
   )),
   available_at INTEGER NOT NULL,
   affinity_runner_id TEXT,
-  origin_session_id TEXT NOT NULL,
+  origin_session_id TEXT,
   consecutive_errors INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_errors >= 0),
   error_code TEXT,
   error_hash BLOB REFERENCES blobs(blob_hash),
@@ -291,7 +291,7 @@ CREATE TABLE run_queue (
 
 CREATE INDEX run_queue_claim_idx ON run_queue(status, available_at, created_at);
 CREATE UNIQUE INDEX run_queue_active_session_idx ON run_queue(origin_session_id)
-WHERE status IN ('queued', 'starting', 'running');
+WHERE origin_session_id IS NOT NULL AND status IN ('queued', 'starting', 'running', 'parked');
 
 CREATE TABLE host_commands (
   request_id TEXT PRIMARY KEY,

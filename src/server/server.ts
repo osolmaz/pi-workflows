@@ -142,7 +142,7 @@ const AUTOMATIC_STATE_PRUNE_IDLE_RETRY_MS = 5 * 60 * 1_000;
 const RUN_CLAIM_LEASE_MS = 30_000;
 const RESOURCE_MANAGER_CLAIM_LEASE_MS = 120_000;
 const RESOURCE_MANAGER_RENEW_MS = 30_000;
-const MAX_RESOURCE_RUNNERS = 4;
+const DEFAULT_MAX_WORKERS = 4;
 const DEFAULT_RESOURCE_MANAGER_TIMEOUT_MS = 60_000;
 
 export type WorkflowServerOptions = {
@@ -154,6 +154,8 @@ export type WorkflowServerOptions = {
   piArgs?: string[];
   env?: Record<string, string>;
   claimPollMs?: number;
+  /** Combined capacity for workflow and resource-manager execution workers. */
+  maxWorkers?: number;
   serverLeaseMs?: number;
   serverRenewMs?: number;
   runClaimLeaseMs?: number;
@@ -248,9 +250,7 @@ export class WorkflowServer {
   private readonly controlClaims = new Map<string, string>();
   private readonly activationTasks = new Map<string, Promise<void>>();
   private readonly maintenanceCommands = new Map<string, Promise<ClientResponse>>();
-  private readonly pendingStarts = new Set<string>();
   private readonly pendingRunClaims = new Map<string, string>();
-  private readonly pendingResumes = new Set<string>();
   private readonly blockedRuns = new Set<string>();
   private readonly pendingTerminalMessageReconciliations = new Set<string>();
   private readonly sessionCoordinators = new Map<string, SessionCoordinator>();
@@ -263,7 +263,9 @@ export class WorkflowServer {
   private viewTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private started = false;
-  private resourceManagerPollActive = false;
+  private schedulerActive = false;
+  private preferResourceManager = false;
+  private readonly maxWorkers: number;
   private decisionTimeoutActive = false;
   private decisionChannelConfig: DecisionChannelConfig | null = null;
   private decisionChannelError: string | null = null;
@@ -278,6 +280,10 @@ export class WorkflowServer {
 
   constructor(options: WorkflowServerOptions = {}) {
     this.options = options;
+    this.maxWorkers = options.maxWorkers ?? DEFAULT_MAX_WORKERS;
+    if (!Number.isSafeInteger(this.maxWorkers) || this.maxWorkers < 1) {
+      throw new Error("maxWorkers must be a positive safe integer");
+    }
     this.serverId = options.runnerId ?? `host-${randomUUID()}`;
     this.databasePath = path.resolve(options.databasePath ?? workflowStatePath());
     this.stateDirectory = path.join(path.dirname(this.databasePath), "host");
@@ -358,7 +364,6 @@ export class WorkflowServer {
       this.started = true;
       this.log(`ready on ${this.socketPath} at epoch ${this.claim.epoch}`);
       this.requestAutomaticStatePrune();
-      this.expireTimedOutInteraction();
       void this.expireTimedOutDecision().finally(() => this.resumeAutomaticStatePruneIfDue());
       void this.claimOne().finally(() => this.resumeAutomaticStatePruneIfDue());
       void this.claimResourceManagerOne().finally(() => this.resumeAutomaticStatePruneIfDue());
@@ -405,7 +410,6 @@ export class WorkflowServer {
       this.queue.parkWorkflowRun({ runId, claimToken });
     }
     this.pendingRunClaims.clear();
-    this.pendingStarts.clear();
     await Promise.allSettled(
       [...this.activeRuns.values()].map(async (active) => {
         active.control = "handoff";
@@ -514,10 +518,8 @@ export class WorkflowServer {
     }, this.options.serverRenewMs ?? SERVER_RENEW_MS);
     this.heartbeatTimer.unref?.();
     this.pollTimer = setInterval(() => {
-      this.expireTimedOutInteraction();
       void this.expireTimedOutDecision();
       void this.claimOne();
-      void this.claimResourceManagerOne();
       this.reconcilePendingTerminalWorkflowMessages();
     }, this.options.claimPollMs ?? CLAIM_POLL_MS);
     this.pollTimer.unref?.();
@@ -1408,7 +1410,7 @@ export class WorkflowServer {
             },
           };
         }
-        if (this.activeRuns.has(runId) || this.pendingStarts.has(runId)) {
+        if (this.activeRuns.has(runId) || this.pendingRunClaims.has(runId)) {
           return {
             outcome: "adopted",
             receipt: {
@@ -1420,22 +1422,16 @@ export class WorkflowServer {
             },
           };
         }
-        const token = randomUUID();
-        const claimed = this.queue.claimWorkflowRun({
-          runId,
-          runnerId: this.serverId,
-          claimToken: token,
-          leaseMs: this.runClaimLeaseMs,
-        });
-        if (claimed === undefined) return { outcome: "rejected", error: "Run is not resumable" };
+        if (!this.queue.requestWorkflowRunResume({ runId })) {
+          return { outcome: "rejected", error: "Run is not resumable" };
+        }
         this.blockedRuns.delete(runId);
-        this.markPendingStart(runId, token);
-        afterCommit.push(() => void this.activateRun(claimed, token));
+        afterCommit.push(() => void this.claimOne());
         return {
           outcome: "accepted",
           receipt: {
             runId,
-            generation: claimed.claimGeneration,
+            status: "queued",
             resumable: true,
             alreadyRunning: false,
             detail: "The parked workflow was claimed for supervised execution.",
@@ -1600,12 +1596,11 @@ export class WorkflowServer {
       return { outcome: "rejected", error: "Workflow definition snapshot is missing" };
     }
     const runId = `restart-${createHash("sha256").update(workflowMessageId).digest("hex").slice(0, 40)}`;
-    const claimToken = randomUUID();
     const scoped = new SqliteResourceManagerStore(this.databasePath, {
       state: this.state,
       projectPath,
     });
-    const prepared = scoped.prepareOrAdoptWorkflowRun({
+    const prepared = scoped.reserveOrAdoptWorkflowRun({
       runId,
       workflowName: source.workflowName,
       workflowSourceRef: source.workflowSourceRef,
@@ -1615,8 +1610,6 @@ export class WorkflowServer {
       input: source.input,
       launchOptions: source.launchOptions,
       runnerId: this.serverId,
-      claimToken,
-      leaseMs: this.runClaimLeaseMs,
       originSessionId: session.targetSessionId,
       executionMode: "interactive",
       parentRunId: sourceRunId,
@@ -1624,12 +1617,9 @@ export class WorkflowServer {
       restartNumber: source.restartNumber + 1,
       parentTerminalFingerprint: terminalFingerprint,
     });
-    if (prepared.state === "claimed") {
-      this.markPendingStart(runId, claimToken);
-      afterCommit.push(() => void this.activateRun(prepared.run, claimToken));
-    }
+    afterCommit.push(() => void this.claimOne());
     return {
-      outcome: prepared.state === "claimed" ? "accepted" : "adopted",
+      outcome: prepared.state === "reserved" ? "accepted" : "adopted",
       receipt: {
         runId,
         parentRunId: sourceRunId,
@@ -1935,6 +1925,8 @@ export class WorkflowServer {
       ambiguousEffects: count("SELECT COUNT(*) AS count FROM effects WHERE status = 'ambiguous'"),
       pendingResourceManagers: count("SELECT COUNT(*) AS count FROM controller_queue"),
       activeResourceRunners: this.activeResourceManagers.size,
+      executionWorkers: this.executionWorkerCount(),
+      maxWorkers: this.maxWorkers,
       lifecycleContradictions: count(
         `SELECT COUNT(*) AS count
          FROM runs r JOIN run_queue q ON q.run_id = r.run_id
@@ -2061,12 +2053,10 @@ export class WorkflowServer {
       this.activeResourceManagers.size === 0 &&
       this.activationTasks.size === 0 &&
       this.maintenanceCommands.size === 0 &&
-      this.pendingStarts.size === 0 &&
       this.pendingRunClaims.size === 0 &&
-      this.pendingResumes.size === 0 &&
       this.controlClaims.size === 0 &&
       this.pendingTerminalMessageReconciliations.size === 0 &&
-      !this.resourceManagerPollActive &&
+      !this.schedulerActive &&
       !this.decisionTimeoutActive &&
       !this.channelReloading &&
       [...this.activeChannels.values()].every((channel) => channel.inFlight.size === 0)
@@ -2154,7 +2144,7 @@ export class WorkflowServer {
       accepted: true,
       receipt: { requestId, runId },
     });
-    this.scheduleInteractionResume(runId, afterCommit);
+    this.scheduleInteractionResume(afterCommit);
     return {
       outcome: result.outcome,
       revision: result.interaction.revision,
@@ -2227,7 +2217,7 @@ export class WorkflowServer {
       accepted: true,
       receipt: accepted.decision as unknown as JsonValue,
     });
-    this.scheduleInteractionResume(options.interaction.runId, options.afterCommit);
+    this.scheduleInteractionResume(options.afterCommit);
     return {
       outcome: accepted.status === "adopted" ? "adopted" : "accepted",
       receipt: {
@@ -2238,14 +2228,8 @@ export class WorkflowServer {
     };
   }
 
-  private scheduleInteractionResume(runId: string, afterCommit: Array<() => void>): void {
-    afterCommit.push(() => {
-      if (this.activeRuns.has(runId) || this.activationTasks.has(runId)) {
-        this.pendingResumes.add(runId);
-      } else {
-        void this.resumePendingRun(runId);
-      }
-    });
+  private scheduleInteractionResume(afterCommit: Array<() => void>): void {
+    afterCommit.push(() => void this.claimOne());
   }
 
   private startRun(
@@ -2260,12 +2244,11 @@ export class WorkflowServer {
     const definitionDigest = requireString(payload.definitionDigest, "definitionDigest");
     const originSessionId = requireString(payload.originSessionId, "originSessionId");
     const executionMode = payload.executionMode === "headless" ? "headless" : "interactive";
-    const token = randomUUID();
     const scoped = new SqliteResourceManagerStore(this.databasePath, {
       state: this.state,
       projectPath,
     });
-    const prepared = scoped.prepareOrAdoptWorkflowRun({
+    const prepared = scoped.reserveOrAdoptWorkflowRun({
       runId,
       workflowName,
       workflowSourceRef,
@@ -2275,8 +2258,6 @@ export class WorkflowServer {
       input: payload.input,
       launchOptions: payload.launchOptions ?? {},
       runnerId: this.serverId,
-      claimToken: token,
-      leaseMs: this.runClaimLeaseMs,
       originSessionId,
       executionMode,
       ...(typeof payload.parentRunId === "string" ? { parentRunId: payload.parentRunId } : {}),
@@ -2287,12 +2268,11 @@ export class WorkflowServer {
         receipt: { runId, status: prepared.run.status } as JsonValue,
       };
     }
-    this.markPendingStart(runId, token);
-    afterCommit.push(() => void this.activateRun(prepared.run, token));
+    afterCommit.push(() => void this.claimOne());
     return {
       outcome: "accepted",
       revision: runRevision(this.state, runId),
-      receipt: { runId, generation: prepared.run.claimGeneration } as JsonValue,
+      receipt: { runId, status: prepared.run.status } as JsonValue,
     };
   }
 
@@ -2422,21 +2402,7 @@ export class WorkflowServer {
     const receipt = isObjectRecord(submission.receipt)
       ? { ...submission.receipt, requestId, submissionId: submission.submissionId }
       : { requestId, submissionId: submission.submissionId, receipt: submission.receipt };
-    if (this.activeRuns.has(interaction.runId) || this.activationTasks.has(interaction.runId)) {
-      this.pendingResumes.add(interaction.runId);
-    } else {
-      const token = randomUUID();
-      const claimed = this.queue.claimWorkflowRunForInteractionValidation({
-        runId: interaction.runId,
-        runnerId: this.serverId,
-        claimToken: token,
-        leaseMs: this.runClaimLeaseMs,
-      });
-      if (claimed !== undefined) {
-        this.markPendingStart(interaction.runId, token);
-        setImmediate(() => void this.activateRun(claimed, token));
-      }
-    }
+    setImmediate(() => void this.claimOne());
     return {
       outcome: submission.outcome,
       revision: interaction.revision,
@@ -3088,16 +3054,8 @@ export class WorkflowServer {
     return row.revision;
   }
 
-  private async claimResourceManagerOne(): Promise<void> {
-    if (
-      this.stopping ||
-      this.claim === null ||
-      this.resourceManagerPollActive ||
-      this.activeResourceManagers.size >= MAX_RESOURCE_RUNNERS
-    ) {
-      return;
-    }
-    this.resourceManagerPollActive = true;
+  private async claimResourceManagerOne(): Promise<boolean> {
+    if (this.stopping || this.claim === null) return false;
     try {
       const rows = this.state.connection
         .prepare(
@@ -3113,6 +3071,7 @@ export class WorkflowServer {
       for (const row of rows) {
         if (typeof row.projectPath !== "string") continue;
         const discovered = await discoverResourceManagers({ cwd: row.projectPath });
+        if (this.stopping || this.claim === null) return false;
         if (discovered.length === 0) continue;
         const byName = new Map(discovered.map((item) => [item.name, item.path]));
         const store = new SqliteResourceManagerStore(this.databasePath, {
@@ -3144,13 +3103,12 @@ export class WorkflowServer {
           continue;
         }
         void this.activateResourceManager(row.projectPath, definitionPath, store, claim, resource);
-        break;
+        return true;
       }
     } catch (error) {
       this.log(`resource manager scheduling failed: ${errorMessage(error)}`);
-    } finally {
-      this.resourceManagerPollActive = false;
     }
+    return false;
   }
 
   private async activateResourceManager(
@@ -3233,7 +3191,7 @@ export class WorkflowServer {
       clearInterval(renewTimer);
       this.activeResourceManagers.delete(key);
       this.requestAutomaticStatePrune();
-      if (!this.stopping) setImmediate(() => void this.claimResourceManagerOne());
+      if (!this.stopping) setImmediate(() => void this.claimOne());
     }
   }
 
@@ -3461,12 +3419,11 @@ export class WorkflowServer {
       cwd: active.projectPath,
       workflowRef: request.workflow,
     });
-    const token = randomUUID();
     const scoped = new SqliteResourceManagerStore(this.databasePath, {
       state: this.state,
       projectPath: active.projectPath,
     });
-    const prepared = scoped.prepareOrAdoptWorkflowRun({
+    const prepared = scoped.reserveOrAdoptWorkflowRun({
       runId: request.runId,
       workflowName: resolved.workflowName,
       workflowSourceRef: resolved.workflowSourceRef,
@@ -3476,15 +3433,10 @@ export class WorkflowServer {
       input: request.input,
       launchOptions: {},
       runnerId: this.serverId,
-      claimToken: token,
-      leaseMs: this.runClaimLeaseMs,
       originSessionId: `resource-manager-${active.resource.metadata.uid}`,
       executionMode: "headless",
     });
-    if (prepared.state === "claimed") {
-      this.markPendingStart(request.runId, token);
-      setImmediate(() => void this.activateRun(prepared.run, token));
-    }
+    setImmediate(() => void this.claimOne());
     return resourceManagerWorkflowResult(prepared.run);
   }
 
@@ -3610,7 +3562,7 @@ export class WorkflowServer {
             interaction.runId === request.runId &&
             interaction.status === "pending" &&
             !this.activeRuns.has(request.runId) &&
-            !this.pendingStarts.has(request.runId),
+            !this.pendingRunClaims.has(request.runId),
         );
       if (
         candidate === undefined ||
@@ -3647,7 +3599,7 @@ export class WorkflowServer {
           if (!this.queue.parkWorkflowRun({ runId: request.runId, claimToken })) {
             throw new Error("Decision timeout could not release the parent run claim");
           }
-          this.scheduleInteractionResume(interaction.runId, afterCommit);
+          this.scheduleInteractionResume(afterCommit);
         });
         committed = true;
         for (const effect of afterCommit) setImmediate(effect);
@@ -3665,7 +3617,9 @@ export class WorkflowServer {
     }
   }
 
-  private expireTimedOutInteraction(): void {
+  private claimExpiredInteraction():
+    | { record: WorkflowRunQueueRecord; claimToken: string }
+    | undefined {
     if (this.stopping || this.claim === null) return;
     const activeSessionIds = new Set(
       [...this.sessionCoordinators.entries()]
@@ -3678,7 +3632,7 @@ export class WorkflowServer {
         (candidate) =>
           activeSessionIds.has(candidate.targetSessionId) &&
           !this.activeRuns.has(candidate.runId) &&
-          !this.pendingStarts.has(candidate.runId),
+          !this.pendingRunClaims.has(candidate.runId),
       );
     if (expired === undefined) return;
     const { runId, targetSessionId } = expired;
@@ -3698,9 +3652,8 @@ export class WorkflowServer {
         claimToken,
       });
       if (activated) {
-        this.markPendingStart(runId, claimToken);
-        setImmediate(() => void this.activateRun(claimed, claimToken));
         this.log(`run ${runId} is finishing its expired origin-session model-turn deadline`);
+        return { record: claimed, claimToken };
       }
     } catch (error) {
       this.log(`interaction timeout failed for run ${runId}: ${errorMessage(error)}`);
@@ -3710,50 +3663,83 @@ export class WorkflowServer {
   }
 
   private markPendingStart(runId: string, claimToken: string): void {
-    this.pendingStarts.add(runId);
     this.pendingRunClaims.set(runId, claimToken);
   }
 
   private clearPendingStart(runId: string, claimToken: string): void {
     if (this.pendingRunClaims.get(runId) !== claimToken) return;
     this.pendingRunClaims.delete(runId);
-    this.pendingStarts.delete(runId);
+  }
+
+  private executionWorkerCount(): number {
+    return (
+      new Set([...this.activeRuns.keys(), ...this.pendingRunClaims.keys()]).size +
+      this.activeResourceManagers.size
+    );
   }
 
   private async claimOne(): Promise<void> {
-    if (this.stopping || this.claim === null) return;
-    const excluded = new Set([
-      ...this.activeRuns.keys(),
-      ...this.pendingStarts,
-      ...this.blockedRuns,
-    ]);
-    const validatingRunId = this.serverState
-      .readyInteractionRunIds()
-      .find((runId) => !excluded.has(runId));
-    if (validatingRunId !== undefined) {
-      const validationToken = randomUUID();
-      const validationRun = this.queue.claimWorkflowRunForInteractionValidation({
-        runId: validatingRunId,
-        runnerId: this.serverId,
-        claimToken: validationToken,
-        leaseMs: this.runClaimLeaseMs,
-      });
-      if (validationRun !== undefined) {
-        this.markPendingStart(validatingRunId, validationToken);
-        await this.activateRun(validationRun, validationToken);
+    if (
+      this.stopping ||
+      this.claim === null ||
+      this.schedulerActive ||
+      this.executionWorkerCount() >= this.maxWorkers
+    )
+      return;
+    this.schedulerActive = true;
+    let launched = false;
+    try {
+      if (this.preferResourceManager && (await this.claimResourceManagerOne())) {
+        this.preferResourceManager = false;
+        launched = true;
         return;
       }
+      const next = this.claimEligibleRun();
+      if (next !== undefined) {
+        this.markPendingStart(next.record.runId, next.claimToken);
+        launched = true;
+        this.preferResourceManager = true;
+        void this.activateRun(next.record, next.claimToken).catch((error: unknown) =>
+          this.log(`workflow launch failed: ${errorMessage(error)}`),
+        );
+      } else {
+        launched = await this.claimResourceManagerOne();
+        if (launched) this.preferResourceManager = false;
+      }
+    } catch (error) {
+      this.log(`worker scheduling failed: ${errorMessage(error)}`);
+    } finally {
+      this.schedulerActive = false;
+      if (launched && !this.stopping) setImmediate(() => void this.claimOne());
     }
-    const token = randomUUID();
-    const claimed = this.queue.claimNextWorkflowRun({
+  }
+
+  private claimEligibleRun(): { record: WorkflowRunQueueRecord; claimToken: string } | undefined {
+    const excluded = new Set([
+      ...this.activeRuns.keys(),
+      ...this.pendingRunClaims.keys(),
+      ...this.blockedRuns,
+    ]);
+    const claimToken = randomUUID();
+    for (const runId of this.serverState.readyInteractionRunIds()) {
+      if (excluded.has(runId) || this.queue.isWorkflowRunPaused(runId)) continue;
+      const record = this.queue.claimWorkflowRunForInteractionValidation({
+        runId,
+        runnerId: this.serverId,
+        claimToken,
+        leaseMs: this.runClaimLeaseMs,
+      });
+      if (record !== undefined) return { record, claimToken };
+    }
+    const expired = this.claimExpiredInteraction();
+    if (expired !== undefined) return expired;
+    const record = this.queue.claimNextWorkflowRun({
       runnerId: this.serverId,
-      claimToken: token,
+      claimToken,
       leaseMs: this.runClaimLeaseMs,
       excludeRunIds: [...excluded],
     });
-    if (claimed === undefined) return;
-    this.markPendingStart(claimed.runId, token);
-    await this.activateRun(claimed, token);
+    return record === undefined ? undefined : { record, claimToken };
   }
 
   private activateRun(record: WorkflowRunQueueRecord, claimToken: string): Promise<void> {
@@ -3764,11 +3750,7 @@ export class WorkflowServer {
         this.activationTasks.delete(record.runId);
       }
       if (this.stopping) return;
-      if (this.pendingResumes.delete(record.runId)) {
-        setImmediate(() => void this.resumePendingRun(record.runId));
-      } else {
-        setImmediate(() => void this.claimOne());
-      }
+      setImmediate(() => void this.claimOne());
     });
     this.activationTasks.set(record.runId, task);
     return task;
@@ -3894,23 +3876,6 @@ export class WorkflowServer {
       this.activeRuns.delete(runId);
       this.requestAutomaticStatePrune();
     }
-  }
-
-  private async resumePendingRun(runId: string): Promise<void> {
-    if (this.stopping || this.claim === null) return;
-    const token = randomUUID();
-    const claimed = this.queue.claimWorkflowRunForInteractionValidation({
-      runId,
-      runnerId: this.serverId,
-      claimToken: token,
-      leaseMs: this.runClaimLeaseMs,
-    });
-    if (claimed === undefined) {
-      await this.claimOne();
-      return;
-    }
-    this.markPendingStart(runId, token);
-    await this.activateRun(claimed, token);
   }
 
   private async handleRunnerMessage(

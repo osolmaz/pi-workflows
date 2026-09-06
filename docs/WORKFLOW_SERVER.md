@@ -115,6 +115,14 @@ Claim rejection uses `ClaimLostError` with one internal reason:
 
 Logs may show the run ID, generation, and reason. They must not show a raw token or token hash.
 
+## Worker scheduling
+
+One scheduler admits workflow runners and resource-manager reconciles. Start and restart reserve a queued run; resume makes existing work eligible. Accepted responses, validation candidates, and expired interactive deadlines use the same admission path. Requests remain durable while capacity is full.
+
+The default capacity is four execution workers. Set `PI_WORKFLOWS_MAX_WORKERS` to a positive integer before starting the host to change it. Embedded test hosts can use `WorkflowServer({ maxWorkers })`. Capacity includes pending launches and live workers. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.
+
+An interactive run holds its origin-session reservation while queued, running, waiting, or paused. Independent headless runs do not reserve a Pi session. Only terminal completion or explicit cancellation releases an interactive reservation.
+
 ## Run lifecycle
 
 The run and queue projections follow these states:
@@ -384,7 +392,7 @@ Active-branch absence is usable only when the branch has no matching ID, Pi is i
 
 The extension subscribes to the active origin-session live run view and projects it into Pi's documented widget and status APIs. It never opens SQLite, runs workflow code, or derives a display status. `Shift+Up` and `Shift+Down` scroll the widget. When Herdr is available, the widget also shows `Ctrl+Shift+R piw`, and `/piw` remains the command fallback. Both actions open or focus the exact run from the same view.
 
-A tool update or submission goes to the server. It includes the exact request, node, attempt, expected revision, and tool-call idempotency key. The server first checks this transport contract and records a provisional `validating` submission. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the server. The server settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the server rejects the provisional submission and leaves the request ready for a corrected retry.
+A tool update or submission goes to the server with an exact `requestId`, the tool-call idempotency key, and the current origin-session coordinator authority. The server resolves the immutable node and attempt from that request. It checks session ownership and request kind before receipt lookup or mutation. An identical submission can adopt its saved result after settlement. A new submission records a provisional `validating` candidate. It then schedules a supervised workflow child. Only that child loads workflow code and runs the node's `validate` function. The child reports `interaction.accepted` or `interaction.rejected` to the server. The server settles the request only after acceptance. A rejected payload leaves the same request pending and returns the stored actionable error to the model. If the child stops before it reports a result, the server rejects the provisional submission and leaves the request ready for a corrected retry.
 
 An ordinary checkpoint accepts the model-facing `answer` action and starts a continuation run. A protected human decision never accepts that tool action. The extension displays the decision without starting a model turn, and a person answers it with `/workflow answer` through `decision.answer`. When a protected decision reaches its saved `onTimeout` deadline, the server takes a control claim on the waiting parent, atomically records the validated default, closes the pending interaction, releases the parent claim, and reserves the continuation. A human answer cannot win after that deadline.
 
@@ -398,7 +406,7 @@ A notify node creates a passive `notification` message in the same transaction a
 
 A run with headless execution mode uses the existing `pi --mode rpc` integration for agent steps. The Pi child uses a separate process group registered with the server. The runner stops that group during normal completion. Cancellation gives the runner a bounded cleanup interval, and the server reaps the registered group if the runner exits first.
 
-The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same step and attempt contract as origin-session work. A headless run cannot use a visible assistant-message step because it has no origin Pi session.
+The headless child receives only the workflow step prompt, configured model arguments, and the bridge extension. Its submission uses the same exact request contract as origin-session work. A headless run cannot use a visible assistant-message step because it has no origin Pi session.
 
 The run binding records `interactive` or `headless` execution mode. Viewers show that mode without exposing provider credentials.
 
