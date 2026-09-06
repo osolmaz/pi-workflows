@@ -18,6 +18,10 @@ const WORKFLOW_MESSAGE_ID_FIELD = "workflowMessageId";
 
 type SettledTurn = { stopReason: WorkflowTurnStopReason; responseSessionEntryId: string | null };
 type BeforeTurnEnd = (message: WorkflowMessage, end: SettledTurn) => Promise<void>;
+type DeliveryCallbacks = {
+  beforeTurnEnd?: BeforeTurnEnd;
+  terminalDelivered?: (message: WorkflowMessage) => Promise<void>;
+};
 
 type PendingTurn = {
   workflowTurnId: string;
@@ -32,6 +36,7 @@ type PendingTurn = {
 export class WorkflowMessageCoordinator {
   private readonly queued = new Set<string>();
   private readonly closedTurnMessages = new Set<string>();
+  private readonly finalizedTerminals = new Set<string>();
   private synchronizing = false;
   private lastBranchEpoch: string | null = null;
   private view: WorkflowSessionView | null = null;
@@ -43,6 +48,9 @@ export class WorkflowMessageCoordinator {
     const visibleIds = new Set(view.workflowMessages.map((message) => message.workflowMessageId));
     for (const messageId of this.closedTurnMessages) {
       if (!visibleIds.has(messageId)) this.closedTurnMessages.delete(messageId);
+    }
+    for (const messageId of this.finalizedTerminals) {
+      if (!visibleIds.has(messageId)) this.finalizedTerminals.delete(messageId);
     }
     for (const message of view.workflowMessages) {
       if (message.status === "sent" || message.status === "cancelled") {
@@ -85,7 +93,7 @@ export class WorkflowMessageCoordinator {
     pi: ExtensionAPI,
     client: WorkflowClient,
     ctx: Pick<ExtensionContext, "hasPendingMessages" | "isIdle" | "sessionManager">,
-    beforeTurnEnd?: BeforeTurnEnd,
+    callbacks: DeliveryCallbacks = {},
   ): Promise<void> {
     if (this.synchronizing || this.view === null) return;
     this.synchronizing = true;
@@ -121,8 +129,19 @@ export class WorkflowMessageCoordinator {
       ) {
         await this.reportBranch(client, ctx, view);
       }
-      await this.flushTurn(client, view, beforeTurnEnd);
-      if (this.turn !== null && this.turn.end === null) return;
+      await this.flushTurn(client, view, callbacks.beforeTurnEnd);
+      if (this.turn !== null || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      for (const message of view.workflowMessages) {
+        if (
+          message.kind === "terminal" &&
+          message.status === "sent" &&
+          branchEntries.has(message.workflowMessageId) &&
+          !this.finalizedTerminals.has(message.workflowMessageId)
+        ) {
+          await callbacks.terminalDelivered?.(message);
+          this.finalizedTerminals.add(message.workflowMessageId);
+        }
+      }
       const messageId = view.nextWorkflowMessageId;
       if (messageId === null || this.queued.has(messageId)) return;
       const message = messageById(view, messageId);
@@ -171,7 +190,7 @@ export class WorkflowMessageCoordinator {
         throw error;
       }
       await this.reportBranch(client, ctx, view);
-      await this.flushTurn(client, view, beforeTurnEnd);
+      await this.flushTurn(client, view, callbacks.beforeTurnEnd);
     } finally {
       this.synchronizing = false;
     }
@@ -180,6 +199,7 @@ export class WorkflowMessageCoordinator {
   clear(): void {
     this.queued.clear();
     this.closedTurnMessages.clear();
+    this.finalizedTerminals.clear();
     this.view = null;
     this.awaitingTurnMessage = null;
     this.turn = null;

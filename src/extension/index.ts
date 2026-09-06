@@ -204,7 +204,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     const message = workflowMessages.activeTurnMessage();
     if (message === undefined || activeRecorderMessageId === message.workflowMessageId) return;
     const contract = agentContractForWorkflowMessage(message);
-    if (contract === undefined && message.kind !== "terminal" && message.kind !== "followUp") {
+    if (contract === undefined && message.kind !== "followUp") {
       return;
     }
     const recorder = await ensureRecorder(message, ctx);
@@ -215,10 +215,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       return;
     }
     if (contract === undefined) {
-      recorder.beginWorkflowMessage(
-        message.workflowMessageId,
-        message.kind as "terminal" | "followUp",
-      );
+      recorder.beginFollowUp(message.workflowMessageId);
     } else {
       recorder.beginAttempt(contract);
     }
@@ -234,18 +231,27 @@ export default function piWorkflows(pi: ExtensionAPI): void {
     });
     await prior;
     try {
-      await workflowMessages.synchronize(pi, client, ctx, async (message, end) => {
-        if (end.stopReason === "completed") {
-          await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
-        }
-        if (message.kind === "followUp") {
-          const recorder = sessionRecorders.get(message.runId);
-          if (recorder !== undefined) {
-            await recorder.finish();
-            sessionRecorders.delete(message.runId);
-            if (activeRecorder === recorder) activeRecorder = null;
+      const finishRecording = async (message: WorkflowMessage): Promise<void> => {
+        const recorder = sessionRecorders.get(message.runId);
+        if (recorder === undefined) return;
+        await recorder.record(ctx).catch((error) => {
+          ctx.ui.notify(
+            `Workflow conversation recording failed: ${errorMessage(error)}`,
+            "warning",
+          );
+        });
+        await recorder.finish();
+        sessionRecorders.delete(message.runId);
+        if (activeRecorder === recorder) activeRecorder = null;
+      };
+      await workflowMessages.synchronize(pi, client, ctx, {
+        beforeTurnEnd: async (message, end) => {
+          if (end.stopReason === "completed") {
+            await submitVisibleAssistantResponse(client, ctx, message, end.responseSessionEntryId);
           }
-        }
+          if (message.kind === "followUp") await finishRecording(message);
+        },
+        terminalDelivered: finishRecording,
       });
       await activateRecorder(ctx);
     } finally {
