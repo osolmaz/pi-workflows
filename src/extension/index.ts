@@ -77,7 +77,7 @@ export type ParsedWorkflowArgs =
     }
   | { kind: "queue-follow-up"; prompt: string; runId?: string }
   | { kind: "remove-follow-up"; followUpId: string; runId?: string }
-  | { kind: "answer"; input: unknown; runId?: string | undefined }
+  | { kind: "answer"; requestId: string; input: unknown }
   | { kind: "run"; ref: string; input: unknown };
 
 /** Parse `/workflow` arguments. Exported for tests. */
@@ -131,35 +131,22 @@ export function parseWorkflowArgs(args: string): ParsedWorkflowArgs {
     return { kind: "status", runId };
   }
   if (trimmed === "answer" || trimmed.startsWith("answer ")) {
-    let rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
-    if (rest.length === 0) {
+    const rest = trimmed === "answer" ? "" : trimmed.slice("answer".length).trim();
+    const firstSpace = rest.search(/\s/);
+    if (firstSpace <= 0 || rest.slice(firstSpace).trim().length === 0) {
       throw new Error(
-        'answer requires a JSON value or text, e.g. /workflow answer {"approved":true}',
+        'answer requires an exact request id and a response: /workflow answer REQUEST_ID {"choice":"approve"}',
       );
     }
-    let runId: string | undefined;
-    const firstSpace = rest.search(/\s/);
-    if (firstSpace > 0) {
-      const candidate = rest.slice(0, firstSpace);
-      const remainder = rest.slice(firstSpace).trim();
-      if (
-        validRunId(candidate) &&
-        remainder.length > 0 &&
-        (remainder.startsWith("{") || remainder.startsWith("["))
-      ) {
-        runId = candidate;
-        rest = remainder;
-      }
-    }
+    const requestId = rest.slice(0, firstSpace);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(requestId))
+      throw new Error("answer requires a valid request id");
+    const text = rest.slice(firstSpace).trim();
     try {
-      return {
-        kind: "answer",
-        input: JSON.parse(rest) as unknown,
-        ...(runId === undefined ? {} : { runId }),
-      };
+      return { kind: "answer", requestId, input: JSON.parse(text) as unknown };
     } catch {
-      if (runId !== undefined) throw new Error("answer with a run id requires a JSON value");
-      return { kind: "answer", input: { answer: rest } };
+      if (/^[{["]/.test(text)) throw new Error("answer contains invalid JSON");
+      return { kind: "answer", requestId, input: { answer: text } };
     }
   }
   const spaceIndex = trimmed.search(/\s/);
@@ -495,7 +482,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       "List, start, restart, inspect, change settings, queue or remove follow-ups, pause, resume, cancel, answer ordinary checkpoints, update, or complete hosted workflow runs.",
       "Protected human decisions cannot be answered with this model-facing tool.",
       "When the user asks to continue or resume the active workflow, call workflow resume immediately.",
-      "Use update or submit only when a workflow step contract asks for it, and pass the exact step and attempt ids.",
+      "Use update or submit only when a workflow step contract asks for it, and pass its exact requestId.",
       "Do not start repeated work without the user's request.",
     ].join(" "),
     parameters: WorkflowToolParameters,
@@ -506,18 +493,14 @@ export default function piWorkflows(pi: ExtensionAPI): void {
           const interaction = sessionSnapshots
             .get(ctx.sessionManager.getSessionId())
             ?.pendingInteractions.map(parseInteractiveRequest)
-            .find((request) => {
-              if (request?.kind !== "agent") return false;
-              const contract = agentContract(request);
-              return contract?.nodeId === params.step && contract.attemptId === params.attempt;
-            });
+            .find((request) => request?.kind === "agent" && request.requestId === params.requestId);
           if (interaction === undefined)
             throw new Error("No matching agent request is waiting for output");
           const contract = agentContract(interaction);
           if (contract === undefined)
             throw new Error("The pending interaction is not an agent step");
-          if (contract.nodeId !== params.step || contract.attemptId !== params.attempt) {
-            throw new Error("Workflow step or attempt does not match the durable request");
+          if (contract.requestId !== interaction.requestId) {
+            throw new Error("Workflow contract does not match the durable request");
           }
           let response: ClientResponse;
           try {
@@ -530,8 +513,8 @@ export default function piWorkflows(pi: ExtensionAPI): void {
               payload: jsonValue({
                 requestId: interaction.requestId,
                 submissionId: toolCallId,
-                step: params.step,
-                attempt: params.attempt,
+                step: contract.nodeId,
+                attempt: contract.attemptId,
                 value:
                   params.action === "update"
                     ? { update: params.update }
@@ -1041,8 +1024,13 @@ async function executeCommand(
       };
     }
     case "answer": {
-      const interaction = pendingDecision(ctx.sessionManager.getSessionId(), command.runId);
-      if (interaction !== undefined) {
+      const interaction = sessionSnapshots
+        .get(ctx.sessionManager.getSessionId())
+        ?.pendingInteractions.map(parseInteractiveRequest)
+        .find((request) => request?.requestId === command.requestId);
+      if (interaction === undefined)
+        throw new Error("No matching checkpoint request is waiting in this session");
+      if (interaction.kind === "decision") {
         if (authority !== "human") {
           throw new Error("Protected human decisions cannot be answered by the workflow tool");
         }
@@ -1067,31 +1055,25 @@ async function executeCommand(
           },
         };
       }
-      const parent = sessionRun(ctx, command.runId);
-      if (parent === undefined) throw new Error("No checkpoint is waiting in this session");
-      const checkpoint = sessionSnapshots
-        .get(ctx.sessionManager.getSessionId())
-        ?.pendingInteractions.map(parseInteractiveRequest)
-        .find((request) => request?.runId === parent.runId && request.kind === "checkpoint");
-      if (checkpoint === undefined)
+      if (interaction.kind !== "checkpoint")
         throw new Error("Only an ordinary checkpoint accepts an answer");
       const response = await requestAccepted(client, {
         operation: "checkpoint.answer",
         requestId: `checkpoint-${idempotencyKey}`,
         idempotencyKey,
-        runId: parent.runId,
-        expectedRevision: checkpoint.revision,
+        runId: interaction.runId,
+        expectedRevision: interaction.revision,
         payload: {
-          requestId: checkpoint.requestId,
+          requestId: interaction.requestId,
           submissionId: idempotencyKey,
           input: jsonValue(command.input),
         },
       });
       return {
-        message: `Answered checkpoint ${checkpoint.requestId}; run ${parent.runId} can continue.`,
+        message: `Answered checkpoint ${interaction.requestId}; run ${interaction.runId} can continue.`,
         details: {
           action: "answer",
-          runId: parent.runId,
+          runId: interaction.runId,
           response: response.receipt ?? null,
         },
       };
@@ -1206,18 +1188,6 @@ function pendingInteractionForSession(sessionId: string): ClientInteractiveReque
     .find((request): request is ClientInteractiveRequest => request !== undefined);
 }
 
-function pendingDecision(sessionId: string, runId?: string): ClientInteractiveRequest | undefined {
-  return sessionSnapshots
-    .get(sessionId)
-    ?.pendingInteractions.map(parseInteractiveRequest)
-    .find(
-      (request): request is ClientInteractiveRequest =>
-        request !== undefined &&
-        request.kind === "decision" &&
-        (runId === undefined || request.runId === runId),
-    );
-}
-
 function workflowRunPaused(runId: string): boolean {
   for (const session of sessionSnapshots.values()) {
     if (session.run?.runId === runId) return session.run.display.status === "paused";
@@ -1330,8 +1300,8 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
     case "answer":
       return {
         kind: "answer",
-        input: params.input ?? {},
-        ...(params.runId === undefined ? {} : { runId: params.runId }),
+        requestId: params.requestId,
+        input: params.input,
       };
     case "update":
     case "submit":

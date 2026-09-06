@@ -46,15 +46,15 @@ When a workflow step message arrives:
 
 1. Do the requested work with the available tools.
 2. Follow the completion form in the current step contract.
-3. For a submitted step, produce the exact expected shape and call `workflow` with `action: "submit"` exactly once, using the current step and attempt ids. If validation rejects the output, correct it and submit again with the same ids.
+3. For a submitted step, produce the exact expected shape and call `workflow` with `action: "submit"` and the exact `requestId` in the current contract. If validation rejects the output, correct it and submit again to that request.
 4. For an assistant-message step, reply with the requested normal assistant message. Do not call `workflow submit`; the settled visible reply is the node output.
 5. After completion, do not add another response. The workflow sends the next step or final presentation when needed.
 
-A node id can run more than once in a loop. Each run has a new attempt id. Never reuse an attempt id from conversation history.
+A node can run more than once in a loop. Each attempt has a new `requestId`. Never use a request ID from an earlier attempt.
 
 ## Publish updates and progress
 
-Use `update` only while the named step attempt is active. An update does not complete the step and does not control routing.
+Use `update` with the exact `requestId` only while that agent request is active. An update does not complete the step and does not control routing.
 
 For progress, publish `pi-workflows.progress.v1` data with stable track keys. Report observed counts and source-provided estimates. Do not invent totals, rates, confidence, or completion times. Use separate keys for concurrent processes and send explicit terminal states before a track disappears.
 

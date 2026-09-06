@@ -72,7 +72,7 @@ import { workflowMessageIdFor } from "../state/workflow-messages.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
-import type { InteractiveRequestRecord } from "../workflows/requests.js";
+import { workflowRequestId, type InteractiveRequestRecord } from "../workflows/requests.js";
 import {
   type WorkflowSettingsDefinition,
   type WorkflowSettingsPathRule,
@@ -4326,7 +4326,16 @@ export class WorkflowServer {
       throw new Error("Interactive request has no origin Pi session");
     }
     const attemptId = requireString(payload.attemptId, "attemptId");
-    const requestId = `interaction-${message.runId}-${attemptId}`;
+    const requestId = workflowRequestId(message.runId, attemptId);
+    const outer = requireRecord(payload.contract, "interactive request");
+    const contract = requireRecord(outer.contract, "agent contract");
+    if (
+      contract.requestId !== requestId ||
+      contract.runId !== message.runId ||
+      contract.attemptId !== attemptId
+    ) {
+      throw new Error("Interactive contract does not match its durable request");
+    }
     return this.state.transaction(() => {
       const request = this.serverState.createInteractiveRequest({
         requestId,

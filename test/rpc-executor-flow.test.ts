@@ -14,7 +14,14 @@ function requestFor(
   accept?: AgentStepRequest["accept"],
 ): AgentStepRequest {
   return {
-    contract: { runId: "r", workflowName: "w", nodeId, attemptId, completion: "submit" },
+    contract: {
+      requestId: `request-${nodeId}-${attemptId}`,
+      runId: "r",
+      workflowName: "w",
+      nodeId,
+      attemptId,
+      completion: "submit",
+    },
     prompt: "do the step",
     accept: accept ?? (async () => ({ ok: true as const, value: null })),
   };
@@ -36,14 +43,13 @@ async function makeFakePi(
 }
 
 function submissionLine(step: string, attempt: string, output: unknown): string {
-  return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({ action: "submit", step, attempt, output })}\\n`;
+  return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({ action: "submit", requestId: `request-${step}-${attempt}`, output })}\\n`;
 }
 
 function updateLine(step: string, attempt: string): string {
   return `PI_WORKFLOWS_STEP_SUBMISSION ${JSON.stringify({
     action: "update",
-    step,
-    attempt,
+    requestId: `request-${step}-${attempt}`,
     idempotencyKey: "tool-1",
     update: { type: "progress", key: "job", data: {} },
   })}\\n`;

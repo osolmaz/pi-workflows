@@ -19,7 +19,7 @@ export default function piWorkflowsRpcBridge(pi: ExtensionAPI) {
     description: [
       "Publish an update or submit the output for the pending workflow step.",
       "Only call this tool when a workflow step contract in the conversation asks you to.",
-      "Pass the exact step and attempt ids from the contract.",
+      "Pass the exact requestId from the contract.",
     ].join(" "),
     parameters: WorkflowSubmissionToolParameters,
     async execute(toolCallId, rawParams) {

@@ -39,6 +39,7 @@ import type {
   AgentExpectedOutput,
   AgentNodeDefinition,
   AgentStepExecutor,
+  AgentStepContract,
   AssistantMessageOutput,
   AssistantMessageReceipt,
   ActionNodeDefinition,
@@ -1331,13 +1332,17 @@ export class WorkflowEngine {
       // may already be terminal.
       throw abortError(signal);
     }
-    const prompt = appendStepContract(
-      basePrompt,
-      workflow.name,
+    const contract: AgentStepContract = {
+      requestId: workflowRequestId(state.runId, attemptId),
+      runId: state.runId,
+      workflowName: workflow.name,
       nodeId,
       attemptId,
-      node.expectedOutput,
-    );
+      completion: assistant === undefined ? "submit" : "assistant",
+      ...(typeof node.expectedOutput === "string" ? { expectedOutput: node.expectedOutput } : {}),
+      ...(assistant?.maxChars !== undefined ? { maxOutputChars: assistant.maxChars } : {}),
+    };
+    const prompt = appendStepContract(basePrompt, contract);
     meta.promptText = prompt;
     await this.persist(runId, state, {
       scope: "agent",
@@ -1349,17 +1354,7 @@ export class WorkflowEngine {
 
     const submission = await this.executor.runAgentStep(
       {
-        contract: {
-          runId: state.runId,
-          workflowName: workflow.name,
-          nodeId,
-          attemptId,
-          completion: assistant === undefined ? "submit" : "assistant",
-          ...(typeof node.expectedOutput === "string"
-            ? { expectedOutput: node.expectedOutput }
-            : {}),
-          ...(assistant?.maxChars !== undefined ? { maxOutputChars: assistant.maxChars } : {}),
-        },
+        contract,
         prompt,
         ...(state.runTitle !== undefined || node.statusDetail !== undefined
           ? {
@@ -1912,15 +1907,9 @@ function settingsDefinitionForNode(
  * The step contract appended to every agent-node prompt. This is the
  * documented standard for how the model completes a workflow step.
  */
-export function appendStepContract(
-  prompt: string,
-  workflowName: string,
-  nodeId: string,
-  attemptId: string,
-  expectedOutput: AgentExpectedOutput | undefined,
-): string {
-  const assistant = assistantMessageOutput(expectedOutput);
-  if (assistant !== undefined) {
+export function appendStepContract(prompt: string, contract: AgentStepContract): string {
+  const { requestId, workflowName, nodeId, attemptId, expectedOutput } = contract;
+  if (contract.completion === "assistant") {
     return [
       prompt.trimEnd(),
       "",
@@ -1930,8 +1919,8 @@ export function appendStepContract(
       "Reply with a normal assistant message.",
       "Do not call the workflow tool to complete this step.",
       "Your visible reply becomes the workflow step output after the turn settles.",
-      ...(assistant.maxChars !== undefined
-        ? [`Keep the visible reply within ${assistant.maxChars} characters.`]
+      ...(contract.maxOutputChars !== undefined
+        ? [`Keep the visible reply within ${contract.maxOutputChars} characters.`]
         : []),
     ].join("\n");
   }
@@ -1942,9 +1931,9 @@ export function appendStepContract(
     `Workflow step contract (workflow: ${workflowName}, step: ${nodeId}, attempt: ${attemptId})`,
     "",
     "While this step is active, you may publish non-completing updates with:",
-    `{"action": "update", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "update": {"type": "...", "key": "...", "data": {...}}}`,
+    `{"action": "update", "requestId": ${JSON.stringify(requestId)}, "update": {"type": "...", "key": "...", "data": {...}}}`,
     "Complete this step by calling the `workflow` tool exactly once with:",
-    `{"action": "submit", "step": ${JSON.stringify(nodeId)}, "attempt": ${JSON.stringify(attemptId)}, "output": <your result>}`,
+    `{"action": "submit", "requestId": ${JSON.stringify(requestId)}, "output": <your result>}`,
     `Expected output: ${typeof expectedOutput === "string" ? expectedOutput : "a JSON object with your result"}`,
     "The step is complete only after the workflow tool accepts the output.",
     "If the tool reports a validation error, correct the output and call it again.",

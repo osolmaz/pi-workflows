@@ -191,11 +191,11 @@ describe("WorkflowEngine", () => {
 
     const request = executor.requests[0];
     const prompt = request?.prompt ?? "";
-    const attemptId = request?.contract.attemptId ?? "";
+    const requestId = request?.contract.requestId ?? "";
     expect(prompt).toContain("Base prompt");
     expect(prompt).toContain("Workflow step contract");
     expect(prompt).toContain(
-      `{"action": "submit", "step": "ask", "attempt": "${attemptId}", "output": <your result>}`,
+      `{"action": "submit", "requestId": "${requestId}", "output": <your result>}`,
     );
     expect(prompt).toContain(`Expected output: { "x": 1 }`);
     expect(request?.presentation).toEqual({

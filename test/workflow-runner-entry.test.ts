@@ -14,6 +14,7 @@ import type {
 } from "../src/workflows/types.js";
 
 const contract: AgentStepContract = {
+  requestId: "test-request-1",
   runId: "run-1",
   workflowName: "example",
   nodeId: "present",

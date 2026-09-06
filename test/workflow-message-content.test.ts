@@ -9,6 +9,7 @@ import {
 
 function agentContract(completion: "submit" | "assistant" = "submit") {
   return {
+    requestId: "request-1",
     runId: "run-1",
     workflowName: "test",
     nodeId: "step",
@@ -49,12 +50,26 @@ describe("workflow message content", () => {
         workflowMessageId: "message-2",
         requestId: "request-2",
         reason: "resumed",
-        contract: { prompt: 1, contract: agentContract("assistant") },
+        contract: {
+          prompt: 1,
+          contract: { ...agentContract("assistant"), requestId: "request-2" },
+        },
       }),
     ).toMatchObject({
       content: "Continue the workflow step.",
       details: { reason: "resumed", contract: { completion: "assistant" } },
     });
+  });
+
+  it("rejects a message that names another request", () => {
+    expect(() =>
+      stepWorkflowMessageContent({
+        workflowMessageId: "message-1",
+        requestId: "other-request",
+        reason: "initial",
+        contract: { contract: agentContract() },
+      }),
+    ).toThrow(/identity conflicts/);
   });
 
   it("rejects malformed step contracts", () => {
@@ -69,6 +84,7 @@ describe("workflow message content", () => {
 
     for (const contract of [
       {},
+      { ...agentContract(), requestId: 1 },
       { ...agentContract(), runId: 1 },
       { ...agentContract(), workflowName: 1 },
       { ...agentContract(), nodeId: 1 },

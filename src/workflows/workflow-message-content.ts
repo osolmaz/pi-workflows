@@ -20,6 +20,8 @@ export function stepWorkflowMessageContent(options: {
 }): WorkflowMessageContent {
   const outer = requireRecord(options.contract, "Stored workflow step contract");
   const agent = requireAgentContract(outer.contract);
+  if (agent.requestId !== options.requestId)
+    throw new Error("Workflow message request identity conflicts with its contract");
   const details: Record<string, JsonValue> = {
     schema: "pi-workflows.agent-step-message.v1",
     kind: "step",
@@ -149,6 +151,7 @@ export function followUpWorkflowMessageContent(options: {
 function requireAgentContract(value: unknown): AgentStepContract {
   if (
     !isRecord(value) ||
+    typeof value.requestId !== "string" ||
     typeof value.runId !== "string" ||
     typeof value.workflowName !== "string" ||
     typeof value.nodeId !== "string" ||
@@ -180,7 +183,7 @@ function decisionPrompt(contract: Record<string, unknown>): string {
     typeof presentation.summary === "string" ? presentation.summary : "",
     ...blocks,
     choices.length === 0 ? "" : `Choices:\n${choices.join("\n")}`,
-    "A human must answer this protected decision with `/workflow answer`.",
+    `A human must answer this protected decision with \`/workflow answer ${String(contract.decisionId)} <response>\`.`,
   ]
     .filter(Boolean)
     .join("\n\n");

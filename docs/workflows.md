@@ -391,7 +391,7 @@ humanDecision({
 
 The waiting run stores the request and asks every channel configured for the audience. The structured `subject` remains machine data. Channels receive the normalized `presentation`, title, choices, input prompts, and deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the server accepts the declared response with `timeout` provenance and resumes the same run. This policy can continue without a configured channel. The original input remains unchanged, and the resolved response becomes the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices.
 
-The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the server-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
+The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer <requestId> <response>` to send the answer through the server-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
 See [Human decisions](HUMAN_DECISIONS.md) for channels, recovery, persistence, and plan approval.
 
@@ -489,9 +489,9 @@ The model sees one `workflow` tool. Its `action` field supports:
 - `status` for the active run or a supplied run ID;
 - `pause` and `resume` for the active session run;
 - `cancel` for the active run or a supplied run ID;
-- `answer` with checkpoint input and an optional run ID;
-- `update` for a non-completing update from the current agent attempt;
-- `submit` for the current workflow step contract.
+- `answer` with an exact checkpoint `requestId` and input;
+- `update` with an exact agent `requestId` and a non-completing update;
+- `submit` with an exact agent `requestId` and its output.
 
 A direct user request to continue or resume the active workflow maps to
 `resume` immediately. The model does not call `status` instead of `resume` or
@@ -682,24 +682,24 @@ cron syntax, calendar scheduling, OS notifications, or a background service.
 ## The step contract
 
 Every `agent` prompt ends with a step contract block naming the workflow, the
-step id, the attempt id, and the expected output shape:
+step id, attempt id, durable request id, and expected output shape:
 
 ```
 ---
 Workflow step contract (workflow: autoimplement, step: review, attempt: 6f9d…)
 
 Complete this step by calling the `workflow` tool exactly once with:
-{"action": "submit", "step": "review", "attempt": "6f9d…", "output": <your result>}
+{"action": "submit", "requestId": "request-EXACT_ID_FROM_CONTRACT", "output": <your result>}
 Expected output: { "route": "clean" | "issues_found", "reason": "short justification" }
 The step is complete only after the workflow tool accepts the output.
 If the tool reports a validation error, correct the output and call it again.
 ```
 
-The `workflow` tool uses `{ action: "submit", step, attempt, output }` for step
-results. Submissions are rejected (with a reason the model sees) when no step
-is pending, the step id is wrong, the attempt id belongs to an earlier attempt
-of the same node (loops revisit node ids, so each attempt gets a fresh id), or
-`validate` throws.
+The `workflow` tool uses `{ action: "submit", requestId, output }` for step
+results. The request binds one run and one attempt. Loops and retries get new
+request IDs; they cannot accept an earlier request's output. A missing, stale,
+wrong-kind, or other-session request is rejected, as is output that fails
+`validate`. The server never selects the oldest pending request.
 Acceptance resolves the step and the engine advances. In an interactive Pi
 session, each agent prompt arrives as a `pi-workflows-step` custom message
 with `triggerTurn: true`. The model receives the complete prompt, while the

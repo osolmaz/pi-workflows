@@ -666,6 +666,7 @@ describe("host workflow display reducer", () => {
       contract: {
         prompt: "Continue",
         contract: {
+          requestId: "request-view",
           runId: "run-view",
           workflowName: "echo",
           nodeId: "reply",
