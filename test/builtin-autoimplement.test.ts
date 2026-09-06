@@ -8,6 +8,7 @@ import autoimplementWorkflow from "../src/builtins/autoimplement.workflow.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { digest } from "../src/workflows/human-decision.js";
+import { compute, defineWorkflow } from "../src/workflows/index.js";
 import {
   applyWorkflowSettingsPatch,
   resolveInitialWorkflowSettings,
@@ -142,8 +143,20 @@ function ciInspection(
   };
 }
 
-function commonExecutor(publication: unknown = published()): ScriptedExecutor {
+function summaryExecutor(): ScriptedExecutor {
   return new ScriptedExecutor()
+    .respond("completedSummary", () => ({
+      output: "The approved work is complete. Validation passed.",
+      assistantMessage: { sha256: "a".repeat(64) },
+    }))
+    .respond("blockedSummary", () => ({
+      output: "Work stopped at the recorded blocker.",
+      assistantMessage: { sha256: "b".repeat(64) },
+    }));
+}
+
+function commonExecutor(publication: unknown = published()): ScriptedExecutor {
+  return summaryExecutor()
     .respond("implement", {
       output: {
         status: "implemented",
@@ -325,6 +338,37 @@ afterEach(() => {
 });
 
 describe("built-in autoimplement", () => {
+  it("preserves the prepared result when its explicit summary fails", async () => {
+    const result = { status: "completed", summary: "Accepted work", validation: ["npm test"] };
+    const executor = new ScriptedExecutor().respond("completedSummary", {
+      error: "Provider unavailable",
+    });
+    const engine = new WorkflowEngine({
+      executor,
+      databasePath: await makeStateDatabasePath("autoimplement-summary-failure"),
+    });
+    const workflow = defineWorkflow({
+      name: "summary-failure",
+      startAt: "prepareCompleted",
+      nodes: {
+        prepareCompleted: compute({ run: () => result }),
+        completedSummary: autoimplementWorkflow.nodes.completedSummary,
+        finalize: autoimplementWorkflow.nodes.finalize,
+      },
+      edges: [
+        { from: "prepareCompleted", to: "completedSummary" },
+        { from: "completedSummary", to: "finalize" },
+      ],
+    });
+    const { state } = await engine.run(workflow, {});
+    expect(state.status).toBe("failed");
+    expect(state.outputs.prepareCompleted).toEqual(result);
+    expect(state.steps.map((step) => [step.nodeId, step.outcome])).toEqual([
+      ["prepareCompleted", "ok"],
+      ["completedSummary", "failed"],
+    ]);
+    expect(executor.requests).toHaveLength(1);
+  });
   it("allows a model to disable merge but not grant merge authority", async () => {
     const definition = autoimplementWorkflow.settings;
     if (definition === undefined) throw new Error("autoimplement settings are missing");
@@ -1114,7 +1158,7 @@ describe("built-in autoimplement", () => {
       ),
     ).toThrow("ready plan");
 
-    const blocked = autoimplementWorkflow.nodes.blocked;
+    const blocked = autoimplementWorkflow.nodes.prepareBlocked;
     if (blocked?.nodeType !== "compute") throw new Error("blocked must be compute");
     expect(
       await blocked.run(
@@ -1285,7 +1329,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("challenges the Bob artifact mismatch and continues through redesign", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond(
         "implement",
         {
@@ -1424,7 +1468,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("allows a confirmed missing external authorization to stop", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("implement", {
         output: {
           status: "blocked",
@@ -1466,7 +1510,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("limits blocker challenges to three and supplies prior challenge context", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("implement", {
         output: {
           status: "blocked",
@@ -1520,7 +1564,7 @@ describe("built-in autoimplement", () => {
   }, 30_000);
 
   it("challenges a missing-plan claim with qualified evidence", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("findPlan", {
         output: {
           route: "blocked",
@@ -1556,7 +1600,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("routes an included Autodoc blocker through the shared challenge", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("documentation/inspectDocumentation", {
         output: {
           route: "blocked",
@@ -1626,10 +1670,10 @@ describe("built-in autoimplement", () => {
     });
 
     expect(Object.hasOwn(autoimplementWorkflow.includes ?? {}, "approval")).toBe(false);
-    expect(edge("redesign.blocked")).toMatchObject({ to: "blocked" });
+    expect(edge("redesign.blocked")).toMatchObject({ to: "prepareBlocked" });
     expect(edge("documentation.blocked")).toMatchObject({ to: "createBlockerClaim" });
     expect(edge("challengeBlocker")).toMatchObject({
-      switch: { cases: { continue: "routeChallenge", blocked: "blocked" } },
+      switch: { cases: { continue: "routeChallenge", blocked: "prepareBlocked" } },
     });
   });
 
@@ -1968,7 +2012,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("routes a timed-out implementation through the shared fallback", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond(
         "implement",
         { hang: true },
@@ -2057,7 +2101,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("stops after three timeout fallback executions", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("implement", { hang: true }, { hang: true }, { hang: true }, { hang: true })
       .respond(
         "timeoutFallback",
@@ -2113,7 +2157,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("challenges a fallback blocker and rejects stale forward routes", async () => {
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("implement", { hang: true })
       .respond("timeoutFallback", {
         output: {
@@ -2196,7 +2240,7 @@ describe("built-in autoimplement", () => {
   });
 
   it("recovers ordinary implementation failures but keeps cancellation terminal", async () => {
-    const failedExecutor = new ScriptedExecutor()
+    const failedExecutor = summaryExecutor()
       .respond("implement", { error: "implementation failed" })
       .respond("timeoutFallback", {
         output: {
@@ -2225,7 +2269,7 @@ describe("built-in autoimplement", () => {
     });
     expect(failed.state.steps.some((step) => step.nodeId === "timeoutFallback")).toBe(true);
 
-    const cancelledExecutor = new ScriptedExecutor().respond("implement", { hang: true });
+    const cancelledExecutor = summaryExecutor().respond("implement", { hang: true });
     const cancelledEngine = new WorkflowEngine({
       executor: cancelledExecutor,
       databasePath: await makeStateDatabasePath("pi-workflows-autoimplement-cancelled"),
@@ -2263,7 +2307,7 @@ describe("built-in autoimplement", () => {
       changedFileScope: false,
       findingFormat: "text" as const,
     };
-    const executor = new ScriptedExecutor()
+    const executor = summaryExecutor()
       .respond("implement", {
         output: {
           status: "implemented",

@@ -8,7 +8,7 @@ export const WORKFLOW_TURN_SCHEMA = "pi-workflows.workflow-turn.v1" as const;
 
 export type WorkflowMessageKind = "step" | "decision" | "notification" | "terminal" | "followUp";
 export type WorkflowMessageStatus = "pending" | "sent" | "cancelled";
-export type WorkflowStepReason = "initial" | "reminder" | "resumed";
+export type WorkflowStepReason = "initial" | "resumed";
 export type WorkflowTurnState = "started" | "ended";
 export type WorkflowTurnStopReason = "completed" | "aborted" | "error" | "lost";
 
@@ -278,6 +278,8 @@ export class WorkflowMessageStore {
       if (message.runId !== options.runId || message.targetSessionId !== options.targetSessionId) {
         throw new Error("Workflow turn does not match its message");
       }
+      if (!message.content.triggerTurn)
+        throw new Error("Workflow message does not request a model turn");
       if (message.status !== "sent") throw new Error("Workflow turn requires a sent message");
       const open = this.openTurnForMessage(options.workflowMessageId);
       if (open !== undefined) {
@@ -496,7 +498,7 @@ export function isWorkflowMessageContent(value: unknown): value is WorkflowMessa
 
 function validateContent(content: WorkflowMessageContent, kind: WorkflowMessageKind): void {
   if (!isWorkflowMessageContent(content)) throw new Error("Workflow message content is invalid");
-  const shouldTrigger = kind === "step" || kind === "terminal" || kind === "followUp";
+  const shouldTrigger = kind === "step" || kind === "followUp";
   if (content.triggerTurn !== shouldTrigger) {
     throw new Error(`Workflow message kind ${kind} has invalid turn behavior`);
   }

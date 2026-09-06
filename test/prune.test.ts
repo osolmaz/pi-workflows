@@ -49,7 +49,7 @@ describe("state prune", () => {
     const setup = new WorkflowRunStore(databasePath);
     setup.state.connection
       .prepare(
-        "UPDATE runs SET parent_run_id = ?, root_run_id = ?, lineage_kind = 'restart', restart_number = 1, parent_terminal_fingerprint = zeroblob(32) WHERE run_id = ?",
+        "UPDATE runs SET parent_run_id = ?, root_run_id = ?, lineage_kind = 'restart', restart_number = 1, parent_run_revision = 1 WHERE run_id = ?",
       )
       .run(result.runId, result.runId, child.runId);
     const runResource = setup.state.connection
@@ -186,7 +186,7 @@ describe("state prune", () => {
         rootRunId: parent.runId,
         parentRunId: parent.runId,
         restartNumber: 1,
-        parentTerminalFingerprint: `sha256:${"a".repeat(64)}`,
+        parentRunRevision: 1,
       },
     });
     store.state.connection

@@ -643,11 +643,7 @@ export class ServerViewStore {
       }
       if (message.status === "pending") return message.runId;
       if (message.status !== "sent") continue;
-      const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
-      if (turn === undefined || turn.state === "started") return message.runId;
-      if (turn.endedAt !== null && Date.parse(turn.endedAt) + TERMINAL_VIEW_RETENTION_MS > now) {
-        return message.runId;
-      }
+      if (Date.parse(message.updatedAt) + TERMINAL_VIEW_RETENTION_MS > now) return message.runId;
     }
     return undefined;
   }
@@ -686,15 +682,15 @@ export class ServerViewStore {
     ) {
       return false;
     }
-    const leaf = this.terminalChainLeaf(source.runId);
-    if (leaf === undefined || leaf.status !== "completed") return false;
+    const run = this.state.connection
+      .prepare("SELECT status FROM runs WHERE run_id = ?")
+      .get(source.runId);
+    if (!isObjectRecord(run) || run.status !== "completed") return false;
     const terminal = this.workflowMessages
-      .listRun(leaf.runId)
+      .listRun(source.runId)
       .filter((candidate) => candidate.kind === "terminal" && candidate.status === "sent")
       .at(-1);
     if (terminal === undefined) return false;
-    const terminalTurn = this.workflowMessages.latestTurnForMessage(terminal.workflowMessageId);
-    if (terminalTurn?.state !== "ended") return false;
     const prior = this.state.connection
       .prepare(
         `SELECT follow_up_id AS followUpId, status FROM workflow_follow_ups
@@ -729,24 +725,6 @@ export class ServerViewStore {
     return reservation === undefined;
   }
 
-  private terminalChainLeaf(runId: string): { runId: string; status: string } | undefined {
-    const row = this.state.connection
-      .prepare(
-        `WITH RECURSIVE chain(run_id, status, depth, created_at) AS (
-           SELECT run_id, status, 0, created_at FROM runs WHERE run_id = ?
-           UNION ALL
-           SELECT child.run_id, child.status, chain.depth + 1, child.created_at
-           FROM runs child JOIN chain ON child.parent_run_id = chain.run_id
-         )
-         SELECT run_id AS runId, status FROM chain
-         ORDER BY depth DESC, created_at DESC LIMIT 1`,
-      )
-      .get(runId);
-    return isObjectRecord(row) && typeof row.runId === "string" && typeof row.status === "string"
-      ? { runId: row.runId, status: row.status }
-      : undefined;
-  }
-
   private openWorkflowMessage(messages: readonly WorkflowMessage[]): WorkflowMessage | undefined {
     for (const message of [...messages].reverse()) {
       if (message.status !== "sent") continue;
@@ -760,7 +738,7 @@ export class ServerViewStore {
         if (isObjectRecord(request) && request.status === "pending" && request.paused === 0) {
           return message;
         }
-      } else if (message.kind === "terminal" || message.kind === "followUp") {
+      } else if (message.kind === "followUp") {
         const turn = this.workflowMessages.latestTurnForMessage(message.workflowMessageId);
         if (turn === undefined || turn.state === "started") return message;
       }
@@ -805,7 +783,7 @@ export class ServerViewStore {
         `SELECT t.target_session_id AS targetSessionId FROM workflow_turns t
          JOIN workflow_messages m ON m.workflow_message_id = t.workflow_message_id
          WHERE t.run_id = ? AND t.state = 'started'
-           AND m.kind IN ('step', 'terminal', 'followUp') LIMIT 1`,
+           AND m.kind IN ('step', 'followUp') LIMIT 1`,
       )
       .get(runId);
     return (
@@ -1000,7 +978,7 @@ function projectQueue(
     rootRunId: run.rootRunId,
     lineageKind: run.lineageKind,
     restartNumber: run.restartNumber,
-    parentTerminalFingerprint: run.parentTerminalFingerprint,
+    parentRunRevision: run.parentRunRevision,
     errorCode: run.errorCode,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,

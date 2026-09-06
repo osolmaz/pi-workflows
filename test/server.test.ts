@@ -431,7 +431,6 @@ async function writeDeliveryWorkflow(cwd: string): Promise<string> {
     )};
 export default defineWorkflow({
   name: "host-delivery",
-  presentationPrompt: ({ finalOutput }) => "Present " + JSON.stringify(finalOutput) + ".",
   startAt: "report",
   nodes: {
     report: notify({ kind: "progress", message: () => "ServerBacked progress." }),
@@ -2563,25 +2562,11 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
-      let originalPresentationHash: Buffer | undefined;
-      const corrupt = new WorkflowRunQueueStore(databasePath, { global: true });
-      try {
-        const row = corrupt.state.connection
-          .prepare(
-            "SELECT presentation_prompt_hash AS presentationPromptHash FROM runs WHERE run_id = ?",
-          )
-          .get("cancel-run") as { presentationPromptHash: Buffer };
-        originalPresentationHash = row.presentationPromptHash;
-        const wrongMediaType = corrupt.state.putJson({ not: "text" });
-        corrupt.state.connection
-          .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
-          .run(wrongMediaType, "cancel-run");
-      } finally {
-        corrupt.close();
-      }
-      if (originalPresentationHash === undefined) {
-        throw new Error("Cancellation presentation prompt is missing");
-      }
+      const terminalRead = vi
+        .spyOn(WorkflowRunStore.prototype, "readTerminalData")
+        .mockImplementation(() => {
+          throw new Error("Injected terminal reporting failure");
+        });
       const cancelled = await client.request({
         operation: "run.cancel",
         runId: "cancel-run",
@@ -2606,14 +2591,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         store.close();
       }
 
-      const repair = new WorkflowRunQueueStore(databasePath, { global: true });
-      try {
-        repair.state.connection
-          .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
-          .run(originalPresentationHash, "cancel-run");
-      } finally {
-        repair.close();
-      }
+      terminalRead.mockRestore();
       await waitUntil(() => {
         const repaired = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
@@ -2640,6 +2618,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }),
       ).resolves.toMatchObject({ outcome: "adopted", receipt: { status: "cancelled" } });
     } finally {
+      vi.restoreAllMocks();
       await host.stop();
     }
   }, 45_000);
@@ -2774,7 +2753,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }),
       ).resolves.toMatchObject({
         outcome: "rejected",
-        error: "Workflow turn identity conflict: late-turn-1",
+        error: "Workflow message not found: other-workflow-message",
       });
 
       const state = new ServerStateStore(databasePath, { readOnly: true });
@@ -3076,7 +3055,8 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       state.close();
       expect(messages.map((message) => message.kind)).toEqual(["notification", "terminal"]);
       expect(messages[0]?.content.content).toBe("ServerBacked progress.");
-      expect(messages[1]?.content.content).toContain('Present {"delivered":true}.');
+      expect(messages[1]?.content.content).toContain('"finalOutput":{"delivered":true}');
+      expect(messages[1]?.content).toMatchObject({ display: true, triggerTurn: false });
 
       const subscribed = await client.request({
         operation: "view.session.watch",
@@ -3107,58 +3087,22 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
 
       const terminal = messages[1];
       if (terminal === undefined) throw new Error("terminal workflow message missing");
-      const started = {
-        state: "started" as const,
-        workflowMessageId: terminal.workflowMessageId,
-        workflowTurnId: "terminal-turn-1",
-        runId: terminal.runId,
-        targetSessionId: terminal.targetSessionId,
-        coordinatorEpoch,
-      };
-      expect(
-        await client.request({
-          operation: "workflowTurn.report",
-          runId: terminal.runId,
-          payload: started,
-        }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { ownership: "active", turn: { state: "started" } },
-      });
-      expect(
-        await client.request({
-          operation: "workflowTurn.report",
-          runId: terminal.runId,
-          payload: started,
-        }),
-      ).toMatchObject({
-        outcome: "adopted",
-        receipt: { ownership: "active", turn: { state: "started" } },
-      });
-      expect(
-        await client.request({
+      await expect(
+        client.request({
           operation: "workflowTurn.report",
           runId: terminal.runId,
           payload: {
-            ...started,
-            state: "ended",
-            stopReason: "completed",
-            responseSessionEntryId: "assistant-entry-1",
+            state: "started",
+            workflowMessageId: terminal.workflowMessageId,
+            workflowTurnId: "invalid-terminal-turn",
+            runId: terminal.runId,
+            targetSessionId: terminal.targetSessionId,
+            coordinatorEpoch,
           },
         }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { ownership: "settled", turn: { state: "ended" } },
-      });
-      expect(
-        await client.request({
-          operation: "workflowTurn.report",
-          runId: terminal.runId,
-          payload: { ...started, workflowTurnId: "terminal-turn-stale" },
-        }),
-      ).toMatchObject({
-        outcome: "adopted",
-        receipt: { ownership: "absent", turn: null },
+      ).resolves.toMatchObject({
+        outcome: "rejected",
+        error: "Workflow message does not start a model turn",
       });
       const afterStaleReport = new ServerStateStore(databasePath, { readOnly: true });
       try {
@@ -3166,7 +3110,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           afterStaleReport.state.connection
             .prepare("SELECT COUNT(*) AS count FROM workflow_turns WHERE workflow_message_id = ?")
             .get(terminal.workflowMessageId),
-        ).toEqual({ count: 1 });
+        ).toEqual({ count: 0 });
       } finally {
         afterStaleReport.close();
       }

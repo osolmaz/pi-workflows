@@ -117,9 +117,7 @@ CREATE TABLE runs (
   root_run_id TEXT NOT NULL REFERENCES runs(run_id),
   lineage_kind TEXT CHECK (lineage_kind IS NULL OR lineage_kind IN ('restart')),
   restart_number INTEGER NOT NULL DEFAULT 0 CHECK (restart_number >= 0),
-  parent_terminal_fingerprint BLOB CHECK (
-    parent_terminal_fingerprint IS NULL OR length(parent_terminal_fingerprint) = 32
-  ),
+  parent_run_revision INTEGER CHECK (parent_run_revision IS NULL OR parent_run_revision >= 0),
   definition_digest BLOB NOT NULL REFERENCES workflow_definitions(definition_digest),
   workflow_ref TEXT NOT NULL,
   launch_options_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
@@ -132,15 +130,14 @@ CREATE TABLE runs (
   input_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   final_output_hash BLOB REFERENCES blobs(blob_hash),
   error_hash BLOB REFERENCES blobs(blob_hash),
-  presentation_prompt_hash BLOB REFERENCES blobs(blob_hash),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
   CHECK ((status IN ('completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
   CHECK ((parent_run_id IS NULL) = (lineage_kind IS NULL)),
   CHECK (
-    (lineage_kind = 'restart' AND parent_terminal_fingerprint IS NOT NULL) OR
-    (lineage_kind IS NOT 'restart' AND parent_terminal_fingerprint IS NULL)
+    (lineage_kind = 'restart' AND parent_run_revision IS NOT NULL) OR
+    (lineage_kind IS NOT 'restart' AND parent_run_revision IS NULL)
   ),
   CHECK (parent_run_id IS NOT NULL OR restart_number = 0)
 ) STRICT;
@@ -507,7 +504,6 @@ CREATE TABLE interactive_requests (
   contract_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
   status TEXT NOT NULL CHECK (status IN ('pending', 'settled', 'cancelled')),
-  unproductive_turn_ends INTEGER NOT NULL DEFAULT 0 CHECK (unproductive_turn_ends >= 0),
   accepted_submission_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,

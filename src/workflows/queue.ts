@@ -36,7 +36,7 @@ export type WorkflowRunReservationOptions = {
   parentRunId?: string;
   lineageKind?: "restart";
   restartNumber?: number;
-  parentTerminalFingerprint?: string;
+  parentRunRevision?: number;
   now?: string;
 };
 
@@ -56,7 +56,7 @@ export type WorkflowRunQueueViewRecord = {
   rootRunId: string;
   lineageKind: "restart" | null;
   restartNumber: number;
-  parentTerminalFingerprint: string | null;
+  parentRunRevision: number | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -86,7 +86,7 @@ export type WorkflowRunQueueRecord = {
   rootRunId: string;
   lineageKind: "restart" | null;
   restartNumber: number;
-  parentTerminalFingerprint: string | null;
+  parentRunRevision: number | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -138,7 +138,7 @@ type RunRow = {
   rootRunId: string;
   lineageKind: "restart" | null;
   restartNumber: number;
-  parentTerminalFingerprint: Buffer | null;
+  parentRunRevision: number | null;
   createdAt: number;
   updatedAt: number;
   startedAt: number | null;
@@ -162,7 +162,7 @@ type WorkflowRunViewRow = {
   rootRunId: string;
   lineageKind: "restart" | null;
   restartNumber: number;
-  parentTerminalFingerprint: Buffer | null;
+  parentRunRevision: number | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: number;
@@ -211,7 +211,7 @@ function workflowRunSelect(clause: string): string {
     b.execution_mode AS executionMode, r.parent_run_id AS parentRunId,
     r.root_run_id AS rootRunId, r.lineage_kind AS lineageKind,
     r.restart_number AS restartNumber,
-    r.parent_terminal_fingerprint AS parentTerminalFingerprint,
+    r.parent_run_revision AS parentRunRevision,
     q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
     l.generation AS leaseGeneration, l.owner_id AS ownerId, l.expires_at AS claimExpiresAt
@@ -228,7 +228,7 @@ function workflowRunViewSelect(clause: string): string {
     b.origin_session_id AS originSessionId, b.execution_mode AS executionMode,
     r.parent_run_id AS parentRunId, r.root_run_id AS rootRunId,
     r.lineage_kind AS lineageKind, r.restart_number AS restartNumber,
-    r.parent_terminal_fingerprint AS parentTerminalFingerprint,
+    r.parent_run_revision AS parentRunRevision,
     q.error_code AS errorCode, CAST(error.content AS TEXT) AS errorMessage,
     q.created_at AS createdAt, q.updated_at AS updatedAt,
     q.started_at AS startedAt, q.finished_at AS finishedAt,
@@ -272,7 +272,7 @@ function workflowRunViewRecord(row: WorkflowRunViewRow): WorkflowRunQueueViewRec
     rootRunId: row.rootRunId,
     lineageKind: row.lineageKind,
     restartNumber: row.restartNumber,
-    parentTerminalFingerprint: row.parentTerminalFingerprint?.toString("hex") ?? null,
+    parentRunRevision: row.parentRunRevision,
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     createdAt: new Date(row.createdAt).toISOString(),
@@ -298,8 +298,7 @@ function isWorkflowRunViewRow(value: unknown): value is WorkflowRunViewRow {
     typeof value.rootRunId === "string" &&
     (value.lineageKind === null || value.lineageKind === "restart") &&
     typeof value.restartNumber === "number" &&
-    (value.parentTerminalFingerprint === null ||
-      Buffer.isBuffer(value.parentTerminalFingerprint)) &&
+    (value.parentRunRevision === null || typeof value.parentRunRevision === "number") &&
     (value.errorCode === null || typeof value.errorCode === "string") &&
     (value.errorMessage === null || typeof value.errorMessage === "string") &&
     typeof value.createdAt === "number" &&
@@ -360,12 +359,6 @@ function isEffectIdentityRow(value: unknown): value is { effectId: string; resou
 function digestBuffer(value: string): Buffer {
   const hex = value.startsWith("sha256:") ? value.slice(7) : value;
   if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a SHA-256 digest");
-  return Buffer.from(hex, "hex");
-}
-
-function terminalFingerprintBuffer(value: string): Buffer {
-  const hex = value.startsWith("sha256:") ? value.slice(7) : value;
-  if (!/^[a-f0-9]{64}$/i.test(hex)) throw new Error("Expected a terminal fingerprint");
   return Buffer.from(hex, "hex");
 }
 
@@ -522,7 +515,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
     }
     let rootRunId = options.runId;
     let restartNumber = 0;
-    let parentTerminalFingerprint: Buffer | null = null;
+    let parentRunRevision: number | null = null;
     if (options.parentRunId !== undefined) {
       const parent = this.requireWorkflowRunRow(options.parentRunId);
       if (parent.originSessionId !== options.originSessionId) {
@@ -536,19 +529,23 @@ export class WorkflowRunQueueStore extends ProjectStore {
         ) {
           throw new Error("Restart parent is not terminal");
         }
-        if (options.parentTerminalFingerprint === undefined) {
-          throw new Error("Restart requires the parent terminal fingerprint");
+        if (
+          options.parentRunRevision === undefined ||
+          !Number.isSafeInteger(options.parentRunRevision) ||
+          options.parentRunRevision < 0
+        ) {
+          throw new Error("Restart requires the exact parent run revision");
         }
-        parentTerminalFingerprint = terminalFingerprintBuffer(options.parentTerminalFingerprint);
+        if (options.parentRunRevision !== this.resourceRevision(parent.resourceId)) {
+          throw new Error("Restart parent revision changed");
+        }
+        parentRunRevision = options.parentRunRevision;
         restartNumber = options.restartNumber ?? parent.restartNumber + 1;
         if (restartNumber !== parent.restartNumber + 1) {
           throw new Error("Restart number does not follow its parent");
         }
       }
-    } else if (
-      options.restartNumber !== undefined ||
-      options.parentTerminalFingerprint !== undefined
-    ) {
+    } else if (options.restartNumber !== undefined || options.parentRunRevision !== undefined) {
       throw new Error("A root workflow run cannot declare restart metadata");
     }
     const resourceId = resourceIdFor("run", options.runId);
@@ -577,7 +574,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       .prepare(
         `INSERT INTO runs(
              run_id, resource_id, project_id, parent_run_id, root_run_id, lineage_kind,
-             restart_number, parent_terminal_fingerprint, definition_digest,
+             restart_number, parent_run_revision, definition_digest,
              workflow_ref, launch_options_hash, status, paused,
              input_hash, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
@@ -590,7 +587,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
         rootRunId,
         lineageKind,
         restartNumber,
-        parentTerminalFingerprint,
+        parentRunRevision,
         definitionDigest,
         options.workflowSourceRef,
         launchHash,
@@ -1667,10 +1664,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       expectedLineageKind === "restart"
         ? (options.restartNumber ?? (parent?.restartNumber ?? -1) + 1)
         : (parent?.restartNumber ?? 0);
-    const expectedParentTerminalFingerprint =
-      options.parentTerminalFingerprint === undefined
-        ? null
-        : terminalFingerprintBuffer(options.parentTerminalFingerprint);
+    const expectedParentRunRevision = options.parentRunRevision ?? null;
     const compatible =
       row.workflowName === options.workflowName &&
       row.workflowRef === options.workflowSourceRef &&
@@ -1686,10 +1680,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       row.rootRunId === expectedRootRunId &&
       row.lineageKind === expectedLineageKind &&
       row.restartNumber === expectedRestartNumber &&
-      ((row.parentTerminalFingerprint === null && expectedParentTerminalFingerprint === null) ||
-        (row.parentTerminalFingerprint !== null &&
-          expectedParentTerminalFingerprint !== null &&
-          row.parentTerminalFingerprint.equals(expectedParentTerminalFingerprint)));
+      row.parentRunRevision === expectedParentRunRevision;
     if (!compatible) {
       throw new Error(`Workflow run preparation conflicts: ${options.runId}`);
     }
@@ -1726,7 +1717,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
       rootRunId: row.rootRunId,
       lineageKind: row.lineageKind,
       restartNumber: row.restartNumber,
-      parentTerminalFingerprint: row.parentTerminalFingerprint?.toString("hex") ?? null,
+      parentRunRevision: row.parentRunRevision,
       errorCode: row.errorCode,
       errorMessage:
         row.errorHash === null

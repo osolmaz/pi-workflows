@@ -40,7 +40,7 @@ export type WorkflowRunQueueView = {
   rootRunId: string;
   lineageKind: "restart" | null;
   restartNumber: number;
-  parentTerminalFingerprint: string | null;
+  parentRunRevision: number | null;
   errorCode: string | null;
   createdAt: string;
   updatedAt: string;
@@ -111,7 +111,6 @@ export type ClientInteractiveRequest = {
   contract: JsonValue;
   revision: number;
   status: "pending" | "settled" | "cancelled";
-  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: string;
   updatedAt: string;

@@ -19,7 +19,7 @@ import {
 export const WORKFLOW_AGENT_STEP_MESSAGE_TYPE = WORKFLOW_STEP_MESSAGE_TYPE;
 export const WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA = "pi-workflows.agent-step-message.v1";
 
-type PromptDeliveryReason = "initial" | "reminder" | "resumed";
+type PromptDeliveryReason = "initial" | "resumed";
 
 export type WorkflowAgentStepMessageDetails = {
   schema: typeof WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA;
@@ -152,6 +152,7 @@ export function recoverAssistantStep(
 
 function sameAttempt(left: AgentStepContract, right: AgentStepContract): boolean {
   return (
+    left.requestId === right.requestId &&
     left.runId === right.runId &&
     left.workflowName === right.workflowName &&
     left.nodeId === right.nodeId &&
@@ -225,9 +226,7 @@ function parseDetails(value: unknown): WorkflowAgentStepMessageDetails | undefin
   if (candidate.schema !== WORKFLOW_AGENT_STEP_MESSAGE_SCHEMA) return undefined;
   if (
     candidate.kind !== "step" ||
-    (candidate.reason !== "initial" &&
-      candidate.reason !== "reminder" &&
-      candidate.reason !== "resumed") ||
+    (candidate.reason !== "initial" && candidate.reason !== "resumed") ||
     typeof candidate.requestId !== "string" ||
     typeof candidate.workflowMessageId !== "string"
   ) {

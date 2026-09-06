@@ -184,7 +184,7 @@ describe("workflow message content", () => {
         content: "Done.",
         details: { outcome: "completed" },
       }),
-    ).toMatchObject({ customType: "pi-workflows-presentation", display: false, triggerTurn: true });
+    ).toMatchObject({ customType: "pi-workflows-terminal", display: true, triggerTurn: false });
     expect(
       followUpWorkflowMessageContent({
         workflowMessageId: "follow-up-message",

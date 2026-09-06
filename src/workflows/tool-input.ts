@@ -44,7 +44,18 @@ export const WorkflowActionSchemas = {
     },
     noExtraProperties,
   ),
-  restart: Type.Object({ action: Type.Literal("restart"), runId: runIdSchema }, noExtraProperties),
+  restart: Type.Object(
+    {
+      action: Type.Literal("restart"),
+      runId: runIdSchema,
+      expectedRevision: Type.Integer({
+        minimum: 0,
+        description:
+          "Exact terminal run revision from status. Restart only when the user explicitly requests a fresh run.",
+      }),
+    },
+    noExtraProperties,
+  ),
   "change-settings": Type.Object(
     {
       action: Type.Literal("change-settings"),

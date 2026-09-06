@@ -56,12 +56,12 @@ describe("workflow agent-step messages", () => {
     const view = buildWorkflowAgentStepView(
       {
         content: "First line\nSecond \u001b[31mline\u001b[0m",
-        details: { ...details, reason: "reminder" },
+        details: { ...details, reason: "resumed" },
       },
       true,
     );
 
-    expect(view.title).toBe("↻ Watch deploy › check · reminder");
+    expect(view.title).toBe("↻ Watch deploy › check · resumed");
     expect(view.expandedText).toContain("Workflow: monitor");
     expect(view.expandedText).toContain("Run id: run-1");
     expect(view.expandedText).toContain("Attempt id: attempt-1");

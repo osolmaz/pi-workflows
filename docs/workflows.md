@@ -154,7 +154,7 @@ same request pending and returns the error to the model. Closing Pi leaves that
 request pending; reopening the same session adopts the existing session entry
 or presents it once. Step prompts, protected decisions, notifications, terminal
 results, and follow-ups use the server-owned `workflow_messages` table and one
-extension sender. Initial, reminder, and resumed prompts are the same step-message
+extension sender. Initial and resumed prompts are the same step-message
 kind with different display reasons. A terminal workflow message becomes
 eligible only after the terminal outcome is committed. A resource manager child
 without an origin session can use a supervised headless `pi --mode rpc` child
@@ -208,10 +208,11 @@ the client stops waiting but does not cancel the durable server command. A retry
 uses a new transport request ID with the same durable submission identity and
 adopts the stored result. Rejected submissions return
 the validation error and can retry in the same step. If the model settles
-without submitting, the server increments the request's unproductive-turn counter
-and can create at most two step messages with reason `reminder`. The next
-unproductive turn fails the step. The timeout remains active during each
-reported model turn, and cancellation remains active throughout. For assistant-message output, the engine appends a normal-response contract,
+without submitting, the exact request stays pending. The server does not add
+reminder turns or apply a hidden retry limit. Additional model work must follow
+a declared graph path or an explicit user request. The timeout remains active
+during each reported model turn, and cancellation remains active throughout.
+For assistant-message output, the engine appends a normal-response contract,
 waits for `agent_settled`, rejects empty, failed, aborted, or tool-only results,
 and never suppresses the visible text. Timeout and cancellation abort either
 form's active Pi turn.
@@ -225,6 +226,28 @@ parking, claim loss, shutdown, and the node's abort signal still work. A timeout
 function can use prepared outputs to select a policy for this run. It has 30
 seconds to return. Computed timeout functions are runtime code, so definition
 snapshots omit them. Snapshots keep fixed numbers and fixed `null` values.
+
+### Explicit summaries and fresh restarts
+
+Terminal notices show the recorded status, result, and error. They are visible
+messages, not model prompts. Use an explicit `assistantMessage()` node when a
+workflow needs a written explanation. `presentationPrompt` is not supported.
+Autoimplement prepares its structured result, runs an explicit summary node,
+and then returns the prepared result. A failed summary cannot erase accepted work.
+
+The extension submits visible assistant text and records the end of a workflow
+turn at `agent_settled`. `agent_end` records only low-level activity. Automatic Pi
+retries keep the same unsettled turn and cannot submit an unfinished response.
+Branch evidence must identify the exact workflow message before reconnect can
+adopt its turn.
+
+A fresh restart requires an explicit user request and targets `runId` plus
+`expectedRevision`. It starts from the original input in a new run. It does not
+copy old steps, changed settings, decisions, or effects. The host rejects a stale
+revision or unsettled external effects before reserving work. An identical retry
+adopts the same child run. There is no terminal-message requirement or hard-coded
+restart count. Explicit queued follow-ups become eligible after terminal notice
+delivery; they do not wait for a terminal model turn.
 
 ### compute
 
@@ -710,11 +733,11 @@ Acceptance resolves the step and the engine advances. In an interactive Pi
 session, each agent prompt arrives as a `pi-workflows-step` custom message
 with `triggerTurn: true`. The model receives the complete prompt, while the
 conversation shows a compact workflow and node card. Expanding tool output with
-Ctrl+O shows the exact contract and full prompt. Step messages with reason `reminder` or `resumed` use the same card and keep the active attempt ID.
+Ctrl+O shows the exact contract and full prompt. Step messages with reason `resumed` use the same card and keep the active attempt ID.
 
 Headless RPC execution receives the same complete prompt without TUI metadata.
 Workflow notifications use a custom message with `triggerTurn: false`, so a
-notification does not start an assistant response. Step prompts, decisions, notifications, terminal results, and follow-ups use the same saved workflow-message contract and extension coordinator. Initial, reminder, and resumed prompts use the same step kind. See
+notification does not start an assistant response. Step prompts, decisions, notifications, terminal results, and follow-ups use the same saved workflow-message contract and extension coordinator. Initial and resumed prompts use the same step kind. See
 [Workflow messages in Pi](WORKFLOW_STEP_MESSAGES.md) and the approved
 [workflow-message restoration plan](2026-09-02-unify-workflow-messages-plan.md).
 

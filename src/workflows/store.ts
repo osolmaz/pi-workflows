@@ -148,7 +148,6 @@ export type WorkflowRunTerminalData = {
   input: JsonValue;
   finalOutput: JsonValue | null;
   error: string | null;
-  presentationInstructions: string;
   restartNumber: number;
 };
 
@@ -952,7 +951,7 @@ export class WorkflowRunStore {
           .prepare(
             `INSERT INTO runs(
                run_id, resource_id, project_id, parent_run_id, root_run_id, lineage_kind,
-               restart_number, parent_terminal_fingerprint, definition_digest,
+               restart_number, parent_run_revision, definition_digest,
                workflow_ref, launch_options_hash, title, status, paused,
                status_detail, input_hash, final_output_hash, error_hash,
                created_at, updated_at, finished_at
@@ -2315,16 +2314,6 @@ export class WorkflowRunStore {
     return row?.errorHash == null ? null : this.readText(row.errorHash);
   }
 
-  readPresentationInstructions(runId: string): string {
-    const row = this.state.connection
-      .prepare("SELECT presentation_prompt_hash AS hash FROM runs WHERE run_id = ?")
-      .get(runId) as { hash?: Buffer | null } | undefined;
-    if (row?.hash == null) {
-      return "Explain the final workflow result to the user in a normal response.";
-    }
-    return this.readText(row.hash);
-  }
-
   readTerminalData(runId: string): WorkflowRunTerminalData | null {
     const row = this.state.connection
       .prepare(
@@ -2348,7 +2337,6 @@ export class WorkflowRunStore {
       input: this.readRunInput(runId) as JsonValue,
       finalOutput: this.readRunFinalOutput(runId),
       error: this.readRunError(runId),
-      presentationInstructions: this.readPresentationInstructions(runId),
       restartNumber: row.restartNumber,
     };
   }
