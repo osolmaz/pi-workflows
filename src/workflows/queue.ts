@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { closeRunTime } from "../state/attempt-time.js";
 import { StateDatabase } from "../state/database.js";
 import { canonicalJson, type JsonObject } from "../state/json.js";
 import { resourceIdFor, tokenHash } from "../state/mutation.js";
@@ -816,16 +817,14 @@ export class WorkflowRunQueueStore extends ProjectStore {
            JOIN runs r ON r.run_id = i.run_id
            WHERE i.run_id = ? AND i.target_session_id = ?
              AND i.status = 'pending' AND r.paused = 0
-             AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
-             AND EXISTS (
-               SELECT 1 FROM workflow_messages m
-               JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-               WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
-             )
-           ORDER BY a.deadline_at, i.request_id LIMIT 1`,
+             AND a.timeout_ms > 0
+             AND (SELECT COALESCE(SUM(elapsed_ms), 0) FROM attempt_active_intervals t
+                  WHERE t.attempt_id = a.attempt_id) >= a.timeout_ms
+           ORDER BY a.started_at, i.request_id LIMIT 1`,
         )
-        .get(options.runId, options.targetSessionId, now);
+        .get(options.runId, options.targetSessionId);
       if (!isExpiredInteractionRow(interaction)) return false;
+      closeRunTime(this.state, options.runId);
       const request = this.state.connection
         .prepare(
           `UPDATE interactive_requests
@@ -1108,6 +1107,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
         )
         .run(now, options.runId);
       if (changed.changes !== 1) return false;
+      closeRunTime(this.state, options.runId);
       const revision = this.resourceRevision(row.resourceId);
       this.bumpResource(row.resourceId, revision, now);
       this.insertEvent(
@@ -2010,6 +2010,7 @@ export class WorkflowRunQueueStore extends ProjectStore {
     errorHash: Buffer,
     now: number,
   ): void {
+    closeRunTime(this.state, runId);
     this.state.connection
       .prepare(
         `UPDATE node_attempts

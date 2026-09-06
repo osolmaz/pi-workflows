@@ -195,7 +195,7 @@ class StdioRunnerTransport implements WorkflowRunnerStoreTransport {
 
 class InteractiveExecutor implements AgentStepExecutor {
   readonly assistantMessageMode = "visible" as const;
-  readonly preservesDeadlineWhileParked = true;
+  readonly preservesActiveTimeBudget = true;
 
   constructor(
     private readonly store: ServerBackedWorkflowStore,

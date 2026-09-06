@@ -374,7 +374,7 @@ CREATE TABLE node_attempts (
   settings_change_number INTEGER CHECK (settings_change_number IS NULL OR settings_change_number >= 0),
   settings_hash BLOB REFERENCES blobs(blob_hash),
   started_at INTEGER,
-  deadline_at INTEGER,
+  timeout_ms REAL CHECK (timeout_ms IS NULL OR timeout_ms >= 0),
   finished_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -384,7 +384,18 @@ CREATE TABLE node_attempts (
 CREATE UNIQUE INDEX node_attempts_active_idx ON node_attempts(run_id)
 WHERE status IN ('pending', 'running', 'waiting');
 CREATE INDEX node_attempts_run_idx ON node_attempts(run_id, created_at);
-CREATE INDEX node_attempts_deadline_idx ON node_attempts(deadline_at) WHERE deadline_at IS NOT NULL;
+-- NULL means not configured; zero is an explicitly unlimited timeout.
+CREATE TABLE attempt_active_intervals (
+  attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
+  interval_number INTEGER NOT NULL CHECK (interval_number > 0),
+  started_at INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  elapsed_ms REAL NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
+  PRIMARY KEY (attempt_id, interval_number)
+) STRICT;
+CREATE UNIQUE INDEX attempt_active_intervals_open_idx ON attempt_active_intervals(attempt_id)
+WHERE ended_at IS NULL;
 
 CREATE TABLE run_steps (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,

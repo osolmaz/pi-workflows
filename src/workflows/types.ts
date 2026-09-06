@@ -684,7 +684,8 @@ export type WorkflowRunState = {
   currentAttemptId?: string;
   currentNodeStartedAt?: string;
   /** Durable active-execution deadline for the current attempt. Null disables the deadline. */
-  currentNodeDeadlineAt?: string | null;
+  currentNodeTimeoutMs?: number | null;
+  currentNodeElapsedMs?: number;
   currentSettingsScopeId?: string;
   currentSettingsChangeNumber?: number;
   currentSettingsHash?: string;
@@ -898,8 +899,8 @@ export interface AgentStepExecutor {
    * leave the run claimable for an origin session. Omission is unsupported.
    */
   readonly assistantMessageMode?: "visible" | "park" | "unsupported";
-  /** True when the executor can park outside this process and resume the same attempt. */
-  readonly preservesDeadlineWhileParked?: boolean;
+  /** True when the host records active time while this executor parks and resumes an attempt. */
+  readonly preservesActiveTimeBudget?: boolean;
   runAgentStep(request: AgentStepRequest, signal: AbortSignal): Promise<AgentStepSubmission>;
 }
 
