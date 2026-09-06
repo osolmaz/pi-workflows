@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WorkflowClient } from "../../src/client/client.js";
 import { buildWidgetView } from "../../src/extension/widget.js";
+import { branchWorkflowEntries } from "../../src/extension/workflow-message-coordinator.js";
 import { SqliteResourceManagerStore } from "../../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../../src/server/state.js";
 import { workflowStatePath } from "../../src/state/database.js";
@@ -916,41 +917,66 @@ describe.sequential("out-of-process workflow server end to end", () => {
     const current = currentState.getInteraction(interaction.requestId);
     currentState.close();
     if (current === undefined) throw new Error("Durable interaction is missing");
-    const contract = interaction.contract as {
-      contract: { nodeId: string; attemptId: string };
-    };
+    await waitForPiIdle(pi);
+    const entries = [...branchWorkflowEntries(await readRpcEntries(pi))].map(
+      ([workflowMessageId, piSessionEntryId]) => ({ workflowMessageId, piSessionEntryId }),
+    );
+    await pi.stop();
     const client = new WorkflowClient({ databasePath, clientId: "e2e-replay-client" });
-    const adopted = await client.request({
-      operation: "interaction.submit",
-      runId: interaction.runId,
-      expectedRevision: current.revision,
-      idempotencyKey: submission.idempotencyKey,
-      payload: {
-        requestId: interaction.requestId,
-        submissionId: submission.submissionId,
-        step: contract.contract.nodeId,
-        attempt: contract.contract.attemptId,
-        value: submission.payload,
-      },
-    });
-    expect(adopted.outcome).toBe("adopted");
+    try {
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: { subscriptionId: "replay-session", sessionId, coordinator: true },
+      });
+      const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
+      const authority = { targetSessionId: sessionId, coordinatorEpoch };
+      expect(
+        (
+          await client.request({
+            operation: "workflowMessage.reportBranch",
+            payload: { ...authority, entries, isIdle: true, hasPendingMessages: false },
+          })
+        ).outcome,
+      ).toBe("accepted");
+      const adopted = await client.request({
+        operation: "interaction.submit",
+        runId: interaction.runId,
+        expectedRevision: current.revision,
+        idempotencyKey: submission.idempotencyKey,
+        payload: {
+          ...authority,
+          requestId: interaction.requestId,
+          submissionId: submission.submissionId,
+          value: submission.payload,
+        },
+      });
+      expect(adopted.outcome).toBe("adopted");
 
-    const stale = await client.request({
-      operation: "interaction.submit",
-      runId: interaction.runId,
-      expectedRevision: current.revision,
-      payload: {
-        requestId: interaction.requestId,
-        submissionId: "stale-e2e-submission",
-        step: contract.contract.nodeId,
-        attempt: "stale-attempt",
-        value: { output: { finished: false } },
-      },
-    });
-    expect(stale).toMatchObject({
-      outcome: "conflict",
-      error: "Interactive request attempt is stale",
-    });
+      const stale = await client.request({
+        operation: "interaction.submit",
+        runId: "another-run",
+        expectedRevision: current.revision,
+        payload: {
+          ...authority,
+          requestId: interaction.requestId,
+          submissionId: "stale-e2e-submission",
+          value: { output: { finished: false } },
+        },
+      });
+      expect(stale).toMatchObject({
+        outcome: "notFound",
+        error: `No matching agent request: ${interaction.requestId}`,
+      });
+    } finally {
+      await client.close();
+      pi = startPiRpc({
+        cwd: projectDir,
+        env: piEnvironment(),
+        sessionDir,
+        session: { file: path.join(sessionDir, sessionFileName) },
+      });
+      await waitForPiIdle(pi);
+    }
   }, 75_000);
 
   it("applies and reconciles a resource manager through supervised children", async () => {

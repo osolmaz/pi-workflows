@@ -18,6 +18,7 @@ export const CLIENT_OPERATIONS = [
   "checkpoint.answer",
   "decision.answer",
   "interaction.submit",
+  "interaction.assistant",
   "interaction.update",
   "workflowMessage.reportBranch",
   "workflowTurn.report",
@@ -168,8 +169,22 @@ export function parseClientResponse(line: string | Buffer): ClientResponse {
 }
 
 export function clientRequestFingerprint(request: ClientRequest): Buffer {
+  // The host verifies current session authority before reading these receipts.
+  // Reconnecting changes authority evidence, not the logical response.
+  const sessionResponse = ["interaction.update", "checkpoint.answer", "decision.answer"].includes(
+    request.operation,
+  );
+  const payload =
+    sessionResponse &&
+    typeof request.payload === "object" &&
+    request.payload !== null &&
+    !Array.isArray(request.payload)
+      ? Object.fromEntries(
+          Object.entries(request.payload).filter(([key]) => key !== "coordinatorEpoch"),
+        )
+      : request.payload;
   return createHash("sha256")
-    .update(canonicalJson({ ...request, requestId: undefined }))
+    .update(canonicalJson({ ...request, requestId: undefined, payload }))
     .digest();
 }
 

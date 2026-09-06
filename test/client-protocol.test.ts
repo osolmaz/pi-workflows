@@ -155,6 +155,37 @@ describe("client protocol fixtures", () => {
     ).toThrow("exceeds 1 MiB");
   });
 
+  it.each(["interaction.update", "checkpoint.answer", "decision.answer"] as const)(
+    "%s fingerprints durable response identity, not the connection epoch",
+    (operation) => {
+      const response = {
+        ...request,
+        operation,
+        payload: {
+          targetSessionId: "session",
+          coordinatorEpoch: "first",
+          requestId: "input",
+          input: "yes",
+        },
+      };
+      expect(
+        clientRequestFingerprint({
+          ...response,
+          payload: { ...response.payload, coordinatorEpoch: "second" },
+        }),
+      ).toEqual(clientRequestFingerprint(response));
+      expect(
+        clientRequestFingerprint({
+          ...response,
+          payload: { ...response.payload, targetSessionId: "other" },
+        }),
+      ).not.toEqual(clientRequestFingerprint(response));
+      expect(
+        clientRequestFingerprint({ ...response, payload: { ...response.payload, input: "no" } }),
+      ).not.toEqual(clientRequestFingerprint(response));
+    },
+  );
+
   it("creates stable durable request fingerprints", () => {
     expect(clientRequestFingerprint(request)).toEqual(clientRequestFingerprint({ ...request }));
     expect(clientRequestFingerprint({ ...request, requestId: "request-2" })).toEqual(

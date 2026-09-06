@@ -31,6 +31,25 @@ import type { InteractiveRequestRecord } from "../src/workflows/requests.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
+async function ownSession(client: WorkflowClient, targetSessionId = "host-test-session") {
+  const watched = await client.request({
+    operation: "view.session.watch",
+    payload: {
+      subscriptionId: `owner-${targetSessionId}`,
+      sessionId: targetSessionId,
+      coordinator: true,
+    },
+  });
+  const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
+  const authority = { targetSessionId, coordinatorEpoch };
+  const reported = await client.request({
+    operation: "workflowMessage.reportBranch",
+    payload: { ...authority, entries: [], isIdle: true, hasPendingMessages: false },
+  });
+  expect(reported.outcome).toBe("accepted");
+  return authority;
+}
+
 async function writeComputeWorkflow(cwd: string): Promise<string> {
   const workflowPath = path.join(cwd, "compute.workflow.ts");
   await fs.writeFile(
@@ -723,31 +742,26 @@ describe("global workflow server", () => {
     };
     await host.start();
     try {
-      const requests: ClientRequest[] = [
-        {
-          schema: "pi-workflows.client.v1",
-          type: "request",
-          requestId: "slow-request",
-          clientId: "multiplex-client",
-          operation: "interaction.submit",
-          idempotencyKey: "slow-request",
-          payload: {},
-        },
-        {
-          schema: "pi-workflows.client.v1",
-          type: "request",
-          requestId: "status-request",
-          clientId: "multiplex-client",
-          operation: "server.status",
-          idempotencyKey: "status-request",
-          payload: {},
-        },
-      ];
-      const responses = await sendServerPipeline(host.endpoint, requests);
-      expect(responses.map((response) => response.requestId)).toEqual([
-        "status-request",
-        "slow-request",
-      ]);
+      const client = new WorkflowClient({ databasePath });
+      try {
+        const authority = await ownSession(client);
+        const completed: string[] = [];
+        await Promise.all([
+          client
+            .request({
+              operation: "interaction.submit",
+              requestId: "slow-request",
+              payload: authority,
+            })
+            .then((response) => completed.push(response.requestId)),
+          client
+            .request({ operation: "server.status", requestId: "status-request" })
+            .then((response) => completed.push(response.requestId)),
+        ]);
+        expect(completed).toEqual(["status-request", "slow-request"]);
+      } finally {
+        await client.close();
+      }
     } finally {
       await host.stop();
     }
@@ -1064,16 +1078,45 @@ setInterval(() => {}, 1000);
         }
       }, 30_000);
       if (interaction === undefined) throw new Error("interaction was not created");
-      const contract = interaction.contract as { contract?: { nodeId?: unknown } };
-      if (typeof contract.contract?.nodeId !== "string") {
-        throw new Error("interaction node is missing");
-      }
+      const authority = await ownSession(client);
       const payload = {
+        ...authority,
         requestId: interaction.requestId,
-        step: contract.contract.nodeId,
-        attempt: interaction.attemptId,
         value: { output: { answer: "done" } },
       };
+      // Knowing an opaque request ID does not grant response authority.
+      const foreign = new WorkflowClient({ databasePath });
+      try {
+        const foreignAuthority = await ownSession(foreign, "other-session");
+        const denied = await foreign.request({
+          operation: "interaction.submit",
+          payload: { ...payload, ...foreignAuthority, submissionId: "foreign" },
+        });
+        expect(denied.outcome).toBe("notFound");
+        const forged = await foreign.request({
+          operation: "interaction.submit",
+          payload: { ...payload, submissionId: "forged" },
+        });
+        expect(forged.outcome).toBe("rejected");
+      } finally {
+        await foreign.close();
+      }
+      const wrongKind = await client.request({
+        operation: "interaction.assistant",
+        payload: { ...payload, submissionId: "wrong-kind" },
+      });
+      expect(wrongKind.outcome).toBe("rejected");
+      const unchanged = new ServerStateStore(databasePath, { readOnly: true });
+      try {
+        expect(unchanged.getInteraction(interaction.requestId)).toEqual(interaction);
+        expect(
+          unchanged.state.connection
+            .prepare("SELECT count(*) AS count FROM interactive_submissions")
+            .get(),
+        ).toEqual({ count: 0 });
+      } finally {
+        unchanged.close();
+      }
       const first = await client.request({
         operation: "interaction.submit",
         requestId: "first-submit-request",
@@ -1101,6 +1144,18 @@ setInterval(() => {}, 1000);
         }),
       ]);
       expect(second.outcome).toBe("adopted");
+      const stale = await client.request({
+        operation: "interaction.submit",
+        idempotencyKey: "same-durable-submission",
+        payload: { ...payload, coordinatorEpoch: "stale-epoch", submissionId: "stale" },
+      });
+      expect(stale.outcome).toBe("rejected");
+      const conflicting = await client.request({
+        operation: "interaction.submit",
+        idempotencyKey: "same-durable-submission",
+        payload: { ...payload, value: { output: "different" }, submissionId: "conflicting" },
+      });
+      expect(conflicting.outcome).toBe("rejected");
       const observed = new ServerStateStore(databasePath, { readOnly: true });
       try {
         expect(
@@ -1166,19 +1221,15 @@ setInterval(() => {}, 1000);
       ).toBeGreaterThan(2 * 1024 * 1024);
       runStore.close();
 
-      const contract = pendingInteraction.contract as { contract?: { nodeId?: unknown } };
-      if (typeof contract.contract?.nodeId !== "string") {
-        throw new Error("interaction node is missing");
-      }
+      const authority = await ownSession(client);
       const response = await client.request({
         operation: "interaction.submit",
         runId: pendingInteraction.runId,
         expectedRevision: pendingInteraction.revision,
         payload: {
+          ...authority,
           requestId: pendingInteraction.requestId,
           submissionId: "large-resume-submission",
-          step: contract.contract.nodeId,
-          attempt: pendingInteraction.attemptId,
           value: { output: { answer: "done" } },
         },
       });
@@ -1198,12 +1249,6 @@ setInterval(() => {}, 1000);
       }, 30_000);
       if (secondInteraction === undefined) throw new Error("second interaction was not created");
       const pendingSecondInteraction = secondInteraction;
-      const secondContract = pendingSecondInteraction.contract as {
-        contract?: { nodeId?: unknown };
-      };
-      if (typeof secondContract.contract?.nodeId !== "string") {
-        throw new Error("second interaction node is missing");
-      }
       const incrementalStore = new WorkflowRunStore(databasePath);
       await incrementalStore.appendSessionEntry("large-resume-run", {
         id: "entry-after-first-resume",
@@ -1216,10 +1261,9 @@ setInterval(() => {}, 1000);
         runId: pendingSecondInteraction.runId,
         expectedRevision: pendingSecondInteraction.revision,
         payload: {
+          ...authority,
           requestId: pendingSecondInteraction.requestId,
           submissionId: "large-resume-second-submission",
-          step: secondContract.contract.nodeId,
-          attempt: pendingSecondInteraction.attemptId,
           value: { output: { answer: "done" } },
         },
       });
@@ -2239,7 +2283,10 @@ setInterval(() => {}, 1000);
           operation: "run.status",
           runId: "interaction-timeout-run",
         }),
-      ).toMatchObject({ outcome: "accepted", receipt: { display: { status: "running" } } });
+      ).toMatchObject({
+        outcome: "accepted",
+        receipt: { display: { status: "waiting", activity: "origin_turn" } },
+      });
       const reconnectedState = new ServerStateStore(databasePath, { readOnly: true });
       const reconnectedDeadline = reconnectedState.state.connection
         .prepare(

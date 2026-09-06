@@ -889,6 +889,16 @@ export class ServerStateStore {
     });
   }
 
+  hasInteractionSubmission(requestId: string, idempotencyKey: string): boolean {
+    return (
+      this.state.connection
+        .prepare(
+          "SELECT 1 FROM interactive_submissions WHERE request_id = ? AND idempotency_key = ?",
+        )
+        .get(requestId, idempotencyKey) !== undefined
+    );
+  }
+
   beginInteractionValidation(options: {
     requestId: string;
     submissionId: string;

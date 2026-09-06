@@ -490,31 +490,16 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       return await runToolInOrder(async () => {
         const params = parseWorkflowToolInput(rawParams);
         if (params.action === "update" || params.action === "submit") {
-          const interaction = sessionSnapshots
-            .get(ctx.sessionManager.getSessionId())
-            ?.pendingInteractions.map(parseInteractiveRequest)
-            .find((request) => request?.kind === "agent" && request.requestId === params.requestId);
-          if (interaction === undefined)
-            throw new Error("No matching agent request is waiting for output");
-          const contract = agentContract(interaction);
-          if (contract === undefined)
-            throw new Error("The pending interaction is not an agent step");
-          if (contract.requestId !== interaction.requestId) {
-            throw new Error("Workflow contract does not match the durable request");
-          }
           let response: ClientResponse;
           try {
             response = await requestAccepted(client, {
               operation: params.action === "update" ? "interaction.update" : "interaction.submit",
               requestId: `${params.action}-${toolCallId}-${randomUUID()}`,
               idempotencyKey: toolCallId,
-              runId: interaction.runId,
-              expectedRevision: interaction.revision,
               payload: jsonValue({
-                requestId: interaction.requestId,
+                ...sessionCommandPayload(ctx),
+                requestId: params.requestId,
                 submissionId: toolCallId,
-                step: contract.nodeId,
-                attempt: contract.attemptId,
                 value:
                   params.action === "update"
                     ? { update: params.update }
@@ -1024,6 +1009,23 @@ async function executeCommand(
       };
     }
     case "answer": {
+      if (authority === "model") {
+        const response = await requestAccepted(client, {
+          operation: "checkpoint.answer",
+          requestId: `checkpoint-${idempotencyKey}`,
+          idempotencyKey,
+          payload: {
+            ...sessionCommandPayload(ctx),
+            requestId: command.requestId,
+            submissionId: idempotencyKey,
+            input: jsonValue(command.input),
+          },
+        });
+        return {
+          message: `Answered checkpoint ${command.requestId}.`,
+          details: { action: "answer", response: response.receipt ?? null },
+        };
+      }
       const interaction = sessionSnapshots
         .get(ctx.sessionManager.getSessionId())
         ?.pendingInteractions.map(parseInteractiveRequest)
@@ -1031,9 +1033,6 @@ async function executeCommand(
       if (interaction === undefined)
         throw new Error("No matching checkpoint request is waiting in this session");
       if (interaction.kind === "decision") {
-        if (authority !== "human") {
-          throw new Error("Protected human decisions cannot be answered by the workflow tool");
-        }
         const response = await requestAccepted(client, {
           operation: "decision.answer",
           requestId: `answer-${idempotencyKey}`,
@@ -1041,6 +1040,7 @@ async function executeCommand(
           runId: interaction.runId,
           expectedRevision: interaction.revision,
           payload: {
+            ...sessionCommandPayload(ctx),
             requestId: interaction.requestId,
             submissionId: idempotencyKey,
             response: decisionResponse(command.input),
@@ -1064,6 +1064,7 @@ async function executeCommand(
         runId: interaction.runId,
         expectedRevision: interaction.revision,
         payload: {
+          ...sessionCommandPayload(ctx),
           requestId: interaction.requestId,
           submissionId: idempotencyKey,
           input: jsonValue(command.input),
@@ -1166,16 +1167,15 @@ async function submitVisibleAssistantResponse(
   const responseId = submission.conversation?.lastEntryId ?? submission.assistantMessage?.entryId;
   if (responseId === undefined) return;
   await requestAccepted(client, {
-    operation: "interaction.submit",
+    operation: "interaction.assistant",
     requestId: `assistant-${interaction.requestId}-${responseId}`,
     idempotencyKey: `assistant-${interaction.requestId}-${responseId}`,
     runId: interaction.runId,
     expectedRevision: interaction.revision,
     payload: {
+      ...sessionCommandPayload(ctx),
       requestId: interaction.requestId,
       submissionId: `assistant-${responseId}`,
-      step: contract.nodeId,
-      attempt: contract.attemptId,
       value: submission as unknown as JsonValue,
     },
   });
