@@ -274,6 +274,7 @@ export class ServerViewStore {
       schema: RUN_VIEW_SCHEMA,
       runId,
       revision,
+      runRevision: this.runs.runRevision(runId),
       display,
       manifest: manifest(queue, display.status),
       state: this.projectState(runId, loaded.state, stepPage.items, updatePage.items),

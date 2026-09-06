@@ -840,7 +840,9 @@ function isWorkflowRunView(value: unknown, runId: string): value is WorkflowRunV
     isRecord(value) &&
     value.schema === "pi-workflows.run-view.v1" &&
     value.runId === runId &&
-    Number.isSafeInteger(value.revision)
+    Number.isSafeInteger(value.revision) &&
+    Number.isSafeInteger(value.runRevision) &&
+    (value.runRevision as number) >= 0
   );
 }
 

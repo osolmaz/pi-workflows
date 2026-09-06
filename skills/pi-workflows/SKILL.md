@@ -19,7 +19,7 @@ Use the smallest applicable action:
 - `status` reads the active run, or the named run when `runId` is supplied.
 - `pause`, `resume`, and `cancel` control the current active run.
 - `answer` completes the exact ordinary checkpoint request in the same run. It cannot complete an agent step or satisfy a protected `humanDecision()` gate.
-- `restart` creates fresh work only when the user explicitly requested it. Supply the exact terminal `runId` and current `expectedRevision`. It does not copy old steps, settings changes, approvals, or effects.
+- `restart` creates fresh work only when the user explicitly requested it. Supply the exact terminal `runId` and use the view's `runRevision` as `expectedRevision`, not its presentation `revision`. It does not copy old steps, settings changes, approvals, or effects.
 - `update` publishes a non-completing durable update for the active step attempt.
 - `submit` completes an active submitted agent step with its required output. An assistant-message step completes through its normal visible reply instead.
 

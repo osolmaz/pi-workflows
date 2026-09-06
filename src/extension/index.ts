@@ -892,8 +892,7 @@ async function executeCommand(
         throw new Error("No workflow terminal result is available to restart");
       const session = sessionCommandPayload(ctx);
       const expectedRevision =
-        command.expectedRevision ??
-        (await requestAccepted(client, { operation: "view.run.get", runId })).revision;
+        command.expectedRevision ?? (await client.getRun(runId))?.runRevision;
       if (expectedRevision === undefined) throw new Error("Workflow run revision is unavailable");
       const response = await requestAccepted(client, {
         operation: "run.restart",

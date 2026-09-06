@@ -420,7 +420,8 @@ function latestStepContract(messages: Array<{ content?: unknown }>): {
 }
 
 function rpcDiagnostic(pi: RpcHandle): string {
-  return `pi stderr:\n${pi.stderr()}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`;
+  const errors = pi.stdoutLines.filter((line) => line.includes('"notifyType":"error"'));
+  return `pi stderr:\n${pi.stderr()}\npi errors:\n${errors.join("\n")}\npi stdout tail:\n${pi.stdoutLines.slice(-20).join("\n")}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -837,6 +838,60 @@ describe.sequential("out-of-process workflow server end to end", () => {
         ),
     ).toHaveLength(2);
   }, 90_000);
+
+  it("restarts a recorded terminal run with its execution revision", async () => {
+    const source = await waitForRun(
+      databasePath,
+      "pause-resume-e2e",
+      (state) => state.status === "completed",
+      () => rpcDiagnostic(pi),
+    );
+    const client = new WorkflowClient({ databasePath });
+    let sourceRevision: number;
+    try {
+      const view = await client.getRun(source.runId);
+      if (view === null) throw new Error("Recorded source view is missing");
+      expect(view.revision).not.toBe(view.runRevision);
+      sourceRevision = view.runRevision;
+      const store = new WorkflowRunStore(databasePath, { readOnly: true });
+      try {
+        expect(sourceRevision).toBe(store.runRevision(source.runId));
+        expect(
+          store.state.connection
+            .prepare(
+              "SELECT e.effect_type, e.status FROM effects e JOIN runs r ON r.resource_id = e.source_resource_id WHERE r.run_id = ? AND e.status IN ('pending', 'applying', 'ambiguous')",
+            )
+            .all(source.runId),
+        ).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await client.close();
+    }
+    pi.send({
+      id: "recorded-run-restart",
+      type: "prompt",
+      message: `/workflow restart ${source.runId}`,
+    });
+    const restarted = await waitForRun(
+      databasePath,
+      "pause-resume-e2e",
+      (state) => state.runId !== source.runId && state.status === "completed",
+      () => rpcDiagnostic(pi),
+    );
+    expect(restarted.state.finalOutput).toEqual({ resumed: true });
+    const queue = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
+    try {
+      expect(queue.getWorkflowRun(restarted.runId)).toMatchObject({
+        parentRunId: source.runId,
+        parentRunRevision: sourceRevision,
+      });
+    } finally {
+      queue.close();
+    }
+    await waitForPiIdle(pi);
+  }, 60_000);
 
   it("adopts one durable interaction across a real Pi restart", async () => {
     pi.send({ id: "restart-start", type: "prompt", message: "/workflow restart-e2e" });

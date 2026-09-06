@@ -161,6 +161,7 @@ describe("host workflow display reducer", () => {
     expect(queue.getWorkflowRunView("missing-run")).toBeUndefined();
     expect(queue.findSessionReservationView("missing-session")).toBeUndefined();
     expect(runs.readRunViewCounts("missing-run")).toBeNull();
+    expect(() => runs.runRevision("missing-run")).toThrow("Workflow run not found: missing-run");
     expect(
       runs.readRunView("missing-run", {
         steps: { start: 0, limit: 1 },
