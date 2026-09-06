@@ -766,7 +766,14 @@ export class WorkflowServer {
             this.recoverDecisionChannel(request, session.targetSessionId),
           );
         }
+        case "interaction.update":
+        case "checkpoint.answer":
+        case "decision.answer":
+          this.requireSessionCommand(connection, request);
+          return this.handleRequest(request, connection);
         case "interaction.submit":
+        case "interaction.assistant":
+          this.requireSessionCommand(connection, request);
           return await this.submitInteractionAndWait(request);
         case "state.status":
           return clientResponse(request.requestId, "accepted", this.stateStatusReceipt());
@@ -1463,8 +1470,11 @@ export class WorkflowServer {
       case "resourceManager.delete":
         return this.executeResourceManagerOperation(request);
       case "interaction.update":
+        this.requireSessionCommand(connection, request);
         return this.publishInteractionUpdate(request);
       case "interaction.submit":
+      case "interaction.assistant":
+        this.requireSessionCommand(connection, request);
         return this.submitInteraction(request);
       case "decision.answer":
         return this.answerDecision(request, afterCommit);
@@ -2106,24 +2116,40 @@ export class WorkflowServer {
     command: ClientRequest,
     afterCommit: Array<() => void>,
   ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
-    const runId = requireRunId(command);
     const payload = requireRecord(command.payload, "checkpoint answer payload");
     const requestId = requireString(payload.requestId, "requestId");
     const interaction = this.serverState.getInteraction(requestId);
-    if (interaction === undefined || interaction.runId !== runId) {
+    if (
+      interaction === undefined ||
+      interaction.targetSessionId !== payload.targetSessionId ||
+      (command.runId !== undefined && interaction.runId !== command.runId)
+    ) {
       return { outcome: "notFound", error: "Checkpoint request not found" };
+    }
+    if (interaction.kind === "decision") {
+      return {
+        outcome: "rejected",
+        error: "Protected human decisions cannot be answered by the workflow tool",
+      };
     }
     if (interaction.kind !== "checkpoint") {
       return { outcome: "rejected", error: "Only an ordinary checkpoint accepts an answer" };
     }
-    if (this.queue.isWorkflowRunPaused(runId)) {
+    const runId = interaction.runId;
+    if (
+      this.queue.isWorkflowRunPaused(runId) &&
+      !this.serverState.hasInteractionSubmission(requestId, command.idempotencyKey)
+    ) {
       return { outcome: "conflict", error: "Workflow run is paused" };
     }
     const result = this.serverState.submitInteraction({
       requestId,
       submissionId: requireString(payload.submissionId, "submissionId"),
       idempotencyKey: command.idempotencyKey,
-      expectedRevision: requireNonNegativeInteger(command.expectedRevision, "expectedRevision"),
+      expectedRevision:
+        command.expectedRevision === undefined
+          ? interaction.revision
+          : requireNonNegativeInteger(command.expectedRevision, "expectedRevision"),
       payload: (payload.input ?? null) as JsonValue,
       accepted: true,
       receipt: { requestId, runId },
@@ -2143,7 +2169,12 @@ export class WorkflowServer {
     const payload = requireRecord(command.payload, "decision answer payload");
     const requestId = requireString(payload.requestId, "requestId");
     const interaction = this.serverState.getInteraction(requestId);
-    if (interaction === undefined || interaction.kind !== "decision") {
+    if (
+      interaction === undefined ||
+      interaction.kind !== "decision" ||
+      interaction.targetSessionId !== payload.targetSessionId ||
+      (command.runId !== undefined && interaction.runId !== command.runId)
+    ) {
       return { outcome: "notFound", error: `Decision request not found: ${requestId}` };
     }
     if (this.queue.isWorkflowRunPaused(interaction.runId)) {
@@ -2268,33 +2299,40 @@ export class WorkflowServer {
   private publishInteractionUpdate(
     request: ClientRequest,
   ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
-    const runId = requireRunId(request);
     const payload = requireRecord(request.payload, "interaction update payload");
     const requestId = requireString(payload.requestId, "requestId");
     const interaction = this.serverState.getInteraction(requestId);
-    if (interaction === undefined || interaction.runId !== runId) {
+    if (
+      interaction === undefined ||
+      interaction.targetSessionId !== payload.targetSessionId ||
+      (request.runId !== undefined && interaction.runId !== request.runId)
+    ) {
       return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
     }
+    const runId = interaction.runId;
     if (interaction.kind !== "agent") {
       return { outcome: "rejected", error: "Only a submitted agent request accepts updates" };
     }
     if (this.queue.isWorkflowRunPaused(runId)) {
       return { outcome: "conflict", error: "Workflow run is paused" };
     }
-    const attemptId = requireString(payload.attempt, "attempt");
-    const nodeId = requireString(payload.step, "step");
+    if (payload.step !== undefined || payload.attempt !== undefined) {
+      return {
+        outcome: "rejected",
+        error: "Updates must target requestId, not step or attempt fields",
+      };
+    }
+    const attemptId = interaction.attemptId;
     const storedContract = requireRecord(interaction.contract, "interactive contract");
     const stepContract = requireRecord(storedContract.contract, "workflow step contract");
-    if (
-      interaction.attemptId !== attemptId ||
-      requireString(stepContract.nodeId, "contract.nodeId") !== nodeId ||
-      interaction.status !== "pending"
-    ) {
+    const nodeId = requireString(stepContract.nodeId, "contract.nodeId");
+    if (interaction.status !== "pending") {
       return { outcome: "conflict", error: "Interactive request attempt is stale" };
     }
     if (
+      request.expectedRevision !== undefined &&
       interaction.revision !==
-      requireNonNegativeInteger(request.expectedRevision, "expectedRevision")
+        requireNonNegativeInteger(request.expectedRevision, "expectedRevision")
     ) {
       return { outcome: "conflict", error: "Interactive request revision is stale" };
     }
@@ -2337,31 +2375,41 @@ export class WorkflowServer {
     const payload = requireRecord(request.payload, "interaction payload");
     const requestId = requireString(payload.requestId, "requestId");
     const current = this.serverState.getInteraction(requestId);
-    if (current === undefined || current.runId !== requireRunId(request)) {
-      return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
+    if (
+      current === undefined ||
+      current.targetSessionId !== payload.targetSessionId ||
+      (request.runId !== undefined && current.runId !== request.runId)
+    ) {
+      return { outcome: "notFound", error: `No matching agent request: ${requestId}` };
     }
-    if (current.kind !== "agent" && current.kind !== "assistant") {
-      return { outcome: "rejected", error: "This request does not accept agent submissions" };
+    const expectedKind = request.operation === "interaction.assistant" ? "assistant" : "agent";
+    if (current.kind !== expectedKind) {
+      return {
+        outcome: "rejected",
+        error: `This request does not accept ${expectedKind} submissions`,
+      };
     }
-    if (this.queue.isWorkflowRunPaused(current.runId)) {
+    if (
+      this.queue.isWorkflowRunPaused(current.runId) &&
+      !this.serverState.hasInteractionSubmission(requestId, request.idempotencyKey)
+    ) {
       return { outcome: "conflict", error: "Workflow run is paused" };
     }
-    const attemptId = requireString(payload.attempt, "attempt");
-    const nodeId = requireString(payload.step, "step");
-    const storedContract = requireRecord(current.contract, "interactive contract");
-    const stepContract = requireRecord(storedContract.contract, "workflow step contract");
-    if (
-      current.attemptId !== attemptId ||
-      requireString(stepContract.nodeId, "contract.nodeId") !== nodeId
-    ) {
-      return { outcome: "conflict", error: "Interactive request attempt is stale" };
+    if (payload.step !== undefined || payload.attempt !== undefined) {
+      return {
+        outcome: "rejected",
+        error: "Responses must target requestId, not step or attempt fields",
+      };
     }
     const submissionId = requireString(payload.submissionId, "submissionId");
     const submission = this.serverState.beginInteractionValidation({
       requestId,
       submissionId,
       idempotencyKey: request.idempotencyKey,
-      expectedRevision: requireNonNegativeInteger(request.expectedRevision, "expectedRevision"),
+      expectedRevision:
+        request.expectedRevision === undefined
+          ? current.revision
+          : requireNonNegativeInteger(request.expectedRevision, "expectedRevision"),
       payload: (payload.value ?? null) as JsonValue,
       receipt: {
         operation: request.operation,

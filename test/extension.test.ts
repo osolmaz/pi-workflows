@@ -438,7 +438,35 @@ describe("pi-workflows hosted extension", () => {
     } finally {
       store.close();
     }
-    expect(fake.sent).toHaveLength(1);
+    // Lost tool acknowledgments must adopt the accepted result after the pending view is empty.
+    await expect(
+      fake.runTool("submit-one", {
+        action: "submit",
+        requestId: contract.requestId,
+        output: { answer: "done" },
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      fake.runTool("submit-one", {
+        action: "submit",
+        requestId: contract.requestId,
+        output: { answer: "different" },
+      }),
+    ).rejects.toThrow(/different|conflict|reuse/i);
+    const afterReplay = new ServerStateStore(workflowStatePath(), { readOnly: true });
+    try {
+      expect(
+        afterReplay.state.connection
+          .prepare("SELECT count(*) AS count FROM interactive_submissions")
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(afterReplay.listPendingInteractions("session-one")).toEqual([]);
+    } finally {
+      afterReplay.close();
+    }
+    expect(
+      fake.sent.filter((entry) => (entry.details as { contract?: unknown }).contract !== undefined),
+    ).toHaveLength(1);
     expect(durableRequests.mock.calls.map(([options]) => options.operation)).toEqual(
       expect.arrayContaining(["run.start", "interaction.update", "interaction.submit"]),
     );
