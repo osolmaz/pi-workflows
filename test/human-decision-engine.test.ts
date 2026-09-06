@@ -9,25 +9,24 @@ import {
   humanDecisionEdge,
 } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { HumanDecisionRequest } from "../src/workflows/types.js";
+import { humanRequest, submitCheckpoint } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, decisionPrompt, ScriptedExecutor } from "./helpers.js";
 
 const choices = defineHumanChoices({
   continue: choice({ label: "Continue" }),
   stop: choice({ label: "Stop" }),
 });
-
 const workflow = defineWorkflow({
   name: "human-decision-engine",
   startAt: "approve",
   nodes: {
     approve: humanDecision({
-      audience: ({ input }) => (input as { audience: string }).audience,
+      audience: "operator",
       choices,
       request: ({ input }) => decisionPrompt(input),
     }),
     continued: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
-    stopped: compute({ run: ({ input, outputs }) => ({ input, answer: outputs.approve }) }),
+    stopped: compute({ run: () => "stopped" }),
   },
   edges: [
     humanDecisionEdge({
@@ -37,147 +36,93 @@ const workflow = defineWorkflow({
     }),
   ],
 });
-
 function engine(store: WorkflowRunStore) {
   return new WorkflowEngine({ store, executor: new ScriptedExecutor() });
 }
 
-describe("human decision engine continuation", () => {
-  it("stores the request, waits, preserves input, and routes from the accepted answer", async () => {
-    const runs = await makeStateDatabasePath("human-decision-engine");
-    const store = new WorkflowRunStore(runs);
-    const parent = await engine(store).run(
-      workflow,
-      { audience: "operator", task: "keep original" },
-      { runId: "human-parent" },
-    );
-    expect(parent.state.status).toBe("waiting");
-    expect(parent.state.waitingOn).toBe("approve");
-    const request = parent.state.finalOutput as HumanDecisionRequest;
-    expect(request).toMatchObject({
-      schema: "pi-workflows.human-decision-request.v1",
-      audience: "operator",
-      runId: "human-parent",
-    });
-    const decisionStore = new HumanDecisionStore(runs);
-    expect(await decisionStore.readRequest(request.decisionId)).toEqual(request);
-
-    const accepted = await decisionStore.accept(request, {
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      choice: "continue",
-      source: { channel: "pi", actorId: "person", eventId: "event" },
-      idempotencyKey: "event",
-    });
-    expect(accepted.status).toBe("accepted");
-    const continued = await engine(store).continueRun(
-      workflow,
-      parent.state.runId,
-      { ignored: true },
-      { humanDecision: accepted.decision, runId: "human-continuation" },
-    );
-    expect(continued.state.status).toBe("completed");
-    expect(continued.state.input).toEqual({ audience: "operator", task: "keep original" });
-    expect(continued.state.finalOutput).toEqual({
-      input: { audience: "operator", task: "keep original" },
-      answer: { choice: "continue" },
-    });
-    expect(continued.state.humanDecision).toMatchObject({
-      schema: "pi-workflows.human-decision-receipt.v1",
-      provenance: "human",
-      response: { choice: "continue" },
-    });
-    expect(continued.state.humanDecision).not.toHaveProperty("source");
-    const loaded = store.readRun("human-continuation");
-    expect(loaded?.state.humanDecision).toEqual(continued.state.humanDecision);
-    expect(loaded?.state.carriedStepCount).toBe(1);
-    expect(
-      store.state.connection
-        .prepare(
-          `SELECT count(*) AS count FROM node_attempts
-           WHERE run_id = 'human-continuation' AND node_id = 'approve'`,
-        )
-        .get(),
-    ).toEqual({ count: 0 });
-    expect(
-      store.state.connection
-        .prepare(
-          `SELECT count(*) AS count FROM run_steps s
-           JOIN node_attempts a ON a.attempt_id = s.attempt_id
-           WHERE s.run_id = 'human-continuation' AND a.run_id = 'human-parent'`,
-        )
-        .get(),
-    ).toEqual({ count: 1 });
-  });
-
-  it("rejects a forged accepted object that is not in the durable decision store", async () => {
-    const runs = await makeStateDatabasePath("human-decision-engine-forged");
-    const store = new WorkflowRunStore(runs);
-    const parent = await engine(store).run(
-      workflow,
-      { audience: "operator" },
-      { runId: "human-parent-forged" },
-    );
-    const request = parent.state.finalOutput as HumanDecisionRequest;
-    await expect(
-      engine(store).continueRun(
+describe("same-run human decision completion", () => {
+  it("stores the request atomically and resumes the exact attempt with a verified receipt", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("human-decision-engine"));
+    const decisions = new HumanDecisionStore(store.databasePath, { state: store.state });
+    try {
+      const waiting = await engine(store).run(
         workflow,
-        parent.state.runId,
-        {},
-        {
-          humanDecision: {
-            schema: "pi-workflows.human-decision-accepted.v1",
-            provenance: "human",
-            decisionId: request.decisionId,
-            requestDigest: request.requestDigest,
-            subjectDigest: request.subjectDigest,
-            presentationDigest: request.presentationDigest,
-            revision: request.revision,
-            response: { choice: "continue" },
-            source: { channel: "pi", actorId: "forged", eventId: "forged" },
-            idempotencyKey: "forged",
-            acceptedAt: "2026-08-19T00:00:00.000Z",
-            answerDigest: `sha256:${"0".repeat(64)}`,
-          },
-        },
-      ),
-    ).rejects.toThrow(/durable decision record/);
+        { task: "keep original" },
+        { runId: "human-run" },
+      );
+      expect(waiting.state.status).toBe("waiting");
+      expect(waiting.state.steps).toHaveLength(0);
+      const request = humanRequest(store, waiting.state);
+      expect(await decisions.readRequest(request.decisionId)).toEqual(request);
+      const accepted = await decisions.accept(request, {
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        choice: "continue",
+        source: { channel: "pi", actorId: "person", eventId: "event" },
+        idempotencyKey: "event",
+      });
+      submitCheckpoint(store, waiting.state, accepted.decision.response);
+      const done = await engine(store).resumeRun(workflow, waiting.runId);
+      expect(done.state.status).toBe("completed");
+      expect(done.state.finalOutput).toEqual({
+        input: { task: "keep original" },
+        answer: { choice: "continue" },
+      });
+      expect(done.state.humanDecision).toMatchObject({
+        provenance: "human",
+        response: { choice: "continue" },
+      });
+      expect(done.state.humanDecision).not.toHaveProperty("source");
+      expect(store.readRun(waiting.runId)?.state.humanDecision).toEqual(done.state.humanDecision);
+      expect(done.state.steps[0]?.attemptId).toBe(waiting.state.currentAttemptId);
+      expect(store.state.connection.prepare("SELECT COUNT(*) AS count FROM runs").get()).toEqual({
+        count: 1,
+      });
+    } finally {
+      store.close();
+    }
   });
 
-  it("rejects a continuation without the verified accepted decision", async () => {
-    const runs = await makeStateDatabasePath("human-decision-engine-reject");
-    const store = new WorkflowRunStore(runs);
-    await engine(store).run(workflow, { audience: "operator" }, { runId: "human-parent-reject" });
-    await expect(engine(store).continueRun(workflow, "human-parent-reject", {})).rejects.toThrow(
-      /accepted verified human decision/,
-    );
+  it("rejects a response without human provenance before it changes the request", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("human-decision-forged"));
+    try {
+      const waiting = await engine(store).run(workflow, {}, { runId: "human-forged" });
+      expect(() => submitCheckpoint(store, waiting.state, { choice: "continue" })).toThrow(
+        /verified human decision/,
+      );
+      await expect(engine(store).resumeRun(workflow, waiting.runId)).rejects.toThrow(/waiting/);
+      expect(
+        store.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM interactive_submissions")
+          .get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      store.close();
+    }
   });
 
-  it("rejects an accepted answer for a different request revision", async () => {
-    const runs = await makeStateDatabasePath("human-decision-engine-stale");
-    const store = new WorkflowRunStore(runs);
-    const parent = await engine(store).run(
-      workflow,
-      { audience: "operator" },
-      { runId: "human-parent-stale" },
-    );
-    const request = parent.state.finalOutput as HumanDecisionRequest;
-    const accepted = await new HumanDecisionStore(runs).accept(request, {
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      choice: "continue",
-      source: { channel: "pi", actorId: "person", eventId: "event" },
-      idempotencyKey: "event",
-    });
-    await expect(
-      engine(store).continueRun(
-        workflow,
-        parent.state.runId,
-        {},
-        {
-          humanDecision: { ...accepted.decision, requestDigest: `sha256:${"0".repeat(64)}` },
-        },
-      ),
-    ).rejects.toThrow(/does not match/);
+  it("rejects a response that differs from the accepted human decision", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("human-decision-mismatch"));
+    try {
+      const waiting = await engine(store).run(workflow, {}, { runId: "human-mismatch" });
+      const request = humanRequest(store, waiting.state);
+      await new HumanDecisionStore(store.databasePath, { state: store.state }).accept(request, {
+        decisionId: request.decisionId,
+        requestDigest: request.requestDigest,
+        choice: "continue",
+        source: { channel: "pi", actorId: "person", eventId: "event" },
+        idempotencyKey: "event",
+      });
+      expect(() => submitCheckpoint(store, waiting.state, { choice: "stop" })).toThrow(
+        /verified human decision/,
+      );
+      expect(
+        store.state.connection
+          .prepare("SELECT COUNT(*) AS count FROM interactive_submissions")
+          .get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      store.close();
+    }
   });
 });

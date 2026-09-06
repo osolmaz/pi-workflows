@@ -8,8 +8,6 @@ import {
 } from "../workflows/store.js";
 import type { WorkflowTransition } from "../workflows/transitions.js";
 import type {
-  HumanDecisionRequest,
-  ResolvedHumanDecision,
   WorkflowDefinition,
   WorkflowEffectRecovery,
   WorkflowEffectReservation,
@@ -126,18 +124,11 @@ export class ServerBackedWorkflowStore implements WorkflowExecutionStore {
     );
   }
 
-  async createHumanDecisionRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
-    return await this.call<"created" | "adopted">(
-      "store.createHumanDecisionRequest",
-      { request },
-      request.attemptId,
-    );
-  }
-
-  async readResolvedHumanDecision(decisionId: string): Promise<ResolvedHumanDecision | null> {
-    return await this.call<ResolvedHumanDecision | null>("store.readResolvedHumanDecision", {
-      decisionId,
-    });
+  async readCheckpoint(runId: string, attemptId: string) {
+    const value = await this.call<
+      import("../workflows/requests.js").WorkflowCheckpointState | null
+    >("store.readCheckpoint", { runId, attemptId }, attemptId);
+    return value ?? undefined;
   }
 
   async reserveEffect(options: {

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,7 +7,7 @@ import {
   validateCommandBatchRequest,
   type CommandBatchItem,
 } from "../src/workflows/command-batch.js";
-import { makeTempDir } from "./helpers.js";
+import { makeTempDir, waitUntil } from "./helpers.js";
 
 function item(
   id: string,
@@ -255,14 +256,19 @@ describe("runCommandBatch", () => {
       "setTimeout(() => {}, 5_000);",
     ].join("\n");
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 80);
-    const result = await runCommandBatch(
+    const running = runCommandBatch(
       {
         items: [item("one", cwd, script, 10_000), item("two", cwd, script, 10_000)],
         maxConcurrency: 1,
       },
       { signal: controller.signal },
     );
+    try {
+      await waitUntil(() => existsSync(log));
+    } finally {
+      controller.abort();
+    }
+    const result = await running;
     const starts = (await fs.readFile(log, "utf8")).trim().split("\n");
     expect(starts).toHaveLength(1);
     expect(result.items.map((entry) => entry.outcome)).toEqual(["cancelled", "cancelled"]);

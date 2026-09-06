@@ -203,7 +203,6 @@ export type {
   HumanDecisionChannelRequest,
   HumanDecisionChoice,
   HumanDecisionChoiceMap,
-  HumanDecisionContinuationRecord,
   HumanDecisionDeliveryRecord,
   HumanDecisionNodeContract,
   HumanDecisionPrompt,

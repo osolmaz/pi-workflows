@@ -452,13 +452,6 @@ function treeHasBlocker(
     ) ||
     hasRow(
       database,
-      `SELECT 1 FROM continuations
-       WHERE (parent_run_id IN (${values}) AND continuation_run_id NOT IN (${values}))
-          OR (continuation_run_id IN (${values}) AND parent_run_id NOT IN (${values}))`,
-      [...runIds, ...runIds, ...runIds, ...runIds],
-    ) ||
-    hasRow(
-      database,
       `SELECT 1 FROM workflow_settings
        WHERE (origin_run_id IN (${values}) AND active_run_id NOT IN (${values}))
           OR (active_run_id IN (${values}) AND origin_run_id NOT IN (${values}))`,
@@ -545,12 +538,6 @@ function deleteRunAggregates(database: Database.Database, runIds: string[]): voi
     const effectValues = placeholders(effectIds);
     database.prepare(`DELETE FROM effects WHERE effect_id IN (${effectValues})`).run(...effectIds);
   }
-  database
-    .prepare(
-      `DELETE FROM continuations
-       WHERE parent_run_id IN (${values}) OR continuation_run_id IN (${values})`,
-    )
-    .run(...runIds, ...runIds);
   const allResources = [...new Set([...resources, ...effectRows.map((row) => row.resourceId)])];
   if (allResources.length !== 0) {
     database

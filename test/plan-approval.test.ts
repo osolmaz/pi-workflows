@@ -6,7 +6,8 @@ import { StateMutationStore, resourceIdFor } from "../src/state/mutation.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
+import type { HumanDecisionResponse } from "../src/workflows/types.js";
+import { humanRequest, submitCheckpoint } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 const planDigest = `sha256:${"a".repeat(64)}`;
@@ -25,7 +26,7 @@ async function runChoice(response: HumanDecisionResponse) {
     },
     { runId: `approval-${response.choice}` },
   );
-  const request = parent.state.finalOutput as HumanDecisionRequest;
+  const request = humanRequest(store, parent.state);
   const accepted = await new HumanDecisionStore(runs).accept(request, {
     decisionId: request.decisionId,
     requestDigest: request.requestDigest,
@@ -33,12 +34,8 @@ async function runChoice(response: HumanDecisionResponse) {
     source: { channel: "pi", actorId: "person", eventId: `event-${response.choice}` },
     idempotencyKey: `event-${response.choice}`,
   });
-  return await makeEngine().continueRun(
-    planApprovalWorkflow,
-    parent.state.runId,
-    {},
-    { humanDecision: accepted.decision },
-  );
+  submitCheckpoint(store, parent.state, accepted.decision.response);
+  return await makeEngine().resumeRun(planApprovalWorkflow, parent.runId);
 }
 
 describe("plan-approval workflow", () => {
@@ -86,7 +83,7 @@ describe("plan-approval workflow", () => {
       },
       { runId: "approval-presentation" },
     );
-    const request = parent.state.finalOutput as HumanDecisionRequest;
+    const request = humanRequest(store, parent.state);
     expect(request.schema).toBe("pi-workflows.human-decision-request.v1");
     if (request.schema !== "pi-workflows.human-decision-request.v1") return;
     expect(request.subject).toMatchObject({
@@ -108,7 +105,7 @@ describe("plan-approval workflow", () => {
       { task: "demo", plan: { step: 1 }, planDigest },
       { runId: "approval-timeout" },
     );
-    const request = parent.state.finalOutput as HumanDecisionRequest;
+    const request = humanRequest(store, parent.state);
     expect(request.defaultResponse).toEqual({ choice: "continue" });
     expect(Date.parse(request.expiresAt ?? "") - Date.parse(request.createdAt)).toBe(600_000);
 
@@ -136,12 +133,14 @@ describe("plan-approval workflow", () => {
       provenance: "timeout",
       response: { choice: "continue" },
     });
-    const continuation = await makeEngine().continueRun(
-      planApprovalWorkflow,
-      parent.state.runId,
-      {},
-      { humanDecision: resolved.decision },
+    new StateMutationStore(store.state).release(
+      claim,
+      store.synchronizeRevision(parent.runId),
+      Date.parse(request.expiresAt!),
     );
+    store.synchronizeRevision(parent.runId);
+    submitCheckpoint(store, parent.state, resolved.decision.response);
+    const continuation = await makeEngine().resumeRun(planApprovalWorkflow, parent.runId);
     expect(continuation.state.finalOutput).toMatchObject({
       status: "continue",
       resolution: {

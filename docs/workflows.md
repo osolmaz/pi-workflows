@@ -130,8 +130,8 @@ The extension, CLI, and `piw` use the same version-1 client protocol over a Unix
 
 A runner verifies the root and all mounted source identities before it loads
 workflow modules. It then checks the resolved mounted-source map and executes
-from committed state through a server-backed store. Resume and continuation
-reads return only `WorkflowRunState`. Session messages, tool results, activity
+from committed state through a server-backed store. Resume reads return only
+`WorkflowRunState`. Session messages, tool results, activity
 events, viewer history, settings, follow-ups, and other inspection data stay in
 server-owned SQLite. If one required result exceeds the runner protocol frame,
 the server returns a digest-bound reference and the runner reads and verifies it
@@ -340,20 +340,21 @@ a manual effect becomes ambiguous. This is not an exactly-once claim.
 
 ### checkpoint
 
-Ends the run in a `waiting` state for human review. The checkpoint run is
-terminal, so no process keeps running while the run waits. The human answers
-with `/workflow answer <json>` (or plain text), which starts a **continuation
-run**: a new run with its own state and events, linked to the checkpointed run
-through `parentRunId`. The continuation receives the answer as its input,
-carries forward every output the parent produced (including the checkpoint's),
-and continues routing along the checkpoint's outgoing edge. Outgoing edges
-from checkpoint nodes are allowed exactly so continuations have somewhere to
-go; step accounting carries over, so `maxSteps` bounds the whole chain.
+Creates a durable input request and parks the worker. The run is waiting, not
+terminal. Its input, settings, history, and active attempt stay unchanged.
+The optional callback creates the request content once. It does not complete
+the node.
+
+An answer completes that exact request in the same run. The answer becomes the
+checkpoint output, and execution follows its outgoing edge. A checkpoint at the
+end of the graph completes the run with its answer. Each answered checkpoint
+counts once toward `maxSteps`. Invalid responses do not create another run or
+change another request.
 
 ```typescript
 checkpoint({
   summary: "human decides how to proceed",
-  run: ({ outputs }) => outputs.reconcile, // optional; default output is { summary }
+  run: ({ outputs }) => outputs.reconcile, // optional request content; defaults to { summary }
 });
 ```
 
@@ -388,7 +389,7 @@ humanDecision({
 });
 ```
 
-The waiting run stores a versioned request and asks every channel configured for the logical audience. The structured `subject` remains machine data. Channels receive only the normalized `presentation`, title, choices, input prompts, and any deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the server takes a control claim on the waiting parent and atomically applies the validated response with `timeout` provenance, closes the interaction, and reserves the continuation. This policy can continue without a configured channel. A continuation preserves the original workflow input and exposes the resolved response as the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices. The removed `body` request form is invalid under the alpha hard cut.
+The waiting run stores the request and asks every channel configured for the audience. The structured `subject` remains machine data. Channels receive the normalized `presentation`, title, choices, input prompts, and deadline policy. The first valid verified human answer wins. When `onTimeout` is present and no human answer wins before the saved deadline, the server accepts the declared response with `timeout` provenance and resumes the same run. This policy can continue without a configured channel. The original input remains unchanged, and the resolved response becomes the checkpoint output. `humanDecisionEdge()` provides exhaustive routing for the choices.
 
 The model-facing workflow tool cannot answer a protected human decision. The origin Pi session displays the request without starting a model turn. A person uses `/workflow answer` to send the answer through the server-owned path. Ordinary checkpoints can also use the model-facing `answer` action.
 
@@ -726,7 +727,7 @@ returns its stored receipt.
 
 A headless resource manager child cannot produce a visible assistant message without
 an approved origin-session binding. Use structured agent output for detached
-work. A final continuation-chain outcome creates its own terminal workflow message through the shared coordinator only after the outcome is durable.
+work. A terminal run creates its own terminal workflow message through the shared coordinator only after the outcome is durable.
 
 ## Runtime behavior
 
@@ -748,9 +749,9 @@ possible. Defaults worth knowing:
   receipt, and fences the runner before process-group shutdown. `/workflow
 resume` takes a new generation and reruns only work after the last durable
   boundary.
-- The server tells each runner to `start`, `resume`, `continue`, or `restart`.
-  A checkpoint continuation names its waiting parent. A restart begins at the
-  workflow start and does not reuse checkpoint continuation rules.
+- The server tells each runner to `start`, `resume`, or `restart`.
+  An answered checkpoint resumes its exact attempt in the same run. An explicit
+  restart creates a new run at the workflow start.
 - Resuming an active run adopts the existing work. Duplicate start, control,
   update, and submission messages return their stored receipts.
 - A start is committed as `queued` with its final run ID before the command
@@ -773,7 +774,7 @@ resume` takes a new generation and reruns only work after the last durable
 
 ## Run history retention
 
-Pi Workflows keeps a terminal root run and all its restart or continuation descendants for 30 days from `finished_at`. The server can remove the tree after that point only when every descendant is terminal and no protected work or outside reference remains.
+Pi Workflows keeps a terminal root run and all its explicit restart descendants for 30 days from `finished_at`. The server can remove the tree after that point only when every descendant is terminal and no protected work or outside reference remains.
 
 Protected work includes waiting or parked runs, live queue rows, pending workflow messages, open workflow turns, pending interactions or decisions, recording session segments, queued follow-ups, active leases, unsettled effects, controller ownership, active runner content, resumable checkpoints, and undelivered terminal results.
 

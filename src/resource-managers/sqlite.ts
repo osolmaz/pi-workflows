@@ -53,7 +53,7 @@ export type WorkflowRunReservationOptions = {
   originSessionId: string;
   executionMode?: "interactive" | "headless";
   parentRunId?: string;
-  lineageKind?: "continuation" | "restart";
+  lineageKind?: "restart";
   restartNumber?: number;
   parentTerminalFingerprint?: string;
   now?: string;
@@ -78,7 +78,7 @@ export type WorkflowRunQueueViewRecord = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   rootRunId: string;
-  lineageKind: "continuation" | "restart" | null;
+  lineageKind: "restart" | null;
   restartNumber: number;
   parentTerminalFingerprint: string | null;
   errorCode: string | null;
@@ -108,7 +108,7 @@ export type WorkflowRunQueueRecord = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   rootRunId: string;
-  lineageKind: "continuation" | "restart" | null;
+  lineageKind: "restart" | null;
   restartNumber: number;
   parentTerminalFingerprint: string | null;
   errorCode: string | null;
@@ -181,7 +181,7 @@ type RunRow = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   rootRunId: string;
-  lineageKind: "continuation" | "restart" | null;
+  lineageKind: "restart" | null;
   restartNumber: number;
   parentTerminalFingerprint: Buffer | null;
   createdAt: number;
@@ -204,7 +204,7 @@ type WorkflowRunViewRow = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   rootRunId: string;
-  lineageKind: "continuation" | "restart" | null;
+  lineageKind: "restart" | null;
   restartNumber: number;
   parentTerminalFingerprint: Buffer | null;
   errorCode: string | null;
@@ -1099,10 +1099,12 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
     if (this.getWorkflowRun(options.runId) !== undefined) {
       throw new Error(`Workflow run already reserved: ${options.runId}`);
     }
-    const lineageKind =
-      options.parentRunId === undefined ? null : (options.lineageKind ?? "continuation");
-    if (options.parentRunId === undefined && options.lineageKind !== undefined) {
-      throw new Error("A root workflow run cannot declare lineage");
+    const lineageKind = options.parentRunId === undefined ? null : (options.lineageKind ?? null);
+    if (
+      (options.parentRunId === undefined && options.lineageKind !== undefined) ||
+      (options.parentRunId !== undefined && lineageKind !== "restart")
+    ) {
+      throw new Error("Only an explicit restart can declare a parent run");
     }
     let rootRunId = options.runId;
     let restartNumber = 0;
@@ -1127,42 +1129,6 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
         restartNumber = options.restartNumber ?? parent.restartNumber + 1;
         if (restartNumber !== parent.restartNumber + 1) {
           throw new Error("Restart number does not follow its parent");
-        }
-      } else {
-        if (
-          options.parentTerminalFingerprint !== undefined ||
-          (options.restartNumber !== undefined && options.restartNumber !== parent.restartNumber)
-        ) {
-          throw new Error("Continuation lineage conflicts with restart metadata");
-        }
-        restartNumber = parent.restartNumber;
-        if (parent.status === "parked") {
-          const parentLease = this.requireLease(parent.resourceId);
-          if (parentLease.ownerId !== null) {
-            throw new Error("Continuation parent still has an active owner");
-          }
-          this.state.connection
-            .prepare(
-              `UPDATE run_queue
-                 SET status = 'done', updated_at = ?, finished_at = ?
-                 WHERE run_id = ? AND status = 'parked'`,
-            )
-            .run(now, now, parent.runId);
-          const parentRevision = this.resourceRevision(parent.resourceId);
-          this.bumpResource(parent.resourceId, parentRevision, now);
-          this.insertEvent(
-            parent.resourceId,
-            parentRevision + 1,
-            "run.queue_done_for_continuation",
-            "session",
-            options.originSessionId,
-            { continuationRunId: options.runId },
-            now,
-          );
-        } else if (parent.status === "done") {
-          throw new Error("Continuation parent already has a reserved continuation");
-        } else {
-          throw new Error(`Continuation parent queue is ${parent.status}`);
         }
       }
     } else if (
@@ -2691,7 +2657,7 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
     definitionDigest: Buffer,
   ): void {
     const expectedLineageKind =
-      options.parentRunId === undefined ? null : (options.lineageKind ?? "continuation");
+      options.parentRunId === undefined ? null : (options.lineageKind ?? null);
     const parent =
       options.parentRunId === undefined
         ? undefined
@@ -3294,9 +3260,7 @@ function isWorkflowRunViewRow(value: unknown): value is WorkflowRunViewRow {
     (value.executionMode === "interactive" || value.executionMode === "headless") &&
     (value.parentRunId === null || typeof value.parentRunId === "string") &&
     typeof value.rootRunId === "string" &&
-    (value.lineageKind === null ||
-      value.lineageKind === "continuation" ||
-      value.lineageKind === "restart") &&
+    (value.lineageKind === null || value.lineageKind === "restart") &&
     typeof value.restartNumber === "number" &&
     (value.parentTerminalFingerprint === null ||
       Buffer.isBuffer(value.parentTerminalFingerprint)) &&

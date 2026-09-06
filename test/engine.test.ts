@@ -340,8 +340,9 @@ describe("WorkflowEngine", () => {
 
     expect(state.status).toBe("waiting");
     expect(state.waitingOn).toBe("hold");
-    expect(state.finalOutput).toEqual({ summary: "needs review" });
-    expect(state.steps.map((step) => step.nodeId)).toEqual(["hold"]);
+    expect(state.finalOutput).toBeUndefined();
+    expect(state.steps).toHaveLength(0);
+    expect(state.currentAttemptId).toBeDefined();
   });
 
   it("runs shell actions and records receipts", async () => {

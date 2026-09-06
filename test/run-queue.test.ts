@@ -37,21 +37,20 @@ function reserve(store: SqliteResourceManagerStore, runId = "run-1") {
   });
 }
 
-function continuationPreparation() {
+function runPreparation() {
   return {
-    runId: "continuation-1",
+    runId: "prepared-1",
     workflowName: "echo",
     workflowSourceRef: "builtin:echo",
     workflowSource: { kind: "builtin" as const, id: "echo", revision: "test" },
     definitionDigest,
     definitionSnapshot: snapshot,
     input: { task: "hello" },
-    launchOptions: { parentRunId: "parent-1" },
+    launchOptions: {},
     runnerId: "runner-1",
     claimToken: "winner-token",
     leaseMs: 30_000,
-    originSessionId: "session-1",
-    parentRunId: "parent-1",
+    originSessionId: "session-prepared",
   };
 }
 
@@ -86,7 +85,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("atomically prepares or adopts one compatible continuation", async () => {
+  it("atomically prepares or adopts one compatible run", async () => {
     const { store } = await setup();
     reserve(store, "parent-1");
     const parentClaim = store.claimWorkflowRun({
@@ -98,43 +97,43 @@ describe("workflow run queue in canonical SQLite", () => {
     expect(parentClaim).toBeDefined();
     expect(store.parkWorkflowRun({ runId: "parent-1", claimToken: "parent-token" })).toBe(true);
 
-    const options = continuationPreparation();
+    const options = runPreparation();
     const first = store.prepareOrAdoptWorkflowRun(options);
     expect(first).toMatchObject({
       state: "claimed",
       run: {
-        runId: "continuation-1",
+        runId: "prepared-1",
         status: "starting",
         claimToken: "winner-token",
         claimGeneration: 1,
       },
     });
-    const before = store.getWorkflowRun("continuation-1");
+    const before = store.getWorkflowRun("prepared-1");
     const revisionBefore = store.state.connection
       .prepare("SELECT revision FROM resources WHERE aggregate_key = ?")
-      .get("continuation-1");
+      .get("prepared-1");
     const eventsBefore = store.state.connection
       .prepare(
         `SELECT count(*) AS count FROM events e
          JOIN runs r ON r.resource_id = e.resource_id WHERE r.run_id = ?`,
       )
-      .get("continuation-1");
+      .get("prepared-1");
 
     const adopted = store.prepareOrAdoptWorkflowRun({ ...options, claimToken: "loser-token" });
     expect(adopted).toMatchObject({
       state: "adopted",
       run: {
-        runId: "continuation-1",
+        runId: "prepared-1",
         status: "starting",
         claimToken: null,
         claimGeneration: 1,
       },
     });
-    expect(store.getWorkflowRun("continuation-1")).toEqual(before);
+    expect(store.getWorkflowRun("prepared-1")).toEqual(before);
     expect(
       store.state.connection
         .prepare("SELECT revision FROM resources WHERE aggregate_key = ?")
-        .get("continuation-1"),
+        .get("prepared-1"),
     ).toEqual(revisionBefore);
     expect(
       store.state.connection
@@ -142,32 +141,30 @@ describe("workflow run queue in canonical SQLite", () => {
           `SELECT count(*) AS count FROM events e
            JOIN runs r ON r.resource_id = e.resource_id WHERE r.run_id = ?`,
         )
-        .get("continuation-1"),
+        .get("prepared-1"),
     ).toEqual(eventsBefore);
-    expect(
-      store.verifyWorkflowRunClaim({ runId: "continuation-1", claimToken: "winner-token" }),
-    ).toBe(true);
-    expect(
-      store.verifyWorkflowRunClaim({ runId: "continuation-1", claimToken: "loser-token" }),
-    ).toBe(false);
+    expect(store.verifyWorkflowRunClaim({ runId: "prepared-1", claimToken: "winner-token" })).toBe(
+      true,
+    );
+    expect(store.verifyWorkflowRunClaim({ runId: "prepared-1", claimToken: "loser-token" })).toBe(
+      false,
+    );
     expect(
       store.renewWorkflowRunClaim({
-        runId: "continuation-1",
+        runId: "prepared-1",
         claimToken: "loser-token",
         leaseMs: 30_000,
       }),
     ).toBe(false);
-    expect(store.parkWorkflowRun({ runId: "continuation-1", claimToken: "loser-token" })).toBe(
+    expect(store.parkWorkflowRun({ runId: "prepared-1", claimToken: "loser-token" })).toBe(false);
+    expect(store.completeWorkflowRun({ runId: "prepared-1", claimToken: "loser-token" })).toBe(
       false,
     );
-    expect(store.completeWorkflowRun({ runId: "continuation-1", claimToken: "loser-token" })).toBe(
-      false,
-    );
-    expect(store.getWorkflowRun("continuation-1")).toEqual(before);
+    expect(store.getWorkflowRun("prepared-1")).toEqual(before);
     store.close();
   });
 
-  it("rejects incompatible continuation adoption without mutation", async () => {
+  it("rejects incompatible run adoption without mutation", async () => {
     const { store } = await setup();
     reserve(store, "parent-1");
     const parent = store.claimWorkflowRun({
@@ -187,9 +184,9 @@ describe("workflow run queue in canonical SQLite", () => {
     });
     expect(secondParent).toBeDefined();
     expect(store.parkWorkflowRun({ runId: "parent-2", claimToken: "parent-2-token" })).toBe(true);
-    const options = continuationPreparation();
+    const options = runPreparation();
     store.prepareOrAdoptWorkflowRun(options);
-    const before = store.getWorkflowRun("continuation-1");
+    const before = store.getWorkflowRun("prepared-1");
     const conflicts = [
       { workflowName: "other" },
       { workflowSourceRef: "builtin:other" },
@@ -208,7 +205,7 @@ describe("workflow run queue in canonical SQLite", () => {
           claimToken: "loser-token",
         }),
       ).toThrow(/preparation conflicts/);
-      expect(store.getWorkflowRun("continuation-1")).toEqual(before);
+      expect(store.getWorkflowRun("prepared-1")).toEqual(before);
     }
     store.close();
   });
@@ -490,7 +487,7 @@ describe("workflow run queue in canonical SQLite", () => {
     store.close();
   });
 
-  it("releases a waiting parent reservation before its continuation", async () => {
+  it("rejects a checkpoint child without changing its parent reservation", async () => {
     const { store } = await setup();
     reserve(store, "parent-run");
     store.claimWorkflowRun({
@@ -500,20 +497,23 @@ describe("workflow run queue in canonical SQLite", () => {
       leaseMs: 60_000,
     });
     expect(store.parkWorkflowRun({ runId: "parent-run", claimToken: "parent-token" })).toBe(true);
-    const continuation = store.reserveWorkflowRun({
-      runId: "continuation-run",
-      workflowName: "echo",
-      workflowSourceRef: "builtin:echo",
-      workflowSource: { kind: "builtin", id: "echo", revision: "test" },
-      definitionDigest,
-      definitionSnapshot: snapshot,
-      input: {},
-      runnerId: "session-1",
-      originSessionId: "session-1",
-      parentRunId: "parent-run",
-    });
-    expect(continuation.status).toBe("queued");
-    expect(store.getWorkflowRun("parent-run")?.status).toBe("done");
+    const before = store.getWorkflowRun("parent-run");
+    expect(() =>
+      store.reserveWorkflowRun({
+        runId: "continuation-run",
+        workflowName: "echo",
+        workflowSourceRef: "builtin:echo",
+        workflowSource: { kind: "builtin", id: "echo", revision: "test" },
+        definitionDigest,
+        definitionSnapshot: snapshot,
+        input: {},
+        runnerId: "session-1",
+        originSessionId: "session-1",
+        parentRunId: "parent-run",
+      }),
+    ).toThrow(/explicit restart/);
+    expect(store.getWorkflowRun("parent-run")).toEqual(before);
+    expect(store.getWorkflowRun("continuation-run")).toBeUndefined();
     expect(() =>
       store.reserveWorkflowRun({
         runId: "duplicate-continuation",
@@ -527,7 +527,7 @@ describe("workflow run queue in canonical SQLite", () => {
         originSessionId: "session-1",
         parentRunId: "parent-run",
       }),
-    ).toThrow(/already has a reserved continuation/);
+    ).toThrow(/explicit restart/);
     expect(store.getWorkflowRun("duplicate-continuation")).toBeUndefined();
     store.close();
   });

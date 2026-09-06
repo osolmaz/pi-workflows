@@ -16,7 +16,6 @@ import type {
   HumanDecisionCancellationRecord,
   HumanDecisionChoiceMap,
   HumanDecisionChannelRequest,
-  HumanDecisionContinuationRecord,
   HumanDecisionDeliveryRecord,
   HumanDecisionPrompt,
   HumanDecisionRequest,
@@ -377,7 +376,7 @@ export class HumanDecisionStore {
     if (this.ownsState) this.state.close();
   }
 
-  async createRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
+  createRequest(request: HumanDecisionRequest): "created" | "adopted" {
     validateHumanDecisionRequestIntegrity(request);
     return this.state.transaction(() => {
       const existing = this.readRequestRow(request.decisionId);
@@ -674,42 +673,9 @@ export class HumanDecisionStore {
     return resolution?.outcome === "accepted" ? resolution.decision : null;
   }
 
-  async recordContinuation(
-    decisionId: string,
-    value: HumanDecisionContinuationRecord,
-  ): Promise<"created" | "adopted"> {
-    return this.state.transaction(() => {
-      const existing = this.readContinuationRow(decisionId);
-      if (existing !== undefined) {
-        const stored = this.continuationRecord(decisionId, existing);
-        if (canonicalJson(stored) !== canonicalJson(value)) {
-          throw new Error("Immutable human decision continuation conflicts");
-        }
-        return "adopted";
-      }
-      const resolution = this.readResolution(decisionId);
-      if (resolution?.outcome !== "accepted") {
-        throw new Error("A continuation requires an accepted human decision");
-      }
-      this.state.connection
-        .prepare(
-          `INSERT INTO continuations(
-             decision_id, parent_run_id, continuation_run_id, created_at
-           ) VALUES (?, ?, ?, ?)`,
-        )
-        .run(decisionId, value.parentRunId, value.runId, Date.parse(value.createdAt));
-      return "created";
-    });
-  }
-
-  async readContinuation(decisionId: string): Promise<HumanDecisionContinuationRecord | null> {
-    const row = this.readContinuationRow(decisionId);
-    return row === undefined ? null : this.continuationRecord(decisionId, row);
-  }
-
   markEffectApplied(
     decisionId: string,
-    effectType: "decision.continue" | "decision.cancel_parent" | "decision.settle_presentations",
+    effectType: "decision.cancel_parent" | "decision.settle_presentations",
   ): void {
     const rows = this.state.connection
       .prepare(
@@ -1005,7 +971,7 @@ export class HumanDecisionStore {
   ): void {
     const types =
       outcome === "accepted"
-        ? ["decision.continue", "decision.settle_presentations"]
+        ? ["decision.settle_presentations"]
         : ["decision.cancel_parent", "decision.settle_presentations"];
     for (const effectType of types) {
       const idempotencyKey = request.decisionId;
@@ -1188,38 +1154,6 @@ export class HumanDecisionStore {
       )
       .run(outcome, resultHash, decisionId, attemptId);
   }
-
-  private readContinuationRow(decisionId: string): ContinuationRow | undefined {
-    const row = this.state.connection
-      .prepare(
-        `SELECT c.parent_run_id AS parentRunId, c.continuation_run_id AS continuationRunId,
-                c.created_at AS createdAt, d.request_hash AS requestHash,
-                r.response_hash AS resolutionHash
-         FROM continuations c
-         JOIN human_decisions d ON d.decision_id = c.decision_id
-         JOIN human_decision_resolutions r ON r.decision_id = c.decision_id
-         WHERE c.decision_id = ? AND r.outcome = 'accepted'`,
-      )
-      .get(decisionId);
-    return isContinuationRow(row) ? row : undefined;
-  }
-
-  private continuationRecord(
-    decisionId: string,
-    row: ContinuationRow,
-  ): HumanDecisionContinuationRecord {
-    const request = this.state.readJson(row.requestHash) as HumanDecisionRequest;
-    const decision = this.state.readJson(row.resolutionHash) as ResolvedHumanDecision;
-    return {
-      schema: "pi-workflows.human-decision-continuation.v1",
-      decisionId,
-      requestDigest: request.requestDigest,
-      provenance: decision.provenance,
-      parentRunId: row.parentRunId,
-      runId: row.continuationRunId,
-      createdAt: new Date(row.createdAt).toISOString(),
-    };
-  }
 }
 
 function recordDecisionViewerChange(
@@ -1299,18 +1233,6 @@ function isCandidateHashRow(value: unknown): value is { candidateHash: Buffer } 
 }
 
 function isContentHashRow(value: unknown): value is { contentHash: Buffer } {
-  return isRecordValue(value);
-}
-
-type ContinuationRow = {
-  parentRunId: string;
-  continuationRunId: string;
-  createdAt: number;
-  requestHash: Buffer;
-  resolutionHash: Buffer;
-};
-
-function isContinuationRow(value: unknown): value is ContinuationRow {
   return isRecordValue(value);
 }
 

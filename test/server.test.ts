@@ -1437,7 +1437,7 @@ setInterval(() => {}, 1000);
     }
   });
 
-  it("resolves a protected decision timeout and starts its continuation", async () => {
+  it("resolves a protected decision timeout and resumes the same run", async () => {
     const cwd = await makeTempDir("host-decision-timeout-project");
     const databasePath = path.join(
       await makeTempDir("host-decision-timeout-state"),
@@ -1473,8 +1473,8 @@ setInterval(() => {}, 1000);
             | undefined;
           decisionId = decision?.decisionId;
           if (decision?.provenance !== "timeout_policy") return false;
-          const continuationRunId = `continuation-${decision.decisionId.replace(/^decision-/, "")}`;
-          return queue.getWorkflowRun(continuationRunId)?.status === "done";
+          expect(queue.listWorkflowRuns()).toHaveLength(1);
+          return queue.getWorkflowRun("decision-timeout-parent")?.status === "done";
         } finally {
           queue.close();
         }
@@ -1594,7 +1594,7 @@ setInterval(() => {}, 1000);
         try {
           return queue
             .listWorkflowRuns()
-            .some((run) => run.parentRunId === "channel-decision-parent" && run.status === "done");
+            .some((run) => run.runId === "channel-decision-parent" && run.status === "done");
         } finally {
           queue.close();
         }

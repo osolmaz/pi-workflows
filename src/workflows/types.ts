@@ -448,20 +448,9 @@ export type HumanDecisionCancellationRecord = {
   reason: "cancelled" | "expired";
 };
 
-export type HumanDecisionContinuationRecord = {
-  schema: "pi-workflows.human-decision-continuation.v1";
-  decisionId: string;
-  requestDigest: string;
-  provenance: "human" | "timeout";
-  parentRunId: string;
-  runId: string;
-  createdAt: string;
-};
-
 /**
- * A pause point. The run terminates with status `waiting` so a human (or an
- * external trigger) can decide how to continue. The optional `run` callback
- * produces the checkpoint's output before the run pauses.
+ * A same-run input request. The optional `run` callback produces its prompt.
+ * The accepted answer becomes the node output; requesting input does not finish the node.
  */
 export type CheckpointNodeDefinition = WorkflowNodeCommon & {
   nodeType: "checkpoint";
@@ -686,14 +675,8 @@ export type WorkflowRunState = {
   traceSeq: number;
   runId: string;
   workflowName: string;
-  /** Set on continuation runs: the checkpointed run this one carries forward. */
+  /** Set on explicit fresh restarts. Checkpoint answers keep the same run. */
   parentRunId?: string;
-  /**
-   * Steps carried from the parent at continuation start. Steps beyond this
-   * count were recorded by this run itself; resume uses it to tell a
-   * carried checkpoint from this run's own.
-   */
-  carriedStepCount?: number;
   runTitle?: string;
   /** Stable built-in identity or immutable file source used by this run. */
   workflowSource?: WorkflowSource;
@@ -723,7 +706,7 @@ export type WorkflowRunState = {
   currentSettingsChangeNumber?: number;
   currentSettingsHash?: string;
   statusDetail?: string;
-  /** Redacted verified-human receipt carried by a continuation run. */
+  /** Redacted receipt for the latest accepted human decision in this run. */
   humanDecision?: HumanDecisionReceipt;
   /** True while the run is held at a step boundary by a pause request. */
   paused?: boolean;

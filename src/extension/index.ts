@@ -1069,31 +1069,29 @@ async function executeCommand(
       }
       const parent = sessionRun(ctx, command.runId);
       if (parent === undefined) throw new Error("No checkpoint is waiting in this session");
-      const continuationRunId = createRunId(parent.workflowName);
+      const checkpoint = sessionSnapshots
+        .get(ctx.sessionManager.getSessionId())
+        ?.pendingInteractions.map(parseInteractiveRequest)
+        .find((request) => request?.runId === parent.runId && request.kind === "checkpoint");
+      if (checkpoint === undefined)
+        throw new Error("Only an ordinary checkpoint accepts an answer");
       const response = await requestAccepted(client, {
         operation: "checkpoint.answer",
         requestId: `checkpoint-${idempotencyKey}`,
         idempotencyKey,
         runId: parent.runId,
+        expectedRevision: checkpoint.revision,
         payload: {
-          continuationRunId,
+          requestId: checkpoint.requestId,
+          submissionId: idempotencyKey,
           input: jsonValue(command.input),
         },
       });
-      const receipt = isRecord(response.receipt) ? response.receipt : undefined;
-      const actualRunId =
-        receipt !== undefined && typeof receipt.runId === "string"
-          ? receipt.runId
-          : continuationRunId;
       return {
-        message:
-          receipt?.alreadyAnswered === true
-            ? `Checkpoint ${parent.runId} was already answered; continuation ${actualRunId} exists.`
-            : `Answered checkpoint ${parent.runId}; continuation ${actualRunId} started.`,
+        message: `Answered checkpoint ${checkpoint.requestId}; run ${parent.runId} can continue.`,
         details: {
           action: "answer",
-          parentRunId: parent.runId,
-          runId: actualRunId,
+          runId: parent.runId,
           response: response.receipt ?? null,
         },
       };
@@ -1492,7 +1490,10 @@ function parseInteractiveRequest(value: unknown): ClientInteractiveRequest | und
     typeof value.runId !== "string" ||
     typeof value.targetSessionId !== "string" ||
     typeof value.revision !== "number" ||
-    (value.kind !== "agent" && value.kind !== "assistant" && value.kind !== "decision")
+    (value.kind !== "agent" &&
+      value.kind !== "assistant" &&
+      value.kind !== "checkpoint" &&
+      value.kind !== "decision")
   ) {
     return undefined;
   }

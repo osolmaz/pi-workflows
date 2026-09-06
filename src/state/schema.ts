@@ -115,7 +115,7 @@ CREATE TABLE runs (
   project_id TEXT REFERENCES projects(project_id),
   parent_run_id TEXT REFERENCES runs(run_id),
   root_run_id TEXT NOT NULL REFERENCES runs(run_id),
-  lineage_kind TEXT CHECK (lineage_kind IS NULL OR lineage_kind IN ('continuation', 'restart')),
+  lineage_kind TEXT CHECK (lineage_kind IS NULL OR lineage_kind IN ('restart')),
   restart_number INTEGER NOT NULL DEFAULT 0 CHECK (restart_number >= 0),
   parent_terminal_fingerprint BLOB CHECK (
     parent_terminal_fingerprint IS NULL OR length(parent_terminal_fingerprint) = 32
@@ -393,7 +393,6 @@ CREATE TABLE run_steps (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   step_index INTEGER NOT NULL CHECK (step_index >= 0),
   attempt_id TEXT NOT NULL REFERENCES node_attempts(attempt_id),
-  output_override_hash BLOB REFERENCES blobs(blob_hash),
   PRIMARY KEY (run_id, step_index),
   UNIQUE (run_id, attempt_id)
 ) STRICT;
@@ -615,13 +614,6 @@ CREATE TABLE human_decision_submissions (
   result_hash BLOB REFERENCES blobs(blob_hash),
   submitted_at INTEGER NOT NULL,
   PRIMARY KEY (decision_id, attempt_id)
-) STRICT;
-
-CREATE TABLE continuations (
-  decision_id TEXT PRIMARY KEY REFERENCES human_decisions(decision_id) ON DELETE CASCADE,
-  parent_run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
-  continuation_run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
-  created_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE controller_resources (

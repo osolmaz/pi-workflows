@@ -12,6 +12,7 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { allowSettingsPath, settingsRoute, workflowSettings } from "../src/workflows/settings.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import type { AgentStepRequest, AgentStepSubmission } from "../src/workflows/types.js";
+import { submitCheckpoint } from "./checkpoint-helpers.js";
 import { ScriptedExecutor, makeStateDatabasePath, waitUntil } from "./helpers.js";
 
 type Settings = { mode: "a" | "b"; notes: string[] };
@@ -623,7 +624,7 @@ describe("durable workflow settings", () => {
     store.close();
   });
 
-  it("carries settings and queued follow-ups through a checkpoint continuation", async () => {
+  it("preserves settings and follow-ups in the same run across a checkpoint", async () => {
     const databasePath = await makeStateDatabasePath("workflow-settings-continuation");
     const workflow = defineWorkflow({
       name: "settings-checkpoint-test",
@@ -661,7 +662,8 @@ describe("durable workflow settings", () => {
       prompt: "Continue later",
     });
 
-    const child = await engine.continueRun(workflow, parent.runId, { answer: true });
+    submitCheckpoint(store, parent.state, { answer: true });
+    const child = await engine.resumeRun(workflow, parent.runId);
     expect(child.state.finalOutput).toEqual({
       settings: { mode: "b", notes: [] },
       settingsChangeNumber: 1,
@@ -674,7 +676,7 @@ describe("durable workflow settings", () => {
     expect(store.readFollowUpQueue(parent.runId)?.followUps).toMatchObject([
       { prompt: "Continue later", order: 1, state: "queued" },
     ]);
-    expect(store.readFollowUpQueue(child.runId)).toBeUndefined();
+    expect(child.runId).toBe(parent.runId);
     store.close();
   });
 });
