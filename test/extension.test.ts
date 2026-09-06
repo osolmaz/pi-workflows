@@ -725,6 +725,54 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_shutdown");
   }, 60_000);
 
+  it("rejects a checkpoint answer at an agent request without changing execution", async () => {
+    const { cwd, workflowPath } = await setupProject();
+    const fake = makePi({ cwd });
+    await fake.emit("session_start");
+    await fake.runCommand(workflowPath);
+    await waitUntil(() => fake.sent.length === 1, 30_000);
+    const contract = stepContract(fake.sent[0] as Record<string, unknown>);
+    const store = new ServerStateStore(workflowStatePath(), { readOnly: true });
+    const queue = new SqliteResourceManagerStore(workflowStatePath(), {
+      readOnly: true,
+      global: true,
+    });
+    try {
+      const requests = store.listPendingInteractions("session-one");
+      const runs = queue.listWorkflowRuns();
+      await expect(
+        fake.runTool("wrong-answer", {
+          action: "answer",
+          input: { approved: true },
+        }),
+      ).rejects.toThrow(/Only an ordinary checkpoint/);
+      expect(store.listPendingInteractions("session-one")).toEqual(requests);
+      expect(queue.listWorkflowRuns()).toEqual(runs);
+      await expect(
+        fake.runTool("wrong-attempt", {
+          action: "submit",
+          step: contract.nodeId,
+          attempt: "another-attempt",
+          output: { answer: "wrong" },
+        }),
+      ).rejects.toThrow(/No matching agent request/);
+      expect(store.listPendingInteractions("session-one")).toEqual(requests);
+      expect(queue.listWorkflowRuns()).toEqual(runs);
+      await expect(
+        fake.runTool("valid-after-rejection", {
+          action: "submit",
+          step: contract.nodeId,
+          attempt: contract.attemptId,
+          output: { answer: "done" },
+        }),
+      ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });
+    } finally {
+      store.close();
+      queue.close();
+      await fake.emit("session_shutdown");
+    }
+  }, 60_000);
+
   it("continues an ordinary checkpoint through the model-facing answer action", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeCheckpointWorkflow(cwd);

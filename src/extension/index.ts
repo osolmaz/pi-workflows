@@ -503,8 +503,16 @@ export default function piWorkflows(pi: ExtensionAPI): void {
       return await runToolInOrder(async () => {
         const params = parseWorkflowToolInput(rawParams);
         if (params.action === "update" || params.action === "submit") {
-          const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
-          if (interaction === undefined) throw new Error("No workflow step is waiting for output");
+          const interaction = sessionSnapshots
+            .get(ctx.sessionManager.getSessionId())
+            ?.pendingInteractions.map(parseInteractiveRequest)
+            .find((request) => {
+              if (request?.kind !== "agent") return false;
+              const contract = agentContract(request);
+              return contract?.nodeId === params.step && contract.attemptId === params.attempt;
+            });
+          if (interaction === undefined)
+            throw new Error("No matching agent request is waiting for output");
           const contract = agentContract(interaction);
           if (contract === undefined)
             throw new Error("The pending interaction is not an agent step");
