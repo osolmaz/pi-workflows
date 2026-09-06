@@ -2137,7 +2137,11 @@ export class WorkflowServer {
       }
       return { outcome: "rejected", error: "Workflow run is not waiting at a checkpoint" };
     }
-    if (bundle.snapshot.nodes[waitingOn]?.humanDecision !== undefined) {
+    const waitingNode = bundle.snapshot.nodes[waitingOn];
+    if (waitingNode?.nodeType !== "checkpoint") {
+      return { outcome: "rejected", error: "Only an ordinary checkpoint accepts an answer" };
+    }
+    if (waitingNode.humanDecision !== undefined) {
       return { outcome: "rejected", error: "Protected human decisions require a human channel" };
     }
     const projectPath = this.queue.workflowRunProjectPath(parentRunId);
@@ -2373,6 +2377,9 @@ export class WorkflowServer {
     if (interaction === undefined || interaction.runId !== runId) {
       return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
     }
+    if (interaction.kind !== "agent") {
+      return { outcome: "rejected", error: "Only a submitted agent request accepts updates" };
+    }
     if (this.queue.isWorkflowRunPaused(runId)) {
       return { outcome: "conflict", error: "Workflow run is paused" };
     }
@@ -2440,6 +2447,9 @@ export class WorkflowServer {
     const current = this.serverState.getInteraction(requestId);
     if (current === undefined || current.runId !== requireRunId(request)) {
       return { outcome: "notFound", error: `Interactive request not found: ${requestId}` };
+    }
+    if (current.kind !== "agent" && current.kind !== "assistant") {
+      return { outcome: "rejected", error: "This request does not accept agent submissions" };
     }
     if (this.queue.isWorkflowRunPaused(current.runId)) {
       return { outcome: "conflict", error: "Workflow run is paused" };

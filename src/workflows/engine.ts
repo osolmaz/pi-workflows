@@ -471,8 +471,10 @@ export class WorkflowEngine {
 
     const waitingNodeId = parentState.waitingOn;
     const waitingNode = workflow.nodes[waitingNodeId];
-    const humanContract =
-      waitingNode?.nodeType === "checkpoint" ? waitingNode.humanDecision : undefined;
+    if (waitingNode?.nodeType !== "checkpoint") {
+      throw new Error("Only a checkpoint can accept a checkpoint answer");
+    }
+    const humanContract = waitingNode.humanDecision;
     let acceptedResponse: unknown;
     let acceptedNodeId: string | undefined;
     let normalizedInput: unknown;
