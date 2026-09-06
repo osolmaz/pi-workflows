@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertSafeTempRoot,
+  configureModelBudget,
   parseArgs,
   RpcSession,
   withTemporaryRoot,
@@ -22,6 +23,67 @@ describe("installed live E2E script", () => {
     expect(() => parseArgs(["--provider", "openai"])).toThrow(
       "requires both --provider and --model",
     );
+  });
+
+  it("bounds only the exact model in an isolated nonsecret configuration", async () => {
+    const options = parseArgs([
+      "--provider",
+      "openrouter",
+      "--model",
+      "deepseek/deepseek-v4-flash",
+      "--max-output-tokens",
+      "4096",
+    ]);
+    expect(options.maxOutputTokens).toBe(4096);
+    for (const tokens of ["0", "-1", "1.5", "no", "9007199254740992"]) {
+      expect(() => parseArgs(["--max-output-tokens", tokens])).toThrow("positive safe integer");
+    }
+    expect(() => parseArgs(["--max-output-tokens", "4096"])).toThrow("isolated generated profile");
+    expect(() =>
+      parseArgs([
+        "--provider",
+        "openrouter",
+        "--model",
+        "deepseek/deepseek-v4-flash",
+        "--profile",
+        "/existing",
+        "--max-output-tokens",
+        "4096",
+      ]),
+    ).toThrow("isolated generated profile");
+    await withTemporaryRoot(async (root) => {
+      await configureModelBudget(root, options);
+      const expected = {
+        providers: {
+          openrouter: { modelOverrides: { "deepseek/deepseek-v4-flash": { maxTokens: 4096 } } },
+        },
+      };
+      expect(JSON.parse(await fs.readFile(path.join(root, "models.json"), "utf8"))).toEqual(
+        expected,
+      );
+      expect(await fs.readdir(root)).toEqual(["models.json"]);
+      await expect(configureModelBudget(root, options)).rejects.toMatchObject({ code: "EEXIST" });
+    });
+  });
+
+  it("fails immediately on a provider error rather than waiting for a pending workflow", async () => {
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const rpc = new RpcSession(child, { root: "/tmp/pi-workflows-live-e2e-provider-error" });
+    try {
+      rpc.events.push({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "402: output allowance exceeds credit",
+        },
+      });
+      expect(() => rpc.assertHealthy()).toThrow("402: output allowance exceeds credit");
+    } finally {
+      await rpc.stop();
+    }
   });
 
   it("refuses cleanup outside one direct guarded temporary root", () => {
@@ -44,7 +106,7 @@ describe("installed live E2E script", () => {
     });
     await once(child, "close");
 
-    expect(() => rpc.assertNoExtensionError()).toThrow("Pi RPC exited with code 7");
+    expect(() => rpc.assertHealthy()).toThrow("Pi RPC exited with code 7");
   });
 
   it("cleans the guarded root when the operation fails", async () => {
