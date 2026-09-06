@@ -1866,6 +1866,116 @@ setInterval(() => {}, 1000);
     }
   }, 60_000);
 
+  it("closes active time atomically when pausing a validating interaction", async () => {
+    const cwd = await makeTempDir("pause-validation-project");
+    const databasePath = path.join(await makeTempDir("pause-validation-state"), "state.sqlite");
+    const workflowPath = path.join(cwd, "validation.workflow.ts");
+    const started = path.join(cwd, "validation.started");
+    await fs.writeFile(
+      workflowPath,
+      `
+import fs from "node:fs";
+import { agent, defineWorkflow } from ${JSON.stringify(path.resolve("src/workflows/index.ts"))};
+export default defineWorkflow({ name: "pause-validation", startAt: "work", nodes: {
+  work: agent({ timeoutMs: 60000, prompt: () => "Return a result.", validate: async (result, ctx) => {
+    fs.writeFileSync(${JSON.stringify(started)}, "started");
+    while (!ctx.signal.aborted) await new Promise(resolve => setTimeout(resolve, 10));
+    ctx.signal.throwIfAborted();
+    return result;
+  } })
+}, edges: [] });`,
+    );
+    const host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    const client = new WorkflowClient({ databasePath });
+    const observed = new ServerStateStore(databasePath, { readOnly: true });
+    let submission: Promise<unknown> | undefined;
+    await host.start();
+    try {
+      await startRun({
+        client,
+        cwd,
+        workflowPath,
+        runId: "pause-validation",
+        executionMode: "interactive",
+      });
+      await waitUntil(
+        () => observed.listPendingInteractions("host-test-session").length === 1,
+        30_000,
+      );
+      const interaction = observed.listPendingInteractions("host-test-session")[0];
+      if (interaction === undefined) throw new Error("request missing");
+      const message = observed.workflowMessages
+        .listRun(interaction.runId)
+        .find((item) => item.sourceId === interaction.requestId);
+      if (message === undefined) throw new Error("step message missing");
+      const authority = await ownSession(client);
+      expect(
+        await client.request({
+          operation: "workflowMessage.reportBranch",
+          payload: {
+            ...authority,
+            entries: [
+              { workflowMessageId: message.workflowMessageId, piSessionEntryId: "step-entry" },
+            ],
+            isIdle: false,
+            hasPendingMessages: false,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+      expect(
+        await client.request({
+          operation: "workflowTurn.report",
+          payload: {
+            ...authority,
+            state: "started",
+            runId: interaction.runId,
+            workflowMessageId: message.workflowMessageId,
+            workflowTurnId: "validation-turn",
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+      submission = client
+        .request({
+          operation: "interaction.submit",
+          payload: {
+            ...authority,
+            requestId: interaction.requestId,
+            submissionId: "validation-result",
+            value: { output: { done: true } },
+          },
+        })
+        .catch((error) => error);
+      await vi.waitFor(
+        async () => {
+          await fs.access(started);
+        },
+        { timeout: 30_000 },
+      );
+      const timing = () =>
+        observed.state.connection
+          .prepare(
+            "SELECT SUM(elapsed_ms) AS elapsedMs, SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) AS openIntervals FROM attempt_active_intervals WHERE attempt_id = ?",
+          )
+          .get(interaction.attemptId) as { elapsedMs: number; openIntervals: number };
+      expect(timing().openIntervals).toBe(1);
+      expect(
+        await client.request({ operation: "run.pause", runId: interaction.runId }),
+      ).toMatchObject({ outcome: "accepted" });
+      const paused = timing();
+      expect(paused.openIntervals).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(timing()).toEqual(paused);
+      expect(await client.request({ operation: "state.verify" })).toMatchObject({
+        outcome: "accepted",
+      });
+    } finally {
+      await client.close();
+      await submission;
+      await host.stop();
+      observed.close();
+    }
+  }, 45_000);
+
   it("counts only active model time across overlapping pause, disconnect, and host recovery", async () => {
     const cwd = await makeTempDir("host-interaction-timeout-project");
     const databasePath = path.join(
