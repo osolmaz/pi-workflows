@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { WorkflowServer } from "../src/server/server.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
 async function writeResourceManager(projectPath: string): Promise<void> {
@@ -244,6 +245,7 @@ export default defineResourceManager({
         }
       }, 75_000);
       const reader = new SqliteResourceManagerStore(databasePath, { projectPath, readOnly: true });
+      const queue = new WorkflowRunQueueStore(databasePath, { state: reader.state, projectPath });
       try {
         const resource = reader.getResource<
           unknown,
@@ -264,13 +266,13 @@ export default defineResourceManager({
         expect(reader.listEffects(resource?.metadata.uid ?? "")).toEqual(
           expect.arrayContaining([expect.objectContaining({ state: "applied" })]),
         );
-        expect(reader.listWorkflowRuns()).toEqual(
+        expect(queue.listWorkflowRuns()).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ workflowName: "hosted-child", status: "done" }),
             expect.objectContaining({ workflowName: "hosted-controlled", status: "parked" }),
           ]),
         );
-        const controlled = reader
+        const controlled = queue
           .listWorkflowRuns()
           .find((run) => run.workflowName === "hosted-controlled");
         if (controlled === undefined) throw new Error("controlled child missing");

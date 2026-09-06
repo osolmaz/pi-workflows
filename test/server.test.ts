@@ -11,7 +11,6 @@ import {
   type ClientRequest,
   type ClientResponse,
 } from "../src/client/protocol.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerProcessRegistry } from "../src/server/processes.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore } from "../src/server/state.js";
@@ -27,6 +26,7 @@ import {
 } from "../src/state/prune.js";
 import type { WorkflowMessage } from "../src/state/workflow-messages.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import type { InteractiveRequestRecord } from "../src/workflows/requests.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
@@ -939,7 +939,7 @@ setInterval(() => {}, 1000);
       try {
         await startRun({ client, cwd, workflowPath, runId: "headless-group-run" });
         await waitUntil(() => {
-          const store = new SqliteResourceManagerStore(databasePath, {
+          const store = new WorkflowRunQueueStore(databasePath, {
             readOnly: true,
             global: true,
           });
@@ -1270,7 +1270,7 @@ setInterval(() => {}, 1000);
       expect(secondResponse.outcome).toBe("accepted");
 
       await waitUntil(() => {
-        const state = new SqliteResourceManagerStore(databasePath, {
+        const state = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -1500,7 +1500,7 @@ setInterval(() => {}, 1000);
       });
       let decisionId: string | undefined;
       await waitUntil(() => {
-        const queue = new SqliteResourceManagerStore(databasePath, {
+        const queue = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -1631,7 +1631,7 @@ setInterval(() => {}, 1000);
         executionMode: "interactive",
       });
       await waitUntil(() => {
-        const queue = new SqliteResourceManagerStore(databasePath, {
+        const queue = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2318,7 +2318,7 @@ setInterval(() => {}, 1000);
       );
 
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2454,7 +2454,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       });
       expect(response.outcome).toBe("accepted");
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2464,7 +2464,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
-      const failed = new SqliteResourceManagerStore(databasePath, {
+      const failed = new WorkflowRunQueueStore(databasePath, {
         readOnly: true,
         global: true,
       });
@@ -2507,7 +2507,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "worker-no-progress-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2518,7 +2518,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
       await new Promise((resolve) => setTimeout(resolve, 100));
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun("worker-no-progress-run")).toMatchObject({
           status: "parked",
@@ -2553,7 +2553,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         executionMode: "interactive",
       });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2564,7 +2564,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
       let originalPresentationHash: Buffer | undefined;
-      const corrupt = new SqliteResourceManagerStore(databasePath, { global: true });
+      const corrupt = new WorkflowRunQueueStore(databasePath, { global: true });
       try {
         const row = corrupt.state.connection
           .prepare(
@@ -2592,7 +2592,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         outcome: "accepted",
         receipt: { runId: "cancel-run", status: "cancelled" },
       });
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun("cancel-run")?.status).toBe("cancelled");
         expect(
@@ -2606,7 +2606,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         store.close();
       }
 
-      const repair = new SqliteResourceManagerStore(databasePath, { global: true });
+      const repair = new WorkflowRunQueueStore(databasePath, { global: true });
       try {
         repair.state.connection
           .prepare("UPDATE runs SET presentation_prompt_hash = ? WHERE run_id = ?")
@@ -2615,7 +2615,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         repair.close();
       }
       await waitUntil(() => {
-        const repaired = new SqliteResourceManagerStore(databasePath, {
+        const repaired = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2849,7 +2849,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
       ]);
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun(runId)?.status).toBe("cancelled");
         const workers = store.state.connection
@@ -2938,7 +2938,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "cancel-effect-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -2970,7 +2970,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         receipt: { runId: "cancel-effect-run", status: "cancelled" },
       });
 
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun("cancel-effect-run")?.status).toBe("cancelled");
         const effect = store.state.connection
@@ -3020,7 +3020,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "child-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3030,7 +3030,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         expect(store.getWorkflowRun("child-run")).toMatchObject({
           status: "done",
@@ -3060,7 +3060,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         executionMode: "interactive",
       });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3190,7 +3190,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "blocked-child-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3201,7 +3201,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
       await new Promise((resolve) => setTimeout(resolve, 500));
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         const run = store.getWorkflowRun("blocked-child-run");
         expect(run?.status).toBe("running");
@@ -3210,7 +3210,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         store.close();
       }
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3239,7 +3239,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "idempotent-crash-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3249,7 +3249,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
           store.close();
         }
       }, 30_000);
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         const effect = store.state.connection
           .prepare(
@@ -3284,7 +3284,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
     try {
       await startRun({ client, cwd, workflowPath, runId: "manual-crash-run" });
       await waitUntil(() => {
-        const store = new SqliteResourceManagerStore(databasePath, {
+        const store = new WorkflowRunQueueStore(databasePath, {
           readOnly: true,
           global: true,
         });
@@ -3296,7 +3296,7 @@ export { default } from ${JSON.stringify(path.resolve("examples/workflows/echo.w
         }
       }, 30_000);
       await new Promise((resolve) => setTimeout(resolve, 200));
-      const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+      const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
       try {
         const effect = store.state.connection
           .prepare(

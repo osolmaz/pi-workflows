@@ -10,14 +10,14 @@ import {
   type WorkflowRunView,
   type WorkflowSessionView,
 } from "../client/view.js";
-import type {
-  SqliteResourceManagerStore,
-  WorkflowRunQueueRecord,
-  WorkflowRunQueueViewRecord,
-} from "../resource-managers/sqlite.js";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import { WorkflowMessageStore, type WorkflowMessage } from "../state/workflow-messages.js";
+import type {
+  WorkflowRunQueueStore,
+  WorkflowRunQueueRecord,
+  WorkflowRunQueueViewRecord,
+} from "../workflows/queue.js";
 import type { WorkflowRunDisplayState, WorkflowRunStore } from "../workflows/store.js";
 import type {
   WorkflowRunState,
@@ -74,7 +74,7 @@ export class ServerViewStore {
 
   constructor(
     private readonly state: StateDatabase,
-    private readonly queue: SqliteResourceManagerStore,
+    private readonly queue: WorkflowRunQueueStore,
     private readonly serverState: ServerStateStore,
     private readonly runs: WorkflowRunStore,
     private readonly hasLiveRunner: (runId: string) => boolean,

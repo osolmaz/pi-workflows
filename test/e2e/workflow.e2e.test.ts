@@ -11,6 +11,7 @@ import { SqliteResourceManagerStore } from "../../src/resource-managers/sqlite.j
 import { ServerStateStore } from "../../src/server/state.js";
 import { workflowStatePath } from "../../src/state/database.js";
 import { parseJson, type JsonValue } from "../../src/state/json.js";
+import { WorkflowRunQueueStore } from "../../src/workflows/queue.js";
 import type { InteractiveRequestRecord } from "../../src/workflows/requests.js";
 import { WorkflowRunStore } from "../../src/workflows/store.js";
 import type { WorkflowRunState } from "../../src/workflows/types.js";
@@ -724,7 +725,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ).toHaveLength(1);
     }
 
-    const store = new SqliteResourceManagerStore(databasePath, { readOnly: true, global: true });
+    const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
     try {
       const workers = store.state.connection
         .prepare("SELECT pid, status FROM run_workers WHERE run_id = ? ORDER BY started_at")

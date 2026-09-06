@@ -41,10 +41,7 @@ import {
   resourceManagerSearchDirs,
   discoverResourceManagers,
 } from "../resource-managers/loader.js";
-import {
-  SqliteResourceManagerStore,
-  type WorkflowRunQueueRecord,
-} from "../resource-managers/sqlite.js";
+import { SqliteResourceManagerStore } from "../resource-managers/sqlite.js";
 import type {
   ResourceManagerQueueClaim,
   ManagedResource,
@@ -72,6 +69,7 @@ import { workflowMessageIdFor } from "../state/workflow-messages.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
+import { WorkflowRunQueueStore, type WorkflowRunQueueRecord } from "../workflows/queue.js";
 import { workflowRequestId, type InteractiveRequestRecord } from "../workflows/requests.js";
 import {
   type WorkflowSettingsDefinition,
@@ -237,7 +235,7 @@ export class WorkflowServer {
   private readonly lockPath: string;
   private readonly state: StateDatabase;
   private readonly serverState: ServerStateStore;
-  private readonly queue: SqliteResourceManagerStore;
+  private readonly queue: WorkflowRunQueueStore;
   private readonly decisions: HumanDecisionStore;
   private readonly channelEffects: ChannelEffectStore;
   private readonly runStore: WorkflowRunStore;
@@ -291,7 +289,7 @@ export class WorkflowServer {
     this.lockPath = path.join(this.stateDirectory, "host.lock.json");
     this.state = new StateDatabase({ filePath: this.databasePath });
     this.serverState = new ServerStateStore(this.databasePath, { state: this.state });
-    this.queue = new SqliteResourceManagerStore(this.databasePath, {
+    this.queue = new WorkflowRunQueueStore(this.databasePath, {
       state: this.state,
       global: true,
     });
@@ -1596,7 +1594,7 @@ export class WorkflowServer {
       return { outcome: "rejected", error: "Workflow definition snapshot is missing" };
     }
     const runId = `restart-${createHash("sha256").update(workflowMessageId).digest("hex").slice(0, 40)}`;
-    const scoped = new SqliteResourceManagerStore(this.databasePath, {
+    const scoped = new WorkflowRunQueueStore(this.databasePath, {
       state: this.state,
       projectPath,
     });
@@ -2244,7 +2242,7 @@ export class WorkflowServer {
     const definitionDigest = requireString(payload.definitionDigest, "definitionDigest");
     const originSessionId = requireString(payload.originSessionId, "originSessionId");
     const executionMode = payload.executionMode === "headless" ? "headless" : "interactive";
-    const scoped = new SqliteResourceManagerStore(this.databasePath, {
+    const scoped = new WorkflowRunQueueStore(this.databasePath, {
       state: this.state,
       projectPath,
     });
@@ -3419,7 +3417,7 @@ export class WorkflowServer {
       cwd: active.projectPath,
       workflowRef: request.workflow,
     });
-    const scoped = new SqliteResourceManagerStore(this.databasePath, {
+    const scoped = new WorkflowRunQueueStore(this.databasePath, {
       state: this.state,
       projectPath: active.projectPath,
     });

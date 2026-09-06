@@ -7,7 +7,6 @@ import {
   MAX_PROTOCOL_MESSAGE_BYTES,
   encodeProtocolLine,
 } from "../src/client/protocol.js";
-import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
 import {
   ServerViewStore,
@@ -20,9 +19,11 @@ import { canonicalJson } from "../src/state/json.js";
 import { compileWorkflowDefinition } from "../src/workflows/composition.js";
 import { compute, defineWorkflow } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowSessionEventRecord } from "../src/workflows/types.js";
 import { makeTempDir, ScriptedExecutor } from "./helpers.js";
+import { claimTestRun } from "./queue-helpers.js";
 
 const base: WorkflowDisplayFacts = {
   queueStatus: "parked",
@@ -131,13 +132,13 @@ describe("host workflow display reducer", () => {
     const projectPath = await makeTempDir("host-view-large-project");
     const databasePath = path.join(await makeTempDir("host-view-large-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
-    const queue = new SqliteResourceManagerStore(databasePath, { state, projectPath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
     const workflow = compileWorkflowDefinition(rawWorkflow);
     const snapshot = createDefinitionSnapshot(workflow);
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
     const largeInput = { task: "request ".repeat(300_000) };
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId: "run-large-view",
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",
@@ -434,7 +435,7 @@ describe("host workflow display reducer", () => {
     const projectPath = await makeTempDir("host-view-graph-project");
     const databasePath = path.join(await makeTempDir("host-view-graph-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
-    const queue = new SqliteResourceManagerStore(databasePath, { state, projectPath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
     const nodeCount = 257;
     const workflow = defineWorkflow({
@@ -455,7 +456,7 @@ describe("host workflow display reducer", () => {
     const compiled = compileWorkflowDefinition(workflow);
     const snapshot = createDefinitionSnapshot(compiled);
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId: "run-large-graph",
       workflowName: compiled.name,
       workflowSourceRef: "builtin:large-graph",
@@ -514,7 +515,7 @@ describe("host workflow display reducer", () => {
     const projectPath = await makeTempDir("host-view-topology-project");
     const databasePath = path.join(await makeTempDir("host-view-topology-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
-    const queue = new SqliteResourceManagerStore(databasePath, { state, projectPath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
     const baseSnapshot = createDefinitionSnapshot(compileWorkflowDefinition(rawWorkflow));
     const template = Object.values(baseSnapshot.nodes)[0];
@@ -536,7 +537,7 @@ describe("host workflow display reducer", () => {
       operatorData: { $artifact: { path: "operator-owned", note: "not a host reference" } },
     };
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId: "run-large-topology",
       workflowName: snapshot.name,
       workflowSourceRef: "builtin:large-topology",
@@ -611,12 +612,12 @@ describe("host workflow display reducer", () => {
     const projectPath = await makeTempDir("host-view-project");
     const databasePath = path.join(await makeTempDir("host-view-state"), "state.sqlite");
     const state = new StateDatabase({ filePath: databasePath });
-    const queue = new SqliteResourceManagerStore(databasePath, { state, projectPath });
+    const queue = new WorkflowRunQueueStore(databasePath, { state, projectPath });
     const serverState = new ServerStateStore(databasePath, { state });
     const workflow = compileWorkflowDefinition(rawWorkflow);
     const snapshot = createDefinitionSnapshot(workflow);
     const definitionDigest = createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
-    queue.enqueueWorkflowRun({
+    claimTestRun(queue, {
       runId: "run-view",
       workflowName: workflow.name,
       workflowSourceRef: "builtin:echo",

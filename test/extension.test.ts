@@ -6,6 +6,7 @@ import piWorkflows from "../src/extension/index.js";
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { StateDatabase, workflowStatePath } from "../src/state/database.js";
+import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
 import { makeTempDir, waitUntil } from "./helpers.js";
 
@@ -422,7 +423,7 @@ describe("pi-workflows hosted extension", () => {
       output: { answer: "done" },
     });
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -746,7 +747,7 @@ describe("pi-workflows hosted extension", () => {
       content: [{ text: "Workflow step output accepted." }],
     });
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -767,7 +768,7 @@ describe("pi-workflows hosted extension", () => {
     await waitUntil(() => fake.sent.length === 1, 30_000);
     const contract = stepContract(fake.sent[0] as Record<string, unknown>);
     const store = new ServerStateStore(workflowStatePath(), { readOnly: true });
-    const queue = new SqliteResourceManagerStore(workflowStatePath(), {
+    const queue = new WorkflowRunQueueStore(workflowStatePath(), {
       readOnly: true,
       global: true,
     });
@@ -813,7 +814,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(workflowPath);
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -846,7 +847,7 @@ describe("pi-workflows hosted extension", () => {
       content: [{ text: expect.stringContaining("Answered checkpoint") }],
     });
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -907,7 +908,7 @@ describe("pi-workflows hosted extension", () => {
       expect.objectContaining({ message: "Human decision answer accepted." }),
     );
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -986,7 +987,7 @@ describe("pi-workflows hosted extension", () => {
     await fake.emit("session_start");
     await fake.runCommand(firstPath);
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });
@@ -1000,7 +1001,7 @@ describe("pi-workflows hosted extension", () => {
     }, 30_000);
     await fake.runCommand(secondPath);
     await waitUntil(() => {
-      const store = new SqliteResourceManagerStore(workflowStatePath(), {
+      const store = new WorkflowRunQueueStore(workflowStatePath(), {
         readOnly: true,
         global: true,
       });

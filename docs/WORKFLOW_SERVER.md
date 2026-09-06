@@ -117,6 +117,8 @@ Logs may show the run ID, generation, and reason. They must not show a raw token
 
 ## Worker scheduling
 
+`WorkflowRunQueueStore` in `src/workflows/queue.ts` owns run reservations, queue state, and execution claims. `SqliteResourceManagerStore` owns managed resources and reconcile state, not workflow scheduling. They share the existing SQLite connection and revision helpers; neither introduces another database.
+
 One scheduler admits workflow runners and resource-manager reconciles. Start and restart reserve a queued run; resume makes existing work eligible. Accepted responses, validation candidates, and expired interactive deadlines use the same admission path. Requests remain durable while capacity is full.
 
 The default capacity is four execution workers. Set `PI_WORKFLOWS_MAX_WORKERS` to a positive integer before starting the host to change it. Embedded test hosts can use `WorkflowServer({ maxWorkers })`. Capacity includes pending launches and live workers. The scheduler alternates workflow and resource-manager admissions when both have work. Claim renewal, cancellation, and cleanup do not wait for an execution slot.

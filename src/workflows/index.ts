@@ -1,4 +1,12 @@
 export {
+  WorkflowRunQueueStore,
+  type RunEventRecord,
+  type WorkflowRunPreparationResult,
+  type WorkflowRunQueueRecord,
+  type WorkflowRunQueueViewRecord,
+  type WorkflowRunReservationOptions,
+} from "./queue.js";
+export {
   agent,
   assistantMessage,
   action,
