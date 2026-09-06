@@ -136,7 +136,7 @@ CREATE TABLE runs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
-  CHECK ((status IN ('waiting', 'completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
+  CHECK ((status IN ('completed', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
   CHECK ((parent_run_id IS NULL) = (lineage_kind IS NULL)),
   CHECK (
     (lineage_kind = 'restart' AND parent_terminal_fingerprint IS NOT NULL) OR
@@ -504,7 +504,7 @@ CREATE TABLE interactive_requests (
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   attempt_id TEXT NOT NULL UNIQUE REFERENCES node_attempts(attempt_id) ON DELETE CASCADE,
   target_session_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('agent', 'assistant', 'decision')),
+  kind TEXT NOT NULL CHECK (kind IN ('agent', 'assistant', 'checkpoint', 'decision')),
   contract_hash BLOB NOT NULL REFERENCES blobs(blob_hash),
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
   status TEXT NOT NULL CHECK (status IN ('pending', 'settled', 'cancelled')),
@@ -520,6 +520,8 @@ CREATE TABLE interactive_requests (
 
 CREATE INDEX interactive_requests_session_idx
   ON interactive_requests(target_session_id, status, created_at);
+CREATE UNIQUE INDEX interactive_requests_pending_run_idx
+  ON interactive_requests(run_id) WHERE status = 'pending';
 
 CREATE TABLE workflow_messages (
   workflow_message_id TEXT PRIMARY KEY,

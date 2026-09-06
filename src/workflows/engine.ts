@@ -33,6 +33,7 @@ import {
   createRunId,
   type WorkflowExecutionStore,
 } from "./store.js";
+import { executionTransition } from "./transitions.js";
 import type {
   ResolvedHumanDecision,
   AgentExpectedOutput,
@@ -63,7 +64,12 @@ import type {
   WorkflowUpdateInput,
   WorkflowUpdateReceipt,
 } from "./types.js";
-import { UpdateRateLimiter, updateReceipt, validateWorkflowUpdate } from "./updates.js";
+import {
+  UpdateRateLimiter,
+  updateProjection,
+  updateReceipt,
+  validateWorkflowUpdate,
+} from "./updates.js";
 
 const DEFAULT_NODE_TIMEOUT_MS = 15 * 60_000;
 const DEFAULT_MAX_STEPS = 100;
@@ -190,12 +196,14 @@ export class WorkflowEngine {
       limiter.take();
       const { event, record } = await this.store.publishUpdate(
         active.runId,
-        active.state,
         active.nodeId,
         active.attemptId,
         update,
         { signal: active.signal },
       );
+      active.state.updates = updateProjection(active.state.updates, record);
+      active.state.traceSeq = event.seq;
+      active.state.updatedAt = event.at;
       try {
         this.onEvent?.(event, active.state);
       } catch {
@@ -835,6 +843,7 @@ export class WorkflowEngine {
             scopeId: latest.scopeId,
             previousChangeNumber: attempt.settings.changeNumber,
             changeNumber: latest.changeNumber,
+            settingsHash: latest.settingsHash,
           },
         });
         resumedAttempt = {
@@ -1416,11 +1425,12 @@ export class WorkflowEngine {
     signal: AbortSignal,
     settings?: WorkflowSettingsScopeRecord,
   ): WorkflowNodeContext {
+    const snapshot = deepFreezeJson(structuredClone(state));
     return {
-      input: state.input,
-      outputs: state.outputs,
-      results: state.results,
-      state,
+      input: snapshot.input,
+      outputs: snapshot.outputs,
+      results: snapshot.results,
+      state: snapshot,
       ...(settings !== undefined
         ? {
             settings: deepFreezeJson(structuredClone(settings.settings)),
@@ -1634,7 +1644,9 @@ export class WorkflowEngine {
     state: WorkflowRunState,
     event: WorkflowTraceEventDraft,
   ): Promise<void> {
-    const traceEvent = await this.store.writeSnapshot(runId, state, event);
+    const traceEvent = await this.store.commitTransition(runId, executionTransition(state, event));
+    state.traceSeq = traceEvent.seq;
+    state.updatedAt = traceEvent.at;
     try {
       this.onEvent?.(traceEvent, state);
     } catch {
@@ -1654,7 +1666,8 @@ export class WorkflowEngine {
       status = "timed_out";
     }
     state.status = status;
-    state.finishedAt = new Date().toISOString();
+    if (status === "waiting") delete state.finishedAt;
+    else state.finishedAt = new Date().toISOString();
     if (fields.error !== undefined) {
       state.error = fields.error;
     }

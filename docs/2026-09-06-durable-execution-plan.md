@@ -140,4 +140,9 @@ All automated tests use temporary directories and deterministic model substitute
 
 ## Progress
 
-- Approved proposal recorded; implementation pending.
+- Approved proposal recorded on `refactor/durable-execution`.
+- Added the incident regression: a checkpoint answer at an agent request leaves queue and request state unchanged; a correct submission still completes it.
+- Replaced worker snapshot writes with narrow execution transitions. Updates now read authoritative stored state, and workflow node contexts are frozen snapshots.
+- Waiting runs no longer have terminal timestamps. Request creation now checks run/attempt identity, keeps accepted requests immutable, and enforces one pending request per run.
+- Initial targeted validation: typecheck passed; 94 foundation tests passed. A full test run found ten failures before the resume and timestamp-fixture corrections; rerun the complete suite after the remaining changes.
+- Same-run checkpoints, request-ID tool calls, scheduling, timing, explicit model work, client updates, and final validation remain in progress.

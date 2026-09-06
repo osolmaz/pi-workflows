@@ -171,6 +171,12 @@ export type WorkflowRunStoreOptions = {
 };
 
 /** The state boundary used by workflow code, including out-of-process runners. */
+import {
+  applyExecutionTransition,
+  executionTransition,
+  type WorkflowTransition,
+} from "./transitions.js";
+
 export interface WorkflowExecutionStore {
   readonly databasePath: string;
   initializeRun(
@@ -180,14 +186,9 @@ export interface WorkflowExecutionStore {
   ): Promise<string>;
   prepareRunResume(runId: string): Promise<WorkflowRunState>;
   readRunState(runId: string): WorkflowRunState | null | Promise<WorkflowRunState | null>;
-  writeSnapshot(
-    runId: string,
-    state: WorkflowRunState,
-    event: WorkflowTraceEventDraft,
-  ): Promise<WorkflowTraceEvent>;
+  commitTransition(runId: string, transition: WorkflowTransition): Promise<WorkflowTraceEvent>;
   publishUpdate(
     runId: string,
-    state: WorkflowRunState,
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
@@ -1525,31 +1526,32 @@ export class WorkflowRunStore {
     delete loaded.state.currentSettingsHash;
     delete loaded.state.statusDetail;
     delete loaded.state.paused;
-    await this.writeSnapshot(runId, loaded.state, {
-      scope: "run",
-      type: "run_interrupted",
-      payload: { error: reason },
-    });
+    await this.commitTransition(
+      runId,
+      executionTransition(loaded.state, {
+        scope: "run",
+        type: "run_interrupted",
+        payload: { error: reason },
+      }),
+    );
     return this.readRun(runId, { includeTrace: true });
   }
 
   async publishUpdate(
     runId: string,
-    state: WorkflowRunState,
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
     options: { signal?: AbortSignal } = {},
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
     return await this.withRunLock(runId, async () =>
-      this.publishUpdateSynchronous(runId, state, nodeId, attemptId, update, options),
+      this.publishUpdateSynchronous(runId, nodeId, attemptId, update, options),
     );
   }
 
   /** Server-only synchronous form for an already serialized command transaction. */
   publishUpdateSynchronous(
     runId: string,
-    state: WorkflowRunState,
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
@@ -1557,6 +1559,14 @@ export class WorkflowRunStore {
   ): { event: WorkflowTraceEvent; record: WorkflowUpdateRecord } {
     if (options.signal?.aborted === true) {
       throw options.signal.reason ?? new Error("workflow update attempt is no longer active");
+    }
+    const state = this.readRunState(runId);
+    if (
+      state === null ||
+      state.currentAttemptId !== attemptId ||
+      (state.currentNode ?? state.waitingOn) !== nodeId
+    ) {
+      throw new Error("Workflow update does not match the active attempt");
     }
     const exists = (state.updates ?? []).some(
       (record) => record.type === update.type && record.key === update.key,
@@ -1632,10 +1642,9 @@ export class WorkflowRunStore {
     return { event: acceptedEvent, record: acceptedRecord };
   }
 
-  async writeSnapshot(
+  async commitTransition(
     runId: string,
-    state: WorkflowRunState,
-    event: WorkflowTraceEventDraft,
+    transition: WorkflowTransition,
   ): Promise<WorkflowTraceEvent> {
     return await this.withRunLock(runId, async () => {
       let accepted: WorkflowTraceEvent | undefined;
@@ -1647,6 +1656,29 @@ export class WorkflowRunStore {
         const now = Date.now();
         const at = new Date(now).toISOString();
         const snapshot = this.readDefinition(run.definitionHash);
+        const current = this.materializeRunState(run, snapshot);
+        const state = applyExecutionTransition(current, snapshot, transition, at);
+        if (
+          transition.kind === "resume" &&
+          transition.attemptId === undefined &&
+          current.currentAttemptId !== undefined
+        ) {
+          const request = this.state.connection
+            .prepare(
+              "SELECT 1 FROM interactive_requests WHERE attempt_id = ? AND status = 'pending'",
+            )
+            .get(current.currentAttemptId);
+          if (request !== undefined)
+            throw new Error("A pending request must resume its exact attempt");
+          const retired = this.state.connection
+            .prepare(
+              `UPDATE node_attempts SET status = 'cancelled', finished_at = ?, updated_at = ?
+             WHERE attempt_id = ? AND run_id = ? AND status = 'interrupted'`,
+            )
+            .run(now, now, current.currentAttemptId, runId);
+          if (retired.changes !== 1) throw new Error("Only an interrupted attempt can be replaced");
+        }
+        const event = transition.event;
         this.assertSettingsRouteCurrent(event, snapshot);
         const traceEvent: WorkflowTraceEvent = { seq: revision, at, runId, ...event };
         state.traceSeq = revision;

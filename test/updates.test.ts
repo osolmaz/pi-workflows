@@ -85,7 +85,7 @@ describe("workflow updates", () => {
     ]);
   });
 
-  it("serializes concurrent admission at the current-key limit", async () => {
+  it("keeps context read-only and serializes concurrent update publication", async () => {
     const { engine: runtime } = await engine();
     const workflow = defineWorkflow({
       name: "concurrent-update-limit",
@@ -94,17 +94,9 @@ describe("workflow updates", () => {
         work: action({
           effect: idempotentEffect("test.concurrent-update-limit"),
           run: async (context) => {
-            context.state.updates = Array.from({ length: 1_023 }, (_, index) => ({
-              updateId: `seed-${index}`,
-              seq: index + 1,
-              at: "2026-08-16T10:00:00.000Z",
-              runId: context.state.runId,
-              nodeId: "work",
-              attemptId: "seed",
-              type: "seed",
-              key: `key-${index}`,
-              data: {},
-            }));
+            expect(() => {
+              context.state.updates = [];
+            }).toThrow(TypeError);
             const results = await Promise.allSettled([
               context.publishUpdate({ type: "test", key: "new-a", data: {} }),
               context.publishUpdate({ type: "test", key: "new-b", data: {} }),
@@ -118,8 +110,8 @@ describe("workflow updates", () => {
 
     const result = await runtime.run(workflow, {});
     expect(result.state.status).toBe("completed");
-    expect(result.state.finalOutput).toEqual(expect.arrayContaining(["fulfilled", "rejected"]));
-    expect(result.state.updates).toHaveLength(1_024);
+    expect(result.state.finalOutput).toEqual(["fulfilled", "fulfilled"]);
+    expect(result.state.updates).toHaveLength(2);
   });
 
   it("accepts agent updates without completing the step and deduplicates concurrent delivery", async () => {

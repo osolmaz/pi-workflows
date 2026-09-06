@@ -43,7 +43,7 @@ export const WORKFLOW_RUNNER_STORE_OPERATIONS = [
   "store.initializeRun",
   "store.prepareRunResume",
   "store.readRunState",
-  "store.writeSnapshot",
+  "store.commitTransition",
   "store.publishUpdate",
   "store.findSettingsScope",
   "store.ensureSettingsScope",
@@ -149,8 +149,8 @@ export function runnerKindForOperation(
   if (operation === "interaction.reject") return "interaction.rejected";
   if (operation === "notification.request") return "notification.requested";
   if (operation === "presentation.request") return "presentation.requested";
-  if (operation === "store.writeSnapshot") {
-    const event = payload.event;
+  if (operation === "store.commitTransition") {
+    const event = isRecord(payload.transition) ? payload.transition.event : undefined;
     const eventType = isRecord(event) && typeof event.type === "string" ? event.type : "";
     if (eventType === "node_started") return "node.started";
     if (eventType === "node_finished") return "node.finished";

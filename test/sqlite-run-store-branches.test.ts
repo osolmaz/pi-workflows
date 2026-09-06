@@ -13,6 +13,7 @@ import {
   listWorkflowRuns,
   readLastTraceEvent,
 } from "../src/workflows/store.js";
+import { executionTransition } from "../src/workflows/transitions.js";
 import type { WorkflowRunState } from "../src/workflows/types.js";
 import { makeStateDatabasePath, makeTempDir } from "./helpers.js";
 
@@ -64,60 +65,55 @@ describe("WorkflowRunStore branch behavior", () => {
     await expect(store.initializeRun(workflow, state("run-1"))).rejects.toThrow(/already exists/);
     current.status = "completed";
     current.finishedAt = new Date().toISOString();
-    await store.writeSnapshot("run-1", current, {
-      scope: "run",
-      type: "run_completed",
-      payload: { finalOutput: true },
-    });
+    await store.commitTransition(
+      "run-1",
+      executionTransition(current, {
+        scope: "run",
+        type: "run_completed",
+        payload: { finalOutput: true },
+      }),
+    );
     expect((await store.markRunInterrupted("run-1"))?.state.status).toBe("completed");
     expect(await store.markRunInterrupted("missing")).toBeNull();
     store.close();
   });
 
-  it("rejects aborted and over-limit update publication", async () => {
+  it("rejects aborted and stale-attempt update publication", async () => {
     const store = new WorkflowRunStore(await makeStateDatabasePath("run-update-branches"));
     const current = state("run-2");
     current.currentNode = "work";
     current.currentAttemptId = "attempt-1";
     current.currentNodeStartedAt = new Date().toISOString();
     await store.initializeRun(workflow, current);
-    await store.writeSnapshot("run-2", current, {
-      scope: "node",
-      type: "node_started",
-      nodeId: "work",
-      attemptId: "attempt-1",
-      payload: {},
-    });
+    await store.commitTransition(
+      "run-2",
+      executionTransition(current, {
+        scope: "node",
+        type: "node_started",
+        nodeId: "work",
+        attemptId: "attempt-1",
+        payload: { nodeType: "compute" },
+      }),
+    );
     const abort = new AbortController();
     abort.abort(new Error("closed"));
     await expect(
       store.publishUpdate(
         "run-2",
-        current,
         "work",
         "attempt-1",
         { type: "note", key: "one", data: {} },
         { signal: abort.signal },
       ),
     ).rejects.toThrow("closed");
-    current.updates = Array.from({ length: 1_024 }, (_, index) => ({
-      updateId: `update-${index}`,
-      seq: index + 1,
-      at: new Date().toISOString(),
-      runId: current.runId,
-      nodeId: "work",
-      attemptId: "attempt-1",
-      type: "note",
-      key: `key-${index}`,
-      data: {},
-    }));
     await expect(
-      store.publishUpdate("run-2", current, "work", "attempt-1", {
+      store.publishUpdate("run-2", "work", "another-attempt", {
         type: "note",
         key: "new",
         data: {},
       }),
-    ).rejects.toThrow(/at most 1024/);
+    ).rejects.toThrow(/active attempt/);
+    expect(store.readRunState("run-2")?.updates ?? []).toEqual([]);
     store.close();
   });
 

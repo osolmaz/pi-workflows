@@ -72,11 +72,13 @@ import { workflowMessageIdFor } from "../state/workflow-messages.js";
 import { humanDecisionChannelRequest } from "../workflows/decision-presentation.js";
 import { errorMessage } from "../workflows/errors.js";
 import { HumanDecisionStore } from "../workflows/human-decision.js";
+import type { InteractiveRequestRecord } from "../workflows/requests.js";
 import {
   type WorkflowSettingsDefinition,
   type WorkflowSettingsPathRule,
 } from "../workflows/settings.js";
 import { WorkflowRunStore } from "../workflows/store.js";
+import type { WorkflowTransition } from "../workflows/transitions.js";
 import type {
   HumanDecisionAnswerSource,
   HumanDecisionCancellationRecord,
@@ -91,7 +93,6 @@ import type {
   WorkflowSessionBinding,
   WorkflowSessionCapture,
   WorkflowSessionEventRecord,
-  WorkflowTraceEventDraft,
   WorkflowUpdateInput,
 } from "../workflows/types.js";
 import { validateWorkflowUpdate } from "../workflows/updates.js";
@@ -121,7 +122,6 @@ import { ResourceRunnerSupervisor } from "./resource-runner-supervisor.js";
 import {
   ServerStateStore,
   type ServerClaim,
-  type InteractiveRequestRecord,
   type InteractiveSubmissionRecord,
   type WorkflowRunnerLaunchEnvelope,
 } from "./state.js";
@@ -2419,13 +2419,7 @@ export class WorkflowServer {
       if (loaded === null || loaded.state.status !== "waiting") {
         throw new Error("Interactive update does not match a waiting workflow run");
       }
-      const result = this.runStore.publishUpdateSynchronous(
-        runId,
-        loaded.state,
-        nodeId,
-        attemptId,
-        update,
-      );
+      const result = this.runStore.publishUpdateSynchronous(runId, nodeId, attemptId, update);
       if (!this.queue.parkWorkflowRun({ runId, claimToken: token })) {
         throw new Error("Interactive update could not release its control claim");
       }
@@ -4081,14 +4075,10 @@ export class WorkflowServer {
         case "store.readRunState":
           result = this.runStore.readRunState(requireString(payload.runId, "runId"));
           break;
-        case "store.writeSnapshot": {
-          const state = payload.state as WorkflowRunState;
-          result = await this.runStore.writeSnapshot(
-            message.runId,
-            state,
-            payload.event as WorkflowTraceEventDraft,
-          );
-          if (!["running", "waiting"].includes(state.status)) {
+        case "store.commitTransition": {
+          const transition = payload.transition as WorkflowTransition;
+          result = await this.runStore.commitTransition(message.runId, transition);
+          if (transition.kind === "finish" && transition.status !== "waiting") {
             this.tryEnsureTerminalWorkflowMessage(message.runId);
           }
           break;
@@ -4096,7 +4086,6 @@ export class WorkflowServer {
         case "store.publishUpdate":
           result = await this.runStore.publishUpdate(
             message.runId,
-            payload.state as WorkflowRunState,
             requireString(payload.nodeId, "nodeId"),
             requireString(payload.attemptId, "attemptId"),
             payload.update as WorkflowUpdateInput,
@@ -4340,7 +4329,7 @@ export class WorkflowServer {
           `UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ?
            WHERE run_id = ? AND status = 'running'`,
         )
-        .run(error, now, now, active.record.runId);
+        .run(error, now, null, active.record.runId);
       if (
         !this.queue.parkWorkflowRun({
           runId: active.record.runId,
@@ -4475,7 +4464,7 @@ export class WorkflowServer {
           `UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ?
            WHERE run_id = ? AND status = 'running'`,
         )
-        .run("waiting for origin Pi session", now, now, message.runId);
+        .run("waiting for origin Pi session", now, null, message.runId);
       if (!this.queue.parkWorkflowRun({ runId: message.runId, claimToken: active.claimToken })) {
         throw new Error("Interactive request could not release the run claim");
       }
@@ -4507,14 +4496,17 @@ export class WorkflowServer {
     loaded.state.status = "running";
     delete loaded.state.statusDetail;
     delete loaded.state.finishedAt;
-    await this.runStore.writeSnapshot(runId, loaded.state, {
-      scope: "node",
-      type: accepted === undefined ? "interaction_validation_started" : "interaction_accepted",
-      nodeId: candidate.nodeId,
-      attemptId: candidate.attemptId,
-      payload: {
-        requestId: candidate.requestId,
-        submissionId: candidate.submissionId,
+    await this.runStore.commitTransition(runId, {
+      kind: "resumeInteraction",
+      event: {
+        scope: "node",
+        type: accepted === undefined ? "interaction_validation_started" : "interaction_accepted",
+        nodeId: candidate.nodeId,
+        attemptId: candidate.attemptId,
+        payload: {
+          requestId: candidate.requestId,
+          submissionId: candidate.submissionId,
+        },
       },
     });
   }

@@ -6,6 +6,7 @@ import {
   type InitializeWorkflowRunOptions,
   type WorkflowExecutionStore,
 } from "../workflows/store.js";
+import type { WorkflowTransition } from "../workflows/transitions.js";
 import type {
   HumanDecisionRequest,
   ResolvedHumanDecision,
@@ -16,7 +17,6 @@ import type {
   WorkflowNotificationRequest,
   WorkflowRunState,
   WorkflowTraceEvent,
-  WorkflowTraceEventDraft,
   WorkflowUpdateInput,
   WorkflowUpdateRecord,
 } from "../workflows/types.js";
@@ -71,28 +71,26 @@ export class ServerBackedWorkflowStore implements WorkflowExecutionStore {
     return await this.call<WorkflowRunState | null>("store.readRunState", { runId });
   }
 
-  async writeSnapshot(
+  async commitTransition(
     runId: string,
-    state: WorkflowRunState,
-    event: WorkflowTraceEventDraft,
+    transition: WorkflowTransition,
   ): Promise<WorkflowTraceEvent> {
     return await this.call<WorkflowTraceEvent>(
-      "store.writeSnapshot",
-      { runId, state, event },
-      event.attemptId,
+      "store.commitTransition",
+      { runId, transition },
+      transition.event.attemptId,
     );
   }
 
   async publishUpdate(
     runId: string,
-    state: WorkflowRunState,
     nodeId: string,
     attemptId: string,
     update: WorkflowUpdateInput,
   ): Promise<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }> {
     return await this.call<{ event: WorkflowTraceEvent; record: WorkflowUpdateRecord }>(
       "store.publishUpdate",
-      { runId, state, nodeId, attemptId, update },
+      { runId, nodeId, attemptId, update },
       attemptId,
     );
   }

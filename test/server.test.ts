@@ -14,7 +14,7 @@ import {
 import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { ServerProcessRegistry } from "../src/server/processes.js";
 import { WorkflowServer } from "../src/server/server.js";
-import { ServerStateStore, type InteractiveRequestRecord } from "../src/server/state.js";
+import { ServerStateStore } from "../src/server/state.js";
 import {
   encodeRunnerLine,
   MAX_WORKFLOW_RUNNER_PROTOCOL_MESSAGE_BYTES,
@@ -27,6 +27,7 @@ import {
 } from "../src/state/prune.js";
 import type { WorkflowMessage } from "../src/state/workflow-messages.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
+import type { InteractiveRequestRecord } from "../src/workflows/requests.js";
 import { SESSION_BINDING_SCHEMA, WorkflowRunStore } from "../src/workflows/store.js";
 import { ScriptedExecutor, makeTempDir, waitUntil } from "./helpers.js";
 
