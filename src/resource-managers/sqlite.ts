@@ -1954,7 +1954,7 @@ export class SqliteResourceManagerStore implements ResourceManagerStore {
           `UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ?
            WHERE run_id = ? AND status = 'running'`,
         )
-        .run(detail, now, now, options.runId);
+        .run(detail, now, null, options.runId);
       const queue = this.state.connection
         .prepare(
           `UPDATE run_queue

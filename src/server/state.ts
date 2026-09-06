@@ -14,6 +14,11 @@ import {
   type WorkflowStepReason,
 } from "../state/workflow-messages.js";
 import {
+  ensureWorkflowRequest,
+  readWorkflowRequest,
+  type InteractiveRequestRecord,
+} from "../workflows/requests.js";
+import {
   decisionWorkflowMessageContent,
   stepWorkflowMessageContent,
 } from "../workflows/workflow-message-content.js";
@@ -67,23 +72,6 @@ export type InteractiveSubmissionRecord = {
   payload: JsonValue;
   receipt: JsonValue | null;
   submittedAt: string;
-};
-
-export type InteractiveRequestRecord = {
-  requestId: string;
-  runId: string;
-  attemptId: string;
-  targetSessionId: string;
-  kind: "agent" | "assistant" | "decision";
-  contract: JsonValue;
-  revision: number;
-  status: "pending" | "settled" | "cancelled";
-  unproductiveTurnEnds: number;
-  acceptedSubmissionId: string | null;
-  createdAt: string;
-  updatedAt: string;
-  settledAt: string | null;
-  consumedAt: string | null;
 };
 
 export class ServerStateStore {
@@ -443,54 +431,10 @@ export class ServerStateStore {
     kind: InteractiveRequestRecord["kind"];
     contract: JsonValue;
   }): InteractiveRequestRecord {
-    const now = Date.now();
     return this.state.transaction(() => {
-      const existing = this.interactiveRequest(options.requestId);
-      if (existing !== undefined) {
-        if (
-          existing.runId !== options.runId ||
-          existing.attemptId !== options.attemptId ||
-          canonicalJson(existing.contract) !== canonicalJson(options.contract)
-        ) {
-          throw new Error(`Interactive request conflicts: ${options.requestId}`);
-        }
-        if (existing.status === "settled" && existing.consumedAt === null) {
-          this.state.connection
-            .prepare(
-              `UPDATE interactive_requests
-               SET status = 'pending', accepted_submission_id = NULL,
-                   settled_at = NULL, consumed_at = NULL, revision = revision + 1, updated_at = ?
-               WHERE request_id = ? AND status = 'settled' AND consumed_at IS NULL`,
-            )
-            .run(now, options.requestId);
-          const reopened = this.requireInteractiveRequest(options.requestId);
-          this.ensureInteractionMessage(reopened, "resumed", now);
-          return reopened;
-        }
-        if (existing.status === "pending") this.ensureInteractionMessage(existing, "initial", now);
-        return existing;
-      }
-      const contractHash = this.state.putJson(options.contract, now);
-      this.state.connection
-        .prepare(
-          `INSERT INTO interactive_requests(
-             request_id, run_id, attempt_id, target_session_id, kind, contract_hash,
-             revision, status, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)`,
-        )
-        .run(
-          options.requestId,
-          options.runId,
-          options.attemptId,
-          options.targetSessionId,
-          options.kind,
-          contractHash,
-          now,
-          now,
-        );
-      const created = this.requireInteractiveRequest(options.requestId);
-      this.ensureInteractionMessage(created, "initial", now);
-      return created;
+      const request = ensureWorkflowRequest(this.state, options);
+      if (request.status === "pending") this.ensureInteractionMessage(request, "initial");
+      return request;
     });
   }
 
@@ -1097,33 +1041,7 @@ export class ServerStateStore {
   }
 
   private interactiveRequest(requestId: string): InteractiveRequestRecord | undefined {
-    const row = this.state.connection
-      .prepare(
-        `SELECT request_id AS requestId, run_id AS runId, attempt_id AS attemptId,
-                target_session_id AS targetSessionId, kind, contract_hash AS contractHash,
-                revision, status, unproductive_turn_ends AS unproductiveTurnEnds,
-                accepted_submission_id AS acceptedSubmissionId, created_at AS createdAt,
-                updated_at AS updatedAt, settled_at AS settledAt, consumed_at AS consumedAt
-         FROM interactive_requests WHERE request_id = ?`,
-      )
-      .get(requestId);
-    if (!isInteractiveRequestRow(row)) return undefined;
-    return {
-      requestId: row.requestId,
-      runId: row.runId,
-      attemptId: row.attemptId,
-      targetSessionId: row.targetSessionId,
-      kind: row.kind,
-      contract: this.state.readJson(row.contractHash),
-      revision: row.revision,
-      status: row.status,
-      unproductiveTurnEnds: row.unproductiveTurnEnds,
-      acceptedSubmissionId: row.acceptedSubmissionId,
-      createdAt: new Date(row.createdAt).toISOString(),
-      updatedAt: new Date(row.updatedAt).toISOString(),
-      settledAt: iso(row.settledAt),
-      consumedAt: iso(row.consumedAt),
-    };
+    return readWorkflowRequest(this.state, requestId);
   }
 
   private shiftInteractionTimeout(
@@ -1243,23 +1161,6 @@ type InactiveInteractionTimeoutRow = {
 };
 type ExpiredInteractionRunRow = { runId: string; targetSessionId: string };
 type PausedAtRow = { pausedAt: number };
-type InteractiveRequestRow = {
-  requestId: string;
-  runId: string;
-  attemptId: string;
-  targetSessionId: string;
-  kind: InteractiveRequestRecord["kind"];
-  contractHash: Buffer;
-  revision: number;
-  status: InteractiveRequestRecord["status"];
-  unproductiveTurnEnds: number;
-  acceptedSubmissionId: string | null;
-  createdAt: number;
-  updatedAt: number;
-  settledAt: number | null;
-  consumedAt: number | null;
-};
-
 function isServerRow(value: unknown): value is ServerRow {
   return (
     isRecord(value) &&
@@ -1389,26 +1290,6 @@ function isSubmissionDetailRow(value: unknown): value is SubmissionDetailRow {
     Buffer.isBuffer(value.payloadHash) &&
     (value.receiptHash === null || Buffer.isBuffer(value.receiptHash)) &&
     typeof value.submittedAt === "number"
-  );
-}
-
-function isInteractiveRequestRow(value: unknown): value is InteractiveRequestRow {
-  return (
-    isRecord(value) &&
-    typeof value.requestId === "string" &&
-    typeof value.runId === "string" &&
-    typeof value.attemptId === "string" &&
-    typeof value.targetSessionId === "string" &&
-    ["agent", "assistant", "decision"].includes(value.kind as string) &&
-    Buffer.isBuffer(value.contractHash) &&
-    typeof value.revision === "number" &&
-    ["pending", "settled", "cancelled"].includes(value.status as string) &&
-    typeof value.unproductiveTurnEnds === "number" &&
-    nullableString(value.acceptedSubmissionId) &&
-    typeof value.createdAt === "number" &&
-    typeof value.updatedAt === "number" &&
-    nullableNumber(value.settledAt) &&
-    nullableNumber(value.consumedAt)
   );
 }
 

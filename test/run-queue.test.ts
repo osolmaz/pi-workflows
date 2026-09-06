@@ -310,7 +310,7 @@ describe("workflow run queue in canonical SQLite", () => {
 
     store.state.connection
       .prepare("UPDATE runs SET status = 'waiting', finished_at = ? WHERE run_id = ?")
-      .run(Date.now(), "pause-run");
+      .run(null, "pause-run");
     expect(store.pauseParkedWorkflowRun({ runId: "pause-run" })).toBe(false);
 
     const now = Date.now();

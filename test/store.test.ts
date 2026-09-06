@@ -87,7 +87,7 @@ describe("WorkflowRunStore SQLite", () => {
         .prepare(
           "UPDATE runs SET status = 'waiting', status_detail = ?, updated_at = ?, finished_at = ? WHERE run_id = ?",
         )
-        .run("waiting for origin Pi session", now, now, parked.runId);
+        .run("waiting for origin Pi session", now, null, parked.runId);
     });
 
     const loaded = store.readRun(parked.runId);

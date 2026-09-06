@@ -653,7 +653,7 @@ describe("host workflow display reducer", () => {
     });
     state.connection
       .prepare("UPDATE runs SET status = 'waiting', paused = 0, finished_at = ? WHERE run_id = ?")
-      .run(Date.now(), "run-view");
+      .run(null, "run-view");
     state.connection
       .prepare("UPDATE run_queue SET status = 'parked', finished_at = NULL WHERE run_id = ?")
       .run("run-view");
