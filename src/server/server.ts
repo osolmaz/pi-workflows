@@ -56,6 +56,7 @@ import {
   type WorkflowSchedulerRequest,
   type WorkflowSchedulerResult,
 } from "../resource-managers/workflows.js";
+import { closeRunTime } from "../state/attempt-time.js";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
 import { resourceIdFor } from "../state/mutation.js";
@@ -4636,6 +4637,7 @@ export class WorkflowServer {
   private commitActivePause(active: ActiveRun): void {
     const now = Date.now();
     this.state.transaction(() => {
+      closeRunTime(this.state, active.record.runId);
       this.state.connection
         .prepare("UPDATE runs SET paused = 1, status_detail = ?, updated_at = ? WHERE run_id = ?")
         .run("paused", now, active.record.runId);
