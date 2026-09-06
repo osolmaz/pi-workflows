@@ -895,8 +895,24 @@ npm run test:e2e:live -- \
   --model gpt-5.6-luna
 ```
 
+For providers that reserve credit against the requested output allowance, pass
+`--max-output-tokens N` with the generated profile. OpenRouter can reject a
+small smoke test when the model's catalog default requests hundreds of thousands
+of output tokens. This option changes only the exact built-in model's `maxTokens`
+through Pi's documented `modelOverrides`. It does not change the provider, model
+ID, API, endpoint, or credentials. The test verifies and reports the allowance,
+keeps the complete response, and fails immediately on a provider error.
+
+```bash
+npm run test:e2e:live -- \
+  --provider openrouter \
+  --model deepseek/deepseek-v4-flash \
+  --max-output-tokens 4096
+```
+
 For subscription authentication, use a dedicated Pi profile that has no other
-extensions or resources:
+extensions or resources. The output-budget option cannot modify this existing
+profile:
 
 ```bash
 npm run test:e2e:live -- \

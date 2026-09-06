@@ -4,6 +4,7 @@ export type LiveE2eOptions = {
   help?: boolean;
   keep: boolean;
   model?: string;
+  maxOutputTokens?: number;
   piEntry: string;
   profile?: string;
   provider?: string;
@@ -12,10 +13,13 @@ export type LiveE2eOptions = {
 
 export class RpcSession {
   constructor(child: ChildProcessWithoutNullStreams, context: { profile?: string; root: string });
-  assertNoExtensionError(): void;
+  events: Record<string, unknown>[];
+  assertHealthy(): void;
+  stop(): Promise<void>;
 }
 
 export function parseArgs(argv: string[]): LiveE2eOptions;
+export function configureModelBudget(profile: string, options: LiveE2eOptions): Promise<void>;
 export function assertSafeTempRoot(root: string, temporaryDirectory?: string): string;
 export function removeTemporaryRoot(root: string, temporaryDirectory?: string): Promise<void>;
 export function withTemporaryRoot<T>(

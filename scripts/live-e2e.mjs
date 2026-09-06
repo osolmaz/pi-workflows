@@ -21,6 +21,7 @@ export function parseArgs(argv) {
   const options = {
     keep: false,
     model: undefined,
+    maxOutputTokens: undefined,
     piEntry: path.join(
       REPO_ROOT,
       "node_modules",
@@ -38,14 +39,21 @@ export function parseArgs(argv) {
     const argument = argv[index];
     if (argument === "--keep") options.keep = true;
     else if (argument === "--runtime-only") options.runtimeOnly = true;
-    else if (["--model", "--pi-entry", "--profile", "--provider"].includes(argument)) {
+    else if (
+      ["--model", "--pi-entry", "--profile", "--provider", "--max-output-tokens"].includes(argument)
+    ) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
         throw new Error(`${argument} requires a value`);
       }
       index += 1;
       if (argument === "--model") options.model = value;
-      else if (argument === "--pi-entry") options.piEntry = path.resolve(value);
+      else if (argument === "--max-output-tokens") {
+        const tokens = Number(value);
+        if (!Number.isSafeInteger(tokens) || tokens <= 0)
+          throw new Error("--max-output-tokens must be a positive safe integer");
+        options.maxOutputTokens = tokens;
+      } else if (argument === "--pi-entry") options.piEntry = path.resolve(value);
       else if (argument === "--profile") options.profile = path.resolve(value);
       else options.provider = value;
     } else if (argument === "--help" || argument === "-h") {
@@ -64,7 +72,30 @@ export function parseArgs(argv) {
     throw new Error("--runtime-only cannot be combined with provider, model, or profile options");
   }
   if (!hasProvider) options.runtimeOnly = true;
+  if (
+    options.maxOutputTokens !== undefined &&
+    (options.runtimeOnly || options.profile !== undefined)
+  ) {
+    throw new Error("--max-output-tokens requires a real model and the isolated generated profile");
+  }
   return options;
+}
+
+export async function configureModelBudget(profile, options) {
+  if (options.maxOutputTokens === undefined) return;
+  // OpenRouter reserves credit against max_tokens. Override only the output
+  // allowance of the exact built-in model, never its endpoint, API, or auth.
+  await fs.writeFile(
+    path.join(profile, "models.json"),
+    JSON.stringify({
+      providers: {
+        [options.provider]: {
+          modelOverrides: { [options.model]: { maxTokens: options.maxOutputTokens } },
+        },
+      },
+    }),
+    { flag: "wx" },
+  );
 }
 
 export function assertSafeTempRoot(root, temporaryDirectory = os.tmpdir()) {
@@ -109,6 +140,7 @@ Options:
   --provider NAME      Exact built-in Pi provider for the optional real-model phase.
   --model ID           Exact model id for the optional real-model phase.
   --profile PATH       Dedicated Pi agent directory that already contains subscription authentication.
+  --max-output-tokens N  Explicit provider output allowance; requires the generated profile. Uses only a built-in model budget override.
   --pi-entry PATH      Base Pi cli.js entry point. Defaults to the repository-pinned Pi dependency.
   --keep               Keep the guarded temporary root for diagnosis.
 `;
@@ -260,7 +292,7 @@ export class RpcSession {
     );
   }
 
-  assertNoExtensionError() {
+  assertHealthy() {
     if (this.exitError !== undefined) throw this.exitError;
     const failure = this.events.find((event) => event.type === "extension_error");
     if (failure !== undefined) {
@@ -269,6 +301,17 @@ export class RpcSession {
       );
     }
     if (this.parseError !== undefined) throw this.parseError;
+    const modelFailure = this.events.find(
+      (event) =>
+        event.type === "message_end" &&
+        event.message?.role === "assistant" &&
+        event.message.stopReason === "error",
+    );
+    if (modelFailure !== undefined) {
+      throw new Error(
+        `Pi model request failed: ${modelFailure.message.errorMessage ?? "No error detail"}`,
+      );
+    }
   }
 
   async stop() {
@@ -295,7 +338,7 @@ async function waitFor(description, check, options) {
   const deadline = Date.now() + options.timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
-    options.rpc?.assertNoExtensionError();
+    options.rpc?.assertHealthy();
     try {
       const result = await check();
       if (result !== false && result !== undefined && result !== null) return result;
@@ -743,7 +786,7 @@ async function runRuntimeWorkflow(context, rpc, client, piwBinary) {
     context.processOptions(context.project),
   );
   assertOneFrame(completedFrame.stdout, workflowName, "completed");
-  rpc.assertNoExtensionError();
+  rpc.assertHealthy();
   return runId;
 }
 
@@ -792,6 +835,14 @@ async function preflightModel(context, rpc) {
     model.api !== "openai-responses"
   ) {
     throw new Error(`openai/gpt-5.6-luna resolved to unexpected API ${model.api}`);
+  }
+  if (
+    context.options.maxOutputTokens !== undefined &&
+    model.maxTokens !== context.options.maxOutputTokens
+  ) {
+    throw new Error(
+      `The exact model did not adopt its requested output allowance: ${model.maxTokens}`,
+    );
   }
   const state = await rpc.request("get_state");
   assertExactModel(state, context.options.provider, context.options.model, model.api);
@@ -853,7 +904,7 @@ async function runModelWorkflow(context, rpc, client, api) {
     context.options.model,
     api,
   );
-  rpc.assertNoExtensionError();
+  rpc.assertHealthy();
   return { costUsd, runId: run.runId };
 }
 
@@ -920,6 +971,7 @@ async function execute(root, options) {
       path.join(context.project, ".pi", "workflows"),
     ].map(async (directory) => await fs.mkdir(directory, { recursive: true })),
   );
+  await configureModelBudget(context.profile, options);
   const operatorHome = os.homedir();
   context.env = cleanEnvironment({
     ...process.env,
@@ -1020,13 +1072,14 @@ async function execute(root, options) {
     if (serverReceipt.lifecycleContradictions !== 0 || serverReceipt.ambiguousEffects !== 0) {
       throw new Error(`Server ended with unsafe state: ${JSON.stringify(serverReceipt)}`);
     }
-    rpc.assertNoExtensionError();
+    rpc.assertHealthy();
     process.stdout.write(
       `${JSON.stringify({
         api: api ?? null,
         mode: options.runtimeOnly ? "runtime-only" : "real-model",
         model: options.model ?? null,
         modelCostUsd: modelCostUsd ?? null,
+        modelMaxOutputTokens: options.maxOutputTokens ?? null,
         modelRunId: modelRunId ?? null,
         packageVersion: packageJson.version,
         piVersion,
