@@ -155,7 +155,14 @@ describe("client protocol fixtures", () => {
     ).toThrow("exceeds 1 MiB");
   });
 
-  it.each(["interaction.update", "checkpoint.answer", "decision.answer"] as const)(
+  it.each([
+    "interaction.submit",
+    "interaction.assistant",
+    "interaction.update",
+    "checkpoint.answer",
+    "decision.answer",
+    "run.restart",
+  ] as const)(
     "%s fingerprints durable response identity, not the connection epoch",
     (operation) => {
       const response = {
