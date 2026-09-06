@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkflowClient } from "../src/client/client.js";
+import { SqliteResourceManagerStore } from "../src/resource-managers/sqlite.js";
 import { WorkflowServer } from "../src/server/server.js";
 import { ServerStateStore } from "../src/server/state.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
@@ -37,6 +38,8 @@ export default defineWorkflow({ name: "gate", startAt: "work", nodes: {
     cwd,
     databasePath,
     client,
+    host,
+    resolved,
     queue,
     state,
     async start(runId: string) {
@@ -78,6 +81,87 @@ describe("shared execution scheduler", () => {
       );
     },
   );
+
+  it("shares startup capacity between pre-existing workflows and resource reconciles", async () => {
+    const test = await setup(1);
+    await test.host.stop();
+    const resourceDirectory = path.join(test.cwd, ".pi", "resource-managers");
+    await fs.mkdir(resourceDirectory, { recursive: true });
+    const resourceStarted = path.join(test.cwd, "resource.started");
+    const resourceRelease = path.join(test.cwd, "resource.release");
+    await fs.writeFile(
+      path.join(resourceDirectory, "gate.resource-manager.ts"),
+      `
+import fs from "node:fs";
+import { defineResourceManager } from ${JSON.stringify(path.resolve("src/resource-managers/index.ts"))};
+export default defineResourceManager({ name: "gate", initialStatus: () => ({}),
+  async reconcile(ctx) {
+    fs.writeFileSync(${JSON.stringify(resourceStarted)}, "started");
+    while (!fs.existsSync(${JSON.stringify(resourceRelease)})) await new Promise(resolve => setTimeout(resolve, 10));
+    return ctx.settled({ resourceManagerStatus: { done: true } });
+  }
+});`,
+    );
+    const seed = new WorkflowRunQueueStore(test.databasePath, { projectPath: test.cwd });
+    const resources = new SqliteResourceManagerStore(test.databasePath, {
+      state: seed.state,
+      projectPath: test.cwd,
+    });
+    seed.reserveWorkflowRun({
+      runId: "startup-work",
+      ...test.resolved,
+      input: {
+        started: path.join(test.cwd, "startup-work.started"),
+        release: path.join(test.cwd, "startup-work.release"),
+      },
+      launchOptions: {},
+      originSessionId: "scheduler-session",
+      executionMode: "headless",
+    });
+    resources.putResource({ resourceManager: "gate", key: "one", spec: {}, initialStatus: {} });
+    seed.close();
+    const host = new WorkflowServer({
+      databasePath: test.databasePath,
+      claimPollMs: 10,
+      maxWorkers: 1,
+    });
+    try {
+      await host.start();
+      let peakWorkers = 0;
+      await vi.waitFor(
+        async () => {
+          const status = await test.client.request({ operation: "server.status" });
+          peakWorkers = Math.max(
+            peakWorkers,
+            (status.receipt as { executionWorkers: number }).executionWorkers,
+          );
+          expect(existsSync(path.join(test.cwd, "startup-work.started"))).toBe(true);
+        },
+        { timeout: 30_000 },
+      );
+      expect(peakWorkers).toBe(1);
+      expect(existsSync(resourceStarted)).toBe(false);
+      await test.release("startup-work");
+      await waitUntil(() => existsSync(resourceStarted), 30_000);
+      expect(test.queue.getWorkflowRun("startup-work")?.status).toBe("done");
+      expect((await test.client.request({ operation: "server.status" })).receipt).toMatchObject({
+        executionWorkers: 1,
+        maxWorkers: 1,
+      });
+      await fs.writeFile(resourceRelease, "release");
+      await vi.waitFor(
+        async () => {
+          expect((await test.client.request({ operation: "server.status" })).receipt).toMatchObject(
+            { executionWorkers: 0 },
+          );
+        },
+        { timeout: 30_000 },
+      );
+    } finally {
+      await host.stop();
+      await test.close();
+    }
+  }, 60_000);
 
   it("bounds concurrent starts and does not make cancellation wait for capacity", async () => {
     const test = await setup(2);

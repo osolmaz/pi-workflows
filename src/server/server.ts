@@ -363,7 +363,6 @@ export class WorkflowServer {
       this.requestAutomaticStatePrune();
       void this.expireTimedOutDecision().finally(() => this.resumeAutomaticStatePruneIfDue());
       void this.claimOne().finally(() => this.resumeAutomaticStatePruneIfDue());
-      void this.claimResourceManagerOne().finally(() => this.resumeAutomaticStatePruneIfDue());
       void this.reloadDecisionChannels()
         .catch((error) => {
           this.log(`decision channel startup failed: ${errorMessage(error)}`);
