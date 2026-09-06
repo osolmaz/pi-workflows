@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import echoWorkflow from "../examples/workflows/echo.workflow.js";
 import workflow from "../examples/workflows/human-decision.workflow.js";
 import { StateDatabase } from "../src/state/database.js";
 import { StateMutationStore, resourceIdFor } from "../src/state/mutation.js";
@@ -58,9 +57,9 @@ describe("HumanDecisionStore SQLite", () => {
     const databasePath = await makeStateDatabasePath("decision-request-adopt");
     const { request, store } = await waitingDecision(databasePath);
     expect(await store.createRequest(request)).toBe("adopted");
-    await expect(
+    expect(() =>
       store.createRequest({ ...request, createdAt: "2000-01-01T00:00:00.000Z" }),
-    ).rejects.toThrow(/request conflicts/);
+    ).toThrow(/request conflicts/);
     expect(await store.readRequest("missing")).toBeNull();
     store.close();
   });
@@ -86,7 +85,7 @@ describe("HumanDecisionStore SQLite", () => {
         },
       },
     });
-    await expect(store.createRequest(request)).rejects.toThrow(/run is missing/);
+    expect(() => store.createRequest(request)).toThrow(/run is missing/);
     store.close();
   });
 
@@ -112,7 +111,7 @@ describe("HumanDecisionStore SQLite", () => {
         .get(),
     ).toEqual({ count: 1 });
     expect(store.state.connection.prepare("SELECT count(*) AS count FROM effects").get()).toEqual({
-      count: 2,
+      count: 1,
     });
     store.close();
   });
@@ -396,42 +395,6 @@ describe("HumanDecisionStore SQLite", () => {
     state.close();
   });
 
-  it("records and adopts one continuation after acceptance", async () => {
-    const databasePath = await makeStateDatabasePath("decision-continuation");
-    const { request, store } = await waitingDecision(databasePath);
-    const accepted = await store.accept(request, {
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      choice: "continue",
-      source: { channel: "pi", actorId: "operator", eventId: "continue" },
-      idempotencyKey: "continue",
-    });
-    const child = await new WorkflowEngine({
-      databasePath,
-      executor: new ScriptedExecutor().respond("reply", { output: { reply: "done" } }),
-    }).run(echoWorkflow, {}, { runId: "continuation-run" });
-    const record = {
-      schema: "pi-workflows.human-decision-continuation.v1" as const,
-      decisionId: request.decisionId,
-      requestDigest: request.requestDigest,
-      provenance: accepted.decision.provenance,
-      parentRunId: request.runId,
-      runId: child.runId,
-      createdAt: accepted.decision.acceptedAt,
-    };
-    expect(await store.recordContinuation(request.decisionId, record)).toBe("created");
-    expect(await store.recordContinuation(request.decisionId, record)).toBe("adopted");
-    expect(await store.readContinuation(request.decisionId)).toEqual(record);
-    expect(await store.readContinuation("missing")).toBeNull();
-    await expect(
-      store.recordContinuation(request.decisionId, {
-        ...record,
-        createdAt: new Date().toISOString(),
-      }),
-    ).rejects.toThrow(/continuation conflicts/);
-    store.close();
-  });
-
   it("marks deterministic decision effects as applied", async () => {
     const databasePath = await makeStateDatabasePath("decision-effects");
     const { request, store } = await waitingDecision(databasePath);
@@ -442,7 +405,6 @@ describe("HumanDecisionStore SQLite", () => {
       source: { channel: "pi", actorId: "operator", eventId: "effect" },
       idempotencyKey: "effect",
     });
-    store.markEffectApplied(request.decisionId, "decision.continue");
     store.markEffectApplied(request.decisionId, "decision.settle_presentations");
     expect(
       store.state.connection
@@ -452,7 +414,7 @@ describe("HumanDecisionStore SQLite", () => {
            WHERE d.decision_id = ? AND e.status = 'applied'`,
         )
         .get(request.decisionId),
-    ).toEqual({ count: 2 });
+    ).toEqual({ count: 1 });
     store.close();
   });
 

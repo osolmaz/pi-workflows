@@ -18,7 +18,6 @@ import type {
   AgentStepExecutor,
   AgentStepRequest,
   AgentStepSubmission,
-  ResolvedHumanDecision,
   WorkflowDefinition,
   WorkflowMountedSource,
   WorkflowRunState,
@@ -317,7 +316,7 @@ export function validateAcceptedAssistantSubmission(
 }
 
 export async function executeRunnerRunCommand(
-  engine: Pick<WorkflowEngine, "run" | "resumeRun" | "continueRun">,
+  engine: Pick<WorkflowEngine, "run" | "resumeRun">,
   workflow: WorkflowDefinition,
   runId: string,
   workflowSource: WorkflowSource,
@@ -333,14 +332,6 @@ export async function executeRunnerRunCommand(
         ...(command.resumeInteractionAttemptId === undefined
           ? {}
           : { resumeInteractionAttemptId: command.resumeInteractionAttemptId }),
-      });
-    case "continue":
-      return await engine.continueRun(workflow, command.parentRunId, command.input, {
-        runId,
-        workflowSource,
-        ...(command.humanDecision === undefined
-          ? {}
-          : { humanDecision: command.humanDecision as ResolvedHumanDecision }),
       });
   }
 }

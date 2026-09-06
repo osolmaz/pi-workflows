@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { JsonValue } from "../state/json.js";
 import type {
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
@@ -16,6 +17,12 @@ export type WorkflowTransition = {
   | { kind: "resume"; attemptId?: string }
   | { kind: "pause" }
   | { kind: "resumeInteraction" }
+  | {
+      kind: "waitForInput";
+      requestId: string;
+      requestKind: "checkpoint" | "decision";
+      contract: JsonValue;
+    }
   | {
       kind: "finish";
       status: "completed" | "failed" | "timed_out" | "cancelled" | "waiting";
@@ -168,6 +175,20 @@ export function applyExecutionTransition(
       }
       if (transition.attemptId === undefined) clearAttempt(state);
       delete state.paused;
+      break;
+    case "waitForInput":
+      requireEvent(event, "checkpoint_requested");
+      requireAttempt(state, event);
+      if (definition.nodes[state.currentNode ?? ""]?.nodeType !== "checkpoint") {
+        throw new Error("Only a checkpoint can request checkpoint input");
+      }
+      state.status = "waiting";
+      state.waitingOn = requireIdentity(event.nodeId, "node");
+      state.statusDetail =
+        transition.requestKind === "decision"
+          ? "waiting for a human decision"
+          : "waiting for checkpoint input";
+      delete state.finishedAt;
       break;
     case "resumeInteraction":
       if (

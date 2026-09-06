@@ -12,8 +12,9 @@ import {
 } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { validateWorkflowDefinition } from "../src/workflows/graph.js";
-import { readWorkflowRun } from "../src/workflows/store.js";
+import { readWorkflowRun, WorkflowRunStore } from "../src/workflows/store.js";
 import type { WorkflowDefinition } from "../src/workflows/types.js";
+import { submitCheckpoint } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function childWorkflow() {
@@ -270,13 +271,15 @@ describe("workflow composition", () => {
       ],
     });
     const databasePath = await makeStateDatabasePath("pi-workflows-composition-checkpoint");
-    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), databasePath });
+    const store = new WorkflowRunStore(databasePath);
+    const engine = new WorkflowEngine({ executor: new ScriptedExecutor(), store });
 
     const waiting = await engine.run(parent, {});
     expect(waiting.state.status).toBe("waiting");
     expect(waiting.state.waitingOn).toBe("child/gate");
 
-    const continuation = await engine.continueRun(parent, waiting.state.runId, { answer: "yes" });
+    submitCheckpoint(store, waiting.state, { approved: true });
+    const continuation = await engine.resumeRun(parent, waiting.runId);
     expect(continuation.state.status).toBe("completed");
     expect(continuation.state.finalOutput).toEqual({
       exit: "ready",

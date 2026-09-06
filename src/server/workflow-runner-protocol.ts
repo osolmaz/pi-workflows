@@ -11,12 +11,6 @@ export const WORKFLOW_RUNNER_CONTENT_CHUNK_SCHEMA = "pi-workflows.worker-content
 export type WorkflowRunnerCommand =
   | { kind: "start"; input: JsonValue }
   | { kind: "resume"; resumeInteractionAttemptId?: string }
-  | {
-      kind: "continue";
-      parentRunId: string;
-      input: JsonValue;
-      humanDecision?: JsonValue;
-    }
   | { kind: "restart"; input: JsonValue };
 
 export const WORKFLOW_RUNNER_MESSAGE_KINDS = [
@@ -48,8 +42,7 @@ export const WORKFLOW_RUNNER_STORE_OPERATIONS = [
   "store.findSettingsScope",
   "store.ensureSettingsScope",
   "store.getSettingsScopeAtChange",
-  "store.createHumanDecisionRequest",
-  "store.readResolvedHumanDecision",
+  "store.readCheckpoint",
   "store.reserveEffect",
   "store.settleEffect",
   "content.read",
@@ -142,7 +135,7 @@ export function runnerKindForOperation(
   if (operation === "store.publishUpdate") return "node.update";
   if (operation === "store.reserveEffect") return "effect.reserve";
   if (operation === "store.settleEffect") return "effect.settle";
-  if (operation === "store.createHumanDecisionRequest" || operation === "interaction.request") {
+  if (operation === "interaction.request") {
     return "interaction.requested";
   }
   if (operation === "interaction.accept") return "interaction.accepted";

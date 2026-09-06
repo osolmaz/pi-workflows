@@ -12,6 +12,7 @@ import {
 } from "../src/workflows/definition.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
+import { checkpointRequest } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 async function makeEngine() {
@@ -148,9 +149,13 @@ describe("WorkflowEngine additional paths", () => {
       nodes: { hold: checkpoint({ run: () => ({ report: "ready for review" }) }) },
       edges: [],
     });
-    const { state } = await (await makeEngine()).run(workflow, {});
+    const engine = await makeEngine();
+    const { state } = await engine.run(workflow, {});
     expect(state.status).toBe("waiting");
-    expect(state.finalOutput).toEqual({ report: "ready for review" });
+    const store = new WorkflowRunStore(engine.databasePath);
+    expect(checkpointRequest(store, state).contract).toEqual({ report: "ready for review" });
+    expect(state.finalOutput).toBeUndefined();
+    store.close();
   });
 
   it("uses string titles verbatim and tolerates undefined title functions", async () => {

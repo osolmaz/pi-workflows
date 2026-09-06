@@ -9,7 +9,8 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { HumanDecisionStore } from "../src/workflows/human-decision.js";
 import { resolveWorkflowRef } from "../src/workflows/loader.js";
 import { WorkflowRunStore } from "../src/workflows/store.js";
-import type { HumanDecisionRequest, HumanDecisionResponse } from "../src/workflows/types.js";
+import type { HumanDecisionResponse } from "../src/workflows/types.js";
+import { humanRequest, submitCheckpoint } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, makeTempDir, ScriptedExecutor } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
@@ -294,7 +295,7 @@ async function answer(
 ) {
   const parent = store.readRun(parentRunId);
   if (parent === null) throw new Error("missing waiting bundle");
-  const request = parent.state.finalOutput as HumanDecisionRequest;
+  const request = humanRequest(store, parent.state);
   if (request?.choices === undefined) {
     throw new Error(`Invalid human decision request: ${JSON.stringify(request)}`);
   }
@@ -305,12 +306,8 @@ async function answer(
     source: { channel: "pi", actorId: "person", eventId: `event-${parentRunId}` },
     idempotencyKey: `event-${parentRunId}`,
   });
-  return await makeEngine(executor, store).continueRun(
-    definition,
-    parentRunId,
-    {},
-    { humanDecision: accepted.decision },
-  );
+  submitCheckpoint(store, parent.state, accepted.decision.response);
+  return await makeEngine(executor, store).resumeRun(definition, parentRunId);
 }
 
 beforeEach(async () => {
@@ -413,8 +410,8 @@ describe("monitor human repair approval", () => {
       stopWhen: "test passes",
       maxChecks: 3,
     });
-    const firstDigest = (first.state.finalOutput as { subject?: { planDigest?: string } }).subject
-      ?.planDigest;
+    const firstDigest = (humanRequest(store, first.state).subject as { planDigest?: string })
+      .planDigest;
     const exact = "  use the smaller repair\nkeep this exact  ";
     const replanned = await answer(store, executor, resolved.definition, first.state.runId, {
       choice: "replan",
@@ -423,7 +420,7 @@ describe("monitor human repair approval", () => {
     expect(replanned.state.status).toBe("waiting");
     expect(replanned.state.waitingOn).toBe("planChange/approval/approve");
     expect(
-      (replanned.state.finalOutput as { subject?: { planDigest?: string } }).subject?.planDigest,
+      (humanRequest(store, replanned.state).subject as { planDigest?: string }).planDigest,
     ).not.toBe(firstDigest);
     const frameRequests = executor.requests.filter(
       (request) => request.contract.nodeId === "planChange/design/frame",

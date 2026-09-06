@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import planChangeWorkflow from "../src/builtins/plan-change.workflow.js";
 import { WorkflowEngine } from "../src/workflows/engine.js";
-import type { HumanDecisionRequest } from "../src/workflows/types.js";
+import { WorkflowRunStore } from "../src/workflows/store.js";
+import { humanRequest } from "./checkpoint-helpers.js";
 import { makeStateDatabasePath, ScriptedExecutor } from "./helpers.js";
 
 function planningExecutor(plan: unknown): ScriptedExecutor {
@@ -143,12 +144,14 @@ describe("plan-change workflow", () => {
   });
 
   it("uses the default autonomous policy for a new plan", async () => {
+    const store = new WorkflowRunStore(await makeStateDatabasePath("plan-change-auto"));
     const result = await new WorkflowEngine({
-      databasePath: await makeStateDatabasePath("plan-change-auto"),
+      store,
       executor: planningExecutor({ summary: "plan", steps: ["one"] }),
     }).run(planChangeWorkflow, { task: "change the implementation" });
     expect(result.state.status).toBe("waiting");
-    const request = result.state.finalOutput as HumanDecisionRequest;
+    const request = humanRequest(store, result.state);
+    store.close();
     expect(request).toMatchObject({
       audience: "operator",
       defaultResponse: { choice: "continue" },

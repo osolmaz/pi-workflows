@@ -18,8 +18,9 @@ import {
   WorkflowSourceChangedError,
 } from "./errors.js";
 import { resolveNext, resolveNextForOutcome, validateWorkflowDefinition } from "./graph.js";
-import { createHumanDecisionRequest, validateHumanDecisionResponse } from "./human-decision.js";
+import { createHumanDecisionRequest } from "./human-decision.js";
 import { extractJsonValue } from "./json.js";
+import { workflowRequestId } from "./requests.js";
 import {
   parseWorkflowSettingsValue,
   resolveInitialWorkflowSettings,
@@ -35,7 +36,6 @@ import {
 } from "./store.js";
 import { executionTransition } from "./transitions.js";
 import type {
-  ResolvedHumanDecision,
   AgentExpectedOutput,
   AgentNodeDefinition,
   AgentStepExecutor,
@@ -55,7 +55,6 @@ import type {
   WorkflowNodeOutcome,
   WorkflowNodeResult,
   WorkflowNotificationSink,
-  HumanDecisionRequest,
   WorkflowRunResult,
   WorkflowRunState,
   WorkflowSource,
@@ -344,13 +343,15 @@ export class WorkflowEngine {
     this.cancelled = false;
     this.paused = false;
     this.parked = false;
-    const state = await this.store.prepareRunResume(runId);
-    const sourceMismatch = workflowIdentityMismatch(state, workflow, options.workflowSource);
+    const stored = await this.store.readRunState(runId);
+    if (stored === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
+    const sourceMismatch = workflowIdentityMismatch(stored, workflow, options.workflowSource);
     if (sourceMismatch && options.force !== true) {
       throw new WorkflowSourceChangedError(runId);
     }
+    const state = await this.store.prepareRunResume(runId);
 
-    const point = this.resumePointFor(workflow, state, "wait");
+    const point = this.resumePointFor(workflow, state);
     const interruptedNode =
       state.currentNode !== undefined ? workflow.nodes[state.currentNode] : undefined;
     let resumedAttempt: ResumedNodeAttempt | undefined;
@@ -358,9 +359,10 @@ export class WorkflowEngine {
       state.currentNode !== undefined &&
       state.currentAttemptId !== undefined &&
       state.currentNodeStartedAt !== undefined &&
-      interruptedNode?.nodeType === "agent" &&
-      (assistantMessageConfig(interruptedNode) !== undefined ||
-        options.resumeInteractionAttemptId === state.currentAttemptId)
+      (interruptedNode?.nodeType === "checkpoint" ||
+        (interruptedNode?.nodeType === "agent" &&
+          (assistantMessageConfig(interruptedNode) !== undefined ||
+            options.resumeInteractionAttemptId === state.currentAttemptId)))
     ) {
       const resumedSettings = await this.persistedSettingsBinding(state);
       resumedAttempt = {
@@ -442,163 +444,6 @@ export class WorkflowEngine {
   }
 
   /**
-   * Start a continuation run from a checkpointed parent. The new run gets a
-   * fresh run and event stream, carries forward the parent's outputs, results,
-   * and step accounting, and continues routing after the checkpoint.
-   */
-  async continueRun(
-    workflow: WorkflowDefinition,
-    parentRunId: string,
-    input: unknown,
-    options: {
-      workflowSource?: WorkflowSource;
-      runId?: string;
-      force?: boolean;
-      humanDecision?: ResolvedHumanDecision;
-    } = {},
-  ): Promise<WorkflowRunResult> {
-    workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
-    validateWorkflowDefinition(workflow);
-    this.presentationRequired = workflow.presentationPrompt !== undefined;
-    this.cancelled = false;
-    this.paused = false;
-    this.parked = false;
-    const parentState = await this.store.readRunState(parentRunId);
-    if (parentState === null) {
-      throw new Error(`Cannot continue from unreadable workflow run: ${parentRunId}`);
-    }
-    if (parentState.status !== "waiting" || parentState.waitingOn === undefined) {
-      throw new Error(
-        `Cannot continue workflow run ${parentRunId} with status ${parentState.status}`,
-      );
-    }
-    const sourceMismatch = workflowIdentityMismatch(parentState, workflow, options.workflowSource);
-    if (sourceMismatch && options.force !== true) {
-      throw new WorkflowSourceChangedError(parentRunId);
-    }
-
-    const waitingNodeId = parentState.waitingOn;
-    const waitingNode = workflow.nodes[waitingNodeId];
-    if (waitingNode?.nodeType !== "checkpoint") {
-      throw new Error("Only a checkpoint can accept a checkpoint answer");
-    }
-    const humanContract = waitingNode.humanDecision;
-    let acceptedResponse: unknown;
-    let acceptedNodeId: string | undefined;
-    let normalizedInput: unknown;
-    if (humanContract !== undefined) {
-      if (options.humanDecision === undefined) {
-        throw new Error(`Checkpoint ${waitingNodeId} requires an accepted verified human decision`);
-      }
-      const request = parentState.finalOutput as HumanDecisionRequest;
-      if (
-        request?.schema !== "pi-workflows.human-decision-request.v1" ||
-        request.decisionId !== options.humanDecision.decisionId ||
-        request.requestDigest !== options.humanDecision.requestDigest
-      ) {
-        throw new Error("Accepted human decision does not match the waiting request");
-      }
-      const durableDecision = await this.store.readResolvedHumanDecision(request.decisionId);
-      if (durableDecision === null || !isDeepStrictEqual(durableDecision, options.humanDecision)) {
-        throw new Error("Accepted human decision does not match the durable decision record");
-      }
-      acceptedResponse = validateHumanDecisionResponse(request, durableDecision.response);
-      acceptedNodeId = request.nodeId;
-      normalizedInput = structuredClone(parentState.input);
-    } else {
-      const suppliedInput = input === undefined ? null : input;
-      normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
-    }
-    assertJsonSerializable(normalizedInput, "Workflow run input");
-    if (options.runId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(options.runId)) {
-      throw new Error(`Invalid workflow run id: ${JSON.stringify(options.runId)}`);
-    }
-
-    const state = await this.createRunState(
-      workflow,
-      normalizedInput,
-      options.workflowSource,
-      options.runId,
-    );
-    state.parentRunId = parentRunId;
-    state.outputs = structuredClone(parentState.outputs);
-    state.results = structuredClone(parentState.results);
-    state.steps = structuredClone(parentState.steps);
-    if (humanContract !== undefined && options.humanDecision !== undefined) {
-      const receipt = {
-        decisionId: options.humanDecision.decisionId,
-        requestDigest: options.humanDecision.requestDigest,
-        nodeId: acceptedNodeId ?? waitingNodeId,
-        response: options.humanDecision.response,
-        provenance: options.humanDecision.provenance,
-        acceptedAt: options.humanDecision.acceptedAt,
-        answerDigest: options.humanDecision.answerDigest,
-      };
-      state.humanDecision = {
-        schema: "pi-workflows.human-decision-receipt.v1",
-        ...receipt,
-        subjectDigest: options.humanDecision.subjectDigest,
-        presentationDigest: options.humanDecision.presentationDigest,
-        revision: options.humanDecision.revision,
-      };
-      state.outputs[waitingNodeId] = acceptedResponse;
-      const priorResult = state.results[waitingNodeId];
-      if (priorResult === undefined) {
-        throw new Error(`Waiting human decision result is missing for ${waitingNodeId}`);
-      }
-      state.results[waitingNodeId] = { ...priorResult, output: acceptedResponse };
-      const stepIndex = state.steps.findLastIndex((step) => step.nodeId === waitingNodeId);
-      if (stepIndex < 0)
-        throw new Error(`Waiting human decision step is missing for ${waitingNodeId}`);
-      const priorStep = state.steps[stepIndex];
-      if (priorStep === undefined)
-        throw new Error("Waiting human decision step became unavailable");
-      state.steps[stepIndex] = { ...priorStep, output: acceptedResponse };
-    }
-    state.carriedStepCount = state.steps.length;
-
-    const runId = await this.store.initializeRun(workflow, state);
-    await this.persist(runId, state, {
-      scope: "run",
-      type: "run_started",
-      payload: {
-        workflowName: workflow.name,
-        ...(state.runTitle ? { runTitle: state.runTitle } : {}),
-        input: state.input,
-        continuedFrom: parentRunId,
-        checkpoint: parentState.waitingOn,
-        carriedSteps: state.steps.length,
-      },
-    });
-    await this.onRunStarted?.(runId, state);
-
-    const point = this.resumePointFor(workflow, state, "continue");
-    if (point.nodeId === null) {
-      // The checkpoint was the final node; the answer completes the chain.
-      await this.finishRun(runId, state, "completed", { finalOutput: point.lastOutput });
-      return { runId, state };
-    }
-    try {
-      await this.executeGraph(
-        workflow,
-        state,
-        runId,
-        point.nodeId,
-        countExecutableSteps(workflow, state.steps),
-        point.lastOutput,
-      );
-    } catch (error) {
-      if (isClaimLostError(error)) throw error;
-      if (isRunParkedError(error) || this.parked) {
-        return { runId, state };
-      }
-      await this.finishAfterError(runId, state, error);
-      return { runId, state };
-    }
-    return { runId, state };
-  }
-
-  /**
    * Find where a resumed run continues. An in-flight node reruns; otherwise
    * routing continues from the last recorded step. A null nodeId means the
    * graph was already done when the crash hit.
@@ -606,7 +451,6 @@ export class WorkflowEngine {
   private resumePointFor(
     workflow: WorkflowDefinition,
     state: WorkflowRunState,
-    checkpointBehavior: "wait" | "continue",
   ): {
     nodeId: string | null;
     lastOutput?: unknown;
@@ -628,19 +472,6 @@ export class WorkflowEngine {
       return { nodeId: lastStep.nodeId };
     }
     if (result.outcome === "ok") {
-      // A recorded checkpoint means the run should be waiting; a crash
-      // before the run_waiting persist restores the gate instead of
-      // routing past it. The gate applies to this run's own checkpoint
-      // only: a continuation's carried steps end with the parent's
-      // already-answered checkpoint, and routing must continue from it.
-      const isCarriedStep = state.steps.length <= (state.carriedStepCount ?? 0);
-      if (
-        checkpointBehavior === "wait" &&
-        !isCarriedStep &&
-        workflow.nodes[lastStep.nodeId]?.nodeType === "checkpoint"
-      ) {
-        return { nodeId: null, waitingOn: lastStep.nodeId, lastOutput: result.output };
-      }
       const next = resolveNext(workflow.edges, lastStep.nodeId, result.output, result);
       return next === null
         ? { nodeId: null, lastOutput: result.output }
@@ -892,13 +723,6 @@ export class WorkflowEngine {
       }
 
       lastOutput = attempt.result.output;
-      if (node.nodeType === "checkpoint") {
-        await this.finishRun(runId, state, "waiting", {
-          waitingOn: attempt.result.nodeId,
-          finalOutput: lastOutput,
-        });
-        return;
-      }
       currentNodeId = resolveNext(
         workflow.edges,
         attempt.result.nodeId,
@@ -1344,13 +1168,40 @@ export class WorkflowEngine {
       }
       case "action":
         return await this.runActionNode(node, context, nodeId, attemptId, signal, meta);
-      case "checkpoint":
-        return await runCheckpointNode(node, context, {
-          store: this.store,
-          workflowName: workflow.name,
-          nodeId,
-          attemptId,
-        });
+      case "checkpoint": {
+        const saved = await this.store.readCheckpoint(state.runId, attemptId);
+        if (saved !== undefined) {
+          if (saved.request.status === "cancelled")
+            throw new Error("Checkpoint request is cancelled");
+          if (saved.request.status === "settled") {
+            if (saved.humanDecision !== undefined) state.humanDecision = saved.humanDecision;
+            return { output: saved.output, promptText: null };
+          }
+        } else {
+          const request = await checkpointRequest(node, context, {
+            workflowName: workflow.name,
+            nodeId,
+            attemptId,
+          });
+          const event = await this.store.commitTransition(state.runId, {
+            kind: "waitForInput",
+            ...request,
+            event: {
+              scope: "node",
+              type: "checkpoint_requested",
+              nodeId,
+              attemptId,
+              payload: { requestId: request.requestId, requestKind: request.requestKind },
+            },
+          });
+          state.traceSeq = event.seq;
+          state.updatedAt = event.at;
+        }
+        state.status = "waiting";
+        state.waitingOn = nodeId;
+        delete state.finishedAt;
+        throw new RunParkedError();
+      }
     }
   }
 
@@ -1705,16 +1556,15 @@ export class WorkflowEngine {
   }
 }
 
-async function runCheckpointNode(
+async function checkpointRequest(
   node: CheckpointNodeDefinition,
   context: WorkflowNodeContext,
   execution: {
-    store: WorkflowExecutionStore;
     workflowName: string;
     nodeId: string;
     attemptId: string;
   },
-): Promise<NodeExecution> {
+): Promise<{ requestId: string; requestKind: "checkpoint" | "decision"; contract: JsonValue }> {
   if (node.humanDecision !== undefined) {
     const prompt = await node.humanDecision.request(context);
     const audience =
@@ -1734,11 +1584,18 @@ async function runCheckpointNode(
       prompt,
       ...(timeout !== undefined ? { timeout } : {}),
     });
-    await execution.store.createHumanDecisionRequest(request);
-    return { output: request, promptText: null };
+    return {
+      requestId: request.decisionId,
+      requestKind: "decision",
+      contract: request as unknown as JsonValue,
+    };
   }
   const output = node.run ? await node.run(context) : { summary: node.summary ?? "checkpoint" };
-  return { output, promptText: null };
+  return {
+    requestId: workflowRequestId(context.state.runId, execution.attemptId),
+    requestKind: "checkpoint",
+    contract: output as JsonValue,
+  };
 }
 
 function shellReceipt(result: ShellActionResult): WorkflowActionReceipt {

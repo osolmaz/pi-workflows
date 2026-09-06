@@ -36,7 +36,7 @@ export type WorkflowRunQueueView = {
   executionMode: "interactive" | "headless";
   parentRunId: string | null;
   rootRunId: string;
-  lineageKind: "continuation" | "restart" | null;
+  lineageKind: "restart" | null;
   restartNumber: number;
   parentTerminalFingerprint: string | null;
   errorCode: string | null;
@@ -105,7 +105,7 @@ export type ClientInteractiveRequest = {
   runId: string;
   attemptId: string;
   targetSessionId: string;
-  kind: "agent" | "assistant" | "decision";
+  kind: "agent" | "assistant" | "checkpoint" | "decision";
   contract: JsonValue;
   revision: number;
   status: "pending" | "settled" | "cancelled";

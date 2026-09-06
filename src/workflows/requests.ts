@@ -1,8 +1,16 @@
 import { createHash } from "node:crypto";
 import type { StateDatabase } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
+import { WorkflowMessageStore } from "../state/workflow-messages.js";
+import type { HumanDecisionReceipt } from "./types.js";
 
 export type WorkflowRequestKind = "agent" | "assistant" | "checkpoint" | "decision";
+
+export type WorkflowCheckpointState = {
+  request: InteractiveRequestRecord;
+  output?: JsonValue;
+  humanDecision?: HumanDecisionReceipt;
+};
 
 export type InteractiveRequestRecord = {
   requestId: string;
@@ -148,4 +156,130 @@ export function acceptedRequestOutput(
     .get(request.requestId, request.acceptedSubmissionId) as { payloadHash: Buffer } | undefined;
   if (row === undefined) throw new Error("Accepted workflow response is missing");
   return state.readJson(row.payloadHash);
+}
+
+export type WorkflowSubmissionOptions = {
+  requestId: string;
+  submissionId: string;
+  idempotencyKey: string;
+  expectedRevision: number;
+  payload: JsonValue;
+  outcome: "validating" | "accepted" | "rejected" | "adopted";
+  settle: boolean;
+  receipt?: JsonValue;
+};
+
+/** Record one exact response candidate or winner under the request revision. */
+export function recordWorkflowSubmission(
+  state: StateDatabase,
+  options: WorkflowSubmissionOptions,
+): {
+  interaction: InteractiveRequestRecord;
+  submissionId: string;
+  outcome: "accepted" | "adopted";
+  receipt: JsonValue;
+} {
+  return state.transaction(() => {
+    const request = readWorkflowRequest(state, options.requestId);
+    if (request === undefined) throw new Error("Workflow request is missing");
+    const payloadHash = createHash("sha256").update(canonicalJson(options.payload)).digest();
+    const existing = state.connection
+      .prepare(
+        `SELECT submission_id AS submissionId, payload_hash AS payloadHash, receipt_hash AS receiptHash
+       FROM interactive_submissions WHERE request_id = ? AND idempotency_key = ?`,
+      )
+      .get(options.requestId, options.idempotencyKey) as
+      | { submissionId: string; payloadHash: Buffer; receiptHash: Buffer | null }
+      | undefined;
+    if (existing !== undefined) {
+      if (!existing.payloadHash.equals(payloadHash))
+        throw new Error("Interactive submission idempotency key conflicts");
+      return {
+        interaction: request,
+        submissionId: existing.submissionId,
+        outcome: "adopted",
+        receipt:
+          existing.receiptHash === null
+            ? { requestId: request.requestId, submissionId: existing.submissionId }
+            : state.readJson(existing.receiptHash),
+      };
+    }
+    if (request.revision !== options.expectedRevision || request.status !== "pending") {
+      throw new Error("Interactive request revision conflict");
+    }
+    if (
+      options.outcome === "validating" &&
+      state.connection
+        .prepare(
+          "SELECT 1 FROM interactive_submissions WHERE request_id = ? AND outcome = 'validating'",
+        )
+        .get(options.requestId) !== undefined
+    )
+      throw new Error("Interactive submission validation is already active");
+    if (options.settle && options.outcome !== "accepted")
+      throw new Error("Only accepted output can settle a request");
+    if (request.kind === "decision" && options.settle) {
+      const resolution = state.connection
+        .prepare(
+          `SELECT r.response_hash AS responseHash FROM human_decision_resolutions r
+         JOIN human_decisions d ON d.decision_id = r.decision_id
+         WHERE d.decision_id = ? AND d.run_id = ? AND d.attempt_id = ? AND r.outcome = 'accepted'`,
+        )
+        .get(request.requestId, request.runId, request.attemptId) as
+        | { responseHash: Buffer }
+        | undefined;
+      const decision =
+        resolution === undefined
+          ? undefined
+          : (state.readJson(resolution.responseHash) as { response?: JsonValue });
+      if (
+        decision?.response === undefined ||
+        canonicalJson(decision.response) !== canonicalJson(options.payload)
+      ) {
+        throw new Error("Checkpoint response does not match a verified human decision");
+      }
+    }
+    const now = Date.now();
+    state.connection
+      .prepare(
+        `INSERT INTO interactive_submissions(
+         submission_id, request_id, idempotency_key, request_revision,
+         payload_hash, outcome, receipt_hash, submitted_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        options.submissionId,
+        request.requestId,
+        options.idempotencyKey,
+        options.expectedRevision,
+        state.putJson(options.payload, now),
+        options.outcome,
+        options.receipt === undefined ? null : state.putJson(options.receipt, now),
+        now,
+      );
+    if (options.settle) {
+      const changed = state.connection
+        .prepare(
+          `UPDATE interactive_requests SET status = 'settled', accepted_submission_id = ?,
+           revision = revision + 1, updated_at = ?, settled_at = ?
+         WHERE request_id = ? AND revision = ? AND status = 'pending'`,
+        )
+        .run(options.submissionId, now, now, request.requestId, options.expectedRevision);
+      if (changed.changes !== 1) throw new Error("Workflow response lost its request revision");
+      const messages = new WorkflowMessageStore(state);
+      messages.cancelPendingForSource(request.requestId, "step", now);
+      messages.cancelPendingForSource(request.requestId, "decision", now);
+    }
+    const interaction = readWorkflowRequest(state, request.requestId);
+    if (interaction === undefined) throw new Error("Workflow request disappeared after acceptance");
+    return {
+      interaction,
+      submissionId: options.submissionId,
+      outcome: "accepted",
+      receipt: options.receipt ?? {
+        requestId: request.requestId,
+        submissionId: options.submissionId,
+      },
+    };
+  });
 }

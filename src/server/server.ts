@@ -87,7 +87,6 @@ import type {
   HumanDecisionRequest,
   HumanDecisionResponse,
   HumanDecisionSettlementRecord,
-  ResolvedHumanDecision,
   WorkflowDefinitionSnapshot,
   WorkflowRunState,
   WorkflowSessionBinding,
@@ -2107,67 +2106,33 @@ export class WorkflowServer {
     command: ClientRequest,
     afterCommit: Array<() => void>,
   ): Omit<ClientResponse, "schema" | "type" | "requestId"> {
-    const parentRunId = requireRunId(command);
+    const runId = requireRunId(command);
     const payload = requireRecord(command.payload, "checkpoint answer payload");
-    const continuationRunId = requireString(payload.continuationRunId, "continuationRunId");
-    const parent = this.queue.getWorkflowRun(parentRunId);
-    const bundle = this.runStore.readRun(parentRunId);
-    if (parent === undefined || bundle === null || bundle instanceof Promise) {
-      return { outcome: "notFound", error: `Checkpoint run not found: ${parentRunId}` };
+    const requestId = requireString(payload.requestId, "requestId");
+    const interaction = this.serverState.getInteraction(requestId);
+    if (interaction === undefined || interaction.runId !== runId) {
+      return { outcome: "notFound", error: "Checkpoint request not found" };
     }
-    const waitingOn = bundle.state.waitingOn;
-    if (bundle.state.status !== "waiting" || waitingOn === undefined) {
-      const continuation = this.state.connection
-        .prepare(
-          `SELECT run_id AS runId FROM runs
-           WHERE parent_run_id = ? AND lineage_kind = 'continuation'
-           ORDER BY created_at DESC LIMIT 1`,
-        )
-        .get(parentRunId) as { runId?: unknown } | undefined;
-      if (typeof continuation?.runId === "string") {
-        return {
-          outcome: "adopted",
-          receipt: {
-            parentRunId,
-            runId: continuation.runId,
-            alreadyAnswered: true,
-            detail: "This checkpoint was already answered.",
-          },
-        };
-      }
-      return { outcome: "rejected", error: "Workflow run is not waiting at a checkpoint" };
-    }
-    const waitingNode = bundle.snapshot.nodes[waitingOn];
-    if (waitingNode?.nodeType !== "checkpoint") {
+    if (interaction.kind !== "checkpoint") {
       return { outcome: "rejected", error: "Only an ordinary checkpoint accepts an answer" };
     }
-    if (waitingNode.humanDecision !== undefined) {
-      return { outcome: "rejected", error: "Protected human decisions require a human channel" };
+    if (this.queue.isWorkflowRunPaused(runId)) {
+      return { outcome: "conflict", error: "Workflow run is paused" };
     }
-    const projectPath = this.queue.workflowRunProjectPath(parentRunId);
-    if (projectPath === undefined || parent.originSessionId === null) {
-      throw new Error("Checkpoint parent provenance is missing");
-    }
-    const prepared = this.prepareContinuation(
-      {
-        parent,
-        parentRunId,
-        continuationRunId,
-        projectPath,
-        definitionSnapshot: bundle.snapshot,
-        input: payload.input as JsonValue,
-        launchOptions: {},
-        originSessionId: parent.originSessionId,
-      },
-      afterCommit,
-    );
+    const result = this.serverState.submitInteraction({
+      requestId,
+      submissionId: requireString(payload.submissionId, "submissionId"),
+      idempotencyKey: command.idempotencyKey,
+      expectedRevision: requireNonNegativeInteger(command.expectedRevision, "expectedRevision"),
+      payload: (payload.input ?? null) as JsonValue,
+      accepted: true,
+      receipt: { requestId, runId },
+    });
+    this.scheduleInteractionResume(runId, afterCommit);
     return {
-      outcome: prepared.state === "adopted" ? "adopted" : "accepted",
-      receipt: {
-        parentRunId,
-        runId: continuationRunId,
-        status: prepared.run.status,
-      } as JsonValue,
+      outcome: result.outcome,
+      revision: result.interaction.revision,
+      receipt: result.receipt,
     };
   }
 
@@ -2231,92 +2196,25 @@ export class WorkflowServer {
       accepted: true,
       receipt: accepted.decision as unknown as JsonValue,
     });
-    const continuationRunId = this.prepareDecisionContinuation(
-      options.interaction,
-      options.request,
-      accepted.decision,
-      options.afterCommit,
-    );
+    this.scheduleInteractionResume(options.interaction.runId, options.afterCommit);
     return {
       outcome: accepted.status === "adopted" ? "adopted" : "accepted",
       receipt: {
         requestId: options.interaction.requestId,
-        parentRunId: options.interaction.runId,
-        runId: continuationRunId,
+        runId: options.interaction.runId,
         decision: accepted.decision,
       } as JsonValue,
     };
   }
 
-  private prepareDecisionContinuation(
-    interaction: InteractiveRequestRecord,
-    request: HumanDecisionRequest,
-    decision: ResolvedHumanDecision,
-    afterCommit: Array<() => void>,
-  ): string {
-    const parent = this.queue.getWorkflowRun(interaction.runId);
-    const bundle = this.runStore.readRun(interaction.runId);
-    if (parent === undefined || bundle === null || bundle instanceof Promise) {
-      throw new Error(`Decision parent run is unreadable: ${interaction.runId}`);
-    }
-    const continuationRunId = `continuation-${request.decisionId.replace(/^decision-/, "")}`;
-    const projectPath = this.queue.workflowRunProjectPath(interaction.runId);
-    if (projectPath === undefined) throw new Error("Decision parent project is missing");
-    this.prepareContinuation(
-      {
-        parent,
-        parentRunId: interaction.runId,
-        continuationRunId,
-        projectPath,
-        definitionSnapshot: bundle.snapshot,
-        input: {},
-        launchOptions: { humanDecision: decision },
-        originSessionId: interaction.targetSessionId,
-      },
-      afterCommit,
-    );
-    return continuationRunId;
-  }
-
-  private prepareContinuation(
-    options: {
-      parent: WorkflowRunQueueRecord;
-      parentRunId: string;
-      continuationRunId: string;
-      projectPath: string;
-      definitionSnapshot: WorkflowDefinitionSnapshot;
-      input: unknown;
-      launchOptions: JsonValue;
-      originSessionId: string;
-    },
-    afterCommit: Array<() => void>,
-  ) {
-    const token = randomUUID();
-    const scoped = new SqliteResourceManagerStore(this.databasePath, {
-      state: this.state,
-      projectPath: options.projectPath,
+  private scheduleInteractionResume(runId: string, afterCommit: Array<() => void>): void {
+    afterCommit.push(() => {
+      if (this.activeRuns.has(runId) || this.activationTasks.has(runId)) {
+        this.pendingResumes.add(runId);
+      } else {
+        void this.resumePendingRun(runId);
+      }
     });
-    const prepared = scoped.prepareOrAdoptWorkflowRun({
-      runId: options.continuationRunId,
-      workflowName: options.parent.workflowName,
-      workflowSourceRef: options.parent.workflowSourceRef,
-      workflowSource: options.parent.workflowSource,
-      definitionDigest: options.parent.definitionDigest,
-      definitionSnapshot: options.definitionSnapshot,
-      input: options.input,
-      launchOptions: options.launchOptions,
-      runnerId: this.serverId,
-      claimToken: token,
-      leaseMs: this.runClaimLeaseMs,
-      originSessionId: options.originSessionId,
-      executionMode: options.parent.executionMode,
-      parentRunId: options.parentRunId,
-    });
-    if (prepared.state === "claimed") {
-      this.markPendingStart(options.continuationRunId, token);
-      afterCommit.push(() => void this.activateRun(prepared.run, token));
-    }
-    return prepared;
   }
 
   private startRun(
@@ -3701,7 +3599,7 @@ export class WorkflowServer {
           if (!this.queue.parkWorkflowRun({ runId: request.runId, claimToken })) {
             throw new Error("Decision timeout could not release the parent run claim");
           }
-          this.prepareDecisionContinuation(interaction, request, accepted.decision, afterCommit);
+          this.scheduleInteractionResume(interaction.runId, afterCommit);
         });
         committed = true;
         for (const effect of afterCommit) setImmediate(effect);
@@ -3782,7 +3680,7 @@ export class WorkflowServer {
       ...this.blockedRuns,
     ]);
     const validatingRunId = this.serverState
-      .validatingInteractionRunIds()
+      .readyInteractionRunIds()
       .find((runId) => !excluded.has(runId));
     if (validatingRunId !== undefined) {
       const validationToken = randomUUID();
@@ -4107,24 +4005,10 @@ export class WorkflowServer {
             requireNonNegativeInteger(payload.changeNumber, "changeNumber"),
           );
           break;
-        case "store.createHumanDecisionRequest": {
-          const decision = payload.request as HumanDecisionRequest;
-          result = await this.runStore.createHumanDecisionRequest(decision);
-          if (active.record.originSessionId !== null) {
-            this.serverState.createInteractiveRequest({
-              requestId: decision.decisionId,
-              runId: decision.runId,
-              attemptId: decision.attemptId,
-              targetSessionId: active.record.originSessionId,
-              kind: "decision",
-              contract: decision as unknown as JsonValue,
-            });
-          }
-          break;
-        }
-        case "store.readResolvedHumanDecision":
-          result = await this.runStore.readResolvedHumanDecision(
-            requireString(payload.decisionId, "decisionId"),
+        case "store.readCheckpoint":
+          result = await this.runStore.readCheckpoint(
+            message.runId,
+            requireString(payload.attemptId, "attemptId"),
           );
           break;
         case "store.reserveEffect":
@@ -4520,12 +4404,11 @@ export class WorkflowServer {
   }): void {
     const active = this.activeRuns.get(context.runId);
     if (active === undefined) return;
-    if (context.event.type === "node_finished" && context.event.attemptId !== undefined) {
-      this.serverState.consumeAcceptedInteraction(
-        context.runId,
-        context.event.attemptId,
-        context.now,
-      );
+    if (context.event.type === "checkpoint_requested") {
+      const requestId = requireString(context.event.payload?.requestId, "checkpoint requestId");
+      const request = this.serverState.getInteraction(requestId);
+      if (request === undefined) throw new Error("Checkpoint request was not committed");
+      this.serverState.ensureInteractionMessage(request, "initial", context.now);
     }
     if (context.state.status === "running") {
       if (context.event.type === "run_started" || context.event.type === "run_resumed") {
@@ -5044,20 +4927,6 @@ function runnerRunCommand(
   }
   const input = record.input as JsonValue;
   if (record.lineageKind === "restart") return { kind: "restart", input };
-  if (record.lineageKind === "continuation") {
-    if (record.parentRunId === null) {
-      throw new Error(`Workflow continuation ${record.runId} has no parent run`);
-    }
-    const launchOptions = isObjectRecord(record.launchOptions) ? record.launchOptions : {};
-    return {
-      kind: "continue",
-      parentRunId: record.parentRunId,
-      input,
-      ...(launchOptions.humanDecision === undefined
-        ? {}
-        : { humanDecision: launchOptions.humanDecision as JsonValue }),
-    };
-  }
   if (record.parentRunId !== null) {
     throw new Error(`Workflow run ${record.runId} has a parent without a lineage kind`);
   }

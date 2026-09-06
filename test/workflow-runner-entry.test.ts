@@ -42,8 +42,7 @@ describe("workflow runner run commands", () => {
     const engine = {
       run: vi.fn().mockResolvedValue(result),
       resumeRun: vi.fn(),
-      continueRun: vi.fn(),
-    } as unknown as Pick<WorkflowEngine, "run" | "resumeRun" | "continueRun">;
+    } as unknown as Pick<WorkflowEngine, "run" | "resumeRun">;
     const workflow = {} as WorkflowDefinition;
     const source: WorkflowSource = { kind: "builtin", id: "demo", revision: "test" };
 
@@ -62,36 +61,29 @@ describe("workflow runner run commands", () => {
         workflowSource: source,
       },
     );
-    expect(engine.continueRun).not.toHaveBeenCalled();
+    expect(engine.resumeRun).not.toHaveBeenCalled();
   });
 
-  it("uses continuation only for an explicit continuation command", async () => {
-    const result = { runId: "continuation-1", state: {} } as WorkflowRunResult;
+  it("resumes the same run with the exact accepted attempt", async () => {
+    const result = { runId: "run-1", state: {} } as WorkflowRunResult;
     const engine = {
       run: vi.fn(),
-      resumeRun: vi.fn(),
-      continueRun: vi.fn().mockResolvedValue(result),
-    } as unknown as Pick<WorkflowEngine, "run" | "resumeRun" | "continueRun">;
+      resumeRun: vi.fn().mockResolvedValue(result),
+    } as unknown as Pick<WorkflowEngine, "run" | "resumeRun">;
     const workflow = {} as WorkflowDefinition;
     const source: WorkflowSource = { kind: "builtin", id: "demo", revision: "test" };
 
     await expect(
-      executeRunnerRunCommand(engine, workflow, "continuation-1", source, {
-        kind: "continue",
-        parentRunId: "parent-1",
-        input: { answer: true },
+      executeRunnerRunCommand(engine, workflow, "run-1", source, {
+        kind: "resume",
+        resumeInteractionAttemptId: "attempt-1",
       }),
     ).resolves.toBe(result);
 
-    expect(engine.continueRun).toHaveBeenCalledWith(
-      workflow,
-      "parent-1",
-      { answer: true },
-      {
-        runId: "continuation-1",
-        workflowSource: source,
-      },
-    );
+    expect(engine.resumeRun).toHaveBeenCalledWith(workflow, "run-1", {
+      workflowSource: source,
+      resumeInteractionAttemptId: "attempt-1",
+    });
     expect(engine.run).not.toHaveBeenCalled();
   });
 });

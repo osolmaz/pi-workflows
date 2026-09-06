@@ -773,7 +773,7 @@ describe("pi-workflows hosted extension", () => {
     }
   }, 60_000);
 
-  it("continues an ordinary checkpoint through the model-facing answer action", async () => {
+  it("answers an ordinary checkpoint in the same run through the model-facing action", async () => {
     const { cwd } = await setupProject();
     const workflowPath = await writeCheckpointWorkflow(cwd);
     const fake = makePi({ cwd });
@@ -785,11 +785,21 @@ describe("pi-workflows hosted extension", () => {
         global: true,
       });
       try {
+        const runs = store.listWorkflowRuns();
+        const failed = runs.find((run) => run.status === "failed");
+        if (failed !== undefined) throw new Error(JSON.stringify(failed));
         return store.findSessionReservation("session-one")?.status === "parked";
       } finally {
         store.close();
       }
     }, 30_000);
+    await waitUntil(
+      () =>
+        fake.sent.some(
+          (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "checkpoint",
+        ),
+      30_000,
+    );
     const result = await fake.runTool("checkpoint-answer", {
       action: "answer",
       input: { approved: true },
@@ -803,9 +813,9 @@ describe("pi-workflows hosted extension", () => {
         global: true,
       });
       try {
-        return store
-          .listWorkflowRuns()
-          .some((run) => run.parentRunId !== null && run.status === "done");
+        const runs = store.listWorkflowRuns();
+        expect(runs).toHaveLength(1);
+        return runs[0]?.status === "done";
       } finally {
         store.close();
       }
@@ -861,9 +871,9 @@ describe("pi-workflows hosted extension", () => {
         global: true,
       });
       try {
-        return store
-          .listWorkflowRuns()
-          .some((run) => run.parentRunId !== null && run.status === "done");
+        const runs = store.listWorkflowRuns();
+        expect(runs).toHaveLength(1);
+        return runs[0]?.status === "done";
       } finally {
         store.close();
       }

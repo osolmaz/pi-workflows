@@ -49,7 +49,6 @@ import type {
   WorkflowEffectReservation,
   HumanDecisionReceipt,
   HumanDecisionRequest,
-  ResolvedHumanDecision,
   WorkflowNodeDefinition,
   WorkflowNodeResult,
   WorkflowNodeSnapshot,
@@ -82,7 +81,6 @@ const STEP_ROW_SELECT = `
   SELECT s.step_index AS stepIndex, a.attempt_id AS attemptId, a.node_id AS nodeId,
          a.node_type AS nodeType, a.status,
          a.prompt_hash AS promptHash, a.output_hash AS outputHash,
-         s.output_override_hash AS outputOverrideHash,
          a.receipt_hash AS receiptHash, a.error_hash AS errorHash,
          prompt_entry.entry_hash AS promptEntryHash,
          response_entry.entry_hash AS responseEntryHash,
@@ -172,6 +170,12 @@ export type WorkflowRunStoreOptions = {
 
 /** The state boundary used by workflow code, including out-of-process runners. */
 import {
+  acceptedRequestOutput,
+  ensureWorkflowRequest,
+  requestForAttempt,
+  type WorkflowCheckpointState,
+} from "./requests.js";
+import {
   applyExecutionTransition,
   executionTransition,
   type WorkflowTransition,
@@ -209,8 +213,7 @@ export interface WorkflowExecutionStore {
     scopeId: string,
     changeNumber: number,
   ): WorkflowSettingsScopeRecord | undefined | Promise<WorkflowSettingsScopeRecord | undefined>;
-  createHumanDecisionRequest(request: HumanDecisionRequest): Promise<"created" | "adopted">;
-  readResolvedHumanDecision(decisionId: string): Promise<ResolvedHumanDecision | null>;
+  readCheckpoint(runId: string, attemptId: string): Promise<WorkflowCheckpointState | undefined>;
   reserveEffect(options: {
     runId: string;
     attemptId: string;
@@ -270,7 +273,6 @@ type StepRow = {
   status: string;
   promptHash: Buffer | null;
   outputHash: Buffer | null;
-  outputOverrideHash: Buffer | null;
   receiptHash: Buffer | null;
   promptEntryHash: Buffer | null;
   responseEntryHash: Buffer | null;
@@ -536,16 +538,25 @@ export class WorkflowRunStore {
     return revision;
   }
 
-  async createHumanDecisionRequest(request: HumanDecisionRequest): Promise<"created" | "adopted"> {
-    return await new HumanDecisionStore(this.databasePath, { state: this.state }).createRequest(
-      request,
-    );
-  }
-
-  async readResolvedHumanDecision(decisionId: string): Promise<ResolvedHumanDecision | null> {
-    return await new HumanDecisionStore(this.databasePath, { state: this.state }).readResolved(
-      decisionId,
-    );
+  async readCheckpoint(
+    runId: string,
+    attemptId: string,
+  ): Promise<WorkflowCheckpointState | undefined> {
+    const request = requestForAttempt(this.state, runId, attemptId);
+    if (request === undefined) return undefined;
+    if (request.kind !== "checkpoint" && request.kind !== "decision") {
+      throw new Error("The attempt does not own a checkpoint request");
+    }
+    if (request.status !== "settled") return { request };
+    const output = acceptedRequestOutput(this.state, request);
+    const humanDecision =
+      request.kind === "decision"
+        ? this.readHumanDecisionReceipt(runId, request.requestId)
+        : undefined;
+    if (request.kind === "decision" && humanDecision === undefined) {
+      throw new Error("The checkpoint has no verified human decision receipt");
+    }
+    return { request, output, ...(humanDecision === undefined ? {} : { humanDecision }) };
   }
 
   async reserveEffect(options: {
@@ -905,22 +916,12 @@ export class WorkflowRunStore {
             [...runViewerTargets(state, traceEvent), ...this.viewerInspectorTargets(state.runId)],
             now,
           );
-          this.syncContinuationIdentity(state);
           context.revision = revision;
           return;
         }
         const definitionHash = this.state.putJson(snapshot, now);
-        const parentLineage =
-          state.parentRunId === undefined
-            ? undefined
-            : this.state.connection
-                .prepare(
-                  `SELECT root_run_id AS rootRunId, restart_number AS restartNumber
-                   FROM runs WHERE run_id = ?`,
-                )
-                .get(state.parentRunId);
-        if (state.parentRunId !== undefined && !isRunLineageRow(parentLineage)) {
-          throw new Error(`Workflow parent run is missing: ${state.parentRunId}`);
+        if (state.parentRunId !== undefined) {
+          throw new Error("A restart must have an explicit host reservation");
         }
         this.state.connection
           .prepare(
@@ -960,10 +961,10 @@ export class WorkflowRunStore {
           .run(
             state.runId,
             resourceId,
-            state.parentRunId ?? null,
-            isRunLineageRow(parentLineage) ? parentLineage.rootRunId : state.runId,
-            state.parentRunId === undefined ? null : "continuation",
-            isRunLineageRow(parentLineage) ? parentLineage.restartNumber : 0,
+            null,
+            state.runId,
+            null,
+            0,
             definitionDigest,
             state.workflowName,
             launchOptionsHash,
@@ -980,7 +981,6 @@ export class WorkflowRunStore {
           );
         initializeViewerRun(this.state, state.runId, now);
         this.insertRunSources(state.runId, source, state.workflowSources ?? []);
-        this.syncContinuationIdentity(state);
         insertRunEvent(this.state, resourceId, 1, at, {
           scope: "run",
           type: "run_created",
@@ -1011,7 +1011,7 @@ export class WorkflowRunStore {
     const now = Date.now();
     return this.state.transaction(() => {
       this.requireRunAcceptsSettings(options.runId, false);
-      const originRunId = this.logicalOriginRunId(options.runId);
+      const originRunId = options.runId;
       const scopeId = workflowSettingsScopeId(originRunId, options.mountPath, options.invocation);
       const existing = this.settingsScopeRow(scopeId);
       if (existing !== undefined) {
@@ -1107,7 +1107,7 @@ export class WorkflowRunStore {
   }
 
   private settingsScopesForRunView(runId: string): WorkflowSettingsScopeRecord[] {
-    const originRunId = this.logicalOriginRunId(runId);
+    const originRunId = runId;
     return this.state.connection
       .prepare(
         `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
@@ -1129,7 +1129,7 @@ export class WorkflowRunStore {
     runId: string,
     range: WorkflowRunViewRange,
   ): WorkflowSettingsScopeRecord[] {
-    const originRunId = this.logicalOriginRunId(runId);
+    const originRunId = runId;
     return this.state.connection
       .prepare(
         `SELECT s.scope_id AS scopeId, s.resource_id AS resourceId,
@@ -1465,8 +1465,27 @@ export class WorkflowRunStore {
   }
 
   async prepareRunResume(runId: string): Promise<WorkflowRunState> {
-    const state = this.readRunState(runId);
+    let state = this.readRunState(runId);
     if (state === null) throw new Error(`Cannot resume unreadable workflow run: ${runId}`);
+    if (state.status === "waiting" && state.currentAttemptId !== undefined) {
+      const checkpoint = await this.readCheckpoint(runId, state.currentAttemptId);
+      if (checkpoint?.request.status === "settled") {
+        if (state.waitingOn === undefined)
+          throw new Error("Accepted checkpoint has no waiting node");
+        await this.commitTransition(runId, {
+          kind: "resumeInteraction",
+          event: {
+            scope: "node",
+            type: "interaction_accepted",
+            nodeId: state.waitingOn,
+            attemptId: state.currentAttemptId,
+            payload: { requestId: checkpoint.request.requestId },
+          },
+        });
+        state = this.readRunState(runId);
+        if (state === null) throw new Error(`Workflow run became unreadable: ${runId}`);
+      }
+    }
     if (state.status !== "running") {
       throw new Error(`Cannot resume workflow run ${runId} with status ${state.status}`);
     }
@@ -1659,6 +1678,56 @@ export class WorkflowRunStore {
         const current = this.materializeRunState(run, snapshot);
         const state = applyExecutionTransition(current, snapshot, transition, at);
         if (
+          transition.kind === "finishAttempt" &&
+          transition.step.nodeType === "checkpoint" &&
+          transition.step.outcome === "ok"
+        ) {
+          const request = requestForAttempt(this.state, runId, transition.step.attemptId);
+          if (
+            request === undefined ||
+            request.status !== "settled" ||
+            canonicalJson(acceptedRequestOutput(this.state, request)) !==
+              canonicalJson(transition.step.output)
+          ) {
+            throw new Error("Checkpoint completion requires its exact accepted response");
+          }
+        }
+        if (transition.kind === "waitForInput") {
+          const node = snapshot.nodes[transition.event.nodeId ?? ""];
+          if ((node?.humanDecision !== undefined) !== (transition.requestKind === "decision")) {
+            throw new Error("Checkpoint response authority does not match its definition");
+          }
+          if (transition.requestKind === "decision") {
+            const decision = transition.contract as unknown as HumanDecisionRequest;
+            if (
+              decision.runId !== runId ||
+              decision.attemptId !== transition.event.attemptId ||
+              decision.nodeId !== transition.event.nodeId ||
+              decision.decisionId !== transition.requestId
+            ) {
+              throw new Error("Human decision does not match the active checkpoint");
+            }
+            new HumanDecisionStore(this.databasePath, { state: this.state }).createRequest(
+              decision,
+            );
+          }
+          const binding = this.state.connection
+            .prepare("SELECT origin_session_id AS sessionId FROM run_bindings WHERE run_id = ?")
+            .get(runId) as { sessionId: string | null } | undefined;
+          ensureWorkflowRequest(
+            this.state,
+            {
+              requestId: transition.requestId,
+              runId,
+              attemptId: transition.event.attemptId ?? "",
+              targetSessionId: binding?.sessionId ?? "",
+              kind: transition.requestKind,
+              contract: transition.contract,
+            },
+            now,
+          );
+        }
+        if (
           transition.kind === "resume" &&
           transition.attemptId === undefined &&
           current.currentAttemptId !== undefined
@@ -1687,6 +1756,15 @@ export class WorkflowRunStore {
         this.persistRunState(run, state, revision, now);
         this.transitionFollowUpsForRunState(state, event, now);
         this.syncNodeAttempts(state, snapshot, now);
+        if (transition.kind === "finishAttempt") {
+          this.state.connection
+            .prepare(
+              `UPDATE interactive_requests SET consumed_at = ?, updated_at = ?
+             WHERE run_id = ? AND attempt_id = ? AND status = 'settled'
+               AND accepted_submission_id IS NOT NULL AND consumed_at IS NULL`,
+            )
+            .run(now, now, runId, transition.step.attemptId);
+        }
         recordViewerDeltas(this.state, runId, runViewerTargets(state, traceEvent), now);
         this.snapshotLifecycle?.({
           runId,
@@ -2308,7 +2386,7 @@ export class WorkflowRunStore {
     const row = this.readRunRow(runId);
     if (row === undefined) return null;
     const segment = this.segmentRow(segmentIdFor(runId));
-    const settingsOrigin = this.logicalOriginRunId(runId);
+    const settingsOrigin = runId;
     const scalar = (sql: string, ...params: unknown[]): number => {
       const count = this.state.connection.prepare(sql).get(...params);
       return isCountRow(count) ? count.count : 0;
@@ -2825,20 +2903,13 @@ export class WorkflowRunStore {
     initialSettings: InitialWorkflowSettingsScope[],
     now: number,
   ): void {
-    if (state.parentRunId !== undefined) {
-      this.state.connection
-        .prepare(
-          `UPDATE workflow_settings SET active_run_id = ?, updated_at = ? WHERE active_run_id = ?`,
-        )
-        .run(state.runId, now, state.parentRunId);
-    }
     const existing = this.state.connection
       .prepare("SELECT COUNT(*) AS count FROM workflow_settings WHERE active_run_id = ?")
       .get(state.runId);
     const hasSettings = isCountRow(existing) && existing.count > 0;
     if (hasSettings) return;
     for (const scope of initialSettings) {
-      const originRunId = this.logicalOriginRunId(state.runId);
+      const originRunId = state.runId;
       const scopeId = workflowSettingsScopeId(originRunId, scope.mountPath, scope.invocation);
       const resourceId = this.mutations.ensureResource("settings", scopeId, now);
       const settingsHash = this.state.putJson(scope.settings, now);
@@ -2863,19 +2934,6 @@ export class WorkflowRunStore {
           now,
         );
     }
-  }
-
-  private logicalOriginRunId(runId: string): string {
-    let current = runId;
-    for (let depth = 0; depth < 100; depth += 1) {
-      const row = this.state.connection
-        .prepare("SELECT parent_run_id AS parentRunId FROM runs WHERE run_id = ?")
-        .get(current);
-      if (!isParentRunRow(row)) return current;
-      if (row.parentRunId === null) return current;
-      current = row.parentRunId;
-    }
-    throw new Error(`Workflow continuation chain is too deep for run ${runId}`);
   }
 
   private requireRunAcceptsSettings(runId: string, allowWaiting: boolean): void {
@@ -3176,7 +3234,7 @@ export class WorkflowRunStore {
     snapshot: WorkflowDefinitionSnapshot,
     now: number,
   ): void {
-    for (const step of state.steps.slice(state.carriedStepCount ?? 0)) {
+    for (const step of state.steps) {
       const promptEntryId = this.findAttemptPromptEntry(state.runId, step.attemptId);
       const promptHash =
         promptEntryId === undefined && step.prompt !== null
@@ -3266,10 +3324,10 @@ export class WorkflowRunStore {
           .run(deadlineAt, now, state.currentAttemptId, state.runId);
       }
     }
-    this.syncRunSteps(state, now);
+    this.syncRunSteps(state);
   }
 
-  private syncRunSteps(state: WorkflowRunState, now: number): void {
+  private syncRunSteps(state: WorkflowRunState): void {
     const existingRows = this.state.connection
       .prepare(
         `SELECT step_index AS stepIndex, attempt_id AS attemptId
@@ -3289,18 +3347,16 @@ export class WorkflowRunStore {
       const step = state.steps[stepIndex];
       /* istanbul ignore if -- array index follows a checked bound */
       if (step === undefined) throw new Error("Workflow run step became unavailable");
-      const attemptOutput = this.readAttemptOutput(step.attemptId);
-      const carried = stepIndex < (state.carriedStepCount ?? 0);
-      const outputOverrideHash =
-        carried && canonicalJson(attemptOutput) !== canonicalJson(step.output)
-          ? this.state.putJson(step.output, now)
-          : null;
+      const attempt = this.state.connection
+        .prepare("SELECT run_id AS runId FROM node_attempts WHERE attempt_id = ?")
+        .get(step.attemptId) as { runId: string } | undefined;
+      if (attempt?.runId !== state.runId) throw new Error("A run cannot own another run's step");
       this.state.connection
         .prepare(
-          `INSERT INTO run_steps(run_id, step_index, attempt_id, output_override_hash)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT INTO run_steps(run_id, step_index, attempt_id)
+           VALUES (?, ?, ?)`,
         )
-        .run(state.runId, stepIndex, step.attemptId, outputOverrideHash);
+        .run(state.runId, stepIndex, step.attemptId);
     }
   }
 
@@ -3371,31 +3427,6 @@ export class WorkflowRunStore {
       )
       .get(runId, attemptId);
     return isEntryIdentityRow(row) ? row.entryId : undefined;
-  }
-
-  private readAttemptOutput(attemptId: string): unknown {
-    const row = this.state.connection
-      .prepare(
-        `SELECT a.output_hash AS outputHash, a.receipt_hash AS receiptHash,
-                e.entry_hash AS responseEntryHash
-         FROM node_attempts a
-         LEFT JOIN attempt_entries l ON l.attempt_id = a.attempt_id AND l.role = 'response'
-         LEFT JOIN session_entries e
-           ON e.segment_id = l.segment_id AND e.entry_id = l.entry_id
-         WHERE a.attempt_id = ?`,
-      )
-      .get(attemptId);
-    if (!isAttemptValueRow(row)) {
-      throw new Error(`Workflow node attempt is missing: ${attemptId}`);
-    }
-    if (row.outputHash !== null) return this.state.readJson(row.outputHash);
-    if (row.responseEntryHash === null) return null;
-    const receipt =
-      row.receiptHash === null ? {} : this.readJsonAs<StoredAttemptReceipt>(row.receiptHash);
-    return assistantOutputFromEntry(
-      this.state.readJson(row.responseEntryHash),
-      receipt.assistantMessage?.maxChars,
-    );
   }
 
   private ensureAttempt(
@@ -3505,34 +3536,6 @@ export class WorkflowRunStore {
     }
   }
 
-  private syncContinuationIdentity(state: WorkflowRunState): void {
-    if (state.parentRunId === undefined || state.humanDecision === undefined) return;
-    const createdAt = Date.parse(state.humanDecision.acceptedAt);
-    this.state.connection
-      .prepare(
-        `INSERT INTO continuations(
-           decision_id, parent_run_id, continuation_run_id, created_at
-         ) VALUES (?, ?, ?, ?)
-         ON CONFLICT(decision_id) DO NOTHING`,
-      )
-      .run(state.humanDecision.decisionId, state.parentRunId, state.runId, createdAt);
-    const row = this.state.connection
-      .prepare(
-        `SELECT parent_run_id AS parentRunId, continuation_run_id AS continuationRunId,
-                created_at AS createdAt
-         FROM continuations WHERE decision_id = ?`,
-      )
-      .get(state.humanDecision.decisionId);
-    if (
-      !isContinuationIdentityRow(row) ||
-      row.parentRunId !== state.parentRunId ||
-      row.continuationRunId !== state.runId ||
-      row.createdAt !== createdAt
-    ) {
-      throw new Error("Immutable human decision continuation conflicts");
-    }
-  }
-
   private readRunRow(runId: string): RunRow | undefined {
     const row = this.state.connection
       .prepare(
@@ -3576,7 +3579,6 @@ export class WorkflowRunStore {
     visibleUpdates: WorkflowUpdateRecord[],
   ): WorkflowRunState {
     const sources = this.readRunSources(row.runId, snapshot);
-    const carriedStepCount = this.carriedStepCount(row.runId);
     const activeAttempt =
       row.status === "running" || row.status === "waiting"
         ? this.readActiveAttempt(row.runId)
@@ -3611,7 +3613,6 @@ export class WorkflowRunStore {
       runId: row.runId,
       workflowName: row.workflowRef,
       ...(row.parentRunId === null ? {} : { parentRunId: row.parentRunId }),
-      ...(carriedStepCount === 0 ? {} : { carriedStepCount }),
       ...(row.title === null ? {} : { runTitle: row.title }),
       ...(sources.root === undefined ? {} : { workflowSource: sources.root }),
       ...(sources.mounted.length === 0 ? {} : { workflowSources: sources.mounted }),
@@ -3725,7 +3726,7 @@ export class WorkflowRunStore {
           : row.promptHash === null
             ? null
             : this.readText(row.promptHash);
-      const outputHash = row.outputOverrideHash ?? row.outputHash;
+      const outputHash = row.outputHash;
       const output =
         outputHash !== null
           ? this.state.readJson(outputHash)
@@ -3795,17 +3796,6 @@ export class WorkflowRunStore {
     return { ...(root === undefined ? {} : { root }), mounted };
   }
 
-  private carriedStepCount(runId: string): number {
-    const row = this.state.connection
-      .prepare(
-        `SELECT count(*) AS count
-         FROM run_steps s JOIN node_attempts a ON a.attempt_id = s.attempt_id
-         WHERE s.run_id = ? AND a.run_id <> s.run_id`,
-      )
-      .get(runId);
-    return isCountRow(row) ? row.count : 0;
-  }
-
   private readActiveAttempt(runId: string):
     | {
         attemptId: string;
@@ -3830,16 +3820,19 @@ export class WorkflowRunStore {
     return isActiveAttemptRow(row) ? row : undefined;
   }
 
-  private readHumanDecisionReceipt(runId: string): HumanDecisionReceipt | undefined {
+  private readHumanDecisionReceipt(
+    runId: string,
+    decisionId?: string,
+  ): HumanDecisionReceipt | undefined {
     const row = this.state.connection
       .prepare(
         `SELECT d.request_hash AS requestHash, r.response_hash AS responseHash
-         FROM continuations c
-         JOIN human_decisions d ON d.decision_id = c.decision_id
-         JOIN human_decision_resolutions r ON r.decision_id = c.decision_id
-         WHERE c.continuation_run_id = ? AND r.outcome = 'accepted'`,
+         FROM human_decisions d
+         JOIN human_decision_resolutions r ON r.decision_id = d.decision_id
+         WHERE d.run_id = ? AND r.outcome = 'accepted' AND (? IS NULL OR d.decision_id = ?)
+         ORDER BY r.resolved_at DESC, d.decision_id DESC LIMIT 1`,
       )
-      .get(runId);
+      .get(runId, decisionId ?? null, decisionId ?? null);
     if (!isDecisionReceiptRow(row)) return undefined;
     const request = this.readJsonAs<Record<string, unknown>>(row.requestHash);
     const decision = this.readJsonAs<Record<string, unknown>>(row.responseHash);
@@ -4773,18 +4766,6 @@ function isFollowUpRow(value: unknown): value is FollowUpRow {
   );
 }
 
-function isParentRunRow(value: unknown): value is { parentRunId: string | null } {
-  return isRecord(value) && (typeof value.parentRunId === "string" || value.parentRunId === null);
-}
-
-function isRunLineageRow(value: unknown): value is { rootRunId: string; restartNumber: number } {
-  return (
-    isRecord(value) &&
-    typeof value.rootRunId === "string" &&
-    typeof value.restartNumber === "number"
-  );
-}
-
 function isStatusRow(value: unknown): value is { status: string } {
   return isRecord(value) && typeof value.status === "string";
 }
@@ -4923,14 +4904,6 @@ function isEntryIdentityRow(value: unknown): value is { entryId: string } {
   return isRecord(value) && typeof value.entryId === "string";
 }
 
-function isAttemptValueRow(value: unknown): value is {
-  outputHash: Buffer | null;
-  receiptHash: Buffer | null;
-  responseEntryHash: Buffer | null;
-} {
-  return isRecord(value);
-}
-
 function isActiveAttemptRow(value: unknown): value is {
   attemptId: string;
   nodeId: string;
@@ -4950,14 +4923,6 @@ function isDecisionReceiptRow(value: unknown): value is {
   return (
     isRecord(value) && Buffer.isBuffer(value.requestHash) && Buffer.isBuffer(value.responseHash)
   );
-}
-
-function isContinuationIdentityRow(value: unknown): value is {
-  parentRunId: string;
-  continuationRunId: string;
-  createdAt: number;
-} {
-  return isRecord(value);
 }
 
 function isUpdateRow(value: unknown): value is UpdateRow {

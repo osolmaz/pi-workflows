@@ -61,6 +61,27 @@ export function decisionWorkflowMessageContent(options: {
   };
 }
 
+export function checkpointWorkflowMessageContent(options: {
+  workflowMessageId: string;
+  requestId: string;
+  runId: string;
+  contract: JsonValue;
+}): WorkflowMessageContent {
+  return {
+    schema: WORKFLOW_MESSAGE_CONTENT_SCHEMA,
+    customType: WORKFLOW_DECISION_MESSAGE_TYPE,
+    content: `${JSON.stringify(options.contract, null, 2)}\n\nAnswer checkpoint ${options.requestId} with the workflow answer action.`,
+    display: true,
+    details: {
+      workflowMessageId: options.workflowMessageId,
+      requestId: options.requestId,
+      runId: options.runId,
+      kind: "checkpoint",
+    },
+    triggerTurn: false,
+  };
+}
+
 export function notificationWorkflowMessageContent(options: {
   workflowMessageId: string;
   notificationId: string;
