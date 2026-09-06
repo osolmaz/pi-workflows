@@ -250,7 +250,7 @@ describe("sanity-check workflow", () => {
       /did not match the verified report/,
     );
 
-    expect(sanityCheckWorkflow.presentationPrompt).toBeUndefined();
+    expect(sanityCheckWorkflow).not.toHaveProperty("presentationPrompt");
     expect(sanityCheckWorkflow.maxSteps).toBe(8);
     expect(sanityCheckWorkflow.nodes.detailedReport).toMatchObject({
       nodeType: "agent",

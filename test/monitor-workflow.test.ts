@@ -651,7 +651,7 @@ describe("built-in monitor workflow", () => {
   });
 
   it("uses no presentation prompt and schedules only the wait route", () => {
-    expect(monitor.presentationPrompt).toBeUndefined();
+    expect(monitor).not.toHaveProperty("presentationPrompt");
     expect(monitor.nodes.report?.nodeType).toBe("notify");
     const edges = JSON.stringify(monitor.edges);
     expect(edges).toContain('"wait":"schedule"');

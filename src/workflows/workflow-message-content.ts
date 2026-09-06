@@ -9,7 +9,7 @@ import type { AgentStepContract } from "./types.js";
 export const WORKFLOW_STEP_MESSAGE_TYPE = "pi-workflows-step";
 export const WORKFLOW_DECISION_MESSAGE_TYPE = "pi-workflows-interaction";
 export const WORKFLOW_NOTIFICATION_MESSAGE_TYPE = "pi-workflows-notification";
-export const WORKFLOW_TERMINAL_MESSAGE_TYPE = "pi-workflows-presentation";
+export const WORKFLOW_TERMINAL_MESSAGE_TYPE = "pi-workflows-terminal";
 export const WORKFLOW_FOLLOW_UP_MESSAGE_TYPE = "pi-workflows-follow-up";
 
 export function stepWorkflowMessageContent(options: {
@@ -116,14 +116,14 @@ export function terminalWorkflowMessageContent(options: {
     schema: WORKFLOW_MESSAGE_CONTENT_SCHEMA,
     customType: WORKFLOW_TERMINAL_MESSAGE_TYPE,
     content: options.content,
-    display: false,
+    display: true,
     details: {
       workflowMessageId: options.workflowMessageId,
       runId: options.runId,
       kind: "terminal",
       terminal: options.details,
     },
-    triggerTurn: true,
+    triggerTurn: false,
   };
 }
 

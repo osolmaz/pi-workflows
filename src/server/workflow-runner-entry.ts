@@ -20,7 +20,6 @@ import type {
   AgentStepSubmission,
   WorkflowDefinition,
   WorkflowMountedSource,
-  WorkflowRunState,
   WorkflowSource,
 } from "../workflows/types.js";
 import { RpcStepExecutor } from "./rpc-executor.js";
@@ -42,7 +41,6 @@ import {
 } from "./workflow-runner-store.js";
 
 const STARTUP_ENV = "PI_WORKFLOWS_WORKFLOW_RUNNER_LAUNCH";
-const PRESENTATION_TIMEOUT_MS = 30_000;
 
 type WorkflowRunnerBootstrap = {
   command: WorkflowRunnerCommand;
@@ -412,11 +410,6 @@ export async function runWorkflowRunner(): Promise<number> {
       notificationSink: {
         notify: async (request) => await store.requestNotification(request),
       },
-      onRunFinishing: async (_runId, state) => {
-        if (state.status !== "completed" || workflow.presentationPrompt === undefined) return;
-        const instructions = await resolvePresentationInstructions(workflow, state);
-        await store.requestPresentation(instructions);
-      },
     });
     try {
       const result = await executeRunnerRunCommand(
@@ -436,43 +429,6 @@ export async function runWorkflowRunner(): Promise<number> {
     }
   } finally {
     transport.close();
-  }
-}
-
-async function resolvePresentationInstructions(
-  workflow: WorkflowDefinition,
-  state: WorkflowRunState,
-): Promise<string> {
-  const fallback = "Summarize the completed workflow result for the user in a normal response.";
-  if (typeof workflow.presentationPrompt === "string") {
-    return workflow.presentationPrompt.trim() || fallback;
-  }
-  if (workflow.presentationPrompt === undefined) return fallback;
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(new Error("Workflow presentation prompt timed out")),
-    PRESENTATION_TIMEOUT_MS,
-  );
-  timer.unref?.();
-  const snapshot = structuredClone(state);
-  try {
-    const instructions = await Promise.race([
-      workflow.presentationPrompt({
-        state: snapshot,
-        finalOutput: snapshot.finalOutput,
-        signal: controller.signal,
-      }),
-      new Promise<never>((_resolve, reject) => {
-        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
-          once: true,
-        });
-      }),
-    ]);
-    return instructions?.trim() || fallback;
-  } catch {
-    return fallback;
-  } finally {
-    clearTimeout(timer);
   }
 }
 

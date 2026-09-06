@@ -467,15 +467,6 @@ export type WorkflowNodeDefinition =
   | ActionNodeDefinition
   | CheckpointNodeDefinition;
 
-export type WorkflowPresentationContext = {
-  /** Final persisted state of the workflow run. */
-  state: WorkflowRunState;
-  /** Convenience alias for `state.finalOutput`. */
-  finalOutput: unknown;
-  /** Aborted if a new run starts, the session closes, or prompt generation times out. */
-  signal: AbortSignal;
-};
-
 /** Runtime parser that also carries its normalized TypeScript result type. */
 export type WorkflowValueParser<T> = (value: unknown) => MaybePromise<T>;
 
@@ -566,14 +557,6 @@ export type WorkflowDefinition<
   title?:
     | string
     | ((context: { input: TInput; workflowName: string }) => MaybePromise<string | undefined>);
-  /**
-   * Optional instructions for a normal assistant response after the run ends.
-   * The Pi extension resolves this only after the final state is persisted;
-   * the engine and durable store remain presentation-agnostic.
-   */
-  presentationPrompt?:
-    | string
-    | ((context: WorkflowPresentationContext) => MaybePromise<string | undefined>);
   startAt: string;
   nodes: Record<string, WorkflowNodeDefinition>;
   includes?: TIncludes;
@@ -952,11 +935,6 @@ export type WorkflowEngineOptions = {
    * Awaited after `run_started` is persisted, before any node executes.
    */
   onRunStarted?: (runId: string, state: WorkflowRunState) => MaybePromise<void>;
-  /**
-   * Awaited before the terminal snapshot is persisted. This is where a
-   * session recorder stops and drains. Errors are swallowed: finishing the run wins.
-   */
-  onRunFinishing?: (runId: string, state: WorkflowRunState) => MaybePromise<void>;
   /** Default per-node timeout. Defaults to 15 minutes. */
   defaultNodeTimeoutMs?: number;
   /** Guard against unbounded graph loops. Defaults to 100 executed steps. */

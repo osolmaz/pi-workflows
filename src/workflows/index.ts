@@ -254,7 +254,6 @@ export type {
   WorkflowNotificationReceipt,
   WorkflowNotificationRequest,
   WorkflowNotificationSink,
-  WorkflowPresentationContext,
   WorkflowProgressData,
   WorkflowProgressStatus,
   WorkflowRunResult,

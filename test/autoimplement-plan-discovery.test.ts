@@ -53,6 +53,10 @@ function blockedImplementation(executor: ScriptedExecutor): ScriptedExecutor {
 }
 
 async function run(executor: ScriptedExecutor, input: unknown) {
+  executor.respond("blockedSummary", () => ({
+    output: "The required plan is missing.",
+    assistantMessage: { sha256: "a".repeat(64) },
+  }));
   const repository = await makeTempDir("autoimplement-plan-discovery-repo");
   await git(repository, ["init", "-b", "main"]);
   await git(repository, ["config", "user.name", "Test"]);

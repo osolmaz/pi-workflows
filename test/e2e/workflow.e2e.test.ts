@@ -27,7 +27,6 @@ const ASSISTANT_WORKFLOW = `import { agent, assistantMessage, compute, defineWor
 
 export default defineWorkflow({
   name: "assistant-e2e",
-  presentationPrompt: "Summarize the completed E2E workflow.",
   startAt: "report",
   nodes: {
     report: notify({ message: () => "Durable E2E progress." }),
@@ -711,7 +710,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
     expect(stepRequestIds.every((requestId) => typeof requestId === "string")).toBe(true);
     expect(new Set(stepRequestIds)).toHaveLength(2);
     expect(customEntriesForRun(entries, "pi-workflows-notification", runId)).toHaveLength(1);
-    expect(customEntriesForRun(entries, "pi-workflows-presentation", runId)).toHaveLength(1);
+    expect(customEntriesForRun(entries, "pi-workflows-terminal", runId)).toHaveLength(1);
 
     for (const deliveryPrompt of [
       "Submit the structured E2E input.",

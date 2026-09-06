@@ -171,9 +171,12 @@ export function parseClientResponse(line: string | Buffer): ClientResponse {
 export function clientRequestFingerprint(request: ClientRequest): Buffer {
   // The host verifies current session authority before reading these receipts.
   // Reconnecting changes authority evidence, not the logical response.
-  const sessionResponse = ["interaction.update", "checkpoint.answer", "decision.answer"].includes(
-    request.operation,
-  );
+  const sessionResponse = [
+    "interaction.update",
+    "checkpoint.answer",
+    "decision.answer",
+    "run.restart",
+  ].includes(request.operation);
   const payload =
     sessionResponse &&
     typeof request.payload === "object" &&

@@ -182,6 +182,10 @@ function completedRepairExecutor(rounds = 1): ScriptedExecutor {
     ),
     rounds,
   )
+    .respond("implementation/completedSummary", () => ({
+      output: "The repair passed its checks.",
+      assistantMessage: { sha256: "a".repeat(64) },
+    }))
     .respond("implementation/implement", {
       output: {
         status: "implemented",

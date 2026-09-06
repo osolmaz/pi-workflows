@@ -45,7 +45,7 @@ describe("built-in plain-summary", () => {
     expect(state.status).toBe("completed");
     expect(state.finalOutput).toEqual({ text: "Use the small option. It is easier to maintain." });
     expect(state.steps.map((step) => step.nodeId)).toEqual(["summarize", "finish"]);
-    expect(plainSummaryWorkflow.presentationPrompt).toBeUndefined();
+    expect(plainSummaryWorkflow).not.toHaveProperty("presentationPrompt");
   });
 
   it("leaves output limits unset unless the caller requests them", () => {

@@ -166,7 +166,7 @@ describe("built-in autoplan", () => {
     expect([...prompts.values()].join("\n")).not.toMatch(
       /materially equivalent|implementation-ready/u,
     );
-    expect(autoplanWorkflow.presentationPrompt).toBeUndefined();
+    expect(autoplanWorkflow).not.toHaveProperty("presentationPrompt");
     expect(
       executor.requests.filter((request) => request.contract.completion === "assistant"),
     ).toHaveLength(1);

@@ -317,12 +317,8 @@ export function assertValidWorkflowDefinitionShape(
   ) {
     fail("workflow title must be a string or function");
   }
-  if (
-    definition.presentationPrompt !== undefined &&
-    typeof definition.presentationPrompt !== "string" &&
-    typeof definition.presentationPrompt !== "function"
-  ) {
-    fail("workflow presentationPrompt must be a string or function");
+  if ("presentationPrompt" in definition) {
+    fail("presentationPrompt is not supported; use an explicit assistant-response node");
   }
   if (typeof definition.startAt !== "string" || definition.startAt.length === 0) {
     fail("workflow requires startAt");

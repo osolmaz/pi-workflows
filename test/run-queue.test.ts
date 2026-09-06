@@ -624,8 +624,6 @@ describe("workflow run queue in canonical SQLite", () => {
       input: {},
       finalOutput: null,
       error: "could not launch",
-      presentationInstructions:
-        "Explain the final workflow result to the user in a normal response.",
     });
     expect(store.cancelWorkflowRun({ runId: "missing" })).toBe(false);
     store.close();
@@ -647,12 +645,12 @@ describe("workflow run queue in canonical SQLite", () => {
       workflowMessageId: "cancel-message",
       runId: "run-1",
       targetSessionId: "session-1",
-      kind: "terminal",
+      kind: "step",
       sourceId: "cancel-source",
       idempotencyKey: "cancel-message",
       content: {
         schema: "pi-workflows.workflow-message-content.v1",
-        customType: "test-terminal",
+        customType: "test-step",
         content: "Finish.",
         display: false,
         details: {},

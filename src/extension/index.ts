@@ -67,7 +67,7 @@ export type ParsedWorkflowArgs =
   | { kind: "resume" }
   | { kind: "status"; runId?: string }
   | { kind: "clear"; runId?: string }
-  | { kind: "restart"; runId?: string }
+  | { kind: "restart"; runId?: string; expectedRevision?: number }
   | {
       kind: "change-settings";
       patch: unknown;
@@ -177,6 +177,7 @@ export default function piWorkflows(pi: ExtensionAPI): void {
   const sessionView = new SessionWorkflowView();
   const sessionRecorders = new Map<string, SessionRecorder>();
   let agentRunning = false;
+  let lastStopReason: ReturnType<typeof workflowTurnStopReason> = "completed";
   let activeRecorder: SessionRecorder | null = null;
   let activeRecorderMessageId: string | null = null;
 
@@ -668,40 +669,17 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("agent_start", async (_event, ctx) => {
     agentRunning = true;
+    lastStopReason = "completed";
     activeRecorder = null;
     activeRecorderMessageId = null;
     workflowMessages.startTurn();
     await presentInOrder(ctx).catch(() => undefined);
   });
 
-  pi.on("agent_end", async (event, ctx) => {
-    try {
-      await submitVisibleAssistantResponse(client, ctx);
-    } catch (error) {
-      ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
-    }
-    const finishedMessage = workflowMessages.activeTurnMessage();
+  pi.on("agent_end", (event, ctx) => {
     agentRunning = false;
-    activeRecorderMessageId = null;
-    workflowMessages.endTurn(
-      workflowTurnStopReason(event.messages, ctx.signal?.aborted === true),
-      responseEntryId(ctx.sessionManager.getBranch()),
-    );
-    if (
-      activeRecorder !== null &&
-      finishedMessage !== undefined &&
-      (finishedMessage.kind === "terminal" || finishedMessage.kind === "followUp")
-    ) {
-      const finishedRecorder = activeRecorder;
-      activeRecorder = null;
-      await finishedRecorder.finish();
-      if (sessionRecorders.get(finishedMessage.runId) === finishedRecorder) {
-        sessionRecorders.delete(finishedMessage.runId);
-      }
-    }
-    await presentInOrder(ctx).catch((error) => {
-      ctx.ui.notify(`Could not record workflow model activity: ${errorMessage(error)}`, "warning");
-    });
+    lastStopReason = workflowTurnStopReason(event.messages, ctx.signal?.aborted === true);
+    // Pi can retry after agent_end. Only agent_settled completes the owned turn.
   });
 
   pi.on("turn_start", (event) => {
@@ -738,12 +716,26 @@ export default function piWorkflows(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", async (_event, ctx) => {
     activeRecorder?.settleAttempt();
-    try {
-      await submitVisibleAssistantResponse(client, ctx);
-    } catch (error) {
-      ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
+    const finishedMessage = workflowMessages.activeTurnMessage();
+    if (lastStopReason === "completed" && finishedMessage !== undefined) {
+      try {
+        await submitVisibleAssistantResponse(client, ctx, finishedMessage);
+      } catch (error) {
+        ctx.ui.notify(`Workflow response was rejected: ${errorMessage(error)}`, "error");
+      }
     }
-    await presentInOrder(ctx).catch(() => undefined);
+    workflowMessages.endTurn(lastStopReason, responseEntryId(ctx.sessionManager.getBranch()));
+    activeRecorderMessageId = null;
+    if (activeRecorder !== null && finishedMessage?.kind === "followUp") {
+      const recorder = activeRecorder;
+      activeRecorder = null;
+      await recorder.finish();
+      if (sessionRecorders.get(finishedMessage.runId) === recorder)
+        sessionRecorders.delete(finishedMessage.runId);
+    }
+    await presentInOrder(ctx).catch((error) => {
+      ctx.ui.notify(`Could not record workflow model activity: ${errorMessage(error)}`, "warning");
+    });
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -896,17 +888,17 @@ async function executeCommand(
       if (runId === undefined)
         throw new Error("No workflow terminal result is available to restart");
       const session = sessionCommandPayload(ctx);
-      const marker = terminalMessageForSession(ctx, runId);
+      const expectedRevision =
+        command.expectedRevision ??
+        (await requestAccepted(client, { operation: "view.run.get", runId })).revision;
+      if (expectedRevision === undefined) throw new Error("Workflow run revision is unavailable");
       const response = await requestAccepted(client, {
         operation: "run.restart",
         requestId: `restart-${idempotencyKey}`,
         idempotencyKey,
         runId,
-        payload: {
-          ...session,
-          workflowMessageId: marker.workflowMessageId,
-          ...(marker.workflowTurnId === undefined ? {} : { workflowTurnId: marker.workflowTurnId }),
-        },
+        expectedRevision,
+        payload: session,
       });
       return {
         message: `Restarted workflow ${runId}.`,
@@ -1151,41 +1143,25 @@ async function executeResourceManagerCommand(
 async function submitVisibleAssistantResponse(
   client: WorkflowClient,
   ctx: ExtensionContext,
+  message: WorkflowMessage,
 ): Promise<void> {
-  const interaction = pendingInteractionForSession(ctx.sessionManager.getSessionId());
-  if (
-    interaction === undefined ||
-    interaction.kind !== "assistant" ||
-    workflowRunPaused(interaction.runId)
-  ) {
-    return;
-  }
-  const contract = agentContract(interaction);
-  if (contract === undefined) return;
+  const contract = agentContractForWorkflowMessage(message);
+  if (contract?.completion !== "assistant" || workflowRunPaused(message.runId)) return;
   const submission = recoverAssistantStep(ctx.sessionManager.getBranch(), contract);
   if (submission === undefined) return;
   const responseId = submission.conversation?.lastEntryId ?? submission.assistantMessage?.entryId;
   if (responseId === undefined) return;
   await requestAccepted(client, {
     operation: "interaction.assistant",
-    requestId: `assistant-${interaction.requestId}-${responseId}`,
-    idempotencyKey: `assistant-${interaction.requestId}-${responseId}`,
-    runId: interaction.runId,
-    expectedRevision: interaction.revision,
+    requestId: `assistant-${message.sourceId}-${responseId}`,
+    idempotencyKey: `assistant-${message.sourceId}-${responseId}`,
     payload: {
       ...sessionCommandPayload(ctx),
-      requestId: interaction.requestId,
+      requestId: message.sourceId,
       submissionId: `assistant-${responseId}`,
       value: submission as unknown as JsonValue,
     },
   });
-}
-
-function pendingInteractionForSession(sessionId: string): ClientInteractiveRequest | undefined {
-  return sessionSnapshots
-    .get(sessionId)
-    ?.pendingInteractions.map(parseInteractiveRequest)
-    .find((request): request is ClientInteractiveRequest => request !== undefined);
 }
 
 function workflowRunPaused(runId: string): boolean {
@@ -1214,25 +1190,6 @@ function sessionCommandPayload(ctx: ExtensionContext): {
     throw new Error("Workflow session coordinator is not ready");
   }
   return { targetSessionId, coordinatorEpoch: session.coordinatorEpoch };
-}
-
-function terminalMessageForSession(
-  ctx: ExtensionContext,
-  runId: string,
-): { workflowMessageId: string; workflowTurnId?: string } {
-  const session = sessionSnapshots.get(ctx.sessionManager.getSessionId());
-  const message = session?.workflowMessages
-    .filter((item) => item.kind === "terminal" && item.runId === runId && item.status === "sent")
-    .sort((left, right) => right.order - left.order)[0];
-  if (message === undefined)
-    throw new Error(`Workflow run ${runId} has no current terminal result`);
-  const turn = session?.openWorkflowTurn;
-  return {
-    workflowMessageId: message.workflowMessageId,
-    ...(turn?.workflowMessageId === message.workflowMessageId
-      ? { workflowTurnId: turn.workflowTurnId }
-      : {}),
-  };
 }
 
 function sessionRun(ctx: ExtensionContext, runId?: string): WorkflowRunQueueView | undefined {
@@ -1264,7 +1221,7 @@ function toolInputToCommand(params: ReturnType<typeof parseWorkflowToolInput>): 
     case "start":
       return { kind: "run", ref: params.workflow, input: params.input ?? {} };
     case "restart":
-      return { kind: "restart", runId: params.runId };
+      return { kind: "restart", runId: params.runId, expectedRevision: params.expectedRevision };
     case "change-settings":
       return {
         kind: "change-settings",
@@ -1324,31 +1281,13 @@ async function requestAccepted(
   return response;
 }
 
-function interactionContract(interaction: ClientInteractiveRequest): Record<string, unknown> {
-  if (!isRecord(interaction.contract)) throw new Error("Stored interaction contract is invalid");
-  return interaction.contract;
-}
-
-function agentContract(interaction: ClientInteractiveRequest): AgentStepContract | undefined {
-  const value = interactionContract(interaction).contract;
-  if (
-    !isRecord(value) ||
-    typeof value.runId !== "string" ||
-    typeof value.workflowName !== "string" ||
-    typeof value.nodeId !== "string" ||
-    typeof value.attemptId !== "string" ||
-    (value.completion !== "submit" && value.completion !== "assistant")
-  ) {
-    return undefined;
-  }
-  return value as unknown as AgentStepContract;
-}
-
 function agentContractForWorkflowMessage(message: WorkflowMessage): AgentStepContract | undefined {
   if (message.kind !== "step" || !isRecord(message.content.details)) return undefined;
   const value = message.content.details.contract;
   if (
     !isRecord(value) ||
+    value.requestId !== message.sourceId ||
+    value.runId !== message.runId ||
     typeof value.runId !== "string" ||
     typeof value.workflowName !== "string" ||
     typeof value.nodeId !== "string" ||

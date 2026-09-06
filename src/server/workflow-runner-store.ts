@@ -193,10 +193,6 @@ export class ServerBackedWorkflowStore implements WorkflowExecutionStore {
     );
   }
 
-  async requestPresentation(instructions: string): Promise<void> {
-    await this.call("presentation.request", { instructions });
-  }
-
   private async call<T>(
     operation: WorkflowRunnerStoreOperation,
     payload: Record<string, unknown>,

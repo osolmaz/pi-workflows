@@ -88,6 +88,4 @@ export default defineWorkflow({
       switch: { on: "$.route", cases: { normal: "normal", careful: "careful" } },
     },
   ],
-  presentationPrompt:
-    "Explain which route and settings were used. Any queued follow-up prompts run only after this response settles.",
 });

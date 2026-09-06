@@ -10,6 +10,7 @@ import { WorkflowEngine } from "../src/workflows/engine.js";
 import { WorkflowRunQueueStore } from "../src/workflows/queue.js";
 import { createDefinitionSnapshot, WorkflowRunStore } from "../src/workflows/store.js";
 import {
+  followUpWorkflowMessageContent,
   notificationWorkflowMessageContent,
   terminalWorkflowMessageContent,
 } from "../src/workflows/workflow-message-content.js";
@@ -85,7 +86,7 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("validates finalizers and missing effect or workflow records", async () => {
-    const { store, queue } = await databaseFixture();
+    const { store } = await databaseFixture();
     const resource = store.putResource({
       resourceManager: "jobs",
       key: "one",
@@ -223,15 +224,43 @@ describe("SQLite delivery lifecycle", () => {
       [{ workflowMessageId: terminalMessageId, piSessionEntryId: "entry-2" }],
       new Set([terminalMessageId]),
     );
+    expect(() =>
+      messages.startTurn({
+        workflowMessageId: terminalMessageId,
+        workflowTurnId: "invalid-terminal-turn",
+        runId: run.runId,
+        targetSessionId: "session-a",
+      }),
+    ).toThrow("does not request a model turn");
+    const followUpMessageId = workflowMessageIdFor("followUp", "follow-up-1", "1");
+    messages.create({
+      workflowMessageId: followUpMessageId,
+      runId: run.runId,
+      targetSessionId: "session-a",
+      kind: "followUp",
+      sourceId: "follow-up-1",
+      idempotencyKey: "1",
+      content: followUpWorkflowMessageContent({
+        workflowMessageId: followUpMessageId,
+        followUpId: "follow-up-1",
+        runId: run.runId,
+        prompt: "Perform the explicit next task.",
+      }),
+    });
+    messages.adoptBranch(
+      "session-a",
+      [{ workflowMessageId: followUpMessageId, piSessionEntryId: "entry-3" }],
+      new Set([followUpMessageId]),
+    );
     const turn = messages.startTurn({
-      workflowMessageId: terminalMessageId,
+      workflowMessageId: followUpMessageId,
       workflowTurnId: "turn-1",
       runId: run.runId,
       targetSessionId: "session-a",
     });
     expect(
       messages.startTurn({
-        workflowMessageId: terminalMessageId,
+        workflowMessageId: followUpMessageId,
         workflowTurnId: "turn-1",
         runId: run.runId,
         targetSessionId: "session-a",
@@ -239,7 +268,7 @@ describe("SQLite delivery lifecycle", () => {
     ).toEqual(turn);
     expect(
       messages.endTurn({
-        workflowMessageId: terminalMessageId,
+        workflowMessageId: followUpMessageId,
         workflowTurnId: "turn-1",
         runId: run.runId,
         targetSessionId: "session-a",
@@ -249,7 +278,7 @@ describe("SQLite delivery lifecycle", () => {
     ).toMatchObject({ state: "ended", stopReason: "completed" });
     expect(() =>
       messages.endTurn({
-        workflowMessageId: terminalMessageId,
+        workflowMessageId: followUpMessageId,
         workflowTurnId: "turn-1",
         runId: run.runId,
         targetSessionId: "session-a",
@@ -261,7 +290,7 @@ describe("SQLite delivery lifecycle", () => {
   });
 
   it("maps rejected and ambiguous resource manager effects", async () => {
-    const { store, queue } = await databaseFixture();
+    const { store } = await databaseFixture();
     const resource = store.putResource({
       resourceManager: "jobs",
       key: "one",

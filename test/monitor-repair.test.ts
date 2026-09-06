@@ -77,6 +77,10 @@ function stopObservation() {
 
 function repairExecutor(secondObservation: unknown): ScriptedExecutor {
   return new ScriptedExecutor()
+    .respond("implementation/completedSummary", () => ({
+      output: "The repair passed its checks.",
+      assistantMessage: { sha256: "a".repeat(64) },
+    }))
     .respond("observe", { output: repairObservation() }, { output: secondObservation })
     .respond("planChange/design/captureIntent", {
       output: { originalUserInstructions: "repair the test failure" },

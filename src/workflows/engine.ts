@@ -125,7 +125,6 @@ export class WorkflowEngine {
   private readonly maxSteps: number;
   private readonly onEvent?: WorkflowEngineOptions["onEvent"];
   private readonly onRunStarted?: WorkflowEngineOptions["onRunStarted"];
-  private readonly onRunFinishing?: WorkflowEngineOptions["onRunFinishing"];
   private activeAbort: AbortController | null = null;
   private activeAttempt:
     | {
@@ -142,7 +141,6 @@ export class WorkflowEngine {
   private cancelled = false;
   private parked = false;
   private paused = false;
-  private presentationRequired = false;
   private wakePause: (() => void) | null = null;
 
   constructor(options: WorkflowEngineOptions) {
@@ -153,7 +151,6 @@ export class WorkflowEngine {
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.onEvent = options.onEvent;
     this.onRunStarted = options.onRunStarted;
-    this.onRunFinishing = options.onRunFinishing;
   }
 
   get databasePath(): string {
@@ -265,7 +262,6 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
-    this.presentationRequired = workflow.presentationPrompt !== undefined;
     // Fail before any run row exists so bad input cannot leave partial state.
     const suppliedInput = input === undefined ? null : input;
     const normalizedInput = workflow.input ? await workflow.input(suppliedInput) : suppliedInput;
@@ -338,7 +334,6 @@ export class WorkflowEngine {
   ): Promise<WorkflowRunResult> {
     workflow = isCompiledWorkflow(workflow) ? workflow : compileWorkflowDefinition(workflow);
     validateWorkflowDefinition(workflow);
-    this.presentationRequired = workflow.presentationPrompt !== undefined;
     // Reset before any await: a park or cancel landing during preparation
     // must survive, or a server drain would hang while the run executes.
     this.cancelled = false;
@@ -1518,13 +1513,6 @@ export class WorkflowEngine {
     delete state.currentSettingsScopeId;
     delete state.currentSettingsChangeNumber;
     delete state.currentSettingsHash;
-    // Let observers stop, drain, and prepare terminal delivery from the final
-    // in-memory state before the immutable terminal event is committed.
-    try {
-      await this.onRunFinishing?.(runId, state);
-    } catch {
-      // Finishing the run wins over observer failures.
-    }
     await this.persist(runId, state, {
       scope: "run",
       type: `run_${status}`,
@@ -1532,7 +1520,6 @@ export class WorkflowEngine {
         status,
         ...(fields.error !== undefined ? { error: fields.error } : {}),
         ...(fields.finalOutput !== undefined ? { finalOutput: fields.finalOutput } : {}),
-        presentationRequired: status === "completed" && this.presentationRequired,
       },
     });
   }

@@ -3,13 +3,13 @@ import type { WorkflowSessionView } from "../src/client/view.js";
 import { WorkflowMessageCoordinator } from "../src/extension/workflow-message-coordinator.js";
 import { WORKFLOW_TURN_SCHEMA, type WorkflowMessage } from "../src/state/workflow-messages.js";
 
-function terminalMessage(status: "pending" | "sent" = "pending"): WorkflowMessage {
+function followUpMessage(status: "pending" | "sent" = "pending"): WorkflowMessage {
   return {
     schema: "pi-workflows.workflow-message.v1",
-    workflowMessageId: "terminal-message",
+    workflowMessageId: "follow-up-message",
     runId: "run-1",
     targetSessionId: "session-1",
-    kind: "terminal",
+    kind: "followUp",
     sourceId: "run-1",
     contentDigest: "sha256:content",
     order: 1,
@@ -19,10 +19,10 @@ function terminalMessage(status: "pending" | "sent" = "pending"): WorkflowMessag
     updatedAt: "2026-09-02T00:00:00.000Z",
     content: {
       schema: "pi-workflows.workflow-message-content.v1",
-      customType: "pi-workflows-presentation",
+      customType: "pi-workflows-follow-up",
       content: "Done.",
       display: false,
-      details: { workflowMessageId: "terminal-message" },
+      details: { workflowMessageId: "follow-up-message" },
       triggerTurn: true,
     },
   };
@@ -82,8 +82,8 @@ function view(message: WorkflowMessage): WorkflowSessionView {
 }
 
 describe("WorkflowMessageCoordinator", () => {
-  it("clears a terminal turn locally as soon as the host accepts its end", async () => {
-    const message = terminalMessage();
+  it("clears an explicit follow-up turn locally as soon as the host accepts its end", async () => {
+    const message = followUpMessage();
     const current = view(message);
     const branch: Record<string, unknown>[] = [];
     const coordinator = new WorkflowMessageCoordinator();
@@ -144,8 +144,8 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(2);
   });
 
-  it("requires fresh host acceptance for each new Pi model turn", async () => {
-    const message = terminalMessage("sent");
+  it("keeps the accepted workflow turn through an automatic Pi retry", async () => {
+    const message = followUpMessage("sent");
     const current = view(message);
     current.openWorkflowMessageId = message.workflowMessageId;
     current.openWorkflowTurn = {
@@ -168,19 +168,23 @@ describe("WorkflowMessageCoordinator", () => {
       {
         isIdle: () => false,
         hasPendingMessages: () => false,
-        sessionManager: { getBranch: () => [] },
+        sessionManager: {
+          getBranch: () => [
+            { type: "custom_message", id: "entry-1", details: message.content.details },
+          ],
+        },
       } as never,
     );
     expect(coordinator.activeTurnMessage()).toBe(message);
 
     coordinator.startTurn();
 
-    expect(coordinator.activeTurnMessage()).toBeUndefined();
+    expect(coordinator.activeTurnMessage()).toBe(message);
   });
 
   it("keeps a sent workflow message ready until its Pi model turn starts", async () => {
     const branch: Record<string, unknown>[] = [];
-    const message = terminalMessage();
+    const message = followUpMessage();
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(message));
     const request = vi.fn(async (options: Record<string, unknown>) =>
@@ -210,9 +214,9 @@ describe("WorkflowMessageCoordinator", () => {
     ).toHaveLength(1);
   });
 
-  it("keeps an accepted turn until agent end when a newer view omits its message", async () => {
+  it("keeps an accepted turn until agent settled when a newer view omits its message", async () => {
     const branch: Record<string, unknown>[] = [];
-    const message = terminalMessage();
+    const message = followUpMessage();
     const current = view(message);
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(current);
@@ -253,7 +257,7 @@ describe("WorkflowMessageCoordinator", () => {
 
   it("clears local ownership when the host says that no workflow owns the turn", async () => {
     const branch: Record<string, unknown>[] = [];
-    const message = terminalMessage();
+    const message = followUpMessage();
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(message));
     const request = vi.fn(async (options: Record<string, unknown>) => {
@@ -287,7 +291,7 @@ describe("WorkflowMessageCoordinator", () => {
 
   it("does not bind a later manual turn to a terminal message that was already reported", async () => {
     const branch: Record<string, unknown>[] = [];
-    const message = terminalMessage();
+    const message = followUpMessage();
     const coordinator = new WorkflowMessageCoordinator();
     coordinator.updateView(view(message));
     const request = vi.fn(async (options: Record<string, unknown>) =>

@@ -25,7 +25,6 @@ export const WORKFLOW_RUNNER_MESSAGE_KINDS = [
   "interaction.accepted",
   "interaction.rejected",
   "notification.requested",
-  "presentation.requested",
   "effect.reserve",
   "effect.settle",
   "runner.progress",
@@ -52,7 +51,6 @@ export const WORKFLOW_RUNNER_STORE_OPERATIONS = [
   "interaction.accept",
   "interaction.reject",
   "notification.request",
-  "presentation.request",
 ] as const;
 export type WorkflowRunnerStoreOperation = (typeof WORKFLOW_RUNNER_STORE_OPERATIONS)[number];
 const WORKFLOW_RUNNER_CONTROL_OPERATIONS = ["runner.ready", "runner.exiting"] as const;
@@ -141,7 +139,6 @@ export function runnerKindForOperation(
   if (operation === "interaction.accept") return "interaction.accepted";
   if (operation === "interaction.reject") return "interaction.rejected";
   if (operation === "notification.request") return "notification.requested";
-  if (operation === "presentation.request") return "presentation.requested";
   if (operation === "store.commitTransition") {
     const event = isRecord(payload.transition) ? payload.transition.event : undefined;
     const eventType = isRecord(event) && typeof event.type === "string" ? event.type : "";

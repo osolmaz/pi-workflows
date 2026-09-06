@@ -46,14 +46,6 @@ export class WorkflowMessageCoordinator {
         this.queued.delete(message.workflowMessageId);
       }
     }
-    if (
-      this.turn !== null &&
-      this.turn.workflowMessageId === null &&
-      view.openWorkflowMessageId !== null
-    ) {
-      const message = messageById(view, view.openWorkflowMessageId);
-      if (message !== undefined && messageStartsTurn(message)) this.bindTurn(message);
-    }
   }
 
   branchChanged(): void {
@@ -61,6 +53,8 @@ export class WorkflowMessageCoordinator {
   }
 
   startTurn(): void {
+    // Automatic Pi retries belong to the same unsettled workflow turn.
+    if (this.turn !== null && this.turn.end === null) return;
     const awaited = this.awaitingTurnMessage;
     this.awaitingTurnMessage = null;
     this.turn = {
@@ -71,12 +65,10 @@ export class WorkflowMessageCoordinator {
       startedReported: false,
       end: null,
     };
-    const candidate = awaited ?? this.turnCandidate();
-    if (candidate !== undefined) this.bindTurn(candidate);
+    if (awaited !== null) this.bindTurn(awaited);
   }
 
   endTurn(stopReason: WorkflowTurnStopReason, responseSessionEntryId: string | null): void {
-    if (this.turn === null) this.startTurn();
     if (this.turn !== null) this.turn.end = { stopReason, responseSessionEntryId };
   }
 
@@ -95,7 +87,19 @@ export class WorkflowMessageCoordinator {
     try {
       const view = this.view;
       if (!view.coordinatorActive || view.coordinatorEpoch === null) return;
-      if (this.turn === null && !ctx.isIdle() && view.openWorkflowTurn !== null) {
+      const branchEntries = branchWorkflowEntries(ctx.sessionManager.getBranch());
+      if (this.turn?.workflowMessageId === null) {
+        const candidate = this.turnCandidate();
+        if (candidate !== undefined && branchEntries.has(candidate.workflowMessageId)) {
+          this.bindTurn(candidate);
+        }
+      }
+      if (
+        this.turn === null &&
+        !ctx.isIdle() &&
+        view.openWorkflowTurn !== null &&
+        branchEntries.has(view.openWorkflowTurn.workflowMessageId)
+      ) {
         this.turn = {
           workflowTurnId: view.openWorkflowTurn.workflowTurnId,
           workflowMessageId: view.openWorkflowTurn.workflowMessageId,
@@ -113,6 +117,7 @@ export class WorkflowMessageCoordinator {
         await this.reportBranch(client, ctx, view);
       }
       await this.flushTurn(client, view);
+      if (this.turn !== null && this.turn.end === null) return;
       const messageId = view.nextWorkflowMessageId;
       if (messageId === null || this.queued.has(messageId)) return;
       const message = messageById(view, messageId);
@@ -140,7 +145,7 @@ export class WorkflowMessageCoordinator {
         this.queued.delete(messageId);
         return;
       }
-      if (message.content.triggerTurn && messageStartsTurn(message)) {
+      if (messageStartsTurn(message)) {
         this.awaitingTurnMessage = message;
       }
       try {
@@ -255,7 +260,7 @@ export class WorkflowMessageCoordinator {
       this.turn = null;
       throw error;
     }
-    if (message?.kind === "terminal" || message?.kind === "followUp") {
+    if (message?.kind === "followUp") {
       this.closedTurnMessages.add(pending.workflowMessageId);
     }
     for (const current of new Set([view, this.view])) {
@@ -264,7 +269,7 @@ export class WorkflowMessageCoordinator {
       }
       if (
         current?.openWorkflowMessageId === pending.workflowMessageId &&
-        (message?.kind === "terminal" || message?.kind === "followUp")
+        message?.kind === "followUp"
       ) {
         current.openWorkflowMessageId = null;
       }
@@ -351,7 +356,7 @@ function messageById(
 }
 
 function messageStartsTurn(message: WorkflowMessage): boolean {
-  return message.kind === "step" || message.kind === "terminal" || message.kind === "followUp";
+  return message.content.triggerTurn;
 }
 
 async function reportTurn(

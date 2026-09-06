@@ -21,7 +21,6 @@ export type InteractiveRequestRecord = {
   contract: JsonValue;
   revision: number;
   status: "pending" | "settled" | "cancelled";
-  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -94,7 +93,6 @@ type RequestRow = {
   contractHash: Buffer;
   revision: number;
   status: InteractiveRequestRecord["status"];
-  unproductiveTurnEnds: number;
   acceptedSubmissionId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -110,7 +108,7 @@ export function readWorkflowRequest(
     .prepare(
       `SELECT request_id AS requestId, run_id AS runId, attempt_id AS attemptId,
             target_session_id AS targetSessionId, kind, contract_hash AS contractHash,
-            revision, status, unproductive_turn_ends AS unproductiveTurnEnds,
+            revision, status,
             accepted_submission_id AS acceptedSubmissionId, created_at AS createdAt,
             updated_at AS updatedAt, settled_at AS settledAt, consumed_at AS consumedAt
      FROM interactive_requests WHERE request_id = ?`,

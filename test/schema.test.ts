@@ -61,9 +61,6 @@ describe("defineWorkflow validation", () => {
     expect(() => define({ name: "" })).toThrow(/requires a name/);
     expect(() => define({ startAt: "" })).toThrow(/requires startAt/);
     expect(() => define({ title: 5 as never })).toThrow(/title must be a string or function/);
-    expect(() => define({ presentationPrompt: 5 as never })).toThrow(
-      /presentationPrompt must be a string or function/,
-    );
     expect(() => define({ maxSteps: 0 })).toThrow(/maxSteps must be a positive integer/);
     expect(() => define({ maxSteps: 1.5 })).toThrow(/maxSteps must be a positive integer/);
     expect(() => define({ nodes: {} })).toThrow(/at least one node/);
@@ -71,13 +68,14 @@ describe("defineWorkflow validation", () => {
     expect(() => define({ edges: {} as never })).toThrow(/edges must be an array/);
   });
 
-  it("accepts static and derived presentation prompts", () => {
-    expect(define({ presentationPrompt: "Summarize it." }).presentationPrompt).toBe(
-      "Summarize it.",
-    );
-    const prompt = ({ finalOutput }: { finalOutput: unknown }) => JSON.stringify(finalOutput);
-    expect(define({ presentationPrompt: prompt }).presentationPrompt).toBe(prompt);
-  });
+  it.each(["Summarize it.", () => "Summarize it.", 5])(
+    "rejects implicit presentation work: %s",
+    (presentationPrompt) => {
+      expect(() => define({ presentationPrompt } as never)).toThrow(
+        /use an explicit assistant-response node/,
+      );
+    },
+  );
 
   it("rejects bad node ids and unknown node types", () => {
     expect(() => define({ nodes: { "bad id!": compute({ run: () => 1 }) } })).toThrow(/must match/);
