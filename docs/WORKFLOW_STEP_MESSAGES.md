@@ -209,7 +209,7 @@ an ambiguous outcome. See [terminal workflow messages](DEFERRED_TURNS.md).
 
 The extension records workflow-related Pi events through a batched server client operation. It uses documented Pi events and does not read or edit Pi session files.
 
-The server deduplicates settled entries by Pi entry ID. It links attempts to their prompt, response, first, and last entries. A recording failure does not fail workflow execution.
+The server deduplicates settled entries by Pi entry ID. It links attempts to their prompt, response, first, and last entries. The coordinator finalizes capture after the terminal notice has a confirmed entry on the current branch, without starting a model turn. Explicit follow-up turns have their own capture segment. A recording failure does not fail workflow execution or block the next delivery.
 
 ## Public API boundary
 

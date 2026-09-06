@@ -204,7 +204,7 @@ describe("SessionRecorder", () => {
     const state = memoryStore();
     const recorder = new SessionRecorder(state.store, "run-1");
     await recorder.bind(ctx);
-    recorder.beginWorkflowMessage("terminal-message", "terminal");
+    recorder.beginFollowUp("follow-up-message");
     recorder.handleTurnStart({ turnIndex: 1 });
     const message = { role: "assistant", timestamp: "time-1" };
     await recorder.handleMessageStart({ message }, ctx);

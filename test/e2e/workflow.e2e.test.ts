@@ -390,8 +390,19 @@ function latestStepContract(messages: Array<{ content?: unknown }>): {
   workflow: string;
   step: string;
   attempt: string;
+  requestId: string | undefined;
 } | null {
-  const text = JSON.stringify(messages);
+  const text = messages
+    .flatMap(({ content }) =>
+      typeof content === "string"
+        ? [content]
+        : Array.isArray(content)
+          ? content.flatMap((part) =>
+              isRecord(part) && typeof part.text === "string" ? [part.text] : [],
+            )
+          : [],
+    )
+    .join("\n");
   const matches = [
     ...text.matchAll(
       /workflow step contract \(workflow: ([^,]+), step: ([^,]+), attempt: ([a-z0-9-]+)\)/giu,
@@ -400,7 +411,12 @@ function latestStepContract(messages: Array<{ content?: unknown }>): {
   const match = matches.at(-1);
   return match === undefined
     ? null
-    : { workflow: match[1] as string, step: match[2] as string, attempt: match[3] as string };
+    : {
+        workflow: match[1] as string,
+        step: match[2] as string,
+        attempt: match[3] as string,
+        requestId: text.slice(match.index).match(/"requestId":\s*"([^"]+)"/u)?.[1],
+      };
 }
 
 function rpcDiagnostic(pi: RpcHandle): string {
@@ -432,9 +448,6 @@ describe.sequential("out-of-process workflow server end to end", () => {
     mock = await startMockOpenAiServer(
       ({ messages, lastRole }) => {
         if (lastRole === "tool") return { kind: "text", text: "Workflow tool result accepted." };
-        if (JSON.stringify(messages.at(-1)).includes("Summarize the completed E2E workflow.")) {
-          return { kind: "text", text: "Final hosted E2E summary." };
-        }
         const contract = latestStepContract(messages);
         if (contract === null) return { kind: "text", text: "No workflow step is pending." };
         if (contract.workflow === "assistant-e2e" && contract.step === "prepare") {
@@ -443,8 +456,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
             toolName: "workflow",
             args: {
               action: "submit",
-              step: contract.step,
-              attempt: contract.attempt,
+              requestId: contract.requestId,
               output: { ready: true },
             },
           };
@@ -458,8 +470,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
             toolName: "workflow",
             args: {
               action: "submit",
-              step: contract.step,
-              attempt: contract.attempt,
+              requestId: contract.requestId,
               output: contract.step === "first" ? { first: true } : { second: true },
             },
             ...(contract.step === "second"
@@ -476,8 +487,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
             toolName: "workflow",
             args: {
               action: "submit",
-              step: contract.step,
-              attempt: contract.attempt,
+              requestId: contract.requestId,
               output: { resumed: true },
             },
           };
@@ -491,8 +501,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
             toolName: "workflow",
             args: {
               action: "submit",
-              step: contract.step,
-              attempt: contract.attempt,
+              requestId: contract.requestId,
               output: { finished: true },
             },
           };
@@ -603,14 +612,14 @@ describe.sequential("out-of-process workflow server end to end", () => {
     await waitForCondition(
       async () => {
         runView = await client.getRun(runId);
-        return runView?.display.status === "running" && runView.display.activity === "origin_turn";
+        return runView?.display.status === "waiting" && runView.display.activity === "origin_turn";
       },
       () => rpcDiagnostic(pi),
       10_000,
     );
     await client.close();
     if (runView === null) throw new Error("Multi-step widget run view disappeared");
-    expect(runView.display).toMatchObject({ status: "running", activity: "origin_turn" });
+    expect(runView.display).toMatchObject({ status: "waiting", activity: "origin_turn" });
     expect(runView.state).toMatchObject({
       status: "waiting",
       waitingOn: "second",
@@ -626,9 +635,9 @@ describe.sequential("out-of-process workflow server end to end", () => {
       ["--import", "tsx", path.join(REPO_ROOT, "src", "viewer", "cli.ts"), "view", runId, "--once"],
       { cwd: REPO_ROOT, env: { ...process.env, ...piEnvironment() } },
     );
-    expect(piwOutput).toContain("● running");
+    expect(piwOutput).toContain("waiting");
     expect(piwOutput).toContain("✓ first · ok");
-    expect(piwOutput).not.toContain("○ waiting");
+    expect(piwOutput).not.toContain("● running");
 
     const store = new WorkflowRunStore(databasePath, { readOnly: true });
     try {
@@ -655,8 +664,8 @@ describe.sequential("out-of-process workflow server end to end", () => {
         runView.display.status,
       ).lines;
       expect(lines.find((line) => line.includes("first"))).toContain("✓");
-      expect(lines.find((line) => line.includes("second"))).toContain("◐");
-      expect(lines.join("\n")).not.toContain("second · waiting");
+      expect(lines.find((line) => line.includes("second"))).toContain("⏸");
+      expect(lines.join("\n")).toContain("second · waiting");
     } finally {
       store.close();
     }
@@ -690,7 +699,7 @@ describe.sequential("out-of-process workflow server end to end", () => {
         const entries = await readRpcEntries(pi);
         return (
           entries.some((entry) => JSON.stringify(entry).includes("Durable E2E progress.")) &&
-          entries.some((entry) => JSON.stringify(entry).includes("Final hosted E2E summary."))
+          customEntriesForRun(entries, "pi-workflows-terminal", runId).length === 1
         );
       },
       () => rpcDiagnostic(pi),
@@ -715,7 +724,6 @@ describe.sequential("out-of-process workflow server end to end", () => {
     for (const deliveryPrompt of [
       "Submit the structured E2E input.",
       "Write the visible assistant E2E response.",
-      "Summarize the completed E2E workflow.",
     ]) {
       expect(
         mock.requests.filter(({ messages }) =>
@@ -723,6 +731,12 @@ describe.sequential("out-of-process workflow server end to end", () => {
         ),
       ).toHaveLength(1);
     }
+
+    expect(
+      mock.requests.filter(({ messages }) =>
+        JSON.stringify(messages.at(-1)).includes("Workflow assistant-e2e: completed."),
+      ),
+    ).toHaveLength(0);
 
     const store = new WorkflowRunQueueStore(databasePath, { readOnly: true, global: true });
     try {

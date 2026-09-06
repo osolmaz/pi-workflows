@@ -190,8 +190,8 @@ export class SessionRecorder {
   }
 
   /** Record a workflow-owned turn that is not tied to one engine node attempt. */
-  beginWorkflowMessage(workflowMessageId: string, kind: "terminal" | "followUp"): void {
-    this.currentAttempt = { nodeId: kind, attemptId: workflowMessageId };
+  beginFollowUp(workflowMessageId: string): void {
+    this.currentAttempt = { nodeId: "followUp", attemptId: workflowMessageId };
   }
 
   /** Release ownership of the turn that Pi has fully settled. */

@@ -82,6 +82,44 @@ function view(message: WorkflowMessage): WorkflowSessionView {
 }
 
 describe("WorkflowMessageCoordinator", () => {
+  it("finalizes a delivered terminal notice once, without starting a turn", async () => {
+    const message = followUpMessage("sent");
+    message.kind = "terminal";
+    message.content.triggerTurn = false;
+    const current = { ...view(message), nextWorkflowMessageId: null };
+    const coordinator = new WorkflowMessageCoordinator();
+    coordinator.updateView(current);
+    const branch: Record<string, unknown>[] = [];
+    const ctx = {
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => branch },
+    } as never;
+    const sendMessage = vi.fn();
+    const request = vi.fn(async (options: Record<string, unknown>) =>
+      acceptedServerRequest(options),
+    );
+    const terminalDelivered = vi.fn(async () => undefined);
+    const sync = async () =>
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        terminalDelivered,
+      });
+    await sync();
+    expect(terminalDelivered).not.toHaveBeenCalled();
+    branch.push({ type: "custom_message", id: "entry-1", details: message.content.details });
+    terminalDelivered.mockRejectedValueOnce(new Error("Recording transport failed"));
+    await expect(sync()).rejects.toThrow("Recording transport failed");
+    await sync();
+    await sync();
+    expect(terminalDelivered).toHaveBeenCalledTimes(2);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(
+      request.mock.calls.every(
+        ([call]) => (call as { operation: string }).operation !== "workflowTurn.report",
+      ),
+    ).toBe(true);
+  });
+
   it("retains a settled response through a lost branch acknowledgment before closing its turn", async () => {
     const message = followUpMessage();
     const branch: Record<string, unknown>[] = [];
@@ -117,11 +155,15 @@ describe("WorkflowMessageCoordinator", () => {
       sessionManager: { getBranch: () => branch },
     } as never;
     await expect(
-      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, beforeEnd),
+      coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+        beforeTurnEnd: beforeEnd,
+      }),
     ).rejects.toThrow("Lost branch acknowledgment");
     coordinator.startTurn(); // An unrelated later event cannot replace the pending settled turn.
     coordinator.endTurn("error", "other-response");
-    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, beforeEnd);
+    await coordinator.synchronize({ sendMessage } as never, { request } as never, ctx, {
+      beforeTurnEnd: beforeEnd,
+    });
     expect(order).toEqual(["started", "submit", "ended"]);
     expect(beforeEnd).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledTimes(1);
