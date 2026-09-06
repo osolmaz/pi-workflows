@@ -352,9 +352,7 @@ export class WorkflowServer {
         leaseMs: this.options.serverLeaseMs ?? SERVER_LEASE_MS,
       });
       this.recoverPreviousServer(previousServer.serverId, this.claim.epoch);
-      const previousHeartbeatAt =
-        previousServer.heartbeatAt === null ? undefined : Date.parse(previousServer.heartbeatAt);
-      this.serverState.recoverInactiveModelTurns(previousHeartbeatAt);
+      this.serverState.recoverInactiveModelTurns();
       this.discoverMissingTerminalWorkflowMessages();
       this.reconcilePendingTerminalWorkflowMessages(Date.now(), true);
       await this.listen();
@@ -516,6 +514,13 @@ export class WorkflowServer {
     }, this.options.serverRenewMs ?? SERVER_RENEW_MS);
     this.heartbeatTimer.unref?.();
     this.pollTimer = setInterval(() => {
+      try {
+        this.serverState.syncActiveTime();
+      } catch (error) {
+        this.log(`active-time ownership failed: ${errorMessage(error)}`);
+        void this.stop();
+        return;
+      }
       void this.expireTimedOutDecision();
       void this.claimOne();
       this.reconcilePendingTerminalWorkflowMessages();
@@ -1078,7 +1083,7 @@ export class WorkflowServer {
       }
       if (message.kind === "step") {
         const now = Date.now();
-        this.serverState.beginInteractionModelTurn(message.sourceId, now);
+        this.serverState.beginInteractionModelTurn(message.sourceId);
         this.serverState.workflowMessages.cancelPendingForSource(message.sourceId, "step", now);
         return workflowTurnReceipt(
           "active",
@@ -1102,6 +1107,7 @@ export class WorkflowServer {
     const turn = this.serverState.workflowMessages.endTurn(report);
     const message = this.serverState.workflowMessages.require(report.workflowMessageId);
     if (message.kind !== "step") return turn;
+    this.serverState.endInteractionModelTurn(message.sourceId);
     const interaction = this.serverState.getInteraction(message.sourceId);
     if (interaction === undefined || interaction.status !== "pending") return turn;
     if (report.stopReason === "aborted") {
@@ -1206,6 +1212,7 @@ export class WorkflowServer {
   }
 
   private handleRequest(request: ClientRequest, connection?: ClientConnection): ClientResponse {
+    this.serverState.syncActiveTime();
     if (this.claim === null || this.stopping) {
       return {
         schema: CLIENT_PROTOCOL_SCHEMA,
@@ -1357,11 +1364,15 @@ export class WorkflowServer {
         const runId = requireRunId(request);
         const resumedInteraction = this.state.transaction(() => {
           const now = Date.now();
-          const pausedAt = this.serverState.interactionPauseStartedAt(runId);
           if (!this.queue.resumePausedInteraction({ runId, now: new Date(now).toISOString() })) {
             return false;
           }
-          this.serverState.resumeInteractionModelTurn(runId, pausedAt, now);
+          const coordinator = this.sessionCoordinators.get(
+            this.runStore.originSessionId(runId) ?? "",
+          );
+          if (coordinator?.branchReported && coordinator.modelTurnActive) {
+            this.serverState.resumeInteractionModelTurn(runId);
+          }
           this.serverState.resumePendingInteraction(runId, now);
           return true;
         });
@@ -3563,18 +3574,11 @@ export class WorkflowServer {
     | { record: WorkflowRunQueueRecord; claimToken: string }
     | undefined {
     if (this.stopping || this.claim === null) return;
-    const activeSessionIds = new Set(
-      [...this.sessionCoordinators.entries()]
-        .filter(([, coordinator]) => coordinator.branchReported && coordinator.modelTurnActive)
-        .map(([sessionId]) => sessionId),
-    );
     const expired = this.serverState
       .expiredInteractionRuns()
       .find(
         (candidate) =>
-          activeSessionIds.has(candidate.targetSessionId) &&
-          !this.activeRuns.has(candidate.runId) &&
-          !this.pendingRunClaims.has(candidate.runId),
+          !this.activeRuns.has(candidate.runId) && !this.pendingRunClaims.has(candidate.runId),
       );
     if (expired === undefined) return;
     const { runId, targetSessionId } = expired;
@@ -3835,6 +3839,7 @@ export class WorkflowServer {
     if (stored !== undefined) {
       return boundRunnerResponse(this.state, active.contentDigests, stored);
     }
+    this.serverState.syncActiveTime();
     const response = await this.handleFreshRunnerMessage(active, message);
     const recorded = this.serverState.recordRunnerMessage(message, response);
     return boundRunnerResponse(this.state, active.contentDigests, recorded);

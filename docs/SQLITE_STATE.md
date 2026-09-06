@@ -112,21 +112,21 @@ Telegram delivery and settlement use these shared effect records. The server rec
 
 The shared records do not replace domain schemas. The following `STRICT` tables keep the state explicit:
 
-| Area                | Tables                                                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Schema and projects | `schema_meta`, `projects`                                                                                                    |
-| Content             | `blobs`, `run_view_content`                                                                                                  |
-| Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                       |
-| Server protocol     | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                         |
-| Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `workflow_updates` |
-| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                              |
-| Post-run follow-ups | `workflow_follow_ups`                                                                                                        |
-| Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                   |
-| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                               |
-| Managed resources   | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                  |
-| Effects             | `effects`, `effect_attempts`                                                                                                 |
-| Pi messages         | `workflow_messages`, `workflow_turns`                                                                                        |
-| Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                            |
+| Area                | Tables                                                                                                                                                   |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Schema and projects | `schema_meta`, `projects`                                                                                                                                |
+| Content             | `blobs`, `run_view_content`                                                                                                                              |
+| Shared lifecycle    | `resources`, `leases`, `events`, `workflow_host_state`                                                                                                   |
+| Server protocol     | `host_commands`, `run_workers`, `worker_messages`, `interactive_requests`, `interactive_submissions`                                                     |
+| Workflows           | `workflow_definitions`, `runs`, `run_sources`, `run_steps`, `run_bindings`, `run_queue`, `node_attempts`, `attempt_active_intervals`, `workflow_updates` |
+| Live settings       | `workflow_settings`, `workflow_setting_changes`                                                                                                          |
+| Post-run follow-ups | `workflow_follow_ups`                                                                                                                                    |
+| Session capture     | `session_segments`, `session_entries`, `attempt_entries`, `session_events`                                                                               |
+| Human decisions     | `human_decisions`, `human_decision_resolutions`, `human_decision_submissions`, `continuations`                                                           |
+| Managed resources   | `controller_resources`, `controller_finalizers`, `controller_queue`, `controller_workflows`                                                              |
+| Effects             | `effects`, `effect_attempts`                                                                                                                             |
+| Pi messages         | `workflow_messages`, `workflow_turns`                                                                                                                    |
+| Channels            | `channels`, `channel_cursors`, `channel_messages`                                                                                                        |
 
 The `host_*`, `run_workers`, `worker_*`, and `controller_*` names remain version-1 internal SQLite identifiers. The `host` and `controller` actor and owner values and the `~/.pi/agent/workflows/host/` state directory also remain internal identifiers. Public APIs and documentation call these components the workflow server, workflow runner, resource manager, resource runner, and managed resource. The alpha hard cut adds no alias or second storage path.
 
@@ -136,7 +136,7 @@ The `host_*`, `run_workers`, `worker_*`, and `controller_*` names remain version
 
 `channels` stores configured channel resource identities. `channel_cursors` stores the last accepted external polling position. `channel_messages` stores immutable decision delivery and settlement records for audit and duplicate evidence. External application state and Telegram message references belong to `effects` and `effect_attempts`.
 
-Foreign keys join projects, runs, attempts, decisions, managed resources, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per interaction request, one nonterminal interactive continuation-chain reservation per Pi session, one decision winner, and one deterministic effect key. A run waiting for a checkpoint or protected decision keeps that chain reservation. A parked waiting parent does not block its own continuation. Reserving that continuation transfers the reservation and settles the parked parent queue in the same transaction, so a failed reservation leaves the parent recoverable.
+Foreign keys join projects, runs, attempts, decisions, managed resources, effects, and channel records. Partial unique indexes enforce one active node attempt per run, one pending step message per request, one nonterminal interactive run per Pi session, one decision winner, and one deterministic effect key. A waiting or paused run keeps its session reservation. Checkpoint responses complete nodes in that same run; they do not reserve child runs.
 
 ### ServerBacked commands and interactions
 
@@ -150,7 +150,7 @@ conflict.
 process identity and terminal outcome. `worker_messages` deduplicates accepted
 state-changing child messages.
 
-`interactive_requests` owns the durable request contract and workflow state for origin-session work. It stores the run, node attempt, target session, contract, request status, accepted submission, `unproductiveTurnEnds`, and revision. Pause is stored once on the run and derived for its one pending interaction. `interactive_submissions` stores the idempotency key, payload, outcome, and receipt. It stores no Pi presentation claim or Pi session entry. `workflow_messages` owns those facts, and the extension reports the active Pi branch after reload.
+`interactive_requests` owns the durable request contract and workflow state for origin-session work. It stores the run, node attempt, target session, contract, request status, accepted submission, and revision. Pause is stored once on the run and derived for its one pending interaction. `interactive_submissions` stores the idempotency key, payload, outcome, and receipt. It stores no Pi presentation claim or Pi session entry. `workflow_messages` owns those facts, and the extension reports the active Pi branch after reload.
 
 ## Content-addressed values
 
@@ -158,11 +158,33 @@ state-changing child messages.
 
 Insertion verifies the digest, media type, byte length, and exact bytes. Repeated content adopts the existing row. This replaces separate artifact files while keeping outputs, errors, settled Pi entries, and rendered channel text deduplicated. Automatic retention and explicit prune remove unreferenced blobs after they delete safe old run trees. They retain each blob referenced by a database foreign key or active runner transfer.
 
-Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership and only stores an output override when a continuation changes a carried checkpoint answer.
+Runs do not store a nested `WorkflowRunState` blob. `runs` stores run-level facts and hashes for independent values. `run_sources` stores source identity without source JSON blobs. `node_attempts` stores structured workflow outputs and small execution receipts. `session_entries` is the only stored copy of each settled Pi entry. `attempt_entries` links an attempt to its prompt, response, first, and last Pi entries. `run_steps` stores ordered attempt membership. Each completed checkpoint keeps its own accepted output.
 
 Readers derive `steps`, `outputs`, `results`, carried-step count, current-node fields, waiting state, source objects, and continuation decision receipts from these rows. Compact trace events do not copy prompts, node outputs, run inputs, final outputs, action receipts, or assistant receipts.
 
 The run store reads each independent value through its declared media type. Input and final output use JSON readers. Run errors and presentation instructions use text readers. Terminal-message construction uses one typed terminal-data result instead of guessing the blob type. A missing or wrong media type fails presentation after the terminal state commits; it cannot roll back that state.
+
+### Active execution time
+
+`node_attempts.started_at` is historical data and never changes. `timeout_ms`
+stores the resolved active-time budget: SQL `NULL` means not yet configured,
+zero means explicitly unlimited, and a positive value is the budget in milliseconds.
+The public contract uses `null` for an unlimited timeout.
+
+`attempt_active_intervals` records numbered active intervals in the same database.
+Only one interval can be open for an attempt. Each interval keeps its start,
+last observation, end, and measured elapsed time. The host measures duration with
+a monotonic clock and saves samples during normal polling. Wall-clock changes
+cannot spend or restore the active budget. Pause, disconnect, and settlement close
+the interval. Reconnect opens another interval only for an unpaused, active model
+turn. Duplicate starts and overlapping inactive causes cannot count time twice.
+
+After a crash, recovery closes an open interval at its last durable observation.
+It does not charge the unobserved gap or server downtime. At most the time since
+the last sample is uncounted. Human decision expiry remains an absolute wall-clock
+deadline. Step start and finish timestamps remain wall-clock history, separate
+from the active-time budget. Interval rows follow their attempt through existing
+foreign-key retention and backup rules.
 
 ### Assistant-message attempts
 
@@ -170,7 +192,7 @@ An agent definition records `expectedOutput` as either a submitted-output descri
 
 A completed interactive assistant-message attempt stores the accepted visible text as its node output. Its small receipt keeps the text digest, final Pi session entry ID, optional author-supplied limit, and whether recovery adopted an existing response.
 
-An interrupted assistant-message attempt keeps its attempt ID. The extension adopts a matching durable request and existing Pi branch entry instead of displaying the prompt or accepting the response twice. Submitted and non-agent attempts use a fresh execution attempt after an uncommitted runner exit.
+An interrupted assistant-message attempt keeps its attempt ID. The extension adopts a matching durable request and existing Pi branch entry instead of displaying the prompt or accepting the response twice. A submitted agent request also retains its exact attempt while waiting, validating, or recovering an accepted receipt. A declared execution retry creates a new attempt; transport recovery does not.
 
 ## Write contract
 

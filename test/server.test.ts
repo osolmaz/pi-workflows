@@ -1857,496 +1857,146 @@ setInterval(() => {}, 1000);
     }
   }, 60_000);
 
-  it("counts only active model-turn time toward an interactive node timeout", async () => {
+  it("counts only active model time across overlapping pause, disconnect, and host recovery", async () => {
     const cwd = await makeTempDir("host-interaction-timeout-project");
     const databasePath = path.join(
       await makeTempDir("host-interaction-timeout-state"),
       "state.sqlite",
     );
     const workflowPath = await writeTimedInteractiveWorkflow(cwd, 1_500);
-    const first = new WorkflowServer({
-      databasePath,
-      runnerId: "host-timeout-first",
-      claimPollMs: 10,
-    });
-    const firstClient = new WorkflowClient({ databasePath });
-    await first.start();
-    await startRun({
-      client: firstClient,
-      cwd,
-      workflowPath,
-      runId: "interaction-timeout-run",
-      executionMode: "interactive",
-    });
-    let requestId: string | undefined;
-    let initialStartedAt: number | null | undefined;
-    let initialDeadlineAt: number | null | undefined;
-    await waitUntil(() => {
-      const state = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        const interaction = state.listPendingInteractions("host-test-session")[0];
-        requestId = interaction?.requestId;
-        const deadline = state.state.connection
-          .prepare(
-            `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
-             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-             WHERE i.run_id = ?`,
-          )
-          .get("interaction-timeout-run") as
-          | { startedAt: number | null; deadlineAt: number | null }
-          | undefined;
-        initialStartedAt = deadline?.startedAt;
-        initialDeadlineAt = deadline?.deadlineAt;
-        return requestId !== undefined && initialStartedAt != null && initialDeadlineAt != null;
-      } finally {
-        state.close();
-      }
-    }, 30_000);
-    if (requestId === undefined || initialStartedAt == null || initialDeadlineAt == null) {
-      throw new Error("durable interaction deadline was not created");
-    }
-    const timedRequestId = requestId;
-    const firstDeadlineAt = initialDeadlineAt;
-    const configuredDurationMs = initialDeadlineAt - initialStartedAt;
-    expect(
-      await firstClient.request({
-        operation: "run.pause",
-        runId: "interaction-timeout-run",
-      }),
-    ).toMatchObject({ outcome: "accepted", receipt: { paused: true } });
-    await firstClient.close();
-    await first.stop();
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(0, firstDeadlineAt - Date.now()) + 100),
-    );
-
-    const restarted = new WorkflowServer({
-      databasePath,
-      runnerId: "host-timeout-restarted",
-      claimPollMs: 10,
-      serverRenewMs: 40,
-    });
-    const client = new WorkflowClient({ databasePath });
-    let reconnectedClient: WorkflowClient | undefined;
-    let recoveredServer: WorkflowServer | undefined;
-    await restarted.start();
+    let host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+    let client = new WorkflowClient({ databasePath });
+    await host.start();
+    const state = new ServerStateStore(databasePath, { readOnly: true });
+    const runId = "interaction-timeout-run";
+    const timing = () =>
+      state.state.connection
+        .prepare(
+          `SELECT a.status, a.started_at AS startedAt, a.timeout_ms AS timeoutMs,
+         (SELECT COALESCE(SUM(elapsed_ms), 0) FROM attempt_active_intervals t WHERE t.attempt_id = a.attempt_id) AS elapsedMs,
+         (SELECT COUNT(*) FROM attempt_active_intervals t WHERE t.attempt_id = a.attempt_id AND t.ended_at IS NULL) AS openIntervals
+       FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id WHERE i.run_id = ?`,
+        )
+        .get(runId) as {
+        status: string;
+        startedAt: number;
+        timeoutMs: number;
+        elapsedMs: number;
+        openIntervals: number;
+      };
+    const connect = async (message: WorkflowMessage, isIdle: boolean) => {
+      const watched = await client.request({
+        operation: "view.session.watch",
+        payload: {
+          subscriptionId: "timeout-watch",
+          sessionId: "host-test-session",
+          coordinator: true,
+        },
+      });
+      const coordinatorEpoch = (watched.receipt as { coordinatorEpoch: string }).coordinatorEpoch;
+      expect(
+        await client.request({
+          operation: "workflowMessage.reportBranch",
+          payload: {
+            targetSessionId: "host-test-session",
+            coordinatorEpoch,
+            entries: [
+              { workflowMessageId: message.workflowMessageId, piSessionEntryId: "step-entry" },
+            ],
+            isIdle,
+            hasPendingMessages: !isIdle,
+          },
+        }),
+      ).toMatchObject({ outcome: "accepted" });
+      return coordinatorEpoch;
+    };
     try {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const pausedState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(pausedState.getInteraction(timedRequestId)?.status).toBe("pending");
-        expect(
-          pausedState.state.connection
-            .prepare("SELECT status, paused FROM runs WHERE run_id = ?")
-            .get("interaction-timeout-run"),
-        ).toEqual({ status: "waiting", paused: 1 });
-      } finally {
-        pausedState.close();
-      }
-
-      const subscribed = await client.request({
-        operation: "view.session.watch",
-        payload: {
-          subscriptionId: "timeout-session",
-          sessionId: "host-test-session",
-          coordinator: true,
-        },
+      await startRun({ client, cwd, workflowPath, runId, executionMode: "interactive" });
+      await waitUntil(
+        () => state.listPendingInteractions("host-test-session").length === 1,
+        30_000,
+      );
+      const interaction = state.listPendingInteractions("host-test-session")[0];
+      if (interaction === undefined) throw new Error("request missing");
+      const initial = timing();
+      expect(initial).toMatchObject({ timeoutMs: 1_500, elapsedMs: 0, openIntervals: 0 });
+      expect(await client.request({ operation: "run.pause", runId })).toMatchObject({
+        outcome: "accepted",
       });
-      const coordinatorEpoch = (subscribed.receipt as { coordinatorEpoch?: string } | undefined)
-        ?.coordinatorEpoch;
-      if (coordinatorEpoch === undefined) throw new Error("coordinator epoch missing");
-      expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch,
-            entries: [],
-            isIdle: true,
-            hasPendingMessages: false,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted" });
-      expect(
-        await client.request({ operation: "run.resume", runId: "interaction-timeout-run" }),
-      ).toMatchObject({ outcome: "accepted", receipt: { paused: false } });
-
-      const resumedState = new ServerStateStore(databasePath, { readOnly: true });
-      const message = resumedState.workflowMessages
+      await client.close();
+      await host.stop();
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+      client = new WorkflowClient({ databasePath });
+      await host.start();
+      expect(timing()).toEqual(initial);
+      expect(state.getInteraction(interaction.requestId)?.status).toBe("pending");
+      await client.request({ operation: "run.resume", runId });
+      const message = state.workflowMessages
         .listSession("host-test-session")
-        .findLast((candidate) => candidate.sourceId === timedRequestId);
-      resumedState.close();
-      if (message === undefined) throw new Error("resumed workflow message missing");
-      expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch,
-            entries: [
-              {
-                workflowMessageId: message.workflowMessageId,
-                piSessionEntryId: "timeout-step-entry",
-              },
-            ],
-            isIdle: false,
-            hasPendingMessages: true,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted" });
-      const started = {
-        state: "started" as const,
+        .findLast((candidate) => candidate.sourceId === interaction.requestId);
+      if (message === undefined) throw new Error("resumed message missing");
+      let coordinatorEpoch = await connect(message, false);
+      const turn = {
+        state: "started",
         workflowMessageId: message.workflowMessageId,
-        workflowTurnId: "timeout-turn-1",
-        runId: message.runId,
-        targetSessionId: message.targetSessionId,
-        coordinatorEpoch,
+        workflowTurnId: "active-turn",
+        runId,
+        targetSessionId: "host-test-session",
       };
       expect(
         await client.request({
           operation: "workflowTurn.report",
-          runId: message.runId,
-          payload: started,
+          runId,
+          payload: { ...turn, coordinatorEpoch },
         }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { ownership: "active", turn: { state: "started" } },
-      });
-      const activeState = new ServerStateStore(databasePath, { readOnly: true });
-      const activeDeadline = activeState.state.connection
-        .prepare(
-          `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
-           FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-           WHERE i.request_id = ?`,
-        )
-        .get(timedRequestId) as { startedAt: number | null; deadlineAt: number | null } | undefined;
-      activeState.close();
-      if (activeDeadline?.startedAt == null || activeDeadline.deadlineAt == null) {
-        throw new Error("active workflow interaction deadline is missing");
-      }
-      const firstActiveDeadlineAt = activeDeadline.deadlineAt;
-      expect(firstActiveDeadlineAt).toBeGreaterThan(Date.now() + 1_000);
-      expect(firstActiveDeadlineAt).toBeGreaterThan(firstDeadlineAt);
-      expect(firstActiveDeadlineAt - activeDeadline.startedAt).toBe(configuredDurationMs);
+      ).toMatchObject({ outcome: "accepted", receipt: { ownership: "active" } });
       expect(
         await client.request({
           operation: "workflowTurn.report",
-          runId: message.runId,
-          payload: started,
+          runId,
+          payload: { ...turn, coordinatorEpoch },
         }),
-      ).toMatchObject({
-        outcome: "adopted",
-        receipt: { ownership: "active", turn: { state: "started" } },
-      });
-      const duplicateState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(
-          duplicateState.state.connection
-            .prepare(
-              `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
-               FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-               WHERE i.request_id = ?`,
-            )
-            .get(timedRequestId),
-        ).toEqual(activeDeadline);
-      } finally {
-        duplicateState.close();
-      }
-
-      expect(
-        await client.request({
-          operation: "run.pause",
-          runId: "interaction-timeout-run",
-        }),
-      ).toMatchObject({ outcome: "accepted", receipt: { paused: true } });
-      expect(
-        await client.request({
-          operation: "workflowTurn.report",
-          runId: message.runId,
-          payload: {
-            ...started,
-            state: "ended",
-            stopReason: "aborted",
-            responseSessionEntryId: null,
-          },
-        }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { ownership: "settled", turn: { state: "ended" } },
-      });
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.max(0, firstActiveDeadlineAt - Date.now()) + 100),
-      );
-      const activePauseState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(activePauseState.getInteraction(timedRequestId)?.status).toBe("pending");
-        expect(
-          activePauseState.state.connection
-            .prepare("SELECT status, paused FROM runs WHERE run_id = ?")
-            .get("interaction-timeout-run"),
-        ).toEqual({ status: "waiting", paused: 1 });
-      } finally {
-        activePauseState.close();
-      }
-
-      expect(
-        await client.request({ operation: "run.resume", runId: "interaction-timeout-run" }),
-      ).toMatchObject({ outcome: "accepted", receipt: { paused: false } });
-      const secondResumeState = new ServerStateStore(databasePath, { readOnly: true });
-      const resumedMessage = secondResumeState.workflowMessages
-        .listSession("host-test-session")
-        .findLast(
-          (candidate) =>
-            candidate.sourceId === timedRequestId &&
-            candidate.workflowMessageId !== message.workflowMessageId,
-        );
-      secondResumeState.close();
-      if (resumedMessage === undefined) throw new Error("second resumed workflow message missing");
-      expect(
-        await client.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch,
-            entries: [
-              {
-                workflowMessageId: message.workflowMessageId,
-                piSessionEntryId: "timeout-step-entry",
-              },
-              {
-                workflowMessageId: resumedMessage.workflowMessageId,
-                piSessionEntryId: "timeout-step-entry-2",
-              },
-            ],
-            isIdle: false,
-            hasPendingMessages: true,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted" });
-      const resumedTurn = {
-        state: "started" as const,
-        workflowMessageId: resumedMessage.workflowMessageId,
-        workflowTurnId: "timeout-turn-2",
-        runId: resumedMessage.runId,
-        targetSessionId: resumedMessage.targetSessionId,
-        coordinatorEpoch,
-      };
-      expect(
-        await client.request({
-          operation: "workflowTurn.report",
-          runId: resumedMessage.runId,
-          payload: resumedTurn,
-        }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { ownership: "active", turn: { state: "started" } },
-      });
-      const resumedTurnState = new ServerStateStore(databasePath, { readOnly: true });
-      const resumedTurnDeadline = resumedTurnState.state.connection
-        .prepare(
-          `SELECT a.started_at AS startedAt, a.deadline_at AS deadlineAt
-           FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-           WHERE i.request_id = ?`,
-        )
-        .get(timedRequestId) as { startedAt: number | null; deadlineAt: number | null } | undefined;
-      resumedTurnState.close();
-      if (resumedTurnDeadline?.startedAt == null || resumedTurnDeadline.deadlineAt == null) {
-        throw new Error("resumed model-turn deadline is missing");
-      }
-      const secondActiveDeadlineAt = resumedTurnDeadline.deadlineAt;
-      expect(secondActiveDeadlineAt).toBeGreaterThan(firstActiveDeadlineAt);
-      expect(secondActiveDeadlineAt).toBeGreaterThan(Date.now() + 1_000);
-      expect(secondActiveDeadlineAt - resumedTurnDeadline.startedAt).toBe(configuredDurationMs);
-
+      ).toMatchObject({ outcome: "adopted" });
+      await waitUntil(() => timing().elapsedMs >= 50, 30_000);
+      expect(timing().openIntervals).toBe(1);
+      await client.request({ operation: "run.pause", runId });
+      const paused = timing();
+      expect(paused.openIntervals).toBe(0);
+      await client.close(); // Disconnect overlaps the pause, not a second duration subtraction.
+      await waitUntil(() => timing().status === "interrupted", 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      expect(timing().elapsedMs).toBe(paused.elapsedMs);
+      client = new WorkflowClient({ databasePath });
+      coordinatorEpoch = await connect(message, false);
+      expect(timing().openIntervals).toBe(0); // Reconnect does not override the durable pause.
+      await client.request({ operation: "run.resume", runId });
+      expect(timing().openIntervals).toBe(1);
+      await waitUntil(() => timing().elapsedMs >= paused.elapsedMs + 50, 30_000);
       await client.close();
-      let disconnectedAt: number | undefined;
-      await waitUntil(() => {
-        const state = new ServerStateStore(databasePath, { readOnly: true });
-        try {
-          const attempt = state.state.connection
-            .prepare(
-              `SELECT a.status, a.updated_at AS updatedAt
-               FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-               WHERE i.request_id = ?`,
-            )
-            .get(timedRequestId) as { status: string; updatedAt: number } | undefined;
-          disconnectedAt = attempt?.updatedAt;
-          return attempt?.status === "interrupted";
-        } finally {
-          state.close();
-        }
-      }, 30_000);
-      if (disconnectedAt === undefined) throw new Error("disconnect time was not recorded");
-      const recordedDisconnectAt = disconnectedAt;
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.max(0, secondActiveDeadlineAt - Date.now()) + 100),
-      );
-      const disconnectedState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(disconnectedState.getInteraction(timedRequestId)?.status).toBe("pending");
-        expect(
-          disconnectedState.state.connection
-            .prepare("SELECT error_code AS errorCode FROM run_queue WHERE run_id = ?")
-            .get("interaction-timeout-run"),
-        ).toEqual({ errorCode: null });
-        expect(
-          disconnectedState.state.connection
-            .prepare(
-              `SELECT a.status, a.updated_at AS updatedAt
-               FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-               WHERE i.request_id = ?`,
-            )
-            .get(timedRequestId),
-        ).toEqual({ status: "interrupted", updatedAt: recordedDisconnectAt });
-        const heartbeatAt = disconnectedState.serverStatus().heartbeatAt;
-        expect(heartbeatAt).not.toBeNull();
-        expect(Date.parse(heartbeatAt ?? "")).toBeGreaterThan(recordedDisconnectAt);
-      } finally {
-        disconnectedState.close();
-      }
-      const disconnectedViewer = new WorkflowClient({ databasePath });
-      try {
-        expect(
-          await disconnectedViewer.request({
-            operation: "run.status",
-            runId: "interaction-timeout-run",
-          }),
-        ).toMatchObject({ outcome: "accepted", receipt: { display: { status: "waiting" } } });
-      } finally {
-        await disconnectedViewer.close();
-      }
-
-      await restarted.stop();
-      recoveredServer = new WorkflowServer({
-        databasePath,
-        runnerId: "host-timeout-recovered",
-        claimPollMs: 10,
+      await waitUntil(() => timing().status === "interrupted", 30_000);
+      const disconnected = timing();
+      await host.stop();
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+      host = new WorkflowServer({ databasePath, claimPollMs: 10 });
+      client = new WorkflowClient({ databasePath });
+      await host.start();
+      expect(timing().elapsedMs).toBe(disconnected.elapsedMs);
+      expect(timing().openIntervals).toBe(0);
+      expect(state.getInteraction(interaction.requestId)?.status).toBe("pending");
+      await connect(message, false);
+      await waitUntil(() => timing().status === "timed_out", 30_000);
+      expect(timing()).toMatchObject({
+        startedAt: initial.startedAt,
+        timeoutMs: 1_500,
+        openIntervals: 0,
       });
-      await recoveredServer.start();
-      const recoveredState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(recoveredState.getInteraction(timedRequestId)?.status).toBe("pending");
-        const recoveredAttempt = recoveredState.state.connection
-          .prepare(
-            `SELECT a.status, a.deadline_at AS deadlineAt, a.updated_at AS updatedAt
-             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-             WHERE i.request_id = ?`,
-          )
-          .get(timedRequestId) as
-          | { status: string; deadlineAt: number | null; updatedAt: number }
-          | undefined;
-        expect(recoveredAttempt?.status).toBe("interrupted");
-        expect(recoveredAttempt?.updatedAt).toBeGreaterThan(recordedDisconnectAt);
-        expect((recoveredAttempt?.deadlineAt ?? 0) - secondActiveDeadlineAt).toBe(
-          (recoveredAttempt?.updatedAt ?? 0) - recordedDisconnectAt,
-        );
-      } finally {
-        recoveredState.close();
-      }
-
-      reconnectedClient = new WorkflowClient({ databasePath });
-      const reconnected = await reconnectedClient.request({
-        operation: "view.session.watch",
-        payload: {
-          subscriptionId: "timeout-session-reconnected",
-          sessionId: "host-test-session",
-          coordinator: true,
-        },
-      });
-      const reconnectedEpoch = (reconnected.receipt as { coordinatorEpoch?: string } | undefined)
-        ?.coordinatorEpoch;
-      if (reconnectedEpoch === undefined) throw new Error("reconnected coordinator epoch missing");
-      expect(
-        await reconnectedClient.request({
-          operation: "workflowMessage.reportBranch",
-          payload: {
-            targetSessionId: "host-test-session",
-            coordinatorEpoch: reconnectedEpoch,
-            entries: [
-              {
-                workflowMessageId: message.workflowMessageId,
-                piSessionEntryId: "timeout-step-entry",
-              },
-              {
-                workflowMessageId: resumedMessage.workflowMessageId,
-                piSessionEntryId: "timeout-step-entry-2",
-              },
-            ],
-            isIdle: false,
-            hasPendingMessages: true,
-          },
-        }),
-      ).toMatchObject({ outcome: "accepted" });
-      expect(
-        await reconnectedClient.request({
-          operation: "run.status",
-          runId: "interaction-timeout-run",
-        }),
-      ).toMatchObject({
-        outcome: "accepted",
-        receipt: { display: { status: "waiting", activity: "origin_turn" } },
-      });
-      const reconnectedState = new ServerStateStore(databasePath, { readOnly: true });
-      const reconnectedDeadline = reconnectedState.state.connection
-        .prepare(
-          `SELECT a.status, a.started_at AS startedAt, a.deadline_at AS deadlineAt,
-                  a.updated_at AS updatedAt
-           FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-           WHERE i.request_id = ?`,
-        )
-        .get(timedRequestId) as
-        | {
-            status: string;
-            startedAt: number | null;
-            deadlineAt: number | null;
-            updatedAt: number;
-          }
-        | undefined;
-      reconnectedState.close();
-      if (reconnectedDeadline?.startedAt == null || reconnectedDeadline.deadlineAt == null) {
-        throw new Error("reconnected model-turn deadline is missing");
-      }
-      expect(reconnectedDeadline.status).toBe("waiting");
-      expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(secondActiveDeadlineAt);
-      expect(reconnectedDeadline.deadlineAt).toBeGreaterThan(Date.now() + 1_000);
-      expect(reconnectedDeadline.deadlineAt - reconnectedDeadline.startedAt).toBe(
-        configuredDurationMs,
-      );
-      expect(reconnectedDeadline.deadlineAt - secondActiveDeadlineAt).toBe(
-        reconnectedDeadline.updatedAt - recordedDisconnectAt,
-      );
-
-      await waitUntil(() => {
-        const store = new WorkflowRunQueueStore(databasePath, {
-          readOnly: true,
-          global: true,
-        });
-        try {
-          return store.getWorkflowRun("interaction-timeout-run")?.errorCode === "timed_out";
-        } finally {
-          store.close();
-        }
-      }, 30_000);
-      const finalState = new ServerStateStore(databasePath, { readOnly: true });
-      try {
-        expect(finalState.getInteraction(timedRequestId)?.status).toBe("cancelled");
-        const attempt = finalState.state.connection
-          .prepare(
-            `SELECT a.status, a.deadline_at AS deadlineAt
-             FROM node_attempts a JOIN interactive_requests i ON i.attempt_id = a.attempt_id
-             WHERE i.request_id = ?`,
-          )
-          .get(timedRequestId) as { status: string; deadlineAt: number | null } | undefined;
-        expect(attempt?.status).toBe("timed_out");
-        expect(attempt?.deadlineAt).toBe(reconnectedDeadline.deadlineAt);
-      } finally {
-        finalState.close();
-      }
+      expect(timing().elapsedMs).toBeGreaterThanOrEqual(1_500);
+      expect(state.getInteraction(interaction.requestId)?.status).toBe("cancelled");
     } finally {
+      state.close();
       await client.close();
-      await reconnectedClient?.close();
-      await recoveredServer?.stop();
-      await restarted.stop();
+      await host.stop();
     }
   }, 60_000);
 

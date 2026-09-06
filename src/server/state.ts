@@ -5,6 +5,7 @@ import {
   type ClientRequest,
   type ClientResponse,
 } from "../client/protocol.js";
+import { AttemptTime, type AttemptClock } from "../state/attempt-time.js";
 import { StateDatabase } from "../state/database.js";
 import { canonicalJson, type JsonValue } from "../state/json.js";
 import { tokenHash } from "../state/mutation.js";
@@ -80,8 +81,12 @@ export class ServerStateStore {
   readonly state: StateDatabase;
   private readonly ownsState: boolean;
   readonly workflowMessages: WorkflowMessageStore;
+  private readonly attemptTime: AttemptTime;
 
-  constructor(databasePath: string, options: { state?: StateDatabase; readOnly?: boolean } = {}) {
+  constructor(
+    databasePath: string,
+    options: { state?: StateDatabase; readOnly?: boolean; clock?: AttemptClock } = {},
+  ) {
     this.ownsState = options.state === undefined;
     this.state =
       options.state ??
@@ -90,6 +95,7 @@ export class ServerStateStore {
         mode: options.readOnly === true ? "read-only" : "read-write",
       });
     this.workflowMessages = new WorkflowMessageStore(this.state);
+    this.attemptTime = new AttemptTime(this.state, options.clock);
   }
 
   close(): void {
@@ -501,144 +507,92 @@ export class ServerStateStore {
     });
   }
 
-  beginInteractionModelTurn(requestId: string, now: number = Date.now()): void {
-    const row = this.state.connection
-      .prepare(
-        `SELECT i.attempt_id AS attemptId, i.created_at AS createdAt,
-                a.started_at AS startedAt, a.deadline_at AS deadlineAt,
-                (SELECT MAX(t.ended_at)
-                 FROM workflow_messages m
-                 JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-                 WHERE m.source_id = i.request_id AND m.kind = 'step'
-                   AND t.state = 'ended') AS previousTurnEndedAt
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         WHERE i.request_id = ? AND i.status = 'pending'`,
-      )
-      .get(requestId);
-    if (!isInteractionTimeoutRow(row)) {
-      throw new Error("Pending workflow interaction timeout is missing");
+  syncActiveTime(): void {
+    this.attemptTime.sample();
+  }
+
+  beginInteractionModelTurn(requestId: string): void {
+    const request = this.requireInteractiveRequest(requestId);
+    if (request.status !== "pending" || !["agent", "assistant"].includes(request.kind)) {
+      throw new Error("Only a pending agent request can start active model time");
     }
-    this.shiftInteractionTimeout(
-      row,
-      Math.max(0, now - (row.previousTurnEndedAt ?? row.startedAt ?? row.createdAt)),
-      now,
-    );
+    const run = this.state.connection
+      .prepare("SELECT paused FROM runs WHERE run_id = ?")
+      .get(request.runId) as { paused: number };
+    if (run.paused !== 0) throw new Error("Paused workflow cannot start active model time");
+    this.attemptTime.start(request.attemptId);
   }
 
-  interactionPauseStartedAt(runId: string): number | undefined {
-    const row = this.state.connection
-      .prepare(
-        `SELECT r.updated_at AS pausedAt
-         FROM runs r
-         JOIN interactive_requests i ON i.run_id = r.run_id AND i.status = 'pending'
-         WHERE r.run_id = ? AND r.paused = 1 LIMIT 1`,
-      )
-      .get(runId);
-    return isPausedAtRow(row) ? row.pausedAt : undefined;
+  endInteractionModelTurn(requestId: string): void {
+    this.attemptTime.stop(this.requireInteractiveRequest(requestId).attemptId);
   }
 
-  resumeInteractionModelTurn(
-    runId: string,
-    pausedAt: number | undefined,
-    now: number = Date.now(),
-  ): void {
-    if (pausedAt === undefined) return;
-    const row = this.state.connection
+  resumeInteractionModelTurn(runId: string): void {
+    const rows = this.state.connection
       .prepare(
-        `SELECT i.attempt_id AS attemptId, i.created_at AS createdAt,
-                a.started_at AS startedAt, a.deadline_at AS deadlineAt,
-                t.ended_at AS previousTurnEndedAt
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
-         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-         WHERE i.run_id = ? AND i.status = 'pending' AND t.started_at <= ?
-           AND (t.ended_at IS NULL OR t.ended_at > ?)
-         ORDER BY t.started_at DESC LIMIT 1`,
+        `SELECT DISTINCT i.attempt_id AS attemptId FROM interactive_requests i
+       JOIN runs r ON r.run_id = i.run_id
+       JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+       JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id AND t.state = 'started'
+       WHERE i.run_id = ? AND i.status = 'pending' AND r.paused = 0`,
       )
-      .get(runId, pausedAt, pausedAt);
-    if (!isInteractionTimeoutRow(row)) return;
-    const modelTurnStoppedAt = Math.min(now, row.previousTurnEndedAt ?? now);
-    this.shiftInteractionTimeout(row, Math.max(0, modelTurnStoppedAt - pausedAt), now);
+      .all(runId) as { attemptId: string }[];
+    for (const row of rows) {
+      this.attemptTime.start(row.attemptId);
+      this.state.connection
+        .prepare("UPDATE node_attempts SET status = 'waiting' WHERE attempt_id = ?")
+        .run(row.attemptId);
+    }
   }
 
   markSessionModelTurnsInactive(targetSessionId: string, now: number = Date.now()): void {
-    this.state.connection
-      .prepare(
-        `UPDATE node_attempts SET status = 'interrupted', updated_at = ?
-         WHERE status <> 'interrupted' AND attempt_id IN (
-           SELECT DISTINCT i.attempt_id
-           FROM interactive_requests i
-           JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
-           JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-                                AND t.state = 'started'
-           WHERE i.target_session_id = ? AND i.status = 'pending'
-         )`,
-      )
-      .run(now, targetSessionId);
-  }
-
-  recoverInactiveModelTurns(
-    previousHeartbeatAt: number | undefined,
-    now: number = Date.now(),
-  ): void {
     const rows = this.state.connection
       .prepare(
-        `SELECT i.attempt_id AS attemptId, a.status, a.started_at AS startedAt,
-                a.deadline_at AS deadlineAt, a.updated_at AS updatedAt,
-                MAX(t.started_at) AS turnStartedAt
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
-         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-                              AND t.state = 'started'
-         WHERE i.status = 'pending'
-         GROUP BY i.attempt_id`,
+        `SELECT DISTINCT i.attempt_id AS attemptId FROM interactive_requests i
+       JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+       JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id AND t.state = 'started'
+       WHERE i.target_session_id = ? AND i.status = 'pending'`,
       )
-      .all()
-      .filter(isInactiveInteractionTimeoutRow);
+      .all(targetSessionId) as { attemptId: string }[];
     for (const row of rows) {
-      const inactiveAt =
-        row.status === "interrupted"
-          ? row.updatedAt
-          : previousHeartbeatAt === undefined
-            ? row.updatedAt
-            : Math.max(previousHeartbeatAt, row.turnStartedAt);
-      this.shiftInteractionTimeout(row, Math.max(0, now - inactiveAt), now);
+      this.attemptTime.stop(row.attemptId);
       this.state.connection
         .prepare(
-          `UPDATE node_attempts SET status = 'interrupted', updated_at = ?
-           WHERE attempt_id = ? AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
+          "UPDATE node_attempts SET status = 'interrupted', updated_at = ? WHERE attempt_id = ?",
         )
         .run(now, row.attemptId);
     }
   }
 
+  recoverInactiveModelTurns(now: number = Date.now()): void {
+    this.attemptTime.recover();
+    this.state.connection
+      .prepare(
+        `UPDATE node_attempts SET status = 'interrupted', updated_at = ? WHERE attempt_id IN (
+         SELECT i.attempt_id FROM interactive_requests i
+         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id AND t.state = 'started'
+         WHERE i.status = 'pending'
+       )`,
+      )
+      .run(now);
+  }
+
   resumeSessionModelTurns(targetSessionId: string, now: number = Date.now()): void {
     const rows = this.state.connection
       .prepare(
-        `SELECT i.attempt_id AS attemptId, a.status, a.started_at AS startedAt,
-                a.deadline_at AS deadlineAt, a.updated_at AS updatedAt,
-                MAX(t.started_at) AS turnStartedAt
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
-         JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-                              AND t.state = 'started'
-         WHERE i.target_session_id = ? AND i.status = 'pending'
-           AND a.status = 'interrupted'
-         GROUP BY i.attempt_id`,
+        `SELECT DISTINCT i.attempt_id AS attemptId FROM interactive_requests i
+       JOIN runs r ON r.run_id = i.run_id
+       JOIN node_attempts a ON a.attempt_id = i.attempt_id
+       JOIN workflow_messages m ON m.source_id = i.request_id AND m.kind = 'step'
+       JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id AND t.state = 'started'
+       WHERE i.target_session_id = ? AND i.status = 'pending' AND r.paused = 0 AND a.status = 'interrupted'`,
       )
-      .all(targetSessionId)
-      .filter(isInactiveInteractionTimeoutRow);
+      .all(targetSessionId) as { attemptId: string }[];
     for (const row of rows) {
-      this.shiftInteractionTimeout(row, Math.max(0, now - row.updatedAt), now);
+      this.attemptTime.start(row.attemptId);
       this.state.connection
-        .prepare(
-          `UPDATE node_attempts SET status = 'waiting', updated_at = ?
-           WHERE attempt_id = ? AND status = 'interrupted'`,
-        )
+        .prepare("UPDATE node_attempts SET status = 'waiting', updated_at = ? WHERE attempt_id = ?")
         .run(now, row.attemptId);
     }
   }
@@ -728,26 +682,21 @@ export class ServerStateStore {
       .flatMap((row) => (isRunIdRow(row) ? [row.runId] : []));
   }
 
-  expiredInteractionRuns(now: number = Date.now()): ExpiredInteractionRunRow[] {
+  expiredInteractionRuns(): ExpiredInteractionRunRow[] {
     return this.state.connection
       .prepare(
         `SELECT i.run_id AS runId, i.target_session_id AS targetSessionId
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         JOIN runs r ON r.run_id = i.run_id
-         JOIN run_queue q ON q.run_id = i.run_id
-         WHERE i.status = 'pending' AND r.paused = 0
-           AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
-           AND q.status NOT IN ('done', 'failed', 'cancelled')
-           AND EXISTS (
-             SELECT 1 FROM workflow_messages m
-             JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-             WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
-           )
-         GROUP BY i.run_id, i.target_session_id
-         ORDER BY MIN(a.deadline_at), i.run_id`,
+       FROM interactive_requests i
+       JOIN node_attempts a ON a.attempt_id = i.attempt_id
+       JOIN runs r ON r.run_id = i.run_id
+       JOIN run_queue q ON q.run_id = i.run_id
+       WHERE i.status = 'pending' AND r.paused = 0 AND a.timeout_ms > 0
+         AND (SELECT COALESCE(SUM(elapsed_ms), 0) FROM attempt_active_intervals t
+              WHERE t.attempt_id = a.attempt_id) >= a.timeout_ms
+         AND q.status NOT IN ('done', 'failed', 'cancelled')
+       GROUP BY i.run_id, i.target_session_id ORDER BY MIN(a.started_at), i.run_id`,
       )
-      .all(now)
+      .all()
       .filter(isExpiredInteractionRunRow);
   }
 
@@ -755,20 +704,17 @@ export class ServerStateStore {
     const row = this.state.connection
       .prepare(
         `SELECT i.request_id AS requestId, i.attempt_id AS attemptId, a.node_id AS nodeId
-         FROM interactive_requests i
-         JOIN node_attempts a ON a.attempt_id = i.attempt_id
-         JOIN runs r ON r.run_id = i.run_id
-         WHERE i.run_id = ? AND i.status = 'cancelled' AND r.status = 'running'
-           AND r.paused = 0 AND a.deadline_at IS NOT NULL AND a.deadline_at <= ?
-           AND a.status IN ('pending', 'running', 'waiting', 'interrupted', 'timed_out')
-           AND EXISTS (
-             SELECT 1 FROM workflow_messages m
-             JOIN workflow_turns t ON t.workflow_message_id = m.workflow_message_id
-             WHERE m.source_id = i.request_id AND m.kind = 'step' AND t.state = 'started'
-           )
-         ORDER BY a.deadline_at, i.request_id LIMIT 1`,
+       FROM interactive_requests i
+       JOIN node_attempts a ON a.attempt_id = i.attempt_id
+       JOIN runs r ON r.run_id = i.run_id
+       WHERE i.run_id = ? AND i.status = 'cancelled' AND r.status = 'running'
+         AND r.paused = 0 AND a.timeout_ms > 0
+         AND (SELECT COALESCE(SUM(elapsed_ms), 0) FROM attempt_active_intervals t
+              WHERE t.attempt_id = a.attempt_id) >= a.timeout_ms
+         AND a.status IN ('pending', 'running', 'waiting', 'interrupted', 'timed_out')
+       ORDER BY a.started_at, i.request_id LIMIT 1`,
       )
-      .get(runId, Date.now());
+      .get(runId);
     return isTimedOutInteractionRow(row) ? row : undefined;
   }
 
@@ -953,23 +899,6 @@ export class ServerStateStore {
     return readWorkflowRequest(this.state, requestId);
   }
 
-  private shiftInteractionTimeout(
-    row: Pick<InteractionTimeoutRow, "attemptId" | "startedAt" | "deadlineAt">,
-    idleMs: number,
-    now: number,
-  ): void {
-    if (idleMs === 0 || row.deadlineAt === null) return;
-    const changed = this.state.connection
-      .prepare(
-        `UPDATE node_attempts
-         SET started_at = CASE WHEN started_at IS NULL THEN NULL ELSE started_at + ? END,
-             deadline_at = deadline_at + ?, updated_at = ?
-         WHERE attempt_id = ? AND deadline_at = ?`,
-      )
-      .run(idleMs, idleMs, now, row.attemptId, row.deadlineAt);
-    if (changed.changes !== 1) throw new Error("Workflow interaction timeout changed concurrently");
-  }
-
   private requireInteractiveRequest(requestId: string): InteractiveRequestRecord {
     const request = this.interactiveRequest(requestId);
     if (request === undefined) throw new Error(`Interactive request not found: ${requestId}`);
@@ -1041,28 +970,13 @@ type AcceptedInteractionRow = {
   submissionId: string;
   payloadHash: Buffer;
 };
+type ExpiredInteractionRunRow = { runId: string; targetSessionId: string };
 type TimedOutInteractionRow = {
   requestId: string;
   attemptId: string;
   nodeId: string;
 };
-type InteractionTimeoutRow = {
-  attemptId: string;
-  createdAt: number;
-  startedAt: number | null;
-  deadlineAt: number | null;
-  previousTurnEndedAt: number | null;
-};
-type InactiveInteractionTimeoutRow = {
-  attemptId: string;
-  status: "pending" | "running" | "waiting" | "interrupted";
-  startedAt: number | null;
-  deadlineAt: number | null;
-  updatedAt: number;
-  turnStartedAt: number;
-};
-type ExpiredInteractionRunRow = { runId: string; targetSessionId: string };
-type PausedAtRow = { pausedAt: number };
+
 function isServerRow(value: unknown): value is ServerRow {
   return (
     isRecord(value) &&
@@ -1135,37 +1049,10 @@ function isTimedOutInteractionRow(value: unknown): value is TimedOutInteractionR
   );
 }
 
-function isInteractionTimeoutRow(value: unknown): value is InteractionTimeoutRow {
-  return (
-    isRecord(value) &&
-    typeof value.attemptId === "string" &&
-    typeof value.createdAt === "number" &&
-    nullableNumber(value.startedAt) &&
-    nullableNumber(value.deadlineAt) &&
-    nullableNumber(value.previousTurnEndedAt)
-  );
-}
-
-function isInactiveInteractionTimeoutRow(value: unknown): value is InactiveInteractionTimeoutRow {
-  return (
-    isRecord(value) &&
-    typeof value.attemptId === "string" &&
-    ["pending", "running", "waiting", "interrupted"].includes(value.status as string) &&
-    nullableNumber(value.startedAt) &&
-    nullableNumber(value.deadlineAt) &&
-    typeof value.updatedAt === "number" &&
-    typeof value.turnStartedAt === "number"
-  );
-}
-
 function isExpiredInteractionRunRow(value: unknown): value is ExpiredInteractionRunRow {
   return (
     isRecord(value) && typeof value.runId === "string" && typeof value.targetSessionId === "string"
   );
-}
-
-function isPausedAtRow(value: unknown): value is PausedAtRow {
-  return isRecord(value) && typeof value.pausedAt === "number";
 }
 
 function isSubmissionDetailRow(value: unknown): value is SubmissionDetailRow {

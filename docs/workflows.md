@@ -768,10 +768,11 @@ possible. Defaults worth knowing:
   number or context callback. A timed-out node has outcome `timed_out` and can
   be routed with `$result.outcome`. A timed-out agent node also aborts its Pi
   turn, and late output for that attempt is rejected. Interactive runs save the
-  resolved deadline before they park. The server advances it only during a
-  reported model turn from an active connected origin session. Message delivery,
-  waiting, pauses, disconnects, and server downtime do not consume the limit. This
-  active-time budget survives server restart.
+  resolved budget before they park. The host records active intervals with a
+  monotonic clock. Message delivery, waiting, pauses, disconnects, wall-clock
+  changes, and server downtime do not consume the limit. Recovery keeps the last
+  saved elapsed-time sample without rewriting the attempt's start timestamp.
+  Human decision deadlines remain absolute wall-clock deadlines.
 - `maxSteps` (workflow-level, default 100) bounds loops built from cycles in
   the graph.
 - `/workflow pause` atomically parks the run with `paused: true`, stores the

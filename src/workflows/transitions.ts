@@ -13,7 +13,7 @@ export type WorkflowTransition = {
 } & (
   | { kind: "startAttempt"; startedAt: string }
   | { kind: "finishAttempt"; step: WorkflowStepRecord }
-  | { kind: "setDeadline"; deadlineAt: string | null }
+  | { kind: "setTimeout"; timeoutMs: number | null }
   | { kind: "resume"; attemptId?: string }
   | { kind: "pause" }
   | { kind: "resumeInteraction" }
@@ -50,8 +50,8 @@ export function executionTransition(
       }
       return { kind: "finishAttempt", step, event };
     }
-    case "node_deadline_set":
-      return { kind: "setDeadline", deadlineAt: state.currentNodeDeadlineAt ?? null, event };
+    case "node_timeout_set":
+      return { kind: "setTimeout", timeoutMs: state.currentNodeTimeoutMs ?? null, event };
     case "run_resumed":
       return {
         kind: "resume",
@@ -160,13 +160,19 @@ export function applyExecutionTransition(
       clearAttempt(state);
       break;
     }
-    case "setDeadline":
-      requireEvent(event, "node_deadline_set");
+    case "setTimeout":
+      requireEvent(event, "node_timeout_set");
       requireAttempt(state, event);
-      if (transition.deadlineAt !== null && !Number.isFinite(Date.parse(transition.deadlineAt))) {
-        throw new Error("Invalid attempt deadline");
+      if (
+        transition.timeoutMs !== null &&
+        (!Number.isFinite(transition.timeoutMs) || transition.timeoutMs <= 0)
+      ) {
+        throw new Error("Invalid attempt timeout");
       }
-      state.currentNodeDeadlineAt = transition.deadlineAt;
+      if (state.currentNodeElapsedMs !== undefined)
+        throw new Error("Attempt timeout was already configured");
+      state.currentNodeTimeoutMs = transition.timeoutMs;
+      state.currentNodeElapsedMs = 0;
       break;
     case "resume":
       requireEvent(event, "run_resumed");
@@ -274,7 +280,8 @@ function clearAttempt(state: WorkflowRunState): void {
   delete state.currentNode;
   delete state.currentAttemptId;
   delete state.currentNodeStartedAt;
-  delete state.currentNodeDeadlineAt;
+  delete state.currentNodeTimeoutMs;
+  delete state.currentNodeElapsedMs;
   delete state.currentSettingsScopeId;
   delete state.currentSettingsChangeNumber;
   delete state.currentSettingsHash;

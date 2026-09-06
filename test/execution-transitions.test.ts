@@ -84,11 +84,11 @@ describe("host-owned execution transitions", () => {
     ).toThrow(/already active/);
     expect(() =>
       apply(active, {
-        kind: "setDeadline",
-        deadlineAt: now,
+        kind: "setTimeout",
+        timeoutMs: 1_000,
         event: {
           scope: "node",
-          type: "node_deadline_set",
+          type: "node_timeout_set",
           nodeId: "work",
           attemptId: "another",
           payload: {},

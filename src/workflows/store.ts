@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { closeAttemptTime, closeRunTime } from "../state/attempt-time.js";
 import { StateDatabase, workflowStatePath } from "../state/database.js";
 import { canonicalJson, parseJson, type JsonValue } from "../state/json.js";
 import {
@@ -1538,7 +1539,8 @@ export class WorkflowRunStore {
     delete loaded.state.currentNode;
     delete loaded.state.currentAttemptId;
     delete loaded.state.currentNodeStartedAt;
-    delete loaded.state.currentNodeDeadlineAt;
+    delete loaded.state.currentNodeTimeoutMs;
+    delete loaded.state.currentNodeElapsedMs;
     delete loaded.state.currentSettingsScopeId;
     delete loaded.state.currentSettingsChangeNumber;
     delete loaded.state.currentSettingsHash;
@@ -2750,6 +2752,9 @@ export class WorkflowRunStore {
         state.runId,
       );
     if (update.changes !== 1) throw new Error(`Workflow run is missing: ${state.runId}`);
+    if (state.paused || ["completed", "failed", "cancelled"].includes(state.status)) {
+      closeRunTime(this.state, state.runId);
+    }
     if (state.status !== "running") {
       this.enqueueRunSettlementEffect(run.resourceId, expectedRevision, state, now);
     }
@@ -3223,6 +3228,7 @@ export class WorkflowRunStore {
     now: number,
   ): void {
     for (const step of state.steps) {
+      closeAttemptTime(this.state, step.attemptId);
       const promptEntryId = this.findAttemptPromptEntry(state.runId, step.attemptId);
       const promptHash =
         promptEntryId === undefined && step.prompt !== null
@@ -3297,19 +3303,14 @@ export class WorkflowRunStore {
     }
     if (state.currentAttemptId !== undefined && state.currentNode !== undefined) {
       this.ensureAttempt(state, state.currentNode, state.currentAttemptId, now, snapshot);
-      if (state.currentNodeDeadlineAt !== undefined) {
-        const deadlineAt =
-          state.currentNodeDeadlineAt === null ? null : Date.parse(state.currentNodeDeadlineAt);
-        if (deadlineAt !== null && !Number.isFinite(deadlineAt)) {
-          throw new Error("Workflow node deadline is invalid");
-        }
+      if (state.currentNodeTimeoutMs !== undefined) {
         this.state.connection
           .prepare(
-            `UPDATE node_attempts SET deadline_at = ?, updated_at = ?
-             WHERE attempt_id = ? AND run_id = ?
+            `UPDATE node_attempts SET timeout_ms = ?, updated_at = ?
+             WHERE attempt_id = ? AND run_id = ? AND timeout_ms IS NULL
                AND status IN ('pending', 'running', 'waiting', 'interrupted')`,
           )
-          .run(deadlineAt, now, state.currentAttemptId, state.runId);
+          .run(state.currentNodeTimeoutMs ?? 0, now, state.currentAttemptId, state.runId);
       }
     }
     this.syncRunSteps(state);
@@ -3621,13 +3622,11 @@ export class WorkflowRunStore {
       ...(activeAttempt?.startedAt === null || activeAttempt === undefined
         ? {}
         : { currentNodeStartedAt: new Date(activeAttempt.startedAt).toISOString() }),
-      ...(activeAttempt === undefined
+      ...(activeAttempt === undefined || activeAttempt.timeoutMs === null
         ? {}
         : {
-            currentNodeDeadlineAt:
-              activeAttempt.deadlineAt === null
-                ? null
-                : new Date(activeAttempt.deadlineAt).toISOString(),
+            currentNodeTimeoutMs: activeAttempt.timeoutMs === 0 ? null : activeAttempt.timeoutMs,
+            currentNodeElapsedMs: activeAttempt.activeElapsedMs,
           }),
       ...savedCurrentSettingsBinding(
         activeAttempt?.settingsScopeId ?? null,
@@ -3789,7 +3788,8 @@ export class WorkflowRunStore {
         attemptId: string;
         nodeId: string;
         startedAt: number | null;
-        deadlineAt: number | null;
+        timeoutMs: number | null;
+        activeElapsedMs: number;
         settingsScopeId: string | null;
         settingsChangeNumber: number | null;
         settingsHash: Buffer | null;
@@ -3798,7 +3798,10 @@ export class WorkflowRunStore {
     const row = this.state.connection
       .prepare(
         `SELECT attempt_id AS attemptId, node_id AS nodeId, started_at AS startedAt,
-                deadline_at AS deadlineAt, settings_scope_id AS settingsScopeId,
+                timeout_ms AS timeoutMs,
+                (SELECT COALESCE(SUM(elapsed_ms), 0) FROM attempt_active_intervals i
+                 WHERE i.attempt_id = node_attempts.attempt_id) AS activeElapsedMs,
+                settings_scope_id AS settingsScopeId,
                 settings_change_number AS settingsChangeNumber,
                 settings_hash AS settingsHash
          FROM node_attempts
@@ -4223,8 +4226,8 @@ function runViewerTargets(
     },
     {
       op: "add",
-      path: "/state/currentNodeDeadlineAt",
-      value: state.currentNodeDeadlineAt ?? null,
+      path: "/state/currentNodeTimeoutMs",
+      value: state.currentNodeTimeoutMs ?? null,
     },
     {
       op: "add",
@@ -4896,7 +4899,8 @@ function isActiveAttemptRow(value: unknown): value is {
   attemptId: string;
   nodeId: string;
   startedAt: number | null;
-  deadlineAt: number | null;
+  timeoutMs: number | null;
+  activeElapsedMs: number;
   settingsScopeId: string | null;
   settingsChangeNumber: number | null;
   settingsHash: Buffer | null;
