@@ -794,7 +794,7 @@ export class ServerViewStore {
       ambiguous: this.hasAmbiguousEffect(queue.runId),
       runnerActive: this.hasLiveRunner(queue.runId),
       originTurnActive: this.hasActivity(queue.runId),
-      pendingInteraction: this.hasPendingInteraction(queue.runId),
+      pendingRequestKind: this.pendingRequestKind(queue.runId),
       errorMessage: state?.error ?? queue.errorMessage,
     });
   }
@@ -815,14 +815,13 @@ export class ServerViewStore {
     );
   }
 
-  private hasPendingInteraction(runId: string): boolean {
+  private pendingRequestKind(runId: string): WorkflowDisplayFacts["pendingRequestKind"] {
     const row = this.state.connection
-      .prepare(
-        `SELECT 1 AS present FROM interactive_requests
-         WHERE run_id = ? AND status = 'pending' LIMIT 1`,
-      )
-      .get(runId);
-    return row !== undefined;
+      .prepare("SELECT kind FROM interactive_requests WHERE run_id = ? AND status = 'pending'")
+      .get(runId) as
+      | { kind: Exclude<WorkflowDisplayFacts["pendingRequestKind"], null> }
+      | undefined;
+    return row?.kind ?? null;
   }
 
   private hasAmbiguousEffect(runId: string): boolean {
@@ -857,7 +856,7 @@ export class ServerViewStore {
       this.workflowActivityRevision(),
       this.hasLiveRunner(runId),
       this.hasActivity(runId),
-      this.hasPendingInteraction(runId),
+      this.pendingRequestKind(runId),
       this.hasAmbiguousEffect(runId),
     ].join(":");
   }
@@ -890,35 +889,49 @@ export type WorkflowDisplayFacts = {
   ambiguous: boolean;
   runnerActive: boolean;
   originTurnActive: boolean;
-  pendingInteraction: boolean;
+  pendingRequestKind: "agent" | "assistant" | "checkpoint" | "decision" | null;
   errorMessage: string | null;
 };
 
 export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisplay {
   let status: WorkflowDisplayStatus;
-  let activity: WorkflowDisplay["activity"] = null;
+  const activity: WorkflowDisplay["activity"] = facts.runnerActive
+    ? "supervised_runner"
+    : facts.originTurnActive
+      ? "origin_turn"
+      : null;
   let reason: string | null = null;
 
-  if (facts.ambiguous) {
-    status = "ambiguous";
-    reason = "An external effect needs explicit recovery.";
-  } else if (facts.runnerActive || facts.originTurnActive) {
-    status = "running";
-    activity = facts.runnerActive ? "supervised_runner" : "origin_turn";
-  } else if (
+  if (
     facts.durableStatus === "completed" ||
     facts.durableStatus === "failed" ||
     facts.durableStatus === "timed_out" ||
     facts.durableStatus === "cancelled"
   ) {
     status = facts.durableStatus;
-    reason = facts.errorMessage;
+    reason = facts.ambiguous
+      ? "The run is terminal, but an external effect still needs explicit recovery."
+      : facts.errorMessage;
+  } else if (facts.ambiguous) {
+    status = "ambiguous";
+    reason = "An external effect needs explicit recovery.";
   } else if (facts.paused) {
     status = "paused";
     reason = "The workflow is durably paused.";
-  } else if (facts.pendingInteraction || facts.durableStatus === "waiting") {
+  } else if (facts.pendingRequestKind !== null || facts.durableStatus === "waiting") {
     status = "waiting";
-    reason = "The workflow is waiting for origin-session input.";
+    reason =
+      facts.pendingRequestKind === "decision"
+        ? "The workflow needs a protected human decision."
+        : facts.pendingRequestKind === "checkpoint"
+          ? "The workflow needs a checkpoint answer."
+          : facts.pendingRequestKind === "agent"
+            ? "The workflow needs its assigned agent result."
+            : facts.pendingRequestKind === "assistant"
+              ? "The workflow needs its assigned visible response."
+              : "The workflow is waiting.";
+  } else if (activity !== null) {
+    status = "running";
   } else if (facts.queueStatus === "parked" || facts.queueStatus === "queued") {
     status = "queued";
     reason =
@@ -941,8 +954,12 @@ export function reduceWorkflowDisplay(facts: WorkflowDisplayFacts): WorkflowDisp
     if (facts.queueStatus === "parked") controls.push("resume");
     controls.push("cancel");
   }
-  if (status === "waiting") controls.push("answer");
-  if (status === "ambiguous") controls.push("review");
+  if (status === "waiting") {
+    if (facts.pendingRequestKind === "checkpoint") controls.push("answer");
+    if (facts.pendingRequestKind === "decision") controls.push("human-answer");
+    if (facts.pendingRequestKind === "agent") controls.push("update", "submit");
+  }
+  if (facts.ambiguous) controls.push("review");
   return { status, activity, controls, reason };
 }
 

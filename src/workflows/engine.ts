@@ -404,15 +404,8 @@ export class WorkflowEngine {
     await this.onRunStarted?.(runId, state);
 
     if (point.nodeId === null) {
-      // The last recorded transition already finished the graph; the crash
-      // happened before the terminal event was written. A finished
-      // checkpoint restores its waiting gate rather than completing.
-      if (point.waitingOn !== undefined) {
-        await this.finishRun(runId, state, "waiting", {
-          waitingOn: point.waitingOn,
-          finalOutput: point.lastOutput,
-        });
-      } else if (point.failedResult === undefined) {
+      // The last attempt finished before the terminal event was committed.
+      if (point.failedResult === undefined) {
         await this.finishRun(runId, state, "completed", { finalOutput: point.lastOutput });
       } else {
         const timedOut = point.failedResult.outcome === "timed_out";
@@ -456,7 +449,6 @@ export class WorkflowEngine {
     nodeId: string | null;
     lastOutput?: unknown;
     failedResult?: WorkflowNodeResult;
-    waitingOn?: string;
   } {
     if (state.currentNode !== undefined) {
       if (workflow.nodes[state.currentNode] === undefined) {
@@ -1505,20 +1497,16 @@ export class WorkflowEngine {
   private async finishRun(
     runId: string,
     state: WorkflowRunState,
-    status: WorkflowRunState["status"],
-    fields: { error?: string; waitingOn?: string; finalOutput?: unknown },
+    status: "completed" | "failed" | "timed_out" | "cancelled",
+    fields: { error?: string; finalOutput?: unknown },
   ): Promise<void> {
     if (status === "failed" && state.status === "timed_out") {
       status = "timed_out";
     }
     state.status = status;
-    if (status === "waiting") delete state.finishedAt;
-    else state.finishedAt = new Date().toISOString();
+    state.finishedAt = new Date().toISOString();
     if (fields.error !== undefined) {
       state.error = fields.error;
-    }
-    if (fields.waitingOn !== undefined) {
-      state.waitingOn = fields.waitingOn;
     }
     if (fields.finalOutput !== undefined) {
       state.finalOutput = fields.finalOutput;
@@ -1543,7 +1531,6 @@ export class WorkflowEngine {
       payload: {
         status,
         ...(fields.error !== undefined ? { error: fields.error } : {}),
-        ...(fields.waitingOn !== undefined ? { waitingOn: fields.waitingOn } : {}),
         ...(fields.finalOutput !== undefined ? { finalOutput: fields.finalOutput } : {}),
         presentationRequired: status === "completed" && this.presentationRequired,
       },

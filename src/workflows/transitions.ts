@@ -25,7 +25,7 @@ export type WorkflowTransition = {
     }
   | {
       kind: "finish";
-      status: "completed" | "failed" | "timed_out" | "cancelled" | "waiting";
+      status: "completed" | "failed" | "timed_out" | "cancelled";
       error?: string;
       finalOutput?: unknown;
     }
@@ -63,13 +63,13 @@ export function executionTransition(
     case "interaction_validation_started":
     case "interaction_accepted":
       return { kind: "resumeInteraction", event };
-    case "run_waiting":
     case "run_completed":
     case "run_failed":
     case "run_interrupted":
     case "run_timed_out":
     case "run_cancelled":
-      if (state.status === "running") throw new Error("Terminal transition has running state");
+      if (state.status === "running" || state.status === "waiting")
+        throw new Error("Terminal transition has unfinished execution");
       return {
         kind: "finish",
         status: state.status,
@@ -212,7 +212,7 @@ export function applyExecutionTransition(
       break;
     case "finish":
       if (
-        !["completed", "failed", "timed_out", "cancelled", "waiting"].includes(transition.status) ||
+        !["completed", "failed", "timed_out", "cancelled"].includes(transition.status) ||
         (event.type !== `run_${transition.status}` &&
           !(event.type === "run_interrupted" && transition.status === "failed"))
       ) {
@@ -222,7 +222,7 @@ export function applyExecutionTransition(
         throw new Error("A run with an unfinished attempt cannot complete");
       }
       state.status = transition.status;
-      if (transition.status !== "waiting") state.finishedAt = now;
+      state.finishedAt = now;
       if (transition.error !== undefined) state.error = transition.error;
       if (transition.finalOutput !== undefined) state.finalOutput = transition.finalOutput;
       clearAttempt(state);

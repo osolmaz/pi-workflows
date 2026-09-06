@@ -20,7 +20,9 @@ export type WorkflowDisplayStatus =
 export type WorkflowDisplay = {
   status: WorkflowDisplayStatus;
   activity: "supervised_runner" | "origin_turn" | null;
-  controls: Array<"pause" | "resume" | "cancel" | "answer" | "review">;
+  controls: Array<
+    "pause" | "resume" | "cancel" | "answer" | "human-answer" | "update" | "submit" | "review"
+  >;
   reason: string | null;
   reasonContent?: JsonValue;
 };
