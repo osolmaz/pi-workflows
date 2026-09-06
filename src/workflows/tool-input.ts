@@ -13,13 +13,12 @@ const inputSchema = Type.Unknown({
 });
 const runIdSchema = Type.String({
   description:
-    "Run id; required for restart and optional for status, cancel, answer, settings, and follow-ups",
+    "Run id; required for restart and optional for status, cancel, settings, and follow-ups",
 });
-const stepSchema = Type.String({
-  description: "Workflow step id; required when action is update or submit",
-});
-const attemptSchema = Type.String({
-  description: "Workflow attempt id; required when action is update or submit",
+const requestIdSchema = Type.String({
+  minLength: 1,
+  description:
+    "Exact durable request id from the step contract or checkpoint; required for answer, update, and submit",
 });
 const updateSchema = Type.Object(
   {
@@ -85,16 +84,15 @@ export const WorkflowActionSchemas = {
   answer: Type.Object(
     {
       action: Type.Literal("answer"),
+      requestId: requestIdSchema,
       input: inputSchema,
-      runId: Type.Optional(runIdSchema),
     },
     noExtraProperties,
   ),
   update: Type.Object(
     {
       action: Type.Literal("update"),
-      step: stepSchema,
-      attempt: attemptSchema,
+      requestId: requestIdSchema,
       update: updateSchema,
     },
     noExtraProperties,
@@ -102,8 +100,7 @@ export const WorkflowActionSchemas = {
   submit: Type.Object(
     {
       action: Type.Literal("submit"),
-      step: stepSchema,
-      attempt: attemptSchema,
+      requestId: requestIdSchema,
       output: outputSchema,
     },
     noExtraProperties,

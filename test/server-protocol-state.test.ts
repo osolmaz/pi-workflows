@@ -209,6 +209,7 @@ describe("server durable state", () => {
       contract: {
         prompt: "Continue",
         contract: {
+          requestId: "interaction-1",
           runId: "run-1",
           workflowName: "echo",
           nodeId: "reply",

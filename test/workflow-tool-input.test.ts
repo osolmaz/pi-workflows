@@ -28,10 +28,10 @@ describe("workflow tool input", () => {
     { action: "resume" },
     { action: "cancel" },
     { action: "cancel", runId: "run-1" },
-    { action: "answer", input: { approved: true } },
-    { action: "answer", input: null, runId: "run-1" },
-    { action: "update", step: "check", attempt: "try-1", update },
-    { action: "submit", step: "check", attempt: "try-1", output: { result: "ok" } },
+    { action: "answer", requestId: "request-1", input: { approved: true } },
+    { action: "answer", requestId: "request-1", input: null },
+    { action: "update", requestId: "request-1", update },
+    { action: "submit", requestId: "request-1", output: { result: "ok" } },
   ])("accepts the exact $action input", (input) => {
     expect(parseWorkflowToolInput(input)).toEqual(input);
   });
@@ -43,17 +43,20 @@ describe("workflow tool input", () => {
     { action: "start" },
     { action: "restart" },
     { action: "answer" },
+    { action: "answer", runId: "run-1", input: true },
+    { action: "submit", step: "check", attempt: "try-1", output: null },
+    { action: "update", step: "check", attempt: "try-1", update },
+    { action: "submit", requestId: "", output: null },
     { action: "change-settings" },
     { action: "queue-follow-up" },
     { action: "remove-follow-up" },
-    { action: "update", step: "check", attempt: "try-1" },
-    { action: "submit", step: "check", attempt: "try-1" },
+    { action: "update", requestId: "request-1" },
+    { action: "submit", requestId: "request-1" },
     { action: "pause", runId: "run-1" },
     { action: "list", workflow: "monitor" },
     {
       action: "update",
-      step: "check",
-      attempt: "try-1",
+      requestId: "request-1",
       update: { type: "progress", key: "items", data: [] },
     },
   ])("rejects invalid action input %#", (input) => {
@@ -68,16 +71,15 @@ describe("workflow tool input", () => {
 
   it("keeps the RPC bridge limited to update and submit", () => {
     expect(
-      parseWorkflowSubmissionInput({ action: "update", step: "check", attempt: "try-1", update }),
-    ).toEqual({ action: "update", step: "check", attempt: "try-1", update });
+      parseWorkflowSubmissionInput({ action: "update", requestId: "request-1", update }),
+    ).toEqual({ action: "update", requestId: "request-1", update });
     expect(
       parseWorkflowSubmissionInput({
         action: "submit",
-        step: "check",
-        attempt: "try-1",
+        requestId: "request-1",
         output: null,
       }),
-    ).toEqual({ action: "submit", step: "check", attempt: "try-1", output: null });
+    ).toEqual({ action: "submit", requestId: "request-1", output: null });
     expect(() => parseWorkflowSubmissionInput({ action: "start", workflow: "monitor" })).toThrow(
       "Invalid workflow submission tool input",
     );
@@ -110,7 +112,6 @@ describe("workflow tool input", () => {
     expect(WorkflowToolParameters).not.toHaveProperty("anyOf");
     expect(Object.keys(WorkflowToolParameters.properties).sort()).toEqual([
       "action",
-      "attempt",
       "expectedChangeNumber",
       "followUpId",
       "input",
@@ -118,9 +119,9 @@ describe("workflow tool input", () => {
       "output",
       "patch",
       "prompt",
+      "requestId",
       "runId",
       "scopeId",
-      "step",
       "update",
       "workflow",
     ]);
@@ -133,9 +134,8 @@ describe("workflow tool input", () => {
     expect(WorkflowSubmissionToolParameters).not.toHaveProperty("anyOf");
     expect(Object.keys(WorkflowSubmissionToolParameters.properties).sort()).toEqual([
       "action",
-      "attempt",
       "output",
-      "step",
+      "requestId",
       "update",
     ]);
   });

@@ -18,15 +18,13 @@ const DEFAULT_ABORT_GRACE_MS = 3_000;
 
 type StepSubmission = {
   action: "submit";
-  step: string;
-  attempt: string;
+  requestId: string;
   output: unknown;
 };
 
 type StepUpdate = {
   action: "update";
-  step: string;
-  attempt: string;
+  requestId: string;
   update: { type: string; key: string; data: Record<string, unknown> };
   idempotencyKey?: string;
 };
@@ -203,8 +201,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
           const parsed = JSON.parse(line.slice(RPC_SUBMISSION_PREFIX.length)) as StepAction;
           if (
             (parsed.action === "submit" || parsed.action === "update") &&
-            typeof parsed.step === "string" &&
-            typeof parsed.attempt === "string"
+            typeof parsed.requestId === "string"
           ) {
             this.actions.push(parsed);
           }
@@ -289,9 +286,7 @@ export class RpcStepExecutor implements AgentStepExecutor {
 
   private takeMatchingAction(request: AgentStepRequest): StepAction | undefined {
     const index = this.actions.findIndex(
-      (candidate) =>
-        candidate.step === request.contract.nodeId &&
-        candidate.attempt === request.contract.attemptId,
+      (candidate) => candidate.requestId === request.contract.requestId,
     );
     return index === -1 ? undefined : (this.actions.splice(index, 1)[0] as StepAction);
   }

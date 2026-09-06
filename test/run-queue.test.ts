@@ -328,6 +328,7 @@ describe("workflow run queue in canonical SQLite", () => {
       contract: {
         prompt: "Continue",
         contract: {
+          requestId: "pause-request",
           runId: "pause-run",
           workflowName: "echo",
           nodeId: "echo",

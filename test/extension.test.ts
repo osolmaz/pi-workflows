@@ -313,13 +313,25 @@ export default defineWorkflow({
   return workflowPath;
 }
 
-function stepContract(entry: Record<string, unknown>): { nodeId: string; attemptId: string } {
+function stepContract(entry: Record<string, unknown>): {
+  requestId: string;
+  nodeId: string;
+  attemptId: string;
+} {
   const details = entry.details as { contract?: unknown };
-  const contract = details.contract as { nodeId?: unknown; attemptId?: unknown };
-  if (typeof contract.nodeId !== "string" || typeof contract.attemptId !== "string") {
+  const contract = details.contract as {
+    requestId?: unknown;
+    nodeId?: unknown;
+    attemptId?: unknown;
+  };
+  if (
+    typeof contract.requestId !== "string" ||
+    typeof contract.nodeId !== "string" ||
+    typeof contract.attemptId !== "string"
+  ) {
     throw new Error("Presented step contract is missing");
   }
-  return { nodeId: contract.nodeId, attemptId: contract.attemptId };
+  return { requestId: contract.requestId, nodeId: contract.nodeId, attemptId: contract.attemptId };
 }
 
 describe("pi-workflows hosted extension", () => {
@@ -401,14 +413,12 @@ describe("pi-workflows hosted extension", () => {
     const contract = stepContract(fake.sent[0] as Record<string, unknown>);
     await fake.runTool("update-one", {
       action: "update",
-      step: contract.nodeId,
-      attempt: contract.attemptId,
+      requestId: contract.requestId,
       update: { type: "note", key: "progress", data: { message: "working" } },
     });
     await fake.runTool("submit-one", {
       action: "submit",
-      step: contract.nodeId,
-      attempt: contract.attemptId,
+      requestId: contract.requestId,
       output: { answer: "done" },
     });
     await waitUntil(() => {
@@ -488,8 +498,7 @@ describe("pi-workflows hosted extension", () => {
     await expect(
       fake.runTool("paused-submit", {
         action: "submit",
-        step: contract.nodeId,
-        attempt: contract.attemptId,
+        requestId: contract.requestId,
         output: { reply: "too early" },
       }),
     ).rejects.toThrow("Workflow run is paused");
@@ -516,8 +525,7 @@ describe("pi-workflows hosted extension", () => {
     await expect(
       fake.runTool("resumed-submit", {
         action: "submit",
-        step: resumedContract.nodeId,
-        attempt: resumedContract.attemptId,
+        requestId: resumedContract.requestId,
         output: { reply: "continued" },
       }),
     ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });
@@ -680,8 +688,7 @@ describe("pi-workflows hosted extension", () => {
     await expect(
       fake.runTool("submit-invalid", {
         action: "submit",
-        step: contract.nodeId,
-        attempt: contract.attemptId,
+        requestId: contract.requestId,
         output: { answer: "wrong" },
       }),
     ).rejects.toThrow(/answer must be accepted/);
@@ -704,8 +711,7 @@ describe("pi-workflows hosted extension", () => {
     await expect(
       fake.runTool("submit-corrected", {
         action: "submit",
-        step: contract.nodeId,
-        attempt: contract.attemptId,
+        requestId: contract.requestId,
         output: { answer: "accepted" },
       }),
     ).resolves.toMatchObject({
@@ -743,6 +749,7 @@ describe("pi-workflows hosted extension", () => {
       await expect(
         fake.runTool("wrong-answer", {
           action: "answer",
+          requestId: contract.requestId,
           input: { approved: true },
         }),
       ).rejects.toThrow(/Only an ordinary checkpoint/);
@@ -751,8 +758,7 @@ describe("pi-workflows hosted extension", () => {
       await expect(
         fake.runTool("wrong-attempt", {
           action: "submit",
-          step: contract.nodeId,
-          attempt: "another-attempt",
+          requestId: "another-request",
           output: { answer: "wrong" },
         }),
       ).rejects.toThrow(/No matching agent request/);
@@ -761,8 +767,7 @@ describe("pi-workflows hosted extension", () => {
       await expect(
         fake.runTool("valid-after-rejection", {
           action: "submit",
-          step: contract.nodeId,
-          attempt: contract.attemptId,
+          requestId: contract.requestId,
           output: { answer: "done" },
         }),
       ).resolves.toMatchObject({ content: [{ text: "Workflow step output accepted." }] });
@@ -800,8 +805,13 @@ describe("pi-workflows hosted extension", () => {
         ),
       30_000,
     );
+    const checkpointEntry = fake.sent.find(
+      (entry) => (entry.details as { kind?: unknown })?.kind === "checkpoint",
+    )!;
+    const requestId = (checkpointEntry.details as { requestId: string }).requestId;
     const result = await fake.runTool("checkpoint-answer", {
       action: "answer",
+      requestId,
       input: { approved: true },
     });
     expect(result).toMatchObject({
@@ -843,6 +853,8 @@ describe("pi-workflows hosted extension", () => {
     const decisionEntry = fake.sent.find(
       (entry) => (entry.details as { kind?: unknown } | undefined)?.kind === "decision",
     );
+    if (decisionEntry === undefined) throw new Error("Decision message is missing");
+    const requestId = (decisionEntry.details as { requestId: string }).requestId;
     expect(decisionEntry).toMatchObject({
       delivery: { triggerTurn: false },
       content: expect.stringContaining("A human must answer"),
@@ -850,18 +862,19 @@ describe("pi-workflows hosted extension", () => {
     await expect(
       fake.runTool("forged-model-answer", {
         action: "answer",
+        requestId,
         input: { choice: "approve" },
       }),
     ).rejects.toThrow(/Protected human decisions/);
 
     await fake.runCommand("pause");
-    await fake.runCommand('answer {"choice":"approve"}');
+    await fake.runCommand(`answer ${requestId} {"choice":"approve"}`);
     expect(fake.notifications.at(-1)).toMatchObject({
       message: expect.stringContaining("Workflow run is paused"),
       level: "error",
     });
     await fake.runCommand("resume");
-    await fake.runCommand('answer {"choice":"approve"}');
+    await fake.runCommand(`answer ${requestId} {"choice":"approve"}`);
     expect(fake.notifications).toContainEqual(
       expect.objectContaining({ message: "Human decision answer accepted." }),
     );

@@ -861,6 +861,7 @@ export type AssistantMessageReceipt = {
 
 /** The step contract handed to the executor alongside the prompt. */
 export type AgentStepContract = {
+  requestId: string;
   runId: string;
   workflowName: string;
   nodeId: string;

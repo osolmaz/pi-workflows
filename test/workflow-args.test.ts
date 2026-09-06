@@ -2,30 +2,28 @@ import { describe, expect, it } from "vitest";
 import { parseWorkflowArgs } from "../src/extension/index.js";
 
 describe("parseWorkflowArgs answer", () => {
-  it("parses plain JSON answers", () => {
-    expect(parseWorkflowArgs('answer {"approved":true}')).toEqual({
+  it("rejects an answer without an exact request id", () => {
+    expect(() => parseWorkflowArgs('answer {"approved":true}')).toThrow(/requires/);
+  });
+
+  it("parses a request id followed by JSON", () => {
+    expect(parseWorkflowArgs('answer request-123 {"approved":true}')).toEqual({
       kind: "answer",
       input: { approved: true },
+      requestId: "request-123",
     });
   });
 
-  it("parses a run id followed by JSON", () => {
-    expect(parseWorkflowArgs('answer run-123 {"approved":true}')).toEqual({
+  it("parses text after the exact request id", () => {
+    expect(parseWorkflowArgs("answer request-123 yes deploy it")).toEqual({
       kind: "answer",
-      input: { approved: true },
-      runId: "run-123",
-    });
-  });
-
-  it("treats bare text as a text answer, not a run id", () => {
-    expect(parseWorkflowArgs("answer yes deploy it")).toEqual({
-      kind: "answer",
+      requestId: "request-123",
       input: { answer: "yes deploy it" },
     });
   });
 
-  it("requires valid JSON when a run id is given", () => {
-    expect(() => parseWorkflowArgs("answer run-123 {broken")).toThrow(/JSON/);
+  it("rejects malformed JSON rather than treating it as text", () => {
+    expect(() => parseWorkflowArgs("answer request-123 {broken")).toThrow(/JSON/);
   });
 
   it("requires a value", () => {

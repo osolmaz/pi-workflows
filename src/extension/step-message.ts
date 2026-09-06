@@ -237,6 +237,7 @@ function parseDetails(value: unknown): WorkflowAgentStepMessageDetails | undefin
   if (
     contract === null ||
     typeof contract !== "object" ||
+    typeof contract.requestId !== "string" ||
     typeof contract.runId !== "string" ||
     typeof contract.workflowName !== "string" ||
     typeof contract.nodeId !== "string" ||

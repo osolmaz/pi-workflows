@@ -35,6 +35,7 @@ sleep 60
       .runAgentStep(
         {
           contract: {
+            requestId: "test-request-1",
             runId: "r",
             workflowName: "w",
             nodeId: "n",
@@ -75,6 +76,7 @@ sleep 60
       .runAgentStep(
         {
           contract: {
+            requestId: "test-request-1",
             runId: "r",
             workflowName: "w",
             nodeId: "n",
@@ -112,6 +114,7 @@ describe("RpcStepExecutor.close", () => {
       .runAgentStep(
         {
           contract: {
+            requestId: "test-request-1",
             runId: "r",
             workflowName: "w",
             nodeId: "n",

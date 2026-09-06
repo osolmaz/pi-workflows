@@ -24,6 +24,7 @@ const details: WorkflowAgentStepMessageDetails = {
   requestId: "request-1",
   workflowMessageId: "message-1",
   contract: {
+    requestId: "test-request-1",
     runId: "run-1",
     workflowName: "monitor",
     nodeId: "check",
@@ -76,6 +77,7 @@ describe("workflow agent-step messages", () => {
         details: {
           ...details,
           contract: {
+            requestId: "test-request-1",
             runId: details.contract.runId,
             workflowName: details.contract.workflowName,
             nodeId: details.contract.nodeId,
@@ -102,6 +104,7 @@ describe("workflow agent-step messages", () => {
       requestId: "request-2",
       workflowMessageId: "message-2",
       contract: {
+        requestId: "test-request-1",
         runId: "run-1",
         workflowName: "monitor",
         nodeId: "summary",
